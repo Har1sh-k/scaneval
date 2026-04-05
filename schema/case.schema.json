@@ -99,6 +99,10 @@
       "$ref": "#/$defs/realWorldMeta",
       "description": "Metadata for real_world_disclosed cases"
     },
+    "fixValidation": {
+      "$ref": "#/$defs/fixValidation",
+      "description": "Optional fix verification mode. Default is slice_absent."
+    },
     "prSimulation": {
       "$ref": "#/$defs/prSimulation",
       "description": "Optional PR simulation metadata for PR benchmark mode"
@@ -244,6 +248,45 @@
         }
       },
       "additionalProperties": false
+    },
+    "fixValidation": {
+      "type": "object",
+      "description": "How to verify that fixCommit addresses the vulnerability. Default (or omitted) is slice_absent: fix must remove the annotated vulnerable slice. For indirect mitigations where the fix lands outside the annotated sink, use mitigation_anchor_present.",
+      "required": ["mode"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["slice_absent", "mitigation_anchor_present"],
+          "description": "slice_absent: fix must not contain the vulnerable slice. mitigation_anchor_present: fix must contain declared anchor strings that the vulnerable commit does not."
+        },
+        "anchors": {
+          "type": "array",
+          "description": "Anchor checks for mitigation_anchor_present mode.",
+          "items": {
+            "type": "object",
+            "required": ["path", "mustContainAll"],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "File path relative to the repo root."
+              },
+              "mustContainAll": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "All listed strings must appear in the file at fixCommit."
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "mitigation_anchor_present" } } },
+          "then": { "required": ["anchors"] }
+        }
+      ]
     },
     "prSimulation": {
       "type": "object",

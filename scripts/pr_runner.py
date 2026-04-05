@@ -415,6 +415,7 @@ def run_pr_benchmark(
 
     adapter = load_adapter(scanner_name)
     adapter_version = getattr(adapter, "ADAPTER_VERSION", "1.0.0")
+    llm_model = getattr(adapter, "LLM_MODEL", None)
     scanner_version = adapter.get_version()
 
     all_cases = find_cases(track, case_type, case_id)
@@ -440,6 +441,8 @@ def run_pr_benchmark(
 
     skipped = len(all_cases) - len(pr_cases) - no_targets_skipped
     print(f"{B} Running SASTbench PR mode ({track} track) with {scanner_name}")
+    if llm_model:
+        print(f"{B} LLM model: {llm_model}")
     print(f"{B} Found {len(pr_cases)} PR-capable cases")
     if no_targets_skipped:
         print(f"{B} Skipping {no_targets_skipped} cases with no mustDetectRegionIds (e.g. capability_safe)")
@@ -623,6 +626,7 @@ def run_pr_benchmark(
             "name": scanner_name,
             "version": scanner_version,
             "adapter": adapter_version,
+            **({"llmModel": llm_model} if llm_model else {}),
         },
         "track": track,
         "timestamp": started_at.isoformat(),
@@ -646,6 +650,8 @@ def run_pr_benchmark(
     # Print PR summary
     print(f"\n{B} {'='*50}")
     print(f"{B} PR Results - {scanner_name} v{scanner_version} ({track} track)")
+    if llm_model:
+        print(f"{B}   LLM Model:                  {llm_model}")
     print(f"{B} {'='*50}")
     print(f"{B}   Introduced Target Hit Rate: {pr_summary.introduced_target_hit_rate:.1%}")
     print(f"{B}   Review Noise:               {pr_summary.total_review_noise}")

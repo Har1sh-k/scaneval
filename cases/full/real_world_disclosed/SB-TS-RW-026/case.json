@@ -41,5 +41,10 @@
       "primary": "ASI07",
       "secondary": []
     }
+  },
+  "prSimulation": {
+    "mode": "git_commit_pair",
+    "baseCommit": "b03e358a1283df0a446616d8ff6cc3d0ef067af7",
+    "headCommit": "bb4db58819b6624de98249125f1ffb8c491d21ef"
   }
 }

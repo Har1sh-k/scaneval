@@ -43,5 +43,10 @@
         "ASI03"
       ]
     }
+  },
+  "prSimulation": {
+    "mode": "git_commit_pair",
+    "baseCommit": "bb5ce3b02f8fcc1bc99f006127f3fca301f46ac7",
+    "headCommit": "5a3a448bc48dc9e72530b46195476a48845bb8da"
   }
 }

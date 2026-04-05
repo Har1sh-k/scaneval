@@ -169,6 +169,7 @@ def run_benchmark(
 
     adapter = load_adapter(scanner_name)
     adapter_version = getattr(adapter, "ADAPTER_VERSION", "1.0.0")
+    llm_model = getattr(adapter, "LLM_MODEL", None)
     cases = find_cases(track, case_type, case_id)
 
     if not cases:
@@ -178,6 +179,8 @@ def run_benchmark(
     B = "\033[1;36m[SASTbench]\033[0m"
     SEP = "\033[2m" + "-" * 45 + "\033[0m"
     print(f"{B} Running SASTbench ({track} track) with {scanner_name}")
+    if llm_model:
+        print(f"{B} LLM model: {llm_model}")
     print(f"{B} Found {len(cases)} cases\n")
 
     scanner_version = adapter.get_version()
@@ -295,6 +298,7 @@ def run_benchmark(
             "name": scanner_name,
             "version": scanner_version,
             "adapter": adapter_version,
+            **({"llmModel": llm_model} if llm_model else {}),
         },
         "track": track,
         "timestamp": started_at.isoformat(),
@@ -310,6 +314,8 @@ def run_benchmark(
 
     print(f"\n{B} {'='*50}")
     print(f"{B} Results - {scanner_name} v{scanner_version} ({track} track)")
+    if llm_model:
+        print(f"{B}   LLM Model:             {llm_model}")
     print(f"{B} {'='*50}")
     print(f"{B}   Target Hit Rate:       {summary.recall:.1%}")
     print(f"{B}   Intent Accuracy:       {summary.mixed_intent_accuracy:.1%}")

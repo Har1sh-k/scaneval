@@ -278,6 +278,63 @@ def test_scan_returns_empty_when_no_findings(tmp_path):
     assert findings == []
 
 
+def test_create_pr_repo_disables_lfs(tmp_path):
+    """_create_pr_repo must disable git-lfs filters so it works without lfs installed."""
+    base = tmp_path / "base"
+    head = tmp_path / "head"
+    base.mkdir()
+    head.mkdir()
+    (base / "a.txt").write_text("base\n")
+    (head / "a.txt").write_text("head\n")
+
+    repo_path, base_sha, head_sha = adapter._create_pr_repo(base, head)
+    try:
+        import subprocess as sp
+        for key in ("filter.lfs.clean", "filter.lfs.smudge", "filter.lfs.process"):
+            val = sp.run(
+                ["git", "-C", str(repo_path), "config", "--local", key],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            # Must be overridden to a passthrough (empty or cat)
+            assert val in ("", "cat"), f"{key} was not disabled: {val!r}"
+        req = sp.run(
+            ["git", "-C", str(repo_path), "config", "--local", "filter.lfs.required"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        assert req == "false", f"filter.lfs.required not disabled: {req!r}"
+        assert base_sha != head_sha
+    finally:
+        import shutil
+        shutil.rmtree(repo_path, ignore_errors=True)
+
+
+def test_create_pr_repo_skips_dotgit_in_sources(tmp_path):
+    """_create_pr_repo must ignore .git dirs that pr_runner injects into source trees."""
+    import subprocess as sp
+    base = tmp_path / "base"
+    head = tmp_path / "head"
+    base.mkdir()
+    head.mkdir()
+    (base / "a.txt").write_text("base\n")
+    (head / "a.txt").write_text("head\n")
+
+    # Simulate pr_runner's _git_init: create a .git in the source trees
+    for d in (base, head):
+        sp.run(["git", "init"], cwd=str(d), capture_output=True, check=True)
+        sp.run(["git", "config", "user.email", "t@t"], cwd=str(d), capture_output=True)
+        sp.run(["git", "config", "user.name", "T"], cwd=str(d), capture_output=True)
+        sp.run(["git", "add", "-A"], cwd=str(d), capture_output=True, check=True)
+        sp.run(["git", "commit", "-m", "init", "--allow-empty"], cwd=str(d), capture_output=True)
+
+    # This must not raise PermissionError from copying .git/objects
+    repo_path, base_sha, head_sha = adapter._create_pr_repo(base, head)
+    try:
+        assert base_sha != head_sha
+    finally:
+        import shutil
+        shutil.rmtree(repo_path, ignore_errors=True)
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

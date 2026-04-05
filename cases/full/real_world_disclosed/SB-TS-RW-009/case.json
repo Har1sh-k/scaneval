@@ -40,5 +40,9 @@
     "owaspAgenticTop10": {
       "primary": "ASI03"
     }
+  },
+  "prSimulation": {
+    "mode": "git_commit_pair",
+    "baseCommit": "101d0f451f238878f9ef48528b33c944d0612d76"
   }
 }

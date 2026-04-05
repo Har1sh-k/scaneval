@@ -43,5 +43,10 @@
         "ASI05"
       ]
     }
+  },
+  "prSimulation": {
+    "mode": "git_commit_pair",
+    "baseCommit": "4894d907faa7540ca8b6835f561a6dd3ea824b77",
+    "headCommit": "10481097f8e6dd0346db9be0b5f27570e1bdfcfa"
   }
 }

@@ -96,5 +96,30 @@
       "primary": "ASI02",
       "secondary": []
     }
+  },
+  "fixValidation": {
+    "mode": "mitigation_anchor_present",
+    "anchors": [
+      {
+        "path": "packages/nodes-base/nodes/MySql/v2/helpers/utils.ts",
+        "mustContainAll": ["conditionSet", "getWhereClauses"]
+      },
+      {
+        "path": "packages/nodes-base/nodes/MySql/v2/actions/database/select.operation.ts",
+        "mustContainAll": ["const whereClauses = getWhereClauses(this, i)"]
+      },
+      {
+        "path": "packages/nodes-base/nodes/Postgres/v2/helpers/utils.ts",
+        "mustContainAll": ["conditionSet", "getWhereClauses"]
+      },
+      {
+        "path": "packages/nodes-base/nodes/Postgres/v2/actions/database/select.operation.ts",
+        "mustContainAll": ["const whereClauses = getWhereClauses(this, i)"]
+      }
+    ]
+  },
+  "prSimulation": {
+    "mode": "git_commit_pair",
+    "baseCommit": "29959be6883d48c0385f333b3d9798a8c7c91c43"
   }
 }

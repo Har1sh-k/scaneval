@@ -345,6 +345,85 @@ def test_pr_seeded_cases_validate():
     assert len(all_errors) == 0, f"PR case validation errors: {all_errors}"
 
 
+def _make_base_case(tmp_path, case_id="SB-TMP-SV-099", extra=None):
+    """Helper: create a minimal valid case dir and return (case_dir, case_dict)."""
+    case_dir = tmp_path / case_id
+    project_dir = case_dir / "project"
+    project_dir.mkdir(parents=True)
+    (case_dir / "context.md").write_text("test\n", encoding="utf-8")
+    (project_dir / "tool.py").write_text("print('vuln')\n", encoding="utf-8")
+
+    case = {
+        "schemaVersion": "1.0.0",
+        "id": case_id,
+        "track": "core",
+        "caseType": "synthetic_vulnerable",
+        "language": "python",
+        "canonicalKind": "command_injection",
+        "files": {"root": "project/"},
+        "regions": [
+            {
+                "id": "R1", "path": "tool.py", "startLine": 1, "endLine": 1,
+                "label": "vulnerable", "acceptedKinds": ["command_injection"],
+            }
+        ],
+        "expectedOutcome": {"mustDetectRegionIds": ["R1"], "mustNotFlagRegionIds": []},
+        "standards": {"owaspAgenticTop10": {"primary": "ASI05"}},
+    }
+    if extra:
+        case.update(extra)
+    (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
+    return case_dir, case
+
+
+# --- fixValidation schema regression tests ---
+
+def test_schema_has_fix_validation_property():
+    """Top-level properties must include fixValidation referencing $defs."""
+    schema_path = Path(__file__).resolve().parent.parent / "schema" / "case.schema.json"
+    with open(schema_path) as f:
+        schema = json.load(f)
+
+    props = schema["properties"]
+    assert "fixValidation" in props, "fixValidation missing from top-level properties"
+    assert props["fixValidation"].get("$ref") == "#/$defs/fixValidation", \
+        "fixValidation should reference #/$defs/fixValidation"
+
+
+def test_fix_validation_string_does_not_crash(tmp_path):
+    """fixValidation as a string must produce errors, not crash."""
+    case_dir, _ = _make_base_case(tmp_path, extra={"fixValidation": "oops"})
+    errors = validate_case(case_dir)
+    assert any("fixValidation must be an object" in str(e) for e in errors)
+
+
+def test_fix_validation_anchor_entry_not_object(tmp_path):
+    """Non-object anchor entries must produce errors, not crash."""
+    case_dir, _ = _make_base_case(tmp_path, extra={
+        "fixValidation": {
+            "mode": "mitigation_anchor_present",
+            "anchors": ["not_an_object"],
+        }
+    })
+    errors = validate_case(case_dir)
+    assert any("must be an object" in str(e) for e in errors)
+
+
+def test_fix_validation_valid_mitigation_anchor(tmp_path):
+    """Valid mitigation_anchor_present structure should not produce fixValidation errors."""
+    case_dir, _ = _make_base_case(tmp_path, extra={
+        "fixValidation": {
+            "mode": "mitigation_anchor_present",
+            "anchors": [
+                {"path": "src/server.ts", "mustContainAll": ["cors({", "localhost"]}
+            ],
+        }
+    })
+    errors = validate_case(case_dir)
+    fv_errors = [e for e in errors if "fixValidation" in str(e)]
+    assert len(fv_errors) == 0, f"Unexpected fixValidation errors: {fv_errors}"
+
+
 if __name__ == "__main__":
     test_core_cases_are_valid()
     test_minimum_case_count()

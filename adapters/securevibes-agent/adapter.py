@@ -19,6 +19,7 @@ import tempfile
 from pathlib import Path
 
 ADAPTER_VERSION = "1.3.0"
+LLM_MODEL = os.environ.get("SECUREVIBES_LLM_MODEL", "anthropic/claude-sonnet-4-5")
 
 _sv_env = os.environ.get("SECUREVIBES_AGENT_DIR", "").strip()
 if _sv_env:
@@ -314,10 +315,15 @@ def _create_pr_repo(base_root: Path, head_root: Path) -> tuple[Path, str, str]:
     _git("init")
     _git("config", "user.email", "bench@sastbench.dev")
     _git("config", "user.name", "SASTbench")
+    # Disable git-lfs filters so operations work without lfs installed
+    _git("config", "filter.lfs.clean", "cat")
+    _git("config", "filter.lfs.smudge", "cat")
+    _git("config", "filter.lfs.process", "")
+    _git("config", "filter.lfs.required", "false")
 
-    # Commit 1: base tree
+    # Commit 1: base tree (skip .git dirs that pr_runner may have created)
     for src in base_root.rglob("*"):
-        if src.is_file():
+        if src.is_file() and ".git" not in src.relative_to(base_root).parts:
             rel = src.relative_to(base_root)
             dst = tmp / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -336,7 +342,7 @@ def _create_pr_repo(base_root: Path, head_root: Path) -> tuple[Path, str, str]:
             item.unlink()
 
     for src in head_root.rglob("*"):
-        if src.is_file():
+        if src.is_file() and ".git" not in src.relative_to(head_root).parts:
             rel = src.relative_to(head_root)
             dst = tmp / rel
             dst.parent.mkdir(parents=True, exist_ok=True)

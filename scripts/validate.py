@@ -264,6 +264,29 @@ def validate_case(case_dir: Path) -> list[ValidationError]:
                 if case_type != "real_world_disclosed":
                     errors.append(ValidationError(case_id, "git_commit_pair mode is only valid for real_world_disclosed cases"))
 
+    # Validate fixValidation (optional)
+    if "fixValidation" in case:
+        fv = case["fixValidation"]
+        if not isinstance(fv, dict):
+            errors.append(ValidationError(case_id, "fixValidation must be an object"))
+        else:
+            fv_mode = fv.get("mode")
+            if fv_mode not in ("slice_absent", "mitigation_anchor_present"):
+                errors.append(ValidationError(case_id, "fixValidation.mode must be slice_absent or mitigation_anchor_present"))
+            if fv_mode == "mitigation_anchor_present":
+                anchors = fv.get("anchors")
+                if not anchors or not isinstance(anchors, list):
+                    errors.append(ValidationError(case_id, "mitigation_anchor_present mode requires fixValidation.anchors"))
+                else:
+                    for i, anchor in enumerate(anchors):
+                        if not isinstance(anchor, dict):
+                            errors.append(ValidationError(case_id, f"fixValidation.anchors[{i}] must be an object"))
+                            continue
+                        if not anchor.get("path"):
+                            errors.append(ValidationError(case_id, f"fixValidation.anchors[{i}] missing path"))
+                        if not anchor.get("mustContainAll") or not isinstance(anchor.get("mustContainAll"), list):
+                            errors.append(ValidationError(case_id, f"fixValidation.anchors[{i}] missing or empty mustContainAll"))
+
     # Context file should exist
     if not (case_dir / "context.md").exists():
         errors.append(ValidationError(case_id, "Missing context.md"))

@@ -65,5 +65,9 @@
       "primary": "ASI03",
       "secondary": []
     }
+  },
+  "prSimulation": {
+    "mode": "git_commit_pair",
+    "baseCommit": "2fb9850af56da711fb13d7d45348181e8e2bb005"
   }
 }

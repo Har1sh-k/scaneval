@@ -39,7 +39,14 @@
   "standards": {
     "owaspAgenticTop10": {
       "primary": "ASI05",
-      "secondary": ["ASI02"]
+      "secondary": [
+        "ASI02"
+      ]
     }
+  },
+  "prSimulation": {
+    "mode": "git_commit_pair",
+    "baseCommit": "cf7d841f88504bba465790eb906f6d758b91ee2c",
+    "headCommit": "ac7cf30e019cde54905bf09b5d3fe1c6ba42f9b9"
   }
 }
