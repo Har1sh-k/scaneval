@@ -85,6 +85,18 @@ python scripts/run.py --scanner semgrep --mode pr --track core
 
 PR mode compares a clean base tree with a vulnerable head tree and measures whether the scanner reports the introduced vulnerability as a review finding. See [docs/PR_MODE.md](docs/PR_MODE.md) for the execution model, metrics, case requirements, and adapter behavior.
 
+Verify PR simulation metadata integrity for real-world cases with:
+
+```bash
+python scripts/verify_pr_strict.py
+```
+
+PR simulation (`baseCommit`/`headCommit`) and remediation verification (`fixCommit`/`fixValidation`) are separate concerns. PR mode runtime does not use `fixCommit`. See [docs/PR_MODE.md](docs/PR_MODE.md#pr-pair-verification-vs-remediation-verification) for details.
+
+### LLM Model Tracking
+
+Adapters for LLM-backed scanners can expose an `LLM_MODEL` constant. When present, results JSON includes `scanner.llmModel` and the model is printed at run start. Set via environment variable (e.g. `SECUREVIBES_LLM_MODEL`).
+
 ### Tests
 
 Run benchmark self-tests from the repo root with:

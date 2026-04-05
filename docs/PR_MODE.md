@@ -221,6 +221,50 @@ They let SASTbench ask both questions at once:
 
 That is why `Capability Noise` remains a first-class PR metric.
 
+## PR Pair Verification vs Remediation Verification
+
+PR simulation runtime and remediation verification are separate concerns.
+
+### PR runtime
+
+PR mode uses only `baseCommit` and `headCommit`. It does not read `fixCommit` or `fixValidation` at scan time. The runtime question is: *would the scanner have flagged the vulnerability in a PR introducing it?*
+
+### Remediation verification
+
+`fixCommit` is advisory metadata recording which commit addressed the vulnerability. It is used for dataset integrity checks, not PR-mode scoring.
+
+`fixValidation` controls how `scripts/verify_pr_strict.py` verifies that `fixCommit` actually addresses the vulnerability:
+
+- `slice_absent` (default): the exact annotated vulnerable slice must not appear in the file at `fixCommit`. This covers the common case where the fix rewrites the vulnerable code.
+- `mitigation_anchor_present`: the fix applies defense at a different code location than the annotated sink (e.g. CORS restriction, config hardening, caller-side validation). The verifier checks that declared anchor strings are present at `fixCommit` but absent at `vulnerableCommit`, and that the fix diff touches the anchor files.
+
+Example `fixValidation` for an indirect mitigation:
+
+```json
+"fixValidation": {
+  "mode": "mitigation_anchor_present",
+  "anchors": [
+    {
+      "path": "src/server.ts",
+      "mustContainAll": ["cors({", "origin(input)", "localhost"]
+    }
+  ]
+}
+```
+
+### Verifier
+
+Run the strict verifier to check all real-world PR simulation metadata:
+
+```bash
+python scripts/verify_pr_strict.py
+```
+
+Output reports two numbers:
+
+- **Fix removes detection slice**: direct slice-removal pass count
+- **Remediation verified**: overall count including indirect mitigations
+
 ## Current Limitations
 
 - PR mode currently operates on benchmark cases, not arbitrary external repos.
@@ -237,3 +281,4 @@ That is why `Capability Noise` remains a first-class PR metric.
 - [scripts/report.py](../scripts/report.py)
 - [schema/case.schema.json](../schema/case.schema.json)
 - [schema/results.schema.json](../schema/results.schema.json)
+- [scripts/verify_pr_strict.py](../scripts/verify_pr_strict.py)
