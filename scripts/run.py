@@ -364,4 +364,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\n\033[1;33m[SASTbench]\033[0m Interrupted by user.")
+        sys.exit(130)
