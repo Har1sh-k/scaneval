@@ -264,9 +264,9 @@ def _run_scan(scan_root: Path, language: str) -> tuple[list[dict], list[str], st
     # Read findings from the knowledge-base files written by the scan.
     kb_records = _read_finding_files(sv_dir / "findings") if sv_dir.exists() else []
 
-    # Clean up .securevibes after reading
-    if sv_dir.exists():
-        shutil.rmtree(sv_dir, ignore_errors=True)
+    # Keep .securevibes for debugging; pre-scan cleanup handles stale state.
+    # if sv_dir.exists():
+    #     shutil.rmtree(sv_dir, ignore_errors=True)
 
     findings = _normalize_findings(kb_records, scan_root)
     return findings, cmd, "", "", None
@@ -380,6 +380,11 @@ def scan_pr_with_metadata(
             "skipReason": "securevibes-agent not found (set SECUREVIBES_AGENT_DIR)",
         }
 
+    # Clean up stale PR temp repos from previous runs
+    import glob as _glob
+    for stale in _glob.glob(os.path.join(tempfile.gettempdir(), "sv-pr-*")):
+        shutil.rmtree(stale, ignore_errors=True)
+
     repo_path = None
     try:
         repo_path, base_sha, head_sha = _create_pr_repo(base_root, head_root)
@@ -465,5 +470,5 @@ def scan_pr_with_metadata(
             "skipReason": "npx_not_found",
         }
     finally:
-        if repo_path and repo_path.exists():
-            shutil.rmtree(repo_path, ignore_errors=True)
+        # Keep temp PR repo for debugging; logged path above.
+        pass
