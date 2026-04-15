@@ -46,7 +46,7 @@
   },
   "prSimulation": {
     "mode": "git_commit_pair",
-    "baseCommit": "d6182becbe155776b159270fe4a5e88d607f0c5e",
-    "headCommit": "db3834733acb46c83922573e4a161d6553346a42"
+    "baseCommit": "8f11652458e0efc6e0a3969c087370ed958d3861",
+    "headCommit": "c25f3ea53e39978b988173934c26fcd6cd1754b8"
   }
 }

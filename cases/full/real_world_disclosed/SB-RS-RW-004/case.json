@@ -15,7 +15,7 @@
       "id": "R1",
       "path": "codex-rs/core/src/config_loader/mod.rs",
       "startLine": 80,
-      "endLine": 160,
+      "endLine": 167,
       "label": "vulnerable",
       "capability": "code_execution",
       "acceptedKinds": [
@@ -46,7 +46,7 @@
   },
   "prSimulation": {
     "mode": "git_commit_pair",
-    "baseCommit": "3a9f436ce00124cabe71f102c3a2c29f097ccc4c",
-    "headCommit": "7351c129992d85405e53a285cb4916ccb223489f"
+    "baseCommit": "96fdbdd434a451fac997eb65cad3a20d44b9d8f4",
+    "headCommit": "8ff16a7714a9680d9bfe51d5a49bba5a9e59ad94"
   }
 }
