@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-RS-RW-006",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "rust",
+  "canonicalKind": "command_injection",
+  "title": "Codex CLI command injection via exec() with unsanitized format string arguments",
+  "description": "The terminal-chat component uses exec() with a format string that interpolates cwd and message preview into an osascript shell command. A crafted cwd or message containing shell metacharacters (e.g. $(rm -rf /)) achieves arbitrary command execution. The fix replaces exec() with spawn() to avoid shell interpretation. Found via commit audit of openai/codex: 63c99e7d 'use spawn instead of exec to avoid injection vulnerability'.",
+  "files": {
+    "root": "../../../../.repos/openai_codex__a3889f92/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "codex-cli/src/components/chat/terminal-chat.tsx",
+      "startLine": 374,
+      "endLine": 379,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openai/codex",
+    "vulnerableCommit": "a3889f92e4ce5ee1f8d1bbe9bea8ba91a8997607",
+    "fixCommit": "63c99e7d8286f756d5bb41d8dd2856946ca41980",
+    "ghsa": "",
+    "cve": ""
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02",
+      "secondary": []
+    }
+  },
+  "prSimulation": {
+    "mode": "git_commit_pair",
+    "baseCommit": "be7e3fd3773258af849af17a7186718de31ee6d7",
+    "headCommit": "a3889f92e4ce5ee1f8d1bbe9bea8ba91a8997607"
+  }
+}

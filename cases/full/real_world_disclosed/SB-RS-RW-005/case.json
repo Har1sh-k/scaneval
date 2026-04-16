@@ -1,0 +1,52 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-RS-RW-005",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "rust",
+  "canonicalKind": "path_traversal",
+  "title": "Codex CLI apply_patch sandbox bypass via symlinks enabling arbitrary file writes",
+  "description": "The apply_patch function processes patch operations in-process without routing through the sandbox, and does not check for symlinks or hardlinks. A model-generated patch can create a symlink pointing outside the writable root and then write through it, escaping sandbox boundaries. Found via commit audit of openai/codex: 221ebfcc 'run apply_patch calls through the sandbox'.",
+  "files": {
+    "root": "../../../../.repos/openai_codex__301ec721/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "codex-rs/core/src/apply_patch.rs",
+      "startLine": 21,
+      "endLine": 40,
+      "label": "vulnerable",
+      "capability": "filesystem",
+      "acceptedKinds": [
+        "path_traversal"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openai/codex",
+    "vulnerableCommit": "301ec72107f107ac5c6103660e276a25bc18273e",
+    "fixCommit": "221ebfcccc3ddd957d5903b8c09e4d02e62387e7",
+    "ghsa": "",
+    "cve": ""
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  },
+  "prSimulation": {
+    "mode": "git_commit_pair",
+    "baseCommit": "d76f96ce797d96a1df19176aa23c0d253ed44ad1",
+    "headCommit": "5ebb7dd34cb773c19414b4d2fd8bb33670fad1cf"
+  }
+}

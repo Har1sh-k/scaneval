@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-RS-RW-010",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "rust",
+  "canonicalKind": "path_traversal",
+  "title": "Codex CLI tilde expansion resolves ~// to / enabling sandbox writable root escape",
+  "description": "The maybe_expand_home_directory function only handles ~ and ~/ prefixes but passes ~// through unmodified. When Path::join receives a path starting with /, it discards the left-hand side entirely, so config values like ~//etc resolve to /etc as an absolute path. This broadens the sandbox writable root to arbitrary directories. Found via commit audit of openai/codex: 8179312f 'Fix tilde expansion to avoid absolute-path escape'.",
+  "files": {
+    "root": "../../../../.repos/openai_codex__3355adad/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "codex-rs/utils/absolute-path/src/lib.rs",
+      "startLine": 25,
+      "endLine": 40,
+      "label": "vulnerable",
+      "capability": "filesystem",
+      "acceptedKinds": [
+        "path_traversal"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openai/codex",
+    "vulnerableCommit": "3355adad1d80dc4a45db727469f9cceb3aa63290",
+    "fixCommit": "8179312ff5b39ea879bceb7eaed8187002a5fa04",
+    "ghsa": "",
+    "cve": ""
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03",
+      "secondary": []
+    }
+  },
+  "prSimulation": {
+    "mode": "git_commit_pair",
+    "baseCommit": "5ae6e70801110da6245ba900a8f07bee3e3d53f1",
+    "headCommit": "2c3843728c11c69b3f3e7d422485e748a69ae674"
+  }
+}
