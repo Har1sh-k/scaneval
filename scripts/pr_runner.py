@@ -9,9 +9,7 @@ Usage (via run.py):
 """
 
 import difflib
-import glob as _glob
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -452,10 +450,6 @@ def run_pr_benchmark(
         print(f"{B} Skipping {skipped} cases without prSimulation")
     print()
 
-    # Clean stale PR temp dirs from previous runs before starting.
-    for stale in _glob.glob(os.path.join(tempfile.gettempdir(), "sastbench_pr_*")):
-        shutil.rmtree(stale, ignore_errors=True)
-
     case_results = []
     all_scorings: list[PRCaseScoring] = []
 
@@ -524,9 +518,8 @@ def run_pr_benchmark(
             skip_reason = f"materialization_error"
 
         finally:
-            # Keep temp dir for debugging; stale dirs are cleaned before the next run.
-            if tmp_dir:
-                print(f"{B} PR artifacts kept at {tmp_dir}")
+            if tmp_dir and tmp_dir.exists():
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
         # Score — only count cases that actually ran as "evaluated"
         if not skip_reason:
