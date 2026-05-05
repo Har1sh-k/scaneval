@@ -30,6 +30,7 @@ from run import (
     REPO_ROOT,
     CASES_DIR,
     find_cases,
+    is_agentic_case,
     load_adapter,
     normalize_relpath,
     write_artifact,
@@ -585,6 +586,7 @@ def run_pr_benchmark(
             "caseId": current_case_id,
             "caseTrack": case["track"],
             "caseType": case["caseType"],
+            "agentic": is_agentic_case(case),
             "language": case["language"],
             "findings": finding_dicts,
             "scoring": {
