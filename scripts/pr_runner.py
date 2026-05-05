@@ -409,6 +409,7 @@ def run_pr_benchmark(
     case_id: str | None = None,
     verbose: bool = False,
     started_at: datetime | None = None,
+    profile: str = "all",
 ) -> int:
     """Run PR simulation benchmark."""
     started_at = started_at or datetime.now(timezone.utc)
@@ -420,7 +421,7 @@ def run_pr_benchmark(
     llm_model = getattr(adapter, "LLM_MODEL", None)
     scanner_version = adapter.get_version()
 
-    all_cases = find_cases(track, case_type, case_id)
+    all_cases = find_cases(track, case_type, case_id, profile)
     # PR mode only runs cases that have prSimulation AND mustDetectRegionIds.
     # Cases with empty mustDetectRegionIds (e.g. capability_safe) don't test
     # vulnerability detection, so they are excluded from PR benchmarking.
@@ -636,6 +637,7 @@ def run_pr_benchmark(
             **({"llmModel": llm_model} if llm_model else {}),
         },
         "track": track,
+        "profile": profile,
         "timestamp": started_at.isoformat(),
         "caseResults": case_results,
         "summary": {
