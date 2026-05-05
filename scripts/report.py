@@ -60,6 +60,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <div class="meta">
   <strong>Scanner:</strong> {scanner_name} v{scanner_version} &nbsp;|&nbsp;
   <strong>Track:</strong> {track} &nbsp;|&nbsp;
+  <strong>Profile:</strong> {profile} &nbsp;|&nbsp;
   <strong>Benchmark:</strong> v{benchmark_version} &nbsp;|&nbsp;
   <strong>Date:</strong> {timestamp}
 </div>
@@ -99,6 +100,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     {track_rows}
   </tbody>
 </table>
+
+{profile_section}
 
 <h2>Per-Case Results</h2>
 <table>
@@ -520,6 +523,55 @@ def generate_report(results: dict, results_dir: Path, output_dir: Path, deep: bo
             f"</tr>"
         )
 
+    profile_totals: dict[str, dict[str, int]] = {}
+    for cr in results["caseResults"]:
+        bucket_key = "agentic" if cr.get("agentic", True) else "generic"
+        bucket = profile_totals.setdefault(bucket_key, {
+            "cases": 0,
+            "findings": 0,
+            "tp": 0,
+            "fn": 0,
+            "fp": 0,
+            "cap_fp": 0,
+        })
+        bucket["cases"] += 1
+        bucket["findings"] += len(cr["findings"])
+        bucket["tp"] += cr["scoring"]["truePositives"]
+        bucket["fn"] += cr["scoring"]["falseNegatives"]
+        bucket["fp"] += cr["scoring"]["falsePositives"]
+        bucket["cap_fp"] += cr["scoring"]["capabilityFalsePositives"]
+
+    if len(profile_totals) > 1:
+        profile_rows = []
+        for profile_name in ("agentic", "generic"):
+            totals = profile_totals.get(profile_name)
+            if not totals:
+                continue
+            profile_rows.append(
+                f"<tr>"
+                f"<td>{profile_name}</td>"
+                f"<td>{totals['cases']}</td>"
+                f"<td>{totals['findings']}</td>"
+                f"<td class='tp'>{totals['tp']}</td>"
+                f"<td class='fn'>{totals['fn']}</td>"
+                f"<td class='fp'>{totals['fp']}</td>"
+                f"<td class='cap-fp'>{totals['cap_fp']}</td>"
+                f"</tr>"
+            )
+        profile_section = (
+            "<h2>Per-Profile Breakdown</h2>\n"
+            "<table>\n"
+            "  <thead><tr>"
+            "<th>Profile</th><th>Cases</th><th>Findings</th>"
+            "<th class='tp'>Targets Hit</th><th class='fn'>Targets Missed</th>"
+            "<th class='fp'>Additional</th><th class='cap-fp'>Cap Noise</th>"
+            "</tr></thead>\n"
+            f"  <tbody>\n{chr(10).join(profile_rows)}\n  </tbody>\n"
+            "</table>"
+        )
+    else:
+        profile_section = ""
+
     case_rows = []
     for cr in results["caseResults"]:
         s = cr["scoring"]
@@ -578,6 +630,7 @@ def generate_report(results: dict, results_dir: Path, output_dir: Path, deep: bo
         scanner_name=html.escape(scanner["name"]),
         scanner_version=html.escape(scanner["version"]),
         track=html.escape(results["track"]),
+        profile=html.escape(results.get("profile", "all")),
         benchmark_version=html.escape(results["benchmarkVersion"]),
         timestamp=html.escape(results["timestamp"][:10]),
         recall=format_pct(summary["recall"]),
@@ -586,6 +639,7 @@ def generate_report(results: dict, results_dir: Path, output_dir: Path, deep: bo
         mixed_intent_accuracy=format_pct(summary["mixedIntentAccuracy"]),
         track_rows="\n".join(track_rows),
         case_rows="\n".join(case_rows),
+        profile_section=profile_section,
         deep_section=deep_html,
         track_note=track_note,
     )
