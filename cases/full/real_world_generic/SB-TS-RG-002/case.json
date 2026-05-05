@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RG-002",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "typescript",
+  "canonicalKind": "ssrf",
+  "title": "Next.js Server Actions SSRF via Host header in app-relative redirect",
+  "description": "createRedirectRenderResult builds an internal fetch URL from the inbound request Host header (originalHost.value) when handling an app-relative redirect for a Server Action. Because the Host header is attacker-controlled, a Server Action that redirects to an internal path causes the server to issue an outbound fetch to a URL composed from the attacker's host value, allowing SSRF against arbitrary destinations.",
+  "files": {
+    "root": "../../../../.repos/vercel_next.js__eb6867fd/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/next/src/server/app-render/action-handler.ts",
+      "startLine": 182,
+      "endLine": 214,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": ["ssrf"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "vercel/next.js",
+    "vulnerableCommit": "eb6867fdade2766b971a28b355f5168de7e8865d",
+    "fixCommit": "8f7a6ca7d21a97bc9f7a1bbe10427b5ad74b9085",
+    "ghsa": "GHSA-fr5h-rqp8-mj6g",
+    "cve": "CVE-2024-34351"
+  }
+}
