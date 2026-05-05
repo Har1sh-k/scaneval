@@ -43,6 +43,10 @@
         "adapter": {
           "type": "string",
           "description": "Adapter version used for normalization"
+        },
+        "llmModel": {
+          "type": "string",
+          "description": "LLM model identifier reported by the adapter, when the scanner is LLM-backed"
         }
       },
       "additionalProperties": false
