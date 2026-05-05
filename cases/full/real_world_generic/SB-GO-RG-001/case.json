@@ -41,5 +41,18 @@
     "fixCommit": "9ffafad4b2d2f9f7668e5504565f356a7c047b77",
     "ghsa": "GHSA-7rh7-c77v-6434",
     "cve": "CVE-2025-54576"
+  },
+  "fixValidation": {
+    "mode": "mitigation_anchor_present",
+    "anchors": [
+      {
+        "path": "oauthproxy.go",
+        "mustContainAll": ["requestutil.GetRequestPath(req)"]
+      },
+      {
+        "path": "pkg/requests/util/util.go",
+        "mustContainAll": ["func GetRequestPath(req *http.Request) string"]
+      }
+    ]
   }
 }
