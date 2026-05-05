@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-GO-RG-004",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "go",
+  "canonicalKind": "auth_bypass",
+  "title": "oauth2-proxy GetRequestPath fragment confusion bypasses skip_auth_routes",
+  "description": "GetRequestPath returns parsedURL.Path without stripping the URL fragment. Backends that interpret '#' as a fragment delimiter route on the path before '#', while oauth2-proxy regex-matches the longer path-with-fragment against skip_auth_routes. An attacker can craft a request whose pre-fragment path is protected but whose path-plus-fragment satisfies a public allowlist regex (or the URL-encoded form '%23'), bypassing authentication.",
+  "files": {
+    "root": "../../../../.repos/oauth2-proxy_oauth2-proxy__848ec8ba/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "pkg/requests/util/util.go",
+      "startLine": 51,
+      "endLine": 65,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": ["auth_bypass", "authz_bypass"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "oauth2-proxy/oauth2-proxy",
+    "vulnerableCommit": "848ec8ba82e8097bf52c16b3ba825dacef8fcbcb",
+    "fixCommit": "bdfde725c6175a5b10e8b5ffe9f09159ea2db03c",
+    "ghsa": "GHSA-pxq7-h93f-9jrg",
+    "cve": "CVE-2026-41059"
+  }
+}
