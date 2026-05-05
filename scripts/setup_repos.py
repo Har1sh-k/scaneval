@@ -27,13 +27,16 @@ def repo_dir_name(repo: str, commit: str) -> str:
     return f"{owner_repo}__{short_sha}"
 
 
+REAL_WORLD_CASE_TYPES = {"real_world_disclosed", "real_world_generic"}
+
+
 def find_real_world_cases() -> list[tuple[Path, dict]]:
-    """Find all real_world_disclosed cases."""
+    """Find all real-world cases (both agentic disclosed and generic)."""
     cases = []
     for case_json in sorted(FULL_CASES_DIR.rglob("case.json")):
         with open(case_json, encoding="utf-8") as f:
             case = json.load(f)
-        if case.get("caseType") == "real_world_disclosed":
+        if case.get("caseType") in REAL_WORLD_CASE_TYPES:
             cases.append((case_json.parent, case))
     return cases
 
@@ -118,7 +121,7 @@ def main() -> int:
     cases = find_real_world_cases()
 
     if not cases:
-        print("No real_world_disclosed cases found in Full Track.")
+        print("No real-world cases found in Full Track.")
         print("Full Track cases will be added as they are annotated.")
         return 0
 

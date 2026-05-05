@@ -1,6 +1,7 @@
-"""Strict verifier for real_world_disclosed PR simulation data.
+"""Strict verifier for real-world PR simulation data.
 
-Checks every real_world_disclosed case against:
+Checks every real-world case (real_world_disclosed and real_world_generic)
+against:
 1. Snapshot is at realWorld.vulnerableCommit
 2. headCommit contains the exact annotated vulnerable slice
 3. baseCommit does NOT contain the exact annotated vulnerable slice
@@ -21,7 +22,11 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CASES_DIR = REPO_ROOT / "cases" / "full" / "real_world_disclosed"
+FULL_CASES_DIR = REPO_ROOT / "cases" / "full"
+REAL_WORLD_DIRS = [
+    FULL_CASES_DIR / "real_world_disclosed",
+    FULL_CASES_DIR / "real_world_generic",
+]
 REPOS_DIR = REPO_ROOT / ".repos"
 
 
@@ -213,7 +218,10 @@ def main():
     parser.add_argument("--case-id", help="Verify a single case")
     args = parser.parse_args()
 
-    case_files = sorted(CASES_DIR.rglob("case.json"))
+    case_files = []
+    for cases_dir in REAL_WORLD_DIRS:
+        if cases_dir.exists():
+            case_files.extend(sorted(cases_dir.rglob("case.json")))
     if args.case_id:
         case_files = [cf for cf in case_files if args.case_id in str(cf)]
 
