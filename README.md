@@ -38,6 +38,11 @@ python scripts/run.py --scanner semgrep --track core
 # Run with per-finding audit trail
 python scripts/run.py --scanner semgrep --track core --verbose
 
+# Filter by profile (agentic only, generic only, or both)
+python scripts/run.py --scanner semgrep --track full --profile agentic
+python scripts/run.py --scanner semgrep --track full --profile generic
+python scripts/run.py --scanner semgrep --track full --profile all
+
 # Validate case definitions (Core Track by default)
 python scripts/validate.py
 
@@ -123,6 +128,16 @@ Both should show `TARGET HIT` for SB-PY-SV-001 (SSRF in reference fetcher).
 
 - **Core Track**: Self-contained, vendored cases. 5-minute quickstart, deterministic runs.
 - **Full Track**: Core Track plus pinned snapshots from real public repositories.
+
+## Profiles
+
+Cases carry an `agentic` boolean. The `--profile` flag filters runs by profile:
+
+- `agentic` — only agentic cases (the default agentic-code thesis).
+- `generic` — only non-agentic real-world cases (`caseType: real_world_generic`).
+- `all` — both, with separate per-profile breakdown in the report.
+
+Legacy cases without an `agentic` field are treated as agentic.
 
 ## Status
 
