@@ -32,5 +32,17 @@
     "fixCommit": "52a078da3884efe6501613c7834a3d02a91676d2",
     "ghsa": "GHSA-f82v-jwr5-mffw",
     "cve": "CVE-2025-29927"
+  },
+  "fixValidation": {
+    "mode": "mitigation_anchor_present",
+    "anchors": [
+      {
+        "path": "packages/next/src/server/lib/server-ipc/utils.ts",
+        "mustContainAll": [
+          "x-middleware-subrequest-id",
+          "@next/middleware-subrequest-id"
+        ]
+      }
+    ]
   }
 }
