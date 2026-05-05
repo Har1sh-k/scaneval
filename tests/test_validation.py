@@ -138,17 +138,23 @@ def test_owasp_standards_when_present():
 
 
 def test_all_cases_have_owasp_mapping():
-    """Every case should have OWASP Agentic Top 10 mapping."""
+    """Every agentic case should have OWASP Agentic Top 10 mapping.
+
+    Non-agentic (real_world_generic) cases are exempt because the
+    OWASP Agentic Top 10 is not the right taxonomy for them.
+    """
 
     cases = find_cases(CASES_DIR)
     unmapped = []
     for case_dir in cases:
         case = load_case(case_dir)
+        if not case.get("agentic", True):
+            continue
         standards = case.get("standards", {})
         if not standards.get("owaspAgenticTop10"):
             unmapped.append(case["id"])
 
-    assert not unmapped, f"Cases without OWASP mapping: {unmapped}"
+    assert not unmapped, f"Agentic cases without OWASP mapping: {unmapped}"
 
 
 def test_disallowed_scan_root_directories_are_rejected(tmp_path):
