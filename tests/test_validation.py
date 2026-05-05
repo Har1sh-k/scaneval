@@ -291,7 +291,7 @@ def test_pr_simulation_git_commit_pair_requires_real_world(tmp_path):
     (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
 
     errors = validate_case(case_dir)
-    assert any("real_world_disclosed" in str(e) for e in errors)
+    assert any("real-world" in str(e) for e in errors)
 
 
 def test_pr_simulation_invalid_mode(tmp_path):
