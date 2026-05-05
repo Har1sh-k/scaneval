@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RG-001",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Next.js middleware authorization bypass via x-middleware-subrequest header",
+  "description": "The Edge runtime sandbox uses a client-supplied x-middleware-subrequest header to track middleware recursion depth. When the header repeats the middleware name MAX_RECURSION_DEPTH (5) times, the runtime short-circuits and returns x-middleware-next: 1, instructing the server to continue without running middleware. An external client can supply this header directly, bypassing any authorization checks the middleware was responsible for.",
+  "files": {
+    "root": "../../../../.repos/vercel_next.js__f4552826/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/next/src/server/web/sandbox/sandbox.ts",
+      "startLine": 94,
+      "endLine": 114,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": ["authz_bypass", "auth_bypass"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "vercel/next.js",
+    "vulnerableCommit": "f4552826e1ed15fbeb951be552d67c5a08ad0672",
+    "fixCommit": "52a078da3884efe6501613c7834a3d02a91676d2",
+    "ghsa": "GHSA-f82v-jwr5-mffw",
+    "cve": "CVE-2025-29927"
+  }
+}
