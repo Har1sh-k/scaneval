@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RG-005",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "typescript",
+  "canonicalKind": "ssrf",
+  "title": "Next.js middleware Location header reused as routing URL regardless of status code",
+  "description": "When middleware returns a response carrying a Location header, getResolveRoutes converts the value with getRelativeURL and assigns it to parsedUrl, treating it as a redirect target. The fix gates this conversion on a real redirect status (3xx). Without the gate, custom middleware that reflects request headers (or any attacker-influenced value) into a non-redirect Location header causes the router to follow the supplied URL on the server side, producing SSRF in self-hosted Next.js applications.",
+  "files": {
+    "root": "../../../../.repos/vercel_next.js__be4aafd4/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/next/src/server/lib/router-utils/resolve-routes.ts",
+      "startLine": 658,
+      "endLine": 670,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": ["ssrf"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "vercel/next.js",
+    "vulnerableCommit": "be4aafd4b744fbf6500b311b74c84243f70a3059",
+    "fixCommit": "1a026e338d2b8c977c8949a134168952338d6d01",
+    "ghsa": "GHSA-4342-x723-ch2f",
+    "cve": "CVE-2025-57822"
+  }
+}
