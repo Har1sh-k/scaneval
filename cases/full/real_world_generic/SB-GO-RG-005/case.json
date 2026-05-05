@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-GO-RG-005",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "go",
+  "canonicalKind": "authz_bypass",
+  "title": "oauth2-proxy email_domain bypass via malformed multi-@ email claims",
+  "description": "isEmailValidWithDomains uses strings.HasSuffix(email, \"@\"+domain) to enforce the email_domain allowlist. The check accepts any email containing the substring '@<domain>' as a suffix, including malformed values with multiple '@' such as 'attacker@evil.com@company.com'. An identity provider that emits or relays such claims allows an attacker to satisfy the email_domain restriction for company.com despite belonging to evil.com. The fix rejects emails whose '@' count is not exactly one before the suffix check.",
+  "files": {
+    "root": "../../../../.repos/oauth2-proxy_oauth2-proxy__848ec8ba/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "validator.go",
+      "startLine": 112,
+      "endLine": 130,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": ["authz_bypass", "auth_bypass"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "oauth2-proxy/oauth2-proxy",
+    "vulnerableCommit": "848ec8ba82e8097bf52c16b3ba825dacef8fcbcb",
+    "fixCommit": "cc0e0335ea9e33c0220c7ce1181e5d41dcac7b48",
+    "ghsa": "GHSA-c5c4-8r6x-56w3",
+    "cve": "CVE-2026-40574"
+  }
+}
