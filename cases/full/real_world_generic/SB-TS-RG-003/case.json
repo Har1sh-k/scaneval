@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RG-003",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Next.js i18n query parameters bypass middleware pathname authorization",
+  "description": "Before invoking middleware, base-server merges request headers and parses the URL but does not validate __nextLocale (and related) query parameters against the configured i18n locales. Internal request meta then concatenates the unverified locale prefix into the pathname when routing. Middleware that authorizes based on req.nextUrl.pathname (e.g., 'deny /admin/*') can be tricked: an attacker-supplied __nextLocale shifts the pathname the middleware sees while the eventual route still resolves to the protected resource. The fix introduces I18NProvider.validateQuery and strips invalid locale query params at request entry.",
+  "files": {
+    "root": "../../../../.repos/vercel_next.js__bb3f5801/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/next/src/server/base-server.ts",
+      "startLine": 902,
+      "endLine": 913,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": ["authz_bypass", "auth_bypass"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "vercel/next.js",
+    "vulnerableCommit": "bb3f58011885369404fe2d6abe5d40b867183fce",
+    "fixCommit": "1c8234eb20bc8afd396b89999a00f06b61d72d7b",
+    "ghsa": "GHSA-7gfc-8cq8-jh5f",
+    "cve": "CVE-2024-51479"
+  }
+}
