@@ -32,5 +32,18 @@
     "fixCommit": "11c35678659c6e0b17d537c1cc893a77c807e576",
     "ghsa": "GHSA-p7w3-9m58-rq83",
     "cve": "CVE-2023-37470"
+  },
+  "fixValidation": {
+    "mode": "mitigation_anchor_present",
+    "anchors": [
+      {
+        "path": "src/metabase/driver/h2.clj",
+        "mustContainAll": [
+          "driver/can-connect? :h2",
+          "malicious-property-value",
+          "INIT not allowed"
+        ]
+      }
+    ]
   }
 }
