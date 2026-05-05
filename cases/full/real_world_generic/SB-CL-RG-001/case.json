@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-CL-RG-001",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "clojure",
+  "canonicalKind": "command_injection",
+  "title": "Metabase H2 connection string injection allowing INIT-based RCE",
+  "description": "connection-details->spec runs an admin-supplied H2 :db string through connection-string-set-safe-options, which only strips an exact case-insensitive 'init' key from a naive ';'-split parse. Because the H2 ConnectionInfo parser accepts options in alternate forms that this routine does not normalize, attacker-controlled INIT clauses can survive into the spec and execute arbitrary SQL/Java on connection (H2 INIT runs SQL, and H2 SQL can load Java code via CREATE ALIAS / custom functions, yielding RCE).",
+  "files": {
+    "root": "../../../../.repos/metabase_metabase__398972be/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/metabase/driver/h2.clj",
+      "startLine": 454,
+      "endLine": 471,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": ["command_injection", "sql_injection"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "metabase/metabase",
+    "vulnerableCommit": "398972be3a050c327a35f162d77e7a8a024e5311",
+    "fixCommit": "11c35678659c6e0b17d537c1cc893a77c807e576",
+    "ghsa": "GHSA-p7w3-9m58-rq83",
+    "cve": "CVE-2023-37470"
+  }
+}
