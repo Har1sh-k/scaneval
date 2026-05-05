@@ -37,9 +37,14 @@
         "synthetic_vulnerable",
         "capability_safe",
         "mixed_intent",
-        "real_world_disclosed"
+        "real_world_disclosed",
+        "real_world_generic"
       ],
-      "description": "The type of benchmark case"
+      "description": "The type of benchmark case. real_world_generic is for non-agentic real-world cases."
+    },
+    "agentic": {
+      "type": "boolean",
+      "description": "Whether this case represents agentic code. Defaults to true when omitted; real_world_generic cases must set this to false."
     },
     "language": {
       "type": "string",
@@ -113,12 +118,25 @@
     }
   },
   "additionalProperties": false,
-  "if": {
-    "properties": { "caseType": { "const": "real_world_disclosed" } }
-  },
-  "then": {
-    "required": ["realWorld"]
-  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "caseType": { "const": "real_world_disclosed" } }
+      },
+      "then": {
+        "required": ["realWorld"]
+      }
+    },
+    {
+      "if": {
+        "properties": { "caseType": { "const": "real_world_generic" } }
+      },
+      "then": {
+        "required": ["realWorld", "agentic"],
+        "properties": { "agentic": { "const": false } }
+      }
+    }
+  ],
   "$defs": {
     "region": {
       "type": "object",
