@@ -142,8 +142,8 @@ Legacy cases without an `agentic` field are treated as agentic.
 ## Status
 
 - **17 Core Track** cases (synthetic vulnerable, capability safe, mixed intent)
-- **40 Full Track** cases (real-world disclosed from public repositories)
-- **57 total cases** across Python, TypeScript, and Rust
+- **68 Full Track** cases — 49 real-world disclosed (agentic) + 19 real-world generic (non-agentic)
+- **85 total cases** across Python, TypeScript, Rust, Swift, Go, Java, and Clojure
 
 ## Official Adapters
 
