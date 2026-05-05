@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-GO-RG-007",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "go",
+  "canonicalKind": "authz_bypass",
+  "title": "crewjam/saml validateSigned only inspects the first Assertion, allowing unsigned-assertion injection",
+  "description": "validateSigned looks for a single Assertion element via findChild(responseEl, ..., 'Assertion') and treats the response as signature-validated whenever either the Response or that one Assertion carries a valid signature. SAML responses can contain multiple assertions, and downstream code processes all of them. An attacker who intercepts a legitimate response with one signed assertion can append additional unsigned assertions (e.g., an Admin identity assertion) and the response still passes validation. This was the upstream library bug that produced Grafana's SAML privilege escalation (CVE-2022-41912 / GHSA-5hcf-rqj9-xh96).",
+  "files": {
+    "root": "../../../../.repos/crewjam_saml__5e0ffd29/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "service_provider.go",
+      "startLine": 1079,
+      "endLine": 1119,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": ["authz_bypass", "auth_bypass"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "crewjam/saml",
+    "vulnerableCommit": "5e0ffd290abf0be7dfd4f8279e03a963071544eb",
+    "fixCommit": "aee3fb1edeeaf1088fcb458727e0fd863d277f8b",
+    "ghsa": "GHSA-j2jp-wvqg-wc2g",
+    "cve": "CVE-2022-41912"
+  }
+}
