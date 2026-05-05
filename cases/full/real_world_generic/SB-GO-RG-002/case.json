@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-GO-RG-002",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "go",
+  "canonicalKind": "auth_bypass",
+  "title": "oauth2-proxy health check User-Agent matching bypasses authentication",
+  "description": "isHealthCheckRequest treats a request as a health check whenever the configured User-Agent matches, regardless of path. In auth_request integrations a forwarded auth subrequest carries the client's User-Agent, so any client sending the configured ping/gcp User-Agent (e.g. GoogleHC/1.0) is treated as a healthy probe and bypasses authentication entirely. The fix requires the path AND user-agent to both match.",
+  "files": {
+    "root": "../../../../.repos/oauth2-proxy_oauth2-proxy__848ec8ba/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "pkg/middleware/healthcheck.go",
+      "startLine": 44,
+      "endLine": 52,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": ["auth_bypass"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "oauth2-proxy/oauth2-proxy",
+    "vulnerableCommit": "848ec8ba82e8097bf52c16b3ba825dacef8fcbcb",
+    "fixCommit": "43596a7bab2053e091ddc513c865e20b4e4b08ea",
+    "ghsa": "GHSA-5hvv-m4w4-gf6v",
+    "cve": "CVE-2026-34457"
+  }
+}
