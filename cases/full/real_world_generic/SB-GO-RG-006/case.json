@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-GO-RG-006",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "go",
+  "canonicalKind": "authz_bypass",
+  "title": "oauth2-proxy header stripping fails to normalize underscores, allowing X_Forwarded-* smuggling",
+  "description": "stripHeaders uses req.Header.Del, which removes only the canonical (Title-Case, hyphenated) form of the header name. When a client supplies a header with an underscore variant (e.g. X_Forwarded-For instead of X-Forwarded-For), Del does not match it and the header passes through to the upstream. WSGI frameworks (Django, Flask, FastAPI, PHP) normalize underscores to dashes when ingesting headers, so the upstream sees attacker-controlled X-Forwarded-* values, enabling spoofing of identity-related headers and privilege escalation.",
+  "files": {
+    "root": "../../../../.repos/oauth2-proxy_oauth2-proxy__87827435/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "pkg/middleware/headers.go",
+      "startLine": 53,
+      "endLine": 60,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": ["authz_bypass", "auth_bypass"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "oauth2-proxy/oauth2-proxy",
+    "vulnerableCommit": "87827435ce895a8d7c6dfa03a879dd3399d36cce",
+    "fixCommit": "5993067505cac4c8e80192787ccd1f4cba05d994",
+    "ghsa": "GHSA-vjrc-mh2v-45x6",
+    "cve": "CVE-2025-64484"
+  }
+}
