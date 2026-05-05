@@ -4,8 +4,8 @@
   "description": "Benchmark for evaluating SAST tools on agentic and general-purpose codebases",
   "releaseBar": {
     "coreTrackCases": 17,
-    "fullTrackCases": 40,
-    "totalCases": 57,
+    "fullTrackCases": 68,
+    "totalCases": 85,
     "officialAdapters": 2,
     "note": "v1.0.0 requires Full Track with at least 3 real_world_disclosed cases"
   },
