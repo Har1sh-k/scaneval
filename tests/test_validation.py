@@ -424,6 +424,97 @@ def test_fix_validation_valid_mitigation_anchor(tmp_path):
     assert len(fv_errors) == 0, f"Unexpected fixValidation errors: {fv_errors}"
 
 
+# --- real_world_generic + agentic field regression tests ---
+
+def _make_generic_case(tmp_path, extra=None):
+    """Build a minimal real_world_generic case dir."""
+    case_id = "SB-PY-RG-001"
+    case_dir = tmp_path / case_id
+    project_dir = case_dir / "project"
+    project_dir.mkdir(parents=True)
+    (case_dir / "context.md").write_text("generic test\n", encoding="utf-8")
+    (project_dir / "tool.py").write_text("print('vuln')\n", encoding="utf-8")
+
+    case = {
+        "schemaVersion": "1.0.0",
+        "id": case_id,
+        "track": "full",
+        "caseType": "real_world_generic",
+        "agentic": False,
+        "language": "python",
+        "canonicalKind": "command_injection",
+        "files": {"root": "project/"},
+        "regions": [
+            {
+                "id": "R1", "path": "tool.py", "startLine": 1, "endLine": 1,
+                "label": "vulnerable", "acceptedKinds": ["command_injection"],
+            }
+        ],
+        "expectedOutcome": {"mustDetectRegionIds": ["R1"], "mustNotFlagRegionIds": []},
+        "realWorld": {
+            "repo": "example/lib",
+            "vulnerableCommit": "a" * 40,
+            "fixCommit": "b" * 40,
+        },
+        "standards": {"owaspAgenticTop10": {"primary": "ASI05"}},
+    }
+    if extra:
+        case.update(extra)
+    (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
+    return case_dir, case
+
+
+def test_real_world_generic_valid(tmp_path):
+    """A correctly-formed real_world_generic case should validate cleanly."""
+    case_dir, _ = _make_generic_case(tmp_path)
+    errors = validate_case(case_dir)
+    assert errors == [], f"Unexpected errors: {[str(e) for e in errors]}"
+
+
+def test_real_world_generic_requires_agentic_false(tmp_path):
+    """real_world_generic without agentic: false must error."""
+    case_dir, case = _make_generic_case(tmp_path)
+    case.pop("agentic")
+    (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
+    errors = validate_case(case_dir)
+    assert any("agentic" in str(e) for e in errors)
+
+
+def test_real_world_generic_requires_real_world_metadata(tmp_path):
+    """real_world_generic without realWorld must error."""
+    case_dir, case = _make_generic_case(tmp_path)
+    case.pop("realWorld")
+    (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
+    errors = validate_case(case_dir)
+    assert any("realWorld" in str(e) for e in errors)
+
+
+def test_real_world_generic_rejects_agentic_true(tmp_path):
+    """real_world_generic explicitly set agentic: true must error."""
+    case_dir, case = _make_generic_case(tmp_path)
+    case["agentic"] = True
+    (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
+    errors = validate_case(case_dir)
+    assert any("agentic" in str(e) for e in errors)
+
+
+def test_agentic_field_must_be_boolean(tmp_path):
+    """Non-boolean agentic values must error."""
+    case_dir, _ = _make_base_case(tmp_path, extra={"agentic": "yes"})
+    errors = validate_case(case_dir)
+    assert any("agentic field must be a boolean" in str(e) for e in errors)
+
+
+def test_pr_simulation_git_commit_pair_allows_real_world_generic(tmp_path):
+    """git_commit_pair PR mode on real_world_generic should validate."""
+    case_dir, _ = _make_generic_case(tmp_path, extra={
+        "prSimulation": {"mode": "git_commit_pair", "baseCommit": "c" * 40},
+    })
+    errors = validate_case(case_dir)
+    pr_errors = [e for e in errors if "git_commit_pair" in str(e)]
+    assert pr_errors == [], f"Unexpected PR errors: {[str(e) for e in pr_errors]}"
+
+
 if __name__ == "__main__":
     test_core_cases_are_valid()
     test_minimum_case_count()
