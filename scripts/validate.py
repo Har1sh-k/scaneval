@@ -24,7 +24,7 @@ VALID_CASE_TYPES = {
     "real_world_generic",
 }
 REAL_WORLD_CASE_TYPES = {"real_world_disclosed", "real_world_generic"}
-VALID_LANGUAGES = {"python", "typescript", "rust", "swift"}
+VALID_LANGUAGES = {"python", "typescript", "rust", "swift", "go", "java", "clojure"}
 VALID_KINDS = {"command_injection", "path_traversal", "ssrf", "auth_bypass", "authz_bypass", "sql_injection"}
 VALID_LABELS = {"vulnerable", "capability_safe"}
 VALID_CAPABILITIES = {"code_execution", "filesystem", "network", "authentication", "authorization", "data_store"}

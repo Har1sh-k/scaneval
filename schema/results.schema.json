@@ -105,7 +105,7 @@
         },
         "language": {
           "type": "string",
-          "enum": ["python", "typescript", "rust", "swift"],
+          "enum": ["python", "typescript", "rust", "swift", "go", "java", "clojure"],
           "description": "Primary language of the case"
         },
         "findings": {

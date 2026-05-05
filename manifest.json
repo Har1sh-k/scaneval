@@ -31,7 +31,7 @@
     "real_world_disclosed",
     "real_world_generic"
   ],
-  "languages": ["python", "typescript", "rust", "swift"],
+  "languages": ["python", "typescript", "rust", "swift", "go", "java", "clojure"],
   "canonicalKinds": ["command_injection", "path_traversal", "ssrf", "auth_bypass", "authz_bypass", "sql_injection"],
   "schemaVersion": "1.0.0"
 }
