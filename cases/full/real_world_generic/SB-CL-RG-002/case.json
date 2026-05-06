@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-CL-RG-002",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "clojure",
+  "canonicalKind": "ssrf",
+  "title": "Metabase GeoJSON fetch trusts system DNS resolution and reaches link-local addresses",
+  "description": "url->geojson invokes http/get on an admin-supplied URL using the default DNS resolver. The static valid-host? / valid-url? checks ahead of the fetch refuse obvious link-local literals, but DNS rebinding — a domain whose A record set contains a link-local address — defeats them. The HTTP client then resolves the host to a local-link IP and fetches from it, leaking access to colocated unsecured resources. The fix injects a custom DnsResolver that rejects any host whose resolution includes a link-local address.",
+  "files": {
+    "root": "../../../../.repos/metabase_metabase__faf54a43/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/metabase/api/geojson.clj",
+      "startLine": 127,
+      "endLine": 152,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": ["ssrf"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "metabase/metabase",
+    "vulnerableCommit": "faf54a43ba464e919f4fc176d0349f4555fe5ff0",
+    "fixCommit": "e47b76cf6b6d5016246530a36817b5c5c2080449",
+    "ghsa": "GHSA-8xf9-9jc8-qp98",
+    "cve": "CVE-2025-30371"
+  }
+}

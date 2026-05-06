@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-GO-RG-003",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "go",
+  "canonicalKind": "auth_bypass",
+  "title": "oauth2-proxy trusts X-Forwarded-* headers from any client when --reverse-proxy is enabled",
+  "description": "IsProxied returns the global scope.ReverseProxy flag (set by --reverse-proxy) without validating the direct caller's address. Every X-Forwarded-* reader (GetRequestProto/Host/URI) uses IsProxied to decide whether to trust client-supplied forwarded headers, so any client can spoof X-Forwarded-Uri to make skip_auth_routes matching evaluate against a different path than the one the upstream actually serves. The fix introduces CanTrustForwardedHeaders, gated by a configured trusted-proxy IP allowlist.",
+  "files": {
+    "root": "../../../../.repos/oauth2-proxy_oauth2-proxy__848ec8ba/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "pkg/requests/util/util.go",
+      "startLine": 67,
+      "endLine": 75,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": ["auth_bypass", "authz_bypass"]
+    },
+    {
+      "id": "R2",
+      "path": "pkg/requests/util/util.go",
+      "startLine": 39,
+      "endLine": 46,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": ["auth_bypass", "authz_bypass"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "oauth2-proxy/oauth2-proxy",
+    "vulnerableCommit": "848ec8ba82e8097bf52c16b3ba825dacef8fcbcb",
+    "fixCommit": "aff369dfa31ca6b8166b4e14613e8fb2d7dac88a",
+    "ghsa": "GHSA-7x63-xv5r-3p2x",
+    "cve": "CVE-2026-40575"
+  }
+}

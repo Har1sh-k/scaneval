@@ -1,0 +1,58 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-GO-RG-001",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "go",
+  "canonicalKind": "auth_bypass",
+  "title": "oauth2-proxy skip_auth_routes bypass via query parameter inclusion",
+  "description": "GetRequestURI returns the full request URI including the query string, and isAllowedPath matches the configured skip_auth_routes regex against that full URI. An attacker can append crafted query parameters to a protected path so the regex still matches a public allowlist entry, letting unauthenticated requests reach protected backends.",
+  "files": {
+    "root": "../../../../.repos/oauth2-proxy_oauth2-proxy__f4b33b64/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "pkg/requests/util/util.go",
+      "startLine": 37,
+      "endLine": 44,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": ["auth_bypass"]
+    },
+    {
+      "id": "R2",
+      "path": "oauthproxy.go",
+      "startLine": 582,
+      "endLine": 590,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": ["auth_bypass"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "oauth2-proxy/oauth2-proxy",
+    "vulnerableCommit": "f4b33b64bd66ad28e9b0d63bea51837b83c00ca1",
+    "fixCommit": "9ffafad4b2d2f9f7668e5504565f356a7c047b77",
+    "ghsa": "GHSA-7rh7-c77v-6434",
+    "cve": "CVE-2025-54576"
+  },
+  "fixValidation": {
+    "mode": "mitigation_anchor_present",
+    "anchors": [
+      {
+        "path": "oauthproxy.go",
+        "mustContainAll": ["requestutil.GetRequestPath(req)"]
+      },
+      {
+        "path": "pkg/requests/util/util.go",
+        "mustContainAll": ["func GetRequestPath(req *http.Request) string"]
+      }
+    ]
+  }
+}

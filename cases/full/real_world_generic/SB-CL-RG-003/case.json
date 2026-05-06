@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-CL-RG-003",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "clojure",
+  "canonicalKind": "ssrf",
+  "title": "Metabase HTTP channel webhook URL is fetched without host validation",
+  "description": "channel/send! :channel/http builds a clj-http request from the admin-supplied :url and posts to it without any check on the destination host. Webhook test and webhook subscription flows reach this code path with a user-controlled URL, so a self-hosted Metabase can be coerced into making HTTP requests to internal metadata services (e.g. metadata.google.internal) and any colocated unsecured local resources. The fix introduces metabase.util.http/valid-host? with strategy-driven blocking of link-local, loopback, site-local, and known cloud-metadata hosts and inserts a guard before send!.",
+  "files": {
+    "root": "../../../../.repos/metabase_metabase__51045504/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/metabase/channel/impl/http.clj",
+      "startLine": 37,
+      "endLine": 53,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": ["ssrf"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "metabase/metabase",
+    "vulnerableCommit": "51045504469c446531e0cca1cd2b93dd6cb794c4",
+    "fixCommit": "7ac7990ceb9f5d088c9459092f60868a15a62ea4",
+    "ghsa": "GHSA-2wgg-7r2p-cmqx",
+    "cve": "CVE-2026-22805"
+  }
+}

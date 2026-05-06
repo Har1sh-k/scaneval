@@ -43,6 +43,10 @@
         "adapter": {
           "type": "string",
           "description": "Adapter version used for normalization"
+        },
+        "llmModel": {
+          "type": "string",
+          "description": "LLM model identifier reported by the adapter, when the scanner is LLM-backed"
         }
       },
       "additionalProperties": false
@@ -50,6 +54,11 @@
     "track": {
       "type": "string",
       "enum": ["core", "full"]
+    },
+    "profile": {
+      "type": "string",
+      "enum": ["agentic", "generic", "all"],
+      "description": "Profile filter applied to this run (agentic, generic, or all)"
     },
     "timestamp": {
       "type": "string",
@@ -87,12 +96,16 @@
         },
         "caseType": {
           "type": "string",
-          "enum": ["synthetic_vulnerable", "capability_safe", "mixed_intent", "real_world_disclosed"],
+          "enum": ["synthetic_vulnerable", "capability_safe", "mixed_intent", "real_world_disclosed", "real_world_generic"],
           "description": "Case type for reporting and aggregation"
+        },
+        "agentic": {
+          "type": "boolean",
+          "description": "Whether the source case is agentic (mirrors case.json agentic field, defaulted to true for legacy cases)"
         },
         "language": {
           "type": "string",
-          "enum": ["python", "typescript", "rust", "swift"],
+          "enum": ["python", "typescript", "rust", "swift", "go", "java", "clojure"],
           "description": "Primary language of the case"
         },
         "findings": {

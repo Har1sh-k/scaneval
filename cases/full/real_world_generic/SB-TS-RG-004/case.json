@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RG-004",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "React Server Components reply parser deserializes attacker-controlled module references (RCE)",
+  "description": "loadServerReference takes a Server Action id from a parsed FormData / RSC reply payload and resolves it through resolveServerReference(bundlerConfig, id), then calls requireModule on the result. The id originates from an HTTP request body that an unauthenticated attacker can craft. Combined with the surrounding reply parser's missing cycle / error handling, the call chain becomes an unauthenticated RCE primitive that lets an attacker invoke arbitrary functions or load arbitrary modules from the bundler graph. The fix in 19.0.1 / 19.1.2 / 19.2.1 brings cycle resolution and deferred error handling from ReactFlightClient to FlightReplyServer.",
+  "files": {
+    "root": "../../../../.repos/facebook_react__f3e3f6fb/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/react-server/src/ReactFlightReplyServer.js",
+      "startLine": 339,
+      "endLine": 382,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": ["command_injection"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "facebook/react",
+    "vulnerableCommit": "f3e3f6fbac2972e3eef2bd2462b984fd1400c740",
+    "fixCommit": "bbed0b0ee64b89353a40d6313037bbc80221bc3d",
+    "ghsa": "GHSA-fv66-9v8q-g76r",
+    "cve": "CVE-2025-55182"
+  }
+}

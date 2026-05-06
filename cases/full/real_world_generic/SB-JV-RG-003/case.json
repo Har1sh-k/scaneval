@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-JV-RG-003",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "java",
+  "canonicalKind": "auth_bypass",
+  "title": "OpenAM SAMLv1.x signature verification missing on unsigned responses",
+  "description": "verifyResponse in SAMLUtils calls response.isSignatureValid() but never checks response.isSigned(). When the inbound SAML response carries no signature, isSignatureValid() returns true (vacuously), so the method approves the response without ever validating origin. processResponse compounds the issue by gating verifySignature on isSigned(). An attacker sending a crafted unsigned SAML response to SAMLPOSTProfileServlet impersonates any OpenAM user, including the administrator.",
+  "files": {
+    "root": "../../../../.repos/OpenIdentityPlatform_OpenAM__46bce7d6/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "openam-federation/openam-federation-library/src/main/java/com/sun/identity/saml/common/SAMLUtils.java",
+      "startLine": 952,
+      "endLine": 957,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": ["auth_bypass", "authz_bypass"]
+    },
+    {
+      "id": "R2",
+      "path": "openam-federation/openam-federation-library/src/main/java/com/sun/identity/saml/common/SAMLUtils.java",
+      "startLine": 1583,
+      "endLine": 1594,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": ["auth_bypass", "authz_bypass"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "OpenIdentityPlatform/OpenAM",
+    "vulnerableCommit": "46bce7d6a8ca696be90d84d708c4216a725fdf65",
+    "fixCommit": "7c18543d126e8a567b83bb4535631825aaa9d742",
+    "ghsa": "GHSA-4mh8-9wq6-rjxg",
+    "cve": "CVE-2023-37471"
+  }
+}

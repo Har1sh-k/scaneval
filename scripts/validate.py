@@ -21,8 +21,10 @@ VALID_CASE_TYPES = {
     "capability_safe",
     "mixed_intent",
     "real_world_disclosed",
+    "real_world_generic",
 }
-VALID_LANGUAGES = {"python", "typescript", "rust", "swift"}
+REAL_WORLD_CASE_TYPES = {"real_world_disclosed", "real_world_generic"}
+VALID_LANGUAGES = {"python", "typescript", "rust", "swift", "go", "java", "clojure"}
 VALID_KINDS = {"command_injection", "path_traversal", "ssrf", "auth_bypass", "authz_bypass", "sql_injection"}
 VALID_LABELS = {"vulnerable", "capability_safe"}
 VALID_CAPABILITIES = {"code_execution", "filesystem", "network", "authentication", "authorization", "data_store"}
@@ -213,8 +215,17 @@ def validate_case(case_dir: Path) -> list[ValidationError]:
         if not vuln_regions:
             errors.append(ValidationError(case_id, "synthetic_vulnerable case must have at least one vulnerable region"))
 
-    if case_type == "real_world_disclosed" and "realWorld" not in case:
-        errors.append(ValidationError(case_id, "real_world_disclosed case must have realWorld metadata"))
+    if case_type in REAL_WORLD_CASE_TYPES and "realWorld" not in case:
+        errors.append(ValidationError(case_id, f"{case_type} case must have realWorld metadata"))
+
+    if case_type == "real_world_generic":
+        if "agentic" not in case:
+            errors.append(ValidationError(case_id, "real_world_generic case must explicitly set agentic: false"))
+        elif case["agentic"] is not False:
+            errors.append(ValidationError(case_id, "real_world_generic case must set agentic: false"))
+
+    if "agentic" in case and not isinstance(case["agentic"], bool):
+        errors.append(ValidationError(case_id, "agentic field must be a boolean"))
 
     # Validate standards field (optional)
     if "standards" in case:
@@ -261,8 +272,8 @@ def validate_case(case_dir: Path) -> list[ValidationError]:
             elif pr_mode == "git_commit_pair":
                 if not pr_sim.get("baseCommit"):
                     errors.append(ValidationError(case_id, "git_commit_pair mode requires prSimulation.baseCommit"))
-                if case_type != "real_world_disclosed":
-                    errors.append(ValidationError(case_id, "git_commit_pair mode is only valid for real_world_disclosed cases"))
+                if case_type not in REAL_WORLD_CASE_TYPES:
+                    errors.append(ValidationError(case_id, "git_commit_pair mode is only valid for real-world cases"))
 
     # Validate fixValidation (optional)
     if "fixValidation" in case:

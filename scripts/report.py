@@ -60,6 +60,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <div class="meta">
   <strong>Scanner:</strong> {scanner_name} v{scanner_version} &nbsp;|&nbsp;
   <strong>Track:</strong> {track} &nbsp;|&nbsp;
+  <strong>Profile:</strong> {profile} &nbsp;|&nbsp;
   <strong>Benchmark:</strong> v{benchmark_version} &nbsp;|&nbsp;
   <strong>Date:</strong> {timestamp}
 </div>
@@ -99,6 +100,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     {track_rows}
   </tbody>
 </table>
+
+{profile_section}
 
 <h2>Per-Case Results</h2>
 <table>
@@ -180,6 +183,7 @@ PR_HTML_TEMPLATE = """<!DOCTYPE html>
   <strong>Scanner:</strong> {scanner_name} v{scanner_version} &nbsp;|&nbsp;
   <strong>Mode:</strong> PR Simulation &nbsp;|&nbsp;
   <strong>Track:</strong> {track} &nbsp;|&nbsp;
+  <strong>Profile:</strong> {profile} &nbsp;|&nbsp;
   <strong>Benchmark:</strong> v{benchmark_version} &nbsp;|&nbsp;
   <strong>Date:</strong> {timestamp}
 </div>
@@ -206,6 +210,8 @@ PR_HTML_TEMPLATE = """<!DOCTYPE html>
 <p class="small"><strong>Note:</strong> PR mode compares base (clean) and head (vulnerable) trees.
 "Review findings" are new-in-head findings. Introduced target hit rate measures whether
 the scanner detects vulnerabilities introduced by the simulated PR.</p>
+
+{pr_profile_section}
 
 <h2>Per-Case PR Results</h2>
 <table>
@@ -425,6 +431,53 @@ def generate_pr_report(results: dict, results_dir: Path, output_dir: Path, deep:
     scanner = results["scanner"]
     pr_summary = results.get("prSummary", {})
 
+    pr_profile_totals: dict[str, dict[str, int]] = {}
+    for cr in results["caseResults"]:
+        bucket_key = "agentic" if cr.get("agentic", True) else "generic"
+        bucket = pr_profile_totals.setdefault(bucket_key, {
+            "cases": 0,
+            "detected": 0,
+            "total": 0,
+            "review_noise": 0,
+            "cap_noise": 0,
+        })
+        pr_score = cr.get("prScoring", {})
+        bucket["cases"] += 1
+        bucket["detected"] += pr_score.get("introducedTargetsDetected", 0)
+        bucket["total"] += pr_score.get("introducedTargetsTotal", 0)
+        bucket["review_noise"] += pr_score.get("reviewNoise", 0)
+        bucket["cap_noise"] += pr_score.get("capabilityNoise", 0)
+
+    if len(pr_profile_totals) > 1:
+        pr_profile_rows = []
+        for profile_name in ("agentic", "generic"):
+            totals = pr_profile_totals.get(profile_name)
+            if not totals:
+                continue
+            pr_profile_rows.append(
+                f"<tr>"
+                f"<td>{profile_name}</td>"
+                f"<td>{totals['cases']}</td>"
+                f"<td class='tp'>{totals['detected']}/{totals['total']}</td>"
+                f"<td class='fp'>{totals['review_noise']}</td>"
+                f"<td class='cap-fp'>{totals['cap_noise']}</td>"
+                f"</tr>"
+            )
+        pr_profile_section = (
+            "<h2>Per-Profile Breakdown</h2>\n"
+            "<table>\n"
+            "  <thead><tr>"
+            "<th>Profile</th><th>Cases</th>"
+            "<th class='tp'>Targets Detected</th>"
+            "<th class='fp'>Review Noise</th>"
+            "<th class='cap-fp'>Cap Noise</th>"
+            "</tr></thead>\n"
+            f"  <tbody>\n{chr(10).join(pr_profile_rows)}\n  </tbody>\n"
+            "</table>"
+        )
+    else:
+        pr_profile_section = ""
+
     pr_case_rows = []
     for cr in results["caseResults"]:
         pr_ctx = cr.get("prContext", {})
@@ -468,12 +521,14 @@ def generate_pr_report(results: dict, results_dir: Path, output_dir: Path, deep:
         scanner_name=html.escape(scanner["name"]),
         scanner_version=html.escape(scanner["version"]),
         track=html.escape(results["track"]),
+        profile=html.escape(results.get("profile", "all")),
         benchmark_version=html.escape(results["benchmarkVersion"]),
         timestamp=html.escape(results["timestamp"][:10]),
         introduced_target_hit_rate=format_pct(pr_summary.get("introducedTargetHitRate", 0)),
         total_review_noise=pr_summary.get("totalReviewNoise", 0),
         total_capability_noise=pr_summary.get("totalCapabilityNoise", 0),
         cases_evaluated=pr_summary.get("casesEvaluated", 0),
+        pr_profile_section=pr_profile_section,
         pr_case_rows="\n".join(pr_case_rows),
         deep_section=deep_html,
     )
@@ -519,6 +574,55 @@ def generate_report(results: dict, results_dir: Path, output_dir: Path, deep: bo
             f"<td class='cap-fp'>{totals['cap_fp']}</td>"
             f"</tr>"
         )
+
+    profile_totals: dict[str, dict[str, int]] = {}
+    for cr in results["caseResults"]:
+        bucket_key = "agentic" if cr.get("agentic", True) else "generic"
+        bucket = profile_totals.setdefault(bucket_key, {
+            "cases": 0,
+            "findings": 0,
+            "tp": 0,
+            "fn": 0,
+            "fp": 0,
+            "cap_fp": 0,
+        })
+        bucket["cases"] += 1
+        bucket["findings"] += len(cr["findings"])
+        bucket["tp"] += cr["scoring"]["truePositives"]
+        bucket["fn"] += cr["scoring"]["falseNegatives"]
+        bucket["fp"] += cr["scoring"]["falsePositives"]
+        bucket["cap_fp"] += cr["scoring"]["capabilityFalsePositives"]
+
+    if len(profile_totals) > 1:
+        profile_rows = []
+        for profile_name in ("agentic", "generic"):
+            totals = profile_totals.get(profile_name)
+            if not totals:
+                continue
+            profile_rows.append(
+                f"<tr>"
+                f"<td>{profile_name}</td>"
+                f"<td>{totals['cases']}</td>"
+                f"<td>{totals['findings']}</td>"
+                f"<td class='tp'>{totals['tp']}</td>"
+                f"<td class='fn'>{totals['fn']}</td>"
+                f"<td class='fp'>{totals['fp']}</td>"
+                f"<td class='cap-fp'>{totals['cap_fp']}</td>"
+                f"</tr>"
+            )
+        profile_section = (
+            "<h2>Per-Profile Breakdown</h2>\n"
+            "<table>\n"
+            "  <thead><tr>"
+            "<th>Profile</th><th>Cases</th><th>Findings</th>"
+            "<th class='tp'>Targets Hit</th><th class='fn'>Targets Missed</th>"
+            "<th class='fp'>Additional</th><th class='cap-fp'>Cap Noise</th>"
+            "</tr></thead>\n"
+            f"  <tbody>\n{chr(10).join(profile_rows)}\n  </tbody>\n"
+            "</table>"
+        )
+    else:
+        profile_section = ""
 
     case_rows = []
     for cr in results["caseResults"]:
@@ -578,6 +682,7 @@ def generate_report(results: dict, results_dir: Path, output_dir: Path, deep: bo
         scanner_name=html.escape(scanner["name"]),
         scanner_version=html.escape(scanner["version"]),
         track=html.escape(results["track"]),
+        profile=html.escape(results.get("profile", "all")),
         benchmark_version=html.escape(results["benchmarkVersion"]),
         timestamp=html.escape(results["timestamp"][:10]),
         recall=format_pct(summary["recall"]),
@@ -586,6 +691,7 @@ def generate_report(results: dict, results_dir: Path, output_dir: Path, deep: bo
         mixed_intent_accuracy=format_pct(summary["mixedIntentAccuracy"]),
         track_rows="\n".join(track_rows),
         case_rows="\n".join(case_rows),
+        profile_section=profile_section,
         deep_section=deep_html,
         track_note=track_note,
     )

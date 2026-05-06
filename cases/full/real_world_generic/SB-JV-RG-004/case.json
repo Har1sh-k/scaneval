@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-JV-RG-004",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "java",
+  "canonicalKind": "auth_bypass",
+  "title": "OpenAM OIDC claims extension returns attacker-requested claim values without verification",
+  "description": "The oidc-claims-extension Groovy script's attributeRetriever closure returns requested.iterator().next() whenever the OIDC claims request asks for a single value. The 'requested' set is populated directly from the client-supplied 'claims' parameter, so the issued id_token / userinfo carry whatever value the caller asked for, not the value bound to the authenticated identity. Relying parties that trust the email claim (or any other identity claim) for identification can be tricked into authenticating attackers as arbitrary users.",
+  "files": {
+    "root": "../../../../.repos/OpenIdentityPlatform_OpenAM__ccf03755/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "openam-scripting/src/main/groovy/oidc-claims-extension.groovy",
+      "startLine": 54,
+      "endLine": 62,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": ["auth_bypass", "authz_bypass"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "OpenIdentityPlatform/OpenAM",
+    "vulnerableCommit": "ccf03755f063eafdf7bbc334e225ea76e8080bef",
+    "fixCommit": "4254b34b2b8b4867f2e7fccfac73904213d48510",
+    "ghsa": "GHSA-39hr-239p-fhqc",
+    "cve": "CVE-2025-64099"
+  }
+}

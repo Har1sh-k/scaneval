@@ -41,8 +41,10 @@ It works on SASTbench cases that satisfy both conditions:
 
 This means:
 
-- `synthetic_vulnerable`, `mixed_intent`, and selected `real_world_disclosed` cases can participate
+- `synthetic_vulnerable`, `mixed_intent`, `real_world_disclosed`, and `real_world_generic` cases can participate when they carry the required PR metadata
 - `capability_safe` cases are excluded from PR mode because they do not model a vulnerability-introducing change
+
+PR mode honours the `--profile` flag, so a run can be scoped to agentic, generic, or all cases. The PR report shows the active profile in its header, and renders a per-profile breakdown when both are present.
 
 If a case has `prSimulation` but no `mustDetectRegionIds`, the runner skips it before scanning.
 

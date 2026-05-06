@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-JV-RG-001",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "java",
+  "canonicalKind": "command_injection",
+  "title": "OpenAM FreeMarker template injection via custom login URL template",
+  "description": "RealmOAuth2ProviderSettings.getCustomLoginUrlTemplate() builds a FreeMarker Template from a configured loginUrlTemplate string using a default Configuration with no class resolver restriction. Combined with FreeMarker's ?new() built-in, an attacker who can influence the template content (e.g., through realm settings or chained OAuth2 flows) can execute arbitrary commands via expressions like ${\"freemarker.template.utility.Execute\"?new()(\"<cmd>\")}. The fix narrows the resolver to TemplateClassResolver.SAFER_RESOLVER.",
+  "files": {
+    "root": "../../../../.repos/OpenIdentityPlatform_OpenAM__ba0c9382/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "openam-oauth2/src/main/java/org/forgerock/oauth2/core/RealmOAuth2ProviderSettings.java",
+      "startLine": 960,
+      "endLine": 967,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": ["command_injection"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "OpenIdentityPlatform/OpenAM",
+    "vulnerableCommit": "ba0c9382d04b226ae332adb35f9ef01646341e28",
+    "fixCommit": "fcb8432aa77d5b2e147624fe954cb150c568e0b8",
+    "ghsa": "GHSA-7726-43hg-m23v",
+    "cve": "CVE-2024-41667"
+  }
+}

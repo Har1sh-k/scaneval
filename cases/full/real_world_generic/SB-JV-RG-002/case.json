@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-JV-RG-002",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "java",
+  "canonicalKind": "command_injection",
+  "title": "OpenAM jato.clientSession unrestricted Java deserialization (pre-auth RCE)",
+  "description": "Encoder.deserialize wraps an attacker-controlled byte array in ApplicationObjectInputStream and calls readObject without a class whitelist. The jato.clientSession HTTP parameter on JATO ViewBean endpoints (e.g. Password Reset pages) is decoded through this routine, so an unauthenticated attacker can deliver a malicious Java serialized payload and achieve remote code execution. A previous fix (CVE-2021-35464) added a WhitelistObjectInputStream for jato.pageSession but did not patch this second deserialization entry point.",
+  "files": {
+    "root": "../../../../.repos/OpenIdentityPlatform_OpenAM__ab64dedf/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "jato-shaded/src/main/java/com/iplanet/jato/util/Encoder.java",
+      "startLine": 117,
+      "endLine": 130,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": ["command_injection"]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": ["R1"],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "OpenIdentityPlatform/OpenAM",
+    "vulnerableCommit": "ab64dedfa722c8b5537338e2fdd22c8455debdf6",
+    "fixCommit": "014007c63cacc834cc795a89fac0e611aebc4a32",
+    "ghsa": "GHSA-2cqq-rpvq-g5qj",
+    "cve": "CVE-2026-33439"
+  }
+}

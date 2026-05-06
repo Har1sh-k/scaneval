@@ -24,13 +24,21 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CASES_DIR = REPO_ROOT / "cases"
 ADAPTERS_DIR = REPO_ROOT / "adapters"
 
+PROFILES = ("agentic", "generic", "all")
+
+
+def is_agentic_case(case: dict) -> bool:
+    """Return whether a case is agentic. Defaults to True for legacy cases."""
+    return case.get("agentic", True)
+
 
 def find_cases(
     track: str,
     case_type: str | None = None,
     case_id: str | None = None,
+    profile: str = "all",
 ) -> list[tuple[Path, dict]]:
-    """Find cases, optionally filtered by case type or specific case ID."""
+    """Find cases, optionally filtered by case type, ID, or profile."""
     cases = []
 
     if track == "core":
@@ -48,6 +56,11 @@ def find_cases(
             if case_type and case["caseType"] != case_type:
                 continue
             if case_id and case["id"] != case_id:
+                continue
+            agentic = is_agentic_case(case)
+            if profile == "agentic" and not agentic:
+                continue
+            if profile == "generic" and agentic:
                 continue
             cases.append((case_json.parent, case))
 
@@ -148,6 +161,7 @@ def run_benchmark(
     case_id: str | None = None,
     verbose: bool = False,
     mode: str = "benchmark",
+    profile: str = "all",
 ) -> int:
     """Run the benchmark and produce results."""
     started_at = datetime.now(timezone.utc)
@@ -163,6 +177,7 @@ def run_benchmark(
             case_id=case_id,
             verbose=verbose,
             started_at=started_at,
+            profile=profile,
         )
     output_dir = output_path.parent
     artifacts_root = output_dir / f"{output_path.stem}_artifacts"
@@ -170,7 +185,7 @@ def run_benchmark(
     adapter = load_adapter(scanner_name)
     adapter_version = getattr(adapter, "ADAPTER_VERSION", "1.0.0")
     llm_model = getattr(adapter, "LLM_MODEL", None)
-    cases = find_cases(track, case_type, case_id)
+    cases = find_cases(track, case_type, case_id, profile)
 
     if not cases:
         print("No cases found.")
@@ -178,7 +193,7 @@ def run_benchmark(
 
     B = "\033[1;36m[SASTbench]\033[0m"
     SEP = "\033[2m" + "-" * 45 + "\033[0m"
-    print(f"{B} Running SASTbench ({track} track) with {scanner_name}")
+    print(f"{B} Running SASTbench ({track} track, profile={profile}) with {scanner_name}")
     if llm_model:
         print(f"{B} LLM model: {llm_model}")
     print(f"{B} Found {len(cases)} cases\n")
@@ -269,6 +284,7 @@ def run_benchmark(
             "caseId": current_case_id,
             "caseTrack": case["track"],
             "caseType": case["caseType"],
+            "agentic": is_agentic_case(case),
             "language": case["language"],
             "findings": finding_dicts,
             "scoring": {
@@ -301,6 +317,7 @@ def run_benchmark(
             **({"llmModel": llm_model} if llm_model else {}),
         },
         "track": track,
+        "profile": profile,
         "timestamp": started_at.isoformat(),
         "caseResults": case_results,
         "summary": {
@@ -346,12 +363,18 @@ def main() -> int:
     parser.add_argument("--output", "-o", type=Path, help="Output JSON file path (defaults under results/)")
     parser.add_argument(
         "--case-type",
-        choices=["synthetic_vulnerable", "capability_safe", "mixed_intent", "real_world_disclosed"],
+        choices=["synthetic_vulnerable", "capability_safe", "mixed_intent", "real_world_disclosed", "real_world_generic"],
         help="Filter to a specific case type",
     )
     parser.add_argument(
         "--case-id",
         help="Run a single case by ID (e.g. SB-TS-RW-001)",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=list(PROFILES),
+        default="all",
+        help="Filter cases by profile: agentic only, generic (non-agentic) only, or all (default)",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -360,7 +383,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    return run_benchmark(args.scanner, args.track, args.output, args.case_type, args.case_id, args.verbose, args.mode)
+    return run_benchmark(args.scanner, args.track, args.output, args.case_type, args.case_id, args.verbose, args.mode, args.profile)
 
 
 if __name__ == "__main__":
