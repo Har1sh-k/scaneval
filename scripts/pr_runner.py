@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from scoring import Finding
+from cutoff import partition_by_cutoff
 from pr_scoring import (
     PRCaseScoring,
     synthesize_review_findings,
@@ -411,6 +412,9 @@ def run_pr_benchmark(
     verbose: bool = False,
     started_at: datetime | None = None,
     profile: str = "all",
+    cutoff=None,
+    cutoff_label: str | None = None,
+    model_id: str | None = None,
 ) -> int:
     """Run PR simulation benchmark."""
     started_at = started_at or datetime.now(timezone.utc)
@@ -423,6 +427,9 @@ def run_pr_benchmark(
     scanner_version = adapter.get_version()
 
     all_cases = find_cases(track, case_type, case_id, profile)
+    excluded_by_cutoff: list[tuple[str, str | None]] = []
+    if cutoff is not None:
+        all_cases, excluded_by_cutoff = partition_by_cutoff(all_cases, cutoff)
     # PR mode only runs cases that have prSimulation AND mustDetectRegionIds.
     # Cases with empty mustDetectRegionIds (e.g. capability_safe) don't test
     # vulnerability detection, so they are excluded from PR benchmarking.
@@ -445,6 +452,8 @@ def run_pr_benchmark(
 
     skipped = len(all_cases) - len(pr_cases) - no_targets_skipped
     print(f"{B} Running SASTbench PR mode ({track} track) with {scanner_name}")
+    if cutoff_label:
+        print(f"{B} Cutoff: {cutoff_label} -> {len(excluded_by_cutoff)} dated case(s) excluded as pre-cutoff")
     if llm_model:
         print(f"{B} LLM model: {llm_model}")
     print(f"{B} Found {len(pr_cases)} PR-capable cases")
@@ -640,6 +649,13 @@ def run_pr_benchmark(
         },
         "track": track,
         "profile": profile,
+        "cutoff": {
+            "model": model_id,
+            "date": cutoff.isoformat() if cutoff else None,
+            "label": cutoff_label,
+            "excludedCount": len(excluded_by_cutoff),
+            "excludedCaseIds": [cid for cid, _ in excluded_by_cutoff],
+        } if cutoff is not None else None,
         "timestamp": started_at.isoformat(),
         "caseResults": case_results,
         "summary": {
