@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-093",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Public API execution retry authorizes with workflow:read instead of workflow:execute",
+  "description": "The n8n Public API's retryExecution handler determines which workflows the caller may act on by calling getSharedWorkflowIds(req.user, ['workflow:read']) and then retries an execution belonging to any of those workflows via ExecutionService.retry(). Because retrying an execution re-runs the workflow, this is an execute-class operation, but the handler scopes it using the workflow:read permission. As a result, a user who has only read-only access to a workflow shared with them (or shared across projects) can call the Public API to retry that workflow's executions, performing an execution they are not authorized to perform and bypassing the intended boundary between read and execute access.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__5826f22c/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/cli/src/public-api/v1/handlers/executions/executions.handler.ts",
+      "startLine": 230,
+      "endLine": 245,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "5826f22c0b67d1c9df4dffeb6757c1e3522df99d",
+    "fixCommit": "284b3f088988cabbaa1f250d56484b9b8b8f106c",
+    "ghsa": "GHSA-h3jj-5f3v-3685",
+    "cve": "",
+    "disclosure": {
+      "ghsaPublished": "2026-06-16",
+      "fixCommitDate": "2026-06-10"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

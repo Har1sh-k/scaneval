@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-125",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "n8n MCP Browser HTTP transport accepts unauthenticated session init and tool invocation",
+  "description": "When @n8n/mcp-browser is launched with the HTTP transport, the raw node:http request handler in server.ts accepts MCP session-initialization and tool-invocation requests with no authentication and an open CORS policy (Access-Control-Allow-Origin: *). The handler creates a new StreamableHTTPServerTransport and registers the full set of browser-control tools (navigation, JavaScript evaluation, cookie/storage access) for any caller, so any network-reachable client or any website the user visits can establish an MCP session and drive the user's real browser profile (CVSS 4.0 8.8).",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__a37ba249/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/@n8n/mcp-browser/src/server.ts",
+      "startLine": 46,
+      "endLine": 99,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "a37ba249d46c98cd3369450c9624bf00497ef9db",
+    "fixCommit": "3f7246b41a768a331efd7681a103cf30a293f725",
+    "ghsa": "GHSA-qrx8-25qr-5r7v",
+    "cve": "CVE-2026-54309",
+    "disclosure": {
+      "ghsaPublished": "2026-06-16",
+      "fixCommitDate": "2026-06-10"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

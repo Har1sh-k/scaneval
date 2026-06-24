@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-104",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "Second-order n8n expression injection via Form node HTML field",
+  "description": "The Form node's prepareFormFields() helper iterates over the resolvable expressions embedded in an HTML form field and calls context.evaluateExpression() on each before rendering the form. When an HTML field interpolates a value originally supplied by an unauthenticated user (e.g. a previously submitted form value) and that resolved value begins with an '=' character, n8n treats the resolved string as a new expression and evaluates it again. This double evaluation lets an unauthenticated attacker inject and execute arbitrary n8n expressions within the expression context, which, when chained with a sandbox escape, can lead to remote code execution on the n8n host.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__8e81f3e3/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/nodes-base/nodes/Form/utils/utils.ts",
+      "startLine": 119,
+      "endLine": 139,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "8e81f3e31398b04fd6f8cc27cf844980cd382117",
+    "fixCommit": "9e5212ecbc5d2d4e6f340b636a5e84be6369882e",
+    "ghsa": "GHSA-75g8-rv7v-32f7",
+    "cve": "CVE-2026-27493",
+    "disclosure": {
+      "ghsaPublished": "2026-02-25",
+      "fixCommitDate": "2026-02-25"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-077",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Flowise account registration mass-assigns req.body, letting unauthenticated users join arbitrary organizations and set roles",
+  "description": "The AccountController.register() handler in packages/server/src/enterprise/controllers/account.controller.ts passes the raw req.body directly into AccountService.register() with no allowlist or DTO validation. The service then maps the client-supplied JSON (user, organization, organizationUser, workspace, workspaceUser, role and metadata fields) straight onto internal domain entities and persists them. Because the endpoint POST /api/v1/account/register is unauthenticated, an attacker can supply server-managed fields (createdBy, updatedBy, createdDate, etc.) and, critically, a nested organization.id and organizationUser.{organizationId,roleId}, causing the newly created account to be associated with an existing organization the attacker does not belong to and assigned an arbitrary role, breaking multi-tenant trust boundaries.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__f0c12941/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/server/src/enterprise/controllers/account.controller.ts",
+      "startLine": 7,
+      "endLine": 15,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "f0c1294173a55f26e0b972c39c0c16917f5ca9e7",
+    "fixCommit": "1e4b0d87883e7f4086da985ca7d83c6e6088f027",
+    "ghsa": "GHSA-48m6-ch88-55mj",
+    "cve": "CVE-2026-41267",
+    "disclosure": {
+      "ghsaPublished": "2026-04-16",
+      "fixCommitDate": "2026-02-12"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-098",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "GitHub Webhook Trigger accepts unsigned requests (missing HMAC-SHA256 signature verification)",
+  "description": "The GithubTrigger node's webhook() handler reads the inbound request body and returns it as the workflow trigger payload without verifying GitHub's X-Hub-Signature-256 HMAC. The node never configured a webhook secret on GitHub's side, so it has no shared secret to validate deliveries. An attacker who knows the workflow's webhook URL can send forged, unsigned POST requests and trigger the workflow with arbitrary data, spoofing GitHub webhook events. This is an authentication-bypass-by-spoofing (CWE-290).",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__e040ab67/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/nodes-base/nodes/Github/GithubTrigger.node.ts",
+      "startLine": 611,
+      "endLine": 638,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "e040ab67e5acf63df4438a7f9352ab91cd43ccc4",
+    "fixCommit": "64c9148e1d65ad9e666bf37cf71720b876b58926",
+    "ghsa": "GHSA-mqpr-49jj-32rc",
+    "cve": "",
+    "disclosure": {
+      "ghsaPublished": "2026-02-26",
+      "fixCommitDate": "2026-01-15"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

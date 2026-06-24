@@ -1,0 +1,47 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-PY-RW-012",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "python",
+  "canonicalKind": "ssrf",
+  "title": "Unauthenticated SSRF in Dify console /remote-files/upload endpoint",
+  "description": "The Dify console endpoint POST /console/api/remote-files/upload (handler upload_remote_file in api/controllers/console/remote_files.py) takes a caller-supplied url field and immediately issues server-side HTTP requests to it via ssrf_proxy.head/get to fetch the remote file. The route is registered on the fastopenapi console_router without any authentication decorator, so any unauthenticated client can drive the Dify backend to make arbitrary outbound requests. By pointing url at internal services or cloud metadata endpoints (e.g. 169.254.169.254), an attacker can reach otherwise-inaccessible internal resources and exfiltrate sensitive responses, the classic Server-Side Request Forgery condition described in the advisory PoC.",
+  "files": {
+    "root": "../../../../.repos/langgenius_dify__cd03e0a9/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "api/controllers/console/remote_files.py",
+      "startLine": 43,
+      "endLine": 66,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "langgenius/dify",
+    "vulnerableCommit": "cd03e0a9ef7f2383853ace444e3aefe4fac05cde",
+    "fixCommit": "26b704da0bed2a0673fcefb06c17532527ab6de6",
+    "ghsa": "GHSA-8235-vv5j-mmvg",
+    "cve": "",
+    "disclosure": {
+      "fixCommitDate": "2026-02-11"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

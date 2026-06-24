@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-118",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "sql_injection",
+  "title": "SQL injection in n8n Snowflake (and legacy MySQL v1) nodes via unescaped identifiers",
+  "description": "The Snowflake node and the legacy MySQL v1 node build INSERT and UPDATE statements by directly interpolating user-controlled identifier fields (table name, column names, update key) into the SQL string with no identifier escaping. While row values are bound as parameters, the identifiers are not, so a workflow that maps external user input via expressions into the table/columns/updateKey parameters allows an attacker to inject arbitrary SQL into the constructed query. This is a follow-up to GHSA-f3f2-mcxc-pwjx, whose original fix did not cover the Snowflake node or MySQL v1.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__e7d95055/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/nodes-base/nodes/Snowflake/Snowflake.node.ts",
+      "startLine": 210,
+      "endLine": 217,
+      "label": "vulnerable",
+      "capability": "data_store",
+      "acceptedKinds": [
+        "sql_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "e7d95055d1ab260ae91f8ba358310211476bd677",
+    "fixCommit": "0e626768ed19d97f3f2aa98c9f1d4021c73ee7e6",
+    "ghsa": "GHSA-hp3c-vfpm-q4f7",
+    "cve": "CVE-2026-42237",
+    "disclosure": {
+      "ghsaPublished": "2026-04-29",
+      "fixCommitDate": "2026-04-22"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

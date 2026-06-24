@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-124",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "Authentication bypass in Microsoft Agent 365 Trigger via forged identity instead of JWT validation",
+  "description": "The Microsoft Agent 365 Trigger webhook handler never validated the inbound Bot Framework token. Instead of verifying the incoming JWT, it hardcoded a fabricated authenticated principal onto the request (`req.user = { aud, appid, azp: credentials.clientId }`) and then handed the request straight to `agent.adapter.process`, which trusts that identity. As a result an unauthenticated attacker who knew the webhook URL could submit a forged payload and have the workflow execute with attacker-controlled data as if it came from a legitimately authenticated Microsoft caller.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__a37ba249/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/@n8n/nodes-langchain/nodes/vendors/Microsoft/MicrosoftAgent365Trigger.node.ts",
+      "startLine": 230,
+      "endLine": 236,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "a37ba249d46c98cd3369450c9624bf00497ef9db",
+    "fixCommit": "3f7246b41a768a331efd7681a103cf30a293f725",
+    "ghsa": "GHSA-jvc7-762p-3743",
+    "cve": "CVE-2026-54308",
+    "disclosure": {
+      "ghsaPublished": "2026-06-16",
+      "fixCommitDate": "2026-06-10"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

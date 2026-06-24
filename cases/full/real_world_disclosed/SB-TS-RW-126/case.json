@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-126",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "sql_injection",
+  "title": "SQL injection via unvalidated column cast type in Postgres v1/TimescaleDB node",
+  "description": "The legacy Postgres v1 and TimescaleDB nodes let a workflow author specify columns using a `name:cast` syntax, where the optional `cast` is a PostgreSQL type that pg-promise emits as a raw, non-parameterized SQL type modifier (e.g. `${column}::cast`). In pgInsert/pgInsertV2/pgUpdate/pgUpdateV2 the `cast` token parsed from the user-controlled `columns` (and `updateKey`) parameter was placed directly into the pg-promise ColumnSet without any validation, so an authenticated user with workflow edit permission could embed arbitrary SQL into the cast and have it executed against the connected database under the credentials of the configured account.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__a37ba249/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/nodes-base/nodes/Postgres/v1/genericFunctions.ts",
+      "startLine": 295,
+      "endLine": 305,
+      "label": "vulnerable",
+      "capability": "data_store",
+      "acceptedKinds": [
+        "sql_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "a37ba249d46c98cd3369450c9624bf00497ef9db",
+    "fixCommit": "3f7246b41a768a331efd7681a103cf30a293f725",
+    "ghsa": "GHSA-c37g-w77q-m4vp",
+    "cve": "CVE-2026-54310",
+    "disclosure": {
+      "ghsaPublished": "2026-06-16",
+      "fixCommitDate": "2026-06-10"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

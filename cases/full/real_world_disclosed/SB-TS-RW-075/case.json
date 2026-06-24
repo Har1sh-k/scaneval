@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-075",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "Code injection in CSVAgent: user-controlled customReadCSV interpolated into Python executed by Pyodide",
+  "description": "The CSVAgent node (CSVAgent.ts) in Flowise <= 3.0.13 builds a Python program by string-interpolating the user-controlled customReadCSV input (customReadCSVFunc) directly into the code template at 'df = pd.${customReadCSVFunc}' (line 158) and immediately executes it with pyodide.runPythonAsync(code) (line 162). Because there is no sanitization or validation of customReadCSVFunc, an authenticated attacker who configures a chatflow with this node can supply a payload such as DataFrame({'foo': ['bar!']});import os;os.system('whoami') that is interpolated and executed by the Pyodide Python runtime, yielding arbitrary code/command execution (RCE) when the chatflow is triggered via /api/v1/prediction.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__f0c12941/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/components/nodes/agents/CSVAgent/CSVAgent.ts",
+      "startLine": 145,
+      "endLine": 162,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "f0c1294173a55f26e0b972c39c0c16917f5ca9e7",
+    "fixCommit": "0c8236ac9a9720725e135603f4a54f7d7d6646ac",
+    "ghsa": "GHSA-9wc7-mj3f-74xv",
+    "cve": "CVE-2026-41137",
+    "disclosure": {
+      "ghsaPublished": "2026-04-16",
+      "fixCommitDate": "2026-02-24"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

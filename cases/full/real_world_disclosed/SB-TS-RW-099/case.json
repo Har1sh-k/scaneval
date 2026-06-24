@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-099",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "n8n expression sandbox escape via reserved-variable shadowing / with statement leading to RCE",
+  "description": "n8n evaluates user-supplied workflow expressions through a sanitizing AST transform (PrototypeSanitizer in expression-sandboxing.ts) that is meant to keep evaluation inside a restricted sandbox. The sanitizer only inspected class declarations, member expressions and object-pattern destructuring, but did not prevent an expression from redeclaring the internal reserved identifiers used by the sandbox (the injected data node ___n8n_data and the __sanitize helper) via variable declarations, function parameters or catch clauses, and did not block 'with' statements. An authenticated user able to create or edit a workflow could craft an expression that shadows these internal variables or uses a 'with' block to defeat the property-access sanitization, escaping the sandbox and executing arbitrary code (RCE) with the privileges of the n8n process.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__61fd8625/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/workflow/src/expression-sandboxing.ts",
+      "startLine": 244,
+      "endLine": 328,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "61fd8625d744592727ddc2d3cf635cb2fbaa98b1",
+    "fixCommit": "30383d86139f3279a698df8d229eadfefe8627f4",
+    "ghsa": "GHSA-6cqr-8cfr-67f8",
+    "cve": "CVE-2026-25049",
+    "disclosure": {
+      "ghsaPublished": "2026-02-04",
+      "fixCommitDate": "2026-01-22"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

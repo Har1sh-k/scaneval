@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-064",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "ssrf",
+  "title": "Credential 'Allowed domains' wildcard bypass enables credentialed requests to attacker domains in n8n",
+  "description": "n8n's isDomainAllowed in packages/workflow/src/utils.ts enforces the HTTP Request credential's 'Allowed domains' allowlist, including wildcard entries like *.example.com. For wildcard entries it computed domainSuffix = 'example.com' and accepted the request URL when hostname.endsWith(domainSuffix) was true. Because the leading dot is not required, a hostname such as evilexample.com or attacker-example.com also ends with 'example.com' and is wrongly treated as allowed. An authenticated user configuring an HTTP Request node can thus point a credentialed request at an attacker-controlled domain that merely shares the suffix, causing the server to send the credential to an unintended destination (credential exfiltration via an allowlist/SSRF-protection bypass).",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__6c484fd4/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/workflow/src/utils.ts",
+      "startLine": 389,
+      "endLine": 401,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "6c484fd4e85bd12025ff13eb88c37e701b468bbe",
+    "fixCommit": "404640f1e93fe848ec4b90e972a1ea53e33f80e2",
+    "ghsa": "GHSA-2xcx-75h9-vr9h",
+    "cve": "CVE-2026-25631",
+    "disclosure": {
+      "ghsaPublished": "2026-02-04",
+      "fixCommitDate": "2025-11-17"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

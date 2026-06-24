@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-078",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "Flowise replaceInputsWithConfig FILE-STORAGE:: bypass allows overrideConfig MCP env injection leading to RCE",
+  "description": "In replaceInputsWithConfig() in packages/server/src/utils/index.ts, when applying a chatflow's overrideConfig to node inputs, the code skips the isParameterEnabled() authorization check for any config value whose string contains the literal 'FILE-STORAGE::'. The check uses String.includes() rather than startsWith() and performs no parameter-type validation, so an attacker can prepend a comment such as '/* FILE-STORAGE:: */' to an arbitrary parameter (e.g. mcpServerConfig) and have it accepted even though the administrator never enabled it for override. On a public chatflow that contains a Custom MCP tool node with API Override enabled, an unauthenticated /api/v1/prediction request can therefore override mcpServerConfig and inject an env block containing NODE_OPTIONS=--experimental-loader (which the MCP node's dangerousEnvVars blocklist does not cover), causing the spawned MCP child process to execute attacker-supplied JavaScript and arbitrary OS commands.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__f0c12941/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/server/src/utils/index.ts",
+      "startLine": 1191,
+      "endLine": 1199,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "f0c1294173a55f26e0b972c39c0c16917f5ca9e7",
+    "fixCommit": "c8282c97fb6854775d475f814c5d20312114b56f",
+    "ghsa": "GHSA-cvrr-qhgw-2mm6",
+    "cve": "CVE-2026-41268",
+    "disclosure": {
+      "ghsaPublished": "2026-04-16",
+      "fixCommitDate": "2026-02-06"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-083",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "Flowise resetPassword authentication bypass via null/empty reset token",
+  "description": "AccountService.resetPassword() in packages/server/src/enterprise/services/account.service.ts looks up the target account by email and then checks the password-reset token with `if (user.tempToken !== data.user.tempToken)`. It never verifies that a reset token was actually generated for the account: for a user who has never requested a reset (or who reset before), the stored tempToken is null or an empty string. An attacker who knows the victim's email can call POST /api/v1/account/reset-password supplying a matching null/empty tempToken, passing the equality check. The only remaining gate is an absolute-value expiry comparison against tokenExpiry; for freshly created accounts tokenExpiry defaults near account-creation time, so `Math.abs(now.diff(tokenExpiry,'minutes')) > 15` is satisfiable within the default 15-minute window, letting the attacker set an arbitrary new password and take over the account.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__20eac8f1/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/server/src/enterprise/services/account.service.ts",
+      "startLine": 571,
+      "endLine": 582,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "20eac8f1eca9ef4697e6da9e357d70bec0ed16c5",
+    "fixCommit": "6c78e1c36f4cf08874b9b7a444d61ab63441d78a",
+    "ghsa": "GHSA-f6hc-c5jr-878p",
+    "cve": "CVE-2026-41276",
+    "disclosure": {
+      "ghsaPublished": "2026-04-16",
+      "fixCommitDate": "2026-03-11"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

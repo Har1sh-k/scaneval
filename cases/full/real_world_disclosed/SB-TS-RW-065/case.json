@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-065",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "LDAP email-based account linking enables account takeover / privilege escalation in n8n",
+  "description": "In n8n's LDAP service (handleLdapLogin in packages/cli/src/ldap.ee/ldap.service.ee.ts), when an authenticating LDAP user has no existing LDAP auth identity, the code looks up a local account by the LDAP-supplied email (getUserByEmail) and, if one is found whose email matches, immediately links the LDAP id to that local account via createLdapAuthIdentity. Because the link is established solely on email equality and the LDAP email attribute is attacker-controllable in many directories, an LDAP user who sets their email to match a victim's (including an administrator's) gains full authenticated access to the victim account. The linkage persists in the database even after the LDAP email is reverted, yielding permanent account takeover and privilege escalation.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__6c484fd4/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/cli/src/ldap.ee/ldap.service.ee.ts",
+      "startLine": 483,
+      "endLine": 499,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "6c484fd4e85bd12025ff13eb88c37e701b468bbe",
+    "fixCommit": "b3af602ed08e11591e17597183cca9c2ab1ff37c",
+    "ghsa": "GHSA-c545-x2rh-82fc",
+    "cve": "CVE-2026-33665",
+    "disclosure": {
+      "ghsaPublished": "2026-03-25",
+      "fixCommitDate": "2025-11-13"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

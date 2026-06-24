@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-095",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "path_traversal",
+  "title": "Path traversal in ExecuteWorkflow localFile source bypassing file access restrictions",
+  "description": "The ExecuteWorkflow node's getWorkflowInfo() helper, for the 'localFile' source option, reads a workflow file directly from disk using the user-supplied 'workflowPath' parameter without applying the N8N_RESTRICT_FILE_ACCESS_TO restriction enforced by other file-reading nodes. Although the localFile option is hidden from the UI since v1.2, it remains settable via the REST API, so an authenticated user with workflow-edit permission could supply an arbitrary absolute or traversal path to probe for the existence of files on the host and, if the target is valid workflow JSON, load and execute it.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__86307124/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/nodes-base/nodes/ExecuteWorkflow/ExecuteWorkflow/GenericFunctions.ts",
+      "startLine": 30,
+      "endLine": 50,
+      "label": "vulnerable",
+      "capability": "filesystem",
+      "acceptedKinds": [
+        "path_traversal"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "8630712455dd64bf76f0860d8fef1a92e308b7ad",
+    "fixCommit": "7277566c64c36f5e43c17a2e620da2408ab1dcb7",
+    "ghsa": "GHSA-2vx9-7wpg-88jq",
+    "cve": "",
+    "disclosure": {
+      "ghsaPublished": "2026-05-19",
+      "fixCommitDate": "2026-04-29"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

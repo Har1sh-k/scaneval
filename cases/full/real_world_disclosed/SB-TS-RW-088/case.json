@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-088",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "ssrf",
+  "title": "Flowise SSRF protection bypass: tools call raw node-fetch/axios instead of the secure HTTP wrapper",
+  "description": "Flowise's SSRF mitigation (introduced via httpSecurity.ts / secureFetch / secureAxiosRequest with HTTP_DENY_LIST, IP-resolution validation, IP pinning and loopback blocking) is opt-in rather than enforced. Multiple tool/loader nodes import raw HTTP clients (node-fetch, axios) directly and fetch user-controlled URLs without routing through the secure wrapper. In packages/components/nodes/tools/OpenAPIToolkit/OpenAPIToolkit.ts the OpenAPI 'link' input destructures the user-supplied openApiLink and calls `await fetch(openApiLink)` using raw node-fetch (imported at the top of the file), so none of the deny-list/IP-pinning checks run. An attacker who can drive such a tool (e.g. via chat prompting the agent to fetch a URL) can force the server to request internal addresses such as the cloud metadata endpoint http://169.254.169.254/latest/meta-data/iam/security-credentials/, exfiltrating internal resources and credentials.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__840d2ae1/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/components/nodes/tools/OpenAPIToolkit/OpenAPIToolkit.ts",
+      "startLine": 284,
+      "endLine": 288,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "840d2ae14d25230579a58aa4305f8506672a0a45",
+    "fixCommit": "c7f18f51bb2e729e34f8301f0fb633a873fe946e",
+    "ghsa": "GHSA-qqvm-66q4-vf5c",
+    "cve": "CVE-2026-43995",
+    "disclosure": {
+      "ghsaPublished": "2026-04-16",
+      "fixCommitDate": "2026-03-10"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-082",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "Flowise unauthenticated OAuth2 token refresh endpoint discloses access tokens",
+  "description": "The route POST /api/v1/oauth2-credential/refresh/:credentialId in packages/server/src/routes/oauth2/index.ts performs no authentication or authorization check: it loads the credential solely by the credentialId path parameter, refreshes the OAuth2 token, and returns it via tokenInfo: { ...tokenData, ... }. The route prefix '/api/v1/oauth2-credential/refresh' is in WHITELIST_URLS, so the global auth middleware does not protect it. Because credential identifiers leak from the also-unauthenticated GET /api/v1/public-chatbotConfig/:chatflowId (its flowData includes the 'credential' field), an unauthenticated attacker can chain the two endpoints to obtain valid OAuth2 access tokens for third-party services configured in a public chatflow.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__f0c12941/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/server/src/routes/oauth2/index.ts",
+      "startLine": 306,
+      "endLine": 402,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "f0c1294173a55f26e0b972c39c0c16917f5ca9e7",
+    "fixCommit": "da8b251a9a4c59484ceaf6f71df7406aede7bef2",
+    "ghsa": "GHSA-6f7g-v4pp-r667",
+    "cve": "CVE-2026-41273",
+    "disclosure": {
+      "ghsaPublished": "2026-04-16",
+      "fixCommitDate": "2026-04-28"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-096",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "SSO enforcement bypass via self-service /me/settings endpoint",
+  "description": "The MeController.updateCurrentUserSettings handler for the self-service PATCH /me/settings endpoint binds the request body to the admin-scoped SettingsUpdateRequestDto and passes the entire payload to userService.updateSettings for the caller's own user id. Because that DTO includes the admin-only allowSSOManualLogin flag, an authenticated user who signed in via SSO could set allowSSOManualLogin on their own account, then create a local password and log in directly with email/password, completely bypassing the organization's SSO policy and any IdP-enforced MFA.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__036ef019/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/cli/src/controllers/me.controller.ts",
+      "startLine": 273,
+      "endLine": 292,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "036ef0195a9475d3c1709ccdf127eaae44a99144",
+    "fixCommit": "a70b2ea379086da3de103bb84811e88cadf29976",
+    "ghsa": "GHSA-vjf3-2gpj-233v",
+    "cve": "",
+    "disclosure": {
+      "ghsaPublished": "2026-02-26",
+      "fixCommitDate": "2026-02-05"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

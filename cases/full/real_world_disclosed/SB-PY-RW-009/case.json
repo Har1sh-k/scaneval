@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-PY-RW-009",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "python",
+  "canonicalKind": "path_traversal",
+  "title": "Path traversal in legacy load_prompt config loaders in langchain-core",
+  "description": "The legacy prompt loaders in langchain_core.prompts.loading (load_prompt / load_prompt_from_config) read files from paths embedded in a deserialized config dict. In _load_template(), a path taken from the config key `{var_name}_path` (e.g. template_path, suffix_path, prefix_path) is passed directly to pathlib.Path(...).read_text() with only a file-extension check (.txt) and no validation against absolute paths or `..` traversal sequences. Sibling helpers _load_examples() and _load_few_shot_prompt() have the same flaw for .json/.yaml example files. An application that feeds an untrusted or user-influenced prompt config to these APIs lets an attacker read arbitrary files on the host (constrained only by extension), e.g. template_path='/tmp/secret.txt' or '../../etc/secret.txt'.",
+  "files": {
+    "root": "../../../../.repos/langchain-ai_langchain__19f81cf6/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "libs/core/langchain_core/prompts/loading.py",
+      "startLine": 44,
+      "endLine": 61,
+      "label": "vulnerable",
+      "capability": "filesystem",
+      "acceptedKinds": [
+        "path_traversal"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "langchain-ai/langchain",
+    "vulnerableCommit": "19f81cf6f1d73f7adf156491ba0617497a526b8c",
+    "fixCommit": "27add913474e01e33bededf4096151130ba0d47c",
+    "ghsa": "GHSA-qh6h-p6c9-ff54",
+    "cve": "CVE-2026-34070",
+    "disclosure": {
+      "ghsaPublished": "2026-03-27",
+      "fixCommitDate": "2026-03-24"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

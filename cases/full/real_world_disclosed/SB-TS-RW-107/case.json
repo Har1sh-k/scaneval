@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-107",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "Expression sandbox escape leading to RCE via spread of Node globals",
+  "description": "n8n evaluates user-authored workflow expressions through the Tournament engine, with PrototypeSanitizer (an AST after-hook) and a substituted EMPTY_CONTEXT meant to deny access to dangerous Node.js globals such as process. The pre-patch sanitizer only neutralized process (not require/module/Buffer) and only recognized reserved identifiers in plain Identifier positions; it had no visitSpreadElement/visitSpreadProperty handling. As a result, an authenticated user could spread a global, e.g. ({...process}) or via destructuring/assignment/for-in bindings, to recover the real Node.js process object and pivot to arbitrary command execution on the n8n host. This extends the earlier CVE-2025-68613 (GHSA-v98v-ff95-f3cp) sandbox-escape class.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__8e81f3e3/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/workflow/src/expression-sandboxing.ts",
+      "startLine": 22,
+      "endLine": 24,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "8e81f3e31398b04fd6f8cc27cf844980cd382117",
+    "fixCommit": "562d867483e871b0f1e31776252e23bd721df75b",
+    "ghsa": "GHSA-vpcf-gvg4-6qwr",
+    "cve": "CVE-2026-27577",
+    "disclosure": {
+      "ghsaPublished": "2026-02-25",
+      "fixCommitDate": "2026-02-25"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

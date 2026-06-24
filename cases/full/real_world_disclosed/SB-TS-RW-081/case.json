@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-081",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "ssrf",
+  "title": "SSRF protection bypass: default-insecure deny list in httpSecurity.ts",
+  "description": "The SSRF wrappers in packages/components/src/httpSecurity.ts (checkDenyList, and resolveAndValidate used by secureFetch/secureAxiosRequest) are gated entirely on the HTTP_DENY_LIST environment variable. In checkDenyList(), if HTTP_DENY_LIST is undefined the function returns immediately (if (!httpDenyListString) return), and resolveAndValidate() likewise only calls isDeniedIP when a deny list is present. In the default deployment (no HTTP_DENY_LIST set) no IPs are blocked, so any node relying on these wrappers can reach loopback, link-local (169.254.169.254 cloud metadata), and private-range hosts, completely defeating the intended SSRF protection.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__f0c12941/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/components/src/httpSecurity.ts",
+      "startLine": 40,
+      "endLine": 56,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "f0c1294173a55f26e0b972c39c0c16917f5ca9e7",
+    "fixCommit": "efffd12f161761790c4bfb7bb25771e0a6ff4b75",
+    "ghsa": "GHSA-2x8m-83vc-6wv4",
+    "cve": "CVE-2026-41272",
+    "disclosure": {
+      "ghsaPublished": "2026-04-16",
+      "fixCommitDate": "2026-02-04"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-117",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "sql_injection",
+  "title": "SQL injection in Oracle Database node select operation via unsanitized Limit field",
+  "description": "The Oracle Database node's select operation builds the LIMIT/pagination portion of its SQL query by reading the `limit` node parameter and interpolating it directly into a template-literal SQL string. The value is fetched with `const limit = this.getNodeParameter('limit', i, 50)` and then concatenated into the query as `FETCH FIRST ${limit} ROWS ONLY` or `WHERE ROWNUM <= ${limit}`, with no numeric coercion, validation, or parameter binding. Because the Limit field accepts n8n expressions, a workflow can route external input (for example from an unauthenticated webhook) into this field, allowing an attacker to inject arbitrary SQL that is executed against the connected Oracle database and exfiltrate data.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__6336f0a4/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/nodes-base/nodes/Oracle/Sql/actions/database/select.operation.ts",
+      "startLine": 132,
+      "endLine": 144,
+      "label": "vulnerable",
+      "capability": "data_store",
+      "acceptedKinds": [
+        "sql_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "6336f0a447eab3600b1fe13216f1abd5b6e25dff",
+    "fixCommit": "1a27bb32564c5b300eff9af6dc22093f1451414b",
+    "ghsa": "GHSA-r6jc-mpqw-m755",
+    "cve": "CVE-2026-42233",
+    "disclosure": {
+      "ghsaPublished": "2026-04-29",
+      "fixCommitDate": "2026-04-22"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

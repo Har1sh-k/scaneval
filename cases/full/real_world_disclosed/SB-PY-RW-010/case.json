@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-PY-RW-010",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "python",
+  "canonicalKind": "ssrf",
+  "title": "SSRF redirect bypass in HTMLHeaderTextSplitter.split_text_from_url",
+  "description": "HTMLHeaderTextSplitter.split_text_from_url() validates the caller-supplied URL with validate_safe_url(allow_private=False) and then fetches it with requests.get(url, ...), which follows HTTP redirects by default. Because redirect targets are not revalidated, an attacker can supply a public URL that passes validate_safe_url and have their server issue a 302 redirect to an internal/localhost/cloud-metadata endpoint (e.g. AWS IMDSv1). requests follows the redirect automatically and the fetched body is parsed into Document objects returned to the caller, defeating the intended SSRF protection.",
+  "files": {
+    "root": "../../../../.repos/langchain-ai_langchain__269947b1/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "libs/text-splitters/langchain_text_splitters/html.py",
+      "startLine": 208,
+      "endLine": 215,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "langchain-ai/langchain",
+    "vulnerableCommit": "269947b11f3b78eb800dd3fe12f3c07151ac9feb",
+    "fixCommit": "c289bf10e940e960a132d7403482283114063063",
+    "ghsa": "GHSA-fv5p-p927-qmxr",
+    "cve": "CVE-2026-41481",
+    "disclosure": {
+      "ghsaPublished": "2026-04-16",
+      "fixCommitDate": "2026-04-16"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

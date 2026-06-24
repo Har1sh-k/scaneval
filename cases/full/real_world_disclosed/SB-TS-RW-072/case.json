@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-072",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "Flowise whitelists /api/v1/nvidia-nim, leaving privileged NIM endpoints unauthenticated",
+  "description": "packages/server/src/utils/constants.ts defines WHITELIST_URLS, the list of route prefixes the global authentication middleware skips. The entry '/api/v1/nvidia-nim' (line 27 at this commit) causes all NVIDIA NIM controller endpoints (/get-token, /pull-image, /start-container, /stop-container, /list-running-containers, etc.) to bypass JWT/API-key validation, and none of those controllers perform their own auth check. An unauthenticated attacker can therefore retrieve a valid NVIDIA API token and manage Docker/NIM containers (start/stop/pull arbitrary images).",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__55b6913c/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/server/src/utils/constants.ts",
+      "startLine": 6,
+      "endLine": 28,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "55b6913c03f0dba37cc207975f0c0d0786e0f3c7",
+    "fixCommit": "8ce06c72017c271bbc7990784c27710d49599f6b",
+    "ghsa": "GHSA-5f53-522j-j454",
+    "cve": "CVE-2026-30824",
+    "disclosure": {
+      "ghsaPublished": "2026-03-06",
+      "fixCommitDate": "2026-01-21"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

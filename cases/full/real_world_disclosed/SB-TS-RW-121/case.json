@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-121",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Cross-user authorization bypass: OAuth credential reconnect authorized with credential:read instead of credential:update",
+  "description": "The OAuth1 and OAuth2 credential auth/reconnect flow in OauthService.getCredential authorized the caller using only the `credential:read` scope before initiating an OAuth flow that overwrites the stored token material of the credential. Because reconnecting a credential is effectively an update, an authenticated user with merely read-only access to a shared credential could trigger the reconnect endpoint and replace the credential's stored tokens with tokens bound to an external account they control. Workflows using the affected shared credential would then execute under the attacker's OAuth identity, enabling data exfiltration and persistent takeover of shared integrations.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__29d42560/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/cli/src/oauth/oauth.service.ts",
+      "startLine": 93,
+      "endLine": 117,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "29d42560ad14983ceb3dcda8cab0a1988d932a5d",
+    "fixCommit": "545da1aa8f9389532ee71a33a0e1beb93ad86591",
+    "ghsa": "GHSA-6h4j-wcr9-2vg7",
+    "cve": "CVE-2026-45732",
+    "disclosure": {
+      "ghsaPublished": "2026-05-14",
+      "fixCommitDate": "2026-05-13"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

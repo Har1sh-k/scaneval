@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-073",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "ssrf",
+  "title": "SSRF in AgentFlow HTTP Node: user-controlled URL reaches server-side request with no default host restrictions",
+  "description": "The AgentFlow HTTP node (HTTP.ts) in Flowise <= 3.0.12 reads a user-controlled url input (line 206), builds finalUrl from it plus query parameters (line 264), and issues the request server-side via secureAxiosRequest(requestConfig) (line 303). secureAxiosRequest delegates host validation to checkDenyList(), which returns immediately when the HTTP_DENY_LIST environment variable is unset (its default), so by default no private/internal IP ranges, localhost, or cloud-metadata endpoints are blocked. Any user able to configure or trigger an HTTP node in a chatflow can therefore force the server to request internal resources (e.g. http://127.0.0.1, http://169.254.169.254/latest/meta-data/), with full read/write HTTP method support.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__55b6913c/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/components/nodes/agentflow/HTTP/HTTP.ts",
+      "startLine": 264,
+      "endLine": 303,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "55b6913c03f0dba37cc207975f0c0d0786e0f3c7",
+    "fixCommit": "643ebf533550460d7688f9e636174885ba2bb5cf",
+    "ghsa": "GHSA-fvcw-9w9r-pxc7",
+    "cve": "CVE-2026-31829",
+    "disclosure": {
+      "ghsaPublished": "2026-03-11",
+      "fixCommitDate": "2026-01-30"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

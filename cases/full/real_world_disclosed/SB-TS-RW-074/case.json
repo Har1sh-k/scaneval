@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-074",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "Authenticated RCE via Custom MCP stdio server config (MCP/core.ts)",
+  "description": "Flowise lets an authenticated user register a Custom MCP stdio server, supplying a command and args that are spawned via StdioClientTransport. validateMCPServerConfig() in packages/components/nodes/tools/MCP/core.ts restricts command to an allowlist (node, npx, python, python3, docker) and runs validateArgsForLocalFileAccess() and validateCommandInjection() over the args. However those arg checks only reject shell metacharacters and local-file paths; they do not reject code-execution flags. An attacker can therefore submit an allowlisted command with a dangerous flag, e.g. {\"command\":\"npx\",\"args\":[\"-c\",\"touch /tmp/pwn\"]} (or node -e / python -c), which passes all checks and results in arbitrary command execution on the host when the MCP transport launches the process.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__f0c12941/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/components/nodes/tools/MCP/core.ts",
+      "startLine": 262,
+      "endLine": 285,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "f0c1294173a55f26e0b972c39c0c16917f5ca9e7",
+    "fixCommit": "b4665df8d1e727129d2b7fda615482e4701b3eb2",
+    "ghsa": "GHSA-c9gw-hvqq-f33r",
+    "cve": "CVE-2026-40933",
+    "disclosure": {
+      "ghsaPublished": "2026-04-16",
+      "fixCommitDate": "2026-02-24"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

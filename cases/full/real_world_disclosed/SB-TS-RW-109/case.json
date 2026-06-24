@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-109",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Credential permission-checker bypass: generic HTTP credential types skipped during pre-execution validation",
+  "description": "n8n's CredentialsPermissionChecker validates, before a workflow runs, that the executing user is authorized to use every credential referenced by the workflow's nodes. To limit checks to credentials a node actually uses, getActiveCredentialTypes() builds the set of \"active\" credential types from the node type's declared credentials and from the nodeCredentialType parameter (predefined credential mode). It omits the genericAuthType parameter, which is how nodes such as HTTP Request select generic credential types (httpBasicAuth, httpHeaderAuth, httpQueryAuth) in generic-credential mode. Consequently, in mapCredIdsToNodes() the skip check `!activeCredTypes.has(credType)` evaluates true for those generic credential types and the credential is dropped from the permission map, so it is never checked for ownership/scope. Combined with a name-based credential resolution path that does not enforce ownership, a global:member user can reference another user's generic HTTP credential ID and have the workflow decrypt and use it without authorization (Community Edition only).",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__2374f40e/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/cli/src/executions/pre-execution-checks/credentials-permission-checker.ts",
+      "startLine": 124,
+      "endLine": 148,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "2374f40ec36795904b4011fb81018da818a76ee8",
+    "fixCommit": "661e03eab744bc45f7c609c1f5c4907a6ab4af2b",
+    "ghsa": "GHSA-m63j-689w-3j35",
+    "cve": "CVE-2026-33663",
+    "disclosure": {
+      "ghsaPublished": "2026-03-25",
+      "fixCommitDate": "2026-03-25"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}
