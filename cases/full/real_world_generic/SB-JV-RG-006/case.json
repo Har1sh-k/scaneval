@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-JV-RG-006",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "java",
+  "canonicalKind": "authz_bypass",
+  "title": "OpenAM Session Service RPC GetSessionCount exposes arbitrary users' sessions (Improper Authorization)",
+  "description": "OpenAM's stateful Session Service RPC handler (SessionRequestHandler.processMethod in openam-core) implements the GetSessionCount request method by reading an attacker-supplied universal identifier from req.getUUID() and calling sessionQueryManager.getAllSessionsByUUID(uuid), returning the full map of active sessions (including session identifiers/credentials) for that UUID via res.setSessionsForGivenUUID(sessions). The only access check performed before this method runs (verifyValidRequest) merely verifies the requester's own session is not a restricted token; it never checks that the requester owns the target UUID or holds administrative privilege. As a result, any low-privileged authenticated user who can reach the session endpoint and who knows another user's identity identifier can retrieve that user's active session credentials, enabling session hijacking and, if a privileged account is targeted, privilege escalation (CWE-285 / CWE-200).",
+  "files": {
+    "root": "../../../../.repos/OpenIdentityPlatform_OpenAM__4529f108/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "openam-core/src/main/java/com/iplanet/dpro/session/service/SessionRequestHandler.java",
+      "startLine": 362,
+      "endLine": 369,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "OpenIdentityPlatform/OpenAM",
+    "vulnerableCommit": "4529f108e9f5d3b8f98b4afb3dd035a3c4d73a1b",
+    "fixCommit": "f775b42236b3cb94e3a02a19f4a4f4f5cc0b91c4",
+    "ghsa": "GHSA-vvhj-w2jq-263q",
+    "cve": "CVE-2026-45048",
+    "disclosure": {
+      "ghsaPublished": "2026-06-23",
+      "fixCommitDate": "2026-06-17"
+    }
+  }
+}

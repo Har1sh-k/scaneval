@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RG-009",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Middleware authorization bypass via dynamic route-parameter query injection in Next.js",
+  "description": "When resolving a request, RouteModule unconditionally calls serverUtils.normalizeQueryParams(query, routeParamKeys), which promotes externally-supplied query values into the dynamic route parameters used to render the page. This normalization is intended only for trusted multi-process deployments where an upstream Next router proxy re-injects the route params it matched; in ordinary requests it lets an attacker supply query parameters that override the dynamic route value seen by the page while leaving the visible URL path unchanged. Applications that rely on middleware to protect dynamic routes (matching on the path) can therefore be bypassed: middleware sees the unchanged path and allows the request, but the page renders content for a different, attacker-chosen dynamic parameter value, exposing protected content without passing the expected middleware check.",
+  "files": {
+    "root": "../../../../.repos/vercel_next.js__412eb90b/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/next/src/server/route-modules/route-module.ts",
+      "startLine": 703,
+      "endLine": 708,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "vercel/next.js",
+    "vulnerableCommit": "412eb90b6587ec02e8361c92efa9091487e7348f",
+    "fixCommit": "87080764c96f5416decccd43f4c434545fd5d4e1",
+    "ghsa": "GHSA-492v-c6pp-mqqv",
+    "cve": "CVE-2026-44574",
+    "disclosure": {
+      "ghsaPublished": "2026-05-11",
+      "fixCommitDate": "2026-05-06"
+    }
+  }
+}

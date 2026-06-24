@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-CL-RG-008",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "clojure",
+  "canonicalKind": "path_traversal",
+  "title": "Arbitrary file read via unvalidated MySQL/MariaDB JDBC connection options",
+  "description": "An attacker who can configure a Metabase MySQL or MariaDB database connection (typically an administrator) could read arbitrary files from the Metabase host by supplying unsafe JDBC parameters in the connection's additional options. The MySQL driver's can-connect? method passed the user-supplied :additional-options straight through to the JDBC driver without rejecting dangerous keys such as allowLoadLocalInfile, allowLoadLocalInfileInPath, allowUrlInLocalInfile, autoDeserialize, and serverRSAPublicKeyFile, which cause the driver to read files from the Metabase host; their contents are then exposed through subsequent queries or connection-validation error messages.",
+  "files": {
+    "root": "../../../../.repos/metabase_metabase__eb9b113a/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/metabase/driver/mysql.clj",
+      "startLine": 210,
+      "endLine": 216,
+      "label": "vulnerable",
+      "capability": "filesystem",
+      "acceptedKinds": [
+        "path_traversal"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "metabase/metabase",
+    "vulnerableCommit": "eb9b113add06427cfe02744a0c8a32c5026227fa",
+    "fixCommit": "57abd670097e33bab8cb8c597c31c9eb3917687d",
+    "ghsa": "GHSA-mfpj-crjq-xrcp",
+    "cve": "CVE-2026-50147",
+    "disclosure": {
+      "fixCommitDate": "2026-05-04"
+    }
+  }
+}

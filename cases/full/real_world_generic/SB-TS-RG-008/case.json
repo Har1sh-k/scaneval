@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RG-008",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Next.js Pages Router i18n middleware bypass via locale-less /_next/data/<buildId>/<page>.json requests",
+  "description": "In getResolveRoutes() in packages/next/src/server/lib/router-utils/resolve-routes.ts, when an application uses the Pages Router with i18n configured, an incoming /_next/data/<buildId>/<page>.json request is first normalized by stripping the data-route prefix, then run through normalizeLocalePath against the configured locales. When the request carries no locale prefix (a locale-less data route), curLocaleResult.detectedLocale is empty, so the i18n block only enters the `if (curLocaleResult.detectedLocale)` branch when a locale is present and otherwise leaves the normalized pathname locale-less. Because the middleware/proxy matcher expects the locale-prefixed internal pathname shape that direct page requests are normalized to, the locale-less normalized data pathname fails to match the middleware matcher, so authorization-enforcing middleware never runs for that route. An attacker can therefore retrieve SSR JSON for protected pages by requesting /_next/data/<buildId>/<page>.json without a locale prefix, bypassing the middleware-based authorization checks entirely.",
+  "files": {
+    "root": "../../../../.repos/vercel_next.js__412eb90b/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/next/src/server/lib/router-utils/resolve-routes.ts",
+      "startLine": 416,
+      "endLine": 425,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "vercel/next.js",
+    "vulnerableCommit": "412eb90b6587ec02e8361c92efa9091487e7348f",
+    "fixCommit": "6c72e0b4ee096643b42c742f35e0de84c41d190d",
+    "ghsa": "GHSA-36qx-fr4f-26g5",
+    "cve": "CVE-2026-44573",
+    "disclosure": {
+      "ghsaPublished": "2026-05-11",
+      "fixCommitDate": "2026-05-06"
+    }
+  }
+}

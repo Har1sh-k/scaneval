@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-CL-RG-006",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "clojure",
+  "canonicalKind": "authz_bypass",
+  "title": "Data access control bypass via client-supplied query permission context on card creation",
+  "description": "An authenticated, low-privilege user could read data from databases or tables they were not permitted to access because query handling trusted client-supplied permission context. On card creation the POST /api/card endpoint called card/check-run-permissions-for-query on the raw client-supplied query, which still carried a client-controlled :query-permissions/perms context; that context was honored during the permission check (and execution) instead of being re-derived server-side from the requesting user's group memberships and sandboxing, letting the caller execute native SQL against tables or databases outside their granted scope. The card update path (check-allowed-to-modify-query) had the same flaw.",
+  "files": {
+    "root": "../../../../.repos/metabase_metabase__dcef702a/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/metabase/api/card.clj",
+      "startLine": 500,
+      "endLine": 502,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "metabase/metabase",
+    "vulnerableCommit": "dcef702a8ca6c1cc079ae6004af6c6d7aee1790f",
+    "fixCommit": "17c12b5707085207703f63329ed2898e09e9cdf8",
+    "ghsa": "GHSA-433r-hw2v-rv9g",
+    "cve": "",
+    "disclosure": {
+      "fixCommitDate": "2026-04-08"
+    }
+  }
+}

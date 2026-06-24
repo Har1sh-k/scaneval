@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RG-006",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "Next.js dev server allowedDevOrigins bypass: Origin: null skips cross-site validation for internal dev endpoints",
+  "description": "In blockCrossSite() in packages/next/src/server/lib/router-utils/block-cross-site.ts (the next dev cross-site protection for internal development endpoints, e.g. websocket upgrades for HMR and other privileged dev functionality), the origin allow-list check is gated on `if (rawOrigin && rawOrigin !== 'null')`. When a request carries an Origin header with the literal value 'null' (sent by opaque/privacy-sensitive browser contexts such as sandboxed documents), the condition is false, so the isCsrfOriginAllowed(originLowerCase, allowedOrigins) check is skipped entirely and the function falls through to `return false`, meaning the request is allowed rather than warned/blocked. As a result, even when the developer has configured allowedDevOrigins, attacker-controlled browser code running in an opaque context can connect to internal dev-server endpoints and interact with sensitive dev functionality that should have been blocked. This affects development mode only (next dev), not next start.",
+  "files": {
+    "root": "../../../../.repos/vercel_next.js__adf8c612/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/next/src/server/lib/router-utils/block-cross-site.ts",
+      "startLine": 85,
+      "endLine": 101,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "vercel/next.js",
+    "vulnerableCommit": "adf8c612adddd103647c90ff0f511ea35c57076e",
+    "fixCommit": "862f9b9bb41d235e0d8cf44aa811e7fd118cee2a",
+    "ghsa": "GHSA-jcc7-9wpm-mj36",
+    "cve": "CVE-2026-27977",
+    "disclosure": {
+      "ghsaPublished": "2026-03-17",
+      "fixCommitDate": "2026-03-17"
+    }
+  }
+}

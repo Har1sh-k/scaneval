@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RG-011",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "typescript",
+  "canonicalKind": "ssrf",
+  "title": "SSRF via WebSocket upgrade proxying in Next.js self-hosted router-server",
+  "description": "Next.js's built-in Node.js router server handles HTTP `upgrade` (WebSocket) requests in router-server.ts. The upgrade handler runs resolveRoutes() with isUpgradeReq:true and then, if no internal output matched, proxies the request to parsedUrl whenever parsedUrl.protocol is set: `if (parsedUrl.protocol) { return await proxyRequest(req, socket, parsedUrl, head) }`. Unlike the normal HTTP request path, the upgrade path does not check that routing actually finished and explicitly marked the request as a safe external rewrite. An attacker who can reach the self-hosted origin server can therefore send a crafted WebSocket upgrade request whose resolved URL points at an arbitrary internal or external destination, causing the server to open a proxied connection to that host (e.g. internal services or cloud metadata endpoints). Vercel-hosted deployments are not affected.",
+  "files": {
+    "root": "../../../../.repos/vercel_next.js__412eb90b/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/next/src/server/lib/router-server.ts",
+      "startLine": 820,
+      "endLine": 835,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "vercel/next.js",
+    "vulnerableCommit": "412eb90b6587ec02e8361c92efa9091487e7348f",
+    "fixCommit": "c4f69086cc8dcbd81b1dbc321c98ea874d90d6f8",
+    "ghsa": "GHSA-c4j6-fc7j-m34r",
+    "cve": "CVE-2026-44578",
+    "disclosure": {
+      "ghsaPublished": "2026-05-11",
+      "fixCommitDate": "2026-05-06"
+    }
+  }
+}

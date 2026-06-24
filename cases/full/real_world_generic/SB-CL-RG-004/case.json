@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-CL-RG-004",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "clojure",
+  "canonicalKind": "authz_bypass",
+  "title": "Public dashboard/card parameter endpoints missing public-sharing-enabled check",
+  "description": "Four GET endpoints under /api/public (card param remapping, dashboard param values, dashboard param search, dashboard param remapping) handle requests as admin (request/as-admin) without first calling public-sharing.validation/check-public-sharing-enabled. The sibling card values/search endpoints in the same file do call that check, so even when an administrator disables 'Enable Public Sharing', these four endpoints continue to return parameter values and remapped values for any card or dashboard that was previously shared publicly. An unauthenticated attacker who retains a previously-valid public UUID can therefore keep reading potentially sensitive parameter data after sharing has been revoked, an inconsistent access-control enforcement across the public route group.",
+  "files": {
+    "root": "../../../../.repos/metabase_metabase__740ab6d8/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/metabase/public_sharing_rest/api.clj",
+      "startLine": 512,
+      "endLine": 566,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "metabase/metabase",
+    "vulnerableCommit": "740ab6d8c95eb6e484f27dca75abc2291b7d8986",
+    "fixCommit": "4ab19dce4d1660a819893a8303981d306addc2b3",
+    "ghsa": "GHSA-j3qp-7mr8-hr55",
+    "cve": "",
+    "disclosure": {
+      "fixCommitDate": "2026-02-26"
+    }
+  }
+}

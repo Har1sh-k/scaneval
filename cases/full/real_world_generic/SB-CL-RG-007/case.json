@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-CL-RG-007",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "clojure",
+  "canonicalKind": "auth_bypass",
+  "title": "Entity-ID translation API routes mounted without authentication",
+  "description": "A set of internal identifier-translation routes under /api/eid-translation, intended only for authenticated frontend use, shipped without the +auth middleware applied to the rest of the API. In src/metabase/api_routes/routes.clj the /eid-translation prefix was mounted as the bare namespace ('metabase.eid-translation.api) rather than wrapped in (+auth ...), so the endpoints were reachable without a session. This allowed anonymous callers to translate any opaque public-looking entity identifier they supplied into its internal numeric ID, enabling unauthenticated enumeration and reconnaissance against an exposed instance (identifier metadata only; no row-level content).",
+  "files": {
+    "root": "../../../../.repos/metabase_metabase__227d50f7/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/metabase/api_routes/routes.clj",
+      "startLine": 155,
+      "endLine": 155,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "metabase/metabase",
+    "vulnerableCommit": "227d50f7080c382541adc8e73949cef9f89a1948",
+    "fixCommit": "73bd2a75a0687397dbb5af2b7f57627b9dc7a1e8",
+    "ghsa": "GHSA-rxq7-9vqf-q9g8",
+    "cve": "",
+    "disclosure": {
+      "fixCommitDate": "2026-04-08"
+    }
+  }
+}

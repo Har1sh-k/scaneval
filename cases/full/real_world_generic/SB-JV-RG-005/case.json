@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-JV-RG-005",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "java",
+  "canonicalKind": "ssrf",
+  "title": "OpenAM authenticated SSRF via /sessionservice addSessionListener notification URL",
+  "description": "OpenAM's stateful session service exposes an AddSessionListener RPC that lets a caller register a notification URL to receive session change events. SessionRequestHandler.processMethod forwards the caller-supplied req.getNotificationURL() through SessionService.addSessionListener into LocalOperations.addSessionListener, which stores it verbatim via internalSession.addSessionEventURL(url, sessionId) with no validation of the URL host and no check that the caller is an admin or server/agent. When the session subsequently fires events, OpenAM issues outbound server-side HTTP notifications to that registered URL, so an authenticated attacker can point the listener at internal services or attacker-controlled endpoints, producing a server-side request forgery that can also exfiltrate session-related data (CWE-918).",
+  "files": {
+    "root": "../../../../.repos/OpenIdentityPlatform_OpenAM__4529f108/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "openam-core/src/main/java/com/iplanet/dpro/session/operations/strategies/LocalOperations.java",
+      "startLine": 203,
+      "endLine": 214,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "OpenIdentityPlatform/OpenAM",
+    "vulnerableCommit": "4529f108e9f5d3b8f98b4afb3dd035a3c4d73a1b",
+    "fixCommit": "a13a4b63ae0e0670c63cbcfa79586407408b3920",
+    "ghsa": "GHSA-c556-q2mh-477v",
+    "cve": "CVE-2026-44202",
+    "disclosure": {
+      "ghsaPublished": "2026-06-22",
+      "fixCommitDate": "2026-05-05"
+    }
+  }
+}
