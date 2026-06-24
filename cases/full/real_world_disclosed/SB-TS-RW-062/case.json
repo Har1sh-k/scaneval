@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-062",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "OpenClaw movePathToTrash resolved 'trash' executable via workspace-influenced service PATH",
+  "description": "In src/plugin-sdk/browser-maintenance.ts the movePathToTrash maintenance helper invoked runExec(\"trash\", [targetPath], ...) using only the bare command name \"trash\", relying on PATH resolution to locate the executable. The service PATH is assembled (in src/daemon/service-env.ts) partly from env-configured bin directories such as PNPM_HOME, NPM_CONFIG_PREFIX, BUN_INSTALL, VOLTA_HOME, NVM_DIR, FNM_DIR and NIX_PROFILES, which can be derived from a lower-trust workspace. A workspace-derived PATH entry could therefore point at an attacker-controlled directory containing a malicious 'trash' binary, causing the daemon to execute an unintended local executable during cleanup/maintenance (untrusted search path, CWE-426).",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__cbc2ba09/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/plugin-sdk/browser-maintenance.ts",
+      "startLine": 62,
+      "endLine": 81,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "cbc2ba0931468259f26a7c547131a06e03ca6c6c",
+    "fixCommit": "230f7122dd5cd8a37a55e671254bd9be8278f6e8",
+    "ghsa": "GHSA-rx78-29qr-5hq8",
+    "cve": "CVE-2026-53865",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-04-28"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

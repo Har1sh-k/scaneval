@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-090",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "Authenticated RCE via POST /api/v1/node-custom-function (arbitrary JS execution, NodeVM sandbox escape)",
+  "description": "In Flowise <= 3.1.1, POST /api/v1/node-custom-function is registered in packages/server/src/routes/node-custom-functions/index.ts as router.post('/', nodesRouter.executeCustomFunction) with no permission middleware. Any authenticated user or API-key holder can submit arbitrary JavaScript (body.javascriptFunction) to the Custom JS Function node. When E2B_APIKEY is not configured (the default), executeJavaScriptCode in packages/components/src/utils.ts silently falls back to the @flowiseai/nodevm sandbox, which can be escaped via an Error object whose constructor chain resolves to the host realm, recovering the host Function constructor and process.getBuiltinModule('child_process') to run system commands (e.g. execSync('id')). The result is authenticated remote code execution on the Flowise host.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__34cf2854/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/server/src/routes/node-custom-functions/index.ts",
+      "startLine": 1,
+      "endLine": 14,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "34cf28546b700998e88a8f14d6f6d0754f572da4",
+    "fixCommit": "e765367fdc9761a7d9cf01a048cac15c78903b85",
+    "ghsa": "GHSA-9rvc-vf7m-pgm2",
+    "cve": "CVE-2026-46442",
+    "disclosure": {
+      "ghsaPublished": "2026-05-14",
+      "fixCommitDate": "2026-04-09"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

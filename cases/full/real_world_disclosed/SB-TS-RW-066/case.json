@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-066",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Cross-workspace chatflow disclosure via missing workspace scope in getChatflowByApiKey",
+  "description": "In Flowise <= 3.1.1, chatflowsService.getChatflowByApiKey in packages/server/src/services/chatflows/index.ts builds a query that returns chatflows bound to the supplied API key plus, when the keyonly parameter is absent, ALL chatflows where apikeyid IS NULL or empty across the entire system. The query has no workspaceId filter, so a user holding a valid API key for one workspace can read the full ChatFlow entities (flowData, system prompts, chatbotConfig, credential references) of chatflows from every other workspace that have no API key assigned, breaking workspace isolation. This endpoint (/api/v1/chatflows/apikey/:apikey) is whitelisted and reachable with API-key auth only.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__34cf2854/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/server/src/services/chatflows/index.ts",
+      "startLine": 223,
+      "endLine": 245,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "34cf28546b700998e88a8f14d6f6d0754f572da4",
+    "fixCommit": "f7d86912fa43b2c77a7cba1b4171a0a236a72bdb",
+    "ghsa": "GHSA-c2c9-mfw7-p8hw",
+    "cve": "",
+    "disclosure": {
+      "ghsaPublished": "2026-05-20",
+      "fixCommitDate": "2026-03-24"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

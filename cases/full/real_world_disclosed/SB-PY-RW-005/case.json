@@ -34,7 +34,10 @@
     "vulnerableCommit": "90b147ff51ea0313547e0c282b68f73564e419f6",
     "fixCommit": "c6703dd89128b59f1fab79dc38eaa8e24009adce",
     "ghsa": "GHSA-wvjg-9879-3m7w",
-    "cve": "CVE-2025-31490"
+    "cve": "CVE-2025-31490",
+    "disclosure": {
+      "fixCommitDate": "2025-03-26"
+    }
   },
   "standards": {
     "owaspAgenticTop10": {

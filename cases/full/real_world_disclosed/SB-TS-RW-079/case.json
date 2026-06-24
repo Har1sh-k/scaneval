@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-079",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "ssrf",
+  "title": "SSRF bypass via unprotected built-in http/https/net modules in Custom Function sandbox (utils.ts)",
+  "description": "Flowise runs user-supplied Custom Function JavaScript inside a NodeVM sandbox. SSRF protection is implemented by mocking axios and node-fetch with secure wrappers that enforce the deny list, but the sandbox's allowed built-in module list (defaultAllowBuiltInDep in packages/components/src/utils.ts) includes 'http', 'https', and 'net' (and 'tls'). Because only axios and node-fetch are wrapped, an authenticated user can require('http')/require('https')/require('net') directly and issue raw requests to internal endpoints (e.g. http.request to 169.254.169.254 for AWS IMDS credentials), completely bypassing the HTTP_DENY_LIST-based SSRF controls.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__f0c12941/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/components/src/utils.ts",
+      "startLine": 125,
+      "endLine": 139,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "f0c1294173a55f26e0b972c39c0c16917f5ca9e7",
+    "fixCommit": "b7e836cf14c3f39aea63a644a3db5cd47979cd37",
+    "ghsa": "GHSA-xhmj-rg95-44hv",
+    "cve": "CVE-2026-41270",
+    "disclosure": {
+      "ghsaPublished": "2026-04-16",
+      "fixCommitDate": "2026-02-10"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

@@ -40,7 +40,11 @@
     "vulnerableCommit": "f4b33b64bd66ad28e9b0d63bea51837b83c00ca1",
     "fixCommit": "9ffafad4b2d2f9f7668e5504565f356a7c047b77",
     "ghsa": "GHSA-7rh7-c77v-6434",
-    "cve": "CVE-2025-54576"
+    "cve": "CVE-2025-54576",
+    "disclosure": {
+      "ghsaPublished": "2025-07-30",
+      "fixCommitDate": "2025-07-30"
+    }
   },
   "fixValidation": {
     "mode": "mitigation_anchor_present",

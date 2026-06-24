@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-076",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "Flowise CSV Agent RCE via bypassable Python import allow-regex before Pyodide execution",
+  "description": "The CSV Agent node (packages/components/nodes/agents/CSVAgent/CSVAgent.ts) builds a system prompt from the user's question, asks the configured LLM to emit pandas Python code, and then evaluates that LLM-generated code with pyodide.runPythonAsync() in a non-sandboxed Pyodide environment. Before execution the code is filtered by validatePythonCodeForDataFrame() in packages/components/src/pythonCodeValidator.ts, whose FORBIDDEN_PATTERNS uses the regex /\\bimport\\s+(?!pandas|numpy\\b)/g intending to allow only pandas/numpy imports. That negative-lookahead only inspects the first imported name, so a statement like `import pandas as np, os as pandas` passes validation while still importing the os module (aliased as pandas), after which `pandas.system(\"...\")` runs arbitrary OS commands. An unauthenticated attacker who can submit a prompt to a chatflow using the CSV Agent node (or an authenticated attacker who points the node at an attacker-controlled model server) can use prompt injection to obtain such code and achieve remote code execution on the Flowise server.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__84758d79/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/components/src/pythonCodeValidator.ts",
+      "startLine": 17,
+      "endLine": 20,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "84758d794d2a3678c1c49cc5d6e20010c84d8ded",
+    "fixCommit": "cf36fb71fbd33437166f8a94de8534a4d9b6180c",
+    "ghsa": "GHSA-3hjv-c53m-58jj",
+    "cve": "CVE-2026-41264",
+    "disclosure": {
+      "ghsaPublished": "2026-04-21",
+      "fixCommitDate": "2026-03-05"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

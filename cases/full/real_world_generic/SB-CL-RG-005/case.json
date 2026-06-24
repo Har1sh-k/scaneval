@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-CL-RG-005",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "clojure",
+  "canonicalKind": "command_injection",
+  "title": "H2 JDBC INIT injection via unsanitized database details in EE serialization import",
+  "description": "Metabase Enterprise's serialization import endpoint (POST /api/ee/serialization/import) lets an authenticated admin upload a crafted archive whose Database YAML contains arbitrary connection-detail keys. When the imported H2 database is synced, connection-details->spec :h2 passes the attacker-controlled details map straight into the H2 JDBC spec built by driver-api/spec. Because the map can carry an INIT property (and other low-level JDBC keys such as connection-uri/subname), H2 will execute the supplied SQL when the connection is opened, which Metabase uses to write and then run a Clojure payload for OS command execution, or to exfiltrate arbitrary files readable by the JVM. The H2 driver only stripped INIT from options embedded inside the :db connection string, never from top-level details keys.",
+  "files": {
+    "root": "../../../../.repos/metabase_metabase__aafb2706/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/metabase/driver/h2.clj",
+      "startLine": 548,
+      "endLine": 552,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "metabase/metabase",
+    "vulnerableCommit": "aafb2706d5fdef69b099119f7d05d22163a2b8d3",
+    "fixCommit": "88a87db2b8d2ca246c25a036517b09a81b0810c8",
+    "ghsa": "GHSA-fppj-vcm3-w229",
+    "cve": "CVE-2026-33725",
+    "disclosure": {
+      "fixCommitDate": "2026-03-23"
+    }
+  }
+}

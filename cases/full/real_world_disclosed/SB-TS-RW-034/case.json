@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-034",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "path_traversal",
+  "title": "OpenClaw marketplace plugin path containment check ignored symlinks, allowing repository-root escape",
+  "description": "ensureInsideMarketplaceRoot() in src/plugins/marketplace.ts (lines 805-818) validates a marketplace plugin source path purely lexically: it does path.resolve(rootDir, candidate) and rejects only when path.relative(rootDir, resolved) is '..' or starts with '..<sep>'. It never canonicalizes the path with fs.realpath, so a symlink placed inside a (remote) marketplace repository root that points outside the root passes the textual containment check because the symlink's own path is lexically inside rootDir, while its resolved target lies outside. validateMarketplaceManifest() and resolveMarketplaceEntryInstallPath() use this helper to authorize plugin source paths, so the missing symlink resolution lets a crafted remote marketplace repository reference files outside the intended repository directory (symlink traversal).",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__d74a1226/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/plugins/marketplace.ts",
+      "startLine": 805,
+      "endLine": 818,
+      "label": "vulnerable",
+      "capability": "filesystem",
+      "acceptedKinds": [
+        "path_traversal"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "d74a12264aa5fb0598605e8f04e1864b7239ddd5",
+    "fixCommit": "b1dd3ded3589f6fa60ab85b3930a82d538edaeae",
+    "ghsa": "GHSA-35mw-5vvr-vrxc",
+    "cve": "CVE-2026-43570",
+    "disclosure": {
+      "ghsaPublished": "2026-05-05",
+      "fixCommitDate": "2026-04-04"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

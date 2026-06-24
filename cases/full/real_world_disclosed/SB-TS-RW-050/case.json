@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-050",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "OpenClaw Active Memory global enable/disable mutated global config without operator.admin scope",
+  "description": "The Active Memory command handler in extensions/active-memory/index.ts processes a `--global` enable/disable action by calling updateActiveMemoryGlobalEnabledInConfig() and persisting the result through api.runtime.config.replaceConfigFile(), which writes the Gateway's global configuration file. In the vulnerable release this global-mutation branch performs no scope check, so any Gateway caller able to reach the command with operator.write access could toggle the global Active Memory configuration without holding operator.admin, applying a configuration change beyond the intended write scope.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__b1abf9d8/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "extensions/active-memory/index.ts",
+      "startLine": 2814,
+      "endLine": 2839,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "b1abf9d8ae4410c6a6e08f7dfd2d617f4550281c",
+    "fixCommit": "5852f5d15cdc5e2c458f2b8d4a7ad67ebeef9db1",
+    "ghsa": "GHSA-x629-46cc-7xgw",
+    "cve": "CVE-2026-53847",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-05-07"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

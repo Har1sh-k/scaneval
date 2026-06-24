@@ -34,7 +34,11 @@
     "vulnerableCommit": "e002e617df6177cb603c8c569d224bce5fb96b33",
     "fixCommit": "4af067a444a579f260d99e8c8eb0ae3d5d9b811a",
     "ghsa": "GHSA-3gcm-f6qx-ff7p",
-    "cve": "CVE-2025-59528"
+    "cve": "CVE-2025-59528",
+    "disclosure": {
+      "ghsaPublished": "2025-09-15",
+      "fixCommitDate": "2025-09-12"
+    }
   },
   "standards": {
     "owaspAgenticTop10": {

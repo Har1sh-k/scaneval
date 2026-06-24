@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-045",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "ssrf",
+  "title": "OpenClaw MCP Streamable HTTP transport forwarded operator-configured custom headers across cross-origin redirects",
+  "description": "When constructing the MCP Streamable HTTP transport in resolveMcpTransport(), OpenClaw passes operator-configured custom headers via requestInit.headers but supplies no custom fetch implementation, so the default StreamableHTTPClientTransport fetch transparently follows HTTP redirects and re-sends those headers to the redirect target. If a configured MCP endpoint (transportType 'streamable-http' with sensitive headers under mcp.servers.*.headers) is malicious, compromised, or otherwise issues a cross-origin redirect, sensitive custom headers such as API keys or tenant-routing headers are leaked to a different origin. The SSE transport branch by contrast already wires a controlled fetch, but the streamable-http branch does not.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__eeef4864/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/agents/mcp-transport.ts",
+      "startLine": 102,
+      "endLine": 111,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "eeef4864494f859838fec1586bedbab1f8fa5702",
+    "fixCommit": "47eb2d48d43452afc4b0160e40a2630e4a38a0ff",
+    "ghsa": "GHSA-rjxq-qqhf-8hwh",
+    "cve": "CVE-2026-53840",
+    "disclosure": {
+      "ghsaPublished": "2026-06-17",
+      "fixCommitDate": "2026-05-12"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

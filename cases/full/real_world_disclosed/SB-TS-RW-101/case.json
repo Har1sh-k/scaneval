@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-101",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "Git node argument injection via unseparated user paths passed to git.add/git.commit",
+  "description": "The Git node passes user-controlled parameters directly into git command arguments. In the 'add' operation the pathsToAdd parameter is split on commas and handed to git.add() without an '--' end-of-options separator, and the 'commit' operation does the same for committed paths. Because the values precede '--', an attacker (an authenticated user who can create or modify workflows) can supply values that begin with '-' so git interprets them as options rather than path operands, achieving argument injection. Combined with a separate bug where validateGitReference validated the constant 'HEAD' instead of the user-supplied options.reference, this allowed dangerous git options (for example option-style references such as '-n', or git arguments that point to external files/commands) to be smuggled into git invocations, leading to arbitrary file read and OS command execution on the n8n host.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__d222a6a7/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/nodes-base/nodes/Git/Git.node.ts",
+      "startLine": 350,
+      "endLine": 352,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "d222a6a7ce721eec15bb81205d55fa0c02dbf416",
+    "fixCommit": "503f29901c568d15778e5e853e804b6e5a7a96db",
+    "ghsa": "GHSA-9g95-qf3f-ggrw",
+    "cve": "CVE-2026-25053",
+    "disclosure": {
+      "ghsaPublished": "2026-02-04",
+      "fixCommitDate": "2026-01-14"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

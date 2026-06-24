@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-103",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "path_traversal",
+  "title": "Merge node SQL mode allows arbitrary file write (incomplete alasql file-access hardening, INTO handlers not disabled)",
+  "description": "The Merge node's combineBySql mode runs a user-supplied SQL query through the alasql in-memory engine. Before executing the query the node calls disableAlasqlFileAccess(), which is intended to neutralise alasql's filesystem features, but the allow/deny list is incomplete: it overrides only a fixed subset of alasql.fn/alasql.from/alasql.engines handlers and never touches the alasql.into.* write handlers (FILE, TXT, CSV, JSON, XLS, XLSX, etc.) or the alasql.utils.saveFile/loadFile helpers. As a result a workflow author can run a query such as `SELECT ... INTO TXT('/path/to/file') FROM input1` and have alasql write attacker-chosen content to an attacker-chosen path on the n8n server's filesystem, leading to arbitrary file write and potential remote code execution. CVSS 9.4 (CVE-2026-25056, CWE-434/CWE-693).",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__a8cdf0f0/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/nodes-base/nodes/Merge/v3/actions/mode/combineBySql.ts",
+      "startLine": 29,
+      "endLine": 65,
+      "label": "vulnerable",
+      "capability": "filesystem",
+      "acceptedKinds": [
+        "path_traversal"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "a8cdf0f01cac8ba1f4452d2ecd9fcb16e0990b32",
+    "fixCommit": "9ce3ac092cf7339f3c4a416cdea6e5fa2d5b22b9",
+    "ghsa": "GHSA-hv53-3329-vmrm",
+    "cve": "CVE-2026-25056",
+    "disclosure": {
+      "ghsaPublished": "2026-02-04",
+      "fixCommitDate": "2026-01-09"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

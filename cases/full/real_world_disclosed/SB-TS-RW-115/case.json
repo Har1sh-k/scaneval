@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-115",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "Unauthenticated chat WebSocket attaches to any execution by ID without authorization",
+  "description": "The /chat WebSocket endpoint backing the Chat Trigger node's Hosted Chat feature establishes a session in ChatService.startSession() using only the sessionId and executionId supplied in the connection query string. The handler calls executionManager.checkIfExecutionExists(executionId) merely to confirm the execution exists, then immediately marks the socket alive and builds the session key, never verifying that the connecting party is authorized to interact with that execution. An unauthenticated remote attacker who can guess or discover the execution ID of a workflow waiting for chat input can attach to it, receive the pending prompt intended for the legitimate user, and submit arbitrary input to resume or steer downstream workflow behavior when the Chat Trigger authentication is set to None.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__6336f0a4/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/cli/src/chat/chat-service.ts",
+      "startLine": 78,
+      "endLine": 103,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "6336f0a447eab3600b1fe13216f1abd5b6e25dff",
+    "fixCommit": "85b7796434df7e80c4023666e2c0ede6e526a6ba",
+    "ghsa": "GHSA-f77h-j2v7-g6mw",
+    "cve": "CVE-2026-42228",
+    "disclosure": {
+      "ghsaPublished": "2026-04-29",
+      "fixCommitDate": "2026-04-22"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

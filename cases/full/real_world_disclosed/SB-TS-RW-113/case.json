@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-113",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Missing credential authorization check in dynamic-node-parameters allows foreign credential replay",
+  "description": "The dynamic-node-parameters service's request-sanitizing routine refineResourceIds() validates only the projectId and workflowId references supplied by the authenticated caller, scrubbing them when the user lacks project/workflow scopes. It performs no authorization check on the credentials supplied in the same request payload, even though those credentials (an INodeCredentials object containing a credential id) are passed straight through to getWorkflow() and attached to the resolved node, where the backend decrypts and uses them in a helper execution path whose destination URL the caller also controls. An authenticated user with access to a shared workflow can therefore supply a foreign credential id, forcing the backend to authenticate against attacker-controlled infrastructure with another user's credential and exfiltrate a reusable API key.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__bc9cbea6/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/cli/src/services/dynamic-node-parameters.service.ts",
+      "startLine": 63,
+      "endLine": 100,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "bc9cbea6c94dda489a0daf872373b100d019cab0",
+    "fixCommit": "ac411127314921aaf82b7b97d76eeaa2703b708c",
+    "ghsa": "GHSA-r4v6-9fqc-w5jr",
+    "cve": "CVE-2026-42226",
+    "disclosure": {
+      "ghsaPublished": "2026-04-29",
+      "fixCommitDate": "2026-04-14"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

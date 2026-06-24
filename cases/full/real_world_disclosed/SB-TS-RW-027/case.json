@@ -34,7 +34,11 @@
     "vulnerableCommit": "6ae4999ef99310d39c43cde611966875787b331b",
     "fixCommit": "11f8597d4ad69ea3b58941573997fdbc4de1fec5",
     "ghsa": "GHSA-w96v-gf22-crwp",
-    "cve": "CVE-2025-68949"
+    "cve": "CVE-2025-68949",
+    "disclosure": {
+      "ghsaPublished": "2026-01-13",
+      "fixCommitDate": "2025-12-22"
+    }
   },
   "standards": {
     "owaspAgenticTop10": {

@@ -1,0 +1,47 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-PY-RW-015",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "python",
+  "canonicalKind": "ssrf",
+  "title": "SSRF in SendEmailBlock via user-controlled SMTP server/port bypassing the IP blocklist",
+  "description": "SendEmailBlock in autogpt_platform/backend/backend/blocks/email_block.py accepts a user-supplied smtp_server (string) and smtp_port (int) as per-execution block inputs (SMTPConfig embedded in Input) and passes them directly into smtplib.SMTP(smtp_server, smtp_port, timeout=30) to open a raw TCP connection with no IP validation. This bypasses the platform's hardened SSRF protections in backend/util/request.py (validate_url_host / BLOCKED_IP_NETWORKS) that every other outbound-connecting block uses. An authenticated user can target internal IPs/ports (e.g. 10.0.0.1:22, 169.254.169.254), and because smtplib reads the target's TCP banner on connect and embeds it in exception messages that are persisted as user-visible block output, this enables non-blind internal port scanning and service fingerprinting.",
+  "files": {
+    "root": "../../../../.repos/Significant-Gravitas_AutoGPT__c51dc7ad/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "autogpt_platform/backend/backend/blocks/email_block.py",
+      "startLine": 110,
+      "endLine": 121,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "Significant-Gravitas/AutoGPT",
+    "vulnerableCommit": "c51dc7ad99265f68d9ea6c5b3a04a955dc06f575",
+    "fixCommit": "522f932e670851fc5e94ea80d03c2928c7040397",
+    "ghsa": "GHSA-4jwj-6mg5-wrwf",
+    "cve": "CVE-2026-33234",
+    "disclosure": {
+      "fixCommitDate": "2026-03-17"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

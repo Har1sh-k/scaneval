@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-058",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "ssrf",
+  "title": "Hostname normalization stripped only one trailing dot, allowing blocklist evasion via repeated trailing dots",
+  "description": "normalizeHostname() in src/infra/net/hostname.ts canonicalizes a hostname for SSRF/blocklist comparison by lowercasing it and stripping a trailing dot using the regex /\\.$/ which removes at most one trailing dot. A model- or workspace-derived URL whose hostname carries a trailing dot (or repeated trailing dots) therefore normalizes inconsistently from the same hostname without the dot, so the normalized value used for the blocklist comparison does not match the blocked host and the request reaches a destination the operator's hostname policy was expected to block.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__a374c3a5/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/infra/net/hostname.ts",
+      "startLine": 3,
+      "endLine": 9,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "a374c3a5bfd5225ce319bce3865aab6216309c4f",
+    "fixCommit": "0314d67d87faf601ee291bbbe9b805db987a929f",
+    "ghsa": "GHSA-gxg4-2rrr-jhc7",
+    "cve": "CVE-2026-53859",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-05-27"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

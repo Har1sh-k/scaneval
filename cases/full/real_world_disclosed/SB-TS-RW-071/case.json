@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-071",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "IDOR in PUT /api/v1/loginmethod allows overwriting any organization's SSO config",
+  "description": "The LoginMethodController.update handler for PUT /api/v1/loginmethod in Flowise <= 3.0.12 takes the organizationId and SSO provider configuration directly from the authenticated request body and passes req.body straight to LoginMethodService.createOrUpdateConfig without verifying that the caller is authorized over the target organization. Because the organizationId is an attacker-controlled key in the JSON body and there is no check that it matches the user's own organization (nor any platform/role gate), any authenticated low-privileged user can overwrite the SSO/OAuth configuration of an arbitrary organization, enabling account takeover (by substituting attacker OAuth client credentials) and bypassing enterprise-only SSO licensing.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__55b6913c/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/server/src/enterprise/controllers/login-method.controller.ts",
+      "startLine": 103,
+      "endLine": 122,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "55b6913c03f0dba37cc207975f0c0d0786e0f3c7",
+    "fixCommit": "06b812653843f21b197cc676a7b2732c06997501",
+    "ghsa": "GHSA-cwc3-p92j-g7qm",
+    "cve": "CVE-2026-30823",
+    "disclosure": {
+      "ghsaPublished": "2026-03-06",
+      "fixCommitDate": "2026-02-03"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

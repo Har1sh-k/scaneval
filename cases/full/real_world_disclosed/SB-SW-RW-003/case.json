@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-SW-RW-003",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "swift",
+  "canonicalKind": "command_injection",
+  "title": "macOS Swift exec allowlist parser missed combined POSIX inline-command flags",
+  "description": "extractPosixInlineCommand() in apps/macos/Sources/OpenClaw/ExecShellWrapperParser.swift extracts the inline shell command payload that the macOS exec allowlist evaluates. It read only the single token at command[1] and required it to be an exact member of posixInlineFlags ({\"-lc\", \"-c\", \"--command\"}), then took the payload from command[2]. A command request that expresses the inline-command flag in a combined POSIX form (for example -ic, -lic, or other clustered short flags ending in c) does not match any allowlist flag, so extractPayload() returns nil and the invocation is treated as not a shell wrapper, causing the inline shell content to skip the allowlist check and run outside the intended allowlist.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__b1abf9d8/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "apps/macos/Sources/OpenClaw/ExecShellWrapperParser.swift",
+      "startLine": 74,
+      "endLine": 81,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "b1abf9d8ae4410c6a6e08f7dfd2d617f4550281c",
+    "fixCommit": "fc065b2693bfaeff795a88d080ff5cf30fe8addf",
+    "ghsa": "GHSA-c226-q6fx-6j6c",
+    "cve": "CVE-2026-53861",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-05-08"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

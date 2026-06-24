@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-RS-RG-001",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "rust",
+  "canonicalKind": "authz_bypass",
+  "title": "Middleware authorization bypass via App Router transport routes under Turbopack (incomplete fix of CVE-2026-44575)",
+  "description": "This is the Turbopack-build follow-up to CVE-2026-44575 (GHSA-267c-6grr-h53f). The fix that added App Router transport variants to the middleware matcher in get-page-static-info.ts was not applied to the Turbopack code path, where the equivalent middleware-matcher regex is generated in Rust in crates/next-api/src/middleware.rs (MiddlewareEndpoint). That generator appended only the legacy `.json` data-route suffix (and root index forms), omitting the App Router `.rsc` and segment-prefetch `...segments/<seg>.segment.rsc` transport variants. Consequently, in Turbopack builds, crafted `.rsc`/segment-prefetch URLs that resolve to a protected page are not matched by the generated middleware matcher, so middleware-based authorization is skipped and protected content can be reached without the expected check.",
+  "files": {
+    "root": "../../../../.repos/vercel_next.js__ad6fd4e5/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "crates/next-api/src/middleware.rs",
+      "startLine": 217,
+      "endLine": 225,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "vercel/next.js",
+    "vulnerableCommit": "ad6fd4e50e5aba20b60d283c42b89273a3167ccd",
+    "fixCommit": "423623ae38c106273085b66946ee5bf9aab77f2c",
+    "ghsa": "GHSA-26hh-7cqf-hhc6",
+    "cve": "CVE-2026-45109",
+    "disclosure": {
+      "ghsaPublished": "2026-05-11",
+      "fixCommitDate": "2026-05-07"
+    }
+  }
+}

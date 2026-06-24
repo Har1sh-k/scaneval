@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-092",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "ssrf",
+  "title": "Credential allowed-domains restriction bypassed in declarative node HTTP requests (SSRF)",
+  "description": "The RoutingNode in n8n's execution engine dispatches declarative-node HTTP requests with decrypted credentials but never enforces the credential's configured Allowed HTTP Request Domains restriction. Via the POST /rest/dynamic-node-parameters/options endpoint, any authenticated user with access to a credential could drive the n8n server into making attacker-chosen HTTP requests that include the credential, bypassing the host allow-list and exfiltrating credentials to arbitrary destinations (CWE-918 SSRF). The unguarded request dispatch is at the makeRequest call in routing-node.ts.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__4e527293/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/core/src/execution-engine/routing-node.ts",
+      "startLine": 222,
+      "endLine": 239,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "4e527293307f5cefd6e801b728bffd54e450d308",
+    "fixCommit": "8551b1b90ce16b31a017bd07177694ef39ad226d",
+    "ghsa": "GHSA-3875-8gcx-7v46",
+    "cve": "",
+    "disclosure": {
+      "ghsaPublished": "2026-05-19",
+      "fixCommitDate": "2026-04-28"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

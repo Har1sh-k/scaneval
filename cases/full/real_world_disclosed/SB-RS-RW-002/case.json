@@ -34,7 +34,10 @@
     "vulnerableCommit": "18b2b30841aaba88d6e37ef6cdde57e99f8d6564",
     "fixCommit": "6cf4b96f9dbbef8a94acc1ff703eb118481514d8",
     "ghsa": "",
-    "cve": "CVE-2025-54558"
+    "cve": "CVE-2025-54558",
+    "disclosure": {
+      "fixCommitDate": "2025-07-22"
+    }
   },
   "standards": {
     "owaspAgenticTop10": {

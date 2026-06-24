@@ -31,6 +31,10 @@
     "vulnerableCommit": "ccf03755f063eafdf7bbc334e225ea76e8080bef",
     "fixCommit": "4254b34b2b8b4867f2e7fccfac73904213d48510",
     "ghsa": "GHSA-39hr-239p-fhqc",
-    "cve": "CVE-2025-64099"
+    "cve": "CVE-2025-64099",
+    "disclosure": {
+      "ghsaPublished": "2025-11-12",
+      "fixCommitDate": "2025-10-29"
+    }
   }
 }

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-080",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "ssrf",
+  "title": "Prompt-injection SSRF in Flowise POST API Chain (postCore.ts)",
+  "description": "The Flowise POST API Chain (packages/components/nodes/chains/ApiChain/postCore.ts) builds an outbound HTTP request from an LLM response. In _call(), apiRequestChain.predict() returns a JSON body whose 'url' field is taken verbatim and passed to secureFetch(url, ...). Because the API documentation used to drive the LLM is attacker-influenced (prompt injection), the attacker can make the LLM emit any URL, including http://host.docker.internal, http://169.254.169.254, or other internal hosts. At flowise@3.0.13 secureFetch only enforces the deny list when the HTTP_DENY_LIST environment variable is explicitly configured, so in the default deployment no SSRF protection applies and the server fetches the attacker-chosen internal endpoint.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__f0c12941/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/components/nodes/chains/ApiChain/postCore.ts",
+      "startLine": 87,
+      "endLine": 99,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "f0c1294173a55f26e0b972c39c0c16917f5ca9e7",
+    "fixCommit": "efffd12f161761790c4bfb7bb25771e0a6ff4b75",
+    "ghsa": "GHSA-6r77-hqx7-7vw8",
+    "cve": "CVE-2026-41271",
+    "disclosure": {
+      "ghsaPublished": "2026-04-16",
+      "fixCommitDate": "2026-02-04"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

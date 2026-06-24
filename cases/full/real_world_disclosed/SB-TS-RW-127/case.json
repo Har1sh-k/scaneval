@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-127",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "sql_injection",
+  "title": "NoSQL injection in MongoDB node Find And Replace via unvalidated updateKey filter value",
+  "description": "In the MongoDB node's Find And Replace (findOneAndReplace) operation, the match filter is built as `{ [updateKey]: item[updateKey] }` directly from the incoming item data without validating the type of the updateKey value. Because MongoDB interprets an object value as a set of query operators, an authenticated user with workflow edit access could supply an object such as `{ \"$ne\": null }` (or `{ \"$gt\": \"\" }`) for the updateKey field, causing the filter to match unintended documents that are then overwritten with attacker-controlled replacement content. This is a NoSQL (query/operator) injection in the document match filter.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__ded62827/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/nodes-base/nodes/MongoDb/MongoDb.node.ts",
+      "startLine": 278,
+      "endLine": 287,
+      "label": "vulnerable",
+      "capability": "data_store",
+      "acceptedKinds": [
+        "sql_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "ded6282794347306df6cba7f7c39876786b2d24d",
+    "fixCommit": "439d2601815a72bf93ca185af1e5b49c520fa9af",
+    "ghsa": "GHSA-jpq7-226w-6cxx",
+    "cve": "CVE-2026-54313",
+    "disclosure": {
+      "ghsaPublished": "2026-06-16",
+      "fixCommitDate": "2026-05-29"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-046",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "OpenClaw Gmail setup let a workspace .env CLOUDSDK_PYTHON select the Python interpreter for gcloud execution",
+  "description": "During Gmail setup, OpenClaw runs gcloud via runGcloudCommand(), which derives its environment from gcloudEnv(). gcloudEnv() short-circuits and returns undefined whenever process.env.CLOUDSDK_PYTHON is already set, meaning gcloud inherits the ambient CLOUDSDK_PYTHON value. Because a workspace .env opened by a trusted operator is loaded into the process environment, an attacker-controlled CLOUDSDK_PYTHON entry in that .env determines which Python interpreter gcloud invokes, allowing setup to execute through an unintended (workspace-controlled) local Python path rather than a trusted interpreter.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__a448042c/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/hooks/gmail-setup-utils.ts",
+      "startLine": 148,
+      "endLine": 167,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "a448042c2edd94a4e8ee86d5ed90a5ed9fe8e4cd",
+    "fixCommit": "86251f43916d8210d38d8f69c9fb0b0070a88fdf",
+    "ghsa": "GHSA-fq9j-vw4w-fr6v",
+    "cve": "CVE-2026-53842",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-05-01"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

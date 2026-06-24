@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-089",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Flowise assistant update endpoint mass-assigns request body, allowing cross-workspace reassignment of assistants",
+  "description": "In updateAssistant in packages/server/src/services/assistants/index.ts (reached via PUT /api/v1/assistants/{id}), the CUSTOM-type branch copies the entire client request body into a new Assistant entity via Object.assign(updateAssistant, body) and then merges it onto the fetched assistant and saves it. The controller only loads the assistant scoped to the caller's activeWorkspaceId but performs no field restriction, so attacker-supplied server-controlled properties such as workspaceId, createdDate and updatedDate are merged into and persisted on the entity. An authenticated user can set workspaceId to an arbitrary workspace UUID and reassign the assistant out of their tenant, breaking workspace isolation.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__34cf2854/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/server/src/services/assistants/index.ts",
+      "startLine": 300,
+      "endLine": 307,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "34cf28546b700998e88a8f14d6f6d0754f572da4",
+    "fixCommit": "faa571c961ee0ebe6fb9f4d060beb54e293ad39b",
+    "ghsa": "GHSA-hp26-q66v-q2w7",
+    "cve": "CVE-2026-46441",
+    "disclosure": {
+      "ghsaPublished": "2026-05-14",
+      "fixCommitDate": "2026-03-31"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

@@ -234,6 +234,36 @@
           "type": "string",
           "pattern": "^CVE-",
           "description": "CVE identifier if available"
+        },
+        "disclosure": {
+          "$ref": "#/$defs/disclosure",
+          "description": "Public-knowledge dates used for model-cutoff gating"
+        }
+      },
+      "additionalProperties": false
+    },
+    "disclosure": {
+      "type": "object",
+      "description": "Public-knowledge dates for a disclosed vulnerability. The knowledge horizon is the minimum of the present dates; a case counts for a model only when that horizon is strictly after the model's knowledge cutoff. Backfill with scripts/backfill_disclosure_dates.py.",
+      "minProperties": 1,
+      "properties": {
+        "ghsaPublished": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "GHSA advisory publication date (YYYY-MM-DD)"
+        },
+        "fixCommitDate": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "Author/committer date of realWorld.fixCommit (YYYY-MM-DD)"
+        },
+        "cvePublished": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "NVD CVE publication date (YYYY-MM-DD), optional"
         }
       },
       "additionalProperties": false

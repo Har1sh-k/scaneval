@@ -31,6 +31,10 @@
     "vulnerableCommit": "5e0ffd290abf0be7dfd4f8279e03a963071544eb",
     "fixCommit": "aee3fb1edeeaf1088fcb458727e0fd863d277f8b",
     "ghsa": "GHSA-j2jp-wvqg-wc2g",
-    "cve": "CVE-2022-41912"
+    "cve": "CVE-2022-41912",
+    "disclosure": {
+      "ghsaPublished": "2022-11-29",
+      "fixCommitDate": "2022-11-28"
+    }
   }
 }

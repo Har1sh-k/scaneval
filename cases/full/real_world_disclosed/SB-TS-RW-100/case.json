@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-100",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "path_traversal",
+  "title": "Allowed-path enforcement bypass via lexical resolve() for non-existent paths enabling arbitrary file access",
+  "description": "n8n's file-system helper functions (used by nodes such as Read/Write Files from Disk and Git) gate file access by resolving the requested path and checking it against the allowed/restricted path lists. resolvePath() returns fsRealpath() for existing paths but, when the path does not exist (ENOENT), falls back to node's lexical resolve(), which only normalizes the string (collapsing '..' textually) and does not resolve symlinks in the path components. Because the containment check (isFilePathBlocked) operates on this lexically-resolved path while the subsequent file open follows real symlinks, an authenticated user able to configure workflows can route a request through a symlinked directory or otherwise craft a path whose lexical form appears inside an allowed directory but whose real target is outside it (CWE-367, time-of-check/time-of-use). This permits reading sensitive host files such as n8n configuration and stored credentials, leading to account takeover.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__911d3771/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/core/src/execution-engine/node-execution-context/utils/file-system-helper-functions.ts",
+      "startLine": 38,
+      "endLine": 47,
+      "label": "vulnerable",
+      "capability": "filesystem",
+      "acceptedKinds": [
+        "path_traversal"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "911d3771ce23dda2eb00a9d2c446e37f8223a9e9",
+    "fixCommit": "46dd25439c4d6119e02f28b88e8feb7105f0d0b1",
+    "ghsa": "GHSA-gfvg-qv54-r4pc",
+    "cve": "CVE-2026-25052",
+    "disclosure": {
+      "ghsaPublished": "2026-02-04",
+      "fixCommitDate": "2026-01-27"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

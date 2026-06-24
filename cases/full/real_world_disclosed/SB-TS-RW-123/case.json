@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-123",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Missing credential-ownership guard in WorkflowService.update allows shared-workflow editors to reference others' credentials",
+  "description": "In n8n's WorkflowService.update, a member-level user who was granted Editor access to a shared workflow could persist node credential references for credentials they do not own. The update path checks only that the user has 'workflow:update' permission on the workflow and resolves old-format credential references via replaceInvalidCredentials, but it never verifies that the acting user is permitted to use the referenced credentials. Because some public API write endpoints route through this central update method, an editor could submit workflow nodes referencing arbitrary credentials and, after the workflow ran, exfiltrate data using credentials owned by other users (CVSS 4.0 8.5).",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__a37ba249/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/cli/src/workflows/workflow.service.ts",
+      "startLine": 354,
+      "endLine": 389,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "a37ba249d46c98cd3369450c9624bf00497ef9db",
+    "fixCommit": "3f7246b41a768a331efd7681a103cf30a293f725",
+    "ghsa": "GHSA-pmqw-72cg-wx85",
+    "cve": "CVE-2026-54307",
+    "disclosure": {
+      "ghsaPublished": "2026-06-16",
+      "fixCommitDate": "2026-06-10"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

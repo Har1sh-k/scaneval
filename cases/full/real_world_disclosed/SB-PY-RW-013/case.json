@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-PY-RW-013",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "python",
+  "canonicalKind": "authz_bypass",
+  "title": "AutoGPT Platform graph validation fails to enforce the block 'disabled' flag, allowing disabled-block (RCE) bypass",
+  "description": "AutoGPT Platform's central graph validation function _validate_graph_get_errors() in autogpt_platform/backend/backend/data/graph.py gates all graph create, update, fork, and execute paths, but its per-node loop only rejects unknown block ids and validates schema/inputs; it never checks block.disabled. The disabled flag is the access control used to keep development-only blocks such as BlockInstallationBlock (which writes attacker-supplied Python to disk and dynamically imports it) out of normal use, and it was enforced only on the direct POST /api/blocks/{id}/execute endpoint. Because validation does not honor disabled, any authenticated user can embed a disabled block as a node in a graph and have it persisted and executed, bypassing the restriction and achieving remote code execution as the backend process. The vulnerable code is the missing-authorization gap in the validation loop (lines 741-748) where a disabled-flag check should reject the block before it is accepted.",
+  "files": {
+    "root": "../../../../.repos/Significant-Gravitas_AutoGPT__4df5b7bd/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "autogpt_platform/backend/backend/data/graph.py",
+      "startLine": 741,
+      "endLine": 748,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "Significant-Gravitas/AutoGPT",
+    "vulnerableCommit": "4df5b7bde7ba548364b75ddce7a91ef6d5ecf5e4",
+    "fixCommit": "062fe1aa709217136b896c8b950e0f04435afb32",
+    "ghsa": "GHSA-4crw-9p35-9x54",
+    "cve": "CVE-2026-26020",
+    "disclosure": {
+      "fixCommitDate": "2026-02-11"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

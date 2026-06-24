@@ -31,6 +31,10 @@
     "vulnerableCommit": "bb3f58011885369404fe2d6abe5d40b867183fce",
     "fixCommit": "1c8234eb20bc8afd396b89999a00f06b61d72d7b",
     "ghsa": "GHSA-7gfc-8cq8-jh5f",
-    "cve": "CVE-2024-51479"
+    "cve": "CVE-2024-51479",
+    "disclosure": {
+      "ghsaPublished": "2024-12-17",
+      "fixCommitDate": "2024-10-08"
+    }
   }
 }

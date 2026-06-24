@@ -62,7 +62,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <strong>Track:</strong> {track} &nbsp;|&nbsp;
   <strong>Profile:</strong> {profile} &nbsp;|&nbsp;
   <strong>Benchmark:</strong> v{benchmark_version} &nbsp;|&nbsp;
-  <strong>Date:</strong> {timestamp}
+  <strong>Date:</strong> {timestamp}{cutoff_meta}
 </div>
 
 <h2>Summary</h2>
@@ -185,7 +185,7 @@ PR_HTML_TEMPLATE = """<!DOCTYPE html>
   <strong>Track:</strong> {track} &nbsp;|&nbsp;
   <strong>Profile:</strong> {profile} &nbsp;|&nbsp;
   <strong>Benchmark:</strong> v{benchmark_version} &nbsp;|&nbsp;
-  <strong>Date:</strong> {timestamp}
+  <strong>Date:</strong> {timestamp}{cutoff_meta}
 </div>
 
 <h2>PR Summary</h2>
@@ -248,6 +248,20 @@ the scanner detects vulnerabilities introduced by the simulated PR.</p>
 
 def format_pct(value: float) -> str:
     return f"{value:.1%}"
+
+
+def cutoff_meta_html(results: dict) -> str:
+    """Render the optional model-cutoff meta fragment for the report header."""
+    cutoff = results.get("cutoff")
+    if not cutoff:
+        return ""
+    label = cutoff.get("label") or cutoff.get("date") or "applied"
+    excluded = cutoff.get("excludedCount", 0)
+    return (
+        " &nbsp;|&nbsp; "
+        f"<strong>Cutoff:</strong> {html.escape(str(label))} "
+        f"({excluded} pre-cutoff case(s) excluded)"
+    )
 
 
 def rebase_link(relative_path: str | None, results_dir: Path, output_dir: Path) -> str | None:
@@ -524,6 +538,7 @@ def generate_pr_report(results: dict, results_dir: Path, output_dir: Path, deep:
         profile=html.escape(results.get("profile", "all")),
         benchmark_version=html.escape(results["benchmarkVersion"]),
         timestamp=html.escape(results["timestamp"][:10]),
+        cutoff_meta=cutoff_meta_html(results),
         introduced_target_hit_rate=format_pct(pr_summary.get("introducedTargetHitRate", 0)),
         total_review_noise=pr_summary.get("totalReviewNoise", 0),
         total_capability_noise=pr_summary.get("totalCapabilityNoise", 0),
@@ -685,6 +700,7 @@ def generate_report(results: dict, results_dir: Path, output_dir: Path, deep: bo
         profile=html.escape(results.get("profile", "all")),
         benchmark_version=html.escape(results["benchmarkVersion"]),
         timestamp=html.escape(results["timestamp"][:10]),
+        cutoff_meta=cutoff_meta_html(results),
         recall=format_pct(summary["recall"]),
         capability_fp_rate=format_pct(summary["capabilityFpRate"]),
         precision_metric=precision_metric,

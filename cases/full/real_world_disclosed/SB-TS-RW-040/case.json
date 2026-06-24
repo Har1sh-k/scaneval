@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-040",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "ssrf",
+  "title": "Workspace dotenv blocklist omits MINIMAX_API_HOST, allowing host override of credentialed MiniMax requests",
+  "description": "In src/infra/dotenv.ts the untrusted-workspace .env blocklist (BLOCKED_WORKSPACE_DOTENV_KEYS and BLOCKED_WORKSPACE_DOTENV_SUFFIXES = [\"_BASE_URL\"]) does not include MINIMAX_API_HOST or the _API_HOST suffix. Because src/agents/minimax-vlm.ts coerceApiHost() reads env.MINIMAX_API_HOST to choose the request origin, a malicious workspace .env can inject MINIMAX_API_HOST and redirect credentialed MiniMax requests to an attacker-controlled origin, leaking the MiniMax API key in the outbound Authorization header.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__041266a6/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/infra/dotenv.ts",
+      "startLine": 71,
+      "endLine": 72,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "041266a6699cac3baef8ef39db41fa26f29f9db3",
+    "fixCommit": "2f06696579a1ab0cb5bbbbb6a900414a6b2e3cd1",
+    "ghsa": "GHSA-h2vw-ph2c-jvwf",
+    "cve": "CVE-2026-44992",
+    "disclosure": {
+      "ghsaPublished": "2026-04-25",
+      "fixCommitDate": "2026-04-20"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

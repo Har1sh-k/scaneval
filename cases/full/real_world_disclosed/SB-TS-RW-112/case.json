@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-112",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "External secrets authorization bypass: credential save resolves $secrets without externalSecret:list check",
+  "description": "When saving (creating or updating) a credential, n8n's CredentialsService validates the payload through checkCredentialData (and prepareUpdateData), which only enforced mandatory-field presence and OAuth URL validation. It performed no authorization check on external-secret references, so a user could embed an external-secret expression ($secrets.<vault>.<key>) in a credential field; the value was resolved from the connected vault and stored, returning the plaintext secret to a user lacking the externalSecret:list permission. This bypassed the externalSecret:list authorization scope (CWE-863-style missing object/permission-level authorization) and required only that an external secrets vault be configured and the attacker know or guess a secret name.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__c49c9c77/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/cli/src/credentials/credentials.service.ts",
+      "startLine": 873,
+      "endLine": 891,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "c49c9c772096d4d10845693f54faaf50a7143cf4",
+    "fixCommit": "2b73ce4288d4bbb57ee20ddffcf3a5015895890b",
+    "ghsa": "GHSA-fxcw-h3qj-8m8p",
+    "cve": "CVE-2026-33722",
+    "disclosure": {
+      "ghsaPublished": "2026-03-25",
+      "fixCommitDate": "2026-02-05"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

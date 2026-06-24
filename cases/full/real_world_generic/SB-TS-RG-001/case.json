@@ -31,7 +31,11 @@
     "vulnerableCommit": "f4552826e1ed15fbeb951be552d67c5a08ad0672",
     "fixCommit": "52a078da3884efe6501613c7834a3d02a91676d2",
     "ghsa": "GHSA-f82v-jwr5-mffw",
-    "cve": "CVE-2025-29927"
+    "cve": "CVE-2025-29927",
+    "disclosure": {
+      "ghsaPublished": "2025-03-21",
+      "fixCommitDate": "2025-03-17"
+    }
   },
   "fixValidation": {
     "mode": "mitigation_anchor_present",

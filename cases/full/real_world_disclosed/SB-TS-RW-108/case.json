@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-108",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "RCE via SQL mode of Merge node (AlaSQL file-access functions not disabled)",
+  "description": "The Merge node's \"Combine by SQL\" mode executes a user-supplied SQL query through the AlaSQL engine. In the combineBySql execute() handler the resolved query string is passed directly to db.exec() without disabling AlaSQL's file-system / loader functions (FILE, LOAD, CSV, JSON, etc.). An authenticated user with workflow create/modify permission can therefore craft SQL that reads arbitrary local files on the n8n host and, by abusing AlaSQL's loader/engine handlers, achieve remote code execution. This is code injection (CWE-94) executed through the embedded SQL interpreter.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__ef9e32b2/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/nodes-base/nodes/Merge/v3/actions/mode/combineBySql.ts",
+      "startLine": 146,
+      "endLine": 236,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "ef9e32b27a784d88c034cfe6fb1f25cca2e9bbd3",
+    "fixCommit": "79f1cca9af0ad92b08356cbd2f70d83f512edb6e",
+    "ghsa": "GHSA-58qr-rcgv-642v",
+    "cve": "CVE-2026-33660",
+    "disclosure": {
+      "ghsaPublished": "2026-03-25",
+      "fixCommitDate": "2025-10-21"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-055",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "OpenClaw strict inline-eval approval gate sequenced after the allowlist allow decision, letting shell positional carriers reach exec",
+  "description": "In evaluateSystemRunPolicyPhase() (src/node-host/invoke-system-run.ts) the strict inline-eval approval gate is evaluated only after the generic policy decision: the code first returns on !policy.allowed and only then checks 'if (inlineEvalHit && !policy.approvedByAsk)'. When a command request combines allowlisted tools with shell positional arguments, inline-eval content is carried in a shell positional parameter that the allowlist evaluation treats as satisfied (policy.allowed === true). In that arrangement the strict inline-eval approval boundary does not fire as intended, so shell-provided inline-eval content can be executed outside the intended allowlist rule without the explicit approval strictInlineEval mode is supposed to require.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__da64a978/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/node-host/invoke-system-run.ts",
+      "startLine": 385,
+      "endLine": 401,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "da64a978e5814567f7797cc34fbe29b61b7eae7a",
+    "fixCommit": "3e452f267139ae26c91766d23f619a1a89e18fcc",
+    "ghsa": "GHSA-5cj2-3jr2-5h77",
+    "cve": "CVE-2026-53855",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-04-02"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

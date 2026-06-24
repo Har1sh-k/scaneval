@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-037",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "ssrf",
+  "title": "Zalo sendPhoto forwards outbound photo URL to Zalo Bot API without applying the SSRF hostname policy",
+  "description": "In extensions/zalo/src/api.ts the sendPhoto() function passes params.photo (an attacker-influenced outbound photo URL) straight to callZaloApi(\"sendPhoto\", ...) without parsing or validating the URL against OpenClaw's shared SSRF hostname policy. Because the Zalo Bot API fetches the supplied photo URL server-side, an attacker who controls the outbound photo URL can cause a credentialed/proxied outbound request to an internal or attacker-chosen host, with no protocol or pinned-hostname check performed before the request is issued.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__f788c88b/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "extensions/zalo/src/api.ts",
+      "startLine": 170,
+      "endLine": 176,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "f788c88b4c508c335336fb292afed8c900656d6d",
+    "fixCommit": "a65eb1b864b7630c1242a82de9e5799b80583c3f",
+    "ghsa": "GHSA-2hh7-c75g-qj2r",
+    "cve": "CVE-2026-44116",
+    "disclosure": {
+      "ghsaPublished": "2026-05-04",
+      "fixCommitDate": "2026-04-21"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

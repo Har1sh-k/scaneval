@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-035",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "path_traversal",
+  "title": "OpenClaw OpenShell FS bridge write was TOCTOU-racy, letting a symlink swap escape the sandbox mount root",
+  "description": "OpenShellFsBridge.writeFile() in extensions/openshell/src/fs-bridge.ts (lines 61-92) validates the destination with assertLocalPathSafety() and then, in a separate step, writes by path: it mkdirs parentDir, writes a temp file, and fsPromises.rename(tempPath, hostPath). Because the boundary check and the filesystem mutation operate on path strings at different times (check by path, then mkdir/write/rename by path), an attacker who swaps a parent directory or the leaf for a symlink between the assertLocalPathSafety check and the rename can redirect the write to a location outside target.mountHostRoot. This is a time-of-check/time-of-use (CWE-367) race that breaks the sandbox mount-root pinning for writes.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__f788c88b/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "extensions/openshell/src/fs-bridge.ts",
+      "startLine": 61,
+      "endLine": 92,
+      "label": "vulnerable",
+      "capability": "filesystem",
+      "acceptedKinds": [
+        "path_traversal"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "f788c88b4c508c335336fb292afed8c900656d6d",
+    "fixCommit": "7be82d4fd1193bcb7e44ee38838f00bf924ffa76",
+    "ghsa": "GHSA-wppj-c6mr-83jj",
+    "cve": "CVE-2026-44112",
+    "disclosure": {
+      "ghsaPublished": "2026-05-04",
+      "fixCommitDate": "2026-04-21"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

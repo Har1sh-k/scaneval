@@ -31,6 +31,9 @@
     "vulnerableCommit": "51045504469c446531e0cca1cd2b93dd6cb794c4",
     "fixCommit": "7ac7990ceb9f5d088c9459092f60868a15a62ea4",
     "ghsa": "GHSA-2wgg-7r2p-cmqx",
-    "cve": "CVE-2026-22805"
+    "cve": "CVE-2026-22805",
+    "disclosure": {
+      "fixCommitDate": "2025-08-14"
+    }
   }
 }

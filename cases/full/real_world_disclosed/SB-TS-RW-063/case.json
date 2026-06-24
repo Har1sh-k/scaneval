@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-063",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "Flowise AirtableAgent executes unvalidated LLM-generated Python in Pyodide, enabling prompt-injection RCE",
+  "description": "In the run() method of packages/components/nodes/agents/AirtableAgent/AirtableAgent.ts, the user-supplied question (the run() `input` parameter, only optionally passed through input moderation) is interpolated directly into the LLMChain prompt template as `{question}` (the systemPrompt in core.ts). The chain's text output is stored in `pythonCode`, stripped of markdown fences, and then executed verbatim via `pyodide.runPythonAsync(`import pandas as pd\\n${pythonCode}`)` with no syntactic or semantic validation of the generated code. Because the prompt is fully attacker-influenced, a prompt-injection payload can make the LLM emit arbitrary Python (e.g. `df.query('@__builtins__.__import__(\"os\").system(...)')`), which is then run in the Pyodide sandbox, yielding remote code execution.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__f0c12941/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/components/nodes/agents/AirtableAgent/AirtableAgent.ts",
+      "startLine": 161,
+      "endLine": 188,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "f0c1294173a55f26e0b972c39c0c16917f5ca9e7",
+    "fixCommit": "a24acac5d8b71aa69caa71650a026d5ceaa9efbc",
+    "ghsa": "GHSA-f228-chmx-v6j6",
+    "cve": "CVE-2026-41138",
+    "disclosure": {
+      "ghsaPublished": "2026-04-16",
+      "fixCommitDate": "2026-02-06"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

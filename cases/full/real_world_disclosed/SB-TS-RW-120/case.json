@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-120",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "sql_injection",
+  "title": "Source Control Pull imports Data Table column name and table ID into raw DDL SQL without validation",
+  "description": "SourceControlImportService.importDataTablesFromWorkFolder parses Data Table JSON files committed to the connected git repository and imports them on a Source Control Pull. The column upsert loop validates only column.type, then passes the attacker-controlled column.name and dataTable.id into DataTableDDLService operations (renameColumn, addColumn, createTableWithColumns). dataTable.id is interpolated directly into the physical table name via toTableName() (`${tablePrefix}data_table_user_${dataTableId}`) and embedded into raw ALTER/CREATE TABLE statements executed with em.query(), allowing SQL injection on the internal PostgreSQL instance when an administrator pulls a malicious file (CVSS 4.0 high).",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__29d42560/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/cli/src/modules/source-control.ee/source-control-import.service.ee.ts",
+      "startLine": 1347,
+      "endLine": 1384,
+      "label": "vulnerable",
+      "capability": "data_store",
+      "acceptedKinds": [
+        "sql_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "29d42560ad14983ceb3dcda8cab0a1988d932a5d",
+    "fixCommit": "545da1aa8f9389532ee71a33a0e1beb93ad86591",
+    "ghsa": "GHSA-mhrx-qhrj-673w",
+    "cve": "CVE-2026-44792",
+    "disclosure": {
+      "ghsaPublished": "2026-05-14",
+      "fixCommitDate": "2026-05-13"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

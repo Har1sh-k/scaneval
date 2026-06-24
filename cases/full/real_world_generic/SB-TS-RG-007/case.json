@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RG-007",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "Next.js Server Actions CSRF bypass: Origin: null treated as missing instead of cross-origin",
+  "description": "In handleAction() in packages/next/src/server/app-render/action-handler.ts, the Server Actions CSRF protection derives originDomain from the request's Origin header with `typeof originHeader === 'string' && originHeader !== 'null'`. An Origin value of the literal string 'null' (sent by opaque/privacy-sensitive browser contexts such as sandboxed iframes, data: URLs, and certain redirects) therefore falls into the `: undefined` branch, making originDomain undefined. The CSRF check then enters the `if (!originDomain)` branch, which merely records a warning ('Missing `origin` header ...') and lets the request proceed, instead of treating 'null' as a distinct cross-origin value to be validated against the host or the experimental.serverActions.allowedOrigins allowlist. As a result, an attacker can induce a victim browser to submit Server Actions from a sandboxed/opaque context, executing state-changing actions with the victim's credentials (CSRF).",
+  "files": {
+    "root": "../../../../.repos/vercel_next.js__adf8c612/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/next/src/server/app-render/action-handler.ts",
+      "startLine": 606,
+      "endLine": 625,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "vercel/next.js",
+    "vulnerableCommit": "adf8c612adddd103647c90ff0f511ea35c57076e",
+    "fixCommit": "a27a11d78e748a8c7ccfd14b7759ad2b9bf097d8",
+    "ghsa": "GHSA-mq59-m269-xvcx",
+    "cve": "CVE-2026-27978",
+    "disclosure": {
+      "ghsaPublished": "2026-03-17",
+      "fixCommitDate": "2026-03-17"
+    }
+  }
+}

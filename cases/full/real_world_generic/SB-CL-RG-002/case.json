@@ -31,6 +31,9 @@
     "vulnerableCommit": "faf54a43ba464e919f4fc176d0349f4555fe5ff0",
     "fixCommit": "e47b76cf6b6d5016246530a36817b5c5c2080449",
     "ghsa": "GHSA-8xf9-9jc8-qp98",
-    "cve": "CVE-2025-30371"
+    "cve": "CVE-2025-30371",
+    "disclosure": {
+      "fixCommitDate": "2025-03-21"
+    }
   }
 }

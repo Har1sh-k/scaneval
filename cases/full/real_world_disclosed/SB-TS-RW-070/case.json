@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-070",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "Unauthenticated read of any organization's SSO config with cleartext OAuth secrets via GET /api/v1/loginmethod",
+  "description": "In Flowise <= 3.0.13 the GET /api/v1/loginmethod endpoint (LoginMethodController.read) is whitelisted from authentication (\\/api\\/v1\\/loginmethod is in WHITELIST_URLS) and its Express route has no permission check, so an unauthenticated caller can supply an arbitrary organizationId query parameter and receive that organization's full login-method records. The handler decrypts each provider's config and returns it verbatim, including OAuth clientSecret values, with no check that the requester is authenticated or owns the target organization, leaking SSO/OAuth client secrets for Azure, Google, Auth0, and GitHub in cleartext.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__f0c12941/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/server/src/enterprise/controllers/login-method.controller.ts",
+      "startLine": 72,
+      "endLine": 111,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "f0c1294173a55f26e0b972c39c0c16917f5ca9e7",
+    "fixCommit": "c22f2d3d25077f065001e07b79870aee2c37d70c",
+    "ghsa": "GHSA-6pcv-j4jx-m4vx",
+    "cve": "",
+    "disclosure": {
+      "ghsaPublished": "2026-04-16",
+      "fixCommitDate": "2026-02-24"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

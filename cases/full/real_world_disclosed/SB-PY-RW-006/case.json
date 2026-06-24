@@ -45,7 +45,11 @@
     "vulnerableCommit": "2a47ba9b7da63bb7df219f7a4480ca8c4cf95ed4",
     "fixCommit": "5b27a727a2190d8c251f17e0a0fbb78a3c59d96f",
     "ghsa": "GHSA-2ww3-72rp-wpp4",
-    "cve": "CVE-2026-25592"
+    "cve": "CVE-2026-25592",
+    "disclosure": {
+      "ghsaPublished": "2026-02-06",
+      "fixCommitDate": "2026-01-29"
+    }
   },
   "standards": {
     "owaspAgenticTop10": {

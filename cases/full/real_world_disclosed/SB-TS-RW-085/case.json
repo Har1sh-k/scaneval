@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-085",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Flowise variable update endpoint mass-assigns request body, allowing cross-workspace reassignment of variables",
+  "description": "In the updateVariable handler of packages/server/src/controllers/variables/index.ts (PUT /api/v1/variables/{id}), the entire JSON request body (req.body) is copied wholesale into a new Variable entity via Object.assign(updatedVariable, body) and then persisted by variablesService.updateVariable. The controller only fetches the existing variable scoped to the caller's activeWorkspaceId but never restricts which fields the client may set, so attacker-supplied server-controlled properties such as workspaceId, createdDate and updatedDate are merged into and saved on the entity. An authenticated user can therefore set workspaceId to an arbitrary workspace UUID and reassign the variable out of their tenant, breaking workspace (tenant) isolation.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__34cf2854/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/server/src/controllers/variables/index.ts",
+      "startLine": 93,
+      "endLine": 96,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "34cf28546b700998e88a8f14d6f6d0754f572da4",
+    "fixCommit": "7dc48adbf02072d9b8ba406426cd8330a854943a",
+    "ghsa": "GHSA-6fw7-3q8r-m5vj",
+    "cve": "CVE-2026-42861",
+    "disclosure": {
+      "ghsaPublished": "2026-05-14",
+      "fixCommitDate": "2026-03-27"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

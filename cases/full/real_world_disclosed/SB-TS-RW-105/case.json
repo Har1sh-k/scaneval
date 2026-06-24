@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-105",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "JavaScript Task Runner sandbox escape via incomplete global freezing enabling arbitrary host code execution",
+  "description": "The n8n JavaScript Task Runner executes user-authored Code-node JavaScript inside a Node.js vm context that is hardened by freezing global object prototypes. When sandbox setup runs (outside of tests), the runner enumerates globalThis function values and freezes only each function's prototype (Object.freeze(fn.prototype)), leaving the constructor/function objects themselves and core namespaces such as Reflect, JSON and Math mutable. An authenticated user able to author or edit a workflow can supply Code-node JavaScript that mutates the static methods or constructors of these un-frozen globals to break out of the vm boundary and execute arbitrary code on the Task Runner host (CWE-94). On default internal-runner deployments this yields full compromise of the n8n host; on external runners it compromises co-located tasks. Task Runners must be enabled (N8N_RUNNERS_ENABLED=true).",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__8e81f3e3/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/@n8n/task-runner/src/js-task-runner/js-task-runner.ts",
+      "startLine": 164,
+      "endLine": 173,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "8e81f3e31398b04fd6f8cc27cf844980cd382117",
+    "fixCommit": "562d867483e871b0f1e31776252e23bd721df75b",
+    "ghsa": "GHSA-jjpj-p2wh-qf23",
+    "cve": "CVE-2026-27495",
+    "disclosure": {
+      "ghsaPublished": "2026-02-25",
+      "fixCommitDate": "2026-02-25"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

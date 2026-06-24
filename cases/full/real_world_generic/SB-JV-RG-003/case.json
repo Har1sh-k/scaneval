@@ -40,6 +40,10 @@
     "vulnerableCommit": "46bce7d6a8ca696be90d84d708c4216a725fdf65",
     "fixCommit": "7c18543d126e8a567b83bb4535631825aaa9d742",
     "ghsa": "GHSA-4mh8-9wq6-rjxg",
-    "cve": "CVE-2023-37471"
+    "cve": "CVE-2023-37471",
+    "disclosure": {
+      "ghsaPublished": "2023-07-20",
+      "fixCommitDate": "2023-07-18"
+    }
   }
 }

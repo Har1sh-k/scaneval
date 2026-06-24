@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-067",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "ssrf",
+  "title": "Flowise Execute Flow node SSRF: user-controlled base URL passed to axios without checkDenyList/secureFetch validation",
+  "description": "In the run() method of ExecuteFlow_Agentflow in packages/components/nodes/agentflow/ExecuteFlow/ExecuteFlow.ts, the base URL used to call another flow is taken from the node's user-configurable executeFlowBaseURL input (baseURL = nodeData.inputs?.executeFlowBaseURL || options.baseURL). That value is concatenated into finalUrl (`${baseURL}/api/v1/prediction/${selectedFlowId}`) and issued directly with the raw axios client (await axios(requestConfig)) without ever calling the project's httpSecurity SSRF guards (checkDenyList / resolveAndValidate / secureAxiosRequest). An attacker who can configure the Execute Flow node (any authenticated user, or via an API with chatflow update permission) can therefore set the base URL to an internal/intranet address, cloud metadata endpoint (e.g. 169.254.169.254), or loopback service and trigger the request by hitting POST /api/v1/prediction/<chatflowId>, causing the server to perform a server-side request to the attacker-chosen internal address and echo back the response.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__f0c12941/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/components/nodes/agentflow/ExecuteFlow/ExecuteFlow.ts",
+      "startLine": 192,
+      "endLine": 204,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "f0c1294173a55f26e0b972c39c0c16917f5ca9e7",
+    "fixCommit": "c7f18f51bb2e729e34f8301f0fb633a873fe946e",
+    "ghsa": "GHSA-9hrv-gvrv-6gf2",
+    "cve": "",
+    "disclosure": {
+      "ghsaPublished": "2026-04-16",
+      "fixCommitDate": "2026-03-10"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

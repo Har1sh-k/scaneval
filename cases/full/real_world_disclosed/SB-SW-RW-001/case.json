@@ -34,7 +34,11 @@
     "vulnerableCommit": "d34ae86114c7a2726df10b4497616b32049ebcc9",
     "fixCommit": "fb141460334f90ce9f8d159575cf342cd5567744",
     "ghsa": "GHSA-q284-4pvr-m585",
-    "cve": "CVE-2026-25157"
+    "cve": "CVE-2026-25157",
+    "disclosure": {
+      "ghsaPublished": "2026-02-02",
+      "fixCommitDate": "2026-01-26"
+    }
   },
   "standards": {
     "owaspAgenticTop10": {

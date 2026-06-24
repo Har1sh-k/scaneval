@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-114",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "IDOR in n8n public API variables endpoint allows cross-project secret disclosure",
+  "description": "The public API getVariables handler reads a client-supplied projectId query parameter and queries the VariablesRepository directly with where: { project: { id: projectId } }, returning all variables for that project without verifying that the requesting user is a member of it. An authenticated user holding an API key scoped to variable:list could therefore enumerate variables from arbitrary projects they do not belong to, disclosing any secrets stored in those project variables. The flaw is an insecure direct object reference that bypasses the authorization-aware service layer used by the internal enterprise controller; it affects licensed enterprise/team deployments with multiple projects and variables enabled.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__732f2a3d/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/cli/src/public-api/v1/handlers/variables/variables.handler.ts",
+      "startLine": 59,
+      "endLine": 70,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "732f2a3d3ddba59fb6e51bf2534fd33792a2cde3",
+    "fixCommit": "2d9a2ec76e180b54e8091e31b1e0638c909abd99",
+    "ghsa": "GHSA-756q-gq9h-fp22",
+    "cve": "CVE-2026-42227",
+    "disclosure": {
+      "ghsaPublished": "2026-04-29",
+      "fixCommitDate": "2026-03-25"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

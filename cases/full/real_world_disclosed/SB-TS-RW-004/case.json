@@ -34,7 +34,11 @@
     "vulnerableCommit": "44270c533b09e8d7e87fbeecc0b1c69a6ee98452",
     "fixCommit": "93b07240257919f770d1e263e1f22753937b80ea",
     "ghsa": "GHSA-mwxv-35wr-4vvj",
-    "cve": ""
+    "cve": "",
+    "disclosure": {
+      "ghsaPublished": "2026-03-03",
+      "fixCommitDate": "2026-03-02"
+    }
   },
   "standards": {
     "owaspAgenticTop10": {

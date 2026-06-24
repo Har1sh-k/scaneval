@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-116",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "sql_injection",
+  "title": "SQL injection in n8n SeaTable node row:search via unescaped query interpolation",
+  "description": "The SeaTable node's row:search operation builds the SQL string sent to the SeaTable SQL gateway by directly interpolating the node parameters tableName, searchColumn and searchTerm into a query template without any identifier or string escaping. When a workflow feeds external user input (for example from a form trigger or webhook) into these parameters via expressions, an attacker can break out of the intended WHERE clause and inject arbitrary SQL, retrieving rows outside the workflow's intended row-level filtering. The companion row:get operation has the same flaw via the rowId parameter.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__e7d95055/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/nodes-base/nodes/SeaTable/v2/actions/row/search.operation.ts",
+      "startLine": 104,
+      "endLine": 115,
+      "label": "vulnerable",
+      "capability": "data_store",
+      "acceptedKinds": [
+        "sql_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "e7d95055d1ab260ae91f8ba358310211476bd677",
+    "fixCommit": "0e626768ed19d97f3f2aa98c9f1d4021c73ee7e6",
+    "ghsa": "GHSA-mp4j-h6gh-f6mp",
+    "cve": "CVE-2026-42229",
+    "disclosure": {
+      "ghsaPublished": "2026-04-29",
+      "fixCommitDate": "2026-04-22"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

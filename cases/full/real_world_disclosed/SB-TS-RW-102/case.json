@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-102",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "path_traversal",
+  "title": "SSH node uploads files using unsanitized filename, enabling path traversal / arbitrary remote file write",
+  "description": "The SSH node's upload operation builds the destination path for ssh.putFile() by concatenating the user-configured directory (parameterPath) with `fileName || binaryData.fileName`, where binaryData.fileName originates from previously uploaded/processed binary metadata. Neither the option fileName nor the binary's fileName is sanitized, so a value containing path separators or `../` segments (e.g. from an unauthenticated webhook file upload feeding the workflow) lets an attacker escape the intended target directory and write the file to an arbitrary location on the remote SSH server, potentially leading to remote code execution there (CVE-2026-25055, CWE-22).",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__747f5c24/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/nodes-base/nodes/Ssh/Ssh.node.ts",
+      "startLine": 447,
+      "endLine": 452,
+      "label": "vulnerable",
+      "capability": "filesystem",
+      "acceptedKinds": [
+        "path_traversal"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "747f5c24d8e2652fa413c1116447137f8c467045",
+    "fixCommit": "e0baf48c6a54808f6dbca8cb352bfa306092c223",
+    "ghsa": "GHSA-m82q-59gv-mcr9",
+    "cve": "CVE-2026-25055",
+    "disclosure": {
+      "ghsaPublished": "2026-02-04",
+      "fixCommitDate": "2026-01-09"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

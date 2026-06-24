@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-069",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "path_traversal",
+  "title": "Flowise Faiss vector store writes to attacker-controlled basePath (path traversal)",
+  "description": "In the Faiss vector store node (packages/components/nodes/vectorstores/Faiss/Faiss.ts), the upsert() method reads basePath = nodeData.inputs?.basePath as string from user-supplied vectorStoreConfig and passes it unsanitized to vectorStore.save(basePath). The same basePath is used in init() via FaissStore.load(basePath, embeddings). Because the value comes from the authenticated /api/v1/document-store/vectorstore/insert request and is never validated, an attacker with documentStores:upsert-config permission can supply an absolute or '../'-laden path and have the Faiss index (docstore.json, faiss.index) written to an arbitrary filesystem location. The sibling SimpleStore (LlamaIndex) node has the identical flaw.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__f0c12941/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/components/nodes/vectorstores/Faiss/Faiss.ts",
+      "startLine": 76,
+      "endLine": 102,
+      "label": "vulnerable",
+      "capability": "filesystem",
+      "acceptedKinds": [
+        "path_traversal"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "f0c1294173a55f26e0b972c39c0c16917f5ca9e7",
+    "fixCommit": "0140ba4a3dbb3edade37b4f5de4346fb47a62a0d",
+    "ghsa": "GHSA-w6v6-49gh-mc9w",
+    "cve": "",
+    "disclosure": {
+      "ghsaPublished": "2026-04-16",
+      "fixCommitDate": "2026-02-24"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

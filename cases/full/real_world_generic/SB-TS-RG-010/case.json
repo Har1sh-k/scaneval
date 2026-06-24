@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RG-010",
+  "track": "full",
+  "caseType": "real_world_generic",
+  "agentic": false,
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Middleware authorization bypass via App Router segment-prefetch/.rsc transport routes in Next.js",
+  "description": "Next.js builds the regex matchers that determine which requests run user middleware in getMiddlewareMatchers() (get-page-static-info.ts). For each configured matcher source the function appends an optional suffix group that only accounts for the Pages Router data-route transport form `.json` (and, for the root, `/index`/`/index.json`); it does not include the App Router transport variants `.rsc` and the segment-prefetch form `...segments/<seg>.segment.rsc`. As a result, a `.rsc` or segment-prefetch URL resolves to the same protected page but is not matched by the generated middleware matcher, so middleware-based authorization checks are skipped. App Router applications that rely on middleware (or proxy-based checks) for authorization can have protected content reached via these crafted transport URLs without the expected authorization check.",
+  "files": {
+    "root": "../../../../.repos/vercel_next.js__412eb90b/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/next/src/build/analysis/get-page-static-info.ts",
+      "startLine": 340,
+      "endLine": 344,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "vercel/next.js",
+    "vulnerableCommit": "412eb90b6587ec02e8361c92efa9091487e7348f",
+    "fixCommit": "25926510f8d3223a447f2e37a56a7686f9190ef2",
+    "ghsa": "GHSA-267c-6grr-h53f",
+    "cve": "CVE-2026-44575",
+    "disclosure": {
+      "ghsaPublished": "2026-05-11",
+      "fixCommitDate": "2026-05-06"
+    }
+  }
+}

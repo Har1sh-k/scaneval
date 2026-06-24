@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-061",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "OpenClaw resolveGroupToolPolicy accepted unvalidated caller-supplied group IDs",
+  "description": "In src/agents/pi-tools.policy.ts the resolveGroupToolPolicy function built its candidate group-id list by directly trusting the caller-supplied params.groupId (via buildScopedGroupIdCandidates(params.groupId)) merged with server-derived session/spawn context group ids, then resolved and returned group-scoped tool policy for those ids. The trust check that validates a caller-provided groupId against the session-derived group context (resolveTrustedGroupId) lived only in one caller, applyFinalEffectiveToolPolicy in pi-embedded-runner/effective-tool-policy.ts, so any other caller of resolveGroupToolPolicy could supply an arbitrary group id and have group-scoped policy resolved for it, applying the wrong group-policy decision for a tool invocation.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__cbcfdf62/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/agents/pi-tools.policy.ts",
+      "startLine": 384,
+      "endLine": 390,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "cbcfdf62c7297bda66009ea7476f053c3e9addab",
+    "fixCommit": "665b0ef542ef9a6df9b5bfd5e9373fd8d9ace121",
+    "ghsa": "GHSA-985f-72mj-8gf7",
+    "cve": "CVE-2026-53863",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-04-29"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

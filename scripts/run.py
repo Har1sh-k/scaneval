@@ -18,6 +18,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from cutoff import load_models, parse_date, partition_by_cutoff, resolve_model_cutoff
 from scoring import Finding, classify_findings, compute_summary
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -162,6 +163,9 @@ def run_benchmark(
     verbose: bool = False,
     mode: str = "benchmark",
     profile: str = "all",
+    cutoff=None,
+    cutoff_label: str | None = None,
+    model_id: str | None = None,
 ) -> int:
     """Run the benchmark and produce results."""
     started_at = datetime.now(timezone.utc)
@@ -178,6 +182,9 @@ def run_benchmark(
             verbose=verbose,
             started_at=started_at,
             profile=profile,
+            cutoff=cutoff,
+            cutoff_label=cutoff_label,
+            model_id=model_id,
         )
     output_dir = output_path.parent
     artifacts_root = output_dir / f"{output_path.stem}_artifacts"
@@ -187,13 +194,22 @@ def run_benchmark(
     llm_model = getattr(adapter, "LLM_MODEL", None)
     cases = find_cases(track, case_type, case_id, profile)
 
+    excluded_by_cutoff: list[tuple[str, str | None]] = []
+    if cutoff is not None:
+        cases, excluded_by_cutoff = partition_by_cutoff(cases, cutoff)
+
     if not cases:
-        print("No cases found.")
+        if excluded_by_cutoff:
+            print(f"No cases found (all {len(excluded_by_cutoff)} dated cases excluded by cutoff {cutoff_label}).")
+        else:
+            print("No cases found.")
         return 1
 
     B = "\033[1;36m[SASTbench]\033[0m"
     SEP = "\033[2m" + "-" * 45 + "\033[0m"
     print(f"{B} Running SASTbench ({track} track, profile={profile}) with {scanner_name}")
+    if cutoff_label:
+        print(f"{B} Cutoff: {cutoff_label} -> {len(excluded_by_cutoff)} dated case(s) excluded as pre-cutoff")
     if llm_model:
         print(f"{B} LLM model: {llm_model}")
     print(f"{B} Found {len(cases)} cases\n")
@@ -318,6 +334,13 @@ def run_benchmark(
         },
         "track": track,
         "profile": profile,
+        "cutoff": {
+            "model": model_id,
+            "date": cutoff.isoformat() if cutoff else None,
+            "label": cutoff_label,
+            "excludedCount": len(excluded_by_cutoff),
+            "excludedCaseIds": [cid for cid, _ in excluded_by_cutoff],
+        } if cutoff is not None else None,
         "timestamp": started_at.isoformat(),
         "caseResults": case_results,
         "summary": {
@@ -377,13 +400,49 @@ def main() -> int:
         help="Filter cases by profile: agentic only, generic (non-agentic) only, or all (default)",
     )
     parser.add_argument(
+        "--model",
+        help="Gate real-world cases to a model's knowledge cutoff (id or alias from taxonomy/models.json, e.g. opus-4.8). Excludes cases disclosed on/before the cutoff.",
+    )
+    parser.add_argument(
+        "--since",
+        help="Gate real-world cases to an explicit cutoff date (YYYY-MM-DD). Mutually exclusive with --model.",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Show per-finding detail with classifications",
     )
     args = parser.parse_args()
 
-    return run_benchmark(args.scanner, args.track, args.output, args.case_type, args.case_id, args.verbose, args.mode, args.profile)
+    cutoff = None
+    cutoff_label = None
+    model_id = None
+    if args.model and args.since:
+        parser.error("--model and --since are mutually exclusive")
+    if args.model:
+        try:
+            model_id, cutoff = resolve_model_cutoff(args.model)
+        except KeyError as e:
+            parser.error(str(e))
+        record = next((m for m in load_models()["models"] if m["id"] == model_id), {})
+        if record.get("verified") is False:
+            print(
+                f"WARNING: knowledge cutoff for {model_id} is an unverified estimate; "
+                f"confirm taxonomy/models.json against the official model card.",
+                file=sys.stderr,
+            )
+        cutoff_label = f"{model_id} (knowledge cutoff {cutoff.isoformat()})"
+    elif args.since:
+        try:
+            cutoff = parse_date(args.since)
+        except ValueError:
+            parser.error(f"--since must be YYYY-MM-DD, got: {args.since}")
+        cutoff_label = f"since {cutoff.isoformat()}"
+
+    return run_benchmark(
+        args.scanner, args.track, args.output, args.case_type, args.case_id,
+        args.verbose, args.mode, args.profile, cutoff, cutoff_label, model_id,
+    )
 
 
 if __name__ == "__main__":

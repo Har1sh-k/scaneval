@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-111",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "OAuth callback authorization bypass: state-owner check skipped when N8N_SKIP_AUTH_ON_OAUTH_CALLBACK is true",
+  "description": "In OauthService.decodeCsrfState, the ownership check that ties the OAuth callback state to the requesting user (decryptedState.userId !== req.user?.id) was gated behind !skipAuthOnOAuthCallback. When the non-default N8N_SKIP_AUTH_ON_OAUTH_CALLBACK environment variable is set to true, the entire conditional short-circuits and no userId comparison is performed for static credentials, so the callback proceeds without verifying that the state belongs to the caller. An attacker can craft an OAuth state referencing a credential they control and trick a victim into completing the OAuth flow, causing the victim's issued OAuth tokens to be written into the attacker-controlled credential (a BOLA / broken object-level authorization issue, CWE-863). The attacker can then run workflows acting as the victim.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__aac5be18/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/cli/src/oauth/oauth.service.ts",
+      "startLine": 235,
+      "endLine": 238,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "aac5be18c4f08a95dade36307af621d29605c5f7",
+    "fixCommit": "7108ef45fad8e1b131767a80237ff6b212c4fade",
+    "ghsa": "GHSA-vpgc-2f6g-7w7x",
+    "cve": "CVE-2026-33720",
+    "disclosure": {
+      "ghsaPublished": "2026-03-25",
+      "fixCommitDate": "2026-02-02"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-084",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Flowise DocumentStore create endpoint mass-assignment / IDOR via client-supplied primary key (UPSERT)",
+  "description": "The POST /api/v1/document-store create flow maps the entire request body to a DocumentStore entity (DocumentStoreDTO.toEntity(body) in the controller) with no DTO allowlist, then createDocumentStore() in packages/server/src/services/documentstore/index.ts calls repository.create(newDocumentStore) followed by repository.save(documentStore). DocumentStore.id is a globally-unique @PrimaryGeneratedColumn('uuid') that is not composite with workspaceId, and because TypeORM's save() performs an UPDATE when the primary key already exists, accepting a client-supplied id turns the create endpoint into an implicit UPSERT. An authenticated user who knows or enumerates a DocumentStore UUID belonging to another workspace can POST it back (optionally with a workspaceId), overwriting the existing record and potentially reassigning it to the attacker's workspace, since the service never verifies that the existing object belongs to the caller before saving (broken object-level authorization / cross-workspace takeover).",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__9d6a4167/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/server/src/services/documentstore/index.ts",
+      "startLine": 59,
+      "endLine": 64,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "9d6a41677759699e886750683ce7753f026b8418",
+    "fixCommit": "840d2ae14d25230579a58aa4305f8506672a0a45",
+    "ghsa": "GHSA-3prp-9gf7-4rxx",
+    "cve": "CVE-2026-41277",
+    "disclosure": {
+      "ghsaPublished": "2026-04-17",
+      "fixCommitDate": "2026-03-10"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

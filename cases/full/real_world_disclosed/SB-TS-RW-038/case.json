@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-038",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "MCP loopback owner context is derived from the spoofable x-openclaw-sender-is-owner request header",
+  "description": "In src/gateway/mcp-http.request.ts, resolveMcpRequestContext() builds the MCP request context (used for owner-gated operations) by reading senderIsOwner directly from the client-supplied x-openclaw-sender-is-owner HTTP header via getHeader(req, ...). Loopback authentication used only a single shared bearer token that conveyed no owner/non-owner distinction, so any authenticated loopback client could set this header to \"true\" and be treated as the owner for owner-gated MCP operations.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__f788c88b/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/gateway/mcp-http.request.ts",
+      "startLine": 165,
+      "endLine": 180,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "f788c88b4c508c335336fb292afed8c900656d6d",
+    "fixCommit": "3cb1a56bfc9579a0f2336f9cfa12a8a744332a19",
+    "ghsa": "GHSA-r6xh-pqhr-v4xh",
+    "cve": "CVE-2026-44118",
+    "disclosure": {
+      "ghsaPublished": "2026-05-04",
+      "fixCommitDate": "2026-04-21"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

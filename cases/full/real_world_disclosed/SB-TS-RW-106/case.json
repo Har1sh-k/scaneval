@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-106",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "RCE via Merge node SQL query mode (unrestricted alasql execution)",
+  "description": "The Merge node's \"Combine by SQL\" mode runs the user-supplied query string directly through the alasql in-memory SQL engine via db.exec(query). alasql exposes file-system and code-loading primitives (FILE/SAVE/LOAD, the REQUIRE statement, and embedded JavaScript) that are reachable from SQL text. In the vulnerable version the only mitigation was disableAlasqlFileAccess(), which blocked some file FROM/fn handlers but not the REQUIRE statement or JavaScript execution path, so an authenticated user able to edit workflows could craft a query that writes arbitrary files and executes arbitrary code on the n8n server.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__8e81f3e3/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/nodes-base/nodes/Merge/v3/actions/mode/combineBySql.ts",
+      "startLine": 340,
+      "endLine": 361,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "8e81f3e31398b04fd6f8cc27cf844980cd382117",
+    "fixCommit": "562d867483e871b0f1e31776252e23bd721df75b",
+    "ghsa": "GHSA-wxx7-mcgf-j869",
+    "cve": "CVE-2026-27497",
+    "disclosure": {
+      "ghsaPublished": "2026-02-25",
+      "fixCommitDate": "2026-02-25"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

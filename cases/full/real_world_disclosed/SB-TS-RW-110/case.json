@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-110",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "sql_injection",
+  "title": "SQL injection in Data Table Get node via unescaped orderByColumn identifier",
+  "description": "The Data Table Get node lets a workflow author choose an orderByColumn to sort results. That column name flows into DataTableRowsRepository.applySortingByField, which builds an ORDER BY clause using quoteIdentifier(field, dbType). In the vulnerable version quoteIdentifier wrapped the name in double quotes but did not escape embedded double quotes, so a column name containing a double quote could break out of the quoted identifier and inject arbitrary SQL into the ORDER BY clause. On SQLite the impact is limited to a single statement, but on PostgreSQL multi-statement execution allowed data modification and deletion.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__2374f40e/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/cli/src/modules/data-table/utils/sql-utils.ts",
+      "startLine": 123,
+      "endLine": 130,
+      "label": "vulnerable",
+      "capability": "data_store",
+      "acceptedKinds": [
+        "sql_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "2374f40ec36795904b4011fb81018da818a76ee8",
+    "fixCommit": "2d9a2ec76e180b54e8091e31b1e0638c909abd99",
+    "ghsa": "GHSA-98c2-4cr3-4jc3",
+    "cve": "CVE-2026-33713",
+    "disclosure": {
+      "ghsaPublished": "2026-03-26",
+      "fixCommitDate": "2026-03-25"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

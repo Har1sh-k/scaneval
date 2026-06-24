@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-119",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "n8n Git node argument injection via pathsToAdd enables arbitrary file read",
+  "description": "The n8n Git node 'add' operation takes the user-supplied 'pathsToAdd' workflow parameter, splits it on commas, and passes the resulting array directly as arguments to the underlying git CLI via simple-git's git.add(). Because the user-controlled tokens are placed into the git argv with no '--' end-of-options separator and no validation, an authenticated workflow author can inject git command-line flags (CWE-88 argument injection) instead of plain paths. By injecting flags/pathspecs that cause git to dereference or stage attacker-chosen locations, an attacker can read arbitrary files from the n8n server, potentially leading to full compromise. The same unsafe pattern also applied to the commit operation's pathsToAdd handling.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__6d67db44/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/nodes-base/nodes/Git/Git.node.ts",
+      "startLine": 339,
+      "endLine": 341,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "6d67db4449db7ab8a5f8d413461ffc46f57d50bb",
+    "fixCommit": "503f29901c568d15778e5e853e804b6e5a7a96db",
+    "ghsa": "GHSA-57g9-58c2-xjg3",
+    "cve": "CVE-2026-44790",
+    "disclosure": {
+      "ghsaPublished": "2026-05-14",
+      "fixCommitDate": "2026-01-14"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

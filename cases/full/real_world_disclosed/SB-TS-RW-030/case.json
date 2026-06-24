@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-030",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "OpenClaw exec allowlist skipped argPattern on Linux/macOS, permitting disallowed argv",
+  "description": "OpenClaw's exec allowlist supports optional argPattern entries that restrict which argv shapes are accepted for an allowlisted executable. In matchAllowlist() the argPattern check is gated on the platform: useArgPattern is only true when the effective platform string starts with 'win'. On Linux and macOS gateways (useArgPattern === false) the loop returns the first allowlist entry whose executable path matches and hits 'if (!useArgPattern) { return entry; }', skipping the configured argPattern argv check entirely. An operator who configures an allowlist entry that appears to permit only a narrow argv shape therefore has that restriction silently ignored, so the agent can run other argv for the same executable without an approval prompt when tools.exec.security is set to 'allowlist'.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__eeef4864/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/infra/exec-command-resolution.ts",
+      "startLine": 362,
+      "endLine": 384,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "eeef4864494f859838fec1586bedbab1f8fa5702",
+    "fixCommit": "d583013b8f961f5cb609c72264d3c680f08a1d2f",
+    "ghsa": "GHSA-v2ww-5rh7-2h5v",
+    "cve": "CVE-2026-53853",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-05-06"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

@@ -60,6 +60,37 @@
       "enum": ["agentic", "generic", "all"],
       "description": "Profile filter applied to this run (agentic, generic, or all)"
     },
+    "cutoff": {
+      "type": ["object", "null"],
+      "description": "Model knowledge-cutoff gate applied to this run, or null when no cutoff was applied",
+      "required": ["date", "excludedCount", "excludedCaseIds"],
+      "properties": {
+        "model": {
+          "type": ["string", "null"],
+          "description": "Resolved model id when gated via --model, else null"
+        },
+        "date": {
+          "type": "string",
+          "format": "date",
+          "description": "Cutoff date; dated cases count only when their disclosure horizon is strictly after this"
+        },
+        "label": {
+          "type": ["string", "null"],
+          "description": "Human-readable cutoff label shown in output"
+        },
+        "excludedCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of dated cases excluded as pre-cutoff"
+        },
+        "excludedCaseIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Case IDs excluded as pre-cutoff"
+        }
+      },
+      "additionalProperties": false
+    },
     "timestamp": {
       "type": "string",
       "format": "date-time",

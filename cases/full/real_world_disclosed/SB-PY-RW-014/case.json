@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-PY-RW-014",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "python",
+  "canonicalKind": "authz_bypass",
+  "title": "Chat session hijack via IDOR in assign_user_to_session (missing ownership check)",
+  "description": "assign_user_to_session in autogpt_platform/backend/backend/copilot/service.py loads the target chat session via get_chat_session(session_id, None), passing None as the user_id so the data-access layer treats it as admin/system access and skips the ownership filter, then unconditionally overwrites session.user_id with the caller's id and persists it. The PATCH /api/chat/sessions/{session_id}/assign-user endpoint (api/features/chat/routes.py) requires only a valid JWT and performs no ownership verification, so any authenticated user who knows or guesses another user's session_id can reassign that session to themselves, gaining access to all of its messages and locking the original owner out (they then receive 404 because the ownership check fails for them).",
+  "files": {
+    "root": "../../../../.repos/Significant-Gravitas_AutoGPT__b342bfa3/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "autogpt_platform/backend/backend/copilot/service.py",
+      "startLine": 290,
+      "endLine": 302,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "Significant-Gravitas/AutoGPT",
+    "vulnerableCommit": "b342bfa3baaaa48b88fecef9edf8f8592059b0e7",
+    "fixCommit": "19d775c43578696baa1db1e0eaf93e701752fa2a",
+    "ghsa": "GHSA-q58p-v9r9-7gqj",
+    "cve": "CVE-2026-30950",
+    "disclosure": {
+      "fixCommitDate": "2026-03-08"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-097",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "Zendesk Trigger webhook accepts unsigned requests (missing HMAC-SHA256 signature verification)",
+  "description": "The ZendeskTrigger node's webhook() handler reads the incoming HTTP request body and immediately returns it as the workflow trigger payload, without verifying the HMAC-SHA256 signature that Zendesk attaches to every outbound webhook. Any party that knows (or guesses) the workflow's webhook URL can therefore send a forged, unsigned POST request and start the workflow with attacker-controlled data, impersonating Zendesk. This is an authentication-bypass-by-spoofing (CWE-290): the node trusts the request origin without authenticating it.",
+  "files": {
+    "root": "../../../../.repos/n8n-io_n8n__df8bafc2/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/nodes-base/nodes/Zendesk/ZendeskTrigger.node.ts",
+      "startLine": 426,
+      "endLine": 431,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "n8n-io/n8n",
+    "vulnerableCommit": "df8bafc24fa13dad25d498928533d64b2acf128d",
+    "fixCommit": "4622acaccc69afb9720390e8e0011f490208fd1a",
+    "ghsa": "GHSA-38c7-23hj-2wgq",
+    "cve": "",
+    "disclosure": {
+      "ghsaPublished": "2026-02-26",
+      "fixCommitDate": "2026-01-28"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

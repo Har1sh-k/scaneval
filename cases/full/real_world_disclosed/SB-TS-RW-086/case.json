@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-086",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Flowise tool update endpoint mass-assigns request body, allowing cross-workspace reassignment of tools",
+  "description": "In updateTool in packages/server/src/services/tools/index.ts (reached via PUT /api/v1/tools/{id}), the controller passes the raw req.body to the service as toolBody, which copies it wholesale into a new Tool entity via Object.assign(updateTool, toolBody), merges it onto the fetched tool, and saves it. The tool is fetched scoped to the caller's activeWorkspaceId, but no field restriction is applied, so attacker-supplied server-controlled properties such as workspaceId, createdDate and updatedDate are merged into and persisted on the entity. An authenticated user can set workspaceId to an arbitrary workspace UUID and reassign the tool out of their tenant, breaking workspace isolation.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__34cf2854/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/server/src/services/tools/index.ts",
+      "startLine": 95,
+      "endLine": 98,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "34cf28546b700998e88a8f14d6f6d0754f572da4",
+    "fixCommit": "f8defac0d64c8a03928781235ddafa0d889a832a",
+    "ghsa": "GHSA-x5v6-pj28-cwwm",
+    "cve": "CVE-2026-42862",
+    "disclosure": {
+      "ghsaPublished": "2026-05-14",
+      "fixCommitDate": "2026-03-24"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

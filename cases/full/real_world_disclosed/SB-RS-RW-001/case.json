@@ -34,7 +34,11 @@
     "vulnerableCommit": "62258df92fd1a6165c0497591cc1281f36212939",
     "fixCommit": "8595237505a1e0faabc2af3db805b66ce3ae182d",
     "ghsa": "GHSA-w5fx-fh39-j5rw",
-    "cve": "CVE-2025-59532"
+    "cve": "CVE-2025-59532",
+    "disclosure": {
+      "ghsaPublished": "2025-09-19",
+      "fixCommitDate": "2025-09-18"
+    }
   },
   "standards": {
     "owaspAgenticTop10": {

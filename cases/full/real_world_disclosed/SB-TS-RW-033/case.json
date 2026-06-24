@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-033",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "OpenClaw Slack thread context skipped the sender allowlist for thread starter and history",
+  "description": "In resolveSlackThreadContextData() in extensions/slack/src/monitor/message-handler/prepare-thread-context.ts the Slack thread starter (lines 53-57) and the thread-history messages fetched via the Slack API (lines 104-123) are placed into the agent's thread context without ever being checked against the effective sender allowlist. The function builds threadStarterBody from starter.text and iterates the entire threadHistory array, formatting every message into threadHistoryBody, regardless of whether each message's userId/botId is on the configured allowlist. When an allowlisted user replies inside a thread, messages authored by non-allowlisted senders elsewhere in that thread are still ingested into the model context, defeating the sender access control the deployment relied on.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__da64a978/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "extensions/slack/src/monitor/message-handler/prepare-thread-context.ts",
+      "startLine": 53,
+      "endLine": 127,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "da64a978e5814567f7797cc34fbe29b61b7eae7a",
+    "fixCommit": "ac5bc4fb37becc64a2ec314864cca1565e921f2d",
+    "ghsa": "GHSA-qm77-8qjp-4vcm",
+    "cve": "CVE-2026-41358",
+    "disclosure": {
+      "ghsaPublished": "2026-05-04",
+      "fixCommitDate": "2026-04-02"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

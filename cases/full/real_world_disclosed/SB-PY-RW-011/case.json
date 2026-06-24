@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-PY-RW-011",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "python",
+  "canonicalKind": "path_traversal",
+  "title": "Path traversal / sandbox escape in file-search agent middleware glob_search",
+  "description": "The file-search agent middleware exposes glob_search/grep tools confined to a configured root_path. glob_search() validates only the starting directory (path) via _validate_and_resolve_path() but then expands the caller-supplied glob pattern with base_full.glob(pattern). pathlib.Path.glob expands '..' components against the base directory, so a pattern like '../../etc/passwd' yields files outside the configured root, and the per-match filter only checks match.is_file() without resolving symlinks or confirming the resolved path is inside root_path. As a result an agent acting on untrusted input (or untrusted workspace contents) can disclose file contents outside the intended sandbox, via traversal patterns or in-root symlinks pointing outside the root.",
+  "files": {
+    "root": "../../../../.repos/langchain-ai_langchain__f6d63bc9/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "libs/langchain_v1/langchain/agents/middleware/file_search.py",
+      "startLine": 160,
+      "endLine": 168,
+      "label": "vulnerable",
+      "capability": "filesystem",
+      "acceptedKinds": [
+        "path_traversal"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "langchain-ai/langchain",
+    "vulnerableCommit": "f6d63bc9f344b2949e91a6904d301553376b4f10",
+    "fixCommit": "dcaf7795a3e6590af55c3ff7bda6add6355e9ea6",
+    "ghsa": "GHSA-gr75-jv2w-4656",
+    "cve": "CVE-2026-55443",
+    "disclosure": {
+      "ghsaPublished": "2026-06-16",
+      "fixCommitDate": "2026-06-12"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

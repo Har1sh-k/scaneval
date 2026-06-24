@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "1.0.0",
+  "description": "Knowledge-cutoff registry for model-specific benchmark runs. A real-world case 'counts' for a model only when its disclosure horizon (min of realWorld.disclosure dates) is strictly after the model's knowledgeCutoff. Cutoffs use the last day of the reported cutoff month (exact, strictly-after gate). Entries with \"verified\": false are not confirmed against the official vendor model card and the runner prints a warning when they are used. Resolve via run.py --model <id|alias>.",
+  "cutoffSemantics": "exact",
+  "models": [
+    {
+      "id": "opus-4.8",
+      "name": "Claude Opus 4.8",
+      "vendor": "anthropic",
+      "aliases": ["claude-opus-4-8", "claude-opus-4-8[1m]", "opus-4-8", "opus4.8"],
+      "knowledgeCutoff": "2026-01-31",
+      "verified": true,
+      "source": "Anthropic model card (January 2026); self-report via `claude -p` agrees (2026-01, 3/3)"
+    },
+    {
+      "id": "opus-4.7",
+      "name": "Claude Opus 4.7",
+      "vendor": "anthropic",
+      "aliases": ["claude-opus-4-7", "opus-4-7", "opus4.7"],
+      "knowledgeCutoff": "2026-01-31",
+      "verified": false,
+      "source": "Self-reported via `claude -p --model claude-opus-4-7` (2026-01, 3/3 consistent, 2026-06-24); confirm against the official model card"
+    },
+    {
+      "id": "opus-4.6",
+      "name": "Claude Opus 4.6",
+      "vendor": "anthropic",
+      "aliases": ["claude-opus-4-6", "opus-4-6", "opus4.6"],
+      "knowledgeCutoff": "2025-05-31",
+      "verified": false,
+      "source": "Self-reported via `claude -p --model claude-opus-4-6` (2025-05, 3/3 consistent, 2026-06-24); confirm against the official model card"
+    },
+    {
+      "id": "sonnet-4.6",
+      "name": "Claude Sonnet 4.6",
+      "vendor": "anthropic",
+      "aliases": ["claude-sonnet-4-6", "sonnet-4-6", "sonnet4.6"],
+      "knowledgeCutoff": "2025-08-31",
+      "verified": false,
+      "source": "Self-reported via `claude -p --model claude-sonnet-4-6` (2025-08, 3/3 consistent, 2026-06-24); confirm against the official model card"
+    },
+    {
+      "id": "sonnet-4.5",
+      "name": "Claude Sonnet 4.5",
+      "vendor": "anthropic",
+      "aliases": ["claude-sonnet-4-5", "sonnet-4-5", "sonnet4.5"],
+      "knowledgeCutoff": "2025-01-31",
+      "verified": false,
+      "source": "Self-reported via `claude -p --model claude-sonnet-4-5` (2025-01, 3/3 consistent, 2026-06-24); confirm against the official model card"
+    },
+    {
+      "id": "gpt-5.5",
+      "name": "GPT-5.5",
+      "vendor": "openai",
+      "aliases": ["gpt-5-5", "gpt5.5"],
+      "knowledgeCutoff": "2024-06-30",
+      "verified": false,
+      "source": "Self-reported via `codex exec -m gpt-5.5` (2024-06, 3/3 consistent, 2026-06-24); confirm against the OpenAI GPT-5.5 model card"
+    },
+    {
+      "id": "gpt-5.4",
+      "name": "GPT-5.4",
+      "vendor": "openai",
+      "aliases": ["gpt-5-4", "gpt5.4"],
+      "knowledgeCutoff": "2024-06-30",
+      "verified": false,
+      "source": "Self-reported via `codex exec -m gpt-5.4` (2024-06, 3/3 consistent, 2026-06-24); confirm against the OpenAI GPT-5.4 model card"
+    }
+  ]
+}

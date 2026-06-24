@@ -334,6 +334,9 @@ def test_pr_simulation_invalid_mode(tmp_path):
 
 def test_pr_seeded_cases_validate():
     """All seeded PR cases should pass validation."""
+    if not full_track_snapshots_ready():
+        pytest.skip("Full Track snapshots are not ready; run python scripts/setup_repos.py")
+
     pr_cases = []
     for case_json in CASES_DIR.rglob("case.json"):
         with open(case_json, encoding="utf-8") as f:
@@ -461,6 +464,7 @@ def _make_generic_case(tmp_path, extra=None):
             "repo": "example/lib",
             "vulnerableCommit": "a" * 40,
             "fixCommit": "b" * 40,
+            "disclosure": {"ghsaPublished": "2026-03-01", "fixCommitDate": "2026-02-28"},
         },
         "standards": {"owaspAgenticTop10": {"primary": "ASI05"}},
     }
@@ -493,6 +497,24 @@ def test_real_world_generic_requires_real_world_metadata(tmp_path):
     (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
     errors = validate_case(case_dir)
     assert any("realWorld" in str(e) for e in errors)
+
+
+def test_real_world_requires_disclosure(tmp_path):
+    """real-world case without realWorld.disclosure must error (needed for cutoff gating)."""
+    case_dir, case = _make_generic_case(tmp_path)
+    case["realWorld"].pop("disclosure")
+    (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
+    errors = validate_case(case_dir)
+    assert any("disclosure" in str(e) for e in errors)
+
+
+def test_disclosure_rejects_bad_date(tmp_path):
+    """A malformed disclosure date must error."""
+    case_dir, case = _make_generic_case(tmp_path)
+    case["realWorld"]["disclosure"] = {"ghsaPublished": "2026/03/01"}
+    (case_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
+    errors = validate_case(case_dir)
+    assert any("ghsaPublished" in str(e) for e in errors)
 
 
 def test_real_world_generic_rejects_agentic_true(tmp_path):

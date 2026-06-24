@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-091",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "Missing authorization on OpenAI Assistants Vector Store CRUD routes",
+  "description": "In Flowise <= 3.1.1, every route in packages/server/src/routes/openai-assistants-vector-store/index.ts (create, read, list, update, delete, file upload, file delete) is registered with no permission-check middleware. The router relies only on the global /api/v1 authentication, so any authenticated user or API-key holder, regardless of assigned RBAC role, can create, modify, delete vector stores and upload or remove files. Comparable sensitive routes in the same codebase gate operations with checkPermission()/checkAnyPermission(), but those gates are absent here.",
+  "files": {
+    "root": "../../../../.repos/FlowiseAI_Flowise__34cf2854/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "packages/server/src/routes/openai-assistants-vector-store/index.ts",
+      "startLine": 7,
+      "endLine": 26,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "FlowiseAI/Flowise",
+    "vulnerableCommit": "34cf28546b700998e88a8f14d6f6d0754f572da4",
+    "fixCommit": "b93ccf3109d9d70e121a752411b28a7a36131556",
+    "ghsa": "GHSA-hmg2-jjjx-jcp2",
+    "cve": "CVE-2026-46444",
+    "disclosure": {
+      "ghsaPublished": "2026-05-14",
+      "fixCommitDate": "2026-04-01"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}
