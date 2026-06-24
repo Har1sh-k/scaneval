@@ -7,7 +7,9 @@ that referenced files and line ranges exist.
 import argparse
 import json
 import os
+import re
 import sys
+from datetime import date
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -31,6 +33,19 @@ VALID_CAPABILITIES = {"code_execution", "filesystem", "network", "authentication
 VALID_GUARDS = {"allowlist", "workspace_root", "host_allowlist", "scheme_allowlist", "caller_verification", "secret_validation", "scope_binding", "role_check", "parameterized_query"}
 VALID_ASI_IDS = {f"ASI{i:02d}" for i in range(1, 11)}
 VALID_PR_MODES = {"vendored_base", "git_commit_pair"}
+DISCLOSURE_DATE_KEYS = {"ghsaPublished", "fixCommitDate", "cvePublished"}
+ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _valid_iso_date(value: str) -> bool:
+    """Return whether value is a YYYY-MM-DD string naming a real calendar date."""
+    if not isinstance(value, str) or not ISO_DATE_RE.match(value):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
 DISALLOWED_SCAN_ROOT_DIRS = {
     ".claude",
     ".mypy_cache",
@@ -217,6 +232,33 @@ def validate_case(case_dir: Path) -> list[ValidationError]:
 
     if case_type in REAL_WORLD_CASE_TYPES and "realWorld" not in case:
         errors.append(ValidationError(case_id, f"{case_type} case must have realWorld metadata"))
+
+    # Validate realWorld.disclosure dates (needed for model-cutoff gating).
+    real_world = case.get("realWorld")
+    if isinstance(real_world, dict):
+        disclosure = real_world.get("disclosure")
+        if disclosure is None:
+            if case_type in REAL_WORLD_CASE_TYPES:
+                errors.append(ValidationError(
+                    case_id,
+                    "real-world case must have realWorld.disclosure with a horizon date "
+                    "(run scripts/backfill_disclosure_dates.py)",
+                ))
+        elif not isinstance(disclosure, dict):
+            errors.append(ValidationError(case_id, "realWorld.disclosure must be an object"))
+        else:
+            for key in disclosure:
+                if key not in DISCLOSURE_DATE_KEYS:
+                    errors.append(ValidationError(case_id, f"realWorld.disclosure has unknown key: {key}"))
+            present_dates = [k for k in DISCLOSURE_DATE_KEYS if disclosure.get(k)]
+            if not present_dates:
+                errors.append(ValidationError(case_id, "realWorld.disclosure must have at least one date"))
+            for key in present_dates:
+                if not _valid_iso_date(disclosure[key]):
+                    errors.append(ValidationError(
+                        case_id,
+                        f"realWorld.disclosure.{key} must be a valid YYYY-MM-DD date: {disclosure[key]!r}",
+                    ))
 
     if case_type == "real_world_generic":
         if "agentic" not in case:
