@@ -58,7 +58,10 @@
     "vulnerableCommit": "a1d8c86ee3b9669e93cde86d9dd6240d3d6aa785",
     "fixCommit": "cc4a4ec7963ff23ce70f5b05267066b5226ae5e4",
     "ghsa": "GHSA-6pw4-jqhv-3626",
-    "cve": "CVE-2025-43862"
+    "cve": "CVE-2025-43862",
+    "disclosure": {
+      "fixCommitDate": "2024-06-17"
+    }
   },
   "standards": {
     "owaspAgenticTop10": {

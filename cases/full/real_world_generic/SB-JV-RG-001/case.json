@@ -31,6 +31,10 @@
     "vulnerableCommit": "ba0c9382d04b226ae332adb35f9ef01646341e28",
     "fixCommit": "fcb8432aa77d5b2e147624fe954cb150c568e0b8",
     "ghsa": "GHSA-7726-43hg-m23v",
-    "cve": "CVE-2024-41667"
+    "cve": "CVE-2024-41667",
+    "disclosure": {
+      "ghsaPublished": "2024-07-25",
+      "fixCommitDate": "2024-07-23"
+    }
   }
 }

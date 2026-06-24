@@ -33,7 +33,11 @@
     "repo": "FlowiseAI/Flowise",
     "vulnerableCommit": "ca69a39b8226b3a6ac218339aa602e8b3a8c8d02",
     "fixCommit": "f963e5aa48a0697798ed63a84e826b1734ee2275",
-    "ghsa": "GHSA-9c4c-g95m-c8cp"
+    "ghsa": "GHSA-9c4c-g95m-c8cp",
+    "disclosure": {
+      "ghsaPublished": "2025-04-07",
+      "fixCommitDate": "2025-04-07"
+    }
   },
   "standards": {
     "owaspAgenticTop10": {

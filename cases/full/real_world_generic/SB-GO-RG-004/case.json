@@ -31,6 +31,10 @@
     "vulnerableCommit": "848ec8ba82e8097bf52c16b3ba825dacef8fcbcb",
     "fixCommit": "bdfde725c6175a5b10e8b5ffe9f09159ea2db03c",
     "ghsa": "GHSA-pxq7-h93f-9jrg",
-    "cve": "CVE-2026-41059"
+    "cve": "CVE-2026-41059",
+    "disclosure": {
+      "ghsaPublished": "2026-04-15",
+      "fixCommitDate": "2026-04-13"
+    }
   }
 }

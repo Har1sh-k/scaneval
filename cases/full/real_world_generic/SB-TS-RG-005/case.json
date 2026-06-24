@@ -31,6 +31,10 @@
     "vulnerableCommit": "be4aafd4b744fbf6500b311b74c84243f70a3059",
     "fixCommit": "1a026e338d2b8c977c8949a134168952338d6d01",
     "ghsa": "GHSA-4342-x723-ch2f",
-    "cve": "CVE-2025-57822"
+    "cve": "CVE-2025-57822",
+    "disclosure": {
+      "ghsaPublished": "2025-08-29",
+      "fixCommitDate": "2025-08-18"
+    }
   }
 }

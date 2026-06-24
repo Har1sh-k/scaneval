@@ -31,7 +31,10 @@
     "vulnerableCommit": "398972be3a050c327a35f162d77e7a8a024e5311",
     "fixCommit": "11c35678659c6e0b17d537c1cc893a77c807e576",
     "ghsa": "GHSA-p7w3-9m58-rq83",
-    "cve": "CVE-2023-37470"
+    "cve": "CVE-2023-37470",
+    "disclosure": {
+      "fixCommitDate": "2023-07-29"
+    }
   },
   "fixValidation": {
     "mode": "mitigation_anchor_present",

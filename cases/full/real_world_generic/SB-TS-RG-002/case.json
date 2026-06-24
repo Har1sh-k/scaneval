@@ -31,6 +31,10 @@
     "vulnerableCommit": "eb6867fdade2766b971a28b355f5168de7e8865d",
     "fixCommit": "8f7a6ca7d21a97bc9f7a1bbe10427b5ad74b9085",
     "ghsa": "GHSA-fr5h-rqp8-mj6g",
-    "cve": "CVE-2024-34351"
+    "cve": "CVE-2024-34351",
+    "disclosure": {
+      "ghsaPublished": "2024-05-09",
+      "fixCommitDate": "2024-02-27"
+    }
   }
 }

@@ -34,7 +34,11 @@
     "vulnerableCommit": "ae1a1fccfeac598a747a9b4a6c9871c93061229c",
     "fixCommit": "1803d16d5cec970c54b0e1ac46b31b1cbade335c",
     "ghsa": "GHSA-63f5-hhc7-cx6p",
-    "cve": ""
+    "cve": "",
+    "disclosure": {
+      "ghsaPublished": "2026-03-16",
+      "fixCommitDate": "2026-03-13"
+    }
   },
   "standards": {
     "owaspAgenticTop10": {

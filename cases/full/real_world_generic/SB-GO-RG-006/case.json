@@ -31,6 +31,10 @@
     "vulnerableCommit": "87827435ce895a8d7c6dfa03a879dd3399d36cce",
     "fixCommit": "5993067505cac4c8e80192787ccd1f4cba05d994",
     "ghsa": "GHSA-vjrc-mh2v-45x6",
-    "cve": "CVE-2025-64484"
+    "cve": "CVE-2025-64484",
+    "disclosure": {
+      "ghsaPublished": "2025-11-12",
+      "fixCommitDate": "2025-11-08"
+    }
   }
 }

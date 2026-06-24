@@ -34,7 +34,11 @@
     "vulnerableCommit": "b17e6fdd07bcd2100946ae4042d3e3ebe5ef7b0f",
     "fixCommit": "c67df653b64b439b48044f9545653d7b6c6f75e0",
     "ghsa": "GHSA-r8g4-86fx-92mq",
-    "cve": "CVE-2026-25475"
+    "cve": "CVE-2026-25475",
+    "disclosure": {
+      "ghsaPublished": "2026-02-04",
+      "fixCommitDate": "2026-01-31"
+    }
   },
   "standards": {
     "owaspAgenticTop10": {

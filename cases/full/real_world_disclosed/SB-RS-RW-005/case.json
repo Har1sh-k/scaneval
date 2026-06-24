@@ -34,7 +34,10 @@
     "vulnerableCommit": "301ec72107f107ac5c6103660e276a25bc18273e",
     "fixCommit": "221ebfcccc3ddd957d5903b8c09e4d02e62387e7",
     "ghsa": "",
-    "cve": ""
+    "cve": "",
+    "disclosure": {
+      "fixCommitDate": "2025-07-30"
+    }
   },
   "standards": {
     "owaspAgenticTop10": {

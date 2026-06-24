@@ -89,7 +89,11 @@
     "repo": "n8n-io/n8n",
     "vulnerableCommit": "9ce3ac092cf7339f3c4a416cdea6e5fa2d5b22b9",
     "fixCommit": "f73fae6fe7fc34907bba102648a9997186aa4385",
-    "ghsa": "GHSA-f3f2-mcxc-pwjx"
+    "ghsa": "GHSA-f3f2-mcxc-pwjx",
+    "disclosure": {
+      "ghsaPublished": "2026-02-26",
+      "fixCommitDate": "2026-01-09"
+    }
   },
   "standards": {
     "owaspAgenticTop10": {

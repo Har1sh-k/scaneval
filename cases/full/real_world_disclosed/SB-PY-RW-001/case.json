@@ -34,7 +34,11 @@
     "vulnerableCommit": "5a45bf836ca93e3668f5678db0386c1e6d773a1b",
     "fixCommit": "ebdeb613f7bdcbdc9d32eb1b850b9b8c8f71dfae",
     "ghsa": "GHSA-x39x-9qw5-ghrf",
-    "cve": "CVE-2025-47241"
+    "cve": "CVE-2025-47241",
+    "disclosure": {
+      "ghsaPublished": "2025-05-05",
+      "fixCommitDate": "2025-05-03"
+    }
   },
   "prSimulation": {
     "mode": "git_commit_pair",

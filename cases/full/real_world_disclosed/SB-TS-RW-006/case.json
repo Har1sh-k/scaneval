@@ -34,7 +34,11 @@
     "vulnerableCommit": "6a1eedf10b1b1cbdd25a2d6c8cc24b06b303ebd1",
     "fixCommit": "b9aa2d436b757d2bd96c8bbaec35dbc1edf4dfb1",
     "ghsa": "GHSA-474h-prjg-mmw3",
-    "cve": ""
+    "cve": "",
+    "disclosure": {
+      "ghsaPublished": "2026-03-03",
+      "fixCommitDate": "2026-03-02"
+    }
   },
   "standards": {
     "owaspAgenticTop10": {

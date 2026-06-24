@@ -31,6 +31,10 @@
     "vulnerableCommit": "f3e3f6fbac2972e3eef2bd2462b984fd1400c740",
     "fixCommit": "bbed0b0ee64b89353a40d6313037bbc80221bc3d",
     "ghsa": "GHSA-fv66-9v8q-g76r",
-    "cve": "CVE-2025-55182"
+    "cve": "CVE-2025-55182",
+    "disclosure": {
+      "ghsaPublished": "2025-12-03",
+      "fixCommitDate": "2025-12-03"
+    }
   }
 }
