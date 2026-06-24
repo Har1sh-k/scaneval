@@ -53,18 +53,18 @@
       "name": "GPT-5.5",
       "vendor": "openai",
       "aliases": ["gpt-5-5", "gpt5.5"],
-      "knowledgeCutoff": "2025-09-30",
+      "knowledgeCutoff": "2024-06-30",
       "verified": false,
-      "source": "ESTIMATE — not verifiable via `claude -p` (Claude CLI only); confirm against the OpenAI GPT-5.5 model card"
+      "source": "Self-reported via `codex exec -m gpt-5.5` (2024-06, 3/3 consistent, 2026-06-24); confirm against the OpenAI GPT-5.5 model card"
     },
     {
       "id": "gpt-5.4",
       "name": "GPT-5.4",
       "vendor": "openai",
       "aliases": ["gpt-5-4", "gpt5.4"],
-      "knowledgeCutoff": "2025-06-30",
+      "knowledgeCutoff": "2024-06-30",
       "verified": false,
-      "source": "ESTIMATE — not verifiable via `claude -p` (Claude CLI only); confirm against the OpenAI GPT-5.4 model card"
+      "source": "Self-reported via `codex exec -m gpt-5.4` (2024-06, 3/3 consistent, 2026-06-24); confirm against the OpenAI GPT-5.4 model card"
     }
   ]
 }
