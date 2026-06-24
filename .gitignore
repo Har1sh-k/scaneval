@@ -27,3 +27,6 @@ results/
 # Scanner artifacts
 .securevibes/
 .claude/
+
+# case-build scratch dirs
+.*_build/

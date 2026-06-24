@@ -43,6 +43,11 @@ python scripts/run.py --scanner semgrep --track full --profile agentic
 python scripts/run.py --scanner semgrep --track full --profile generic
 python scripts/run.py --scanner semgrep --track full --profile all
 
+# Model-specific run: only score vulns disclosed AFTER a model's knowledge cutoff
+python scripts/run.py --scanner semgrep --track full --model opus-4.8
+# Or gate on an explicit date
+python scripts/run.py --scanner semgrep --track full --since 2026-01-31
+
 # Validate case definitions (Core Track by default)
 python scripts/validate.py
 
@@ -102,6 +107,39 @@ PR simulation (`baseCommit`/`headCommit`) and remediation verification (`fixComm
 
 Adapters for LLM-backed scanners can expose an `LLM_MODEL` constant. When present, results JSON includes `scanner.llmModel` and the model is printed at run start. Set via environment variable (e.g. `SECUREVIBES_LLM_MODEL`).
 
+### Model-Specific Benchmarks (knowledge-cutoff gating)
+
+The central validity threat for any LLM-backed vulnerability detector is **training-data contamination**: if a model saw the advisory or the fix commit during training, a "hit" may be memorization rather than detection. SASTbench controls for this by gating real-world cases on each model's **knowledge cutoff**.
+
+Every real-world case records public-knowledge dates under `realWorld.disclosure`:
+
+```json
+"disclosure": {
+  "ghsaPublished": "2026-06-18",
+  "fixCommitDate": "2026-05-06"
+}
+```
+
+The **knowledge horizon** of a case is the earliest public signal that the code path is a problem — `min(ghsaPublished, fixCommitDate, cvePublished)`. A case "counts" for a model only when its horizon is **strictly after** the model's cutoff (exact gate, no buffer).
+
+Run a model-specific benchmark with `--model <id>` (resolved against [`taxonomy/models.json`](taxonomy/models.json), aliases supported) or an explicit `--since YYYY-MM-DD`:
+
+```bash
+python scripts/run.py --scanner securevibes-agent --track full --model opus-4.8
+```
+
+The runner prints how many dated cases were excluded as pre-cutoff, and the results JSON carries a `cutoff` block (`model`, `date`, `excludedCount`, `excludedCaseIds`). Cases without disclosure dates (synthetic core, capability-safe, mixed-intent) are author-written and not subject to contamination gating, so they are always retained.
+
+Predefined models in `taxonomy/models.json` include `opus-4.8`, `opus-4.7`, `opus-4.6`, `sonnet-4.6`, `sonnet-4.5`, `sonnet-4.4`, `gpt-5.5`, and `gpt-5.4` (aliases accepted, e.g. `claude-sonnet-4-5`). Entries with `"verified": false` carry best-effort estimated cutoffs — the runner prints a warning and they must be confirmed against the official model card before use in published results. Only `opus-4.8` is verified.
+
+Backfill or refresh disclosure dates from the GitHub API (GHSA publish date + fix-commit date) with:
+
+```bash
+python scripts/backfill_disclosure_dates.py        # incremental; --overwrite to re-fetch
+```
+
+Add a model by appending an entry to `taxonomy/models.json` with its `knowledgeCutoff` from the official model card.
+
 ### Tests
 
 Run benchmark self-tests from the repo root with:
@@ -142,8 +180,8 @@ Legacy cases without an `agentic` field are treated as agentic.
 ## Status
 
 - **17 Core Track** cases (synthetic vulnerable, capability safe, mixed intent)
-- **68 Full Track** cases — 49 real-world disclosed (agentic) + 19 real-world generic (non-agentic)
-- **85 total cases** across Python, TypeScript, Rust, Swift, Go, Java, and Clojure
+- **189 Full Track** cases — 156 real-world disclosed (agentic) + 33 real-world generic (non-agentic)
+- **206 total cases** across Python, TypeScript, Rust, Swift, Go, Java, and Clojure
 
 ## Official Adapters
 
