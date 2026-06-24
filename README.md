@@ -130,7 +130,7 @@ python scripts/run.py --scanner securevibes-agent --track full --model opus-4.8
 
 The runner prints how many dated cases were excluded as pre-cutoff, and the results JSON carries a `cutoff` block (`model`, `date`, `excludedCount`, `excludedCaseIds`). Cases without disclosure dates (synthetic core, capability-safe, mixed-intent) are author-written and not subject to contamination gating, so they are always retained.
 
-Predefined models in `taxonomy/models.json` include `opus-4.8`, `opus-4.7`, `opus-4.6`, `sonnet-4.6`, `sonnet-4.5`, `sonnet-4.4`, `gpt-5.5`, and `gpt-5.4` (aliases accepted, e.g. `claude-sonnet-4-5`). Entries with `"verified": false` carry best-effort estimated cutoffs — the runner prints a warning and they must be confirmed against the official model card before use in published results. Only `opus-4.8` is verified.
+Predefined models in `taxonomy/models.json`: `opus-4.8`, `opus-4.7`, `opus-4.6`, `sonnet-4.6`, `sonnet-4.5`, `gpt-5.5`, `gpt-5.4` (aliases accepted, e.g. `claude-sonnet-4-5`). `opus-4.8` is confirmed against the model card. The other Claude cutoffs are self-reported (sampled via `claude -p`, 3/3 consistent) and the GPT cutoffs are estimates; all are marked `"verified": false`, the runner prints a warning when they are used, and they should be confirmed against the official vendor model card before use in published results.
 
 Backfill or refresh disclosure dates from the GitHub API (GHSA publish date + fix-commit date) with:
 
