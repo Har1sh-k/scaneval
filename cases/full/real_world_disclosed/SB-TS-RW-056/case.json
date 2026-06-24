@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-056",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "OpenClaw Zalo (zalouser) allowFrom startup resolution matched entries against mutable friend/group display names without the dangerous-name-matching gate",
+  "description": "In monitorZalouserProvider() (extensions/zalouser/src/monitor.ts) startup allowlist resolution builds a name index from the account's friends via buildNameIndex(friends, (friend) => friend.displayName) and resolves non-numeric allowFrom/groupAllowFrom entries against that index in resolveUserAllowlistEntries(), adding the matched friend's userId to the effective allowlist. The same is done for group entries against group names (buildNameIndex(groups, (group) => group.name)). This name resolution runs unconditionally, ignoring the dangerous-name-matching opt-in (isDangerousNameMatchingEnabled). Because Zalo friend/contact and group display names are mutable, a friend or contact can match an allowFrom policy entry through mutable display metadata and thereby be bound into the allowlist, so agent responses intended for one Zalo identity can be received by another.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__8b2a6e57/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "extensions/zalouser/src/monitor.ts",
+      "startLine": 832,
+      "endLine": 868,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "8b2a6e57fef6c582ec6d27b85150616f9e3a7ba4",
+    "fixCommit": "ea75cd897182bef44da045be3ab51913ccfa4714",
+    "ghsa": "GHSA-8c59-hr4w-qg69",
+    "cve": "CVE-2026-53857",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-05-04"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

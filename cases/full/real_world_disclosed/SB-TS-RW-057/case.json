@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-057",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "Workspace .env STATE_DIRECTORY not blocked, influencing bundled runtime dependency roots",
+  "description": "In src/infra/dotenv.ts the guard shouldBlockWorkspaceDotEnvKey() decides whether a key parsed from an untrusted workspace .env file may be loaded into the runtime environment, rejecting only keys that appear in the BLOCKED_WORKSPACE_DOTENV_KEYS allow-deny set (or matching blocked prefixes/suffixes). At the vulnerable release the set did not include STATE_DIRECTORY, so a workspace .env opened by a trusted operator could set STATE_DIRECTORY before bundled runtime dependency root resolution, redirecting where the runtime loads its bundled dependencies from a local state path the operator did not intend.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__a448042c/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/infra/dotenv.ts",
+      "startLine": 111,
+      "endLine": 119,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "a448042c2edd94a4e8ee86d5ed90a5ed9fe8e4cd",
+    "fixCommit": "42dfc36da50ad81c3fb2fef64e7849e6bbda8283",
+    "ghsa": "GHSA-wc84-j36w-pw4x",
+    "cve": "CVE-2026-53858",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-05-02"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

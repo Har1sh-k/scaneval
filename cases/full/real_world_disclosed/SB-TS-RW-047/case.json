@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-047",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "OpenClaw gateway per-RPC dispatch lacked a device-token invalidation re-check, letting revoked node tokens keep authority",
+  "description": "In the gateway WebSocket message handler's per-RPC dispatch path, OpenClaw re-checks shared-gateway-auth freshness (usesSharedGatewayAuth / sharedGatewaySessionGeneration) before handling each request, but performs no equivalent re-check for device-token / pairing-scoped clients. device.token.rotate, device.token.revoke and device.pair.remove respond 200 OK to the admin and only schedule disconnectClientsForDevice via queueMicrotask, so the socket stays open briefly after revocation. A device with RPCs already pipelined into its WS socket buffer could land additional authenticated node-WebSocket operations with the rotated/revoked token during that window, effectively restoring revoked node token authority without renewed pairing approval.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__a374c3a5/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/gateway/server/ws-connection/message-handler.ts",
+      "startLine": 1798,
+      "endLine": 1813,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "a374c3a5bfd5225ce319bce3865aab6216309c4f",
+    "fixCommit": "1e1cf14da242280502b28142a8f696675c4c00f6",
+    "ghsa": "GHSA-q99w-vh6v-q3v7",
+    "cve": "CVE-2026-53843",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-05-26"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

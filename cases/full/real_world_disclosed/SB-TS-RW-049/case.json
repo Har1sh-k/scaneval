@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-049",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "OpenClaw bundled runtime dependency installer trusted npm_execpath from workspace .env",
+  "description": "In resolveBundledRuntimeDepsNpmRunner() the bundled runtime dependency installer reads env.npm_execpath and, when it passes a loose isNpmCliPath() shape check, uses it as the first npm CLI candidate (npmCliCandidates[0]) that is then spawned via the resolved node execPath to run `npm install` for bundled runtime deps. Because npm_execpath is an environment variable that a workspace .env can set, and that key was not on the BLOCKED_WORKSPACE_DOTENV_KEYS dotenv blocklist at the vulnerable release, a workspace .env in a repository opened by a trusted operator could override the package-manager executable path used during dependency setup, causing an unintended local package-manager executable to be invoked during install.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__cbc2ba09/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/plugins/bundled-runtime-deps.ts",
+      "startLine": 1406,
+      "endLine": 1415,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "cbc2ba0931468259f26a7c547131a06e03ca6c6c",
+    "fixCommit": "ccb3af556fcb1618f30e94bdd55f77cec07c45a0",
+    "ghsa": "GHSA-24vr-rprv-67rf",
+    "cve": "CVE-2026-53846",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-04-28"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

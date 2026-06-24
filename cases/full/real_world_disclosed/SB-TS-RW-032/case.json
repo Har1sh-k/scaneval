@@ -1,0 +1,52 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-032",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "OpenClaw internal/webchat command auth inherited wildcard ownerAllowFrom across channels",
+  "description": "In resolveOwnerAllowFromList() a channel-prefixed ownerAllowFrom entry (e.g. 'discord:owner') is only skipped when params.providerId is set AND differs from the entry's channel. On internal and webchat command paths params.providerId is left unset, so the guard 'params.providerId && channel !== params.providerId' short-circuits to false, the 'continue' is not taken, and the channel-scoped owner allowlist entry is accepted regardless of which channel it was scoped to. This lets owner/wildcard ownerAllowFrom state leak across channel boundaries, granting owner-style command authorization to internal/webchat senders that should remain channel-scoped (CWE-863 Incorrect Authorization).",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__cbcfdf62/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/auto-reply/command-auth.ts",
+      "startLine": 291,
+      "endLine": 294,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "cbcfdf62c7297bda66009ea7476f053c3e9addab",
+    "fixCommit": "fef42acda0467c6317b3a1451795f46c133eb2a5",
+    "ghsa": "GHSA-4hpg-mp64-x7xq",
+    "cve": "CVE-2026-53854",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-04-29"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

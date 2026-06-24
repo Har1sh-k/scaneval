@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-051",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "command_injection",
+  "title": "OpenClaw exec wrapper trust plan treated side-effecting script/time wrappers as transparent",
+  "description": "DISPATCH_WRAPPER_SPECS in src/infra/dispatch-wrapper-resolution.ts declares per-wrapper unwrap and transparentUsage behavior used by the exec allowlist trust plan. A wrapper marked transparentUsage: true is unwrapped so that only the inner command is evaluated against the exec allowlist, on the assumption that the wrapper itself has no security-relevant side effects. In the vulnerable release the `script` wrapper and the `time` wrapper were marked transparentUsage: true unconditionally, but both can have file-writing side effects (script records a typescript/output file, and `time -o`/`--output` writes timing output to a file). As a result a command request reaching the exec allowlist path was evaluated only against the inner command while the wrapper invocation (and its file-writing side effects) still executed, performing wrapper-level effects outside the intent of the allowlisted command.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__a374c3a5/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/infra/dispatch-wrapper-resolution.ts",
+      "startLine": 370,
+      "endLine": 375,
+      "label": "vulnerable",
+      "capability": "code_execution",
+      "acceptedKinds": [
+        "command_injection"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "a374c3a5bfd5225ce319bce3865aab6216309c4f",
+    "fixCommit": "8e41c118fa80c186ac40676e87bfecf988101ecb",
+    "ghsa": "GHSA-cwpp-5962-q4f6",
+    "cve": "CVE-2026-53848",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-05-27"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI05",
+      "secondary": [
+        "ASI02"
+      ]
+    }
+  }
+}

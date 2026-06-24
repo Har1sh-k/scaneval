@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-042",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "ssrf",
+  "title": "Workspace dotenv blocklist omits connector endpoint host variables, allowing endpoint redirection",
+  "description": "The workspace .env loader enforces an allow/deny model for untrusted workspace environment variables via BLOCKED_WORKSPACE_DOTENV_KEYS and BLOCKED_WORKSPACE_DOTENV_SUFFIXES. The suffix blocklist only covered _API_HOST and _BASE_URL, and the explicit key set did not include connector endpoint variables for Matrix (MATRIX_HOMESERVER and per-account MATRIX_<ACCOUNT>_HOMESERVER), Mattermost (MATTERMOST_URL), IRC (IRC_HOST), or Synology (SYNOLOGY_CHAT_INCOMING_URL, SYNOLOGY_NAS_HOST). A malicious or compromised workspace .env could therefore set these variables and redirect connector runtime traffic from the operator-configured endpoint to an attacker-controlled host (CWE-610 / CWE-427).",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__f788c88b/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/infra/dotenv.ts",
+      "startLine": 72,
+      "endLine": 73,
+      "label": "vulnerable",
+      "capability": "network",
+      "acceptedKinds": [
+        "ssrf"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "f788c88b4c508c335336fb292afed8c900656d6d",
+    "fixCommit": "0623079e98abf7202591f1b04a89755eb7ec9272",
+    "ghsa": "GHSA-55cf-xx38-4p9p",
+    "cve": "CVE-2026-45003",
+    "disclosure": {
+      "ghsaPublished": "2026-05-04",
+      "fixCommitDate": "2026-04-22"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

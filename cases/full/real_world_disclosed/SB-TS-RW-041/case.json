@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-041",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "ACP child sessions do not inherit subagent security envelope constraints in spawnAcpDirect",
+  "description": "In spawnAcpDirect, an ACP child session is created from a requesting (possibly restricted subagent) session without resolving or enforcing the subagent security envelope. The requester state is resolved without a subagent capability store, no maximum-depth or active-child-count check is performed, and the gateway sessions.patch that creates the child session persists only spawnedBy and label, omitting spawnDepth, subagentRole, and subagentControlScope. As a result a restricted subagent can spawn an ACP child that escapes subagent-only constraints such as depth, child-count limits, control scope, and target-agent restrictions (CWE-277, insecure inherited permissions).",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__f788c88b/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/agents/acp-spawn.ts",
+      "startLine": 1009,
+      "endLine": 1077,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "f788c88b4c508c335336fb292afed8c900656d6d",
+    "fixCommit": "31160dc069b7cc5d833b39c53736a41ad3befda2",
+    "ghsa": "GHSA-q3jj-46pq-826r",
+    "cve": "CVE-2026-44997",
+    "disclosure": {
+      "ghsaPublished": "2026-05-04",
+      "fixCommitDate": "2026-04-21"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

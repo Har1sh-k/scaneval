@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-060",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "OpenClaw bootstrap token replay could widen pending pairing scopes in verifyDeviceBootstrapToken",
+  "description": "In src/infra/device-bootstrap.ts the verifyDeviceBootstrapToken function validated a presented bootstrap token's requested role/scopes only against the token's issued allowlist (allowedProfile) and then rewrote the persisted token record with the caller-supplied profile, without recording or comparing against any previously requested pending pairing profile. A caller holding a pending bootstrap token could therefore re-present (replay) the same token before approval with a different, broader requested scope set, and the newly requested pending pairing authority would be accepted and persisted, widening the scopes awaiting operator approval beyond what was first requested.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__8287402d/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/infra/device-bootstrap.ts",
+      "startLine": 377,
+      "endLine": 390,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "8287402da75236c63b6c144b97689e1930ae807b",
+    "fixCommit": "2d00bedc1e731c19ceeac3c7058809ece7b3dc2b",
+    "ghsa": "GHSA-9v8j-9c9g-w66c",
+    "cve": "CVE-2026-53862",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-05-12"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

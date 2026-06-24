@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-044",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "Webhook route secret cached per target, leaving rotated SecretRef secret valid until restart",
+  "description": "createTaskFlowWebhookRequestHandler memoizes each route's resolved secret in a WeakMap (secretByTarget) keyed by the webhook target. resolveTargetSecret returns the cached promise on subsequent requests, so a SecretRef-backed route secret is resolved only once for the lifetime of the handler. After an operator rotates the underlying secret and runs 'openclaw secrets reload', the cached (old) value continues to be used for webhook route authentication until the plugin or gateway restarts. An attacker holding a previously valid route secret can therefore keep authenticating webhook requests after rotation (CWE-613, insufficient session/credential expiration).",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__00bd2cf7/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "extensions/webhooks/src/http.ts",
+      "startLine": 670,
+      "endLine": 695,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "00bd2cf7a376f1fba26291c6c4766f1f15cbdfa5",
+    "fixCommit": "36c4a372a0ad5dca8bfc0d93f7aab9c2f2de66fa",
+    "ghsa": "GHSA-q8ff-7ffm-m3r9",
+    "cve": "CVE-2026-45005",
+    "disclosure": {
+      "ghsaPublished": "2026-05-05",
+      "fixCommitDate": "2026-04-23"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

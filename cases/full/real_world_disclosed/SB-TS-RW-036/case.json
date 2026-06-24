@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-036",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "path_traversal",
+  "title": "OpenClaw OpenShell FS bridge read was TOCTOU-racy, letting a symlink swap read outside the sandbox mount root",
+  "description": "OpenShellFsBridge.readFile() in extensions/openshell/src/fs-bridge.ts (lines 45-59) validates hostPath with assertLocalPathSafety() and then, as a separate operation, calls fsPromises.readFile(hostPath), re-resolving the path through the live filesystem. Because the boundary check (time-of-check) and the read-by-path (time-of-use) are not atomic, an attacker who swaps a parent directory (or the leaf) for a symlink between the check and the read can cause readFile to follow the swapped link and return bytes from a file outside target.mountHostRoot. This is a TOCTOU (CWE-367) symlink-swap race that escapes the sandbox mount-root pinning for reads.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__f788c88b/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "extensions/openshell/src/fs-bridge.ts",
+      "startLine": 45,
+      "endLine": 59,
+      "label": "vulnerable",
+      "capability": "filesystem",
+      "acceptedKinds": [
+        "path_traversal"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "f788c88b4c508c335336fb292afed8c900656d6d",
+    "fixCommit": "95119017c847c737bd113f0bff728c4666d79c45",
+    "ghsa": "GHSA-5h3g-6xhh-rg6p",
+    "cve": "CVE-2026-44113",
+    "disclosure": {
+      "ghsaPublished": "2026-05-04",
+      "fixCommitDate": "2026-04-22"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI02"
+    }
+  }
+}

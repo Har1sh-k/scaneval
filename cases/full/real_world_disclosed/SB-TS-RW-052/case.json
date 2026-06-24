@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-052",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "OpenClaw Discord allowFrom resolved allowlist entries against mutable user display names",
+  "description": "resolveDiscordAllowlistConfig() in extensions/discord/src/monitor/provider.allowlist.ts unconditionally calls resolveAllowFromByUserAllowlist() (and resolveGuildEntriesByUserAllowlist() for guild entries) to resolve configured Discord allowlist entries into user IDs. Those helpers call resolveDiscordUserAllowlist() against the Discord API, which can match entries by mutable user metadata (display name / global name) rather than only stable user IDs. Because this name-based resolution always ran, a Discord account able to change its display or global name metadata could match an allowlist policy entry intended for another identity, receiving agent access intended for a different Discord user.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__c97b9f79/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "extensions/discord/src/monitor/provider.allowlist.ts",
+      "startLine": 374,
+      "endLine": 388,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "c97b9f79ec43b531a3472c3219ca51efbf7695a3",
+    "fixCommit": "ff80167e5a29c8111fd26c4948a8ab775d411c37",
+    "ghsa": "GHSA-cw4q-gqg5-g38h",
+    "cve": "CVE-2026-53849",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-05-08"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

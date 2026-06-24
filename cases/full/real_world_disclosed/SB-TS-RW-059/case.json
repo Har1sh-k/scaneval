@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-059",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "Chat sender allowlist matched mutable conversation identifiers (chatId/chatGuid/chatIdentifier) instead of a stable sender",
+  "description": "isAllowedParsedChatSender() in src/channels/plugins/chat-target-prefixes.ts decides whether an inbound message satisfies a configured allowFrom allowlist. At the vulnerable release it unconditionally derived chatId, chatGuid, and chatIdentifier from the message and, in the matching loop, returned true whenever an allowlist entry matched any of those conversation-level identifiers. For the BlueBubbles/iMessage channel these conversation identifiers are mutable and can be influenced by a participant, so a participant able to shape conversation-level identifiers could match an allowlist entry through conversation metadata rather than a stable sender identity and receive agent responses meant only for a configured sender.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__c97b9f79/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/channels/plugins/chat-target-prefixes.ts",
+      "startLine": 50,
+      "endLine": 70,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "c97b9f79ec43b531a3472c3219ca51efbf7695a3",
+    "fixCommit": "b7e0decf0cd3cef742c02b9e8ad58cefd3c8c3a9",
+    "ghsa": "GHSA-8j37-5w68-wj2g",
+    "cve": "CVE-2026-53860",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-05-13"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

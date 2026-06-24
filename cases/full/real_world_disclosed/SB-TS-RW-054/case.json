@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-054",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "auth_bypass",
+  "title": "OpenClaw device token re-pairing computed caller-scope containment from request scopes, so an empty scope set bypassed the guard",
+  "description": "In the gateway device token rotation handler (src/gateway/server-methods/devices.ts) the caller-scope containment check derives requestedScopes from the request via normalizeDeviceAuthScopes(scopes ?? pairedDevice.tokens?.[normalizedRole]?.scopes ?? pairedDevice.scopes) and passes them to resolveMissingRequestedScope({ role, requestedScopes, allowedScopes: authz.callerScopes }). resolveMissingRequestedScope iterates over requestedScopes and returns null when the set is empty, so a re-pairing/rotation request with an empty scope set produces no missing scope and the containment guard is skipped. rotateDeviceToken({ deviceId, role, scopes }) is then invoked and the persisted token falls back to the device's existing approved scope baseline, restoring/retaining scopes broader than the empty-scope caller should be able to grant. The sibling revoke handler called revokeDeviceToken({ deviceId, role }) with no caller-scope containment at all.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__cbcfdf62/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/gateway/server-methods/devices.ts",
+      "startLine": 371,
+      "endLine": 394,
+      "label": "vulnerable",
+      "capability": "authentication",
+      "acceptedKinds": [
+        "auth_bypass",
+        "authz_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "cbcfdf62c7297bda66009ea7476f053c3e9addab",
+    "fixCommit": "8bbb143ab87e0a45f9d3f986768d75168750b672",
+    "ghsa": "GHSA-8mg9-j9cf-54cj",
+    "cve": "CVE-2026-53852",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-04-26"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}

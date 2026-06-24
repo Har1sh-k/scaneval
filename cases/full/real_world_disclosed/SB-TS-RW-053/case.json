@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "SB-TS-RW-053",
+  "track": "full",
+  "caseType": "real_world_disclosed",
+  "language": "typescript",
+  "canonicalKind": "authz_bypass",
+  "title": "OpenClaw /focus command resolved and acted on target sessions without enforcing subagent controlScope",
+  "description": "In handleSubagentsFocusAction() (src/auto-reply/reply/commands-subagents/action-focus.ts) the /focus subagent command validates the token, binding context, and binding-service capabilities, then directly calls resolveFocusTargetSession({ runs, token }) and proceeds to change focus state, without ever consulting the caller's subagent controlScope. A caller whose subagent controlScope is 'leaf' (and therefore not authorized to control other sessions) could still trigger the focus command and change focus state outside its intended caller authority, because the controlScope containment guard was missing from this code path.",
+  "files": {
+    "root": "../../../../.repos/openclaw_openclaw__cbcfdf62/"
+  },
+  "regions": [
+    {
+      "id": "R1",
+      "path": "src/auto-reply/reply/commands-subagents/action-focus.ts",
+      "startLine": 74,
+      "endLine": 91,
+      "label": "vulnerable",
+      "capability": "authorization",
+      "acceptedKinds": [
+        "authz_bypass",
+        "auth_bypass"
+      ]
+    }
+  ],
+  "expectedOutcome": {
+    "mustDetectRegionIds": [
+      "R1"
+    ],
+    "mustNotFlagRegionIds": []
+  },
+  "realWorld": {
+    "repo": "openclaw/openclaw",
+    "vulnerableCommit": "cbcfdf62c7297bda66009ea7476f053c3e9addab",
+    "fixCommit": "c1a42dce86cba23fb7ceb5994a83ddf82bdd754e",
+    "ghsa": "GHSA-mpc8-jxjh-qpgh",
+    "cve": "CVE-2026-53850",
+    "disclosure": {
+      "ghsaPublished": "2026-06-18",
+      "fixCommitDate": "2026-04-29"
+    }
+  },
+  "standards": {
+    "owaspAgenticTop10": {
+      "primary": "ASI03"
+    }
+  }
+}
