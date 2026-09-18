@@ -2,9 +2,9 @@
 
 > The current runner and historical scores use legacy scoring. [Design decisions](docs/DESIGN_DECISIONS.md#4-scoring-without-exhaustive-repository-labels) and [evaluation math](docs/EVALUATION_MATH.md) specify the proposed replacement, which is not implemented yet. Repositories for the first public-workload release remain under selection.
 
-> Can your scanner find real vulnerabilities in agentic repos without flagging the code the agent is supposed to run?
+> Can your scanner find real vulnerabilities without flagging authorized capabilities?
 
-SASTbench evaluates whether static analyzers can detect real vulnerabilities in agentic codebases without treating intentional agent capabilities as vulnerabilities.
+SASTbench evaluates whether static analyzers find real vulnerabilities at an acceptable review cost. The proposed [workload scope](docs/DESIGN_DECISIONS.md#workload-classification) covers conventional applications, conventional automation, AI-assisted applications, and agentic applications, with separate scorecards. The current corpus is agentic-heavy; existing `agentic`/`generic` CLI profiles are legacy selections, not the proposed workflow classifications.
 
 ## What SASTbench Is and Is Not
 
@@ -13,7 +13,7 @@ SASTbench measures whether a static analyzer can detect annotated vulnerable cod
 Scoring uses six canonical vulnerability kinds (`command_injection`, `path_traversal`, `ssrf`, `auth_bypass`, `authz_bypass`, `sql_injection`) and region-level overlap matching.
 
 **Why capability-safe regions matter:**
-Agentic code often calls dangerous APIs on purpose: `subprocess.run()`, `fs.writeFile()`, `requests.get()`.
+Conventional automation and agentic code often call dangerous APIs on purpose: `subprocess.run()`, `fs.writeFile()`, `requests.get()`.
 A good scanner should flag those calls only when the guard is missing, not every time they appear.
 Capability-safe cases contain properly guarded dangerous code.
 The legacy Capability FP Rate currently covers six synthetic safe regions, not a real-world safe-control corpus. The design requires reviewed, property-specific controls for buyer-facing results.

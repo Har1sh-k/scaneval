@@ -2,7 +2,7 @@
 
 > This page describes the legacy mapping and scoring implementation. Its case lists are historical, non-exhaustive examples, not the next release manifest. See the proposed [scoring contract](DESIGN_DECISIONS.md#4-scoring-without-exhaustive-repository-labels); the composite Agentic Score is legacy only.
 
-SASTbench aligns with the [OWASP Top 10 for Agentic Applications for 2026](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) as a **reporting crosswalk**, not a replacement for the benchmark's own scoring taxonomy.
+SASTbench aligns with the [OWASP Top 10 for Agentic Applications for 2026](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) as a **reporting crosswalk**, not a replacement for the benchmark's own scoring taxonomy. Under the broader [workload design](DESIGN_DECISIONS.md#workload-classification), apply agentic mappings only where the annotated mechanism fits; conventional cases do not require an ASI label.
 
 The mapping enables users and report consumers to filter or aggregate results by OWASP ASI category. The six-kind canonical taxonomy is `command_injection`, `path_traversal`, `ssrf`, `auth_bypass`, `authz_bypass`, and `sql_injection`. The legacy scorer uses kind and region overlap; the design adds claim/property validation. OWASP mappings remain reporting metadata and do not establish ground truth or change scoring.
 

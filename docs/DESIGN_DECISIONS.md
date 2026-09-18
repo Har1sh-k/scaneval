@@ -6,14 +6,29 @@ SASTbench evaluates whether a SAST product or harness finds relevant security pr
 
 ## 1. Scope and comparison contract
 
-The initial scope is agentic-application SAST: command injection, SQL injection, path traversal, SSRF, authentication bypass, and authorization bypass. Generic applications and synthetic diagnostic fixtures remain separate slices. This corpus cannot support a universal vendor ranking.
+The scope is repository-scale SAST across conventional, AI-assisted, and agentic workflows. The initial vulnerability families are command injection, SQL injection, path traversal, SSRF, authentication bypass, and authorization bypass. Synthetic evaluator fixtures remain separate from real-world results. A frozen workload does not support a universal vendor ranking.
+
+### Workload classification
+
+Select coverage by application/workflow type and security mechanism, not repository branding or the volume of published GHSAs.
+
+| Workload | What it represents |
+|---|---|
+| Conventional applications | Web/API authorization, database access, file handling, and network operations without model-directed behavior. |
+| Conventional automation | Intentional command execution and privileged operations controlled by configured workflows. |
+| AI-assisted applications | Model-generated content or data handled by application code. |
+| Agentic applications | Model output selects actions, tools, or their arguments. |
+
+Use "conventional," not "deterministic": non-agentic software is not necessarily deterministic. Record component role separately as application, library/SDK, or infrastructure. Classify the evaluated workflow and the target's mechanism, including whether model output or selection participates in that mechanism. An ordinary authentication bug in an agent product is not automatically an agent-specific failure. A repository may supply several workloads; preserve canonical-target identity across their reporting views.
+
+### Comparison contract
 
 Two comparisons use the same evaluation contracts:
 
 - **Products and harnesses:** evaluate the complete configuration, including edition, engine, rules, models, context selection, and reporting. Preserve native workflows under a common workload and declared resource limits.
 - **Models:** keep the harness, prompts, tools, context policy, inputs, and budget policy fixed. Changing those creates a different system comparison.
 
-Report full-repository scans and native PR review separately. Scanners receive ordinary task inputs, not a selected CVE, expected location, or hint that a vulnerability must exist. Use a workload-specific scorecard, not one composite leaderboard score.
+Report each workload separately, with full-repository scans and native PR review also separate. Scanners receive ordinary task inputs, not a selected CVE, expected location, or hint that a vulnerability must exist. Any combined workload result needs predeclared membership and weights; do not let available CVE counts determine them implicitly. Use a workload-specific scorecard, not one composite leaderboard score.
 
 The first release compares systems on public workloads only. Repositories and snapshots are not selected yet: assess candidates against the admission rules, then freeze the release manifest before comparison. The inventory below is not that manifest. Results describe performance on the frozen workload, not resistance to benchmark-specific tuning. A sealed or private slice is not a first-release requirement; organization-owned packs remain supported by the design.
 
@@ -21,18 +36,18 @@ SecureVibes may appear in the first comparison; inclusion and independent review
 
 ### Current starting point
 
-Metadata recounted on 2026-09-17; these counts do not independently validate the labels.
+Metadata recounted on 2026-09-17, with disclosed-subset repository/language counts checked on 2026-09-18. These counts do not independently validate labels. The existing agentic/generic inventory groups are legacy selections, not assignments to the workflow classes above.
 
 | Corpus | Cases | Repositories | Repo/commit snapshots | Snapshot/root/language groups |
 |---|---:|---:|---:|---:|
-| Disclosed agentic | 156 | 10 | 103 | 104 |
+| Legacy disclosed agentic subset | 156 | 10 | 103 | 104 |
 | All real-world | 189 | 16 | 128 | 129 |
 
-Of the disclosed cases, 128 come from OpenClaw, n8n, and Flowise. Twenty-three snapshots are shared, with up to 12 cases on one snapshot. Only 49 real-world cases have PR-pair metadata. There are zero real-world capability-safe annotations. More independent applications and reviewed controls matter more than a higher CVE count.
+Of the 156 disclosed cases, 128 (82%) come from OpenClaw, n8n, and Flowise, and 127 (81%) are annotated as TypeScript. Twenty-three snapshots are shared, with up to 12 cases on one snapshot. Only 49 real-world cases have PR-pair metadata. There are zero real-world capability-safe annotations. Retain useful cases, but expand conventional-workflow coverage and independent applications deliberately; a higher CVE count alone does not fix the imbalance.
 
 The candidate inventory is TypeScript-heavy. Across the 189 real-world records, language counts are TypeScript 138, Python 16, Rust 11, Clojure 8, Go 7, Java 6, and Swift 3. Within the separate 156-case disclosed subset, kind counts are command injection 41, authorization bypass 34, authentication bypass 29, SSRF 23, path traversal 20, and SQL injection 9. All nine SQL-injection records are TypeScript cases from two repositories. These are inventory counts, not validated release coverage.
 
-Each release reports a kind-by-language-by-repository coverage matrix for admitted targets and controls. Show counts, denominators, and uncertainty; mark sparse slices and avoid generalizing from them. No universal minimum such as ten targets from three repositories is assumed. The release's language claims must follow its admitted corpus.
+Each release reports workload and component-role coverage alongside a kind-by-language-by-repository matrix for admitted targets and controls. Show counts, denominators, and uncertainty; mark sparse slices and avoid generalizing from them. No universal minimum such as ten targets from three repositories is assumed. The release's workload and language claims must follow its admitted corpus.
 
 The existing [case schema](../schema/case.schema.json) already has `capability_safe`, `capability`, and `requiredGuards`. The [current scorer](../scripts/scoring.py) still classifies these findings by location overlap and capability-kind agreement, not by the validated security property. The richer annotation workflow, scorer changes, SDK, and invocation interfaces below are planned work, not existing guarantees. This document and the math companion define the current design.
 
@@ -43,6 +58,7 @@ A case represents a specific root cause in real code, not an entire repository's
 Each accepted case records:
 
 - `represents`: the distinct analysis challenge or justified independent replication it contributes.
+- Evaluated workflow, component role, and the model's involvement, if any, in the target mechanism.
 - A coverage signature: language/framework idiom, input source or trust boundary, security operation, guard-failure mechanism, and interprocedural span.
 - Canonical target and variant family, pinned snapshots and scope, deployment/authorization assumptions, and accepted reporting locations.
 - Evidence origin, reviewer decisions, validation level, disclosure artifacts, and release/split membership.
@@ -51,9 +67,58 @@ Same CWE, repository, or file is a duplicate-review signal, not proof of the sam
 
 Field states are distinct: `not_applicable` means the concept does not fit and needs a reason; `unknown` means applicable but unresolved; `not_reviewed` means assessment is pending. None bypasses required root-cause evidence or admission review.
 
+### Candidate intake and evidence sources
+
+Define coverage needs first, then search across disclosure sources for cases that fill a gap or provide justified independent replication. Use the CVE Program's official [CVE List V5](https://github.com/CVEProject/cvelistV5) JSON records for broad intake rather than scraping individual cve.org pages or relying only on repository GHSAs.
+
+- **CVE records:** discovery, identifiers, reported affected products/versions, and references.
+- **GHSA and vendor advisories:** supplementary descriptions, aliases, and remediation evidence.
+- **Source, fixes, and independent review:** establish the actual target/control label on the exact snapshot under stated assumptions.
+
+Retain source provenance and the record revision used. Resolve product/package references to the code in scan scope, merge CVE/GHSA aliases, and group genuine root-cause variants. A CVE is neither required nor sufficient; reviewed findings without one remain eligible. A dependency-version alert alone is SCA evidence, not a SAST target. A dependency vulnerability qualifies only if the vulnerable implementation is in scope and receives the same source-level validation.
+
+The following are candidates to assess, not selected repositories or validated cases:
+
+| Candidate | Coverage to assess |
+|---|---|
+| [Gitea](https://docs.gitea.com/) | Go application workflows involving repository permissions, file handling, package hosting, and CI. |
+| [Apache Airflow](https://airflow.apache.org/docs/apache-airflow/stable/security/index.html) | Conventional automation, authorized execution, user roles, and deployment assumptions. |
+| [Open WebUI](https://github.com/open-webui/open-webui/security/advisories/GHSA-p4fx-23fq-jfg6) | The distinction between intentional Python tool execution and unauthorized access to that capability. |
+| [FastMCP](https://github.com/PrefectHQ/fastmcp/security/advisories/GHSA-rww4-4w9c-7733) | MCP authorization and OAuth consent boundaries. |
+
+Where valid cases exist, cover the same operation in conventional automation and agentic workflows, such as command execution under different authority and guard assumptions. Score the specific security properties; the comparison is not proof of a scanner's internal understanding.
+
+### Candidate screening and disposition
+
+Screen candidates before spending effort on full validation. Passing these checks makes a case worth validating, not an established ground-truth label.
+
+| Criterion | What must be established |
+|---|---|
+| SAST relevance | The claimed root cause concerns an in-scope source-code mechanism, not just an outdated dependency or an out-of-scope deployment setting. |
+| Available source | The affected repository, component, and candidate snapshot can be identified and pinned. |
+| Credible evidence | An advisory, maintainer discussion, patch, or reviewed analysis supports investigating the claimed root cause. A severity number alone is insufficient. |
+| Clear security boundary | The input or actor, intended restriction, claimed failure, and necessary trust/deployment assumptions can be described. Intentional functionality alone is not a vulnerability. |
+| Useful contribution | The case adds a distinct mechanism, framework/language pattern, trust boundary, analysis challenge, or justified independent replication. |
+| Assessable finding | There is enough evidence to propose what a correct security allegation must establish and its acceptable reporting locations, subject to validation. |
+
+Source-level insecure defaults or failed configuration enforcement can qualify under stated assumptions. Do not require an existing scanner to detect a candidate before admitting it. Severity is coverage metadata, not a substitute for these checks; severity proportions remain a separate release-selection decision.
+
+For each candidate, draft its `represents` statement:
+
+> This case tests [specific security mechanism] under [trust/deployment assumptions], and adds [coverage gap or justified replication].
+
+Record one disposition and its reason:
+
+- **Validate:** credible evidence and a useful contribution justify proceeding to the label-validation process below. This is not release admission yet.
+- **Needs evidence:** plausible, but source, assumptions, or root-cause evidence is incomplete. Record what is missing; missing evidence alone is not grounds for exclusion.
+- **Extended regression:** a validated case whose contribution is redundant for the main release. Keep it separately with the same label-validation requirements; merge duplicate records of the same target rather than counting them again.
+- **Exclude:** outside the declared scope or contradicted by the evidence. Record the reason; exclusion from this benchmark is not necessarily a finding that the issue is harmless.
+
+The artifact and localization requirements have direct precedents. [NIST SATE 2010, Section 2.3](https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication500-283.pdf#page=10) selected available vulnerable source with identifiable CVE locations and supporting records. [OpenSSF's contribution guide](https://github.com/ossf-cve-benchmark/ossf-cve-benchmark/blob/main/CONTRIBUTING.md#contributing-to-benchmark-data) requires vulnerable/patched commits and an expected reporting location. [CWE-Bench-Java](https://github.com/iris-sast/cwe-bench-java#packaged-data) records affected/fix commits and manually vetted fix locations. These precedents support the evidence requirements, not a universal admission checklist. Our contribution rule and dispositions are coverage policy. Unlike pair-only designs, a validated positive target does not require a fixed counterpart; without one, fixed/pair results remain unavailable.
+
 ### Validation
 
-Record evidence origin separately from validation: public advisory and maintainer fix, fix without advisory, independently reviewed internal finding, or diagnostic fixture. A CVE is neither required nor sufficient.
+Record evidence origin separately from validation: public advisory and maintainer fix, fix without advisory, independently reviewed internal finding, or diagnostic fixture.
 
 | Annotation validation level | Cumulative requirement |
 |---|---|
@@ -144,13 +209,37 @@ This reduces selected identity cues; package names and recognizable code may sti
 
 Report full-output known-target recall and a recall-versus-review-budget curve. For each assigned target observation with native ordering, store the first accepted claim's rank, or `null` if there is no accepted hit, plus output length and execution status. Unranked output retains hit flags but has no measured native rank. Never replace a missing hit with the last output position. Declare budgets before comparison, for example 5, 10, 20, and 50 claims, with separate full-scan and PR settings. Show the distribution of assigned targets per input beside budgeted results. Shared targets compete for the same per-scan budget; positions are not divided into per-target allowances.
 
-A claim is one distinct security allegation about one root cause, with one primary reporting location and optional related locations/evidence. One claim can establish at most one canonical target hit; CVE aliases do not create additional targets. A related location contributes to matching only if it is an accepted reporting location and supports that allegation. Location overlap, a broad file range, or a CVE mention alone is insufficient.
+### Claim acceptance
+
+A claim is one distinct security allegation about one root cause, with one primary reporting location and optional related locations/evidence. One claim can establish at most one canonical target hit; CVE aliases do not create additional targets. A related location contributes to matching only if it is an accepted reporting location and supports that allegation. Location and type agreement alone, a broad file range, or a CVE mention is insufficient.
+
+Evaluate the full allegation and supporting evidence against the validated target:
+
+| Check | What must match |
+|---|---|
+| Security issue | The finding identifies the annotated root cause, not merely a dangerous operation. |
+| Vulnerability type | The category is compatible with the actual issue under the versioned kind/rule mapping. |
+| Affected input or authority | The relevant parameter, data flow, actor, or missing permission check is identified where needed to distinguish the issue. |
+| Code location | An accepted location supports the allegation, such as the entry point, missing guard, or sink. An identical line number is not required. |
+| Assumptions | The allegation holds under the snapshot's declared deployment and authorization assumptions. |
+
+These are correctness conditions, not five mandatory output fields. Defer dedicated endpoint/parameter fields; preserve full native finding text and code references instead. A clear description or code reference can establish the affected input without naming it in a separate field. This applies to HTTP parameters, agent tool arguments, and other relevant inputs or authority boundaries. Missing output detail does not mean the concept is not applicable. The finding need not restate every supplied assumption or establish a complete evidence chain to earn detection credit.
+
+For example, suppose a database handler safely binds `search` but unsafely incorporates `sort` into query structure:
+
+- A finding saying only "SQL injection somewhere in this function" is insufficient.
+- Correctly identifying the unsafe handling of `sort`, with an accepted code reference, can earn credit.
+- Claiming that the safely bound `search` parameter is injectable does not detect that target, even if the location and vulnerability type match.
+
+Automate clear matches with validated, versioned matching rules. Arbitrary prose or ambiguous root-cause/input attribution needs recorded human review; until resolved, it earns no confirmed hit and is not automatically a false positive. Replay reuses frozen decisions. This provides deterministic scoring, not guaranteed automatic semantic interpretation of every report; no LLM judge is required.
 
 Importers split native results only where separate allegations are explicitly structured, using frozen label-blind splitting/order rules. Bundles requiring interpretation go to recorded human review; replay reuses those decisions. Budgeted scoring remains pending for an unresolved bundle, rather than treating it as one cheap claim or dropping it. Do not split one issue merely because it has several evidence locations or paths.
 
 For the pilot, detect exact structured duplicates using a versioned canonical payload: allegation, canonical kind, native rule identity, primary/related locations, and supplied flow/evidence details. Normalize path separators and text line endings; exclude delivery IDs, ranks, and timestamps. The same allegation/kind/primary-location tuple is only a duplicate-review hint because distinct flows can share it. Record review decisions for ambiguous semantic duplicates. Keep all delivered copies: duplicates consume review positions and burden but earn no additional target credit.
 
 Preserve a product's declared native review order and tie-breaking, frozen before label matching. If no meaningful native order is supplied, mark output unranked. Report full-output recall plus an optional expected recall over uniform random orderings of the delivered claims, including duplicates, as a diagnostic. This is not a measured prioritization score or a promotion metric; repetition of a claim can change that expectation. Keep native-order and random-order results separate. The [math specification](EVALUATION_MATH.md#unranked-output-diagnostic) defines the diagnostic without rerunning the scanner.
+
+### Scorecard and review
 
 | Scorecard item | What it answers |
 |---|---|
@@ -163,7 +252,7 @@ Preserve a product's declared native review order and tie-breaking, frozen befor
 | Operational fit | Completion, unsupported work, full/PR latency, resources, and cost including setup and retries. |
 | Complementary value | Confirmed targets beyond a named baseline, with added review effort and cost. |
 
-Count each target once, average its planned observations, and use equal-target weights by default, with a separately reported equal-project view. Freeze any alternative weights. Retain assigned failures in operational detection denominators. Valid positive findings from partial output may count; incomplete or failed scans cannot establish a successful negative control. Report control availability, completion, and unresolved matching alongside false-alarm rates. Zero resolved controls means a resolved rate of N/A, not 0%; zero completed controls also leaves the completed-observation bound unavailable.
+Within each declared workload, count each target once, average its planned observations, and use equal-target weights by default, with a separately reported equal-project view. Freeze any alternative or cross-workload weights. Retain assigned failures in operational detection denominators. Valid positive findings from partial output may count; incomplete or failed scans cannot establish a successful negative control. Report control availability, completion, and unresolved matching alongside false-alarm rates. Zero resolved controls means a resolved rate of N/A, not 0%; zero completed controls also leaves the completed-observation bound unavailable.
 
 Alongside the resolved control false-alarm rate, report a worst-case upper bound among completed eligible observations, treating every unresolved assessment as a false allegation. This is a sensitivity bound, not a confidence interval or a bound covering failed scans. Promotion uses that upper bound with predeclared minimum completion and assessable-control coverage, plus uncertainty requirements. Pair and mixed-intent success instead require confirmed success; incomplete or unresolved observations earn no success credit.
 
@@ -212,7 +301,7 @@ Keep schemas language-neutral. [JSON Schema](https://json-schema.org/understandi
 
 Integrate our own harness first with a thin `scan(request, observer=None) -> ScanResult` adapter. Preserve its agent loop. Execution adapters invoke functions/CLIs/containers/services; result importers translate native output; the observer SDK and connectors capture diagnostic events. The pure scorer evaluates saved outputs independently of instrumentation or backend choice.
 
-Canonical claims retain a stable claim ID, native finding ID, original allegation, primary/related locations, native rule/CWE/type/severity, rank, evidence, and raw-output references. Centralize versioned kind/rule mappings. Do not invent precise locations, discard unmapped claims, or turn parse errors into empty successful scans. A small structured exporter is preferable to free-text extraction; ambiguous extraction still needs review. Adapters do not receive labels or decide TP/FP status.
+Canonical claims retain a stable claim ID, native finding ID, full original allegation and evidence text, primary/related locations, native rule/CWE/type/severity, rank, and raw-output references. Do not reduce the allegation to its title. Centralize versioned kind/rule mappings. Do not invent precise locations, discard unmapped claims, or turn parse errors into empty successful scans. A small structured exporter is preferable to free-text extraction; ambiguous extraction still needs review. Adapters do not receive labels or decide TP/FP status.
 
 ### Invocation and multi-model support
 
@@ -353,10 +442,10 @@ Version the engine, schemas, SDK/connectors, adapters, mappings, scorer, corpus,
 | Deliverable | Acceptance check |
 |---|---|
 | D1. Core protocol and evaluator | Versioned schemas; validate/plan/run/import/score/report interfaces; offline score replay without an agent framework or LLM judge. |
-| D2. Reviewed corpus release | Admitted repositories/snapshots frozen in a release manifest; targets, families, coverage, splits, validation records, hashes, and preparation recipes; safe-capability pilot aiming for ten repositories with independent property/evidence review; visible control gaps and private-pack starter template. |
+| D2. Reviewed corpus release | Admitted repositories/snapshots frozen in a release manifest; workflow/role annotations, source provenance, targets, families, coverage, splits, validation records, hashes, and preparation recipes; safe-capability pilot aiming for ten repositories with independent property/evidence review; visible control gaps and private-pack starter template. |
 | D3. Integrations and backend decision | Own-harness adapter with observer SDK integration, callback/native-trace connectors, pinned CLI scanner, SARIF/native import, multi-model execution, parity/conformance tests, and an Inspect/Harbor/direct-runner comparison. |
 | D4. Reproducible run bundle | Raw/canonical predictions, status, setup/usage/cost, policy and version provenance, trace with per-category capture status where supported, and evaluator-side decisions. Equivalent inputs score identically across paths; diagnostic claims require their supporting capture. |
-| D5. Buyer report and review pack | Full recall and budget curves with first-hit ranks, target density, conditional control bounds/coverage, sampled review, uncertainty, cost, local trace timeline, and baseline/candidate comparison. Native ranking and unranked diagnostics labeled separately; imported vendor runs marked independently verified or unverified. |
+| D5. Buyer report and review pack | Workload-separated scorecards: full recall and budget curves with first-hit ranks, target density, conditional control bounds/coverage, sampled review, uncertainty, cost, local trace timeline, and baseline/candidate comparison. Native ranking and unranked diagnostics labeled separately; imported vendor runs marked independently verified or unverified. |
 | D6. Development gate | Frozen acceptance constraints and protected evaluation separated from development feedback. |
 | D7. Guides and examples | Install, native scanner, own harness/multi-model, SDK/connector integration and capture limits, PR mode, output import, private corpus, safe-control/adapter/case authoring, and offline replay; future corpus-maintenance SKILL.md with the correction-PR workflow. Turn the worked scoring and trace examples into conformance fixtures. |
 
@@ -391,6 +480,7 @@ TypeSafe's [Security Incidents evaluation](https://evals.typesafe.ai/security_in
 
 - Select repositories and snapshots through admission review, then freeze the workload, product editions/model snapshots, network profiles, scan limits, and full/PR review-budget grids.
 - Approve coverage priorities, evidence requirements, and protected project/snapshot groups before seeing comparative scores.
+- Sampling proportions, severity mix, repository caps, and cross-workload weights remain open decisions. The workload classes and candidate list do not fix that distribution.
 - Set pilot uncertainty goals and promotion tolerances; leave backend selection to D3's comparison.
 - Verify corpus redistribution and named-result publication permissions under the actual licenses. Anonymization is not an assumed workaround.
 - A project rename is planned; the current name and example CLI/library names are placeholders. Avoid unsupported first/only, zero-day, and contamination-free claims.

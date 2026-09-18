@@ -10,6 +10,8 @@ Let $s$ identify a system configuration, $i$ a canonical target, $m$ a planned s
 
 Report `standard` and `metadata_blinded` scores separately. Cross-profile contrasts use a common validated case set with exclusions shown, not unequal denominators.
 
+Apply the metrics separately to the [declared workflows](DESIGN_DECISIONS.md#workload-classification): conventional applications, conventional automation, AI-assisted applications, and agentic applications. Workflow and mechanism annotations describe the evaluated inputs, not repository-wide labels. Component role is a separate reporting dimension. Restrict eligibility and normalize the relevant weights within each slice. Preserve canonical-target identity across overlapping views; do not pool their counts as independent targets. Any cross-workload summary requires predeclared membership and weights. Sampling proportions, severity mix, and repository caps remain undecided; no allocation formula or fixed distribution is adopted here.
+
 Use the claim, splitting, and duplicate rules in [design Section 4](DESIGN_DECISIONS.md#4-scoring-without-exhaustive-repository-labels). One claim can hit at most one canonical target. Freeze the native review order and tie-breaking before label matching; record any necessary human normalization decisions. Duplicates occupy review positions but cannot create additional target hits. Unresolved bundles leave budgeted scoring pending, not artificially cheap.
 
 For ranked output, store the first accepted rank $q_{simr}$ per target observation, or `null` when there is no accepted hit. Record delivered claim count $M_{smr}$ and execution status separately; a miss does not receive rank $M_{smr}$. For unranked output, retain target-hit flags but mark native rank unavailable, and use the separately labeled diagnostic below.
@@ -40,7 +42,7 @@ $$
 
 $B=\infty$ denotes full submitted output, still subject to the execution budget; an undetected target never becomes a hit at infinity. Unranked full-output hits use the retained hit flags, not a fabricated rank. Report full-output recall and a curve over predeclared finite budgets, for example 5, 10, 20, and 50. Full and PR scans have separate budget grids. Report the distribution of assigned target counts per input beside the curve. First-hit ranks let us recompute every finite budget without rescanning; retain all claims for burden and control assessment.
 
-Default equal-target weights are $w_i=1/N$. A separately reported equal-project or equal-family view uses $w_i=1/(G n_{g(i)})$ for $G$ disjoint groups with $n_g$ targets. Group CVE aliases and genuine variants first. Multiple snapshots can contribute observations of one target without increasing its total weight.
+Within a declared reporting slice, $N$ is its target count and default equal-target weights are $w_i=1/N$. A separately reported equal-project or equal-family view uses $w_i=1/(G n_{g(i)})$ for $G$ disjoint groups with $n_g$ targets. Group CVE aliases and genuine variants first. Multiple snapshots can contribute observations of one target without increasing its total weight. Weighting cannot establish coverage of absent workflows or mechanisms.
 
 For systems $s$ and $t$ on the same frozen workload:
 
