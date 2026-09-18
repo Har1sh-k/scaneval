@@ -1,8 +1,10 @@
 # OWASP Agentic Top 10 -- SASTbench Mapping
 
+> This page describes the legacy mapping and scoring implementation. Its case lists are historical, non-exhaustive examples, not the next release manifest. See the proposed [scoring contract](DESIGN_DECISIONS.md#4-scoring-without-exhaustive-repository-labels); the composite Agentic Score is legacy only.
+
 SASTbench aligns with the [OWASP Top 10 for Agentic Applications for 2026](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) as a **reporting crosswalk**, not a replacement for the benchmark's own scoring taxonomy.
 
-The mapping documented here enables users and report consumers to filter or aggregate SASTbench results by OWASP ASI category. It does not change how cases are scored. SASTbench scoring always uses its own 5-kind canonical taxonomy (`command_injection`, `path_traversal`, `ssrf`, `auth_bypass`, `authz_bypass`) plus region overlap matching. The OWASP mapping is metadata layered on top.
+The mapping enables users and report consumers to filter or aggregate results by OWASP ASI category. The six-kind canonical taxonomy is `command_injection`, `path_traversal`, `ssrf`, `auth_bypass`, `authz_bypass`, and `sql_injection`. The legacy scorer uses kind and region overlap; the design adds claim/property validation. OWASP mappings remain reporting metadata and do not establish ground truth or change scoring.
 
 ## Mapping Table
 
@@ -165,15 +167,16 @@ These categories are valuable for agentic security programs, but they belong in 
 
 ## Relationship Between SASTbench Scoring and the OWASP Mapping
 
-SASTbench uses its own 5-kind canonical taxonomy for scoring:
+SASTbench uses its own six-kind canonical taxonomy:
 
 - `command_injection`
 - `path_traversal`
 - `ssrf`
 - `auth_bypass`
 - `authz_bypass`
+- `sql_injection`
 
-The official metrics (Recall, Capability FP Rate, Mixed-Intent Accuracy, Agentic Score) are computed entirely from this taxonomy. A finding is scored based on whether the adapter maps it to the correct canonical kind and whether it overlaps the correct annotated region.
+Legacy metrics (Recall, Capability FP Rate, Mixed-Intent Accuracy, Agentic Score) use kind/region matching. They are not the proposed claim-based scorecard, and Agentic Score is scheduled for retirement. Capability FP results currently cover six synthetic safe regions, not validated real-world controls.
 
 The OWASP mapping is **metadata** stored in each case's `standards.owaspAgenticTop10` field. It enables:
 
@@ -185,7 +188,7 @@ The OWASP mapping does **not**:
 
 - Change how true positives, false positives, or false negatives are determined
 - Replace the canonical kind as the matching key
-- Affect the Agentic Score computation
+- Affect the legacy Agentic Score computation or introduce a new composite score
 - Require adapters to emit ASI category labels
 
 In short, the OWASP mapping is a reporting crosswalk that sits alongside the scoring system without replacing it.

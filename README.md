@@ -1,5 +1,7 @@
 # SASTbench
 
+> The current runner and historical scores use legacy scoring. [Design decisions](docs/DESIGN_DECISIONS.md#4-scoring-without-exhaustive-repository-labels) and [evaluation math](docs/EVALUATION_MATH.md) specify the proposed replacement, which is not implemented yet. Repositories for the first public-workload release remain under selection.
+
 > Can your scanner find real vulnerabilities in agentic repos without flagging the code the agent is supposed to run?
 
 SASTbench evaluates whether static analyzers can detect real vulnerabilities in agentic codebases without treating intentional agent capabilities as vulnerabilities.
@@ -11,10 +13,10 @@ SASTbench measures whether a static analyzer can detect annotated vulnerable cod
 Scoring uses six canonical vulnerability kinds (`command_injection`, `path_traversal`, `ssrf`, `auth_bypass`, `authz_bypass`, `sql_injection`) and region-level overlap matching.
 
 **Why capability-safe regions matter:**
-Agentic code often calls dangerous APIs on purpose — `subprocess.run()`, `fs.writeFile()`, `requests.get()`.
+Agentic code often calls dangerous APIs on purpose: `subprocess.run()`, `fs.writeFile()`, `requests.get()`.
 A good scanner should flag those calls only when the guard is missing, not every time they appear.
 Capability-safe cases contain properly guarded dangerous code.
-The Capability FP Rate metric measures how often a scanner flags guarded code that it should leave alone.
+The legacy Capability FP Rate currently covers six synthetic safe regions, not a real-world safe-control corpus. The design requires reviewed, property-specific controls for buyer-facing results.
 
 **What SASTbench does not measure:**
 - Prompt injection as a runtime attack (it measures whether tainted prompt data reaches code sinks)
@@ -109,7 +111,7 @@ Adapters for LLM-backed scanners can expose an `LLM_MODEL` constant. When presen
 
 ### Model-Specific Benchmarks (knowledge-cutoff gating)
 
-The central validity threat for any LLM-backed vulnerability detector is **training-data contamination**: if a model saw the advisory or the fix commit during training, a "hit" may be memorization rather than detection. SASTbench controls for this by gating real-world cases on each model's **knowledge cutoff**.
+Prior exposure to advisories or fixes can affect LLM-backed scanner performance. The legacy runner's knowledge-cutoff gate aims to reduce one exposure route; it does not establish absence of memorization. The design retains credit for correct findings regardless of prior knowledge and uses freshness as a reporting slice.
 
 Every real-world case records public-knowledge dates under `realWorld.disclosure`:
 
@@ -120,7 +122,7 @@ Every real-world case records public-knowledge dates under `realWorld.disclosure
 }
 ```
 
-The **knowledge horizon** of a case is the earliest public signal that the code path is a problem — `min(ghsaPublished, fixCommitDate, cvePublished)`. A case "counts" for a model only when its horizon is **strictly after** the model's cutoff (exact gate, no buffer).
+The **legacy implementation's horizon** is `min(ghsaPublished, fixCommitDate, cvePublished)` over available metadata. Its gate retains dated cases only when that value is strictly after the selected cutoff. A commit timestamp alone does not establish first public availability. The proposed [freshness policy](docs/DESIGN_DECISIONS.md#7-freshness-and-memorization-audit) requires evidenced public artifacts, explicit unknown states, and reporting-time slices rather than this pre-scan filter.
 
 Run a model-specific benchmark with `--model <id>` (resolved against [`taxonomy/models.json`](taxonomy/models.json), aliases supported) or an explicit `--since YYYY-MM-DD`:
 
@@ -128,7 +130,7 @@ Run a model-specific benchmark with `--model <id>` (resolved against [`taxonomy/
 python scripts/run.py --scanner securevibes-agent --track full --model opus-4.8
 ```
 
-The runner prints how many dated cases were excluded as pre-cutoff, and the results JSON carries a `cutoff` block (`model`, `date`, `excludedCount`, `excludedCaseIds`). Cases without disclosure dates (synthetic core, capability-safe, mixed-intent) are author-written and not subject to contamination gating, so they are always retained.
+The runner prints how many dated cases were excluded as pre-cutoff, and the results JSON carries a `cutoff` block (`model`, `date`, `excludedCount`, `excludedCaseIds`). The legacy gate also retains records with missing disclosure dates; retention does not establish freshness. In the new design, applicable but missing dates remain unknown, while model-cutoff gating is not applicable to diagnostic fixtures.
 
 Predefined models in `taxonomy/models.json`: `opus-4.8`, `opus-4.7`, `opus-4.6`, `sonnet-4.6`, `sonnet-4.5`, `gpt-5.5`, `gpt-5.4` (aliases accepted, e.g. `claude-sonnet-4-5`). `opus-4.8` is confirmed against the model card. The other Claude cutoffs are self-reported via `claude -p` and the GPT cutoffs via `codex exec` (3/3 consistent each); all are marked `"verified": false`, the runner prints a warning when they are used, and they should be confirmed against the official vendor model card before use in published results.
 
@@ -171,16 +173,16 @@ Both should show `TARGET HIT` for SB-PY-SV-001 (SSRF in reference fetcher).
 
 Cases carry an `agentic` boolean. The `--profile` flag filters runs by profile:
 
-- `agentic` — only agentic cases (the default agentic-code thesis).
-- `generic` — only non-agentic real-world cases (`caseType: real_world_generic`).
-- `all` — both, with separate per-profile breakdown in the report.
+- `agentic`: only agentic cases (the default agentic-code thesis).
+- `generic`: only non-agentic real-world cases (`caseType: real_world_generic`).
+- `all`: both, with separate per-profile breakdown in the report.
 
 Legacy cases without an `agentic` field are treated as agentic.
 
 ## Status
 
 - **17 Core Track** cases (synthetic vulnerable, capability safe, mixed intent)
-- **189 Full Track** cases — 156 real-world disclosed (agentic) + 33 real-world generic (non-agentic)
+- **189 Full Track** cases: 156 real-world disclosed (agentic) + 33 real-world generic (non-agentic)
 - **206 total cases** across Python, TypeScript, Rust, Swift, Go, Java, and Clojure
 
 ## Official Adapters
@@ -190,7 +192,7 @@ Legacy cases without an `agentic` field are treated as agentic.
 
 ## Baseline Reference Results
 
-These were measured on March 24, 2026 against the Core Track using the current official adapters in this repository:
+Historical legacy results measured on March 24, 2026 against the synthetic Core Track. They are not results under the proposed scoring design. Capability FP Rate uses six annotated synthetic safe regions; the composite Agentic Score is retained here only as a historical field.
 
 | Adapter | Version | Rule Set Used | Recall | Precision | Cap FP Rate | Agentic Score | Notes |
 |---------|---------|---------------|--------|-----------|-------------|---------------|-------|
@@ -220,20 +222,22 @@ If you want another agent to work on this repo, use these repo-local skills:
 
 ## Scoring
 
-Default reporting uses security-readable labels:
+This section describes legacy report labels. The replacement [scoring contract](docs/DESIGN_DECISIONS.md#4-scoring-without-exhaustive-repository-labels) separates known-target detection, reviewed precision, controls, and operational outcomes without a composite score.
+
+Legacy reporting uses security-readable labels:
 
 - **Target Hit Rate**: did the scanner detect the disclosed/annotated vulnerability?
 - **Intent Accuracy**: in mixed-intent cases (safe + unsafe code together), did the scanner correctly hit the target without flagging the guarded code?
 - **Capability Noise**: how often did the scanner flag properly guarded capability code?
 - **Additional Findings**: findings beyond the annotated target (on Full Track real-world cases these may be legitimate, not necessarily wrong)
 
-Verbose mode (`--verbose`) also shows the underlying benchmark internals: Recall, Precision, Capability FP Rate, Mixed-Intent Accuracy, and Benchmark Index (geometric mean of Recall, 1 - Capability FP Rate, Intent Accuracy).
+Verbose mode (`--verbose`) also shows legacy Recall, Precision, Capability FP Rate, Mixed-Intent Accuracy, and Benchmark Index (geometric mean of Recall, 1 - Capability FP Rate, Intent Accuracy). Benchmark Index and Agentic Score are not part of the proposed buyer scorecard.
 
 ### Core Track vs Full Track scoring language
 
 **Core Track** cases are closed-world synthetic benchmarks. Every finding outside the annotated region is a known false positive. Strict scoring labels apply.
 
-**Full Track** cases are real-world repo snapshots with one disclosed vulnerability. Additional findings may be legitimate issues in the repo. The benchmark only scores whether the disclosed target was detected - it does not claim that every other finding is wrong.
+**Full Track** records identify targets in real-world snapshots, sometimes shared by several cases. Additional findings may be legitimate. The proposed scorer preserves unreviewed outcomes and evaluates all assigned targets per scan. The legacy scorer still treats unmatched findings as false positives and counts TP findings rather than unique targets, so its precision and recall must not be read as implementing that design.
 
 ### PR mode scoring language
 
