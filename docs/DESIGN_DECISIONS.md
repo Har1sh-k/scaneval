@@ -95,13 +95,15 @@ Separate the execution unit from the scoring unit. Run once per exact input, roo
 
 Version ranges identify candidate shared inputs, not validated labels. If CVE1 affects 1.0 through 1.7 and CVE2 affects 1.4 through 2.8, a validated 1.7 snapshot can test both. Disjoint affected ranges need different positive snapshots; a later planned snapshot may also supply an earlier target's fixed control.
 
-| Planned snapshot | CVE1 | CVE2 | CVE3 |
-|---|---|---|---|
-| A | Vulnerable | Not assessed | Not assessed |
-| B | Fixed control | Vulnerable | Not assessed |
-| C | Fixed control | Fixed control | Vulnerable |
+For a separate hypothetical release sequence in one repository, the plan could be:
 
-Each row requires one scan per system/configuration/repetition. Validate every cell, including whether a repair remains effective in later snapshots. Freeze target/control selection and weights so repeated old fixes do not dominate.
+| Planned version | CVE1 | CVE2 | CVE3 |
+|---|---|---|---|
+| v1.7.0 | Vulnerable | Not assessed | Not assessed |
+| v2.8.0 | Fixed control | Vulnerable | Not assessed |
+| v3.2.0 | Fixed control | Fixed control | Vulnerable |
+
+These version numbers are illustrative, not selected real releases. Resolve each version to a recorded commit SHA and input-tree hash. Each row requires one scan per system/configuration/repetition. Validate every assessed cell, including whether a repair remains effective in later snapshots. "Not assessed" means no label is assigned, not that the target is absent or safe. Freeze target/control selection and weights so repeated old fixes do not dominate.
 
 Prefer later already-planned scans for fixed observations. Do not automatically add a fixed-only scan for every CVE. A final target without a fixed observation keeps its detection result; pair/control coverage is unavailable, not passed. Rolling controls measure practical discrimination, not the isolated effect of a patch. Dedicated matched pairs remain opt-in research inputs.
 
