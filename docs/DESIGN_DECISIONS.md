@@ -474,12 +474,19 @@ Documentation deliverable: `docs/BRING_YOUR_OWN_CORPUS.md` and the case-authorin
 
 Ship a core Python package with CLI/library entry points, separate versioned corpus packs, pinned scanner images where useful, and downloadable HTML/CSV/JSON reports. Default to hash-checked preparation recipes that fetch pinned sources. Check use and redistribution permissions against each exact snapshot and relevant paths, not just today's repository-wide license. Source archives may be distributed separately where permitted; they are not permanently prohibited. Keep large source archives, proprietary tools, credentials, and protected labels out of the core package. A static documentation site and local trace viewer are sufficient initially. A hosted service and public leaderboard are not required.
 
+### What SASTbench delivers
+
+- **Versioned CVE corpus:** real vulnerable repository snapshots, fixes, target mechanisms, accepted evidence locations, and validated fixed/safe controls where available. Published advisories and maintainer records supply the vulnerability evidence; benchmark review checks the exact source mapping and scoring label used by the evaluator. Organization-owned packs use the same format.
+- **SDK for harness visibility:** records model/tool calls, context delivered to the model, candidate findings, filtering decisions, errors, and timing. A shared trace format links those observations to scan results and marks incomplete capture. It shows recorded harness behavior, with the reasoning limits described in Section 6.
+
+The evaluator turns those assets into detection, control, review-burden, completion, cost, and observability reports. It does not claim that every repository vulnerability is labeled.
+
 Version the engine, schemas, SDK/connectors, adapters, mappings, scorer, corpus, and system configuration independently; record applicable versions in every run bundle and provide explicit migrations.
 
 | Deliverable | Acceptance check |
 |---|---|
 | D1. Core protocol and evaluator | Versioned schemas; validate/plan/run/import/score/report interfaces; offline score replay without an agent framework or LLM judge. |
-| D2. Reviewed corpus release | Admitted repositories/snapshots frozen in a release manifest; workflow/role annotations, source provenance, targets, families, coverage, splits, validation records, hashes, and preparation recipes; safe-capability pilot aiming for ten repositories with independent property/evidence review; visible control gaps and private-pack starter template. |
+| D2. Versioned CVE corpus release | Admitted repositories/snapshots frozen in a release manifest; workflow/role annotations, source provenance, targets, families, coverage, splits, validation records, hashes, and preparation recipes; safe-capability pilot aiming for ten repositories with independent property/evidence review; visible control gaps and private-pack starter template. |
 | D3. Integrations and backend decision | Own-harness adapter with observer SDK integration, callback/native-trace connectors, pinned CLI scanner, SARIF/native import, multi-model execution, parity/conformance tests, and an Inspect/Harbor/direct-runner comparison. |
 | D4. Reproducible run and observability bundle | Raw/canonical predictions, status, setup/usage/cost, policy and version provenance, model/tool calls, model-visible context and filtering events with per-category capture status, and evaluator-side decisions. Equivalent inputs score identically across paths; diagnostic claims require their supporting capture. |
 | D5. Detection report and review pack | Workload-separated scorecards: known-target detection rate (full recall) and budget curves with first-hit ranks, target density, conditional control bounds/coverage, sampled review, uncertainty, cost, local trace timeline, and baseline/candidate comparison. Native ranking and unranked diagnostics labeled separately; imported vendor runs marked independently verified or unverified. |
