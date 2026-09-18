@@ -1,6 +1,8 @@
 # SASTbench design decisions
 
-SASTbench evaluates whether a SAST product or harness finds relevant security problems at an acceptable review cost. It also provides a fixed evaluator for improving a harness against reviewed ground truth.
+SASTbench evaluates whether a SAST product or harness finds relevant security problems at an acceptable review cost. It provides reviewed cases, a fixed evaluator, and observer traces that help explain harness behavior. A separate engineering-agent project can consume that feedback and propose harness changes; this repository does not implement that improvement agent.
+
+Bring your own test cases is a core use case: organizations can turn existing security fixes, findings, and internal documents into a private benchmark. Teams or a separate engineering agent can use its scores and observer traces to improve a harness for that codebase. The same evaluation contracts support public comparisons and organization-owned workloads.
 
 [Evaluation math](EVALUATION_MATH.md) defines the scores, denominators, assumptions, and optional research contrasts.
 
@@ -405,33 +407,68 @@ A credible post-cutoff association flags a temporal inconsistency for investigat
 
 Report available knowledge, discrimination, identity effects, and retrieval limitations separately. Do not produce a memorization percentage, force a memory-versus-reasoning verdict, or embed CVE-printing instructions in source. Formal identity/temporal contrasts and popularity regressions remain future research in the math appendix, outside release and promotion gates.
 
-## 8. Repetitions, uncertainty, and the engineering loop
+## 8. Repetitions, uncertainty, and feedback for harness improvement
 
 Pilot nondeterministic systems on a diverse small set, for example 8 to 10 cases at three repetitions. Measure variance, failures, review effort, and cost, then simulate the case/repetition counts needed for a declared effect or interval width. Neither five cases per class nor five repetitions is a statistical rule. One accuracy run is enough only for a demonstrably deterministic pinned configuration; timing may need repeats.
 
 Compare systems on common inputs and policies. Preserve repository, family, shared-scan, and repeat dependencies in uncertainty estimates. Show per-project results and leave-one-project-out sensitivity when repositories are few. More repeats do not create more independent applications. Report mean per-run detection first; optional best-of/all-runs views have different meanings. [Planning formulas](EVALUATION_MATH.md#5-repetitions-and-uncertainty) state the assumptions.
 
-The development loop is:
+SASTbench owns the evaluations, observations, comparison reports, and gate decisions below. Humans or an engineering agent in a separate repository own the proposed changes. SASTbench does not edit the harness, open improvement PRs, or deploy a candidate automatically. This is evaluation support for an automated engineering loop, not recursive self-modification by the benchmark.
+
+The surrounding development loop is:
 
 1. Freeze development labels, evaluator, workload, and improvement/regression constraints.
 2. Evaluate baseline and candidate on the same contract; provide development failure and review feedback.
-3. Permit changes to the harness, rules, or configuration, not labels, scorer, or protected inputs.
-4. Promote only when detection and precision/control/completion/burden/cost constraints are met with sufficient evidence.
+3. Have the separate engineering workflow change the harness, rules, or configuration, keeping labels, scorer, and protected inputs fixed.
+4. Return a gate decision and evidence from detection and precision/control/completion/burden/cost constraints. The external workflow owns any promotion after those constraints pass.
 5. Evaluate releases on declared repository-held-out or later-case sets with limited feedback. First-release splits use public cases; restricted evaluation access does not make those cases unpublished.
+
+The cycle returns from re-test to the next harness run with the selected candidate configuration. Approved development cases and scoring rules stay fixed during that cycle; case intake and label changes follow a separate reviewed release.
 
 Keep related targets, fixes, variants, and overlapping snapshot families together. A chronological split must exclude related leakage; repository holdout supports a different claim from within-repository tuning. Repeatedly tuning against leave-one-repository-out scores turns them into validation, not untouched holdout. Rolling ingestion still needs human admission and frozen releases; the newest 90 days are not automatically unseen.
 
 Give the engineering agent development results and permitted traces only. Keep holdout labels, per-case matching decisions, and diagnostic artifacts with the independent evaluator; release only predeclared aggregate feedback. Limit repeated holdout queries. A public repository-held-out case tests tuning separation, not guaranteed absence from foundation-model training. New reviewed development findings enter a new corpus version, never an agent-authored change to frozen answers.
 
-## 9. Organization-owned corpora
+## 9. Bring your own test cases
 
-Support namespaced, versioned private packs through the same schemas, adapters, and scorer, without a fork. Proposed `corpus init`, `corpus import`, and `corpus validate` commands create and check drafts from JSON/SARIF and mapped ticket/CSV exports. Internal reviews, incidents, and fixes can supply cases without CVEs. Importing a scanner allegation does not validate it; closed tickets, suppressions, and accepted risks are not automatic negative labels.
+An organization can build a private benchmark around its own code and use its feedback to refine its harness. Support namespaced, versioned packs through the same schemas, adapters, observer SDK, and scorer. This workflow belongs in the first end-to-end pilot; building the separate improvement agent does not.
 
-Use the same admission and split rules, allowing organization-specific categories with declared matching rules. Organizations may supply ordinary architecture and security-policy context as versioned runtime input, but not expected answers. Tune harness configuration on development cases; adding a private pack does not automatically fine-tune a model. Report private and public scores separately; any combined score needs explicit weights.
+This helps teams:
+
+- **Catch recurring failures:** preserve reviewed internal bugs as regression cases when prompts, models, rules, or filtering change.
+- **Test local security rules:** represent the organization's frameworks, permissions, trust boundaries, and intentional capabilities with validated targets and controls.
+- **Measure changes on relevant code:** compare detection, false allegations, completion, review effort, and cost on their own workload, with traces to investigate what changed.
+
+### Skill-guided intake and case preparation
+
+Provide a case-authoring skill as the primary onboarding path. It uses the shared library/CLI operations to prepare an organization-owned pack. Users can supply existing cases, internal documents, GitHub commit links, or a repository URL/local path. The skill gathers the selected documents, commit metadata, diffs, and relevant source as evidence for Jev; a repository URL is an intake instruction, not evidence that the classifier has inspected its code. A hosted service is not required.
+
+Start with existing security fixes and findings through these inputs:
+
+- **Import cases:** internal security reviews, incident records, fixes, and findings supplied through JSON/SARIF or mapped ticket/CSV exports. A CVE is not required.
+- **Point to a repository:** accept a local path or authorized repository reference with a declared component/history scope and available fix commits or issue references. Extract candidate changes and assemble evidence from that security history. A repository reference alone cannot establish target labels.
+- **Provide documents:** accept internal review reports, incident write-ups, tickets, and remediation notes. Preserve document/page/section references and resolve each proposed case to its affected source and snapshot. If those artifacts or root-cause evidence are missing, record the gap and retain a draft.
+
+The proposed `corpus init`, `corpus import`, and `corpus validate` operations create and check drafts. They retain source references, pinned snapshots, candidate affected locations, assumptions, and the evidence behind each proposed label. Importing a scanner allegation does not validate it; closed tickets, suppressions, and accepted risks are not automatic negative labels.
+
+The skill can use Jev to identify candidate security fixes or findings in the supplied material, classify their evidence, suggest possible duplicates, and flag inconsistencies or missing context under Section 11. Record suggestions alongside their evidence. Jev remains an optional dependency; the same workflow accepts manually prepared drafts. This step does not certify correctness, remove secrets, or approve a case. Curators and independent reviewers apply Section 2 before a draft becomes eligible for scoring.
+
+The skill produces draft case records, an evidence/missing-context review queue, and a proposed private-pack manifest. Approval records and validated labels belong to the evaluator. The skill must never infer an approved label from a document's wording, a classifier confidence score, or a successful import.
+
+### From private cases to a harness improvement
+
+1. Use the skill to import existing cases or prepare candidates from selected repository history and supplied documents.
+2. Validate target labels and any fixed/safe controls, recording the human decisions and evidence.
+3. Publish an approved version into the organization's private case registry. Freeze development and evaluation membership, grouping related fixes and variants together.
+4. Run the baseline harness on that version. Use development scores and available observer traces to identify missed targets, false allegations, lost context, and filtering mistakes.
+5. Return that feedback to humans or the separate engineering agent. Evaluate the candidate harness they supply against the frozen evaluator and acceptance constraints in Section 8, then repeat harness runs on the same approved cases. Keep protected evaluation feedback outside the tuning loop.
+6. Admit additional cases or label corrections through review into a new version, retaining earlier run records.
+
+Allow organization-specific categories with declared matching rules. Organizations may supply architecture and security-policy context as versioned runtime input, while expected answers stay with the evaluator. Tune harness configuration on development cases; importing a pack does not fine-tune a model. Within-repository evaluation supports claims about that codebase; cross-repository claims need separate coverage. Report private and public scores separately; any combined score needs explicit weights.
 
 Keep source, labels, results, and traces in organization-controlled storage by default. Remote inference requires an approved data-egress and retention policy; local logs alone do not make it private. Credentials stay outside manifests. Retain draft/reviewed/released states so new cases cannot silently change an earlier denominator.
 
-Documentation deliverable: `docs/BRING_YOUR_OWN_CORPUS.md`, written when interfaces exist, covering import mappings, human validation, splits, provider/privacy settings, execution, and one complete worked example.
+Documentation deliverable: `docs/BRING_YOUR_OWN_CORPUS.md` and the case-authoring `SKILL.md`, written when interfaces exist, covering these inputs, mappings, human validation, splits, provider/privacy settings, execution, and one complete example from an internal fix or document to a measured harness change. Reuse the corpus-maintenance review and correction rules from Section 2.
 
 ## 10. Packaging, deliverables, and build order
 
@@ -444,17 +481,17 @@ Version the engine, schemas, SDK/connectors, adapters, mappings, scorer, corpus,
 | D1. Core protocol and evaluator | Versioned schemas; validate/plan/run/import/score/report interfaces; offline score replay without an agent framework or LLM judge. |
 | D2. Reviewed corpus release | Admitted repositories/snapshots frozen in a release manifest; workflow/role annotations, source provenance, targets, families, coverage, splits, validation records, hashes, and preparation recipes; safe-capability pilot aiming for ten repositories with independent property/evidence review; visible control gaps and private-pack starter template. |
 | D3. Integrations and backend decision | Own-harness adapter with observer SDK integration, callback/native-trace connectors, pinned CLI scanner, SARIF/native import, multi-model execution, parity/conformance tests, and an Inspect/Harbor/direct-runner comparison. |
-| D4. Reproducible run bundle | Raw/canonical predictions, status, setup/usage/cost, policy and version provenance, trace with per-category capture status where supported, and evaluator-side decisions. Equivalent inputs score identically across paths; diagnostic claims require their supporting capture. |
-| D5. Buyer report and review pack | Workload-separated scorecards: full recall and budget curves with first-hit ranks, target density, conditional control bounds/coverage, sampled review, uncertainty, cost, local trace timeline, and baseline/candidate comparison. Native ranking and unranked diagnostics labeled separately; imported vendor runs marked independently verified or unverified. |
-| D6. Development gate | Frozen acceptance constraints and protected evaluation separated from development feedback. |
-| D7. Guides and examples | Install, native scanner, own harness/multi-model, SDK/connector integration and capture limits, PR mode, output import, private corpus, safe-control/adapter/case authoring, and offline replay; future corpus-maintenance SKILL.md with the correction-PR workflow. Turn the worked scoring and trace examples into conformance fixtures. |
+| D4. Reproducible run and observability bundle | Raw/canonical predictions, status, setup/usage/cost, policy and version provenance, model/tool calls, model-visible context and filtering events with per-category capture status, and evaluator-side decisions. Equivalent inputs score identically across paths; diagnostic claims require their supporting capture. |
+| D5. Detection report and review pack | Workload-separated scorecards: known-target detection rate (full recall) and budget curves with first-hit ranks, target density, conditional control bounds/coverage, sampled review, uncertainty, cost, local trace timeline, and baseline/candidate comparison. Native ranking and unranked diagnostics labeled separately; imported vendor runs marked independently verified or unverified. |
+| D6. Development gate | Frozen acceptance constraints and protected evaluation separated from development feedback; one complete organization-owned case import, review, baseline/candidate comparison, and decision using the same scorer. |
+| D7. Guides and examples | Install, native scanner, own harness/multi-model, SDK/connector integration and capture limits, PR mode, output import, private corpus, safe-control/adapter/case authoring, and offline replay; case-authoring SKILL.md for repository/document intake and corpus-maintenance SKILL.md with the correction-PR workflow. Turn the worked scoring and trace examples into conformance fixtures. |
 
 Build in this order:
 
 1. Contracts and scorer fixtures: unique targets, claim budgets, unknowns, duplicates, shared snapshots, partial/error states, and unavailable controls.
-2. A small end-to-end real-case slice with our own harness and one pinned scanner: grouped inputs, isolation, controls, canonical outputs, and replay. Include the observer SDK at shared boundaries, context selection, and finding filtering without replacing the harness.
+2. A small end-to-end real-case slice with our own harness and one pinned scanner: grouped inputs, isolation, controls, canonical outputs, and replay. Include the observer SDK at shared boundaries, context selection, and finding filtering without replacing the harness. Exercise the case-authoring skill with imported findings, repository fixes, and a supporting document on an approved sample pack, then carry it through a baseline/candidate comparison.
 3. Native PR integration, review workflow, repeated-run pilot, backend comparison, and buyer report. Expand validated coverage, including the ten-repository safe-control pilot.
-4. Protected splits, release gates, private-pack examples, and selected follow-on experiments.
+4. Broader protected splits, release gates, and selected follow-on experiments.
 
 Migrate reviewed cases, raw results, and ingestion utilities rather than discarding them. Replace per-case execution and unmatched-as-FP scoring, remove ground truth from adapter requests, bind actual models, and replace live Semgrep rule selection. Fix finding-count TP versus region-count FN inflation, represent zero assessable controls as N/A, and retire the composite `agenticScore` requirement from the result schema. Adapter errors must have explicit status, not empty successful output; update the adapter guide accordingly. Make sv-agent setup explicit and the PR runner's dual-scan fallback opt-in. Keep README and mapping documentation synchronized and legacy results clearly labeled. These are pending implementation changes, not fixes made by this design. New scoring is not directly comparable to old headline scores.
 
