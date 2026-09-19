@@ -370,9 +370,11 @@ An external CLI does not automatically make model requests unobservable: a suppo
 
 Support `off`, `metadata`, and `content` recording. Normal scans work without the SDK; turning tracing off does not disable required run provenance or finding submission. Keep instrumentation passive: preserve prompts, tools/results, generation settings, streaming, retries, and exceptions. Record SDK/connector versions and any integration patches.
 
-Capture relevant model requests/responses, exposed reasoning, tool calls/results, context inclusion/truncation, handoffs, candidate/filter/submission events, and errors. In content-mode debug runs these may be stored locally, with credential redaction, declared omissions, and separate approval for uploads. Do not elicit extra reasoning during a scored run or claim access to hidden thoughts. Exposed explanations can be unfaithful to what affected an answer. [Turpin et al.](https://arxiv.org/abs/2305.04388).
+Capture relevant model requests/responses, exposed reasoning, tool calls/results, context inclusion/truncation, handoffs, candidate/validation/filter/submission events, and errors. In content-mode debug runs these may be stored locally, with credential redaction, declared omissions, and separate approval for uploads. Do not elicit extra reasoning during a scored run or claim access to hidden thoughts. Exposed explanations can be unfaithful to what affected an answer. [Turpin et al.](https://arxiv.org/abs/2305.04388).
 
-Distinguish system-access traces from the actual outgoing model request captured after context selection, summarization, and truncation. A search touching 1,000 files may deliver only three snippets. Recorded input establishes availability, not use. Record schema version, event/run/producer IDs, sequence, call/attempt IDs, parent links, timestamps/durations, and artifact hashes; concurrent events have a partial order. Use stable candidate IDs to link findings across filtering and submission, and link selected context to tool results or derived summaries. Separate observer facts, harness self-reports, and model statements. Mark capture complete, partial, redacted, or unavailable for each event category. Hashes detect changed artifacts, not a dishonest producer.
+Distinguish system-access traces from the actual outgoing model request captured after context selection, summarization, and truncation. A search touching 1,000 files may deliver only three snippets. Recorded input establishes availability, not use. Record schema version, event/run/producer IDs, sequence, call/attempt IDs, parent links, timestamps/durations, and artifact hashes; concurrent events have a partial order. Link selected context to tool results or derived summaries. Separate observer facts, harness self-reports, and model statements. Mark capture complete, partial, redacted, or unavailable for each event category. Hashes detect changed artifacts, not a dishonest producer.
+
+Track the finding lifecycle: candidate creation, any validation attempts and outcomes, filtering or suppression, and inclusion in the final report. Use stable candidate IDs linked to submitted claim IDs. Record the stage, outcome, responsible component, evidence references, and any explanation the harness exposes. A harness validation verdict records its decision; it does not establish the benchmark's security label. Follow the harness's actual lifecycle without requiring a particular sequence or inventing unobserved stages or reasons.
 
 The own-harness connector wraps the shared model client and tool dispatcher, then adds context-selection and finding-filter events. Record tool arguments, result/status, errors, and duration; model events include resolved model/settings and available token usage. For web tools, distinguish attempted/denied requests, returned content, and content actually included in a model request. A tool call alone does not establish that a page was read. Redact stored copies, not the inputs delivered to the harness.
 
@@ -415,7 +417,7 @@ Compare systems on common inputs and policies. Preserve repository, family, shar
 
 SASTbench owns the evaluations, observations, comparison reports, and gate decisions below. Humans or an engineering agent in a separate repository own the proposed changes. SASTbench does not edit the harness, open improvement PRs, or deploy a candidate automatically. This is evaluation support for an automated engineering loop, not recursive self-modification by the benchmark.
 
-The surrounding development loop is:
+The comparison contract for externally supplied harness changes is:
 
 1. Freeze development labels, evaluator, workload, and improvement/regression constraints.
 2. Evaluate baseline and candidate on the same contract; provide development failure and review feedback.
@@ -423,11 +425,18 @@ The surrounding development loop is:
 4. Return a gate decision and evidence from detection and precision/control/completion/burden/cost constraints. The external workflow owns any promotion after those constraints pass.
 5. Evaluate releases on declared repository-held-out or later-case sets with limited feedback. First-release splits use public cases; restricted evaluation access does not make those cases unpublished.
 
-The cycle returns from re-test to the next harness run with the selected candidate configuration. Approved development cases and scoring rules stay fixed during that cycle; case intake and label changes follow a separate reviewed release.
+Approved development cases and scoring rules stay fixed during each comparison; case intake and label changes follow a separate reviewed release.
 
 Keep related targets, fixes, variants, and overlapping snapshot families together. A chronological split must exclude related leakage; repository holdout supports a different claim from within-repository tuning. Repeatedly tuning against leave-one-repository-out scores turns them into validation, not untouched holdout. Rolling ingestion still needs human admission and frozen releases; the newest 90 days are not automatically unseen.
 
 Give the engineering agent development results and permitted traces only. Keep holdout labels, per-case matching decisions, and diagnostic artifacts with the independent evaluator; release only predeclared aggregate feedback. Limit repeated holdout queries. A public repository-held-out case tests tuning separation, not guaranteed absence from foundation-model training. New reviewed development findings enter a new corpus version, never an agent-authored change to frozen answers.
+
+### Future plans: separate RSI harness loop
+
+The separate engineering-agent project may automate the workflow below. Building that agent and its organization-specific tuning is future work; SASTbench supplies the evaluation and visibility contracts.
+
+- **Improvement cycle:** Evaluate → inspect failures → propose a harness change → rerun → compare. The engineering agent uses development results and permitted traces to propose changes to prompts, tools, rules, context, workflow, or thresholds. SASTbench measures the candidate against the baseline with the same evaluation cases, scoring rules, and declared constraints. The external project owns promotion and the next iteration; proposed changes do not guarantee improvement.
+- **Organization security context:** Alongside private test cases, organizations could supply versioned architecture notes, authorization rules, tenant boundaries, and intended capabilities to guide harness tuning and provide permitted scanner context. Keep the evaluated case's expected answer and fix details outside the scan input. Record supplied context as part of the system configuration so comparisons identify any context changes.
 
 ## 9. Bring your own test cases
 
@@ -464,7 +473,7 @@ The skill produces draft case records, an evidence/missing-context review queue,
 5. Return that feedback to humans or the separate engineering agent. Evaluate the candidate harness they supply against the frozen evaluator and acceptance constraints in Section 8, then repeat harness runs on the same approved cases. Keep protected evaluation feedback outside the tuning loop.
 6. Admit additional cases or label corrections through review into a new version, retaining earlier run records.
 
-Allow organization-specific categories with declared matching rules. Organizations may supply architecture and security-policy context as versioned runtime input, while expected answers stay with the evaluator. Tune harness configuration on development cases; importing a pack does not fine-tune a model. Within-repository evaluation supports claims about that codebase; cross-repository claims need separate coverage. Report private and public scores separately; any combined score needs explicit weights.
+Allow organization-specific categories with declared matching rules. Keep necessary deployment and authorization assumptions in the scan contract under Section 2. Broader organization security context for harness tuning belongs to the [future RSI work](#future-plans-separate-rsi-harness-loop). Tune harness configuration on development cases; importing a pack does not fine-tune a model. Within-repository evaluation supports claims about that codebase; cross-repository claims need separate coverage. Report private and public scores separately; any combined score needs explicit weights.
 
 Keep source, labels, results, and traces in organization-controlled storage by default. Remote inference requires an approved data-egress and retention policy; local logs alone do not make it private. Credentials stay outside manifests. Retain draft/reviewed/released states so new cases cannot silently change an earlier denominator.
 
@@ -477,7 +486,7 @@ Ship a core Python package with CLI/library entry points, separate versioned cor
 ### What SASTbench delivers
 
 - **Versioned CVE corpus:** real vulnerable repository snapshots, fixes, target mechanisms, accepted evidence locations, and validated fixed/safe controls where available. Published advisories and maintainer records supply the vulnerability evidence; benchmark review checks the exact source mapping and scoring label used by the evaluator. Organization-owned packs use the same format.
-- **SDK for harness visibility:** records model/tool calls, context delivered to the model, candidate findings, filtering decisions, errors, and timing. A shared trace format links those observations to scan results and marks incomplete capture. It shows recorded harness behavior, with the reasoning limits described in Section 6.
+- **SDK for harness visibility:** records model/tool calls, context delivered to the model, the finding lifecycle from candidate creation through validation/filtering to final submission, errors, and timing. A shared trace format links those observations to scan results and marks incomplete capture. It shows recorded harness behavior, with the reasoning limits described in Section 6.
 
 The evaluator turns those assets into detection, control, review-burden, completion, cost, and observability reports. It does not claim that every repository vulnerability is labeled.
 
@@ -488,7 +497,7 @@ Version the engine, schemas, SDK/connectors, adapters, mappings, scorer, corpus,
 | D1. Core protocol and evaluator | Versioned schemas; validate/plan/run/import/score/report interfaces; offline score replay without an agent framework or LLM judge. |
 | D2. Versioned CVE corpus release | Admitted repositories/snapshots frozen in a release manifest; workflow/role annotations, source provenance, targets, families, coverage, splits, validation records, hashes, and preparation recipes; safe-capability pilot aiming for ten repositories with independent property/evidence review; visible control gaps and private-pack starter template. |
 | D3. Integrations and backend decision | Own-harness adapter with observer SDK integration, callback/native-trace connectors, pinned CLI scanner, SARIF/native import, multi-model execution, parity/conformance tests, and an Inspect/Harbor/direct-runner comparison. |
-| D4. Reproducible run and observability bundle | Raw/canonical predictions, status, setup/usage/cost, policy and version provenance, model/tool calls, model-visible context and filtering events with per-category capture status, and evaluator-side decisions. Equivalent inputs score identically across paths; diagnostic claims require their supporting capture. |
+| D4. Reproducible run and observability bundle | Raw/canonical predictions, status, setup/usage/cost, policy and version provenance, model/tool calls, model-visible context and finding-lifecycle events with per-category capture status, and evaluator-side decisions. Equivalent inputs score identically across paths; diagnostic claims require their supporting capture. |
 | D5. Detection report and review pack | Workload-separated scorecards: known-target detection rate (full recall) and budget curves with first-hit ranks, target density, conditional control bounds/coverage, sampled review, uncertainty, cost, local trace timeline, and baseline/candidate comparison. Native ranking and unranked diagnostics labeled separately; imported vendor runs marked independently verified or unverified. |
 | D6. Development gate | Frozen acceptance constraints and protected evaluation separated from development feedback; one complete organization-owned case import, review, baseline/candidate comparison, and decision using the same scorer. |
 | D7. Guides and examples | Install, native scanner, own harness/multi-model, SDK/connector integration and capture limits, PR mode, output import, private corpus, safe-control/adapter/case authoring, and offline replay; case-authoring SKILL.md for repository/document intake and corpus-maintenance SKILL.md with the correction-PR workflow. Turn the worked scoring and trace examples into conformance fixtures. |
@@ -496,7 +505,7 @@ Version the engine, schemas, SDK/connectors, adapters, mappings, scorer, corpus,
 Build in this order:
 
 1. Contracts and scorer fixtures: unique targets, claim budgets, unknowns, duplicates, shared snapshots, partial/error states, and unavailable controls.
-2. A small end-to-end real-case slice with our own harness and one pinned scanner: grouped inputs, isolation, controls, canonical outputs, and replay. Include the observer SDK at shared boundaries, context selection, and finding filtering without replacing the harness. Exercise the case-authoring skill with imported findings, repository fixes, and a supporting document on an approved sample pack, then carry it through a baseline/candidate comparison.
+2. A small end-to-end real-case slice with our own harness and one pinned scanner: grouped inputs, isolation, controls, canonical outputs, and replay. Include the observer SDK at shared boundaries, context selection, and finding lifecycle stages without replacing the harness. Exercise the case-authoring skill with imported findings, repository fixes, and a supporting document on an approved sample pack, then carry it through a baseline/candidate comparison.
 3. Native PR integration, review workflow, repeated-run pilot, backend comparison, and buyer report. Expand validated coverage, including the ten-repository safe-control pilot.
 4. Broader protected splits, release gates, and selected follow-on experiments.
 
