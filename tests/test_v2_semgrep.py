@@ -17,6 +17,7 @@ import pytest
 
 from sastbench.adapters import semgrep as semgrep_module
 from sastbench.adapters.base import AdapterError, CommandResult, SystemSpec
+from sastbench.contracts import _require_relative_path as validate_relative_path
 from sastbench.adapters.semgrep import (SemgrepAdapter, _dotted_prefixes, import_semgrep_results,
                                         semgrep_version)
 
@@ -54,15 +55,15 @@ UNLOADED_RULE_FILES = {
 }
 
 
-def pinned_rules_repo(tmp_path: Path, *, escape_symlink: bool = False, rule_symlink: str | None = None,
+def pinned_rules_repo(tmp_path: Path, *, symlinks: dict[str, str] | None = None,
                       extra_files: dict[str, str] | None = None, name: str = "rules-repo") -> tuple[Path, str]:
     """A tiny git repository holding one pinned Semgrep rule, as an offline ruleset source.
 
-    ``rule_symlink`` checks in ``python/linked.yaml`` as a symlink to that literal target, the
+    ``symlinks`` checks in each checkout-relative path as a symlink to that literal target, the
     way a rules repository can carry one: git stores the target string and recreates it on
-    checkout, so the link is relative to wherever the pinned checkout lands. ``extra_files``
-    adds further checkout-relative files verbatim, and ``name`` allows two repositories under
-    one tmp_path.
+    checkout, so a relative link resolves against wherever the pinned checkout lands.
+    ``extra_files`` adds further checkout-relative files verbatim, and ``name`` allows two
+    repositories under one tmp_path.
     """
     rules = tmp_path / name
     (rules / "python").mkdir(parents=True)
@@ -71,11 +72,10 @@ def pinned_rules_repo(tmp_path: Path, *, escape_symlink: bool = False, rule_syml
         target = rules / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-    if rule_symlink is not None:
-        os.symlink(rule_symlink, rules / "python" / "linked.yaml")
-    if escape_symlink:
-        # A checked-in symlink that leaves the checkout once it is resolved.
-        (rules / "escape").symlink_to("..")
+    for relative, link_target in (symlinks or {}).items():
+        link = rules / relative
+        link.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(link_target, link)
     _git("init", "-q", "-b", "main", cwd=rules)
     _git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=rules)
     _git("add", "-A", cwd=rules)
@@ -103,6 +103,18 @@ def fake_semgrep(tmp_path: Path, stdout_text: str, exit_code: int, *,
         "    raise SystemExit(0)\n"
         f"sys.stdout.write({stdout_text!r})\n"
         f"raise SystemExit({exit_code})\n", encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
+def failing_version_semgrep(tmp_path: Path, stderr_text: str = "semgrep: unknown option --version\n") -> Path:
+    """A stand-in binary whose ``--version`` writes to stderr and exits non-zero."""
+    script = tmp_path / "fake-semgrep-badversion"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        f"sys.stderr.write({stderr_text!r})\n"
+        "raise SystemExit(2)\n", encoding="utf-8")
     script.chmod(0o755)
     return script
 
@@ -322,23 +334,21 @@ def test_semgrep_import_keeps_a_posix_file_name_containing_a_backslash():
 
 @pytest.mark.skipif(os.sep != "/", reason="POSIX file-name semantics")
 @pytest.mark.parametrize("raw_path, expected", [
-    # A drive prefix cannot be a POSIX path, so that one is translated even here.
-    ("C:\\proj\\app.py", "C:/proj/app.py"),
     ("src\\app.py", "src\\app.py"),
     ("./app.py", "app.py"),
     ("src/app.py", "src/app.py"),
 ])
-def test_semgrep_import_translates_only_paths_that_cannot_be_posix(raw_path, expected):
+def test_semgrep_import_leaves_a_posix_path_spelling_alone(raw_path, expected):
     payload = {"results": [{"check_id": "a", "path": raw_path, "start": {"line": 1}, "end": {"line": 1},
                             "extra": {}}]}
-    claims, _ = import_semgrep_results(payload)
+    claims, notes = import_semgrep_results(payload)
     assert claims[0]["primary_location"]["path"] == expected
+    assert notes == []
 
 
 @pytest.mark.parametrize("raw_path, expected", [
     ("src\\app.py", "src/app.py"),
     (".\\app.py", "app.py"),
-    ("C:\\proj\\app.py", "C:/proj/app.py"),
     ("we\\ird.py", "we/ird.py"),
 ])
 def test_semgrep_import_translates_separators_when_the_platform_uses_backslashes(monkeypatch, raw_path, expected):
@@ -350,6 +360,83 @@ def test_semgrep_import_translates_separators_when_the_platform_uses_backslashes
                             "extra": {}}]}
     claims, _ = import_semgrep_results(payload)
     assert claims[0]["primary_location"]["path"] == expected
+
+
+@pytest.mark.parametrize("raw_path, expected", [
+    ("./app.py", "app.py"),
+    (".//app.py", "app.py"),
+    ("././app.py", "app.py"),
+    (".///src/app.py", "src/app.py"),
+    ("./.hidden.py", ".hidden.py"),
+])
+def test_semgrep_import_drops_leading_dot_segments_without_making_the_path_absolute(raw_path, expected):
+    # ".//app.py" used to lose exactly two characters and come back as "/app.py", an absolute
+    # path naming a different file, which the scan-result contract then refuses outright.
+    payload = {"results": [{"check_id": "a", "path": raw_path, "start": {"line": 1}, "end": {"line": 1},
+                            "extra": {}}]}
+    claims, notes = import_semgrep_results(payload)
+    assert claims[0]["primary_location"]["path"] == expected
+    assert notes == []
+
+
+@pytest.mark.parametrize("raw_path", ["./", ".//", "././", ".", "..", "../app.py", "src/../../app.py",
+                                     "/etc/passwd", "/", "C:\\proj\\app.py", "app\x00.py"])
+def test_semgrep_import_reports_a_path_that_cannot_be_relative_instead_of_rewriting_it(raw_path):
+    # "./" became the empty string, which no claim can carry. A path that cannot be expressed
+    # inside the scanned tree is reported and left out rather than rewritten into some other
+    # file's name: a claim location has to be a relative path.
+    payload = {"results": [{"check_id": "a", "path": raw_path, "start": {"line": 1}, "end": {"line": 1},
+                            "extra": {}},
+                           {"check_id": "b", "path": "app.py", "start": {"line": 2}, "end": {"line": 2},
+                            "extra": {}}]}
+    claims, notes = import_semgrep_results(payload)
+    # The usable result is still imported and keeps its own result index in the claim id.
+    assert [claim["claim_id"] for claim in claims] == ["c2"]
+    assert claims[0]["primary_location"]["path"] == "app.py"
+    assert len(notes) == 1 and repr(raw_path) in notes[0]
+    assert "no claim was recorded" in notes[0] and "result 1:" in notes[0]
+
+
+def test_semgrep_import_returns_paths_the_scan_result_contract_accepts():
+    # The property the unusable branch exists for: whatever reaches primary_location.path is a
+    # relative path with no '..' segment, which is what _require_relative_path checks when the
+    # runner writes result.json.
+    payload = {"results": [{"check_id": f"c{index}", "path": raw_path, "start": {"line": 1}, "end": {"line": 1},
+                            "extra": {}}
+                           for index, raw_path in enumerate([".//app.py", "./", "..", "/etc/passwd", "src/app.py",
+                                                             "../x.py", "C:\\proj\\app.py", "app\x00.py",
+                                                             "we\\ird.py"])]}
+    claims, notes = import_semgrep_results(payload)
+    for claim in claims:
+        validate_relative_path(claim["primary_location"]["path"], "primary_location.path")
+    assert [claim["primary_location"]["path"] for claim in claims] == ["app.py", "src/app.py", "we\\ird.py"]
+    assert len(notes) == 6
+
+
+def test_semgrep_import_reports_a_windows_absolute_path_as_unusable(monkeypatch):
+    # On Windows both a drive path and a UNC path are absolute, so neither can be a location
+    # inside the scanned tree; translating the separators would only hide that.
+    monkeypatch.setattr(semgrep_module, "_NATIVE_SEPARATOR", "\\")
+    for raw_path in ("C:\\proj\\app.py", "\\\\server\\share\\app.py"):
+        payload = {"results": [{"check_id": "a", "path": raw_path, "start": {"line": 1}, "end": {"line": 1},
+                                "extra": {}}]}
+        claims, notes = import_semgrep_results(payload)
+        assert claims == []
+        assert len(notes) == 1 and "absolute" in notes[0] and repr(raw_path) in notes[0]
+
+
+def test_semgrep_import_still_reports_a_bad_shape_in_a_result_whose_path_is_unusable():
+    # Dropping the claim must not skip the checks: a malformed field in that same result is
+    # still a named shape error, not a result quietly passed over.
+    payload = {"results": [{"check_id": "a", "path": "/etc/passwd", "start": {"line": 1}, "end": {"line": 1},
+                            "extra": {"message": 7}}]}
+    with pytest.raises(AdapterError, match="extra.message as a int"):
+        import_semgrep_results(payload)
+
+
+def test_semgrep_import_docstring_states_what_happens_to_an_unusable_path():
+    doc = " ".join((import_semgrep_results.__doc__ or "").split())
+    assert "neither rewritten nor recorded" in doc and "a claim location must be a relative path" in doc
 
 
 def test_semgrep_import_docstring_calls_the_unmatched_prefix_note_a_heuristic():
@@ -485,36 +572,105 @@ def test_semgrep_prepare_requires_relative_string_paths_inside_the_checkout(tmp_
 def test_semgrep_prepare_refuses_a_ruleset_path_that_escapes_through_a_symlink(tmp_path):
     # The entry itself looks relative and harmless; only resolution shows it leaves the pinned
     # checkout, which would hash and scan rules that the recorded commit does not contain.
-    rules, commit = pinned_rules_repo(tmp_path, escape_symlink=True)
+    rules, commit = pinned_rules_repo(tmp_path, symlinks={"escape": ".."})
     spec = SystemSpec("s", "semgrep", {"ruleset": {"url": str(rules), "commit": commit, "paths": ["escape"]}})
     with pytest.raises(AdapterError, match="outside the pinned checkout"):
         SemgrepAdapter().prepare(spec, tmp_path / "cache")
 
 
-def test_semgrep_prepare_refuses_a_symlinked_rule_file_inside_an_allowed_directory(tmp_path):
-    # The ruleset path itself is fine; the symlink sits inside it. rglob yields the link and
-    # is_file() follows it, so without this refusal a rule file from outside the pinned commit
-    # would be hashed into the recorded tree hash and loaded by Semgrep.
+def test_semgrep_prepare_refuses_a_rule_symlink_resolving_outside_the_checkout(tmp_path):
+    # The ruleset path itself is fine; the symlink sits inside it and Semgrep would load it,
+    # since read_config_folder keeps `is_config_suffix(l) and l.is_file()` and is_file() follows
+    # the link. Without this refusal a rule file the pinned commit does not hold would be hashed
+    # into the recorded tree hash and scanned with.
     (tmp_path / "outside").mkdir()
     (tmp_path / "outside" / "evil.yaml").write_text(RULE_YAML, encoding="utf-8")
-    rules, commit = pinned_rules_repo(tmp_path, rule_symlink="../../../outside/evil.yaml")
-    spec = SystemSpec("s", "semgrep", {"ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}})
-    with pytest.raises(AdapterError, match="contains the symlink") as raised:
-        SemgrepAdapter().prepare(spec, tmp_path / "cache")
-    assert "'python'" in str(raised.value) and "python/linked.yaml" in str(raised.value)
-
-
-def test_semgrep_prepare_refuses_a_rule_file_resolving_outside_the_checkout(tmp_path, monkeypatch):
-    # Defense in depth behind the symlink refusal: with is_symlink() answering False, the
-    # resolved location of every hashed rule file still has to sit under the pinned root.
-    (tmp_path / "outside").mkdir()
-    (tmp_path / "outside" / "evil.yaml").write_text(RULE_YAML, encoding="utf-8")
-    rules, commit = pinned_rules_repo(tmp_path, rule_symlink="../../../outside/evil.yaml")
-    monkeypatch.setattr(Path, "is_symlink", lambda self: False)
+    rules, commit = pinned_rules_repo(tmp_path, symlinks={"python/linked.yaml": "../../../outside/evil.yaml"})
     spec = SystemSpec("s", "semgrep", {"ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}})
     with pytest.raises(AdapterError, match="outside the pinned checkout") as raised:
         SemgrepAdapter().prepare(spec, tmp_path / "cache")
-    assert "python/linked.yaml" in str(raised.value)
+    assert "python/linked.yaml" in str(raised.value) and "outside/evil.yaml" in str(raised.value)
+
+
+def test_semgrep_prepare_hashes_a_rule_symlink_that_stays_inside_the_checkout(tmp_path):
+    # A rule file symlinked to another file in the same pinned commit is content that commit
+    # holds, and Semgrep loads it under the path the link occupies. Refusing it refused
+    # legitimate rulesets; it is counted and hashed by the content it resolves to, which is why
+    # the checkout carrying the link and the one carrying a plain copy record the same hash.
+    linked, commit_link = pinned_rules_repo(tmp_path, name="linked-repo",
+                                            symlinks={"python/linked.yaml": "shell.yaml"})
+    copied, commit_copy = pinned_rules_repo(tmp_path, name="copied-repo",
+                                            extra_files={"python/linked.yaml": RULE_YAML})
+    prepared_link = SemgrepAdapter().prepare(
+        SystemSpec("s", "semgrep", {"ruleset": {"url": str(linked), "commit": commit_link, "paths": ["python"]}}),
+        tmp_path / "cache")
+    prepared_copy = SemgrepAdapter().prepare(
+        SystemSpec("s", "semgrep", {"ruleset": {"url": str(copied), "commit": commit_copy, "paths": ["python"]}}),
+        tmp_path / "cache")
+    assert (Path(prepared_link["ruleset_root"]) / "python" / "linked.yaml").is_symlink()
+    assert prepared_link["ruleset"]["rule_files"] == 2
+    assert prepared_link["ruleset"]["tree_hash"] == prepared_copy["ruleset"]["tree_hash"]
+
+
+def test_semgrep_prepare_ignores_a_symlink_semgrep_would_not_load_as_a_rule_file(tmp_path):
+    # Real rules repositories carry symlinks that are not rule files. read_config_folder keeps
+    # only `is_config_suffix(l) and l.is_file()`, so Semgrep opens none of these three, and
+    # refusing them refused whole rulesets over files no scan ever reads.
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "NOTES.md").write_text("notes\n", encoding="utf-8")
+    (tmp_path / "outside" / "more-rules").mkdir()
+    rules, commit = pinned_rules_repo(tmp_path, symlinks={
+        # Not a rule-file suffix, a directory once followed, and a target that is not there.
+        "python/README.md": "../../../outside/NOTES.md",
+        "python/dir.yaml": "../../../outside/more-rules",
+        "python/missing.yaml": "../../../outside/absent.yaml",
+    })
+    spec = SystemSpec("s", "semgrep", {"ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}})
+    prepared = SemgrepAdapter().prepare(spec, tmp_path / "cache")
+    root = Path(prepared["ruleset_root"])
+    assert (root / "python" / "README.md").is_symlink() and (root / "python" / "dir.yaml").is_symlink()
+    # Only shell.yaml is a rule file Semgrep would load, so only shell.yaml is in the inventory.
+    assert prepared["ruleset"]["rule_files"] == 1
+
+
+def test_semgrep_prepare_docstring_states_the_symlink_rule_and_the_error_type(tmp_path):
+    doc = " ".join((SemgrepAdapter.prepare.__doc__ or "").split())
+    assert "refused only when Semgrep would load it as a rule file" in doc
+    assert "resolves outside the pinned checkout root" in doc
+    assert "resolves inside the checkout is kept and hashed by the content it resolves to" in doc
+    assert "Every other symlink is ignored" in doc
+    assert "Every failure raised here is an ``AdapterError``" in doc
+
+
+def test_semgrep_prepare_wraps_a_short_commit_in_an_adapter_error(tmp_path):
+    # MaterializationError is not an AdapterError, and prepare() is contracted to raise the
+    # latter, so a commit git never sees must still arrive as an AdapterError.
+    rules, _ = pinned_rules_repo(tmp_path)
+    spec = SystemSpec("s", "semgrep", {"ruleset": {"url": str(rules), "commit": "abc123", "paths": ["python"]}})
+    with pytest.raises(AdapterError, match="ruleset could not be materialized") as raised:
+        SemgrepAdapter().prepare(spec, tmp_path / "cache")
+    # The original message survives inside the wrapper.
+    assert "full 40-hex SHA" in str(raised.value)
+
+
+def test_semgrep_prepare_wraps_an_unreachable_ruleset_url_in_an_adapter_error(tmp_path):
+    # A local path that is not a repository: the fetch fails without touching the network.
+    missing = tmp_path / "no-such-repo"
+    spec = SystemSpec("s", "semgrep", {"ruleset": {"url": str(missing), "commit": "a" * 40, "paths": ["python"]}})
+    with pytest.raises(AdapterError, match="ruleset could not be materialized") as raised:
+        SemgrepAdapter().prepare(spec, tmp_path / "cache")
+    assert "git fetch" in str(raised.value)
+
+
+def test_semgrep_prepare_wraps_a_modified_cache_entry_in_an_adapter_error(tmp_path):
+    # The cache is immutable, so a checkout someone edited is refused on the next preparation.
+    rules, commit = pinned_rules_repo(tmp_path)
+    spec = SystemSpec("s", "semgrep", {"ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}})
+    prepared = SemgrepAdapter().prepare(spec, tmp_path / "cache")
+    (Path(prepared["ruleset_root"]) / "python" / "extra.yaml").write_text(RULE_YAML, encoding="utf-8")
+    with pytest.raises(AdapterError, match="ruleset could not be materialized") as raised:
+        SemgrepAdapter().prepare(spec, tmp_path / "cache")
+    assert "local modifications" in str(raised.value)
 
 
 def test_semgrep_prepare_rejects_a_ruleset_path_containing_a_nul_byte(tmp_path):
@@ -672,6 +828,35 @@ def test_semgrep_version_refuses_to_overwrite_an_existing_raw_file(tmp_path):
     assert (raw / "semgrep-version.txt").read_text(encoding="utf-8") == "1.2.3 from an earlier run\n"
 
 
+def test_semgrep_version_failure_leaves_no_artifacts_for_the_next_attempt(tmp_path):
+    # The two claimed files stayed behind empty when the probe failed, so a second attempt in
+    # the same raw directory reported a create-only collision instead of the failure that
+    # actually stopped the first one.
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    binary = str(failing_version_semgrep(tmp_path))
+    with pytest.raises(AdapterError, match="semgrep --version failed") as first:
+        semgrep_version(binary, raw)
+    assert "unknown option" in str(first.value)
+    assert sorted(path.name for path in raw.iterdir()) == []
+    with pytest.raises(AdapterError, match="semgrep --version failed") as second:
+        semgrep_version(binary, raw)
+    assert "already exists" not in str(second.value)
+
+
+def test_semgrep_version_failure_keeps_a_file_it_did_not_create(tmp_path):
+    # Cleanup covers only what this call claimed: an earlier attempt's recorded output is
+    # evidence, and the create-only refusal is what protects it.
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "semgrep-version.stderr.txt").write_text("an earlier run\n", encoding="utf-8")
+    with pytest.raises(AdapterError, match="already exists and semgrep raw output files are create-only"):
+        semgrep_version(str(failing_version_semgrep(tmp_path)), raw)
+    assert (raw / "semgrep-version.stderr.txt").read_text(encoding="utf-8") == "an earlier run\n"
+    # The file this call did create before the refusal is gone, so a retry reports its own cause.
+    assert not (raw / "semgrep-version.txt").exists()
+
+
 def test_semgrep_scan_refuses_to_overwrite_an_existing_raw_output_file(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
@@ -726,6 +911,31 @@ def test_semgrep_non_object_entries_in_the_errors_array_are_noted(tmp_path):
     outcome, _ = scan_with_fake(tmp_path, payload, 0)
     assert outcome.status == "success"
     assert any("were not objects" in note for note in outcome.notes)
+
+
+@pytest.mark.parametrize("diagnostic, reason_in_message", [
+    ("Rule timeout on app.py", True),
+    ("   ", False),
+    ("", False),
+])
+def test_semgrep_zero_exit_with_fatal_diagnostics_reports_the_shared_message_shape(tmp_path, diagnostic,
+                                                                                   reason_in_message):
+    # This partial branch reported the first diagnostic and nothing else, so an empty diagnostic
+    # left an empty error message, and the stderr tail every other failure path carries was
+    # dropped exactly where the JSON said least.
+    payload = json.dumps({"version": "9.9.9", "paths": {"scanned": ["app.py"]},
+                          "errors": [{"level": "error", "message": diagnostic}],
+                          "results": [{"check_id": "probe.rule", "path": "app.py", "start": {"line": 1},
+                                       "end": {"line": 1},
+                                       "extra": {"message": "finding", "severity": "WARNING", "metadata": {}}}]})
+    outcome, _ = scan_with_fake(tmp_path, payload, 0)
+    assert outcome.status == "partial" and outcome.exit_code == 0
+    assert outcome.error["code"] == "scan_errors"
+    message = outcome.error["message"]
+    assert message.startswith("semgrep exited 0 after scanning 1 paths with 1 error-level diagnostics")
+    assert message.endswith("; stderr: ")
+    assert ("reason: Rule timeout on app.py" in message) is reason_in_message
+    assert [claim["native_rule_id"] for claim in outcome.claims] == ["probe.rule"]
 
 
 # --- the real binary --------------------------------------------------------------------

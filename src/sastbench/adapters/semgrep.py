@@ -14,9 +14,14 @@ against the installed binary. Selection is not parse success: a file Semgrep sel
 fails to parse, or whose rules its version filter drops, is still counted and hashed here, and
 rules Semgrep reads from anywhere but the configured directories are not covered at all.
 
-Only plain files inside the pinned checkout are read: a symlink under a configured ruleset
-directory is refused rather than followed, so the recorded hash describes that commit's own
-content. Live ``p/...`` registry configs are refused because they are moving targets, not pins.
+Every hashed byte comes from inside the pinned checkout. A symlink under a configured ruleset
+directory is judged only when Semgrep would load it as a rule file, which is the selection above
+and being a regular file once followed: such a link is refused when its target resolves outside
+the checkout root, and is otherwise hashed by the content it resolves to, recorded under the path
+the link occupies. A symlink Semgrep would not read as a rule file is ignored, because rules
+repositories carry symlinks for other things. Rules reachable only through a symlinked directory
+are covered by neither this inventory nor Semgrep's own walk, since neither descends into one.
+Live ``p/...`` registry configs are refused because they are moving targets, not pins.
 
 Raw output files are create-only. ``semgrep.json``, ``semgrep.stderr.txt``,
 ``semgrep-version.txt`` and ``semgrep-version.stderr.txt`` are claimed with an exclusive
@@ -35,7 +40,7 @@ import sys
 from typing import Any
 
 from ..kinds import cwe_ids, kind_for_cwes, mapping_version
-from ..materialize import fetch_snapshot, sha256_file, tree_hash
+from ..materialize import MaterializationError, fetch_snapshot, sha256_file, tree_hash
 from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command, tail_text
 
 
@@ -53,6 +58,10 @@ _RULE_FIXTEST_SUFFIX = ".fixed"
 # file name, so a payload path is only translated when it cannot be a POSIX path.
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 _NATIVE_SEPARATOR = os.sep
+# Leading "./" segments name the same file the rest of the path does: "./x", ".//x" and "././x"
+# are all "x". Consuming the slashes together with the dot is what keeps ".//x" from becoming
+# "/x", an absolute path naming a different file.
+_LEADING_DOT_SEGMENTS = re.compile(r"^(?:\./+)+")
 
 
 def _is_loaded_rule_file(path: Path) -> bool:
@@ -88,6 +97,21 @@ def _claim_output(path: Path, what: str) -> None:
         raise AdapterError(f"{what} could not be recorded: {exc}") from exc
 
 
+def _discard_outputs(paths) -> None:
+    """Remove raw files this module created for an attempt that recorded nothing usable.
+
+    A failure that leaves zero-byte artifacts behind makes the next attempt in the same raw
+    directory fail on the create-only claim, which reports a file collision instead of the
+    failure that actually stopped the first one. Only files the failing call created are passed
+    here, so evidence from an earlier attempt is never removed.
+    """
+    for path in paths:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
 def _binary(spec: SystemSpec) -> str:
     configured = spec.config.get("binary")
     if configured:
@@ -117,23 +141,35 @@ def semgrep_version(binary: str, raw_dir: Path, timeout_seconds: float = 60) -> 
     these are raised as ``AdapterError``. Bytes that are not UTF-8 are replaced rather than
     raising, so the returned string can contain replacement characters: an undecodable version
     banner is a provenance defect, not a reason to abandon the run before it starts.
+
+    A failure removes the two files this call created, carrying their content into the raised
+    message as a stderr tail instead. Left behind, the empty pair would make a second attempt in
+    the same raw directory fail on the create-only claim and report a file collision rather than
+    the failure that actually stopped the first one. A file this call did not create is never
+    removed: that one is an earlier attempt's evidence.
     """
     stdout_path = raw_dir / "semgrep-version.txt"
     stderr_path = raw_dir / "semgrep-version.stderr.txt"
     what = f"semgrep --version output under {raw_dir}"
     _claim_output(stdout_path, what)
-    _claim_output(stderr_path, what)
+    created = [stdout_path]
     try:
-        result = run_command([binary, "--version"], cwd=raw_dir, timeout_seconds=timeout_seconds,
-                             env=build_env(), stdout_path=stdout_path, stderr_path=stderr_path)
-        if result.timed_out:
-            raise AdapterError(f"semgrep --version exceeded its {timeout_seconds}s limit and was killed after "
-                               f"{result.wall_seconds:.1f}s: {tail_text(result.stderr_path)}")
-        if result.exit_code != 0:
-            raise AdapterError(f"semgrep --version failed: {tail_text(result.stderr_path)}")
-        text = stdout_path.read_text(encoding="utf-8", errors="replace")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise AdapterError(f"{what} could not be recorded: {exc}") from exc
+        _claim_output(stderr_path, what)
+        created.append(stderr_path)
+        try:
+            result = run_command([binary, "--version"], cwd=raw_dir, timeout_seconds=timeout_seconds,
+                                 env=build_env(), stdout_path=stdout_path, stderr_path=stderr_path)
+            if result.timed_out:
+                raise AdapterError(f"semgrep --version exceeded its {timeout_seconds}s limit and was killed after "
+                                   f"{result.wall_seconds:.1f}s: {tail_text(result.stderr_path)}")
+            if result.exit_code != 0:
+                raise AdapterError(f"semgrep --version failed: {tail_text(result.stderr_path)}")
+            text = stdout_path.read_text(encoding="utf-8", errors="replace")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise AdapterError(f"{what} could not be recorded: {exc}") from exc
+    except AdapterError:
+        _discard_outputs(created)
+        raise
     return text.strip()
 
 
@@ -190,8 +226,8 @@ def _path_segment_pool(prefixes) -> set[str]:
     return pool
 
 
-def _claim_path(raw: str) -> str:
-    """The payload path with a leading ``./`` removed, without inventing a rename.
+def _claim_path(raw: str) -> tuple[str, str]:
+    """``(path relative to the scanned tree, "")``, or ``(raw, reason)`` when it is not one.
 
     Semgrep emits the path with the separators of the platform it ran on, and the adapter reads
     the output of a scan that just ran on this one. So backslashes are translated only when the
@@ -199,12 +235,33 @@ def _claim_path(raw: str) -> str:
     separator is a backslash. On POSIX a source file named ``we\\ird.py`` keeps the name it
     really has instead of becoming ``we/ird.py``, which names a different file or none at all.
     The cost is that a payload recorded on Windows and imported on POSIX keeps its backslashes.
+
+    The only other normalization is dropping leading ``./`` segments, which name the same file:
+    ``./app.py``, ``.//app.py`` and ``././app.py`` all become ``app.py``. A returned path is
+    therefore always usable as a claim location: never absolute, never empty, never carrying a
+    ``..`` segment and never carrying a NUL byte, which is exactly what the scan-result contract
+    requires of one. A value that cannot be expressed that way is not rewritten at all: an
+    absolute path, a drive-prefixed path, one that names nothing once its dot segments are
+    removed (``./``, ``.``), one that leaves the scanned tree (``..``, ``../x.py``) and one
+    holding a NUL byte come back verbatim with the reason they are unusable, for the caller to
+    report.
     """
-    if _NATIVE_SEPARATOR == "\\" or _WINDOWS_DRIVE.match(raw):
-        raw = raw.replace("\\", "/")
-    if raw.startswith("./"):
-        raw = raw[2:]
-    return raw
+    text = raw
+    if "\x00" in text:
+        return raw, "it holds a NUL byte, which cannot name a file"
+    if _NATIVE_SEPARATOR == "\\" or _WINDOWS_DRIVE.match(text):
+        text = text.replace("\\", "/")
+    if _WINDOWS_DRIVE.match(text):
+        return raw, "it carries a drive prefix, so it is absolute on the platform that emitted it"
+    if text.startswith("/"):
+        return raw, "it is an absolute path"
+    remainder = _LEADING_DOT_SEGMENTS.sub("", text)
+    segments = [segment for segment in remainder.split("/") if segment not in ("", ".")]
+    if not segments:
+        return raw, "it names nothing once its dot segments are removed"
+    if ".." in segments:
+        return raw, "it leaves the scanned tree through a '..' segment"
+    return remainder, ""
 
 
 def _line_number(item: dict, index: int, key: str) -> int:
@@ -238,11 +295,16 @@ def import_semgrep_results(payload: dict, *, artifact_id: str = ARTIFACT_JSON,
     check_id whose path prefix none of the supplied directories match: such an id is kept
     verbatim.
 
-    ``primary_location.path`` is the payload's ``path`` with a leading ``./`` removed.
-    Backslashes become forward slashes only for a path that cannot be a POSIX one: a Windows
-    drive prefix, or any backslash when this platform's separator is a backslash. On POSIX a
-    file whose name contains a backslash keeps the name it really has, and a payload recorded
-    on Windows and imported here keeps its backslashes rather than being guessed at.
+    ``primary_location.path`` is the payload's ``path`` with its leading ``./`` segments
+    removed. Backslashes become forward slashes only for a path that cannot be a POSIX one: a
+    Windows drive prefix, or any backslash when this platform's separator is a backslash. On
+    POSIX a file whose name contains a backslash keeps the name it really has, and a payload
+    recorded on Windows and imported here keeps its backslashes rather than being guessed at.
+    A payload path that cannot be expressed as a path inside the scanned tree (an absolute or
+    drive-prefixed path, one that names nothing once its dot segments are removed, one that
+    leaves the tree through ``..``, or one holding a NUL byte) is neither rewritten nor
+    recorded: a claim location must be a relative path, so that result contributes a note
+    naming it and its reason instead of a claim.
 
     Whether an unshortened id is also *noted* is a heuristic keyed on the supplied roots'
     leading segments: the note fires only when the id's first segment is one of those segments
@@ -293,7 +355,7 @@ def import_semgrep_results(payload: dict, *, artifact_id: str = ARTIFACT_JSON,
         raw_path = item.get("path")
         _require(isinstance(raw_path, str) and raw_path,
                  f"semgrep JSON result {index} has path as a {_shape(raw_path)}, not a non-empty string")
-        path = _claim_path(raw_path)
+        path, unusable = _claim_path(raw_path)
         start = _line_number(item, index, "start")
         end = _line_number(item, index, "end")
         if end < start:
@@ -330,6 +392,14 @@ def import_semgrep_results(payload: dict, *, artifact_id: str = ARTIFACT_JSON,
             claim["native_severity"] = severity
         if cwes:
             claim["native_cwe"] = cwes
+        if unusable:
+            # Every field of the result was still read and type-checked above, so a malformed
+            # payload is reported whether or not its location can be used; only the claim is
+            # left out, because a claim location has to be a relative path.
+            notes.append(f"result {index}: path {raw_path!r} cannot be expressed as a path inside the scanned "
+                         f"tree ({unusable}); no claim was recorded for it and the raw payload keeps the result "
+                         "verbatim")
+            continue
         claims.append(claim)
     for head, count in sorted(unmatched.items()):
         notes.append(f"{count} check_id(s) start with {head!r}, a path-like prefix that no supplied ruleset root "
@@ -407,6 +477,24 @@ class SemgrepAdapter(Adapter):
     supported_languages = frozenset({"python", "javascript", "typescript", "go", "rust"})
 
     def prepare(self, spec: SystemSpec, cache_root: Path) -> dict[str, Any]:
+        """Fetch the pinned rules commit and record an inventory of the rule files it holds.
+
+        The symlink rule, exactly: a symlink under a configured ruleset path is refused only
+        when Semgrep would load it as a rule file, which is ``_is_loaded_rule_file`` and being a
+        regular file once followed (``read_config_folder`` keeps ``is_config_suffix(l) and
+        l.is_file()``), and its target resolves outside the pinned checkout root. Such a link
+        would put content the recorded commit does not hold into the recorded hash and into the
+        scan. A link Semgrep would load whose target resolves inside the checkout is kept and
+        hashed by the content it resolves to, under the path the link occupies. Every other
+        symlink is ignored, including one to a directory and one whose target is missing, since
+        Semgrep reads neither.
+
+        Every failure raised here is an ``AdapterError``, which is what the adapter contract
+        promises its callers: a bad configuration value, a ruleset path that leaves the
+        checkout, and the ``MaterializationError`` that a short or non-hex commit, an
+        unreachable URL, or a modified cache entry raises, whose message is kept verbatim
+        inside the wrapper.
+        """
         ruleset = spec.config.get("ruleset")
         if not isinstance(ruleset, dict) or not {"url", "commit", "paths"} <= set(ruleset):
             raise AdapterError("semgrep config.ruleset needs url, commit, and paths (a pinned rules checkout)")
@@ -428,7 +516,13 @@ class SemgrepAdapter(Adapter):
             relative = Path(entry)
             if relative.is_absolute() or ".." in relative.parts:
                 raise AdapterError(f"ruleset path {entry!r} must stay inside the checkout: no absolute paths and no '..'")
-        snapshot = fetch_snapshot(url, str(ruleset["commit"]), cache_root)
+        try:
+            snapshot = fetch_snapshot(url, str(ruleset["commit"]), cache_root)
+        except MaterializationError as exc:
+            # The runner records either exception as a skip, but prepare() is contracted to
+            # raise AdapterError, so the materialization failure is wrapped rather than left to
+            # escape as a second exception type with the same meaning.
+            raise AdapterError(f"semgrep ruleset could not be materialized: {exc}") from exc
         # scan() runs semgrep with cwd=source_dir (a private workspace), so a config path
         # relative to the controller's working directory would not resolve there. Record
         # absolute paths only.
@@ -449,25 +543,23 @@ class SemgrepAdapter(Adapter):
                 raise AdapterError(f"ruleset path {entry!r} is not a directory in {root}")
             config_dirs.append(str(directory))
             for rule_file in sorted(directory.rglob("*")):
-                # Every symlink under the directory is refused, not followed. rglob does not
-                # descend into a symlinked directory, so rules Semgrep would load through one
-                # would be missing from this hash; a symlinked rule file is followed by both
-                # rglob and Semgrep and can point anywhere on the machine. Neither is content
-                # the pinned commit holds at this path.
-                if rule_file.is_symlink():
-                    raise AdapterError(
-                        f"ruleset path {entry!r} contains the symlink {rule_file.relative_to(root).as_posix()!r}; "
-                        "a pinned ruleset must be plain files inside the checkout")
                 # Exactly Semgrep's own selection for a --config directory: read_config_folder
-                # walks rglob("*") and keeps is_config_suffix() files. Skipping dotfiles here
-                # missed rules Semgrep loads, and keeping .test/.fixed YAMLs hashed files it
-                # never reads, so the recorded hash described neither set.
+                # walks rglob("*") and keeps `is_config_suffix(l) and l.is_file()`. Skipping
+                # dotfiles here missed rules Semgrep loads, and keeping .test/.fixed YAMLs
+                # hashed files it never reads, so the recorded hash described neither set. The
+                # same two questions decide a symlink, which is why a linked README or a link
+                # to a directory or to a missing target is passed over rather than refused:
+                # Semgrep opens none of them, and rules repositories do carry them.
                 if not _is_loaded_rule_file(rule_file) or not rule_file.is_file():
                     continue
                 try:
                     resolved = rule_file.resolve()
                 except (OSError, ValueError) as exc:
                     raise AdapterError(f"rule file {rule_file} could not be resolved: {exc}") from exc
+                # A file Semgrep will load has to hold content the pinned commit holds.
+                # resolve() follows symlinks, so a link out of the checkout is refused here and
+                # a link inside it is hashed below by the content it resolves to. rglob does not
+                # descend into a symlinked directory, and neither does Semgrep's own walk.
                 if root not in resolved.parents:
                     raise AdapterError(f"rule file {rule_file.relative_to(root).as_posix()!r} resolves to {resolved}, "
                                        f"outside the pinned checkout {root}")
@@ -577,17 +669,23 @@ class SemgrepAdapter(Adapter):
         if fatal:
             base["notes"].append(f"{len(fatal)} error-level Semgrep diagnostics; see raw semgrep.json errors")
             reason = str(fatal[0].get("message", "")).strip()
+            detail = f"; reason: {reason}" if reason else ""
             if not scanned and not claims:
                 # Exit 0 does not make this a clean run: nothing was scanned and nothing was
                 # reported, so the invocation observed no source at all. Calling it partial
                 # would let a failed run read as a quiet negative result.
-                detail = f"; reason: {reason}" if reason else ""
                 message = ("semgrep exited 0 with error-level diagnostics, no scanned paths and "
                            f"no results{detail}; stderr: {tail_text(stderr)}")
                 return NativeOutcome(status="error", exit_code=0, claims=[],
                                      error={"code": "scan_errors", "message": message[:2000]}, **base)
+            # The same shape as every other failure message here: what the run did, the first
+            # diagnostic when it carries one, and the stderr tail. Reporting the diagnostic
+            # alone left an empty message whenever Semgrep sent an empty one, and dropped the
+            # only other place the reason could be.
+            message = (f"semgrep exited 0 after scanning {len(scanned)} paths with {len(fatal)} error-level "
+                       f"diagnostics{detail}; stderr: {tail_text(stderr)}")
             return NativeOutcome(status="partial", exit_code=0, claims=claims,
-                                 error={"code": "scan_errors", "message": reason[:500]}, **base)
+                                 error={"code": "scan_errors", "message": message[:2000]}, **base)
         if skipped:
             base["notes"].append(f"Semgrep skipped {len(skipped)} paths under its own ignore rules; see raw semgrep.json paths")
         if not scanned_reported:
