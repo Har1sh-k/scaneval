@@ -28,11 +28,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import errno
+import os
 from pathlib import Path, PurePath
 import shutil
 import tempfile
 import time
 from typing import Callable
+import uuid
 
 from . import __version__
 from .adapters.base import Adapter, NativeOutcome, SystemSpec
@@ -93,8 +96,27 @@ def _canonical_bytes(value: dict) -> bytes:
 
 
 def _write_new_bytes(path: Path, payload: bytes) -> None:
-    with path.open("xb") as handle:
-        handle.write(payload)
+    """Write *payload* at *path* in one step, refusing to overwrite an existing path.
+
+    The bytes go to a temporary file in the same directory and are renamed into place, so a
+    reader never sees a partially written document: a bundle document is either absent or
+    complete, and a truncated ``execution.json`` never appears beside a valid ``result.json``.
+    The existence check and the rename are two operations rather than one, so this refuses a
+    record that is already there; it does not arbitrate between concurrent writers for one path.
+    """
+    if os.path.lexists(path):
+        raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(path))
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.part")
+    # Created the way a plain create would be, so the umask still decides the mode, and with
+    # O_EXCL so this never writes through a name something else put there first.
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _write_new(path: Path, value: dict) -> None:
@@ -131,12 +153,14 @@ def _resolves_inside(path: Path, base: Path) -> bool:
 
     Used to refuse a path an adapter reported that leaves the bundle through a link. It compares
     resolved paths only: it does not follow bind mounts or hard links, so it catches the obvious
-    escape and is not an isolation boundary.
+    escape and is not an isolation boundary. A path that cannot be resolved at all is not inside
+    anything: the filesystem refused it (``OSError``) or it is not a path the filesystem accepts,
+    such as one holding an embedded NUL byte (``ValueError``).
     """
     try:
         resolved = path.resolve()
         root = base.resolve()
-    except OSError:
+    except (OSError, ValueError):
         return False
     return resolved == root or resolved.is_relative_to(root)
 
@@ -145,9 +169,16 @@ def _move_into_bundle(staging: Path, destination: Path) -> None:
     """Move one staged directory out of the private workspace and into the bundle.
 
     A staging directory the adapter removed is recreated empty at the destination, so the
-    bundle always holds the directory the execution record describes.
+    bundle always holds the directory the execution record describes. A staging directory the
+    adapter replaced with a symbolic link is refused instead of moved: moving it would make the
+    bundle's own ``raw/`` or ``trace/`` a link to somewhere outside the bundle while the run
+    recorded a success. The caller records that refusal as an outcome contract violation.
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if staging.is_symlink():
+        raise ExecutionError(
+            f"the staging directory {staging.name} is a symbolic link, not a directory; it was "
+            "not moved into the bundle")
     if staging.exists():
         shutil.move(str(staging), str(destination))
     else:
@@ -192,11 +223,13 @@ def _read_trace(outcome: NativeOutcome, staged_areas: list[tuple[Path, Path, Pat
                 trace_mode: str, bundle: Path) -> dict:
     """Count the events in the staged trace file and record where it landed.
 
-    Only a file this bundle actually holds is read: a trace path that is a symbolic link, or that
-    resolves outside the bundle, is refused with a note and no count, because a number taken from
-    a file the run never staged would describe something the bundle does not contain. A missing
-    trace file is an unavailable count, not a failure. A file that is not UTF-8 text raises,
-    because a count taken from bytes this cannot decode would be an invented number.
+    Only a regular file this bundle actually holds is read: a trace path that is a symbolic link,
+    that resolves outside the bundle, or that is not a regular file is refused with a note and no
+    count. A number taken from a file the run never staged would describe something the bundle
+    does not contain, and opening a named pipe for reading would block until something wrote to
+    it, which nothing here ever does. A missing trace file is an unavailable count, not a
+    failure. A file that is not UTF-8 text raises, because a count taken from bytes this cannot
+    decode would be an invented number.
     """
     events_path = (_rebase(Path(outcome.trace_path), staged_areas) if outcome.trace_path
                    else trace_dir / "events.jsonl")
@@ -206,7 +239,10 @@ def _read_trace(outcome: NativeOutcome, staged_areas: list[tuple[Path, Path, Pat
         outcome.notes.append("declared trace file is a symbolic link; it was not read or counted")
     elif not _resolves_inside(events_path, bundle):
         outcome.notes.append("declared trace file is outside the bundle; it was not read or counted")
-    elif events_path.exists():
+    elif events_path.exists() and not events_path.is_file():
+        outcome.notes.append("declared trace file is not a regular file; it was not read or "
+                             f"counted: {events_path.name}")
+    elif events_path.is_file():
         try:
             recorded_trace_path = events_path.relative_to(bundle).as_posix()
         except ValueError:
@@ -333,8 +369,11 @@ def run_invocation(
     comparison never completed, so the provenance reports no observed modification and the
     violation names the failed re-hash. And an adapter whose own ``name`` or ``adapter_version``
     is not a non-empty string makes the execution record unwritable: that raises
-    :class:`ExecutionError` with nothing written, which is why :mod:`sastbench.runner` checks
-    those attributes when it prepares a system rather than when it invokes one.
+    :class:`ExecutionError` once the bundle directory, its ``request.json``, and the staged
+    ``raw/`` and ``trace/`` trees are already there, so what remains is a bundle holding the
+    request and the scanner's own output with neither ``result.json`` nor ``execution.json``.
+    That is why :mod:`sastbench.runner` vets the attributes every record copies when it prepares
+    a system rather than when it invokes one.
     """
     if network_policy not in NETWORK_POLICIES:
         raise ExecutionError(f"unknown network policy {network_policy!r}")
@@ -455,6 +494,12 @@ def run_invocation(
             if not path.exists():
                 outcome.notes.append(f"declared artifact missing: {artifact['id']}")
                 continue
+            if not path.is_file():
+                # Only a regular file is hashed. A directory has no bytes of its own, and opening
+                # a named pipe for reading would block until something wrote to it.
+                outcome.notes.append(
+                    f"declared artifact is not a regular file and was not hashed: {artifact['id']}")
+                continue
             try:
                 relative = path.relative_to(bundle).as_posix()
             except ValueError:
@@ -523,8 +568,8 @@ def run_invocation(
         Every way the documents can fail to be written is a :class:`_BundleRefused` naming it:
         anything raised while collecting or hashing declared artifacts, a scan result the
         contract refuses even as an explicit error record, an execution record the contract
-        refuses, and a document holding text UTF-8 cannot encode. Nothing is written until both
-        documents survive all of it.
+        refuses, anything else raised while validating that record, and a document holding text
+        UTF-8 cannot encode. Nothing is written until both documents survive all of it.
         """
         try:
             result, execution = build_documents()
@@ -537,6 +582,12 @@ def run_invocation(
             validate_document("execution-record", execution)
         except ContractError as exc:
             raise _BundleRefused(f"execution record violates its contract: {exc}") from exc
+        except Exception as exc:
+            # Validating walks what the adapter supplied, so a cyclic capture or model_identity
+            # mapping raises here rather than violating the contract. Contained the same way the
+            # build step is, so no adapter-supplied mapping escapes as a crash of the run.
+            raise _BundleRefused(
+                f"the execution record could not be validated: {_failure_message(exc)}") from exc
         try:
             return _canonical_bytes(result), _canonical_bytes(execution)
         except ContractError as exc:

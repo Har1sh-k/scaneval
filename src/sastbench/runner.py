@@ -136,8 +136,20 @@ def _inside(child: Path, parent: Path) -> bool:
     return child == parent or child.is_relative_to(parent)
 
 
+def _sanitized(text: str) -> str:
+    """*text* with whatever UTF-8 cannot encode written out as an escape.
+
+    A lone UTF-16 surrogate survives :func:`canonical_json` and every contract check but cannot
+    be encoded, so text that reaches the manifest from outside this module (an exception message,
+    say) is escaped here rather than left to make the whole manifest unwritable, including the
+    partial manifest a failing run depends on.
+    """
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def _message(exc: BaseException) -> str:
-    return (str(exc) or repr(exc))[:2000]
+    """The exception's own message, escaped where UTF-8 cannot encode it, capped for a record."""
+    return _sanitized(str(exc) or repr(exc))[:2000]
 
 
 def _selected(items: list[dict], key: str, only: set[str] | None, label: str) -> list[dict]:
@@ -255,14 +267,19 @@ def _prepare_input(entry: dict, pack: dict, out_dir: Path, cache_root: Path,
 
 
 def _vet_adapter_identity(spec: SystemSpec, adapter: Adapter) -> None:
-    """Refuse an adapter whose own name or version no record here can carry.
+    """Refuse an adapter whose declared attributes no record here can carry.
 
     The manifest and every execution record copy ``adapter.name`` and ``adapter.adapter_version``
     verbatim, and both contracts require a non-empty string, so an adapter declaring anything
-    else (a float version, say) would make each of its execution records unwritable. Checking the
-    attributes here turns that into one skipped system with a reason instead of a failed run.
-    This checks the two attributes the records copy; it says nothing about whether the adapter
-    scans correctly or reports its real version.
+    else (a float version, say) would make each of its execution records unwritable. Every
+    execution record also copies ``adapter.env_passthrough`` into its environment record and
+    walks ``adapter.state_dirs`` to capture harness state, so a value that is not a sequence of
+    non-empty strings fails every invocation of that system, or quietly means something else: the
+    string ``"PATH"`` is a sequence of four one-letter names. Text UTF-8 cannot encode is refused
+    here too, for the same reason :func:`_utf8` refuses it before a file exists. Checking the
+    attributes here turns each of those into one skipped system with a reason instead of a failed
+    run. This checks the attributes the records are built from; it says nothing about whether the
+    adapter scans correctly or reports its real version.
     """
     for attribute in ("name", "adapter_version"):
         value = getattr(adapter, attribute, None)
@@ -270,6 +287,21 @@ def _vet_adapter_identity(spec: SystemSpec, adapter: Adapter) -> None:
             raise AdapterError(
                 f"{spec.adapter}.{attribute} must be a non-empty string, not {value!r}; the run "
                 "manifest and every execution record copy it verbatim")
+        _utf8(value, f"{spec.adapter}.{attribute}")
+    for attribute, carried in (("env_passthrough", "every execution record copies it into "
+                                                   "environment.passthrough"),
+                               ("state_dirs", "every invocation walks it to capture harness state")):
+        value = getattr(adapter, attribute, ())
+        if not isinstance(value, (tuple, list, set, frozenset)):
+            raise AdapterError(
+                f"{spec.adapter}.{attribute} must be a tuple, list, or set of non-empty strings, "
+                f"not {value!r}; {carried}")
+        for item in value:
+            if not isinstance(item, str) or not item:
+                raise AdapterError(
+                    f"{spec.adapter}.{attribute} must hold non-empty strings, not {item!r}; "
+                    f"{carried}")
+            _utf8(item, f"{spec.adapter}.{attribute}")
 
 
 def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
@@ -278,15 +310,16 @@ def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
 
     Any failure resolving, vetting, or preparing the adapter is recorded as a skip carrying the
     exception's own type name and message, whether it failed as an adapter, while materializing
-    what it needs, on the filesystem, because its module is not installed, or because its own
-    name or version is not something the manifest and execution records can carry. A preparation that
-    returns something other than a record is a preparation failure too, and so is one holding a
-    value the manifest cannot carry: the record goes into the manifest verbatim, so a value
-    canonical JSON cannot represent, or a non-finite number, would make the whole manifest
-    unwritable, including the partial manifest a failing run depends on. The skip reason carries
-    the refusal's own message, which names the offending type or the field holding it. None of
-    this aborts the run, no invocation of a skipped system is attempted, and a skipped system
-    never becomes an empty successful scan.
+    what it needs, on the filesystem, because its module is not installed, or because an
+    attribute the manifest and execution records are built from is not something they can carry.
+    A preparation that returns something other than a record is a preparation failure too, and so
+    is one holding a value the manifest cannot carry: the record goes into the manifest verbatim,
+    so a value canonical JSON cannot represent, a non-finite number, or text UTF-8 cannot encode
+    would make the whole manifest unwritable, including the partial manifest a failing run
+    depends on. The skip reason carries the refusal's own message, escaped where UTF-8 cannot
+    encode it, which names the offending type or the field holding it. None of this aborts the
+    run, no invocation of a skipped system is attempted, and a skipped system never becomes an
+    empty successful scan.
     """
     spec = SystemSpec(entry["system_id"], entry["adapter"], dict(entry["config"]),
                       entry.get("model_id"), entry.get("model_revision"))
@@ -308,7 +341,7 @@ def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
                 f"{spec.adapter}.prepare returned {type(prepared).__name__}; a preparation phase "
                 "must report what it prepared as a record")
         reject_nonfinite(prepared, f"{spec.adapter}.prepare record")
-        canonical_json(prepared)
+        _utf8(canonical_json(prepared), f"{spec.adapter}.prepare record")
         preparation = prepared
     except Exception as exc:
         preparation = {}

@@ -684,8 +684,9 @@ def test_an_adapter_identity_the_records_cannot_carry_is_a_skipped_system(tmp_pa
 @pytest.mark.parametrize(
     ("record", "fragment"),
     [({"ruleset": {"paths"}}, "Object of type set is not JSON serializable"),
-     ({"ruleset": {"cost_usd": float("inf")}}, "odd.prepare record.ruleset.cost_usd contains a non-finite number")],
-    ids=["not-json", "non-finite"],
+     ({"ruleset": {"cost_usd": float("inf")}}, "odd.prepare record.ruleset.cost_usd contains a non-finite number"),
+     ({"ruleset": f"lone surrogate {LONE_SURROGATE}"}, "odd.prepare record is not UTF-8 text")],
+    ids=["not-json", "non-finite", "not-utf8"],
 )
 def test_a_preparation_record_the_manifest_cannot_carry_is_a_skipped_system(tmp_path, upstream, record, fragment):
     """The record is copied into the manifest verbatim, so an unwritable one is a preparation failure."""
@@ -707,6 +708,66 @@ def test_a_preparation_record_the_manifest_cannot_carry_is_a_skipped_system(tmp_
     assert manifest["systems"][1]["preparation"] == {}
     assert fragment in manifest["systems"][1]["skipped_reason"]
     assert manifest["systems"][1]["skipped_reason"].startswith("ContractError: ")
+    assert [(row["system_id"], row["status"]) for row in manifest["invocations"]] == [
+        ("fake-a", "success"), ("odd-b", "skipped")]
+    assert load_document(out / MANIFEST_NAME, "run-manifest") == manifest
+    assert not (out / "invocations" / "snap-a__odd-b__r1").exists()
+
+
+def test_a_preparation_failure_whose_message_utf8_cannot_encode_is_still_a_skipped_system(tmp_path, upstream):
+    """The skip reason goes into the manifest verbatim, so a surrogate there destroyed the record.
+
+    The exception came from the adapter, so its message is escaped rather than trusted: an
+    unencodable reason made the whole run unrecordable, including its partial manifest.
+    """
+    repo, commit = upstream
+    write_pack(tmp_path / "pack.json", repo, commit)
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake"), system_entry("odd-b", "odd")])
+    odd = FakeAdapter(prepare_exception=AdapterError(f"ruleset {LONE_SURROGATE} is missing"))
+    out = tmp_path / "out"
+
+    manifest = run_from_config(config_path, out, clock=CLOCK, adapters={"fake": FakeAdapter(), "odd": odd})
+
+    assert manifest["status"] == "completed" and odd.calls == 0
+    reason = manifest["systems"][1]["skipped_reason"]
+    assert reason == "AdapterError: ruleset \\ud800 is missing" and LONE_SURROGATE not in reason
+    assert f"odd-b: not invoked ({reason})" in manifest["warnings"]
+    assert [(row["system_id"], row["status"]) for row in manifest["invocations"]] == [
+        ("fake-a", "success"), ("odd-b", "skipped")]
+    assert load_document(out / MANIFEST_NAME, "run-manifest") == manifest
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value", "fragment"),
+    [("env_passthrough", "PATH",
+      "odd.env_passthrough must be a tuple, list, or set of non-empty strings, not 'PATH'"),
+     ("env_passthrough", ("PATH", 3), "odd.env_passthrough must hold non-empty strings, not 3"),
+     ("state_dirs", None,
+      "odd.state_dirs must be a tuple, list, or set of non-empty strings, not None"),
+     ("state_dirs", (".fakestate", ""), "odd.state_dirs must hold non-empty strings, not ''")],
+    ids=["env-passthrough-string", "env-passthrough-entry", "state-dirs-none", "state-dirs-empty"],
+)
+def test_an_adapter_attribute_every_execution_record_copies_is_a_skipped_system(tmp_path, upstream,
+                                                                                attribute, value, fragment):
+    """Every execution record copies env_passthrough and walks state_dirs, so both are vetted here.
+
+    A bad value failed every invocation of that system with an error naming neither the adapter
+    nor the attribute, and the string ``"PATH"`` quietly meant four one-letter variable names.
+    """
+    repo, commit = upstream
+    write_pack(tmp_path / "pack.json", repo, commit)
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake"), system_entry("odd-b", "odd")])
+    odd = type("OddAttributeAdapter", (FakeAdapter,), {attribute: value})()
+    out = tmp_path / "out"
+
+    manifest = run_from_config(config_path, out, clock=CLOCK, adapters={"fake": FakeAdapter(), "odd": odd})
+
+    assert manifest["status"] == "completed" and odd.prepared == 0 and odd.calls == 0
+    reason = manifest["systems"][1]["skipped_reason"]
+    assert reason.startswith("AdapterError: ") and fragment in reason
+    assert manifest["systems"][1]["preparation"] == {}
     assert [(row["system_id"], row["status"]) for row in manifest["invocations"]] == [
         ("fake-a", "success"), ("odd-b", "skipped")]
     assert load_document(out / MANIFEST_NAME, "run-manifest") == manifest

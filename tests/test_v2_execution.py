@@ -7,8 +7,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -25,6 +27,32 @@ CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
 # A lone UTF-16 surrogate: canonical JSON keeps it and every contract check passes it, but UTF-8
 # cannot encode it, so it only fails at the moment the bytes are produced.
 LONE_SURROGATE = chr(0xD800)
+mkfifo_required = pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no named pipes on this platform")
+
+
+def call_with_deadline(function, seconds: float = 30.0):
+    """Call *function* on a daemon thread and fail the test if it does not return in time.
+
+    Opening a named pipe for reading blocks until something writes to it, so a regression in the
+    guards below would wait forever. The worker is a daemon thread, so a blocked call cannot hold
+    up the rest of the suite or the interpreter's exit either.
+    """
+    outcome: dict[str, object] = {}
+
+    def call() -> None:
+        try:
+            outcome["value"] = function()
+        except BaseException as exc:  # re-raised below, on the thread running the test
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        pytest.fail(f"the call was still running after {seconds} seconds; it is blocked on a read")
+    if "error" in outcome:
+        raise outcome["error"]  # type: ignore[misc]
+    return outcome["value"]
 
 
 def prepared_input(tmp_path: Path, *, languages=("python",)) -> PreparedInput:
@@ -422,11 +450,10 @@ class HostileAdapter(FakeAdapter):
 
 @pytest.mark.parametrize(
     ("hostility", "fragment"),
-    [("directory-artifact", "IsADirectoryError"),
-     ("state-squat", "harness state could not be captured"),
+    [("state-squat", "harness state could not be captured"),
      ("cyclic-claim", "RecursionError"),
      ("deep-claim", "RecursionError")],
-    ids=["directory-artifact", "state-squat", "cyclic-claim", "deep-claim"],
+    ids=["state-squat", "cyclic-claim", "deep-claim"],
 )
 def test_a_post_scan_failure_the_adapter_caused_is_a_recorded_violation(tmp_path, hostility, fragment):
     """Each of these raised out of run_invocation, losing the invocation and its raw output."""
@@ -440,6 +467,170 @@ def test_a_post_scan_failure_the_adapter_caused_is_a_recorded_violation(tmp_path
     assert execution["error"] == result["error"] and execution["raw_artifacts"] == []
     # The scanner's own output is preserved: only the outcome it reported was discarded.
     assert (bundle / "raw" / "native.json").read_text(encoding="utf-8").startswith('{"findings"')
+
+
+def test_a_directory_declared_as_an_artifact_is_noted_rather_than_hashed(tmp_path):
+    """A directory has no bytes of its own, so it joins the symlink and the missing file as a note."""
+    bundle = run(tmp_path, HostileAdapter("directory-artifact"))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "success"
+    assert "raw_artifacts" not in result and execution["raw_artifacts"] == []
+    assert "declared artifact is not a regular file and was not hashed: dump" in execution["notes"]
+    assert (bundle / "raw" / "dump").is_dir()
+
+
+@mkfifo_required
+def test_a_named_pipe_in_a_staging_directory_is_skipped_rather_than_opened(tmp_path):
+    """Both guards gated on exists() alone, so hashing or counting a FIFO blocked forever.
+
+    The invocation runs behind a deadline, so a regression fails here instead of stalling the run.
+    """
+
+    class PipeAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            pipe = kwargs["raw_dir"] / "stream.jsonl"
+            events = kwargs["trace_dir"] / "events.jsonl"
+            os.mkfifo(pipe)
+            os.mkfifo(events)
+            outcome.artifacts = [{"id": "native", "path": kwargs["raw_dir"] / "native.json"},
+                                 {"id": "stream", "path": pipe}]
+            outcome.trace_path = events
+            return outcome
+
+    bundle = call_with_deadline(
+        lambda: run(tmp_path, PipeAdapter(), trace_mode="metadata", workspace_root=tmp_path))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "success"
+    assert [artifact["id"] for artifact in result["raw_artifacts"]] == ["native"]
+    assert "declared artifact is not a regular file and was not hashed: stream" in execution["notes"]
+    assert execution["trace"] == {"path": None, "events": None, "mode": "metadata",
+                                  "capture_gap": None, "dropped_events": None}
+    assert ("declared trace file is not a regular file; it was not read or counted: events.jsonl"
+            in execution["notes"])
+    # Both pipes are still in the bundle exactly as the scanner left them: staged, never opened.
+    assert stat.S_ISFIFO((bundle / "raw" / "stream.jsonl").stat().st_mode)
+    assert stat.S_ISFIFO((bundle / "trace" / "events.jsonl").stat().st_mode)
+
+
+@pytest.mark.parametrize("field", ["capture", "model_identity"], ids=["capture", "model-identity"])
+def test_a_cyclic_mapping_the_adapter_supplied_is_a_recorded_violation(tmp_path, field):
+    """Validating the execution record walks what the adapter supplied, so a cycle raises there.
+
+    Only the build step was contained, so the cycle escaped run_invocation as a RecursionError.
+    """
+
+    def mutate(outcome: NativeOutcome) -> NativeOutcome:
+        cyclic: dict = {"model_requests": "unavailable"}
+        cyclic["self"] = cyclic
+        return _with(outcome, **{field: cyclic})
+
+    bundle = run(tmp_path, OutcomeAdapter(mutate))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "outcome_contract_violation"
+    assert "the execution record could not be validated" in result["error"]["message"]
+    assert "RecursionError" in result["error"]["message"]
+    assert execution["capture"] == {} and execution["model_identity"] is None
+    assert (bundle / "raw" / "native.json").is_file()
+
+
+def test_a_trace_path_holding_a_nul_byte_is_recorded_rather_than_raised(tmp_path):
+    """Path.resolve() raises ValueError, not OSError, for an embedded NUL; that escaped as a crash."""
+
+    class NulTraceAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            (kwargs["trace_dir"] / "events.jsonl").write_text('{"type":"model_request"}\n', encoding="utf-8")
+            outcome.trace_path = Path(str(kwargs["trace_dir"] / "events.jsonl") + "\x00")
+            return outcome
+
+    bundle = run(tmp_path, NulTraceAdapter(), trace_mode="metadata")
+
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["status"] == "success"
+    assert execution["trace"] == {"path": None, "events": None, "mode": "metadata",
+                                  "capture_gap": None, "dropped_events": None}
+    assert "declared trace file is outside the bundle; it was not read or counted" in execution["notes"]
+    assert (bundle / "trace" / "events.jsonl").is_file()
+
+
+def test_a_staging_directory_replaced_with_a_symlink_is_refused_not_moved(tmp_path):
+    """Moving it made bundle/raw a link pointing outside the bundle while the run recorded success."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("not part of the scan output\n", encoding="utf-8")
+
+    class SwappingAdapter(FakeAdapter):
+        state_dirs = ()  # nothing is copied back into the staging area after the scan
+
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            raw_dir = kwargs["raw_dir"]
+            shutil.rmtree(raw_dir)
+            raw_dir.symlink_to(outside, target_is_directory=True)
+            return outcome
+
+    bundle = run(tmp_path, SwappingAdapter())
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["error"]["code"] == "outcome_contract_violation"
+    assert "staged output could not be moved into the bundle" in result["error"]["message"]
+    assert "raw: ExecutionError: the staging directory raw is a symbolic link" in result["error"]["message"]
+    assert not (bundle / "raw").exists() and not (bundle / "raw").is_symlink()
+    assert execution["raw_artifacts"] == []
+    assert [path.name for path in outside.iterdir()] == ["secret.txt"]
+
+
+def test_a_document_write_that_fails_part_way_leaves_no_file_and_no_leftover(tmp_path, monkeypatch):
+    """A truncated execution.json beside a valid result.json would read as a finished record."""
+    directory = tmp_path / "bundle"
+    directory.mkdir()
+    path = directory / "execution.json"
+
+    def failing(source, destination):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(os, "replace", failing)
+    with pytest.raises(OSError, match="No space left on device"):
+        _write_new(path, {"status": "success"})
+
+    assert not path.exists()
+    assert list(directory.iterdir()) == []
+
+
+def test_a_written_document_keeps_the_mode_a_plain_create_would_have_given_it(tmp_path):
+    """The bytes land through a temporary file, so the umask must still decide the mode."""
+    written = tmp_path / "result.json"
+    plain = tmp_path / "plain.json"
+
+    _write_new(written, {"status": "success"})
+    with plain.open("xb") as handle:
+        handle.write(b"{}\n")
+
+    assert written.read_text(encoding="utf-8") == '{"status":"success"}\n'
+    assert written.stat().st_mode == plain.stat().st_mode
+    # The temporary file is gone: only the two documents are in the directory.
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["plain.json", "result.json"]
+
+
+def test_a_document_write_refuses_a_destination_that_already_exists(tmp_path):
+    """The create-only guarantee survives the rename: an existing record is never replaced."""
+    path = tmp_path / "result.json"
+    path.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        _write_new(path, {"status": "success"})
+
+    assert path.read_text(encoding="utf-8") == "{}\n"
+    assert [entry.name for entry in tmp_path.iterdir()] == ["result.json"]
 
 
 def test_staged_output_that_cannot_be_moved_into_the_bundle_is_a_recorded_violation(tmp_path, monkeypatch):
@@ -511,7 +702,8 @@ def test_an_adapter_version_the_record_cannot_carry_writes_no_bundle_documents(t
     """The execution record copies the adapter's own version, so a float makes it unwritable.
 
     The runner vets these attributes when it prepares a system, so this path is what remains for
-    a direct call: an explicit failure with no half-written bundle.
+    a direct call: an explicit failure with neither bundle document written. What the invocation
+    had already created stays, which is what the docstring now says.
     """
 
     class FloatVersionAdapter(FakeAdapter):
@@ -523,6 +715,9 @@ def test_an_adapter_version_the_record_cannot_carry_writes_no_bundle_documents(t
     bundle = tmp_path / "out" / invocation_id("input-a", "fake-sys", 1)
     assert (bundle / "request.json").is_file()
     assert not (bundle / "result.json").exists() and not (bundle / "execution.json").exists()
+    # The bundle directory and the staged raw tree are already there when the refusal happens.
+    assert (bundle / "raw" / "native.json").read_text(encoding="utf-8").startswith('{"findings"')
+    assert (bundle / "raw" / "harness-state" / "fakestate" / "notes.md").is_file()
 
 
 def test_a_scanner_gets_an_export_for_source_while_a_ruleset_path_may_be_in_the_cache(tmp_path):
@@ -807,5 +1002,7 @@ def test_semgrep_zero_exit_with_fatal_diagnostics_after_scanning_stays_partial(t
                             "extra": {"message": "finding", "severity": "WARNING", "metadata": {}}}]}
     outcome, _ = _scan_with_fake(tmp_path, payload, 0)
     assert outcome.status == "partial"
-    assert outcome.exit_code == 0 and outcome.error == {"code": "scan_errors", "message": "Rule timeout on app.py"}
+    # The reason the adapter reports must carry the diagnostic; its wording is the adapter's own.
+    assert outcome.exit_code == 0 and outcome.error["code"] == "scan_errors"
+    assert "Rule timeout on app.py" in outcome.error["message"]
     assert [claim["native_rule_id"] for claim in outcome.claims] == ["probe.rule"]
