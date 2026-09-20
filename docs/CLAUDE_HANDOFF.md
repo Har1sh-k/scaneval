@@ -176,7 +176,11 @@ Output paths must be new. Run `npm ci` then `npm test` from `sdk/typescript`. Va
 
 The earlier temporary Python environment is `/private/tmp/sastbench-build.5DpOoK/venv`. It may be removed or contain an older installed wheel, so reinstall the current checkout if using it. Do not treat ephemeral paths as package requirements.
 
-Use the mounted external drive for large research data, source caches, and build artifacts where compatible. Verify `/Volumes/Untitled` is mounted before writing. Existing research cache: `/Volumes/Untitled/sastbench-research/2026-09-19/`. Small Python packaging builds needed an internal temporary cache because the external filesystem generated AppleDouble `._` files that confused setuptools. Do not download all snapshots or large model weights as a side effect of testing.
+The mounted external drive holds research data at `/Volumes/Untitled/sastbench-research/2026-09-19/`. Verify it is mounted before writing.
+
+Do not put the source cache on that drive. It is formatted exFAT, which carries no POSIX permission bits, so git reports every checked-out tree as modified and `verify_cached_snapshot` refuses the entry: the immutable-cache guarantee cannot hold there. Measured on 2026-09-20 by copying one cache entry onto it: the entry was refused with "has local modifications", and the copy generated 462 AppleDouble `._` files, which is the same interference that earlier confused setuptools. Reformatting that volume to APFS would remove both problems; until then keep `.repos` and any git checkout on the internal disk and use the drive only for archives that need no file modes.
+
+The cache location is configuration, not a hard-coded path: pass `--cache-root` to the CLI or set `cache_root` in a run configuration. Prefer that over editing a path into the code. Disk pressure has not been an issue so far; measured 2026-09-20, the whole working footprint was about 170 MB with 16 GB free. Do not download all snapshots or large model weights as a side effect of testing.
 
 Run untrusted snapshot code only in an appropriate disposable environment with no live credentials. Ask before paid model sweeps, external submission of private material, destructive operations, or material changes outside this repository. Check license terms for the exact source snapshot and paths before redistribution; recipe-first preparation does not itself grant rights.
 
