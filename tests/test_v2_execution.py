@@ -258,7 +258,10 @@ def test_semgrep_adapter_runs_pinned_local_ruleset_end_to_end(tmp_path):
     execution = load_document(bundle / "execution.json", "execution-record")
     assert result["status"] == "success" and result["ranking"] == "unranked"
     assert [c["primary_location"] for c in result["claims"]] == [{"path": "app.py", "start_line": 3, "end_line": 3}]
-    assert result["claims"][0]["kind"] == "command_injection" and result["claims"][0]["native_rule_id"] == "probe.subprocess-shell"
+    assert result["claims"][0]["kind"] == "command_injection"
+    # The rule is declared as probe.subprocess-shell in python/, so the ruleset-relative id
+    # keeps that directory; only the cache path is stripped.
+    assert result["claims"][0]["native_rule_id"] == "python.probe.subprocess-shell"
     assert result["usage"]["cost_usd"] == 0.0
     assert execution["tool_versions"]["semgrep"] == execution["tool_versions"]["semgrep_reported"]
     assert execution["tool_versions"]["ruleset_commit"] == commit
@@ -289,7 +292,7 @@ def test_semgrep_prepare_resolves_config_dirs_against_a_relative_cache_root(tmp_
     execution = load_document(bundle / "execution.json", "execution-record")
     assert result["status"] == "success" and "error" not in result
     assert [c["primary_location"] for c in result["claims"]] == [{"path": "app.py", "start_line": 3, "end_line": 3}]
-    assert result["claims"][0]["native_rule_id"] == "probe.subprocess-shell"
+    assert result["claims"][0]["native_rule_id"] == "python.probe.subprocess-shell"
     assert all(not arg.startswith("--config=.") for arg in execution["command"] if arg.startswith("--config="))
 
 
@@ -316,7 +319,8 @@ def _scan_with_fake(tmp_path: Path, payload: dict, exit_code: int):
     raw.mkdir()
     spec = SystemSpec("semgrep-fake", "semgrep", {"binary": str(fake_semgrep(tmp_path, payload, exit_code))})
     preparation = {"ruleset": {"commit": "a" * 40, "tree_hash": "sha256:" + "b" * 64},
-                   "config_dirs": [str(tmp_path / "rules" / "python")]}
+                   "config_dirs": [str(tmp_path / "rules" / "python")],
+                   "ruleset_root": str(tmp_path / "rules")}
     outcome = SemgrepAdapter().scan(request={}, source_dir=source, raw_dir=raw, spec=spec, preparation=preparation,
                                     timeout_seconds=60, trace_mode="off", trace_dir=None)
     return outcome, raw
@@ -346,4 +350,77 @@ def test_semgrep_nonzero_exit_after_scanning_paths_stays_partial(tmp_path):
     assert outcome.status == "partial"
     assert outcome.exit_code == 7 and outcome.error["code"] == "exit_7"
     assert "Rule timeout" in outcome.error["message"]
+    assert [claim["native_rule_id"] for claim in outcome.claims] == ["probe.rule"]
+
+
+def test_semgrep_import_keeps_the_rule_id_relative_to_the_pinned_ruleset_root():
+    # semgrep-rules declares this rule as `shared-url-struct-mutation` in go/lang/security/,
+    # and semgrep prefixes check_id with the config path it was given. Stripping only the
+    # checkout root keeps the ruleset-relative id; stripping each config directory would drop
+    # the language and category segments and collide with same-named rules in other languages.
+    payload = {"results": [
+        {"check_id": "Users.x.cache.rules__abc.go.lang.security.shared-url-struct-mutation",
+         "path": "pkg/proxy.go", "start": {"line": 12, "col": 1}, "end": {"line": 12, "col": 40},
+         "extra": {"message": "shared url struct mutated", "severity": "ERROR", "metadata": {}}},
+    ]}
+    claims, _ = import_semgrep_results(payload, ruleset_roots=["/Users/x/cache/rules__abc"])
+    assert claims[0]["native_rule_id"] == "go.lang.security.shared-url-struct-mutation"
+    # The machine path is still absent, which is the property the config_dirs behavior had.
+    assert "Users" not in claims[0]["native_rule_id"] and "cache" not in claims[0]["native_rule_id"]
+
+    # A supplied root wins over config_dirs; config_dirs alone keeps its older, narrower behavior.
+    claims, _ = import_semgrep_results(payload, ruleset_roots=["/Users/x/cache/rules__abc"],
+                                       config_dirs=["/Users/x/cache/rules__abc/go"])
+    assert claims[0]["native_rule_id"] == "go.lang.security.shared-url-struct-mutation"
+    claims, _ = import_semgrep_results(payload, config_dirs=["/Users/x/cache/rules__abc/go"])
+    assert claims[0]["native_rule_id"] == "lang.security.shared-url-struct-mutation"
+
+
+def test_semgrep_prepare_records_the_ruleset_root_covering_every_config_dir(tmp_path):
+    rules, commit = pinned_rules_repo(tmp_path)
+    spec = SystemSpec("s", "semgrep", {"ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}})
+    preparation = SemgrepAdapter().prepare(spec, tmp_path / "cache")
+    root = preparation["ruleset_root"]
+    assert Path(root).is_absolute() and Path(root).resolve() == Path(root)
+    assert (Path(root) / "python" / "shell.yaml").is_file()
+    assert preparation["config_dirs"] == [str(Path(root) / "python")]
+    assert all(directory.startswith(root + os.sep) for directory in preparation["config_dirs"])
+
+
+def test_semgrep_scan_shortens_rule_ids_against_the_recorded_ruleset_root(tmp_path):
+    # The fake binary reports the check_id semgrep would build for a rule declared in
+    # <root>/python/, so scan() must hand the importer the recorded root, not the config dirs.
+    dotted_root = str(tmp_path / "rules").replace("\\", "/").strip("/").replace("/", ".")
+    payload = {"version": "9.9.9", "paths": {"scanned": ["app.py"]}, "errors": [],
+               "results": [{"check_id": f"{dotted_root}.python.probe.subprocess-shell", "path": "app.py",
+                            "start": {"line": 1}, "end": {"line": 1},
+                            "extra": {"message": "shell=True", "severity": "WARNING", "metadata": {}}}]}
+    outcome, _ = _scan_with_fake(tmp_path, payload, 0)
+    assert outcome.status == "success"
+    assert [claim["native_rule_id"] for claim in outcome.claims] == ["python.probe.subprocess-shell"]
+
+
+def test_semgrep_zero_exit_with_fatal_diagnostics_and_nothing_scanned_is_an_error(tmp_path):
+    # Semgrep can exit 0 while every target failed to parse or be reached. Nothing was scanned
+    # and nothing was reported, so this observed no source at all: silence here is missing
+    # evidence, not a quiet negative control.
+    payload = {"version": "9.9.9", "results": [], "paths": {"scanned": []},
+               "errors": [{"level": "error", "code": 3, "message": "Invalid rule schema in go/lang.yaml"}]}
+    outcome, raw = _scan_with_fake(tmp_path, payload, 0)
+    assert outcome.status == "error"
+    assert outcome.exit_code == 0 and outcome.error["code"] == "scan_errors"
+    assert "Invalid rule schema" in outcome.error["message"]
+    assert "no scanned paths and no results" in outcome.error["message"]
+    assert outcome.claims == []
+    assert json.loads((raw / "semgrep.json").read_text(encoding="utf-8"))["errors"][0]["level"] == "error"
+
+
+def test_semgrep_zero_exit_with_fatal_diagnostics_after_scanning_stays_partial(tmp_path):
+    payload = {"version": "9.9.9", "paths": {"scanned": ["app.py"]},
+               "errors": [{"level": "error", "message": "Rule timeout on app.py"}],
+               "results": [{"check_id": "probe.rule", "path": "app.py", "start": {"line": 1}, "end": {"line": 1},
+                            "extra": {"message": "finding", "severity": "WARNING", "metadata": {}}}]}
+    outcome, _ = _scan_with_fake(tmp_path, payload, 0)
+    assert outcome.status == "partial"
+    assert outcome.exit_code == 0 and outcome.error == {"code": "scan_errors", "message": "Rule timeout on app.py"}
     assert [claim["native_rule_id"] for claim in outcome.claims] == ["probe.rule"]

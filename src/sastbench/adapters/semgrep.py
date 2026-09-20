@@ -44,11 +44,13 @@ def semgrep_version(binary: str, raw_dir: Path, timeout_seconds: float = 60) -> 
     return (raw_dir / "semgrep-version.txt").read_text(encoding="utf-8").strip()
 
 
-def _rule_id_prefixes(config_dirs) -> list[str]:
-    # Semgrep prefixes every rule id with the local config directory, dot-separated. That
-    # prefix is a machine path, not rule identity, so it is removed before recording.
+def _dotted_prefixes(directories) -> list[str]:
+    # Semgrep builds check_id as the config path it was given, dot-separated and without the
+    # leading slash, then the subdirectories under that path, then the declared rule id. The
+    # path part is a machine location, so it is removed before recording. Longest first, so a
+    # nested directory is stripped before a parent of it.
     prefixes = []
-    for directory in config_dirs or ():
+    for directory in directories or ():
         dotted = str(directory).replace("\\", "/").strip("/").replace("/", ".")
         if dotted:
             prefixes.append(dotted + ".")
@@ -56,14 +58,24 @@ def _rule_id_prefixes(config_dirs) -> list[str]:
 
 
 def import_semgrep_results(payload: dict, *, artifact_id: str = ARTIFACT_JSON,
-                           config_dirs=()) -> tuple[list[dict], list[str]]:
-    """Translate Semgrep JSON ``results`` into atomic claims without inventing evidence."""
+                           ruleset_roots=(), config_dirs=()) -> tuple[list[dict], list[str]]:
+    """Translate Semgrep JSON ``results`` into atomic claims without inventing evidence.
+
+    ``ruleset_roots`` is the preferred input: stripping the rules checkout root leaves
+    ``native_rule_id`` as the id relative to that checkout, so the language and category
+    directories a rule was declared under survive while the local cache path does not.
+    ``config_dirs`` is the older behavior kept for existing callers and drops every directory
+    segment inside the checkout as well; it is used only when no root is supplied.
+
+    This does not assign truth labels, split bundled findings, invent locations, or recover a
+    rule id from a check_id that carries a path prefix none of the supplied directories match.
+    """
     claims: list[dict] = []
     notes: list[str] = []
     results = payload.get("results")
     if not isinstance(results, list):
         raise AdapterError("semgrep JSON has no results array")
-    prefixes = _rule_id_prefixes(config_dirs)
+    prefixes = _dotted_prefixes(ruleset_roots) if ruleset_roots else _dotted_prefixes(config_dirs)
     for index, item in enumerate(results, start=1):
         extra = item.get("extra") or {}
         metadata = extra.get("metadata") or {}
@@ -146,6 +158,9 @@ class SemgrepAdapter(Adapter):
                 "tree_hash": tree_hash(hashes),
             },
             "config_dirs": config_dirs,
+            # The checkout root, recorded so the importer can shorten check_id to a
+            # ruleset-relative rule id instead of dropping the directories inside the checkout.
+            "ruleset_root": str(root),
         }
 
     def scan(self, *, request, source_dir, raw_dir, spec, preparation, timeout_seconds, trace_mode, trace_dir):
@@ -175,7 +190,14 @@ class SemgrepAdapter(Adapter):
                                  "message": f"semgrep exceeded {timeout_seconds}s; output written at exit only"}, **base)
         try:
             payload = json.loads(stdout.read_text(encoding="utf-8"))
-            claims, notes = import_semgrep_results(payload, config_dirs=preparation["config_dirs"])
+            ruleset_root = preparation.get("ruleset_root")
+            # config_dirs stays as the fallback so a preparation recorded before ruleset_root
+            # existed still keeps the cache path out of native_rule_id.
+            claims, notes = import_semgrep_results(
+                payload,
+                ruleset_roots=(ruleset_root,) if ruleset_root else (),
+                config_dirs=preparation.get("config_dirs") or (),
+            )
         except (OSError, ValueError, KeyError, TypeError, AdapterError) as exc:
             return NativeOutcome(status="error", exit_code=result.exit_code,
                                  error={"code": f"exit_{result.exit_code}" if result.exit_code else "unparseable_output",
@@ -203,8 +225,18 @@ class SemgrepAdapter(Adapter):
                                  error={"code": f"exit_{result.exit_code}", "message": message[:2000]}, **base)
         if fatal:
             base["notes"].append(f"{len(fatal)} error-level Semgrep diagnostics; see raw semgrep.json errors")
+            reason = str(fatal[0].get("message", "")).strip()
+            if not scanned and not claims:
+                # Exit 0 does not make this a clean run: nothing was scanned and nothing was
+                # reported, so the invocation observed no source at all. Calling it partial
+                # would let a failed run read as a quiet negative result.
+                detail = f"; reason: {reason}" if reason else ""
+                message = ("semgrep exited 0 with error-level diagnostics, no scanned paths and "
+                           f"no results{detail}; stderr: {tail_text(stderr)}")
+                return NativeOutcome(status="error", exit_code=0, claims=[],
+                                     error={"code": "scan_errors", "message": message[:2000]}, **base)
             return NativeOutcome(status="partial", exit_code=0, claims=claims,
-                                 error={"code": "scan_errors", "message": str(fatal[0].get("message", ""))[:500]}, **base)
+                                 error={"code": "scan_errors", "message": reason[:500]}, **base)
         skipped = (payload.get("paths") or {}).get("skipped") or []
         if skipped:
             base["notes"].append(f"Semgrep skipped {len(skipped)} paths under its own ignore rules; see raw semgrep.json paths")
