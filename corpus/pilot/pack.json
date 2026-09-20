@@ -427,7 +427,7 @@
           {
             "path": "lib/four-oh-four.js",
             "role": "missing_guard",
-            "note": "candidate: custom 404 dispatch before URL validation; line range not yet mapped"
+            "note": "candidate at v5.12.1: custom 404 route registration (router.all with prefix wildcard, lines 160-170) and fourOhFourFallBack (lines 172-193) dispatch before request-target validation; exact accepted range not yet reviewed"
           }
         ],
         "assumptions": [
