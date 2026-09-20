@@ -133,7 +133,32 @@ def fetch_snapshot(url: str, commit: str, cache_root: Path, *, timeout: float = 
     return CachedSnapshot(target, url, commit, tree, method)
 
 
-def _sha256_file(path: Path) -> tuple[str, int]:
+def inspect_commit(url: str, commit: str, *, timeout: float = 600) -> dict:
+    """Describe *commit* at *url* (parents, committer date, subject) through a throwaway shallow fetch.
+
+    Nothing is cached: this is a read-only lookup used to pin a vulnerable snapshot as the
+    parent of a fix commit and to record the fix commit date as disclosure evidence.
+    """
+    commit = _require_commit(commit)
+    import tempfile
+
+    staging = Path(tempfile.mkdtemp(prefix="sastbench-inspect-"))
+    try:
+        _git(["init", "-q"], staging)
+        _git(["remote", "add", "origin", url], staging)
+        try:
+            _git(["fetch", "-q", "--depth", "2", "origin", commit], staging, timeout=timeout)
+        except MaterializationError:
+            _git(["fetch", "-q", "origin"], staging, timeout=timeout)
+        line = _git(["log", "-1", "--format=%H%x00%P%x00%cI%x00%aI%x00%s", commit], staging).strip("\n")
+        sha, parents, committed, authored, subject = line.split("\x00")
+        return {"commit": sha, "parents": parents.split() if parents else [], "committed_at": committed,
+                "authored_at": authored, "subject": subject}
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def sha256_file(path: Path) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
     with path.open("rb") as handle:
@@ -209,7 +234,7 @@ def export_snapshot(
             destination.chmod(0o755)
         else:
             destination.chmod(0o644)
-        digest, size = _sha256_file(destination)
+        digest, size = sha256_file(destination)
         hashes[rel] = digest
         byte_count += size
         if _is_instruction_file(rel):
@@ -278,5 +303,5 @@ def hash_exported_tree(source_dir: Path) -> dict:
         rel = path.relative_to(source_dir).as_posix()
         if any(part == ".git" for part in rel.split("/")):
             continue
-        hashes[rel] = _sha256_file(path)[0]
+        hashes[rel] = sha256_file(path)[0]
     return {"tree_hash": tree_hash(hashes), "file_count": len(hashes)}

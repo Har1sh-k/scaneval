@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sastbench.dev/schemas/v2/case-pack.schema.json",
+  "title": "SASTbench case pack",
+  "description": "A namespaced, versioned set of pinned snapshots and case records. Public and organization-owned packs share this contract. Labels become scoring evidence only through recorded human review; nothing here is a scanner input.",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "namespace", "pack_id", "version", "status", "description", "review_budgets", "snapshots", "cases", "admissions"],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "namespace": {"type": "string", "pattern": "^[a-z0-9]+(\\.[a-z0-9-]+)*$"},
+    "pack_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+    "version": {"type": "string", "minLength": 1},
+    "status": {"enum": ["draft", "reviewed", "released"]},
+    "description": {"type": "string"},
+    "review_budgets": {
+      "type": "object", "additionalProperties": false, "required": ["full", "pr"],
+      "properties": {
+        "full": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},
+        "pr": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}}
+      }
+    },
+    "snapshots": {"type": "array", "items": {"$ref": "#/$defs/snapshot"}},
+    "cases": {"type": "array", "items": {"$ref": "#/$defs/case"}},
+    "admissions": {"type": "array", "items": {"$ref": "#/$defs/admission"}},
+    "notes": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "date": {"type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "field_state": {
+      "type": "object", "additionalProperties": false, "required": ["state"],
+      "properties": {"state": {"enum": ["not_applicable", "unknown", "not_reviewed"]}, "reason": {"type": "string"}}
+    },
+    "stated": {"oneOf": [{"type": "string", "minLength": 1}, {"$ref": "#/$defs/field_state"}]},
+    "location": {
+      "type": "object", "additionalProperties": false, "required": ["path", "role"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "start_line": {"type": "integer", "minimum": 1},
+        "end_line": {"type": "integer", "minimum": 1},
+        "role": {"enum": ["entry", "source", "propagation", "guard", "missing_guard", "sink", "authorization_decision", "operation", "other"]},
+        "note": {"type": "string"}
+      }
+    },
+    "snapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["snapshot_id", "repository", "commit", "languages", "workload", "component_role", "license", "reference"],
+      "properties": {
+        "snapshot_id": {"$ref": "#/$defs/id"},
+        "repository": {"type": "object", "additionalProperties": false, "required": ["url", "name"],
+                       "properties": {"url": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1},
+                                      "historical_url": {"type": "string"}}},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "reference": {"type": "string", "description": "How the commit was chosen: tag, parent of fix, or explicit advisory commit."},
+        "languages": {"type": "array", "minItems": 1, "uniqueItems": true,
+                      "items": {"enum": ["python", "typescript", "javascript", "go", "rust"]}},
+        "workload": {"enum": ["conventional_application", "conventional_automation", "ai_assisted_application", "agentic_application"]},
+        "component_role": {"enum": ["application", "library_sdk", "infrastructure"]},
+        "production_use_evidence": {"type": "string"},
+        "license": {"type": "object", "additionalProperties": false, "required": ["spdx", "verified", "note"],
+                    "properties": {"spdx": {"type": ["string", "null"]}, "verified": {"type": "boolean"}, "note": {"type": "string"}}},
+        "tree_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "git_tree": {"type": ["string", "null"]},
+        "role": {"enum": ["vulnerable", "fixed", "ordinary"], "default": "vulnerable"}
+      }
+    },
+    "evidence": {
+      "type": "object", "additionalProperties": false, "required": ["evidence_id", "origin", "kind", "reference", "note"],
+      "properties": {
+        "evidence_id": {"$ref": "#/$defs/id"},
+        "origin": {"enum": ["public_advisory_and_maintainer_fix", "fix_without_advisory", "independently_reviewed_internal_finding",
+                            "diagnostic_fixture", "legacy_case_record", "research_note"]},
+        "kind": {"enum": ["cve_record", "ghsa_advisory", "vendor_advisory", "fix_commit", "fix_pull_request", "maintainer_discussion",
+                          "source_inspection", "regression_test", "internal_document", "scanner_allegation", "ticket", "other"]},
+        "reference": {"type": "string", "minLength": 1},
+        "revision": {"type": "string"},
+        "retrieved": {"$ref": "#/$defs/date"},
+        "note": {"type": "string"}
+      }
+    },
+    "target": {
+      "type": "object", "additionalProperties": false,
+      "required": ["target_id", "snapshot_id", "kind", "description", "accepted_locations", "assumptions", "matching_rules"],
+      "properties": {
+        "target_id": {"$ref": "#/$defs/id"},
+        "snapshot_id": {"$ref": "#/$defs/id"},
+        "kind": {"type": "string", "minLength": 1},
+        "description": {"type": "string", "minLength": 1},
+        "affected_input_or_authority": {"$ref": "#/$defs/stated"},
+        "accepted_locations": {"type": "array", "items": {"$ref": "#/$defs/location"}},
+        "assumptions": {"type": "array", "items": {"type": "string"}},
+        "matching_rules": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "control": {
+      "type": "object", "additionalProperties": false,
+      "required": ["control_id", "snapshot_id", "type", "description", "property", "allowed_actors_inputs", "assumptions", "ruled_out_allegation", "locations", "evidence_ids"],
+      "properties": {
+        "control_id": {"$ref": "#/$defs/id"},
+        "snapshot_id": {"$ref": "#/$defs/id"},
+        "type": {"enum": ["capability_safe", "fixed_target", "both"]},
+        "target_id": {"$ref": "#/$defs/id"},
+        "description": {"type": "string", "minLength": 1},
+        "property": {"type": "string", "minLength": 1},
+        "allowed_actors_inputs": {"type": "string"},
+        "assumptions": {"type": "array", "items": {"type": "string"}},
+        "ruled_out_allegation": {"type": "string", "minLength": 1},
+        "locations": {"type": "array", "items": {"$ref": "#/$defs/location"}},
+        "evidence_ids": {"type": "array", "items": {"$ref": "#/$defs/id"}}
+      }
+    },
+    "review": {
+      "type": "object", "additionalProperties": false, "required": ["reviewer", "role", "decision", "level", "at", "note"],
+      "properties": {
+        "reviewer": {"type": "string", "minLength": 1},
+        "role": {"enum": ["curator", "independent_reviewer", "adjudicator"]},
+        "decision": {"enum": ["approve", "reject", "unresolved"]},
+        "level": {"enum": ["L1", "L2", "L3", "L4"]},
+        "at": {"type": "string", "minLength": 1},
+        "note": {"type": "string"}
+      }
+    },
+    "check": {
+      "type": "object", "additionalProperties": false, "required": ["check", "result", "at", "detail"],
+      "properties": {"check": {"type": "string", "minLength": 1}, "result": {"enum": ["pass", "fail", "skipped"]},
+                     "at": {"type": "string", "minLength": 1}, "detail": {"type": "string"}}
+    },
+    "case": {
+      "type": "object", "additionalProperties": false,
+      "required": ["case_id", "represents", "workload", "component_role", "model_involvement", "coverage_signature",
+                   "canonical_target", "target", "controls", "evidence", "disclosure", "disposition", "validation", "split", "notes"],
+      "properties": {
+        "case_id": {"$ref": "#/$defs/id"},
+        "represents": {"type": "string", "minLength": 1},
+        "workload": {"enum": ["conventional_application", "conventional_automation", "ai_assisted_application", "agentic_application"]},
+        "component_role": {"enum": ["application", "library_sdk", "infrastructure"]},
+        "model_involvement": {"$ref": "#/$defs/stated"},
+        "coverage_signature": {
+          "type": "object", "additionalProperties": false,
+          "required": ["idiom", "input_source", "trust_boundary", "security_operation", "guard_failure", "analysis_span"],
+          "properties": {
+            "idiom": {"$ref": "#/$defs/stated"}, "input_source": {"$ref": "#/$defs/stated"},
+            "trust_boundary": {"$ref": "#/$defs/stated"}, "security_operation": {"$ref": "#/$defs/stated"},
+            "guard_failure": {"$ref": "#/$defs/stated"}, "analysis_span": {"$ref": "#/$defs/stated"}
+          }
+        },
+        "canonical_target": {
+          "type": "object", "additionalProperties": false, "required": ["kind", "variant_family", "aliases"],
+          "properties": {"kind": {"type": "string", "minLength": 1}, "variant_family": {"type": "string", "minLength": 1},
+                         "aliases": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}
+        },
+        "target": {"$ref": "#/$defs/target"},
+        "controls": {"type": "array", "items": {"$ref": "#/$defs/control"}},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
+        "disclosure": {
+          "type": "object", "additionalProperties": false,
+          "required": ["earliest_public_artifact", "cve_published", "ghsa_published", "fix_commit_date", "note"],
+          "properties": {"earliest_public_artifact": {"$ref": "#/$defs/date"}, "cve_published": {"$ref": "#/$defs/date"},
+                         "ghsa_published": {"$ref": "#/$defs/date"}, "fix_commit_date": {"$ref": "#/$defs/date"}, "note": {"type": "string"}}
+        },
+        "disposition": {"type": "object", "additionalProperties": false, "required": ["value", "reason"],
+                        "properties": {"value": {"enum": ["validate", "needs_evidence", "extended_regression", "exclude"]},
+                                       "reason": {"type": "string", "minLength": 1}}},
+        "validation": {
+          "type": "object", "additionalProperties": false, "required": ["level", "review_state", "checks", "reviews"],
+          "properties": {
+            "level": {"enum": [null, "L1", "L2", "L3", "L4"]},
+            "review_state": {"enum": ["draft", "mechanically_checked", "human_approved"]},
+            "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+            "reviews": {"type": "array", "items": {"$ref": "#/$defs/review"}}
+          }
+        },
+        "split": {"enum": ["development", "evaluation", "unassigned"]},
+        "notes": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "admission": {
+      "type": "object", "additionalProperties": false, "required": ["case_id", "decision", "by", "at", "reason"],
+      "properties": {"case_id": {"$ref": "#/$defs/id"}, "decision": {"enum": ["admitted", "rejected", "deferred"]},
+                     "by": {"type": "string", "minLength": 1}, "at": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}
+    }
+  }
+}

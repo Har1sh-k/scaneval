@@ -7,7 +7,17 @@
   "properties": {
     "schema_version": {"const": "2.0"},
     "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-    "scope": {"enum": ["diagnostic", "reviewed"]},
+    "scope": {"enum": ["diagnostic", "draft", "reviewed"]},
+    "provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["namespace", "pack_id", "pack_version", "pack_sha256", "snapshot_id", "mode"],
+      "properties": {
+        "namespace": {"type": "string", "minLength": 1}, "pack_id": {"type": "string", "minLength": 1},
+        "pack_version": {"type": "string", "minLength": 1}, "pack_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "snapshot_id": {"type": "string", "minLength": 1}, "mode": {"enum": ["full", "pr"]},
+        "case_ids": {"type": "array", "items": {"type": "string"}}
+      }
+    },
     "targets": {"type": "array", "items": {"$ref": "#/$defs/target"}},
     "controls": {"type": "array", "items": {"$ref": "#/$defs/control"}},
     "review_budgets": {

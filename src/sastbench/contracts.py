@@ -14,7 +14,8 @@ from jsonschema import Draft202012Validator
 
 
 CONTRACT_KINDS = frozenset(
-    {"scan-request", "scan-result", "evaluation-plan", "review-decisions", "execution-record"}
+    {"scan-request", "scan-result", "evaluation-plan", "review-decisions", "execution-record",
+     "case-pack", "review-record", "run-config"}
 )
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
 
@@ -143,9 +144,9 @@ def _validate_evaluation_plan(document: dict[str, Any]) -> None:
     _unique([control["control_id"] for control in document["controls"]], "control_id")
     levels = [item["validation_level"] for item in document["targets"]]
     levels += [item["validation_level"] for item in document["controls"]]
-    allowed = {"L3", "L4"} if document["scope"] == "reviewed" else {"fixture"}
+    allowed = {"reviewed": {"L3", "L4"}, "draft": {"L1", "L2"}, "diagnostic": {"fixture"}}[document["scope"]]
     if any(level not in allowed for level in levels):
-        label = "L3 or L4" if document["scope"] == "reviewed" else "fixture"
+        label = {"reviewed": "L3 or L4", "draft": "L1 or L2", "diagnostic": "fixture"}[document["scope"]]
         raise ContractError(f"{document['scope']} plans may only use {label} validation")
 
 
@@ -176,7 +177,69 @@ def _validate_execution_record(document: dict[str, Any]) -> None:
         raise ContractError("status 'timeout' requires timed_out to be true")
 
 
+def _validate_case_pack(document: dict[str, Any]) -> None:
+    snapshots = [snapshot["snapshot_id"] for snapshot in document["snapshots"]]
+    _unique(snapshots, "snapshot_id")
+    known = set(snapshots)
+    _unique([case["case_id"] for case in document["cases"]], "case_id")
+    target_ids: list[str] = []
+    control_ids: list[str] = []
+    for case in document["cases"]:
+        label = f"case {case['case_id']}"
+        target = case["target"]
+        target_ids.append(target["target_id"])
+        if target["snapshot_id"] not in known:
+            raise ContractError(f"{label}: target snapshot {target['snapshot_id']} is not declared")
+        for index, location in enumerate(target["accepted_locations"]):
+            _validate_location(location, f"{label}.target.accepted_locations[{index}]")
+        evidence_ids = [item["evidence_id"] for item in case["evidence"]]
+        _unique(evidence_ids, f"{label} evidence_id")
+        for control in case["controls"]:
+            control_ids.append(control["control_id"])
+            if control["snapshot_id"] not in known:
+                raise ContractError(f"{label}: control snapshot {control['snapshot_id']} is not declared")
+            if control["type"] in ("fixed_target", "both") and control.get("target_id") != target["target_id"]:
+                raise ContractError(f"{label}: fixed-target control {control['control_id']} must reference the case target")
+            for index, location in enumerate(control["locations"]):
+                _validate_location(location, f"{label}.control {control['control_id']}.locations[{index}]")
+            missing = set(control["evidence_ids"]) - set(evidence_ids)
+            if missing:
+                raise ContractError(f"{label}: control {control['control_id']} references unknown evidence {sorted(missing)}")
+        validation = case["validation"]
+        approvals = [r for r in validation["reviews"] if r["decision"] == "approve"]
+        if validation["review_state"] == "human_approved" and not approvals:
+            raise ContractError(f"{label}: human_approved requires at least one recorded approving review")
+        if validation["review_state"] == "human_approved" and validation["level"] is None:
+            raise ContractError(f"{label}: human_approved requires a validation level")
+        if validation["level"] in ("L3", "L4") and validation["review_state"] != "human_approved":
+            raise ContractError(f"{label}: {validation['level']} requires human_approved review state")
+        if validation["review_state"] == "draft" and validation["level"] is not None:
+            raise ContractError(f"{label}: draft cases cannot carry a validation level")
+    _unique(target_ids, "target_id")
+    _unique(control_ids, "control_id")
+    case_ids = {case["case_id"] for case in document["cases"]}
+    for admission in document["admissions"]:
+        if admission["case_id"] not in case_ids:
+            raise ContractError(f"admission references unknown case {admission['case_id']}")
+
+
+def _validate_review_record(document: dict[str, Any]) -> None:
+    if document["state"] == "human_approved":
+        if not document["reviews"]:
+            raise ContractError("human_approved review records need at least one review entry")
+        if document["reviews"][-1]["decisions_sha256"] != document["decisions_sha256"]:
+            raise ContractError("the latest review must bind to the current decisions hash")
+
+
+def _validate_run_config(document: dict[str, Any]) -> None:
+    _unique([system["system_id"] for system in document["systems"]], "system_id")
+    _unique([item["snapshot_id"] for item in document["inputs"]], "inputs.snapshot_id")
+
+
 _RUNTIME_VALIDATORS = {
+    "case-pack": _validate_case_pack,
+    "review-record": _validate_review_record,
+    "run-config": _validate_run_config,
     "execution-record": _validate_execution_record,
     "scan-request": _validate_scan_request,
     "scan-result": _validate_scan_result,

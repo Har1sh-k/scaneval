@@ -190,6 +190,8 @@ clock, randomness or LLM calls are used.
     warnings = []
     if plan["scope"] == "diagnostic":
         warnings.append("Diagnostic fixture results are not real-world benchmark evidence.")
+    if plan["scope"] == "draft":
+        warnings.append("Draft labels (L1/L2, not independently reviewed): pipeline diagnostics, not benchmark evidence.")
     if not result["bundles_resolved"]:
         warnings.append("Unresolved bundles: claim budgets and total atomic-claim burden are pending.")
     if pending:

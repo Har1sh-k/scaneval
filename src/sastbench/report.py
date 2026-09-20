@@ -14,11 +14,12 @@ def _show(value):
 def render_report(record: dict, result: dict, plan: dict) -> str:
     """Render data as escaped text. No scripts, CDN, source links or raw HTML."""
     m = record["metrics"]
-    disclaimer = (
-        "Diagnostic fixture only. No scanner or model was run. These are not real-world performance results."
-        if record["scope"] == "diagnostic" else
-        "Saved-output evaluation. Review decisions and validation levels are supplied by the evaluator, not certified by this report."
-    )
+    disclaimer = {
+        "diagnostic": "Diagnostic fixture only. No scanner or model was run. These are not real-world performance results.",
+        "draft": "Draft labels. Targets and controls are mechanically checked drafts (L1/L2) without independent human review; "
+                 "matching decisions may be unreviewed. Use for pipeline diagnostics only, not as benchmark evidence.",
+        "reviewed": "Saved-output evaluation. Review decisions and validation levels are supplied by the evaluator, not certified by this report.",
+    }[record["scope"]]
     warnings = "".join(f"<li>{escape(w)}</li>" for w in record["warnings"])
     budgets = "".join(f"<tr><td>{escape(b)}</td><td>{_show(r)}</td></tr>"
                       for b, r in m["recall_at_budget"].items())

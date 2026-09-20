@@ -159,3 +159,15 @@ def test_synthetic_history_is_single_neutral_commit_covering_ignored_files(tmp_p
     assert record["trial"]["tree_hash"] == before["tree_hash"]
     with pytest.raises(MaterializationError, match="already has git history"):
         prepare_synthetic_history(source)
+
+
+def test_inspect_commit_reports_parent_and_dates_without_caching(tmp_path, upstream):
+    from sastbench.materialize import inspect_commit
+    repo, first = upstream
+    second = git("rev-parse", "HEAD", cwd=repo)
+    info = inspect_commit(str(repo), second)
+    assert info["commit"] == second and info["parents"] == [first] and info["subject"] == "second"
+    assert info["committed_at"][:4].isdigit() and "T" in info["committed_at"]
+    assert not list(tmp_path.glob("sastbench-inspect-*"))
+    with pytest.raises(MaterializationError, match="full 40-hex SHA"):
+        inspect_commit(str(repo), "HEAD")
