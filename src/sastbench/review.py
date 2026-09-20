@@ -95,12 +95,15 @@ def _refuse_symlinked_dirs(bundle_dir: str | PathLike[str]) -> Path:
     Three spellings are refused: a symlinked bundle directory, a symlinked ``evaluator``
     directory inside it, and a bundle whose resolved path differs from its absolute path,
     which is how a symlink higher up the path shows itself. This keeps a write from landing
-    outside the directory the caller named, and the reading functions here use it too so a
-    status or a load reports on the bundle that was asked for. It refuses symlinks on that
-    path and nothing else: it is not an isolation boundary and says nothing about hard links,
-    bind mounts, a directory swapped after the check, or where the files a bundle already
-    holds point. A path spelled with ``..`` or ``.`` segments also resolves differently from
-    its absolute form and is refused, so name the bundle plainly.
+    outside the directory the caller named. It refuses those three spellings and nothing
+    else: it is not an isolation boundary and says nothing about hard links, bind mounts, a
+    directory swapped after the check, or where the files a bundle already holds point.
+
+    A ``..`` segment survives into the absolute form and is removed by resolution, so a path
+    spelled with one is refused by the third check as well; the message names both causes
+    because this cannot tell them apart. A ``.`` segment is dropped when the path is built,
+    so it is not refused. The reading functions here accept ``guard_symlinks=False``, which
+    skips this check entirely; that belongs to a caller that resolved the path itself.
     """
     bundle = Path(bundle_dir)
     for directory in (bundle, bundle / EVALUATOR_DIR):
@@ -108,18 +111,29 @@ def _refuse_symlinked_dirs(bundle_dir: str | PathLike[str]) -> Path:
             raise ContractError(f"refusing to write through a symlinked directory at {directory}")
     if bundle.resolve() != bundle.absolute():
         raise ContractError(
-            f"refusing to use {bundle}: a symlink in the path leads to {bundle.resolve()}; "
-            "name the bundle by its real path")
+            f"refusing to use {bundle}: it does not resolve to itself (a symlink or a .. segment "
+            f"in the path); it leads to {bundle.resolve()}; name the bundle by its real path")
     return bundle
+
+
+def _bundle_path(bundle_dir: str | PathLike[str], guard_symlinks: bool) -> Path:
+    """The bundle as a :class:`~pathlib.Path`, guarded against symlinked spellings or not.
+
+    With the guard off the path is used exactly as given, symlinks and all. That is for a
+    read whose caller has already resolved the path; it is never right for a write, which is
+    why every writing function here keeps the guard.
+    """
+    return _refuse_symlinked_dirs(bundle_dir) if guard_symlinks else Path(bundle_dir)
 
 
 def _replace_document(path: Path, document: dict) -> None:
     """Replace one document atomically through a temporary file in its own directory.
 
-    This is the only overwrite in this module. It does not merge, keep a backup, or copy
-    the previous version anywhere, and it replaces a symlink sitting at *path* rather than
-    writing through it. A replaced regular file's permission bits are copied onto the
-    temporary file first; the permissions of a symlink's target are not.
+    This is the only overwrite in this module, and :mod:`sastbench.cli` routes ``review
+    approve`` through it, so every replacement of a review record behaves the same way. It does
+    not merge, keep a backup, or copy the previous version anywhere, and it replaces a symlink
+    sitting at *path* rather than writing through it. A replaced regular file's permission bits
+    are copied onto the temporary file first; the permissions of a symlink's target are not.
     """
     handle = tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", newline="\n", dir=str(path.parent),
@@ -154,6 +168,26 @@ def _assert_draft_only(decisions: dict) -> dict:
 def _assert_binds_to_plan(plan: dict, decisions: dict) -> None:
     if decisions["input_hash"] != plan["input_hash"]:
         raise ContractError(INPUT_MISMATCH)
+
+
+def _assert_binds_to_result(bundle: Path, decisions: dict) -> None:
+    """Refuse decisions that do not bind to the ``result.json`` beside *bundle*'s evaluator dir.
+
+    A bundle holding no ``result.json`` is not checked: nothing here fetches one, and this
+    compares two saved documents, so agreement says the decisions were filed against these
+    exact result bytes and nothing about the scan that produced them. Both the re-draft in
+    :func:`record_decisions` and ``review approve`` in :mod:`sastbench.cli` call it, so
+    neither writes a record against a result edited after the decisions were filed.
+    """
+    result_path = bundle / RESULT_FILE
+    if not result_path.is_file():
+        return
+    result = load_document(result_path, RESULT_KIND)
+    if decisions["result_sha256"] != canonical_sha256(result):
+        raise ContractError(
+            f"the decisions were filed against a different result than {result_path}")
+    if decisions["run_id"] != result["run_id"]:
+        raise ContractError(f"the decisions and {result_path} name different runs")
 
 
 def draft_decisions(plan: dict, result: dict, pack: dict | None = None, *,
@@ -261,15 +295,7 @@ def record_decisions(bundle_dir: str | PathLike[str], *, clock: Callable[[], dat
     plan = load_document(evaluator / PLAN_FILE, PLAN_KIND)
     decisions = load_document(evaluator / DECISIONS_FILE, DECISIONS_KIND)
     _assert_binds_to_plan(plan, decisions)
-
-    result_path = bundle / RESULT_FILE
-    if result_path.is_file():
-        result = load_document(result_path, RESULT_KIND)
-        if decisions["result_sha256"] != canonical_sha256(result):
-            raise ContractError(
-                f"the decisions were filed against a different result than {result_path}")
-        if decisions["run_id"] != result["run_id"]:
-            raise ContractError(f"the decisions and {result_path} name different runs")
+    _assert_binds_to_result(bundle, decisions)
 
     record = review_record(plan, decisions, clock=clock, notes=notes)
     record_path = evaluator / RECORD_FILE
@@ -387,18 +413,22 @@ def write_evaluator_records(bundle_dir: str | PathLike[str], plan: dict, decisio
     return paths
 
 
-def review_status(bundle_dir: str | PathLike[str]) -> str:
+def review_status(bundle_dir: str | PathLike[str], *, guard_symlinks: bool = True) -> str:
     """Report ``missing``, ``stale``, or the record's own state for one bundle.
 
-    ``stale`` means the decisions file or the plan changed after the record was written, or
-    that the two no longer bind to the same input hash, which is the only tampering this can
-    see: it does not check the result, the source tree, or the pack the plan came from. A
-    ``human_approved`` state is the record's own assertion, not a verified one, and a bundle
-    with no record is unreviewed, not rejected. A record beside an unreadable or invalid plan
-    or decisions file raises instead of reporting a state, and so does a bundle reached
-    through a symlink.
+    ``stale`` means the decisions file or the plan changed after the record was written, that
+    the two no longer bind to the same input hash, or that the record and the decisions name
+    different runs. That is the only tampering this can see: it does not check the result, the
+    source tree, or the pack the plan came from. A ``human_approved`` state is the record's own
+    assertion, not a verified one, and a bundle with no record is unreviewed, not rejected. A
+    record beside an unreadable or invalid plan or decisions file raises instead of reporting a
+    state.
+
+    This reads and never writes, so ``guard_symlinks=False`` is available to a caller that has
+    already resolved the bundle path and wants a status for the bundle that path reaches. The
+    default refuses a symlinked spelling, which is what an unresolved caller wants.
     """
-    evaluator = _refuse_symlinked_dirs(bundle_dir) / EVALUATOR_DIR
+    evaluator = _bundle_path(bundle_dir, guard_symlinks) / EVALUATOR_DIR
     record_path = evaluator / RECORD_FILE
     if not record_path.is_file():
         return "missing"
@@ -411,18 +441,23 @@ def review_status(bundle_dir: str | PathLike[str]) -> str:
         return "stale"
     if decisions["input_hash"] != plan["input_hash"]:
         return "stale"
+    if record["run_id"] != decisions["run_id"]:
+        return "stale"
     return record["state"]
 
 
-def load_evaluator(bundle_dir: str | PathLike[str]) -> tuple[dict, dict, dict | None]:
+def load_evaluator(bundle_dir: str | PathLike[str], *,
+                   guard_symlinks: bool = True) -> tuple[dict, dict, dict | None]:
     """Load and validate the evaluator side of a bundle; the record is ``None`` when absent.
 
     Loading validates each document against its contract. It does not check that the three
     agree with each other or with ``result.json``; use :func:`review_status` for staleness
-    and :func:`sastbench.scoring.score` for the result binding. A bundle reached through a
-    symlink is refused rather than read.
+    and :func:`sastbench.scoring.score` for the result binding. ``guard_symlinks=False``
+    reads the bundle the given path reaches, symlinks and all, and belongs to a caller that
+    resolved the path itself; the default refuses a symlinked spelling instead, which is what
+    a caller that is about to write through this path needs.
     """
-    evaluator = _refuse_symlinked_dirs(bundle_dir) / EVALUATOR_DIR
+    evaluator = _bundle_path(bundle_dir, guard_symlinks) / EVALUATOR_DIR
     plan = load_document(evaluator / PLAN_FILE, PLAN_KIND)
     decisions = load_document(evaluator / DECISIONS_FILE, DECISIONS_KIND)
     record_path = evaluator / RECORD_FILE

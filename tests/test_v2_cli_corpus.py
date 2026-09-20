@@ -863,7 +863,7 @@ def test_review_approve_refuses_a_bundle_reached_through_a_symlink(tmp_path, cap
 
     code, _, err = cli(capsys, "review", "approve", str(linked_parent / "bundle"),
                        "--reviewer", "R. Eviewer", "--note", "read them")
-    assert code == 2 and "symlink in the path" in err
+    assert code == 2 and "does not resolve to itself" in err
 
     assert record_path.read_bytes() == before
     assert load_document(record_path, "review-record")["state"] == "draft"
@@ -1048,3 +1048,112 @@ def test_new_version_is_stripped_and_refused_when_it_repeats_the_current_version
     document = read_pack(pack)
     assert document["version"] == "1.1.0-draft" and document["status"] == "draft"
     assert "version 1.0.0 (status released) reopened as 1.1.0-draft (status draft)" in document["notes"]
+
+
+def test_read_only_bundle_commands_read_a_bundle_under_a_symlinked_parent(tmp_path, capsys, checked_pack):
+    bundle = make_bundle(tmp_path, checked_pack)
+    assert main(["review", "init", str(bundle), "--pack", str(checked_pack["pack"])]) == 0
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(tmp_path, target_is_directory=True)
+    reached = linked_parent / "bundle"
+    capsys.readouterr()
+
+    code, out, _ = cli(capsys, "review", "status", str(reached))
+    assert code == 0 and out.strip() == "draft"
+
+    code, out, err = cli(capsys, "replay", str(reached))
+    assert code == 0 and json.loads(out)["metrics"]["pending_matching_count"] == 1
+    assert "review state draft" in err
+
+    code, _, err = cli(capsys, "report", str(reached), "--output", str(tmp_path / "linked.html"))
+    assert code == 0 and "review record is draft" in err
+    assert (tmp_path / "linked.html").is_file()
+
+    # Reading through the link changed nothing: approving still refuses that spelling.
+    code, _, err = cli(capsys, "review", "approve", str(reached), "--reviewer", "R. Eviewer",
+                       "--note", "read them")
+    assert code == 2 and "does not resolve to itself" in err
+    assert load_document(bundle / "evaluator" / "review-record.json", "review-record")["state"] == "draft"
+
+
+def test_review_approve_refuses_decisions_that_do_not_bind_to_the_saved_result(tmp_path, capsys,
+                                                                              checked_pack):
+    bundle = make_bundle(tmp_path, checked_pack)
+    assert main(["review", "init", str(bundle), "--pack", str(checked_pack["pack"])]) == 0
+    record_path = bundle / "evaluator" / "review-record.json"
+    before = record_path.read_bytes()
+    result = json.loads((bundle / "result.json").read_text(encoding="utf-8"))
+    result["claims"][0]["allegation"] = "rewritten after the decisions were filed"
+    (bundle / "result.json").write_text(canonical_json(result) + "\n", encoding="utf-8")
+    capsys.readouterr()
+
+    code, _, err = cli(capsys, "review", "approve", str(bundle), "--reviewer", "R. Eviewer",
+                       "--note", "read them")
+    assert code == 2 and "filed against a different result" in err
+    assert record_path.read_bytes() == before
+    assert load_document(record_path, "review-record")["state"] == "draft"
+    assert not list((bundle / "evaluator").glob("*.tmp"))
+
+
+def test_corpus_init_refuses_a_pack_path_inside_a_trial_directory(tmp_path, capsys, checked_pack):
+    trial = tmp_path / "trial" / "snap-a"
+    assert (trial / "provenance.json").is_file() and (trial / "source").is_dir()
+    capsys.readouterr()
+
+    for pack in (trial / "pack.json", trial / "source" / "pack.json"):
+        code, _, err = cli(capsys, *init_argv(pack))
+        assert code == 2 and "inside the trial directory" in err
+        assert not pack.exists()
+
+    outside = tmp_path / "second-pack.json"
+    code, out, _ = cli(capsys, *init_argv(outside))
+    assert code == 0 and "Created draft pack" in out and outside.is_file()
+
+
+def test_review_commands_refuse_a_bundle_inside_a_trial_directory(tmp_path, capsys, checked_pack):
+    trial = tmp_path / "trial" / "snap-a"
+    bundle = trial / "source" / "bundle"
+    capsys.readouterr()
+
+    refused = {
+        "init": ["review", "init", str(bundle), "--pack", str(checked_pack["pack"])],
+        "record": ["review", "record", str(bundle)],
+        "approve": ["review", "approve", str(bundle), "--reviewer", "R. Eviewer", "--note", "n"],
+    }
+    for argv in refused.values():
+        code, _, err = cli(capsys, *argv)
+        assert code == 2 and "inside the trial directory" in err
+
+    assert not bundle.exists()
+
+
+@pytest.mark.parametrize("fields, message", [
+    ({"realWorld": {"cve": 7}}, "realWorld.cve must be a string"),
+    ({"realWorld": {"cve": None}}, "realWorld.cve must be a string"),
+    ({"realWorld": {"ghsa": ["GHSA-aaaa-bbbb-cccc"]}}, "realWorld.ghsa must be a string"),
+    ({"realWorld": {"fixCommit": "c" * 40}}, "realWorld.fixCommit needs realWorld.repo"),
+    ({"realWorld": {"fixCommit": "c" * 40, "repo": "   "}}, "realWorld.fixCommit needs realWorld.repo"),
+    ({"canonicalKind": ["command_injection"]}, "canonicalKind must be a string"),
+    ({"title": 7}, "title must be a string"),
+    ({"description": {"text": "shell injection"}}, "description must be a string"),
+    ({"regions": [{"path": "src/app.py", "startLine": 5}]}, "must be supplied together"),
+    ({"regions": [{"path": "src/app.py", "endLine": None}]}, "must be supplied together"),
+    ({"regions": [{"path": "src/app.py", "startLine": 5, "endLine": None}]},
+     "endLine must be an integer of at least 1"),
+    ({"regions": [{"path": "src/app.py", "startLine": None, "endLine": 5}]},
+     "startLine must be an integer of at least 1"),
+    ({"regions": [{"path": "src/app.py", "startLine": 9, "endLine": 5}]},
+     "startLine must not exceed endLine"),
+])
+def test_import_refuses_further_legacy_shapes_the_migration_cannot_read(tmp_path, capsys, upstream,
+                                                                       fields, message):
+    pack = pack_with_snapshot(tmp_path, upstream)
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps(legacy_record(**fields)) + "\n", encoding="utf-8")
+    capsys.readouterr()
+
+    code, _, err = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
+    assert code == 2 and message in err
+    assert err.startswith("sastbench: ") and "Traceback" not in err
+    assert str(legacy) in err
+    assert read_pack(pack)["cases"] == []

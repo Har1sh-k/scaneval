@@ -20,14 +20,20 @@ What each command writes:
   or the whole new one. The previous version is not kept, and a pack whose status is no longer
   ``draft`` is refused unless ``--new-version`` opens a new draft version of it.
 - ``evaluator/review-record.json`` is replaced the same way by ``review record`` and
-  ``review approve``. Both refuse a bundle reached through a symlink before writing.
+  ``review approve``, through the one replace function :mod:`sastbench.review` uses. Both
+  refuse a bundle reached through a symlink before writing.
 - Everything else is create-only: an existing output path is refused, never overwritten.
 
+The read-only bundle commands do not refuse a symlink: ``replay``, ``report`` and ``review
+status`` resolve the bundle path and report on the bundle it reaches, so a bundle named through
+a symlinked parent is read rather than refused. They write nothing into the bundle.
+
 No command writes inside a materialized trial directory: the output path of ``plan``, ``run``,
-``demo``, ``score``, ``replay`` and ``report``, and the directory ``corpus validate`` exports a
-snapshot into, are each refused when a trial's ``provenance.json`` and ``source`` sit above
-them. That keeps evaluator material out of the tree a scanner is handed; it is a check on the
-path, not an isolation boundary.
+``demo``, ``score``, ``replay`` and ``report``, the pack path of ``corpus init``, the bundle
+argument of ``review init``, ``review record`` and ``review approve``, and the directory
+``corpus validate`` exports a snapshot into, are each refused when a trial's ``provenance.json``
+and ``source`` sit above them. That keeps evaluator material out of the tree a scanner is
+handed; it is a check on the path, not an isolation boundary.
 
 Exit codes. 2 means the command could not be carried out: a usage or contract error, a refused
 overwrite, a failed fetch or export. 1 means the command ran and reports a negative result: a
@@ -50,7 +56,12 @@ from .demo import SOURCE, demo_documents
 from .execution import ExecutionError
 from .materialize import MaterializationError
 from .report import render_report
-from .review import _keep_mode, _refuse_symlinked_dirs
+from .review import (
+    _assert_binds_to_result,
+    _keep_mode,
+    _refuse_symlinked_dirs,
+    _replace_document,
+)
 from .scoring import score
 
 
@@ -84,27 +95,6 @@ def _write_new(path: Path, content: str) -> None:
 
 def _json(value: dict) -> str:
     return canonical_json(value) + "\n"
-
-
-def _replace_json(path: Path, value: dict) -> None:
-    """Replace one existing JSON document atomically, through a temporary file in its directory.
-
-    This is used where a command updates a record that already exists; it does not merge, back
-    up, or keep the previous version, and it replaces a symlink sitting at *path* rather than
-    writing through it.
-    """
-    handle = tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", newline="\n", dir=str(path.parent),
-        prefix=path.name + ".", suffix=".tmp", delete=False,
-    )
-    try:
-        with handle:
-            handle.write(_json(value))
-        _keep_mode(Path(handle.name), path)
-        os.replace(handle.name, path)
-    except BaseException:
-        Path(handle.name).unlink(missing_ok=True)
-        raise
 
 
 def _read_json(path: Path) -> dict:
@@ -213,22 +203,40 @@ def _legacy_document(path: Path) -> dict:
     This checks structure, not truth: it says nothing about whether the record's regions,
     identifiers, or dates are correct, and every value it accepts still enters the pack as
     draft evidence. It exists so a malformed file is reported as a refusal naming the file
-    rather than raising out of :func:`sastbench.cases.draft_case_from_legacy` as a traceback.
-    Fields the migration does not read are left alone, and the schema check in ``cases``
-    remains the authority on the case this produces.
+    rather than raising out of :func:`sastbench.cases.draft_case_from_legacy` as a traceback,
+    so every refusal here names the file. Fields the migration does not read are left alone,
+    and the schema check in ``cases`` remains the authority on the case this produces.
+
+    The strings the migration copies into a case must already be strings: an identifier, kind,
+    title, or description of another type would become an alias or a description that misstates
+    the record, and a ``cve`` or ``ghsa`` key present as ``null`` is refused rather than read as
+    absent, so a record that meant to name one is corrected instead of quietly losing it. A line
+    bound present as ``null`` counts as present, because dropping it would silently widen the
+    region to the whole file, and a fix commit without a repository is refused because the
+    evidence reference it would produce is ``'<repo>@<sha>'``.
     """
     legacy = _read_json(path)
+    for key in ("canonicalKind", "title", "description"):
+        if legacy.get(key) is not None and not isinstance(legacy[key], str):
+            raise ContractError(f"{path}: {key} must be a string")
     real = legacy.get("realWorld")
     if real is not None and not isinstance(real, dict):
         raise ContractError(f"{path}: realWorld must be a JSON object")
-    disclosure = (real or {}).get("disclosure")
+    real = real or {}
+    disclosure = real.get("disclosure")
     if disclosure is not None and not isinstance(disclosure, dict):
         raise ContractError(f"{path}: realWorld.disclosure must be a JSON object")
-    repository = (real or {}).get("repo")
+    for key in ("cve", "ghsa"):
+        if key in real and not isinstance(real[key], str):
+            raise ContractError(f"{path}: realWorld.{key} must be a string")
+    repository = real.get("repo")
     if repository is not None:
         if not isinstance(repository, str):
             raise ContractError(f"{path}: realWorld.repo must be a string")
         _reject_credentials(f"{path}: realWorld.repo", repository)
+    if real.get("fixCommit") and not (isinstance(repository, str) and repository.strip()):
+        raise ContractError(f"{path}: realWorld.fixCommit needs realWorld.repo as a non-blank "
+                            "string; the fix evidence is recorded as '<repo>@<sha>'")
     regions = legacy.get("regions", [])
     if not isinstance(regions, list):
         raise ContractError(f"{path}: regions must be a list of region objects")
@@ -238,9 +246,14 @@ def _legacy_document(path: Path) -> dict:
             raise ContractError(f"{label} must be a JSON object")
         if not isinstance(region.get("path"), str) or not region["path"].strip():
             raise ContractError(f"{label} must carry a non-blank path string")
-        for key in ("startLine", "endLine"):
-            if region.get(key) is not None:
-                _legacy_line(region[key], f"{label}.{key}")
+        bounds = [key for key in ("startLine", "endLine") if key in region]
+        if len(bounds) == 1:
+            raise ContractError(
+                f"{label}: startLine and endLine must be supplied together; {bounds[0]} is alone")
+        for key in bounds:
+            _legacy_line(region[key], f"{label}.{key}")
+        if bounds and region["startLine"] > region["endLine"]:
+            raise ContractError(f"{label}: startLine must not exceed endLine")
     return legacy
 
 
@@ -273,15 +286,16 @@ def _refuse_trial_path(output: Path) -> None:
     """Refuse an output path that lies inside a materialized trial directory.
 
     A trial holds the exported source a scanner is handed, so anything this tool writes inside
-    one would put evaluator material where the scanned tree lives. Every command that names an
-    output path checks it: ``plan``, ``run``, ``demo``, the ``--output`` of ``score``,
-    ``replay`` and ``report``, and the trial ``corpus validate`` is about to export into. A
-    trial is recognized by a ``provenance.json`` file beside a ``source`` directory; any other
-    directory is left alone. Only the parents of *output* are examined: a path that is itself a
-    trial root is not caught by its own marker, which is why ``corpus validate`` checks the
-    snapshot directory it would create rather than ``--trial-root`` itself. The comparison
-    resolves symlinks in the path but follows no bind mount or hard link, so it catches the
-    obvious mistake and is not an isolation boundary.
+    one would put evaluator material where the scanned tree lives. Every command that names a
+    path it may write checks it: ``plan``, ``run``, ``demo``, the ``--output`` of ``score``,
+    ``replay`` and ``report``, the pack ``corpus init`` creates, the bundle ``review init``,
+    ``review record`` and ``review approve`` write into, and the trial ``corpus validate`` is
+    about to export into. A trial is recognized by a ``provenance.json`` file beside a
+    ``source`` directory; any other directory is left alone. Only the parents of *output* are
+    examined: a path that is itself a trial root is not caught by its own marker, which is why
+    ``corpus validate`` checks the snapshot directory it would create rather than
+    ``--trial-root`` itself. The comparison resolves symlinks in the path but follows no bind
+    mount or hard link, so it catches the obvious mistake and is not an isolation boundary.
     """
     for directory in output.expanduser().resolve().parents:
         if (directory / TRIAL_MARKER).is_file() and (directory / TRIAL_SOURCE).is_dir():
@@ -320,6 +334,7 @@ def _demo(directory: Path) -> None:
 
 
 def _corpus_init(args: argparse.Namespace) -> int:
+    _refuse_trial_path(args.pack)
     pack = cases.new_pack(args.namespace, args.pack_id, args.description, version=args.version)
     _create_pack(args.pack, pack)
     print(f"Created draft pack {pack['namespace']}/{pack['pack_id']} {pack['version']}: {args.pack}")
@@ -490,6 +505,7 @@ def _plan(args: argparse.Namespace) -> int:
 
 
 def _review_init(args: argparse.Namespace) -> int:
+    _refuse_trial_path(args.bundle)
     evaluator = args.bundle / review.EVALUATOR_DIR
     plan = load_document(evaluator / review.PLAN_FILE, "evaluation-plan")
     result = load_document(args.bundle / "result.json", "scan-result")
@@ -504,6 +520,7 @@ def _review_init(args: argparse.Namespace) -> int:
 
 def _review_record(args: argparse.Namespace) -> int:
     """Re-draft the review record for decisions a human edited, and print what it now binds to."""
+    _refuse_trial_path(args.bundle)
     record = review.record_decisions(args.bundle, notes=args.notes)
     print(f"Review record state: {record['state']} ({len(record['reviews'])} recorded reviews)")
     print(f"decisions_sha256: {record['decisions_sha256']}")
@@ -512,23 +529,31 @@ def _review_record(args: argparse.Namespace) -> int:
 
 
 def _review_approve(args: argparse.Namespace) -> int:
-    plan, decisions, record = review.load_evaluator(args.bundle)
-    if record is None:
-        raise ContractError(f"no review record in {args.bundle}; run 'review init' first")
-    approved = review.approve_review(record, decisions, plan, reviewer=args.reviewer, note=args.note)
-    # Loading refused a symlinked bundle already; this is the check that guards the write,
-    # which is the only thing this command overwrites.
+    """Record one human approval of the decisions a bundle holds, and replace only its record."""
+    _refuse_trial_path(args.bundle)
+    # This writes, so the bundle is guarded rather than resolved, and the guarded path is what
+    # the load, the result check, and the replace all use.
     bundle = _refuse_symlinked_dirs(args.bundle)
-    _replace_json(bundle / review.EVALUATOR_DIR / review.RECORD_FILE, approved)
+    plan, decisions, record = review.load_evaluator(bundle)
+    if record is None:
+        raise ContractError(f"no review record in {bundle}; run 'review init' first")
+    # An approval names the decisions, and the decisions name a saved result. A result edited
+    # after they were filed is refused here, so no approval is recorded against stale output.
+    _assert_binds_to_result(bundle, decisions)
+    approved = review.approve_review(record, decisions, plan, reviewer=args.reviewer, note=args.note)
+    _replace_document(bundle / review.EVALUATOR_DIR / review.RECORD_FILE, approved)
     print(f"Review record state: {approved['state']} ({len(approved['reviews'])} recorded reviews)")
     return 0
 
 
 def _review_status(args: argparse.Namespace) -> int:
+    """Print the review state of one bundle. This reads; it writes nothing and approves nothing."""
     if not args.bundle.is_dir():
         raise ContractError(f"{args.bundle} is not a bundle directory; review status reads "
                             "evaluator/review-record.json inside one")
-    print(review.review_status(args.bundle))
+    # Resolved here, so a bundle named through a symlinked parent is reported on rather than
+    # refused. Nothing is written, so the symlink guard the writing commands keep is not needed.
+    print(review.review_status(args.bundle.resolve(), guard_symlinks=False))
     return 0
 
 
@@ -724,14 +749,18 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if args.output:
                 _refuse_trial_path(args.output)
+            review_state = None
             if args.command == "score":
                 plan = load_document(args.plan, "evaluation-plan")
                 result = load_document(args.result, "scan-result")
                 decisions = load_document(args.decisions, "review-decisions")
             else:
-                plan, result, decisions = load_bundle(args.bundle)
-            # The review state is reported, never checked: it says what the record on disk claims.
-            review_state = review.review_status(args.bundle) if args.command in ("replay", "report") else None
+                # replay and report only read, so the bundle path is resolved and used as it
+                # lands: a bundle named through a symlinked parent is replayed, not refused.
+                bundle = args.bundle.resolve()
+                plan, result, decisions = load_bundle(bundle)
+                # The state is reported, never checked: it says what the record on disk claims.
+                review_state = review.review_status(bundle, guard_symlinks=False)
             if args.command == "report":
                 _warn_unreviewed(review_state)
             elif args.command == "replay" and review_state != APPROVED_REVIEW_STATE:

@@ -635,7 +635,7 @@ def test_record_decisions_refuses_a_bundle_reached_through_a_symlink(tmp_path):
     with pytest.raises(ContractError, match="symlinked directory"):
         record_decisions(linked_bundle, clock=LATER)
 
-    with pytest.raises(ContractError, match="symlink in the path"):
+    with pytest.raises(ContractError, match="does not resolve to itself"):
         record_decisions(linked_parent / "bundle", clock=LATER)
 
     assert record_path.read_bytes() == before
@@ -712,7 +712,7 @@ def test_status_and_load_evaluator_refuse_a_bundle_reached_through_a_symlink(tmp
     for reached in (review_status, load_evaluator):
         with pytest.raises(ContractError, match="symlinked directory"):
             reached(linked_bundle)
-        with pytest.raises(ContractError, match="symlink in the path"):
+        with pytest.raises(ContractError, match="does not resolve to itself"):
             reached(linked_parent / "bundle")
 
     assert review_status(bundle) == "draft"
@@ -733,3 +733,32 @@ def test_write_keeps_a_plan_whose_bytes_differ_but_whose_document_is_the_same(tm
     # The file is kept as it stands, not rewritten into canonical form.
     assert (evaluator / "plan.json").read_text(encoding="utf-8") == spaced
     assert review_status(tmp_path / "bundle") == "draft"
+
+
+def test_status_is_stale_when_the_record_and_the_decisions_name_different_runs(tmp_path):
+    bundle, _plan, _result, decisions = written_bundle(tmp_path)
+    record_path = bundle / "evaluator" / "review-record.json"
+    renamed = json.loads(record_path.read_text(encoding="utf-8"))
+    renamed["run_id"] = "run-2"
+    record_path.write_text(canonical_json(renamed) + "\n", encoding="utf-8")
+
+    # Both hashes still bind, so the run id is the only thing left that can say these
+    # documents describe different scans.
+    assert renamed["decisions_sha256"] == canonical_sha256(decisions)
+    assert review_status(bundle) == "stale"
+
+
+def test_status_and_load_evaluator_read_a_symlinked_parent_when_the_guard_is_off(tmp_path):
+    bundle, plan, _result, decisions = written_bundle(tmp_path)
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(tmp_path, target_is_directory=True)
+    reached = linked_parent / "bundle"
+
+    assert review_status(reached, guard_symlinks=False) == "draft"
+    loaded_plan, loaded_decisions, loaded_record = load_evaluator(reached, guard_symlinks=False)
+    assert loaded_plan == plan and loaded_decisions == decisions
+    assert loaded_record["state"] == "draft"
+
+    # The guard is opt-out, not gone: the default still refuses the same spelling.
+    with pytest.raises(ContractError, match="does not resolve to itself"):
+        review_status(reached)
