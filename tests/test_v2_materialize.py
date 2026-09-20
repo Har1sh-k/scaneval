@@ -44,6 +44,11 @@ def upstream(tmp_path: Path) -> tuple[Path, str]:
     (repo / ".securevibes").mkdir()
     (repo / ".securevibes" / "findings.md").write_text("controller state\n", encoding="utf-8")
     (repo / "CLAUDE.md").write_text("project instructions\n", encoding="utf-8")
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "settings.json").write_text("{}\n", encoding="utf-8")
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    (repo / ".github" / "workflows" / "ci.yml").write_text("name: ci\n", encoding="utf-8")
+    (repo / ".github" / "copilot-instructions.md").write_text("assistant instructions\n", encoding="utf-8")
     (repo / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
     (repo / "ignored.txt").write_text("tracked despite ignore\n", encoding="utf-8")
     os.symlink("app.py", repo / "link.py")
@@ -100,26 +105,32 @@ def test_export_strips_state_skips_links_records_cues_and_hashes_tree(tmp_path, 
 
     source = trial / "source"
     exported = sorted(p.relative_to(source).as_posix() for p in source.rglob("*") if p.is_file())
-    assert exported == [".gitignore", "CLAUDE.md", "app.py", "ignored.txt", "src/run.sh"]
+    assert exported == [".claude/settings.json", ".github/copilot-instructions.md", ".github/workflows/ci.yml",
+                        ".gitignore", "CLAUDE.md", "app.py", "ignored.txt", "src/run.sh"]
     assert not (source / ".git").exists()
     assert not (source / ".securevibes").exists()
     assert os.access(source / "src" / "run.sh", os.X_OK)
     assert record["stripped"] == [".securevibes/findings.md"]
     assert record["skipped"] == [{"path": "link.py", "reason": "symbolic link not exported"}]
-    assert record["instruction_files"] == ["CLAUDE.md"]
+    # Instruction cues are the files an assistant reads as instructions, not all of .github:
+    # ordinary workflow and CODEOWNERS files are repository content, not a retained cue.
+    assert record["instruction_files"] == [".claude/settings.json", ".github/copilot-instructions.md", "CLAUDE.md"]
+    assert ".github/workflows/ci.yml" not in record["instruction_files"]
+    assert ".github/copilot-instructions.md" in record["instruction_files"]
+    assert ".claude/settings.json" in record["instruction_files"]
     assert record["source"] == {"url": str(repo), "commit": first, "git_tree": snapshot.git_tree,
                                 "fetch_method": snapshot.fetch_method}
     assert record["exported_at"] == "2026-09-20T12:00:00+00:00"
     assert record["profile"] == "standard"
     assert record["synthetic_history"] is None
-    assert record["trial"]["file_count"] == 5
+    assert record["trial"]["file_count"] == 8
 
     expected = {}
     for rel in exported:
         import hashlib
         expected[rel] = "sha256:" + hashlib.sha256((source / rel).read_bytes()).hexdigest()
     assert record["trial"]["tree_hash"] == tree_hash(expected) == canonical_sha256(dict(sorted(expected.items())))
-    assert hash_exported_tree(source) == {"tree_hash": record["trial"]["tree_hash"], "file_count": 5}
+    assert hash_exported_tree(source) == {"tree_hash": record["trial"]["tree_hash"], "file_count": 8}
 
     path = write_provenance(trial, record)
     assert json.loads(path.read_text(encoding="utf-8")) == record
@@ -171,3 +182,15 @@ def test_inspect_commit_reports_parent_and_dates_without_caching(tmp_path, upstr
     assert not list(tmp_path.glob("sastbench-inspect-*"))
     with pytest.raises(MaterializationError, match="full 40-hex SHA"):
         inspect_commit(str(repo), "HEAD")
+
+
+def test_instruction_cue_detection_covers_assistant_files_only():
+    from sastbench.materialize import _is_instruction_file
+
+    for path in ("CLAUDE.md", "docs/AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules", ".clinerules",
+                 ".claude/settings.json", ".codex/config.toml", ".cursor/rules/style.mdc",
+                 ".github/copilot-instructions.md", ".github/instructions/python.instructions.md"):
+        assert _is_instruction_file(path), path
+    for path in (".github/workflows/ci.yml", ".github/CODEOWNERS", ".github/ISSUE_TEMPLATE/bug.md",
+                 ".github/dependabot.yml", "README.md", "src/claude.py", "docs/github/instructions/x.md"):
+        assert not _is_instruction_file(path), path

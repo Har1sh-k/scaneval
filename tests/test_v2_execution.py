@@ -225,9 +225,8 @@ def _git(*args: str, cwd: Path) -> str:
                                "GIT_COMMITTER_EMAIL": "u@x", "GIT_CONFIG_GLOBAL": "/dev/null"}).stdout.strip()
 
 
-@pytest.mark.skipif(not (Path(sys.executable).with_name("semgrep").exists() or shutil.which("semgrep")),
-                    reason="semgrep binary not installed")
-def test_semgrep_adapter_runs_pinned_local_ruleset_end_to_end(tmp_path):
+def pinned_rules_repo(tmp_path: Path) -> tuple[Path, str]:
+    """A tiny git repository holding one pinned Semgrep rule, as an offline ruleset source."""
     rules = tmp_path / "rules-repo"
     (rules / "python").mkdir(parents=True)
     (rules / "python" / "shell.yaml").write_text(
@@ -238,8 +237,17 @@ def test_semgrep_adapter_runs_pinned_local_ruleset_end_to_end(tmp_path):
     _git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=rules)
     _git("add", "-A", cwd=rules)
     _git("commit", "-q", "-m", "rules", cwd=rules)
-    commit = _git("rev-parse", "HEAD", cwd=rules)
+    return rules, _git("rev-parse", "HEAD", cwd=rules)
 
+
+semgrep_required = pytest.mark.skipif(
+    not (Path(sys.executable).with_name("semgrep").exists() or shutil.which("semgrep")),
+    reason="semgrep binary not installed")
+
+
+@semgrep_required
+def test_semgrep_adapter_runs_pinned_local_ruleset_end_to_end(tmp_path):
+    rules, commit = pinned_rules_repo(tmp_path)
     adapter = get_adapter("semgrep")
     spec = SystemSpec("semgrep-pinned", "semgrep", {"ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}})
     preparation = adapter.prepare(spec, tmp_path / "cache")
@@ -257,3 +265,85 @@ def test_semgrep_adapter_runs_pinned_local_ruleset_end_to_end(tmp_path):
     assert "--metrics=off" in execution["command"] and not any(a.startswith("p/") for a in execution["command"])
     assert (bundle / "raw" / "semgrep.json").exists()
     assert execution["capture"]["model_requests"] == "not_applicable"
+
+
+@semgrep_required
+def test_semgrep_prepare_resolves_config_dirs_against_a_relative_cache_root(tmp_path, monkeypatch):
+    # scan() runs semgrep inside a private workspace, so a config path recorded relative to the
+    # controller's working directory would not exist there: semgrep would exit nonzero having
+    # scanned nothing. Preparation must record absolute config directories.
+    rules, commit = pinned_rules_repo(tmp_path)
+    prepared = prepared_input(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    adapter = get_adapter("semgrep")
+    spec = SystemSpec("semgrep-relcache", "semgrep", {"ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}})
+    preparation = adapter.prepare(spec, Path("cache"))
+
+    assert preparation["config_dirs"], "preparation recorded no config directories"
+    assert all(Path(directory).is_absolute() for directory in preparation["config_dirs"])
+    assert preparation["ruleset"]["rule_files"] == 1
+
+    bundle = run_invocation(prepared=prepared, adapter=adapter, spec=spec, preparation=preparation,
+                            out_dir=tmp_path / "out", run_id="run-relcache", timeout_seconds=300, clock=CLOCK)
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "success" and "error" not in result
+    assert [c["primary_location"] for c in result["claims"]] == [{"path": "app.py", "start_line": 3, "end_line": 3}]
+    assert result["claims"][0]["native_rule_id"] == "probe.subprocess-shell"
+    assert all(not arg.startswith("--config=.") for arg in execution["command"] if arg.startswith("--config="))
+
+
+def fake_semgrep(tmp_path: Path, payload: dict, exit_code: int) -> Path:
+    """A stand-in binary that answers ``--version`` and then prints *payload* and exits *exit_code*."""
+    script = tmp_path / "fake-semgrep"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "if '--version' in sys.argv:\n"
+        "    print('9.9.9')\n"
+        "    raise SystemExit(0)\n"
+        f"print(json.dumps({payload!r}))\n"
+        f"raise SystemExit({exit_code})\n", encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
+def _scan_with_fake(tmp_path: Path, payload: dict, exit_code: int):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("import subprocess\n", encoding="utf-8")
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    spec = SystemSpec("semgrep-fake", "semgrep", {"binary": str(fake_semgrep(tmp_path, payload, exit_code))})
+    preparation = {"ruleset": {"commit": "a" * 40, "tree_hash": "sha256:" + "b" * 64},
+                   "config_dirs": [str(tmp_path / "rules" / "python")]}
+    outcome = SemgrepAdapter().scan(request={}, source_dir=source, raw_dir=raw, spec=spec, preparation=preparation,
+                                    timeout_seconds=60, trace_mode="off", trace_dir=None)
+    return outcome, raw
+
+
+def test_semgrep_nonzero_exit_with_nothing_scanned_is_an_error_not_partial(tmp_path):
+    payload = {"version": "9.9.9", "results": [], "paths": {"scanned": []},
+               "errors": [{"level": "error", "code": 7,
+                           "message": "unable to find a config; path `rules/python` does not exist"}]}
+    outcome, raw = _scan_with_fake(tmp_path, payload, 7)
+    assert outcome.status == "error"
+    assert outcome.exit_code == 7 and outcome.error["code"] == "exit_7"
+    assert "unable to find a config" in outcome.error["message"]
+    assert outcome.claims == []
+    # --quiet leaves stderr empty, so the raw JSON is the only record of why the run failed.
+    assert (raw / "semgrep.json").exists()
+    assert json.loads((raw / "semgrep.json").read_text(encoding="utf-8"))["errors"][0]["level"] == "error"
+    assert [artifact["id"] for artifact in outcome.artifacts] == ["semgrep-json", "semgrep-stderr"]
+
+
+def test_semgrep_nonzero_exit_after_scanning_paths_stays_partial(tmp_path):
+    payload = {"version": "9.9.9", "paths": {"scanned": ["app.py"]},
+               "errors": [{"level": "error", "message": "Rule timeout on app.py"}],
+               "results": [{"check_id": "probe.rule", "path": "app.py", "start": {"line": 1}, "end": {"line": 1},
+                            "extra": {"message": "finding", "severity": "WARNING", "metadata": {}}}]}
+    outcome, _ = _scan_with_fake(tmp_path, payload, 7)
+    assert outcome.status == "partial"
+    assert outcome.exit_code == 7 and outcome.error["code"] == "exit_7"
+    assert "Rule timeout" in outcome.error["message"]
+    assert [claim["native_rule_id"] for claim in outcome.claims] == ["probe.rule"]

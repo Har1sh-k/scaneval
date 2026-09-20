@@ -120,16 +120,20 @@ class SemgrepAdapter(Adapter):
         if any(str(p).startswith("p/") or str(p).startswith("r/") for p in ruleset["paths"]):
             raise AdapterError("registry rulesets are not pins; use a rules repository commit")
         snapshot = fetch_snapshot(str(ruleset["url"]), str(ruleset["commit"]), cache_root)
+        # scan() runs semgrep with cwd=source_dir (a private workspace), so a config path
+        # relative to the controller's working directory would not resolve there. Record
+        # absolute paths only.
+        root = snapshot.path.resolve()
         config_dirs: list[str] = []
         hashes: dict[str, str] = {}
         for relative in ruleset["paths"]:
-            directory = snapshot.path / str(relative)
+            directory = (root / str(relative)).resolve()
             if not directory.is_dir():
-                raise AdapterError(f"ruleset path {relative!r} is not a directory in {snapshot.path}")
+                raise AdapterError(f"ruleset path {relative!r} is not a directory in {root}")
             config_dirs.append(str(directory))
             for rule_file in sorted(directory.rglob("*")):
                 if rule_file.suffix in {".yaml", ".yml"} and rule_file.is_file() and not rule_file.name.startswith("."):
-                    hashes[rule_file.relative_to(snapshot.path).as_posix()] = sha256_file(rule_file)[0]
+                    hashes[rule_file.relative_to(root).as_posix()] = sha256_file(rule_file)[0]
         if not hashes:
             raise AdapterError("ruleset contains no rule files")
         return {
@@ -180,10 +184,23 @@ class SemgrepAdapter(Adapter):
         base["tool_versions"]["semgrep_reported"] = str(payload.get("version", ""))
         errors = payload.get("errors") or []
         fatal = [e for e in errors if isinstance(e, dict) and e.get("level") == "error"]
+        scanned = (payload.get("paths") or {}).get("scanned") or []
         if result.exit_code != 0:
+            # --quiet keeps the reason off stderr, so the JSON errors array carries it.
+            reason = str(fatal[0].get("message", "")).strip() if fatal else ""
+            detail = f"; reason: {reason}" if reason else ""
+            if not scanned and not claims:
+                # Nothing was scanned and nothing was reported: this run produced no output at
+                # all, so it is an error. Calling it partial would let a failed invocation read
+                # as a quiet negative result.
+                message = (f"semgrep exited {result.exit_code} with no scanned paths and no results"
+                           f"{detail}; stderr: {tail_text(stderr)}")
+                return NativeOutcome(status="error", exit_code=result.exit_code, claims=[],
+                                     error={"code": f"exit_{result.exit_code}", "message": message[:2000]}, **base)
+            message = (f"semgrep exited {result.exit_code} after scanning {len(scanned)} paths"
+                       f"{detail}; stderr: {tail_text(stderr)}")
             return NativeOutcome(status="partial", exit_code=result.exit_code, claims=claims,
-                                 error={"code": f"exit_{result.exit_code}",
-                                        "message": f"semgrep exited {result.exit_code}; stderr: {tail_text(stderr)}"}, **base)
+                                 error={"code": f"exit_{result.exit_code}", "message": message[:2000]}, **base)
         if fatal:
             base["notes"].append(f"{len(fatal)} error-level Semgrep diagnostics; see raw semgrep.json errors")
             return NativeOutcome(status="partial", exit_code=0, claims=claims,

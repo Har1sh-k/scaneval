@@ -26,9 +26,14 @@ PROFILES = ("standard", "metadata_blinded")
 # Harness or evaluator state that must never travel with an exported snapshot.
 STRIPPED_TOP_LEVEL = frozenset({".securevibes", ".sastbench", ".repos"})
 # Files whose presence a scanner may treat as project instructions. They stay in the export
-# under the standard profile, but their presence is recorded as a retained identity cue.
-INSTRUCTION_FILE_NAMES = frozenset({"CLAUDE.md", "AGENTS.md", ".cursorrules", ".windsurfrules"})
-INSTRUCTION_TOP_LEVEL = frozenset({".claude", ".codex", ".cursor", ".github"})
+# under the standard profile, but their presence is recorded as a retained identity cue. Only
+# paths an agent actually reads as instructions count: ``.github`` as a whole does not, because
+# workflows and CODEOWNERS are ordinary repository content, not instructions to a scanner.
+INSTRUCTION_FILE_NAMES = frozenset({"CLAUDE.md", "AGENTS.md", "GEMINI.md", ".cursorrules",
+                                    ".windsurfrules", ".clinerules"})
+INSTRUCTION_TOP_LEVEL = frozenset({".claude", ".codex", ".cursor"})
+INSTRUCTION_PATHS = frozenset({".github/copilot-instructions.md"})
+INSTRUCTION_PATH_PREFIXES = (".github/instructions/",)
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _LFS_CONFIG = (
     ("filter.lfs.clean", "cat"),
@@ -178,7 +183,12 @@ def _first_component(path: str) -> str:
 
 
 def _is_instruction_file(path: str) -> bool:
-    return path.split("/")[-1] in INSTRUCTION_FILE_NAMES or _first_component(path) in INSTRUCTION_TOP_LEVEL
+    return (
+        path.split("/")[-1] in INSTRUCTION_FILE_NAMES
+        or _first_component(path) in INSTRUCTION_TOP_LEVEL
+        or path in INSTRUCTION_PATHS
+        or path.startswith(INSTRUCTION_PATH_PREFIXES)
+    )
 
 
 def export_snapshot(
