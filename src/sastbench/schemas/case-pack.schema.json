@@ -166,8 +166,8 @@
         "validation": {
           "type": "object", "additionalProperties": false, "required": ["level", "review_state", "checks", "reviews"],
           "properties": {
-            "level": {"enum": [null, "L1", "L2", "L3", "L4"]},
-            "review_state": {"enum": ["draft", "mechanically_checked", "human_approved"]},
+            "level": {"enum": [null, "L1", "L2", "L3", "L4"], "description": "L1 is the mechanical state; L2 and above are recorded human reviews. L3 and L4 also require disposition validate, because a reviewed label rests on the screening decision behind it."},
+            "review_state": {"enum": ["draft", "mechanically_checked", "human_approved"], "description": "mechanically_checked means level L1 and a recorded passing check set, carrying snapshot_id, for every snapshot the case references; it is never a claim that a person read anything."},
             "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
             "checks_failed": {"type": "boolean", "description": "Absent by default. Set when a mechanical check set failed for a snapshot this case references after the case was human approved: the recorded review and level stand, and planning leaves the case out until a correction decision resolves it."},
             "reviews": {"type": "array", "items": {"$ref": "#/$defs/review"}}
