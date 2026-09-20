@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 from typing import Any
 
@@ -253,9 +254,18 @@ class LlmHarnessAdapter(Adapter):
                      {"id": "driver-config", "path": config_path}]
         state_dir = source_dir / preset["state_dir"]
         claims, import_notes = import_harness_findings(state_dir / "findings", harness=harness, artifact_id="harness-findings")
-        for name in ("bootstrap-plan.md", "hypothesis-scanned-files.md", "specialists.json", "scan-log.md"):
-            if (state_dir / name).exists():
-                artifacts.append({"id": f"harness-{name}", "path": state_dir / name})
+        # The harness writes its plan and scan log inside the workspace, which is removed once
+        # the scan returns. Copy the records worth hashing into the staging directory so they
+        # survive as raw artifacts; the whole state directory is preserved separately.
+        plans = raw_dir / "harness-plan"
+        for name in ("bootstrap-plan.md", "pr-plan.md", "batch-plan.md", "hypothesis-scanned-files.md",
+                     "specialists.json", "specialists.md", "scan-log.md", "threat-model.md", "codebase-profile.json"):
+            written = state_dir / name
+            if written.is_file() and not written.is_symlink():
+                plans.mkdir(parents=True, exist_ok=True)
+                copied = plans / name
+                shutil.copyfile(written, copied)
+                artifacts.append({"id": f"harness-{name}", "path": copied})
         output: dict[str, Any] = {}
         try:
             output = json.loads((raw_dir / "driver-output.json").read_text(encoding="utf-8"))

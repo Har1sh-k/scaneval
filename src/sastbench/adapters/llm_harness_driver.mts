@@ -258,7 +258,7 @@ async function main(): Promise<void> {
   }
   const output = {
     schema_version: "2.0",
-    driver_version: "2.0.0",
+    driver_version: "2.1.0",
     harness: { root: config.harness_root, package_version: packageVersion, ...gitHead(config.harness_root) },
     model: config.model,
     runner: config.runner,
@@ -300,7 +300,7 @@ main().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
   if (outputPath) {
     try {
-      writeFileSync(outputPath, JSON.stringify({ schema_version: "2.0", driver_version: "2.0.0", summary: null,
+      writeFileSync(outputPath, JSON.stringify({ schema_version: "2.0", driver_version: "2.1.0", summary: null,
         error: { name: "DriverFailure", message } }, null, 2));
     } catch {
       // Nothing else to record; the exit code carries the failure.

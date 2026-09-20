@@ -152,6 +152,14 @@ def test_mock_runner_engine_run_produces_observed_bundle(tmp_path, harness, root
     assert execution["trace"]["capture_gap"] is False and execution["trace"]["dropped_events"] == 0
     assert (bundle / "raw" / "harness-state").exists()
 
+    # The harness writes its plan inside the workspace, which is gone by the time the bundle is
+    # sealed. Every declared artifact must still resolve, and its hash must cover real bytes.
+    assert not any("declared artifact missing" in note for note in execution["notes"]), execution["notes"]
+    for artifact in execution["raw_artifacts"]:
+        assert (bundle / artifact["path"]).is_file(), artifact
+    plans = {a["id"] for a in execution["raw_artifacts"] if a["id"].startswith("harness-")}
+    assert "harness-threat-model.md" in plans and "harness-scan-log.md" in plans
+
 
 def test_metadata_mode_omits_prompt_content(tmp_path):
     root = SECUREVIBES
