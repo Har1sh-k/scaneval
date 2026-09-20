@@ -1,5 +1,5 @@
 ---
-name: sastbench-adapter-authoring
+name: scaneval-adapter-authoring
 description: Build or update a SASTbench scanner adapter under adapters/. Use when an agent needs to create, repair, or extend an adapter for a scanner, including rule mapping, path normalization, raw-output capture, optional PR-mode support, adapter tests, and harness validation against core benchmark cases.
 ---
 

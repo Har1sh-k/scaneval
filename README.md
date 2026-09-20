@@ -269,8 +269,8 @@ Bandit results above use the default built-in rule set because the official adap
 
 If you want another agent to work on this repo, use these repo-local skills:
 
-- [skills/sastbench-results-validation/SKILL.md](skills/sastbench-results-validation/SKILL.md): verify claimed benchmark or PR-mode results, rerun scanners, confirm the exact rule set used, and distinguish valid runs from environment or scanner failures.
-- [skills/sastbench-adapter-authoring/SKILL.md](skills/sastbench-adapter-authoring/SKILL.md): build or update a SASTbench scanner adapter, including rule mapping, metadata capture, PR-mode support, tests, and harness validation.
+- [skills/scaneval-results-validation/SKILL.md](skills/scaneval-results-validation/SKILL.md): verify claimed benchmark or PR-mode results, rerun scanners, confirm the exact rule set used, and distinguish valid runs from environment or scanner failures.
+- [skills/scaneval-adapter-authoring/SKILL.md](skills/scaneval-adapter-authoring/SKILL.md): build or update a SASTbench scanner adapter, including rule mapping, metadata capture, PR-mode support, tests, and harness validation.
 
 ## Legacy V1 canonical vulnerability kinds
 

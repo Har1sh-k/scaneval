@@ -4,7 +4,7 @@ Each adapter lives in `adapters/<scanner-name>/adapter.py` and normalizes scanne
 
 Use [CREATING_AN_ADAPTER.md](./CREATING_AN_ADAPTER.md) for the full adapter contract.
 
-If you want another agent to implement the adapter, use the repo-local skill at [../skills/sastbench-adapter-authoring/SKILL.md](../skills/sastbench-adapter-authoring/SKILL.md).
+If you want another agent to implement the adapter, use the repo-local skill at [../skills/scaneval-adapter-authoring/SKILL.md](../skills/scaneval-adapter-authoring/SKILL.md).
 
 ## Required interface
 

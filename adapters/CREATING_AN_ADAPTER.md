@@ -2,7 +2,7 @@
 
 This guide covers everything needed to build an adapter that connects a security scanner to the SASTbench benchmark harness. Use it as a reference or as a prompt to generate a new adapter.
 
-If you want another agent to implement the adapter for you, use the repo-local skill at [../skills/sastbench-adapter-authoring/SKILL.md](../skills/sastbench-adapter-authoring/SKILL.md).
+If you want another agent to implement the adapter for you, use the repo-local skill at [../skills/scaneval-adapter-authoring/SKILL.md](../skills/scaneval-adapter-authoring/SKILL.md).
 
 ---
 
