@@ -16,7 +16,7 @@ from sastbench.adapters import get_adapter
 from sastbench.adapters.base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command
 from sastbench.adapters.semgrep import SemgrepAdapter, import_semgrep_results
 from sastbench.contracts import ContractError, load_document, validate_document
-from sastbench.execution import ExecutionError, PreparedInput, invocation_id, run_invocation
+from sastbench.execution import ExecutionError, PreparedInput, _write_new, invocation_id, run_invocation
 from sastbench.materialize import hash_exported_tree
 
 
@@ -212,6 +212,133 @@ def test_workspace_hash_mismatch_and_bad_policies_are_rejected(tmp_path):
         run(tmp_path / "b", FakeAdapter(), network_policy="lan")
     with pytest.raises(ExecutionError, match="trace mode"):
         run(tmp_path / "c", FakeAdapter(), trace_mode="verbose")
+
+
+class OutcomeAdapter(FakeAdapter):
+    """Writes real raw output, then hands back whatever *mutate* makes of the outcome."""
+
+    def __init__(self, mutate):
+        super().__init__()
+        self.mutate = mutate
+
+    def scan(self, **kwargs):
+        return self.mutate(super().scan(**kwargs))
+
+
+def _with(outcome: NativeOutcome, **fields) -> NativeOutcome:
+    for name, value in fields.items():
+        setattr(outcome, name, value)
+    return outcome
+
+
+@pytest.mark.parametrize(
+    ("mutate", "fragment"),
+    [
+        (lambda outcome: _with(outcome, tool_versions={"fake": 1.0}), "tool_versions['fake'] must be a string, not float"),
+        (lambda outcome: _with(outcome, command=[Path("/bin/fake"), "scan"]), "command[0] must be a string, not"),
+        (lambda outcome: {"status": "success", "claims": []}, "adapter returned dict, not a NativeOutcome"),
+        (lambda outcome: _with(outcome, artifacts=[{"id": 7, "path": "raw/native.json"}]), "artifacts[0].id must be a non-empty string"),
+        (lambda outcome: _with(outcome, usage={"cost_usd": "free"}), "usage['cost_usd'] must be a number, not str"),
+        (lambda outcome: _with(outcome, notes=[object()]), "notes[0] must be a string, not object"),
+    ],
+    ids=["float-version", "path-in-command", "dict-outcome", "artifact-id", "usage-string", "note-object"],
+)
+def test_an_outcome_that_breaks_the_adapter_contract_is_a_recorded_error(tmp_path, mutate, fragment):
+    """An outcome this module cannot read is an error bundle, never a success with fields dropped."""
+    bundle = run(tmp_path, OutcomeAdapter(mutate))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "outcome_contract_violation"
+    assert fragment in result["error"]["message"]
+    assert "raw_artifacts" not in result and result["usage"]["cost_usd"] is None
+    assert execution["status"] == "error" and execution["error"] == result["error"]
+    assert execution["command"] == [] and execution["tool_versions"] == {} and execution["raw_artifacts"] == []
+    assert execution["import_error"] is None
+    assert execution["notes"] == [f"The adapter outcome was discarded: {execution['error']['message']}"]
+    # The scanner's own output is still preserved: only the outcome it reported was discarded.
+    assert (bundle / "raw" / "native.json").read_text(encoding="utf-8").startswith('{"findings"')
+    assert (bundle / "raw" / "harness-state" / "fakestate" / "notes.md").is_file()
+
+
+def test_a_trace_file_that_is_not_utf8_is_recorded_as_a_failure_not_an_invented_count(tmp_path):
+    """A count taken from bytes this cannot decode would be a number nothing observed."""
+
+    class BadTraceAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            events = kwargs["trace_dir"] / "events.jsonl"
+            events.write_bytes(b'{"type":"model_request"}\n\xff\xfe\n')
+            outcome.trace_path = events
+            return outcome
+
+    bundle = run(tmp_path, BadTraceAdapter(), trace_mode="metadata")
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["error"]["code"] == "outcome_contract_violation"
+    assert "trace file could not be read as UTF-8 text" in result["error"]["message"]
+    assert "UnicodeDecodeError" in result["error"]["message"]
+    assert execution["trace"] == {"path": None, "events": None, "mode": "metadata",
+                                  "capture_gap": None, "dropped_events": None}
+    # The undecodable file itself is kept exactly as the adapter wrote it.
+    assert (bundle / "trace" / "events.jsonl").read_bytes().endswith(b"\xff\xfe\n")
+
+
+def test_an_execution_record_the_contract_refuses_never_leaves_a_successful_result(tmp_path):
+    """The two documents are written together, so result.json cannot outlive a refused record."""
+
+    class OddCaptureAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            outcome.capture = {"model_requests": "sometimes"}
+            return outcome
+
+    bundle = run(tmp_path, OddCaptureAdapter())
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "outcome_contract_violation"
+    assert "execution record violates its contract" in result["error"]["message"]
+    assert "sometimes" in result["error"]["message"]
+    assert execution["capture"] == {} and execution["error"] == result["error"]
+    assert (bundle / "raw" / "native.json").is_file()
+
+
+def test_writing_a_document_canonical_json_cannot_represent_creates_no_file(tmp_path):
+    """The serialization must fail before the file exists; an empty file would read as a record."""
+    path = tmp_path / "result.json"
+
+    with pytest.raises(ContractError, match="not canonical JSON"):
+        _write_new(path, {"claims": {"c1"}})
+
+    assert not path.exists()
+
+
+def test_a_scanner_gets_an_export_for_source_while_a_ruleset_path_may_be_in_the_cache(tmp_path):
+    """The narrowed boundary: no cache path for evaluated source, adapter rulesets excepted."""
+    cache_rules = tmp_path / "cache" / "rules__abc" / "python"
+    cache_rules.mkdir(parents=True)
+    seen: dict[str, Path] = {}
+
+    class RulesetAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            seen["source_dir"] = Path(kwargs["source_dir"])
+            seen["config_dir"] = Path(kwargs["preparation"]["config_dirs"][0])
+            return super().scan(**kwargs)
+
+    prepared = prepared_input(tmp_path)
+    bundle = run_invocation(prepared=prepared, adapter=RulesetAdapter(), spec=SystemSpec("s", "fake", {}),
+                            preparation={"config_dirs": [str(cache_rules)]}, out_dir=tmp_path / "out",
+                            run_id="run-1", clock=CLOCK)
+
+    assert not seen["source_dir"].is_relative_to(tmp_path / "cache")
+    assert not seen["source_dir"].is_relative_to(prepared.source_dir)
+    assert seen["config_dir"].is_relative_to(tmp_path / "cache")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["preparation"] == {"config_dirs": [str(cache_rules)]}
 
 
 def test_execution_record_contract_rejects_inconsistent_timeout_and_escaping_paths():

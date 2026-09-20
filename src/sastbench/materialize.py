@@ -1,9 +1,12 @@
 """Immutable source cache, pinned snapshot export, tree hashing, and preparation provenance.
 
-The cache under ``.repos`` is controller-only. A scanner never receives a cache path; it
-receives a fresh export under a trial directory whose ``source`` subtree contains tracked
-regular files only. Exporting a tree records what was stripped or skipped, but it is not a
-sandbox: filesystem and network policy must be enforced outside this module.
+The cache under ``.repos`` is controller-only for evaluated source: a scanner never receives a
+cache path to a source snapshot, it receives a fresh export under a trial directory whose
+``source`` subtree contains tracked regular files only. The cache holds adapter preparation
+material as well, and an adapter may hand its scanner paths to its own pinned rulesets there;
+that is configuration the adapter checked out, not the tree under evaluation. Exporting a tree
+records what was stripped or skipped, but it is not a sandbox: filesystem and network policy
+must be enforced outside this module.
 """
 
 from __future__ import annotations

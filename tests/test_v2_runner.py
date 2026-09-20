@@ -19,11 +19,12 @@ from sastbench.adapters.base import Adapter, AdapterError, NativeOutcome
 from sastbench.cli import main
 from sastbench.contracts import ContractError, canonical_json, canonical_sha256, load_document
 from sastbench.materialize import MaterializationError
-from sastbench.runner import MANIFEST_NAME, run_from_config
+from sastbench.runner import MANIFEST_NAME, _write_new, run_from_config
 
 
 CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
 VULNERABLE = "import subprocess\n\n\ndef run(cmd):\n    return subprocess.run(cmd, shell=True)\n"
+REPAIRED = "import subprocess\n\n\ndef run(cmd):\n    return subprocess.run(cmd, shell=False)\n"
 REPRESENTS = ("This case tests caller-controlled shell command construction under a trusted-argument "
               "assumption, and adds a single-file Python sink for the runner pilot.")
 
@@ -556,3 +557,169 @@ def test_the_frozen_pack_is_written_once_before_the_first_invocation(tmp_path, p
     checked = json.loads(frozen[0])["cases"][0]["validation"]
     assert checked["review_state"] == "mechanically_checked" and checked["level"] == "L1"
     assert manifest["pack"]["sha256"] == canonical_sha256(json.loads(frozen[0]))
+
+
+def repaired_commit(repo: Path) -> str:
+    """A second local commit whose ``src/app.py`` no longer builds a shell string."""
+    (repo / "src" / "app.py").write_text(REPAIRED, encoding="utf-8")
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "repair", cwd=repo)
+    return git("rev-parse", "HEAD", cwd=repo)
+
+
+def write_two_snapshot_pack(path: Path, repo: Path, commit: str, repaired: str) -> dict:
+    """One case whose target is on the vulnerable snapshot and whose control is on the repaired one."""
+    pack = cases.new_pack("test", "runner-pilot", "Local fixture pack spanning two snapshots.")
+    base = {"repository": {"url": str(repo), "name": "widget"},
+            "reference": "Commit chosen by the test fixture; no advisory is claimed.",
+            "languages": ["python"], "workload": "conventional_application", "component_role": "application",
+            "license": {"spdx": None, "verified": False, "note": "Local fixture repository."}}
+    cases.add_snapshot(pack, {**base, "snapshot_id": "snap-a", "commit": commit})
+    cases.add_snapshot(pack, {**base, "snapshot_id": "snap-fixed", "commit": repaired, "role": "fixed"})
+    case = cases.draft_case(
+        "case-a", snapshot_id="snap-a", kind="command_injection",
+        description="Caller-controlled command string reaches subprocess with shell=True.",
+        represents=REPRESENTS, workload="conventional_application", component_role="application",
+        aliases=[],
+        evidence=[cases.evidence("source", origin="research_note", kind="source_inspection",
+                                 reference="src/app.py", note="Fixture inspection, not an advisory.")],
+        accepted_locations=[{"path": "src/app.py", "start_line": 5, "end_line": 5, "role": "sink", "note": ""}],
+    )
+    case["controls"].append({
+        "control_id": "C-case-a-fixed", "snapshot_id": "snap-fixed", "type": "fixed_target",
+        "target_id": "T-case-a", "description": "The repaired call passes an argument list.",
+        "property": "No shell string is built at this call site.",
+        "allowed_actors_inputs": "The same callers as the vulnerable snapshot.",
+        "assumptions": ["Default deployment."],
+        "ruled_out_allegation": "Caller-controlled shell interpolation at this call site.",
+        "locations": [{"path": "src/app.py", "start_line": 5, "end_line": 5, "role": "operation", "note": ""}],
+        "evidence_ids": ["source"],
+    })
+    cases.add_case(pack, case)
+    cases.save_pack(path, pack)
+    return pack
+
+
+def test_a_run_whose_output_sits_under_a_symlinked_parent_completes(tmp_path, pilot):
+    """macOS puts /tmp behind a symlink, and the bundle writer refuses a path that resolves away."""
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+
+    manifest = run(pilot, link / "out")
+
+    out = real / "out"
+    assert manifest["status"] == "completed"
+    assert [(row["status"], row["bundle_path"]) for row in manifest["invocations"]] == [
+        ("success", "invocations/snap-a__fake-a__r1")]
+    assert load_document(out / MANIFEST_NAME, "run-manifest") == manifest
+    bundle = out / "invocations" / "snap-a__fake-a__r1"
+    assert (bundle / "evaluator" / "plan.json").is_file() and (bundle / "evaluation.json").is_file()
+    assert (out / "evaluator" / "pack.json").is_file()
+
+
+def test_a_document_canonical_json_cannot_represent_leaves_no_file_behind(tmp_path):
+    """The serialization must fail before the file exists; an empty file would read as a record."""
+    path = tmp_path / "run-manifest.json"
+
+    with pytest.raises(ContractError, match="not canonical JSON"):
+        _write_new(path, {"warnings": {"a", "b"}})
+
+    assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    ("record", "fragment"),
+    [({"ruleset": {"paths"}}, "Object of type set is not JSON serializable"),
+     ({"ruleset": {"cost_usd": float("inf")}}, "odd.prepare record.ruleset.cost_usd contains a non-finite number")],
+    ids=["not-json", "non-finite"],
+)
+def test_a_preparation_record_the_manifest_cannot_carry_is_a_skipped_system(tmp_path, upstream, record, fragment):
+    """The record is copied into the manifest verbatim, so an unwritable one is a preparation failure."""
+    repo, commit = upstream
+    write_pack(tmp_path / "pack.json", repo, commit)
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake"), system_entry("odd-b", "odd")])
+
+    class OddAdapter(FakeAdapter):
+        def prepare(self, spec, cache_root):
+            self.prepared += 1
+            return record
+
+    odd = OddAdapter()
+    out = tmp_path / "out"
+    manifest = run_from_config(config_path, out, clock=CLOCK, adapters={"fake": FakeAdapter(), "odd": odd})
+
+    assert manifest["status"] == "completed" and odd.calls == 0
+    assert manifest["systems"][1]["preparation"] == {}
+    assert fragment in manifest["systems"][1]["skipped_reason"]
+    assert manifest["systems"][1]["skipped_reason"].startswith("ContractError: ")
+    assert [(row["system_id"], row["status"]) for row in manifest["invocations"]] == [
+        ("fake-a", "success"), ("odd-b", "skipped")]
+    assert load_document(out / MANIFEST_NAME, "run-manifest") == manifest
+    assert not (out / "invocations" / "snap-a__odd-b__r1").exists()
+
+
+def test_a_two_input_run_records_the_state_and_notes_of_the_plan_it_actually_built(tmp_path, upstream):
+    """A case spanning both inputs is complete only after both are checked, so the manifest waits."""
+    repo, commit = upstream
+    repaired = repaired_commit(repo)
+    write_two_snapshot_pack(tmp_path / "pack.json", repo, commit, repaired)
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake")],
+                 inputs=[{"snapshot_id": "snap-a"}, {"snapshot_id": "snap-fixed"}])
+    out = tmp_path / "out"
+
+    manifest = run_from_config(config_path, out, clock=CLOCK, adapters={"fake": FakeAdapter()})
+
+    assert manifest["status"] == "completed"
+    assert [recorded["snapshot_id"] for recorded in manifest["inputs"]] == ["snap-a", "snap-fixed"]
+    for recorded in manifest["inputs"]:
+        assert [(o["case_id"], o["passed"], o["review_state"], o["level"])
+                for o in recorded["mechanical_checks"]] == [("case-a", True, "mechanically_checked", "L1")]
+    assert all("not planned" not in warning for warning in manifest["warnings"])
+
+    frozen = cases.load_pack(out / "evaluator" / "pack.json")
+    expected: list[str] = []
+    planned: dict[str, dict] = {}
+    for recorded in manifest["inputs"]:
+        plan, notes = cases.build_plan(frozen, recorded["snapshot_id"], recorded["tree_hash"], mode="full")
+        planned[recorded["snapshot_id"]] = plan
+        expected += [f"{recorded['snapshot_id']}: {note}" for note in notes]
+    assert manifest["warnings"] == expected
+
+    for snapshot_id, plan in planned.items():
+        written = load_document(out / "invocations" / f"{snapshot_id}__fake-a__r1" / "evaluator" / "plan.json",
+                                "evaluation-plan")
+        assert written == plan
+    assert [target["target_id"] for target in planned["snap-a"]["targets"]] == ["T-case-a"]
+    assert [control["control_id"] for control in planned["snap-fixed"]["controls"]] == ["C-case-a-fixed"]
+    assert [(row["input_id"], row["targets_assigned"]) for row in manifest["invocations"]] == [
+        ("snap-a", 1), ("snap-fixed", 0)]
+
+
+def test_a_second_input_that_fails_to_export_still_leaves_the_first_one_recorded(tmp_path, upstream):
+    """The partial manifest needs a label state for what finished, so the failure path fills it."""
+    repo, commit = upstream
+    repaired = repaired_commit(repo)
+    write_two_snapshot_pack(tmp_path / "pack.json", repo, commit, repaired)
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake")],
+                 inputs=[{"snapshot_id": "snap-a"},
+                         {"snapshot_id": "snap-fixed", "profile": "metadata_blinded"}])
+    adapter = FakeAdapter()
+    out = tmp_path / "out"
+
+    with pytest.raises(MaterializationError, match="metadata blinding unavailable"):
+        run_from_config(config_path, out, clock=CLOCK, adapters={"fake": adapter})
+
+    manifest = load_document(out / MANIFEST_NAME, "run-manifest")
+    assert manifest["status"] == "failed"
+    assert manifest["failure"]["type"] == "MaterializationError"
+    assert [recorded["snapshot_id"] for recorded in manifest["inputs"]] == ["snap-a"]
+    # snap-fixed was never checked, so the case is still short of a complete check set.
+    assert [(o["case_id"], o["passed"], o["review_state"], o["level"])
+            for o in manifest["inputs"][0]["mechanical_checks"]] == [("case-a", True, "draft", None)]
+    assert manifest["invocations"] == [] and manifest["warnings"] == []
+    assert adapter.prepared == 0 and adapter.calls == 0

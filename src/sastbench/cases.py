@@ -38,6 +38,7 @@ DISPOSITIONS = ("validate", "needs_evidence", "extended_regression", "exclude")
 REVIEWED_LEVELS = ("L3", "L4")
 _ALIAS = re.compile(r"^(CVE-\d{4}-\d{4,}|GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4})$")
 _REPRESENTS = re.compile(r"^This case tests .+ under .+, and adds .+", re.DOTALL)
+_TREE_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _now(clock: Callable[[], datetime] | None) -> str:
@@ -56,19 +57,26 @@ def not_reviewed() -> dict:
     return field_state("not_reviewed")
 
 
-# Space, format, and control characters: a string made only of these says nothing.
-_BLANK_CATEGORIES = frozenset({"Zs", "Cf", "Cc"})
+# Space, separator, format, and control characters: a string made only of these says nothing.
+_BLANK_CATEGORIES = frozenset({"Zs", "Zl", "Zp", "Cf", "Cc"})
 
 
 def _is_stated(value: Any) -> bool:
-    """True when *value* is a string holding at least one character that is not blank.
+    """True when *value* is a string that both survives stripping and holds a non-blank character.
 
-    Blank here means Unicode category ``Zs`` (spaces), ``Cf`` (zero-width and directional
-    marks), or ``Cc`` (control characters), so a name made only of U+200B zero-width spaces is
-    not a name even though stripping it leaves a non-empty string. This judges characters only:
-    it says nothing about whether a name belongs to a person or a reason explains anything.
+    Blank here means Unicode category ``Zs`` (spaces), ``Zl``/``Zp`` (line and paragraph
+    separators), ``Cf`` (zero-width and directional marks), or ``Cc`` (control characters), so a
+    name made only of U+200B zero-width spaces is not a name even though stripping it leaves a
+    non-empty string. Both tests must pass. Against the Unicode data this build sees, the
+    category test is the stricter of the two: every character Python strips already falls in one
+    of these categories, while many characters in them survive stripping. The strip is kept
+    because it is the plain reading of blank and does not depend on that staying true. This
+    judges characters only: it says nothing about whether a name belongs to a person or a reason
+    explains anything.
     """
-    return isinstance(value, str) and any(unicodedata.category(ch) not in _BLANK_CATEGORIES for ch in value)
+    if not isinstance(value, str) or not value.strip():
+        return False
+    return any(unicodedata.category(ch) not in _BLANK_CATEGORIES for ch in value)
 
 
 def _require_stated(value: Any, message: str) -> str:
@@ -355,63 +363,73 @@ def mechanical_checks(pack: dict, snapshot_id: str, source_dir: Path, tree_hash:
     L1. A snapshot whose pack record already carries a different tree hash is not rewritten: every
     case on it records a failing ``snapshot_hash_recorded`` check instead, and both
     :func:`build_plan` and the runner still refuse that input.
+
+    The results are applied to a validated copy, so a check set the contract would refuse leaves
+    *pack* exactly as it was. The caller's pack reference stays valid; references taken to cases,
+    snapshots, or validation blocks beforehand point at the superseded copy and must be re-read.
     """
-    snapshot = snapshot_by_id(pack, snapshot_id)
-    declared = snapshot.get("tree_hash")
-    hash_agrees = not declared or declared == tree_hash
-    if hash_agrees:
-        snapshot["tree_hash"] = tree_hash
+    if not isinstance(tree_hash, str) or not _TREE_HASH.match(tree_hash):
+        raise ContractError(f"tree_hash must be a sha256:<64 hex digits> digest, not {tree_hash!r}")
+    snapshot_by_id(pack, snapshot_id)
     now = _now(clock)
     present = exported_file_paths(source_dir)
-    outcomes = []
-    for case in cases_for_snapshot(pack, snapshot_id):
-        checks = []
 
-        def check(name: str, passed: bool, detail: str) -> None:
-            checks.append({"check": name, "result": "pass" if passed else "fail", "at": now,
-                           "detail": detail, "snapshot_id": snapshot_id})
+    def mutate(candidate: dict) -> list[dict]:
+        snapshot = snapshot_by_id(candidate, snapshot_id)
+        declared = snapshot.get("tree_hash")
+        hash_agrees = not declared or declared == tree_hash
+        if hash_agrees:
+            snapshot["tree_hash"] = tree_hash
+        outcomes = []
+        for case in cases_for_snapshot(candidate, snapshot_id):
+            checks = []
 
-        locations = [(case["target"]["target_id"], loc) for loc in case["target"]["accepted_locations"]
-                     if case["target"]["snapshot_id"] == snapshot_id]
-        locations += [(control["control_id"], loc) for control in case["controls"]
-                      if control["snapshot_id"] == snapshot_id for loc in control["locations"]]
-        missing = [loc["path"] for _, loc in locations if loc["path"] not in present]
-        check("locations_exist_in_snapshot", not missing and bool(locations),
-              "missing: " + ", ".join(missing) if missing else ("no locations declared" if not locations else f"{len(locations)} locations found"))
-        bad_ranges = []
-        for owner, loc in locations:
-            if "start_line" in loc and loc["path"] in present:
-                if loc["end_line"] > _count_lines(source_dir / loc["path"]):
-                    bad_ranges.append(f"{owner}:{loc['path']}:{loc['end_line']}")
-        check("line_ranges_within_files", not bad_ranges, ", ".join(bad_ranges) or "all ranges within file length")
-        aliases = case["canonical_target"]["aliases"]
-        check("aliases_well_formed", all(_ALIAS.match(a) for a in aliases), ", ".join(aliases) or "no aliases")
-        check("represents_statement", bool(_REPRESENTS.match(case["represents"])), "template: This case tests ... under ..., and adds ...")
-        check("evidence_recorded", bool(case["evidence"]), f"{len(case['evidence'])} evidence records")
-        check("snapshot_hash_recorded", hash_agrees,
-              tree_hash if hash_agrees else f"pack records {declared}; this export is {tree_hash}")
-        validation = case["validation"]
-        validation["checks"] = [c for c in validation["checks"]
-                                if c.get("snapshot_id") != snapshot_id] + checks
-        passed = all(c["result"] == "pass" for c in checks)
-        every_snapshot_passed = not _unchecked_snapshots(case)
-        if validation["review_state"] == "human_approved":
-            # A snapshot that failed and one that was never checked are both missing evidence
-            # for this label, so both raise the flag; only code, never a reviewer, is overruled.
-            if every_snapshot_passed:
-                validation.pop("checks_failed", None)
-            else:
-                validation["checks_failed"] = True
-        elif every_snapshot_passed:
-            validation["review_state"] = "mechanically_checked"
-            validation["level"] = "L1"
-        elif validation["review_state"] == "mechanically_checked":
-            validation["review_state"] = "draft"
-            validation["level"] = None
-        outcomes.append({"case_id": case["case_id"], "passed": passed, "checks": checks,
-                         "review_state": validation["review_state"], "level": validation["level"]})
-    validate_document(PACK_KIND, pack)
-    return outcomes
+            def check(name: str, passed: bool, detail: str) -> None:
+                checks.append({"check": name, "result": "pass" if passed else "fail", "at": now,
+                               "detail": detail, "snapshot_id": snapshot_id})
+
+            locations = [(case["target"]["target_id"], loc) for loc in case["target"]["accepted_locations"]
+                         if case["target"]["snapshot_id"] == snapshot_id]
+            locations += [(control["control_id"], loc) for control in case["controls"]
+                          if control["snapshot_id"] == snapshot_id for loc in control["locations"]]
+            missing = [loc["path"] for _, loc in locations if loc["path"] not in present]
+            check("locations_exist_in_snapshot", not missing and bool(locations),
+                  "missing: " + ", ".join(missing) if missing else ("no locations declared" if not locations else f"{len(locations)} locations found"))
+            bad_ranges = []
+            for owner, loc in locations:
+                if "start_line" in loc and loc["path"] in present:
+                    if loc["end_line"] > _count_lines(source_dir / loc["path"]):
+                        bad_ranges.append(f"{owner}:{loc['path']}:{loc['end_line']}")
+            check("line_ranges_within_files", not bad_ranges, ", ".join(bad_ranges) or "all ranges within file length")
+            aliases = case["canonical_target"]["aliases"]
+            check("aliases_well_formed", all(_ALIAS.match(a) for a in aliases), ", ".join(aliases) or "no aliases")
+            check("represents_statement", bool(_REPRESENTS.match(case["represents"])), "template: This case tests ... under ..., and adds ...")
+            check("evidence_recorded", bool(case["evidence"]), f"{len(case['evidence'])} evidence records")
+            check("snapshot_hash_recorded", hash_agrees,
+                  tree_hash if hash_agrees else f"pack records {declared}; this export is {tree_hash}")
+            validation = case["validation"]
+            validation["checks"] = [c for c in validation["checks"]
+                                    if c.get("snapshot_id") != snapshot_id] + checks
+            passed = all(c["result"] == "pass" for c in checks)
+            every_snapshot_passed = not _unchecked_snapshots(case)
+            if validation["review_state"] == "human_approved":
+                # A snapshot that failed and one that was never checked are both missing evidence
+                # for this label, so both raise the flag; only code, never a reviewer, is overruled.
+                if every_snapshot_passed:
+                    validation.pop("checks_failed", None)
+                else:
+                    validation["checks_failed"] = True
+            elif every_snapshot_passed:
+                validation["review_state"] = "mechanically_checked"
+                validation["level"] = "L1"
+            elif validation["review_state"] == "mechanically_checked":
+                validation["review_state"] = "draft"
+                validation["level"] = None
+            outcomes.append({"case_id": case["case_id"], "passed": passed, "checks": checks,
+                             "review_state": validation["review_state"], "level": validation["level"]})
+        return outcomes
+
+    return _apply_validated(pack, mutate)
 
 
 def approve_case(pack: dict, case_id: str, *, reviewer: str, role: str, level: str, note: str,
@@ -523,12 +541,21 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
     unchecked or failing. Planned items keep their real validation level; the plan's scope, not a
     rewritten level, says whether the labels are reviewed drafts.
 
+    A snapshot that carries recorded mechanical checks but no tree hash is refused outright: the
+    checks describe some exported tree, and without the hash nothing says it was this one.
+
     This builds a plan. It does not approve, admit, re-check, or correct anything, and a case
     left out here is unplanned for this input, not judged wrong.
     """
     snapshot = snapshot_by_id(pack, snapshot_id)
     if snapshot.get("tree_hash") and snapshot["tree_hash"] != tree_hash:
         raise ContractError(f"snapshot {snapshot_id} tree hash does not match the materialized input")
+    if not snapshot.get("tree_hash") and any(check.get("snapshot_id") == snapshot_id
+                                             for case in pack["cases"]
+                                             for check in case["validation"]["checks"]):
+        raise ContractError(
+            f"snapshot {snapshot_id} records mechanical checks but carries no tree hash, so nothing "
+            "binds those checks to this export; re-run the checks against the materialized input")
     notes: list[str] = []
     included: list[dict] = []
     for case in cases_for_snapshot(pack, snapshot_id):

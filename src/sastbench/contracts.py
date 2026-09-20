@@ -74,15 +74,20 @@ def _require_relative_path(path: str, label: str) -> None:
         raise ContractError(f"{label} must be a relative path without '..' components")
 
 
-def _reject_nonfinite(value: Any, path: str = "document") -> None:
+def reject_nonfinite(value: Any, path: str = "document") -> None:
+    """Refuse a NaN or infinity anywhere in *value*, naming where it sits.
+
+    This walks dicts and lists only, so a non-finite float hidden inside another container
+    type is not found here; :func:`canonical_json` refuses that value for a different reason.
+    """
     if isinstance(value, float) and not math.isfinite(value):
         raise ContractError(f"{path} contains a non-finite number")
     if isinstance(value, dict):
         for key, item in value.items():
-            _reject_nonfinite(item, f"{path}.{key}")
+            reject_nonfinite(item, f"{path}.{key}")
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            _reject_nonfinite(item, f"{path}[{index}]")
+            reject_nonfinite(item, f"{path}[{index}]")
 
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -204,13 +209,17 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
 
     ``mechanically_checked`` is the L1 state and claims a passing check set for every snapshot
     the case references, ``checks_failed`` belongs only to an approved case whose checks later
-    failed, and an L3/L4 label belongs only to a case screened as worth validating. These
-    compare recorded fields with each other: none of them reads source, a reviewer, or a
-    scanner, so a pack that passes here is consistent, not correct.
+    failed, and an L3/L4 label belongs only to a case screened as worth validating. A
+    ``human_approved`` case makes the same claim about its check sets as a mechanically checked
+    one unless it raises ``checks_failed``, and it cannot stand under a latest review that
+    rejected it. A snapshot whose recorded checks say its hash was confirmed must carry that
+    hash. These compare recorded fields with each other: none of them reads source, a reviewer,
+    or a scanner, so a pack that passes here is consistent, not correct.
     """
     snapshots = [snapshot["snapshot_id"] for snapshot in document["snapshots"]]
     _unique(snapshots, "snapshot_id")
     known = set(snapshots)
+    snapshot_hashes = {snapshot["snapshot_id"]: snapshot.get("tree_hash") for snapshot in document["snapshots"]}
     _unique([case["case_id"] for case in document["cases"]], "case_id")
     target_ids: list[str] = []
     control_ids: list[str] = []
@@ -237,11 +246,32 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
                 raise ContractError(f"{label}: control {control['control_id']} references unknown evidence {sorted(missing)}")
         validation = case["validation"]
         state = validation["review_state"]
-        approvals = [r for r in validation["reviews"] if r["decision"] == "approve"]
+        reviews = validation["reviews"]
+        approvals = [r for r in reviews if r["decision"] == "approve"]
+        referenced = [target["snapshot_id"]] + [control["snapshot_id"] for control in case["controls"]]
+        unchecked = sorted({snapshot for snapshot in referenced
+                            if recorded_check_state(validation["checks"], snapshot) != "pass"})
+        for snapshot_id in sorted(set(referenced)):
+            confirmed = [check for check in validation["checks"]
+                         if check.get("snapshot_id") == snapshot_id
+                         and check["check"] == "snapshot_hash_recorded" and check["result"] == "pass"]
+            if confirmed and not snapshot_hashes.get(snapshot_id):
+                raise ContractError(
+                    f"{label}: snapshot {snapshot_id} records a passing snapshot_hash_recorded check "
+                    "but the snapshot carries no tree_hash")
         if state == "human_approved" and not approvals:
             raise ContractError(f"{label}: human_approved requires at least one recorded approving review")
         if state == "human_approved" and validation["level"] is None:
             raise ContractError(f"{label}: human_approved requires a validation level")
+        if state == "human_approved" and reviews and reviews[-1]["decision"] == "reject":
+            raise ContractError(
+                f"{label}: the latest recorded review rejected this case, so it cannot also be "
+                "human_approved; record the decision that reinstated it")
+        if state == "human_approved" and unchecked and not validation.get("checks_failed"):
+            raise ContractError(
+                f"{label}: human_approved requires a recorded passing check set for every referenced "
+                f"snapshot, or validation.checks_failed to record that one failed; missing or failed "
+                f"for: {', '.join(unchecked)}")
         if validation["level"] in ("L3", "L4") and state != "human_approved":
             raise ContractError(f"{label}: {validation['level']} requires human_approved review state")
         if state == "draft" and validation["level"] is not None:
@@ -255,9 +285,6 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
                 raise ContractError(
                     f"{label}: mechanically_checked is the L1 state; level {validation['level']!r} "
                     "needs a recorded human review")
-            referenced = [target["snapshot_id"]] + [control["snapshot_id"] for control in case["controls"]]
-            unchecked = sorted({snapshot for snapshot in referenced
-                                if recorded_check_state(validation["checks"], snapshot) != "pass"})
             if unchecked:
                 raise ContractError(
                     f"{label}: mechanically_checked requires a recorded passing check set for every "
@@ -341,7 +368,7 @@ def validate_document(kind: str, document: dict[str, Any]) -> dict[str, Any]:
 
     if not isinstance(document, dict):
         raise ContractError("contract document must be a JSON object")
-    _reject_nonfinite(document)
+    reject_nonfinite(document)
     validator = Draft202012Validator(_schema(kind))
     errors = sorted(
         validator.iter_errors(document),

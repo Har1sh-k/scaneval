@@ -44,6 +44,7 @@ from .contracts import (
     canonical_json,
     canonical_sha256,
     load_document,
+    reject_nonfinite,
     validate_document,
 )
 
@@ -81,9 +82,14 @@ def _now(clock: Callable[[], datetime] | None) -> str:
 
 
 def _write_new(path: Path, value: dict) -> None:
-    """Write one canonical JSON document, refusing to overwrite an existing path."""
+    """Write one canonical JSON document, refusing to overwrite an existing path.
+
+    The document is serialized before the file is created, so a value canonical JSON cannot
+    represent leaves no empty file behind for a reader to mistake for a record.
+    """
+    text = canonical_json(value) + "\n"
     with path.open("x", encoding="utf-8", newline="\n") as handle:
-        handle.write(canonical_json(value) + "\n")
+        handle.write(text)
 
 
 def _write_new_text(path: Path, content: str) -> None:
@@ -189,16 +195,18 @@ def _check_input_snapshots(pack: dict, inputs: list[dict]) -> None:
 
 
 def _prepare_input(entry: dict, pack: dict, out_dir: Path, cache_root: Path,
-                   clock: Callable[[], datetime] | None) -> tuple[execution.PreparedInput, dict, list[str]]:
+                   clock: Callable[[], datetime] | None) -> tuple[execution.PreparedInput, dict]:
     """Fetch, export, verify, and mechanically check one configured input.
 
-    The warnings returned are this input's planning notes, so they state what will actually be
-    planned and why a case was left out, rather than restating a check outcome that may not
-    decide the question.
+    The summary records this input's raw check outcomes and nothing that depends on the other
+    inputs. A case spanning two snapshots is only fully checked once every configured input has
+    been prepared, so its label state and its planning notes are derived later, by
+    :func:`_planning_records`, rather than read here from an incomplete check set.
     """
     snapshot_id = entry["snapshot_id"]
     profile = entry.get("profile", "standard")
     snapshot = cases.snapshot_by_id(pack, snapshot_id)
+    languages = tuple(snapshot["languages"])
     cached = materialize.fetch_snapshot(snapshot["repository"]["url"], snapshot["commit"], cache_root)
     trial = out_dir / "inputs" / snapshot_id
     record = materialize.export_snapshot(cached, trial, profile=profile, clock=clock)
@@ -210,14 +218,14 @@ def _prepare_input(entry: dict, pack: dict, out_dir: Path, cache_root: Path,
             f"snapshot {snapshot_id} declares tree hash {declared} but the export produced {tree_hash}"
         )
     outcomes = cases.mechanical_checks(pack, snapshot_id, trial / "source", tree_hash, clock=clock)
-    _, notes = cases.build_plan(pack, snapshot_id, tree_hash, mode=PLAN_MODE)
-    warnings = [f"{snapshot_id}: {note}" for note in notes]
     prepared = execution.PreparedInput(
-        snapshot_id, trial / "source", tree_hash, tuple(snapshot["languages"]), record, profile,
+        snapshot_id, trial / "source", tree_hash, languages, record, profile,
     )
     summary = {"snapshot_id": snapshot_id, "tree_hash": tree_hash,
-               "provenance_path": _relative(provenance_path, out_dir), "mechanical_checks": outcomes}
-    return prepared, summary, warnings
+               "provenance_path": _relative(provenance_path, out_dir),
+               "mechanical_checks": [{"case_id": outcome["case_id"], "passed": outcome["passed"],
+                                      "checks": outcome["checks"]} for outcome in outcomes]}
+    return prepared, summary
 
 
 def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
@@ -227,9 +235,13 @@ def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
     Any failure resolving or preparing the adapter is recorded as a skip carrying the
     exception's own type name and message, whether it failed as an adapter, while materializing
     what it needs, on the filesystem, or because its module is not installed. A preparation that
-    returns something other than a record is a preparation failure too, because the manifest
-    records what preparation produced. None of this aborts the run, no invocation of a skipped
-    system is attempted, and a skipped system never becomes an empty successful scan.
+    returns something other than a record is a preparation failure too, and so is one holding a
+    value the manifest cannot carry: the record goes into the manifest verbatim, so a value
+    canonical JSON cannot represent, or a non-finite number, would make the whole manifest
+    unwritable, including the partial manifest a failing run depends on. The skip reason carries
+    the refusal's own message, which names the offending type or the field holding it. None of
+    this aborts the run, no invocation of a skipped system is attempted, and a skipped system
+    never becomes an empty successful scan.
     """
     spec = SystemSpec(entry["system_id"], entry["adapter"], dict(entry["config"]),
                       entry.get("model_id"), entry.get("model_revision"))
@@ -247,6 +259,8 @@ def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
             raise AdapterError(
                 f"{spec.adapter}.prepare returned {type(prepared).__name__}; a preparation phase "
                 "must report what it prepared as a record")
+        reject_nonfinite(prepared, f"{spec.adapter}.prepare record")
+        canonical_json(prepared)
         preparation = prepared
     except Exception as exc:
         preparation = {}
@@ -254,6 +268,39 @@ def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
         warnings.append(f"{spec.system_id}: not invoked ({skipped})")
     policy = entry.get("network_policy", default_policy)
     return _PreparedSystem(spec, adapter, preparation, policy, skipped), warnings
+
+
+def _record_label_states(pack: dict, manifest_inputs: list[dict]) -> None:
+    """Give every recorded check outcome the label state the pack carries right now.
+
+    A case spanning several snapshots is only fully checked once every input has been prepared,
+    so the state belongs to the pack as a whole and not to the moment one input was checked.
+    The manifest cannot be written without these fields, so a failed run fills them too, from
+    however far the pack got.
+    """
+    validations = {case["case_id"]: case["validation"] for case in pack["cases"]}
+    for summary in manifest_inputs:
+        for outcome in summary["mechanical_checks"]:
+            validation = validations[outcome["case_id"]]
+            outcome["review_state"] = validation["review_state"]
+            outcome["level"] = validation["level"]
+
+
+def _planning_records(pack: dict, prepared_inputs: list[execution.PreparedInput],
+                      manifest_inputs: list[dict]) -> list[str]:
+    """Fill in each input's label state from the frozen pack and return the planning warnings.
+
+    This runs once the pack is frozen, so it reads the same state every invocation plans
+    against. The notes come from :func:`cases.build_plan`, so they state what was actually
+    planned and why a case was left out rather than restating a check outcome that may not
+    decide the question.
+    """
+    _record_label_states(pack, manifest_inputs)
+    warnings: list[str] = []
+    for prepared in prepared_inputs:
+        _, notes = cases.build_plan(pack, prepared.input_id, prepared.tree_hash, mode=PLAN_MODE)
+        warnings.extend(f"{prepared.input_id}: {note}" for note in notes)
+    return warnings
 
 
 def _evaluate_bundle(bundle: Path, pack: dict, prepared: execution.PreparedInput,
@@ -316,6 +363,11 @@ def run_from_config(
     than a silently empty run, and what was narrowed away is recorded in the manifest.
     ``out_dir`` must not exist, and ``workspace_root`` must be outside it.
 
+    ``out_dir`` is resolved once before anything is written, so every recorded path is relative
+    to the same real directory. The manifest's planning notes and per-input label states are
+    derived after every input has been checked and the pack has been frozen, which is what the
+    invocations then plan against.
+
     An input snapshot the pack does not declare, colliding invocation ids, a cache root that
     overlaps the output directory, and a workspace inside evaluator storage are all refused
     before the output directory is created, so a refused run writes nothing at all. Once that
@@ -328,7 +380,9 @@ def run_from_config(
     aggregate across inputs or systems, and does not enforce the declared network policy.
     """
     config_path = Path(config_path)
-    out_dir = Path(out_dir)
+    # Resolved once, here: every path recorded, compared, or handed on below is built from this
+    # one, so a run under a symlinked prefix (/tmp on macOS) stays consistent end to end.
+    out_dir = _resolved(out_dir)
     config = load_document(config_path, "run-config")
     base = config_path.resolve().parent
     pack_path = base / config["pack"]
@@ -366,15 +420,17 @@ def run_from_config(
         _write_new(out_dir / "run-config.json", config)
 
         for entry in inputs:
-            prepared, summary, input_warnings = _prepare_input(entry, pack, out_dir, cache_root, clock)
+            prepared, summary = _prepare_input(entry, pack, out_dir, cache_root, clock)
             prepared_inputs.append(prepared)
             manifest_inputs.append(summary)
-            warnings.extend(input_warnings)
 
         # The pack is frozen once, here: every input has been checked and nothing is invoked yet.
         evaluator_dir = out_dir / "evaluator"
         evaluator_dir.mkdir()
         _write_new(evaluator_dir / "pack.json", pack)
+        # Only now does the pack say what each case's check set amounts to, so the manifest's
+        # planning notes and per-input label states are derived from the frozen copy.
+        warnings.extend(_planning_records(pack, prepared_inputs, manifest_inputs))
 
         for entry in systems:
             system, system_warnings = _prepare_system(entry, cache_root, config["network_policy"], adapters)
@@ -402,11 +458,7 @@ def run_from_config(
                         timeout_seconds=config["timeout_seconds"], trace_mode=config["trace_mode"],
                         network_policy=system.network_policy, workspace_root=workspace_root, clock=clock,
                     )
-                    plan, record, evaluation, notes = _evaluate_bundle(bundle, pack, prepared, clock)
-                    for note in notes:
-                        warning = f"{prepared.input_id}: {note}"
-                        if warning not in warnings:
-                            warnings.append(warning)
+                    plan, record, evaluation, _notes = _evaluate_bundle(bundle, pack, prepared, clock)
                     metrics = evaluation["metrics"]
                     invocations.append({**row, "status": evaluation["status"],
                                         "claim_records": metrics["claim_records"], "plan_scope": plan["scope"],
@@ -416,6 +468,9 @@ def run_from_config(
                                         "bundle_path": _relative(bundle, out_dir),
                                         "review_state": record["state"], "skipped_reason": None})
     except BaseException as exc:
+        # Inputs prepared before the failure may never have reached the derivation above, and
+        # the manifest cannot record them without a label state.
+        _record_label_states(pack, manifest_inputs)
         partial = _manifest(config=config, pack=pack, selection=selection, manifest_inputs=manifest_inputs,
                             systems=prepared_systems, invocations=invocations, warnings=warnings,
                             status="failed", failure={"type": type(exc).__name__, "message": _message(exc)},
