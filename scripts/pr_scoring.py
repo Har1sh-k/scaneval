@@ -1,4 +1,4 @@
-"""SASTbench PR mode scoring engine.
+"""ScanEval PR mode scoring engine.
 
 Implements PR-specific scoring rules:
 - Review findings: new-in-head findings not present in base

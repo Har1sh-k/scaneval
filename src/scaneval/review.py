@@ -7,7 +7,7 @@ earn detection credit, a rejection, or a quiet control. Only :func:`approve_revi
 called with a reviewer name supplied by the caller, records a human review; no path here
 infers approval from a passing check, a matching hash, or the absence of an objection.
 
-A review record is an evaluator-side sidecar. :mod:`sastbench.scoring` never reads it,
+A review record is an evaluator-side sidecar. :mod:`scaneval.scoring` never reads it,
 so it cannot raise a draft into evidence, and it is not a signature, an identity check,
 or proof that the named reviewer saw the decisions. Pack material stays here: nothing in
 this module writes into a scanner workspace or copies accepted locations into a bundle.
@@ -66,7 +66,7 @@ def _now(clock: Callable[[], datetime] | None) -> str:
 
 
 def _normalize(path: str) -> str:
-    """Compare paths the way :mod:`sastbench.scoring` fingerprints them, not by resolving them.
+    """Compare paths the way :mod:`scaneval.scoring` fingerprints them, not by resolving them.
 
     This is textual: no symlink, case, or filesystem lookup happens, so two spellings of
     the same file on disk can still compare as different paths.
@@ -88,7 +88,7 @@ def _keep_mode(temporary: Path, existing: Path) -> None:
     that is not a symlink: when the name reaches a symlink, a directory, or nothing at all, the
     replacement keeps the owner-only mode of the temporary file rather than adopting the mode of
     whatever that name currently leads to. This copies permission bits only, not ownership, and
-    not any access control the filesystem keeps elsewhere. :mod:`sastbench.cli` calls this same
+    not any access control the filesystem keeps elsewhere. :mod:`scaneval.cli` calls this same
     function before it renames a pack into place, so a replaced pack and a replaced review
     record follow exactly this rule, symlinked paths included.
     """
@@ -136,7 +136,7 @@ def _bundle_path(bundle_dir: str | PathLike[str], guard_symlinks: bool) -> Path:
 def _replace_document(path: Path, document: dict) -> None:
     """Replace one document atomically through a temporary file in its own directory.
 
-    This is the only overwrite in this module, and :mod:`sastbench.cli` routes ``review
+    This is the only overwrite in this module, and :mod:`scaneval.cli` routes ``review
     approve`` through it, so every replacement of a review record behaves the same way. It does
     not merge, keep a backup, or copy the previous version anywhere, and it replaces a symlink
     sitting at *path* rather than writing through it. Permission bits are carried over by
@@ -182,7 +182,7 @@ def _assert_binds_to_result(bundle: Path, decisions: dict) -> None:
     A bundle holding no ``result.json`` is not checked: nothing here fetches one, and this
     compares two saved documents, so agreement says the decisions were filed against these
     exact result bytes and nothing about the scan that produced them. Both the re-draft in
-    :func:`record_decisions` and ``review approve`` in :mod:`sastbench.cli` call it, so
+    :func:`record_decisions` and ``review approve`` in :mod:`scaneval.cli` call it, so
     neither writes a record against a result edited after the decisions were filed.
     """
     result_path = bundle / RESULT_FILE
@@ -206,7 +206,7 @@ def draft_decisions(plan: dict, result: dict, pack: dict | None = None, *,
     guessed. Claims are never rejected here, so an empty draft is not evidence of absence.
 
     With *pack* omitted there are no candidates at all; the pack is read only through
-    :func:`sastbench.cases.accepted_paths_for_targets` and is not re-validated here. When
+    :func:`scaneval.cases.accepted_paths_for_targets` and is not re-validated here. When
     the plan carries provenance, a supplied pack must hash to the ``pack_sha256`` the plan
     was built from; that compares documents, not the evidence or reviews inside them, and a
     plan without provenance is not checked at all. ``clock`` is accepted so one clock can be
@@ -324,7 +324,7 @@ def approve_review(record: dict, decisions: dict, plan: dict, *, reviewer: str, 
 
     The reviewer name comes from the caller and is stored verbatim; anything that is not a
     non-blank string is refused rather than coerced, by the same rule
-    :mod:`sastbench.cases` applies to a reviewer name, so a name made only of zero-width or
+    :mod:`scaneval.cases` applies to a reviewer name, so a name made only of zero-width or
     other format characters is refused here too. This function does not authenticate the
     reviewer, check their independence, or verify that anything was read; it records a claim
     of review and refuses one whose record no longer matches the decisions, the plan, or the
@@ -460,7 +460,7 @@ def load_evaluator(bundle_dir: str | PathLike[str], *,
 
     Loading validates each document against its contract. It does not check that the three
     agree with each other or with ``result.json``; use :func:`review_status` for staleness
-    and :func:`sastbench.scoring.score` for the result binding. ``guard_symlinks=False``
+    and :func:`scaneval.scoring.score` for the result binding. ``guard_symlinks=False``
     reads the bundle the given path reaches, symlinks and all, and belongs to a caller that
     resolved the path itself; the default refuses a symlinked spelling instead, which is what
     a caller that is about to write through this path needs.

@@ -1,4 +1,4 @@
-"""SASTbench adapter for Bandit.
+"""ScanEval adapter for Bandit.
 
 Runs Bandit on a case directory and returns normalized findings plus
 scanner invocation metadata. Bandit only supports Python.

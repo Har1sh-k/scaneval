@@ -22,7 +22,7 @@ node_modules/
 .DS_Store
 Thumbs.db
 
-# SASTbench
+# ScanEval
 .repos/
 results/
 *.html

@@ -160,8 +160,8 @@ Replaying a bundle offline reproduces its evaluation byte for byte, and prints a
 because the decisions carry no recorded human approval:
 
 ```sh
-sastbench replay corpus/pilot/runs/2026-09-20-semgrep/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
-# sastbench: review state draft: these numbers come from decisions with no recorded human approval
+scaneval replay corpus/pilot/runs/2026-09-20-semgrep/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
+# scaneval: review state draft: these numbers come from decisions with no recorded human approval
 ```
 
 Replay reads the saved result and the frozen evaluator records. It makes no model or
@@ -171,13 +171,13 @@ network call, and it does not re-execute the scanner.
 
 ```sh
 # Re-check the pack against each pinned snapshot (fetches the pinned commits).
-sastbench corpus validate corpus/pilot/pack.json --snapshot-id oauth2-proxy-f4b33b64 --cache-root .repos --trial-root <new dir>
+scaneval corpus validate corpus/pilot/pack.json --snapshot-id oauth2-proxy-f4b33b64 --cache-root .repos --trial-root <new dir>
 
 # Pinned conventional scanner, all three inputs.
-sastbench run corpus/pilot/run-semgrep.json --output <new dir>
+scaneval run corpus/pilot/run-semgrep.json --output <new dir>
 
 # Own harness, one input, live model calls.
-sastbench run corpus/pilot/run-harness.json --output <new dir> --only-input fastify-v5.12.1
+scaneval run corpus/pilot/run-harness.json --output <new dir> --only-input fastify-v5.12.1
 ```
 
 Output directories must not exist. The harness run makes real model calls through the
@@ -199,8 +199,8 @@ local `claude` CLI login and took about 12 minutes for one input.
 
 ## Next
 
-1. Human review of the four routed candidates, recorded through `sastbench review record`
-   and `sastbench review approve`, which is the only path to a non-zero recall.
+1. Human review of the four routed candidates, recorded through `scaneval review record`
+   and `scaneval review approve`, which is the only path to a non-zero recall.
 2. Independent review of the three case labels to L3, which is the only path out of draft
    scope.
 3. Fixed-state snapshots to give the cases property-specific negative controls.

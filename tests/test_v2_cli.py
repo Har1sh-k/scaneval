@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from sastbench import __version__
-from sastbench.cli import main
-from sastbench.contracts import canonical_json, canonical_sha256
+from scaneval import __version__
+from scaneval.cli import main
+from scaneval.contracts import canonical_json, canonical_sha256
 
 
 def run_demo(tmp_path: Path) -> Path:
@@ -116,7 +116,7 @@ def test_validate_malformed_input_returns_nonzero(tmp_path, capsys, payload):
     path.write_text(payload, encoding="utf-8")
 
     assert main(["validate", "scan-request", str(path)]) != 0
-    assert "sastbench:" in capsys.readouterr().err
+    assert "scaneval:" in capsys.readouterr().err
 
 
 def test_report_escapes_untrusted_claim_and_target_text(tmp_path):
@@ -154,7 +154,7 @@ def test_diagnostic_report_has_prominent_fixture_banner(tmp_path):
     assert "not real-world performance results" in report
 
 
-from sastbench.report import render_report  # noqa: E402  (appended report-banner tests)
+from scaneval.report import render_report  # noqa: E402  (appended report-banner tests)
 
 
 REVIEW_BANNERS = [
@@ -215,7 +215,7 @@ def test_report_without_a_review_state_renders_exactly_the_bundled_page(tmp_path
         assert sentence not in html
 
 
-from sastbench.scoring import score  # noqa: E402  (appended draft-wording tests)
+from scaneval.scoring import score  # noqa: E402  (appended draft-wording tests)
 
 
 DRAFT_BANNER = ("Draft labels. Targets and controls come from a draft plan and are not "

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sastbench.dev/schema/v2/trace-event.schema.json",
-  "title": "SASTbench observer trace event v2",
+  "$id": "https://scaneval.dev/schema/v2/trace-event.schema.json",
+  "title": "ScanEval observer trace event v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "event_id", "run_id", "producer_id", "sequence", "type", "category", "capture_status", "timestamp", "metadata"],

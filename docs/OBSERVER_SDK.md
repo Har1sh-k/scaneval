@@ -1,6 +1,6 @@
 # Experimental TypeScript observer SDK
 
-`@sastbench/observer-sdk` is a small, opt-in emitter for observing an existing harness. It is not an integration with SecureVibes (or any other product), does not make model/provider calls, does not retrieve data, does not enforce policy, and does not monkeypatch global clients. Importing it captures nothing. A harness must explicitly emit at its real model-client, tool-dispatch, context-selection, and finding-lifecycle boundaries.
+`@scaneval/observer` is a small, opt-in emitter for observing an existing harness. It is not an integration with SecureVibes (or any other product), does not make model/provider calls, does not retrieve data, does not enforce policy, and does not monkeypatch global clients. Importing it captures nothing. A harness must explicitly emit at its real model-client, tool-dispatch, context-selection, and finding-lifecycle boundaries.
 
 The language-neutral event contract is [`schema/v2/trace-event.schema.json`](../schema/v2/trace-event.schema.json). Every event has schema version `2.0`, run/producer/event IDs, a producer-local nonnegative sequence, timestamp, type/category, capture status, and metadata. Parent and call references retain a chronological partial order across concurrent producers. `candidate_id` is a stable lifecycle link; emitting validation or filtering is optional and must reflect actual observed stages rather than invented ones.
 
@@ -14,7 +14,7 @@ npm run build
 npm test
 ```
 
-The package has no runtime dependencies. Build output is conventional `dist/` JavaScript and declarations; consumers import `@sastbench/observer-sdk` after publishing or use the local package path.
+The package has no runtime dependencies. Build output is conventional `dist/` JavaScript and declarations; consumers import `@scaneval/observer` after publishing or use the local package path.
 
 ## Recording and privacy
 
@@ -29,7 +29,7 @@ All instrumentation failures (including sink, clock, ID factory, redactor, and n
 This illustrates calls an existing dispatcher/model client could make. It is not a claim that an integration already exists.
 
 ```ts
-import { Observer, createJsonlSink } from "@sastbench/observer-sdk";
+import { Observer, createJsonlSink } from "@scaneval/observer";
 
 const observer = new Observer({
   mode: "content",

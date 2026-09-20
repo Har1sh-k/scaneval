@@ -1,4 +1,4 @@
-"""SASTbench runner.
+"""ScanEval runner.
 
 Runs a scanner adapter against benchmark cases and produces
 normalized results in the official JSON format.
@@ -205,9 +205,9 @@ def run_benchmark(
             print("No cases found.")
         return 1
 
-    B = "\033[1;36m[SASTbench]\033[0m"
+    B = "\033[1;36m[ScanEval]\033[0m"
     SEP = "\033[2m" + "-" * 45 + "\033[0m"
-    print(f"{B} Running SASTbench ({track} track, profile={profile}) with {scanner_name}")
+    print(f"{B} Running ScanEval ({track} track, profile={profile}) with {scanner_name}")
     if cutoff_label:
         print(f"{B} Cutoff: {cutoff_label} -> {len(excluded_by_cutoff)} dated case(s) excluded as pre-cutoff")
     if llm_model:
@@ -378,7 +378,7 @@ def run_benchmark(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="SASTbench runner")
+    parser = argparse.ArgumentParser(description="ScanEval runner")
     parser.add_argument("--scanner", required=True, help="Scanner adapter name")
     parser.add_argument("--track", default="core", choices=["core", "full"])
     parser.add_argument("--mode", default="benchmark", choices=["benchmark", "pr"],
@@ -449,5 +449,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        print("\n\033[1;33m[SASTbench]\033[0m Interrupted by user.")
+        print("\n\033[1;33m[ScanEval]\033[0m Interrupted by user.")
         sys.exit(130)

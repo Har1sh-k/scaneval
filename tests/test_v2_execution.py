@@ -14,13 +14,13 @@ import threading
 
 import pytest
 
-from sastbench import execution as execution_module
-from sastbench.adapters import get_adapter
-from sastbench.adapters.base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command
-from sastbench.adapters.semgrep import SemgrepAdapter, import_semgrep_results
-from sastbench.contracts import ContractError, load_document, validate_document
-from sastbench.execution import ExecutionError, PreparedInput, _write_new, invocation_id, run_invocation
-from sastbench.materialize import hash_exported_tree, sha256_file
+from scaneval import execution as execution_module
+from scaneval.adapters import get_adapter
+from scaneval.adapters.base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command
+from scaneval.adapters.semgrep import SemgrepAdapter, import_semgrep_results
+from scaneval.contracts import ContractError, load_document, validate_document
+from scaneval.execution import ExecutionError, PreparedInput, _write_new, invocation_id, run_invocation
+from scaneval.materialize import hash_exported_tree, sha256_file
 
 
 CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
@@ -134,7 +134,7 @@ def test_successful_invocation_writes_validated_bundle_and_captures_state(tmp_pa
                                            "note": "Policy is recorded, not enforced by this runner; enforce it in the execution environment."}
     assert "declared artifact missing: missing" in execution["notes"]
     assert execution["system_config"] == {"knob": 1} and execution["versions"]["kind_mapping"] == "1.0.0"
-    assert not list(Path(tmp_path).glob("sastbench-trial-*"))
+    assert not list(Path(tmp_path).glob("scaneval-trial-*"))
     with pytest.raises(FileExistsError):
         run(tmp_path, adapter)
 

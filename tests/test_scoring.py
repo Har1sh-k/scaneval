@@ -1,4 +1,4 @@
-"""Tests for the SASTbench scoring engine."""
+"""Tests for the ScanEval scoring engine."""
 
 import sys
 from pathlib import Path

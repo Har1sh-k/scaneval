@@ -372,7 +372,7 @@ def run_invocation(
     :class:`ExecutionError` once the bundle directory, its ``request.json``, and the staged
     ``raw/`` and ``trace/`` trees are already there, so what remains is a bundle holding the
     request and the scanner's own output with neither ``result.json`` nor ``execution.json``.
-    That is why :mod:`sastbench.runner` vets the attributes every record copies when it prepares
+    That is why :mod:`scaneval.runner` vets the attributes every record copies when it prepares
     a system rather than when it invokes one.
     """
     if network_policy not in NETWORK_POLICIES:
@@ -388,7 +388,7 @@ def run_invocation(
     _write_new(bundle / "request.json", request)
 
     state_dirs = frozenset(getattr(adapter, "state_dirs", ()))
-    workspace = Path(tempfile.mkdtemp(prefix="sastbench-trial-", dir=str(workspace_root) if workspace_root else None))
+    workspace = Path(tempfile.mkdtemp(prefix="scaneval-trial-", dir=str(workspace_root) if workspace_root else None))
     # The scanner writes into the workspace, never into the run directory; both staged
     # directories are moved into the bundle below, whether the scan returns or raises.
     resolved_workspace = workspace.resolve()
@@ -540,7 +540,7 @@ def run_invocation(
             "schema_version": "2.0", "run_id": run_id, "invocation_id": bundle.name,
             "input_id": prepared.input_id, "system_id": spec.system_id, "repetition": repetition,
             "adapter": {"name": adapter.name, "version": adapter.adapter_version},
-            "versions": {"sastbench": __version__, "kind_mapping": mapping_version()},
+            "versions": {"scaneval": __version__, "kind_mapping": mapping_version()},
             "status": result["status"], "exit_code": outcome.exit_code,
             "timed_out": bool(outcome.timed_out or outcome.status == "timeout"), "command": list(outcome.command),
             "started_at": started_at, "finished_at": finished_at, "wall_seconds": round(wall, 3),

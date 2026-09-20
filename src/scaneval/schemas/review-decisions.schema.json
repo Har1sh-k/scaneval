@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sastbench.dev/schemas/v2/review-decisions.schema.json",
-  "title": "SASTbench review decisions",
+  "$id": "https://scaneval.dev/schemas/v2/review-decisions.schema.json",
+  "title": "ScanEval review decisions",
   "type": "object", "additionalProperties": false,
   "required": ["schema_version", "run_id", "input_hash", "result_sha256", "claim_matches", "control_assessments"],
   "properties": {

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sastbench.dev/schemas/v2/run-manifest.schema.json",
-  "title": "SASTbench run manifest",
+  "$id": "https://scaneval.dev/schemas/v2/run-manifest.schema.json",
+  "title": "ScanEval run manifest",
   "description": "What one run executed, what it left out, and where every artifact landed. It is an evaluator-side record of a run, not a score, a comparison, or a label: nothing here says a claim was correct. A manifest with status 'failed' is the partial record written when a run raised, so its invocation list stops at the last one that finished.",
   "type": "object", "additionalProperties": false,
   "required": ["schema_version", "run_id", "status", "created_at", "config_sha256", "pack", "selection", "inputs", "systems", "invocations", "warnings"],

@@ -8,18 +8,18 @@ from pathlib import Path
 
 import pytest
 
-from sastbench.adapters import get_adapter
-from sastbench.adapters.base import AdapterError, SystemSpec
-from sastbench.adapters.llm_harness import (
+from scaneval.adapters import get_adapter
+from scaneval.adapters.base import AdapterError, SystemSpec
+from scaneval.adapters.llm_harness import (
     HARNESS_PRESETS,
     TOOL_POLICY,
     capture_status,
     import_harness_findings,
     parse_frontmatter,
 )
-from sastbench.contracts import load_document
-from sastbench.execution import PreparedInput, run_invocation
-from sastbench.materialize import hash_exported_tree
+from scaneval.contracts import load_document
+from scaneval.execution import PreparedInput, run_invocation
+from scaneval.materialize import hash_exported_tree
 
 
 ROOT = Path(__file__).resolve().parents[1]

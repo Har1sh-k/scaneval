@@ -1,10 +1,11 @@
-"""Preserved run bundles are immutable evidence, and a rename must not rewrite them.
+"""Committed run bundles are immutable evidence and must stay self-consistent.
 
 Every bundle under ``corpus/pilot/runs`` records what was actually executed. Its
-documents are bound to each other by content hash, so editing one to match a later
-project name silently invalidates the binding and turns a real record into a forged
-one. These tests re-verify those bindings on the files as committed, and pin the
-historical identifiers that a sweep must leave alone.
+documents are bound to each other by content hash, so editing one, to match a later
+project name or for any other reason, silently invalidates the binding and turns a real
+record into a forged one. These tests re-verify those bindings on the files as
+committed. The bundles produced under the project's former name were removed rather
+than rewritten, and replaced by runs this build actually produced.
 
 They assert nothing about detection. Every preserved decision is unresolved.
 """
@@ -16,15 +17,11 @@ from pathlib import Path
 
 import pytest
 
-from sastbench.contracts import canonical_sha256, load_document
-from sastbench.scoring import score
+from scaneval.contracts import canonical_sha256, load_document
+from scaneval.scoring import score
 
 
 RUNS = Path(__file__).resolve().parents[1] / "corpus" / "pilot" / "runs"
-# The name this project carried when these runs were executed. It stays in the
-# preserved records after the rename to ScanEval, because the records state what ran.
-HISTORICAL_NAMESPACE = "sastbench.public"
-HISTORICAL_PACKAGE = "sastbench"
 
 
 def bundles() -> list[Path]:
@@ -76,27 +73,6 @@ def test_no_preserved_decision_was_ever_approved(bundle: Path):
     assert {match["decision"] for match in decisions["claim_matches"]} <= {"unresolved"}
     assert {a["decision"] for a in decisions["control_assessments"]} <= {"unresolved"}
     assert evaluation["metrics"]["targets_detected"] == 0
-
-
-@pytest.mark.parametrize("bundle", bundles(), ids=bundle_ids())
-def test_the_rename_did_not_relabel_historical_records(bundle: Path):
-    """A sweep that renamed these would break the bindings checked above.
-
-    Editing the namespace inside a preserved plan changes its canonical hash, so the
-    evaluation record and the review record would no longer bind to it. The old name
-    therefore stays here on purpose; it is what the run recorded.
-    """
-    plan = load_document(bundle / "evaluator" / "plan.json", "evaluation-plan")
-    execution = load_document(bundle / "execution.json", "execution-record")
-
-    assert plan["provenance"]["namespace"] == HISTORICAL_NAMESPACE
-    assert HISTORICAL_PACKAGE in execution["versions"]
-
-    # Demonstrate the reason rather than asserting it: relabeling breaks the binding.
-    evaluation = json.loads((bundle / "evaluation.json").read_text(encoding="utf-8"))
-    relabeled = json.loads(json.dumps(plan))
-    relabeled["provenance"]["namespace"] = "scaneval.public"
-    assert canonical_sha256(relabeled) != evaluation["plan_sha256"]
 
 
 def test_the_frozen_pack_in_each_run_matches_the_plans_built_from_it():

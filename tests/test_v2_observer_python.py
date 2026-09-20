@@ -1,6 +1,6 @@
 """Behavioral pins for the Python emitter, one named test per promise it makes.
 
-These tests exercise :class:`sastbench.observer.Observer` directly. They start no scanner, read
+These tests exercise :class:`scaneval.observer.Observer` directly. They start no scanner, read
 no corpus, load no contract, call no model, and reach no network; every clock and ID factory is
 injected, so nothing here depends on wall-clock time, ordering luck, or a sleep.
 
@@ -23,7 +23,7 @@ import sys
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
 
-from sastbench.observer import CaptureState, EVENT_TYPES, Observer, create_jsonl_sink
+from scaneval.observer import CaptureState, EVENT_TYPES, Observer, create_jsonl_sink
 
 
 ROOT = Path(__file__).resolve().parents[1]

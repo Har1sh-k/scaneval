@@ -1,6 +1,6 @@
-# SASTbench design decisions
+# ScanEval design decisions
 
-SASTbench evaluates whether a SAST product or harness finds relevant security problems at an acceptable review cost. It provides reviewed cases, a fixed evaluator, and observer traces that help explain harness behavior. A separate engineering-agent project can consume that feedback and propose harness changes; this repository does not implement that improvement agent.
+ScanEval evaluates whether a SAST product or harness finds relevant security problems at an acceptable review cost. It provides reviewed cases, a fixed evaluator, and observer traces that help explain harness behavior. A separate engineering-agent project can consume that feedback and propose harness changes; this repository does not implement that improvement agent.
 
 Bring your own test cases is a core use case: organizations can turn existing security fixes, findings, and internal documents into a private benchmark. Teams or a separate engineering agent can use its scores and observer traces to improve a harness for that codebase. The same evaluation contracts support public comparisons and organization-owned workloads.
 
@@ -332,7 +332,7 @@ review_budgets:                    # example reporting cutoffs, not scan limits
 trace: content                    # off | metadata | content
 ```
 
-Invoke through `sastbench run bench.yaml` or `sastbench.evaluate("bench.yaml")`; inspect results with `sastbench report runs/<run-id>`. Planning freezes the workload, workers run sanitized requests, and evaluation happens outside the worker. Library use must preserve that boundary.
+Invoke through `scaneval run bench.yaml` or `scaneval.evaluate("bench.yaml")`; inspect results with `scaneval report runs/<run-id>`. Planning freezes the workload, workers run sanitized requests, and evaluation happens outside the worker. Library use must preserve that boundary.
 
 Support multiple models regardless of backend. Bound provider concurrency, rate limits, and spending; record usage, incompatible combinations, failures, and retry history. Retries are not independent repetitions. Give every compared system the same frozen sample and controls, sampled without replacement with diversity constraints and reported shortfalls. Record selected IDs, weights, hashes, and actual execution order. Selection, order, and model-sampling seeds are separate.
 
@@ -348,7 +348,7 @@ If Inspect is selected, reuse its [agent bridge](https://inspect.aisi.org.uk/age
 
 The proposed mapping uses [Inspect's task components](https://inspect.aisi.org.uk/tasks.html):
 
-| Inspect component | SASTbench responsibility |
+| Inspect component | ScanEval responsibility |
 |---|---|
 | Task | Frozen corpus selection, workflow, and comparison contract. |
 | Sample and epoch | One unique scan input/scope/condition; independent repetitions, not one rescan per CVE. |
@@ -415,7 +415,7 @@ Pilot nondeterministic systems on a diverse small set, for example 8 to 10 cases
 
 Compare systems on common inputs and policies. Preserve repository, family, shared-scan, and repeat dependencies in uncertainty estimates. Show per-project results and leave-one-project-out sensitivity when repositories are few. More repeats do not create more independent applications. Report mean per-run detection first; optional best-of/all-runs views have different meanings. [Planning formulas](EVALUATION_MATH.md#5-repetitions-and-uncertainty) state the assumptions.
 
-SASTbench owns the evaluations, observations, comparison reports, and gate decisions below. Humans or an engineering agent in a separate repository own the proposed changes. SASTbench does not edit the harness, open improvement PRs, or deploy a candidate automatically. This is evaluation support for an automated engineering loop, not recursive self-modification by the benchmark.
+ScanEval owns the evaluations, observations, comparison reports, and gate decisions below. Humans or an engineering agent in a separate repository own the proposed changes. ScanEval does not edit the harness, open improvement PRs, or deploy a candidate automatically. This is evaluation support for an automated engineering loop, not recursive self-modification by the benchmark.
 
 The comparison contract for externally supplied harness changes is:
 
@@ -433,9 +433,9 @@ Give the engineering agent development results and permitted traces only. Keep h
 
 ### Future plans: separate RSI harness loop
 
-The separate engineering-agent project may automate the workflow below. Building that agent and its organization-specific tuning is future work; SASTbench supplies the evaluation and visibility contracts.
+The separate engineering-agent project may automate the workflow below. Building that agent and its organization-specific tuning is future work; ScanEval supplies the evaluation and visibility contracts.
 
-- **Improvement cycle:** Evaluate → inspect failures → propose a harness change → rerun → compare. The engineering agent uses development results and permitted traces to propose changes to prompts, tools, rules, context, workflow, or thresholds. SASTbench measures the candidate against the baseline with the same evaluation cases, scoring rules, and declared constraints. The external project owns promotion and the next iteration; proposed changes do not guarantee improvement.
+- **Improvement cycle:** Evaluate → inspect failures → propose a harness change → rerun → compare. The engineering agent uses development results and permitted traces to propose changes to prompts, tools, rules, context, workflow, or thresholds. ScanEval measures the candidate against the baseline with the same evaluation cases, scoring rules, and declared constraints. The external project owns promotion and the next iteration; proposed changes do not guarantee improvement.
 - **Organization security context:** Alongside private test cases, organizations could supply versioned architecture notes, authorization rules, tenant boundaries, and intended capabilities to guide harness tuning and provide permitted scanner context. Keep the evaluated case's expected answer and fix details outside the scan input. Record supplied context as part of the system configuration so comparisons identify any context changes.
 
 ## 9. Bring your own test cases
@@ -483,7 +483,7 @@ Documentation deliverable: `docs/BRING_YOUR_OWN_CORPUS.md` and the case-authorin
 
 Ship a core Python package with CLI/library entry points, separate versioned corpus packs, pinned scanner images where useful, and downloadable HTML/CSV/JSON reports. Default to hash-checked preparation recipes that fetch pinned sources. Check use and redistribution permissions against each exact snapshot and relevant paths, not just today's repository-wide license. Source archives may be distributed separately where permitted; they are not permanently prohibited. Keep large source archives, proprietary tools, credentials, and protected labels out of the core package. A static documentation site and local trace viewer are sufficient initially. A hosted service and public leaderboard are not required.
 
-### What SASTbench delivers
+### What ScanEval delivers
 
 - **Versioned CVE corpus:** real vulnerable repository snapshots, fixes, target mechanisms, accepted evidence locations, and validated fixed/safe controls where available. Published advisories and maintainer records supply the vulnerability evidence; benchmark review checks the exact source mapping and scoring label used by the evaluator. Organization-owned packs use the same format.
 - **SDK for harness visibility:** records model/tool calls, context delivered to the model, the finding lifecycle from candidate creation through validation/filtering to final submission, errors, and timing. A shared trace format links those observations to scan results and marks incomplete capture. It shows recorded harness behavior, with the reasoning limits described in Section 6.

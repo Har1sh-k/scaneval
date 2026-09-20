@@ -10,8 +10,8 @@ import subprocess
 
 import pytest
 
-from sastbench.contracts import ContractError, canonical_sha256
-from sastbench.materialize import (
+from scaneval.contracts import ContractError, canonical_sha256
+from scaneval.materialize import (
     MaterializationError,
     cache_key,
     export_snapshot,
@@ -163,7 +163,7 @@ def test_synthetic_history_is_single_neutral_commit_covering_ignored_files(tmp_p
     history = prepare_synthetic_history(trial / "source")
     source = trial / "source"
     assert git("rev-parse", "HEAD", cwd=source) == history["commit"]
-    assert git("log", "--format=%s%n%an <%ae>", cwd=source).splitlines() == ["snapshot", "SASTbench <sastbench@localhost>"]
+    assert git("log", "--format=%s%n%an <%ae>", cwd=source).splitlines() == ["snapshot", "ScanEval <scaneval@localhost>"]
     assert git("rev-list", "--count", "HEAD", cwd=source) == "1"
     assert "ignored.txt" in git("ls-files", cwd=source).splitlines()
     assert hash_exported_tree(source) == before
@@ -173,13 +173,13 @@ def test_synthetic_history_is_single_neutral_commit_covering_ignored_files(tmp_p
 
 
 def test_inspect_commit_reports_parent_and_dates_without_caching(tmp_path, upstream):
-    from sastbench.materialize import inspect_commit
+    from scaneval.materialize import inspect_commit
     repo, first = upstream
     second = git("rev-parse", "HEAD", cwd=repo)
     info = inspect_commit(str(repo), second)
     assert info["commit"] == second and info["parents"] == [first] and info["subject"] == "second"
     assert info["committed_at"][:4].isdigit() and "T" in info["committed_at"]
-    assert not list(tmp_path.glob("sastbench-inspect-*"))
+    assert not list(tmp_path.glob("scaneval-inspect-*"))
     with pytest.raises(MaterializationError, match="full 40-hex SHA"):
         inspect_commit(str(repo), "HEAD")
 
@@ -200,7 +200,7 @@ def test_a_provenance_record_utf8_cannot_encode_leaves_no_file_behind(tmp_path):
 
 
 def test_instruction_cue_detection_covers_assistant_files_only():
-    from sastbench.materialize import _is_instruction_file
+    from scaneval.materialize import _is_instruction_file
 
     for path in ("CLAUDE.md", "docs/AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules", ".clinerules",
                  ".claude/settings.json", ".codex/config.toml", ".cursor/rules/style.mdc",

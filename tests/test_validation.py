@@ -1,4 +1,4 @@
-"""Tests for the SASTbench case validator."""
+"""Tests for the ScanEval case validator."""
 
 import json
 import sys

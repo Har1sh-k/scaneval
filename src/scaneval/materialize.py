@@ -27,7 +27,7 @@ from .contracts import ContractError, canonical_json, canonical_sha256
 SCHEMA_VERSION = "2.0"
 PROFILES = ("standard", "metadata_blinded")
 # Harness or evaluator state that must never travel with an exported snapshot.
-STRIPPED_TOP_LEVEL = frozenset({".securevibes", ".sastbench", ".repos"})
+STRIPPED_TOP_LEVEL = frozenset({".securevibes", ".scaneval", ".repos"})
 # Files whose presence a scanner may treat as project instructions. They stay in the export
 # under the standard profile, but their presence is recorded as a retained identity cue. Only
 # paths an agent actually reads as instructions count: ``.github`` as a whole does not, because
@@ -150,7 +150,7 @@ def inspect_commit(url: str, commit: str, *, timeout: float = 600) -> dict:
     commit = _require_commit(commit)
     import tempfile
 
-    staging = Path(tempfile.mkdtemp(prefix="sastbench-inspect-"))
+    staging = Path(tempfile.mkdtemp(prefix="scaneval-inspect-"))
     try:
         _git(["init", "-q"], staging)
         _git(["remote", "add", "origin", url], staging)
@@ -289,7 +289,7 @@ def prepare_synthetic_history(source_dir: Path, *, message: str = "snapshot") ->
         raise MaterializationError(f"{source_dir} already has git history")
     _git(["init", "-q"], source_dir)
     for key, value in (
-        ("user.name", "SASTbench"), ("user.email", "sastbench@localhost"),
+        ("user.name", "ScanEval"), ("user.email", "scaneval@localhost"),
         ("commit.gpgsign", "false"), ("core.autocrlf", "false"), *_LFS_CONFIG,
     ):
         _git(["config", "--local", key, value], source_dir)
@@ -297,14 +297,14 @@ def prepare_synthetic_history(source_dir: Path, *, message: str = "snapshot") ->
     _git(["add", "-A", "-f", "."], source_dir)
     _git(["commit", "-q", "--allow-empty", "--no-verify", "-m", message], source_dir)
     commit = _git(["rev-parse", "HEAD"], source_dir).strip()
-    return {"commit": commit, "message": message, "identity": "SASTbench <sastbench@localhost>"}
+    return {"commit": commit, "message": message, "identity": "ScanEval <scaneval@localhost>"}
 
 
 def write_provenance(trial_dir: Path, record: dict) -> Path:
     """Write the preparation record beside the export, refusing to overwrite an existing file.
 
     The record is serialized and encoded before the file is created, so a record canonical JSON
-    or UTF-8 cannot represent raises :class:`~sastbench.contracts.ContractError` and leaves no
+    or UTF-8 cannot represent raises :class:`~scaneval.contracts.ContractError` and leaves no
     empty file behind for a reader to mistake for provenance. A lone UTF-16 surrogate is the
     case that survives serialization and fails only on encoding.
     """

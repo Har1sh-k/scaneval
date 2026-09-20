@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sastbench.dev/schemas/v2/evaluation-plan.schema.json",
-  "title": "SASTbench evaluation plan",
+  "$id": "https://scaneval.dev/schemas/v2/evaluation-plan.schema.json",
+  "title": "ScanEval evaluation plan",
   "type": "object", "additionalProperties": false,
   "required": ["schema_version", "input_hash", "scope", "targets", "controls", "review_budgets"],
   "properties": {

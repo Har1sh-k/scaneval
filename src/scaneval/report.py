@@ -44,7 +44,7 @@ def render_report(record: dict, result: dict, plan: dict, review_state=None) -> 
     """Render data as escaped text. No scripts, CDN, source links or raw HTML.
 
     ``review_state`` adds one notice about the bundle's review record, as
-    :func:`sastbench.review.review_status` reports it. Omitting it renders exactly the same
+    :func:`scaneval.review.review_status` reports it. Omitting it renders exactly the same
     page as before; supplying it adds a statement about the record, not a verification of
     it, and no value of it changes a metric on this page.
     """
@@ -88,13 +88,13 @@ def render_report(record: dict, result: dict, plan: dict, review_state=None) -> 
     return f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
-<title>SASTbench saved evaluation</title><style>
+<title>ScanEval saved evaluation</title><style>
 body{{font:16px/1.55 system-ui,sans-serif;max-width:1100px;margin:40px auto;padding:0 20px;color:#15202b;background:#fafafa}}
 h1,h2,h3{{line-height:1.2}} h2{{margin-top:2em}} .notice{{border-left:4px solid #a46700;background:#fff4da;padding:16px}}
 table{{border-collapse:collapse;width:100%;margin:16px 0}} th,td{{padding:10px;border:1px solid #ccd3da;text-align:left;vertical-align:top}}
 th{{background:#edf1f5}} .scroll{{overflow-x:auto}} code{{overflow-wrap:anywhere}} dd{{margin:0 0 12px}} .muted{{color:#526170}}
 </style></head><body>
-<h1>SASTbench: saved evaluation</h1><p class="notice">{disclaimer}</p>{review_notice}
+<h1>ScanEval: saved evaluation</h1><p class="notice">{disclaimer}</p>{review_notice}
 <p>System: <strong>{escape(record['system_id'])}</strong> · Run: {escape(record['run_id'])} · Status: {escape(record['status'])}</p>
 <h2>Detection and review burden</h2>
 <p>Full-output recall: <strong>{_show(m['known_target_recall'])}</strong> ({m['targets_detected']}/{m['targets_assigned']} targets on this input).</p>

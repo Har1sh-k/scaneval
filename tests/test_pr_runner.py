@@ -1,4 +1,4 @@
-"""Tests for the SASTbench PR runner (tree materialization, diff, integration)."""
+"""Tests for the ScanEval PR runner (tree materialization, diff, integration)."""
 
 import json
 import shutil

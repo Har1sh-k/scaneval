@@ -1,6 +1,6 @@
 {
   "schema_version": "2.0",
-  "namespace": "sastbench.public",
+  "namespace": "scaneval.public",
   "pack_id": "pilot-2026-09",
   "version": "0.1.0-draft",
   "status": "draft",

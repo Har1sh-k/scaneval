@@ -25,8 +25,8 @@ Requires Python 3.11 or later. Run from the repository:
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
-sastbench --version
-sastbench demo results/diagnostic-demo
+scaneval --version
+scaneval demo results/diagnostic-demo
 ```
 
 Open `results/diagnostic-demo/report.html`. The demo is the design's worked example, with fabricated source, findings, and review decisions. It makes no scanner or model calls and supplies no evidence about real-world detection performance.
@@ -48,7 +48,7 @@ All commands refuse to overwrite existing output files. `demo` requires a new di
 
 ## Contracts
 
-Schemas ship inside [`src/sastbench/schemas`](../src/sastbench/schemas) and are the values `sastbench validate` accepts.
+Schemas ship inside [`src/scaneval/schemas`](../src/scaneval/schemas) and are the values `scaneval validate` accepts.
 
 | Kind | What it holds |
 |---|---|
@@ -66,9 +66,9 @@ The preparation record written beside an exported tree (`provenance.json`) is ve
 
 ## Materialization and the immutable cache
 
-`sastbench.materialize` fetches exactly one 40-hex commit into a cache directory (default `.repos`) keyed by repository and short SHA. A cache entry that already exists is verified rather than refetched: its HEAD must be the requested commit and it must have no local modifications. A branch, tag, or short id is refused.
+`scaneval.materialize` fetches exactly one 40-hex commit into a cache directory (default `.repos`) keyed by repository and short SHA. A cache entry that already exists is verified rather than refetched: its HEAD must be the requested commit and it must have no local modifications. A branch, tag, or short id is refused.
 
-Export copies the tracked regular files of that commit into `<trial>/source`. `.git`, `.securevibes`, `.sastbench`, and `.repos` are stripped; submodule gitlinks and symbolic links are not exported and are recorded as skipped with a reason. Files a scanner may read as project instructions (`CLAUDE.md`, `AGENTS.md`, `.claude/`, `.cursor/`, and similar) stay in the export under the `standard` profile and are recorded as retained identity cues.
+Export copies the tracked regular files of that commit into `<trial>/source`. `.git`, `.securevibes`, `.scaneval`, and `.repos` are stripped; submodule gitlinks and symbolic links are not exported and are recorded as skipped with a reason. Files a scanner may read as project instructions (`CLAUDE.md`, `AGENTS.md`, `.claude/`, `.cursor/`, and similar) stay in the export under the `standard` profile and are recorded as retained identity cues.
 
 The tree hash is the canonical SHA-256 of the `{relative path: file content hash}` map. Only the `standard` profile is implemented. `metadata_blinded` is refused outright, with and without a supplied replacement map, rather than silently downgraded to `standard`.
 
@@ -78,7 +78,7 @@ This is preparation and provenance, not a sandbox. Filesystem and network policy
 
 ## The invocation runner and the bundle layout
 
-`sastbench run <config> --output <new dir>` executes a frozen run configuration and writes:
+`scaneval run <config> --output <new dir>` executes a frozen run configuration and writes:
 
 ```text
 <out>/
@@ -115,11 +115,11 @@ Two adapters are registered, `semgrep` and `llm-harness`. An adapter runs the re
 
 **`semgrep`** runs Semgrep OSS against a local git checkout of a rules repository pinned to one commit, with `--metrics=off` and no registry download. A `p/...` or `r/...` registry config is refused because it is not a pin. Preparation records the ruleset commit, the number of rule files Semgrep's own `--config <directory>` walk would select, and one aggregate hash over those files; a symlink anywhere under a configured ruleset directory is refused rather than followed. Native rule identity is recorded relative to the pinned checkout so the cache path does not leak into the rule id. A run that scanned no paths and reported nothing is an error, not a quiet negative result.
 
-**`llm-harness`** runs the `securevibes-agent` and `fieldglass` engine family through its own engine entry point inside its own `tsx`. Presets exist for both; only `securevibes-agent` has been exercised against a live model. SASTbench injects only the harness's default model runner wrapped by the observer and a progress reporter. Findings are imported from the harness's own `findings/*.md` records; they are file-level, and this importer keeps them file-level and never invents line ranges. The harness plan, threat model, scan log, profile, and specialist records are copied into the staging directory so they survive as hashed raw artifacts, and the whole state directory is captured separately. Only `bootstrap` mode on a full scan is supported; native PR mode is not wired.
+**`llm-harness`** runs the `securevibes-agent` and `fieldglass` engine family through its own engine entry point inside its own `tsx`. Presets exist for both; only `securevibes-agent` has been exercised against a live model. ScanEval injects only the harness's default model runner wrapped by the observer and a progress reporter. Findings are imported from the harness's own `findings/*.md` records; they are file-level, and this importer keeps them file-level and never invents line ranges. The harness plan, threat model, scan log, profile, and specialist records are copied into the staging directory so they survive as hashed raw artifacts, and the whole state directory is captured separately. Only `bootstrap` mode on a full scan is supported; native PR mode is not wired.
 
 ## Observer connection: what is captured and what is not
 
-The TypeScript observer is connected to the own harness through [`llm_harness_driver.mts`](../src/sastbench/adapters/llm_harness_driver.mts). Importing the SDK still captures nothing on its own; this driver is what emits.
+The TypeScript observer is connected to the own harness through [`llm_harness_driver.mts`](../src/scaneval/adapters/llm_harness_driver.mts). Importing the SDK still captures nothing on its own; this driver is what emits.
 
 It emits `model.request` and `model.response` around each logical model call, `context.selection` from the harness's own progress notes, and `finding.submitted` for each finding the engine finally wrote. It does not emit tool events or finding candidate, validation, and filtering events.
 
@@ -149,7 +149,7 @@ Plan generation degrades to the lowest state present: a plan is `reviewed` only 
 
 ## Review workflow
 
-`sastbench review init` routes saved claims to planned targets. A candidate means only that the claim's primary location path is an accepted location path of that target. Routing does not read claim prose, compare line ranges, weigh severities, or establish a root cause. Every decision it writes is `unresolved`, so a draft can never earn detection credit, a rejection, or a quiet control, and an empty draft is not evidence of absence.
+`scaneval review init` routes saved claims to planned targets. A candidate means only that the claim's primary location path is an accepted location path of that target. Routing does not read claim prose, compare line ranges, weigh severities, or establish a root cause. Every decision it writes is `unresolved`, so a draft can never earn detection credit, a rejection, or a quiet control, and an empty draft is not evidence of absence.
 
 A human edits `evaluator/decisions.json`. `review record` then re-drafts the review record for the edited decisions and keeps the recorded review history. `review approve` records one explicit human approval, refusing decisions that no longer bind to the saved result.
 
@@ -206,13 +206,13 @@ diagnostic-demo/
 ```
 
 ```sh
-sastbench validate scan-request results/diagnostic-demo/request.json
-sastbench validate scan-result results/diagnostic-demo/result.json
-sastbench replay results/diagnostic-demo --output results/diagnostic-replay.json
-sastbench report results/diagnostic-demo --output results/diagnostic-report.html
+scaneval validate scan-request results/diagnostic-demo/request.json
+scaneval validate scan-result results/diagnostic-demo/result.json
+scaneval replay results/diagnostic-demo --output results/diagnostic-replay.json
+scaneval report results/diagnostic-demo --output results/diagnostic-report.html
 
 # The same evaluator also accepts separately stored records.
-sastbench score \
+scaneval score \
   --plan results/diagnostic-demo/evaluator/plan.json \
   --result results/diagnostic-demo/result.json \
   --decisions results/diagnostic-demo/evaluator/decisions.json
@@ -225,12 +225,12 @@ Replay reads `result.json` and `evaluator/` records. It does not execute `reques
 The library entry point is:
 
 ```python
-from sastbench import evaluate
+from scaneval import evaluate
 
 record = evaluate(plan, saved_result, frozen_decisions)
 ```
 
-This is saved-record evaluation of documents that already exist. The live path is `sastbench run`, which produces those documents from a frozen configuration.
+This is saved-record evaluation of documents that already exist. The live path is `scaneval run`, which produces those documents from a frozen configuration.
 
 ## Contract rules enforced now
 
@@ -238,7 +238,7 @@ Strict parsing rejects duplicate JSON keys, nonfinite numbers, escaping file pat
 
 - **Scanner boundary:** `ScanRequest` cannot contain evaluator target IDs, regions, fixes, or matching decisions. This is a shape check, not automatic source sanitization.
 - **Locations:** file-only reports stay file-only. A line range is optional; if supplied it must be positive and ordered. Location overlap alone never earns credit.
-- **Claims:** one allegation and its evidence per normalized claim. Separately structured bundles must be split by an importer or reviewer before claiming an atomic count. Adapters normalize the output of the system they just ran; there is no importer for a saved vendor file, SARIF or native, produced outside a SASTbench invocation.
+- **Claims:** one allegation and its evidence per normalized claim. Separately structured bundles must be split by an importer or reviewer before claiming an atomic count. Adapters normalize the output of the system they just ran; there is no importer for a saved vendor file, SARIF or native, produced outside a ScanEval invocation.
 - **Duplicates:** canonicalize allegation, kind, native rule ID, primary/related locations, and evidence text. Normalize path separators and line endings. Ignore delivery IDs and ranks. Different evidence stays distinct; semantic duplicate review is not implemented yet.
 - **Credit:** one claim or exact-duplicate group can hit at most one canonical target. Duplicate copies keep their review positions. Contradictory frozen decisions are rejected.
 - **Ranking:** native ranks must be contiguous and follow the submitted array. Unranked output has no native budget score. Its optional random-order expectation is a separate diagnostic and can be affected by duplicate spam.
@@ -278,7 +278,7 @@ npm test
 
 ## Next implementation slice
 
-1. Human review of the routed candidates from [the pilot](PILOT.md), recorded through `sastbench review record` and `sastbench review approve`, which is the only path to a non-zero recall.
+1. Human review of the routed candidates from [the pilot](PILOT.md), recorded through `scaneval review record` and `scaneval review approve`, which is the only path to a non-zero recall.
 2. Independent review of the pilot case labels to L3, which is the only path out of draft scope.
 3. Fixed-state snapshots so the cases have property-specific negative controls.
 4. The own harness on the remaining inputs, plus repetitions, before any comparison between systems.

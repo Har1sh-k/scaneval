@@ -1,9 +1,9 @@
 ---
 name: scaneval-adapter-authoring
-description: Build or update a SASTbench scanner adapter under adapters/. Use when an agent needs to create, repair, or extend an adapter for a scanner, including rule mapping, path normalization, raw-output capture, optional PR-mode support, adapter tests, and harness validation against core benchmark cases.
+description: Build or update a ScanEval scanner adapter under adapters/. Use when an agent needs to create, repair, or extend an adapter for a scanner, including rule mapping, path normalization, raw-output capture, optional PR-mode support, adapter tests, and harness validation against core benchmark cases.
 ---
 
-# SASTbench Adapter Authoring
+# ScanEval Adapter Authoring
 
 Build adapters that actually work with this repo's scoring and reporting model.
 
@@ -50,7 +50,7 @@ A finished adapter must:
 3. return normalized findings with correct path, line, and `mappedKind`
 4. handle unsupported languages and scanner failures without crashing the harness
 5. include tests
-6. pass at least one real SASTbench smoke run
+6. pass at least one real ScanEval smoke run
 
 If raw stdout/stderr matters, also implement `scan_with_metadata()`.
 
@@ -158,7 +158,7 @@ Bad candidates:
 
 - whole-tree scanners with no diff semantics
 
-If the scanner is not genuinely PR-aware, skip the method and rely on SASTbench fallback PR synthesis.
+If the scanner is not genuinely PR-aware, skip the method and rely on ScanEval fallback PR synthesis.
 
 ### 7. Add tests before claiming success
 
@@ -185,7 +185,7 @@ Reuse the existing test style in:
 
 Do not stop at "the file exists."
 
-A SASTbench adapter is only good if it:
+A ScanEval adapter is only good if it:
 
 - hits the right file
 - hits the right line range

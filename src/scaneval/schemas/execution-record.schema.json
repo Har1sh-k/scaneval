@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sastbench.dev/schemas/v2/execution-record.schema.json",
-  "title": "SASTbench execution record",
+  "$id": "https://scaneval.dev/schemas/v2/execution-record.schema.json",
+  "title": "ScanEval execution record",
   "description": "Evaluator-side record of one scanner invocation: status, timing, versions, declared policy, capture availability, and preparation provenance.",
   "type": "object", "additionalProperties": false,
   "required": ["schema_version", "run_id", "invocation_id", "input_id", "system_id", "repetition", "adapter", "versions",

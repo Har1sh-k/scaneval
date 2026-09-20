@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sastbench.dev/schemas/v2/case-pack.schema.json",
-  "title": "SASTbench case pack",
+  "$id": "https://scaneval.dev/schemas/v2/case-pack.schema.json",
+  "title": "ScanEval case pack",
   "description": "A namespaced, versioned set of pinned snapshots and case records. Public and organization-owned packs share this contract. Labels become scoring evidence only through recorded human review; nothing here is a scanner input.",
   "type": "object", "additionalProperties": false,
   "required": ["schema_version", "namespace", "pack_id", "version", "status", "description", "review_budgets", "snapshots", "cases", "admissions"],

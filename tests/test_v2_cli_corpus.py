@@ -17,9 +17,9 @@ import tempfile
 
 import pytest
 
-from sastbench.adapters.base import Adapter, AdapterError, NativeOutcome
-from sastbench.cli import main
-from sastbench.contracts import canonical_json, canonical_sha256, load_document
+from scaneval.adapters.base import Adapter, AdapterError, NativeOutcome
+from scaneval.cli import main
+from scaneval.contracts import canonical_json, canonical_sha256, load_document
 
 
 VULNERABLE = "import subprocess\n\n\ndef run(cmd):\n    return subprocess.run(cmd, shell=True)\n"
@@ -134,7 +134,7 @@ def test_corpus_init_creates_a_draft_pack_and_refuses_to_overwrite_one(tmp_path,
 
     before = pack.read_bytes()
     code, _, err = cli(capsys, *init_argv(pack))
-    assert code == 2 and "sastbench:" in err and "File exists" in err
+    assert code == 2 and "scaneval:" in err and "File exists" in err
     assert pack.read_bytes() == before
 
 
@@ -448,7 +448,7 @@ def write_config(tmp_path: Path, *, systems: list[dict] | None = None) -> Path:
 
 def test_run_executes_one_configuration_and_leaves_the_source_pack_a_draft(tmp_path, capsys, monkeypatch,
                                                                           checked_pack):
-    monkeypatch.setattr("sastbench.runner.get_adapter", lambda name: FakeAdapter())
+    monkeypatch.setattr("scaneval.runner.get_adapter", lambda name: FakeAdapter())
     config = write_config(tmp_path)
     workspace = tmp_path / "work"
     workspace.mkdir()
@@ -467,7 +467,7 @@ def test_run_executes_one_configuration_and_leaves_the_source_pack_a_draft(tmp_p
     assert "human_approved" not in checked_pack["pack"].read_text(encoding="utf-8")
 
     code, _, err = cli(capsys, "run", str(config), "--output", str(out_dir))
-    assert code == 2 and "sastbench:" in err
+    assert code == 2 and "scaneval:" in err
 
     code, _, err = cli(capsys, "run", str(config), "--output", str(tmp_path / "other"),
                        "--only-system", "absent")
@@ -480,7 +480,7 @@ def test_run_reports_a_skipped_system_without_inventing_a_scan(tmp_path, capsys,
             raise AdapterError("unknown adapter 'broken'")
         return FakeAdapter()
 
-    monkeypatch.setattr("sastbench.runner.get_adapter", resolve)
+    monkeypatch.setattr("scaneval.runner.get_adapter", resolve)
     config = write_config(tmp_path, systems=[{"system_id": "fake-a", "adapter": "fake", "config": {}},
                                              {"system_id": "broken-b", "adapter": "broken", "config": {}}])
     out_dir = tmp_path / "out"
@@ -570,11 +570,11 @@ def test_replay_warns_about_an_unapproved_review_state_without_changing_its_json
     capsys.readouterr()
 
     code, drafted, err = cli(capsys, "replay", str(bundle))
-    assert code == 0 and "sastbench: review state draft: these numbers come from decisions" in err
+    assert code == 0 and "scaneval: review state draft: these numbers come from decisions" in err
 
     (bundle / "evaluator" / "review-record.json").unlink()
     code, out, err = cli(capsys, "replay", str(bundle))
-    assert code == 0 and "sastbench: review state missing:" in err and out == drafted
+    assert code == 0 and "scaneval: review state missing:" in err and out == drafted
 
     assert main(["review", "record", str(bundle)]) == 0
     assert main(["review", "approve", str(bundle), "--reviewer", "R. Eviewer", "--note", "read them"]) == 0
@@ -645,7 +645,7 @@ def test_corpus_approve_at_l3_requires_the_validate_disposition(tmp_path, capsys
 
 def test_run_returns_one_when_an_invocation_records_an_error_status(tmp_path, capsys, monkeypatch,
                                                                    checked_pack):
-    monkeypatch.setattr("sastbench.runner.get_adapter", lambda name: FailingAdapter())
+    monkeypatch.setattr("scaneval.runner.get_adapter", lambda name: FailingAdapter())
     config = write_config(tmp_path)
     out_dir = tmp_path / "out"
 
@@ -743,7 +743,7 @@ def test_import_refuses_finding_lines_that_are_not_a_pair_of_positive_integers(t
 
     code, _, err = cli(capsys, *import_argv(pack, "case-finding", "--finding", str(finding)))
     assert code == 2 and message in err
-    assert "Traceback" not in err and err.startswith("sastbench: ")
+    assert "Traceback" not in err and err.startswith("scaneval: ")
     assert read_pack(pack)["cases"] == []
 
 
@@ -810,7 +810,7 @@ def test_plan_refuses_an_output_path_inside_a_trial_directory(tmp_path, capsys, 
 
 
 def test_the_cli_docstring_states_which_files_are_rewritten_and_which_are_create_only():
-    from sastbench import cli
+    from scaneval import cli
 
     assert "A pack file is rewritten in place" in cli.__doc__
     assert "review-record.json" in cli.__doc__ and "review record" in cli.__doc__
@@ -831,7 +831,7 @@ def test_corpus_validate_makes_no_temporary_trial_directory_when_the_fetch_fails
 
     code, _, err = cli(capsys, "corpus", "validate", str(pack), "--snapshot-id", "snap-a",
                        "--cache-root", str(tmp_path / "cache"))
-    assert code == 2 and "sastbench:" in err
+    assert code == 2 and "scaneval:" in err
     assert list(temporary.iterdir()) == []
     assert case_by_id(pack, "case-finding")["validation"]["checks"] == []
 
@@ -995,7 +995,7 @@ def test_import_refuses_a_malformed_legacy_record_without_a_traceback(tmp_path, 
 
     code, _, err = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
     assert code == 2 and message in err
-    assert err.startswith("sastbench: ") and "Traceback" not in err
+    assert err.startswith("scaneval: ") and "Traceback" not in err
     assert str(legacy) in err
     assert read_pack(pack)["cases"] == []
 
@@ -1162,7 +1162,7 @@ def test_import_refuses_further_legacy_shapes_the_migration_cannot_read(tmp_path
 
     code, _, err = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
     assert code == 2 and message in err
-    assert err.startswith("sastbench: ") and "Traceback" not in err
+    assert err.startswith("scaneval: ") and "Traceback" not in err
     assert str(legacy) in err
     assert read_pack(pack)["cases"] == []
 
@@ -1182,12 +1182,12 @@ def test_a_snapshot_url_that_cannot_be_parsed_is_refused_naming_the_flag(tmp_pat
     code, _, err = cli(capsys, *unparsable)
     assert code == 2 and "--url is not a URL this tool can read" in err
     assert "Invalid IPv6 URL" in err and "could not be checked for credentials" in err
-    assert err.startswith("sastbench: ") and "Traceback" not in err
+    assert err.startswith("scaneval: ") and "Traceback" not in err
 
     code, _, err = cli(capsys, *snapshot_argv(pack, repo, commit),
                        "--historical-url", UNPARSABLE_URL)
     assert code == 2 and "--historical-url is not a URL this tool can read" in err
-    assert err.startswith("sastbench: ") and "Traceback" not in err
+    assert err.startswith("scaneval: ") and "Traceback" not in err
 
     assert pack.read_bytes() == before and read_pack(pack)["snapshots"] == []
 
@@ -1201,7 +1201,7 @@ def test_an_import_repository_url_that_cannot_be_parsed_is_refused_naming_the_fl
     code, _, err = cli(capsys, *import_argv(pack, "case-fix", "--fix-commit", "a" * 40,
                                             "--repo", UNPARSABLE_URL))
     assert code == 2 and "--repo is not a URL this tool can read" in err
-    assert err.startswith("sastbench: ") and "Traceback" not in err
+    assert err.startswith("scaneval: ") and "Traceback" not in err
     assert pack.read_bytes() == before and read_pack(pack)["cases"] == []
 
 
@@ -1217,7 +1217,7 @@ def test_a_legacy_repository_url_that_cannot_be_parsed_is_refused_naming_the_rec
     code, _, err = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
     assert code == 2 and "realWorld.repo is not a URL this tool can read" in err
     assert str(legacy) in err
-    assert err.startswith("sastbench: ") and "Traceback" not in err
+    assert err.startswith("scaneval: ") and "Traceback" not in err
     assert read_pack(pack)["cases"] == []
 
 
@@ -1254,11 +1254,11 @@ def test_a_document_that_is_not_utf_8_is_refused_naming_the_file(tmp_path, capsy
         code, _, err = cli(capsys, *argv)
         assert code == 2 and f"could not load {broken}" in err
         assert "utf-8" in err and "Traceback" not in err
-        assert err.startswith("sastbench: ")
+        assert err.startswith("scaneval: ")
 
     code, _, err = cli(capsys, "replay", str(bundle))
     assert code == 2 and f"could not load {bundle / 'result.json'}" in err
-    assert err.startswith("sastbench: ") and "utf-8" in err and "Traceback" not in err
+    assert err.startswith("scaneval: ") and "utf-8" in err and "Traceback" not in err
 
 
 def test_review_commands_refuse_a_bundle_that_is_itself_a_trial_directory(tmp_path, capsys,
@@ -1276,7 +1276,7 @@ def test_review_commands_refuse_a_bundle_that_is_itself_a_trial_directory(tmp_pa
     for argv in refused.values():
         code, _, err = cli(capsys, *argv)
         assert code == 2 and "which is itself the trial directory" in err
-        assert err.startswith("sastbench: ") and "Traceback" not in err
+        assert err.startswith("scaneval: ") and "Traceback" not in err
 
     assert not (trial / "evaluator").exists()
     assert sorted(path.name for path in trial.iterdir()) == before
@@ -1292,7 +1292,7 @@ def test_writing_commands_refuse_an_output_that_is_itself_a_trial_directory(tmp_
     for argv in (["demo", str(trial)], ["run", str(config), "--output", str(trial)]):
         code, _, err = cli(capsys, *argv)
         assert code == 2 and "which is itself the trial directory" in err
-        assert err.startswith("sastbench: ") and "Traceback" not in err
+        assert err.startswith("scaneval: ") and "Traceback" not in err
 
     assert sorted(path.name for path in trial.iterdir()) == before
     assert not (trial / "evaluator").exists() and not (trial / "invocations").exists()
@@ -1301,8 +1301,8 @@ def test_writing_commands_refuse_an_output_that_is_itself_a_trial_directory(tmp_
 def test_a_pack_replaced_through_a_symlink_does_not_take_the_permissions_it_points_at(tmp_path,
                                                                                       capsys,
                                                                                       checked_pack):
-    from sastbench import cli as cli_module
-    from sastbench import review as review_module
+    from scaneval import cli as cli_module
+    from scaneval import review as review_module
 
     # The pack file and the review record are replaced by one helper, so the two cannot drift.
     assert cli_module._keep_mode is review_module._keep_mode
@@ -1369,7 +1369,7 @@ def test_every_corpus_command_that_rewrites_a_pack_refuses_one_inside_a_trial_di
     for argv in mutating.values():
         code, _, err = cli(capsys, *argv)
         assert code == 2 and "inside the trial directory" in err
-        assert err.startswith("sastbench: ") and "Traceback" not in err
+        assert err.startswith("scaneval: ") and "Traceback" not in err
         assert planted.read_bytes() == before
     assert not (tmp_path / "planted-cache").exists() and not (tmp_path / "planted-trial").exists()
 
@@ -1387,7 +1387,7 @@ def test_review_status_refuses_a_bundle_inside_a_trial_directory(tmp_path, capsy
 
     code, out, err = cli(capsys, "review", "status", str(planted))
     assert code == 2 and "inside the trial directory" in err and out == ""
-    assert err.startswith("sastbench: ") and "Traceback" not in err
+    assert err.startswith("scaneval: ") and "Traceback" not in err
 
     code, out, err = cli(capsys, "review", "status", str(trial))
     assert code == 2 and "which is itself the trial directory" in err and out == ""
@@ -1430,7 +1430,7 @@ def test_import_refuses_legacy_values_made_only_of_zero_width_characters(tmp_pat
 
     code, _, err = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
     assert code == 2 and message in err
-    assert err.startswith("sastbench: ") and "Traceback" not in err
+    assert err.startswith("scaneval: ") and "Traceback" not in err
     assert read_pack(pack)["cases"] == []
 
 
@@ -1456,7 +1456,7 @@ def test_a_supplied_finding_the_parser_cannot_read_is_refused_naming_the_file(tm
 
     code, _, err = cli(capsys, *import_argv(pack, "case-finding", "--finding", str(finding)))
     assert code == 2 and f"could not load {finding}" in err
-    assert err.startswith("sastbench: ") and "Traceback" not in err
+    assert err.startswith("scaneval: ") and "Traceback" not in err
     assert read_pack(pack)["cases"] == []
 
 
@@ -1469,7 +1469,7 @@ def test_a_contract_file_the_parser_cannot_read_is_refused_naming_the_file(tmp_p
 
     code, _, err = cli(capsys, "validate", "case-pack", str(path))
     assert code == 2 and f"could not load {path}" in err
-    assert err.startswith("sastbench: ") and "Traceback" not in err
+    assert err.startswith("scaneval: ") and "Traceback" not in err
 
 
 def test_a_hand_edited_pack_cannot_claim_a_review_or_an_admission_by_an_unnamed_person(tmp_path, capsys,

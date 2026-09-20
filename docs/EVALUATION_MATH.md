@@ -1,4 +1,4 @@
-# SASTbench evaluation math
+# ScanEval evaluation math
 
 Companion to [the design decisions](DESIGN_DECISIONS.md). Updated 2026-09-18. Metric specification; implementation pending.
 

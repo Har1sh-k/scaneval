@@ -1,4 +1,4 @@
-# SASTbench
+# ScanEval
 
 > The replacement core is an alpha (`2.0.0a1`) that now runs end to end: versioned contracts, case packs with mechanical checks and explicit human approval, an immutable source cache and pinned snapshot export, an invocation runner, two real adapters (pinned Semgrep OSS and the own LLM harness), an observer connection at the harness model boundary, a review workflow, saved-output scoring and offline replay, and an HTML report. See [initial build](docs/INITIAL_BUILD.md) for what it does and does not do, and [the pilot report](docs/PILOT.md) for the first real runs.
 >
@@ -8,14 +8,14 @@
 
 > Can your scanner find real vulnerabilities without flagging authorized capabilities?
 
-SASTbench evaluates whether static analyzers find real vulnerabilities at an acceptable review cost. The proposed [workload scope](docs/DESIGN_DECISIONS.md#workload-classification) covers conventional applications, conventional automation, AI-assisted applications, and agentic applications, with separate scorecards. The legacy `cases/` corpus is agentic-heavy, and its `agentic`/`generic` CLI profiles are legacy selections, not the proposed workflow classifications. The new core's corpus is the draft pilot pack under `corpus/pilot/`, which covers three cases and no controls.
+ScanEval evaluates whether static analyzers find real vulnerabilities at an acceptable review cost. The proposed [workload scope](docs/DESIGN_DECISIONS.md#workload-classification) covers conventional applications, conventional automation, AI-assisted applications, and agentic applications, with separate scorecards. The legacy `cases/` corpus is agentic-heavy, and its `agentic`/`generic` CLI profiles are legacy selections, not the proposed workflow classifications. The new core's corpus is the draft pilot pack under `corpus/pilot/`, which covers three cases and no controls.
 
 ## Try the new evaluation core
 
 ```bash
 python -m pip install -e ".[dev]"
-sastbench demo results/diagnostic-demo
-sastbench replay results/diagnostic-demo --output results/diagnostic-replay.json
+scaneval demo results/diagnostic-demo
+scaneval replay results/diagnostic-demo --output results/diagnostic-replay.json
 # Open results/diagnostic-demo/report.html locally.
 ```
 
@@ -24,8 +24,8 @@ This uses fabricated evaluator fixtures, not a live scanner or admitted CVEs. It
 Replay one of the preserved pilot bundles offline, with no network and no model call:
 
 ```bash
-sastbench replay corpus/pilot/runs/2026-09-20-semgrep/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
-# sastbench: review state draft: these numbers come from decisions with no recorded human approval
+scaneval replay corpus/pilot/runs/2026-09-20-semgrep/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
+# scaneval: review state draft: these numbers come from decisions with no recorded human approval
 ```
 
 That warning is the accurate state of every bundle in this repository.
@@ -34,15 +34,15 @@ That warning is the accurate state of every bundle in this repository.
 
 | Command | What it does |
 |---|---|
-| `sastbench validate <kind> <path>` | Validate one of nine versioned contracts: `scan-request`, `scan-result`, `execution-record`, `evaluation-plan`, `review-decisions`, `review-record`, `case-pack`, `run-config`, `run-manifest`. |
-| `sastbench demo <new dir>` | Create the fabricated conformance bundle. No scanner or model runs. |
-| `sastbench score --plan --result --decisions` | Score separately stored records. |
-| `sastbench replay <bundle>` | Recompute a saved bundle offline. |
-| `sastbench report <bundle> --output` | Render a standalone HTML report for a saved bundle. |
-| `sastbench corpus init\|add-snapshot\|import\|validate\|approve\|admit\|disposition` | Build and mechanically check an evaluator-side case pack, and record explicit human reviews, admissions, and dispositions. |
-| `sastbench plan --pack --snapshot-id --tree-hash --output` | Build one evaluation plan for a materialized input. |
-| `sastbench run <config> --output <new dir>` | Execute one frozen run configuration into a new run directory. |
-| `sastbench review init\|record\|approve\|status` | Draft, re-draft, approve, and inspect the review of one invocation bundle. |
+| `scaneval validate <kind> <path>` | Validate one of nine versioned contracts: `scan-request`, `scan-result`, `execution-record`, `evaluation-plan`, `review-decisions`, `review-record`, `case-pack`, `run-config`, `run-manifest`. |
+| `scaneval demo <new dir>` | Create the fabricated conformance bundle. No scanner or model runs. |
+| `scaneval score --plan --result --decisions` | Score separately stored records. |
+| `scaneval replay <bundle>` | Recompute a saved bundle offline. |
+| `scaneval report <bundle> --output` | Render a standalone HTML report for a saved bundle. |
+| `scaneval corpus init\|add-snapshot\|import\|validate\|approve\|admit\|disposition` | Build and mechanically check an evaluator-side case pack, and record explicit human reviews, admissions, and dispositions. |
+| `scaneval plan --pack --snapshot-id --tree-hash --output` | Build one evaluation plan for a materialized input. |
+| `scaneval run <config> --output <new dir>` | Execute one frozen run configuration into a new run directory. |
+| `scaneval review init\|record\|approve\|status` | Draft, re-draft, approve, and inspect the review of one invocation bundle. |
 
 Only `corpus validate --snapshot-id` and `run` reach the network; what `run` contacts depends on the configured systems. Everything else is offline. Exit code `2` means the command could not be carried out, `1` means it ran and reports a negative result, `0` means it ran and reports nothing wrong, which is not a statement that any label or decision is correct.
 
@@ -65,7 +65,7 @@ Guides: [initial build](docs/INITIAL_BUILD.md) for the current build and its lim
 ## Legacy runner: what gets scored
 
 **What gets scored:**
-SASTbench measures whether a static analyzer can detect annotated vulnerable code regions (true positives) without flooding the user with false positives on nearby code.
+ScanEval measures whether a static analyzer can detect annotated vulnerable code regions (true positives) without flooding the user with false positives on nearby code.
 Scoring uses six canonical vulnerability kinds (`command_injection`, `path_traversal`, `ssrf`, `auth_bypass`, `authz_bypass`, `sql_injection`) and region-level overlap matching.
 
 **Why capability-safe regions matter:**
@@ -74,7 +74,7 @@ A good scanner should flag those calls only when the guard is missing, not every
 Capability-safe cases contain properly guarded dangerous code.
 The legacy Capability FP Rate currently covers six synthetic safe regions, not a real-world safe-control corpus. The design requires reviewed, property-specific controls for buyer-facing results.
 
-**What SASTbench does not measure:**
+**What ScanEval does not measure:**
 - Prompt injection as a runtime attack (it measures whether tainted prompt data reaches code sinks)
 - Secret scanning quality
 - Severity calibration across vendors
@@ -146,7 +146,7 @@ python scripts/validate.py --track full
 
 ### Legacy PR simulation mode
 
-SASTbench also supports benchmarked PR simulation with:
+ScanEval also supports benchmarked PR simulation with:
 
 ```bash
 python scripts/run.py --scanner semgrep --mode pr --track core
@@ -270,7 +270,7 @@ Bandit results above use the default built-in rule set because the official adap
 If you want another agent to work on this repo, use these repo-local skills:
 
 - [skills/scaneval-results-validation/SKILL.md](skills/scaneval-results-validation/SKILL.md): verify claimed benchmark or PR-mode results, rerun scanners, confirm the exact rule set used, and distinguish valid runs from environment or scanner failures.
-- [skills/scaneval-adapter-authoring/SKILL.md](skills/scaneval-adapter-authoring/SKILL.md): build or update a SASTbench scanner adapter, including rule mapping, metadata capture, PR-mode support, tests, and harness validation.
+- [skills/scaneval-adapter-authoring/SKILL.md](skills/scaneval-adapter-authoring/SKILL.md): build or update a ScanEval scanner adapter, including rule mapping, metadata capture, PR-mode support, tests, and harness validation.
 
 ## Legacy V1 canonical vulnerability kinds
 
@@ -314,9 +314,9 @@ See [docs/PR_MODE.md](docs/PR_MODE.md) for the full PR-mode model and output sch
 
 ## Legacy OWASP Agentic Top 10 alignment
 
-SASTbench cases are mapped to the [OWASP Top 10 for Agentic Applications for 2026](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) as a reporting crosswalk. Each case carries a `standards.owaspAgenticTop10` field with primary and optional secondary ASI category labels. This mapping enables filtering and aggregating results by OWASP category without changing how the benchmark scores findings.
+ScanEval cases are mapped to the [OWASP Top 10 for Agentic Applications for 2026](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) as a reporting crosswalk. Each case carries a `standards.owaspAgenticTop10` field with primary and optional secondary ASI category labels. This mapping enables filtering and aggregating results by OWASP category without changing how the benchmark scores findings.
 
-SASTbench currently has strong coverage for ASI02 (Tool Misuse & Exploitation), ASI03 (Identity & Privilege Abuse), and ASI05 (Unexpected Code Execution), plus targeted coverage for ASI01, ASI04, ASI06, and ASI07.
+ScanEval currently has strong coverage for ASI02 (Tool Misuse & Exploitation), ASI03 (Identity & Privilege Abuse), and ASI05 (Unexpected Code Execution), plus targeted coverage for ASI01, ASI04, ASI06, and ASI07.
 
 ASI08 (Cascading Failures), ASI09 (Human-Agent Trust Exploitation), and ASI10 (Rogue Agents) remain out of scope for the benchmark's current scoring model because they depend on system-level runtime behavior, human-in-the-loop evaluation, or long-horizon agent behavior rather than stable region-level SAST findings.
 
@@ -328,8 +328,8 @@ These directories are created at runtime and excluded from git via `.gitignore`:
 
 | Directory | Created by | Contents |
 |-----------|-----------|----------|
-| `results/` | `scripts/run.py`, `sastbench demo` | Results JSON, HTML reports, raw scanner artifacts |
-| `.repos/` | `scripts/setup_repos.py`, `sastbench corpus validate`, `sastbench run` | Legacy Full Track snapshots and the new core's immutable source cache |
+| `results/` | `scripts/run.py`, `scaneval demo` | Results JSON, HTML reports, raw scanner artifacts |
+| `.repos/` | `scripts/setup_repos.py`, `scaneval corpus validate`, `scaneval run` | Legacy Full Track snapshots and the new core's immutable source cache |
 | `.securevibes/` | securevibes-agent scanner | Scanner knowledge-base state (cleaned up by adapter) |
 | `.claude/` | Some LLM-backed scanners | Scanner config/skills state (cleaned up by adapter) |
 | `__pycache__/` | Python | Bytecode cache |
@@ -340,11 +340,11 @@ Do not commit these directories. If you see them in `git status`, check `.gitign
 ## Repository Layout
 
 ```text
-sastbench/
+scaneval/
 |- manifest.json
 |- LICENSE
 |- pyproject.toml
-|- src/sastbench/     # Evaluation core: contracts, cases, materialize, runner,
+|- src/scaneval/     # Evaluation core: contracts, cases, materialize, runner,
 |  |                  # execution, review, scoring, report, CLI
 |  |- schemas/        # The nine versioned JSON contracts
 |  `- adapters/       # semgrep, llm-harness, and the harness driver

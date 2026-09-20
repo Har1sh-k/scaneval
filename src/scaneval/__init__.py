@@ -1,4 +1,4 @@
-"""Framework-independent SASTbench evaluation core.
+"""Framework-independent ScanEval evaluation core.
 
 Live scanner integrations and legacy results remain separate from this protocol.
 """

@@ -12,7 +12,7 @@ Each spec object must have:
 Behaviour:
 - Idempotent: specs whose (repo, ghsa) or (repo, cve) already exist as a case
   are skipped, so re-runs only add genuinely new cases.
-- Skips specs whose language is not a SASTbench language or whose canonicalKind
+- Skips specs whose language is not a ScanEval language or whose canonicalKind
   is not a canonical kind (reported, not built).
 - Assigns IDs SB-<LANG>-RW-<NNN> continuing from the current per-language max.
 - Disclosure dates are NOT written here; run backfill_disclosure_dates.py after.

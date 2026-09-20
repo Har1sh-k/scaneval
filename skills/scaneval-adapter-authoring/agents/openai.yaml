@@ -1,3 +1,3 @@
 interface:
-  display_name: "SASTbench Adapter Authoring"
-  short_description: "Build or update a SASTbench scanner adapter"
+  display_name: "ScanEval Adapter Authoring"
+  short_description: "Build or update a ScanEval scanner adapter"

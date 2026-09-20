@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sastbench.dev/schemas/v2/scan-request.schema.json",
-  "title": "SASTbench scan request",
+  "$id": "https://scaneval.dev/schemas/v2/scan-request.schema.json",
+  "title": "ScanEval scan request",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "run_id", "input", "system", "limits", "trace_mode"],

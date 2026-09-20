@@ -1,10 +1,10 @@
 # Claude continuation prompt
 
-Continue implementing SASTbench in this repository. An offline evaluator, a case-pack workflow, a live invocation runner, two real adapters, an observer connection to the own harness, and a review workflow already exist. Audit and extend them; do not restart from an empty project or treat the complete design as implemented.
+Continue implementing ScanEval in this repository. An offline evaluator, a case-pack workflow, a live invocation runner, two real adapters, an observer connection to the own harness, and a review workflow already exist. Audit and extend them; do not restart from an empty project or treat the complete design as implemented.
 
 ## Start here
 
-Repository: `/Users/hk/Documents/GitHub/sast-bench`.
+Repository: `/Users/hk/Documents/GitHub/scaneval`.
 
 Working branch: `feat/evaluation-core`, created from `docs/design-decisions`. Inspect the current branch, status, and recent commits before editing. Do not reset, overwrite unrelated changes, or move back to `main`. Leave the untracked `docs/archive/` directory alone unless the user explicitly asks otherwise.
 
@@ -33,13 +33,13 @@ Read these files before planning implementation:
 5. `docs/OBSERVER_SDK.md`: event integration, passivity, flushing, and capture limitations.
 6. `docs/BRING_YOUR_OWN_CORPUS.md`: the organization-owned pack path as the code implements it.
 7. `docs/REPOSITORY_INVENTORY.md` and `docs/CVE_CORPUS_SHORTLIST.md`: source leads and candidate dossiers.
-8. `src/sastbench/`, `sdk/typescript/`, `schema/v2/`, `corpus/pilot/`, and `tests/test_v2*`: current code, preserved runs, and executable invariants.
+8. `src/scaneval/`, `sdk/typescript/`, `schema/v2/`, `corpus/pilot/`, and `tests/test_v2*`: current code, preserved runs, and executable invariants.
 
 The design and math describe the destination. The initial-build guide and inspected code describe current capabilities. Do not silently change a design decision to accommodate a shortcut in the alpha implementation.
 
 ## What we are building
 
-SASTbench supplies a versioned real-world vulnerability corpus, evaluation tools, and a thin SDK for visibility into security scanner harnesses. Users should be able to compare scanners or harness configurations, understand recorded failure points, and evaluate against their own organization's security fixes and findings.
+ScanEval supplies a versioned real-world vulnerability corpus, evaluation tools, and a thin SDK for visibility into security scanner harnesses. Users should be able to compare scanners or harness configurations, understand recorded failure points, and evaluate against their own organization's security fixes and findings.
 
 The benchmark is not the separate engineering agent that modifies a scanner. A future project may consume evaluation results and traces, propose harness changes, and rerun comparisons. Keep that optimization agent outside this repository. Do not add automatic model training, prompt optimization, or self-modifying evaluators.
 
@@ -47,15 +47,15 @@ The first release evaluates public workloads. Do not claim that public-case resu
 
 ## Current implementation
 
-- Python package `sastbench`, alpha version `2.0.0a1`.
-- `sastbench validate`, `score`, `replay`, `report`, `demo`, `corpus`, `plan`, `review`, and `run` commands. `corpus` has `init`, `add-snapshot`, `import`, `validate`, `approve`, `admit`, `disposition`; `review` has `init`, `record`, `approve`, `status`.
+- Python package `scaneval`, alpha version `2.0.0a1`.
+- `scaneval validate`, `score`, `replay`, `report`, `demo`, `corpus`, `plan`, `review`, and `run` commands. `corpus` has `init`, `add-snapshot`, `import`, `validate`, `approve`, `admit`, `disposition`; `review` has `init`, `record`, `approve`, `status`.
 - `evaluate(plan, saved_result, frozen_decisions)` library entry point. This does not run an agent.
 - Nine strict JSON contracts: `scan-request`, `scan-result`, `execution-record`, `evaluation-plan`, `review-decisions`, `review-record`, `case-pack`, `run-config`, `run-manifest`.
 - Case packs with pinned snapshots, drafted cases, six mechanical (L1) checks per snapshot, recorded human approvals, admissions, and dispositions. Plan generation degrades to the lowest label state present.
 - Immutable source cache and pinned snapshot export with a recorded tree hash, stripped controller state, recorded instruction files, and preparation provenance. Only the `standard` profile is implemented; `metadata_blinded` is refused rather than downgraded.
 - An invocation runner that executes a frozen run configuration, freezes the pack copy, prepares each input, invokes each system per input per repetition into its own bundle, and writes a run manifest. A failure after the output directory exists writes a `failed` manifest rather than losing what finished.
 - Two real adapters: `semgrep` against a pinned local rules checkout with no registry download, and `llm-harness` running the securevibes-agent/Fieldglass engine through its own entry point. Only the securevibes-agent preset has been exercised against a live model, in `bootstrap` mode.
-- The TypeScript observer is connected to the own harness through `src/sastbench/adapters/llm_harness_driver.mts`, which wraps the harness's default model runner and emits model request/response, context selection from the harness's own progress notes, and finding submission.
+- The TypeScript observer is connected to the own harness through `src/scaneval/adapters/llm_harness_driver.mts`, which wraps the harness's default model runner and emits model request/response, context selection from the harness's own progress notes, and finding submission.
 - A review workflow: machine-drafted decisions routed by accepted location path, all unresolved; `review record` re-drafts after a human edits the decisions; `review approve` records one explicit human approval bound to the saved result.
 - One-input scoring against all assigned targets and controls, with exact-duplicate handling, first-hit ranks, budgeted/full-output recall, unranked diagnostics, and completed-control bounds.
 - A fabricated conformance demo and standalone HTML score report. No real scanner runs in the demo.
@@ -83,7 +83,7 @@ Important limitations:
 
 The end-to-end slice is built and exercised: three prepared inputs, four real scanner invocations across two systems, preserved native output, machine-drafted decisions, observed harness model events, and offline replay. `docs/PILOT.md` records it. The organization-owned pack path runs through the same interface and is documented in `docs/BRING_YOUR_OWN_CORPUS.md`.
 
-What is missing is the human half. The next objective is to turn the preserved runs into reviewed evidence: human review of the routed candidates through `sastbench review record` and `sastbench review approve`, and independent review of the three case labels to L3 through `sastbench corpus approve` and `sastbench corpus admit`. That is the only path to a non-zero recall and the only path out of draft scope. After that, prepare fixed-state snapshots so the cases have property-specific negative controls, then run the own harness on the remaining inputs with repetitions before any comparison between systems.
+What is missing is the human half. The next objective is to turn the preserved runs into reviewed evidence: human review of the routed candidates through `scaneval review record` and `scaneval review approve`, and independent review of the three case labels to L3 through `scaneval corpus approve` and `scaneval corpus admit`. That is the only path to a non-zero recall and the only path out of draft scope. After that, prepare fixed-state snapshots so the cases have property-specific negative controls, then run the own harness on the remaining inputs with repetitions before any comparison between systems.
 
 Start with a short plan grounded in the existing code. Use the milestones below, but complete and test one vertical slice before expanding the platform.
 
@@ -105,7 +105,7 @@ Start with a short plan grounded in the existing code. Use the milestones below,
 
 ### 2. Materialize and invoke once per applicable input
 
-**Status: built for full scans.** `sastbench.materialize` keeps the cache immutable and exports a pinned snapshot with a recorded tree hash and provenance; `sastbench.runner` groups execution by prepared input, system, and repetition, and scores every planned target and control from one output. Raw output, exit status, timeout and partial behavior, tool and ruleset versions, model identity, configuration, timing, usage, and per-category capture are all preserved in the execution record. Still missing: enforced network and filesystem policy (the declared policy is recorded only), the `metadata_blinded` profile, native PR mode, and repetitions greater than one in practice. The guidance below still governs.
+**Status: built for full scans.** `scaneval.materialize` keeps the cache immutable and exports a pinned snapshot with a recorded tree hash and provenance; `scaneval.runner` groups execution by prepared input, system, and repetition, and scores every planned target and control from one output. Raw output, exit status, timeout and partial behavior, tool and ruleset versions, model identity, configuration, timing, usage, and per-category capture are all preserved in the execution record. Still missing: enforced network and filesystem policy (the declared policy is recorded only), the `metadata_blinded` profile, native PR mode, and repetitions greater than one in practice. The guidance below still governs.
 
 - Keep the source cache immutable. Export a pinned snapshot to an isolated trial directory and record exact hashes and preparation provenance.
 - Group execution by actual prepared input, scan scope, configuration, and repetition. Score every applicable target/control from that output rather than rescanning separately for each CVE.
@@ -143,7 +143,7 @@ Start with a short plan grounded in the existing code. Use the milestones below,
 
 ### 5. Bring-your-own-case path
 
-**Status: the local library/CLI workflow exists and is documented.** `sastbench corpus init`, `add-snapshot`, `import`, `validate`, `approve`, `admit`, and `disposition` carry a supplied artifact (a legacy case record, a fix commit, a finding, or an internal document) into a namespaced draft pack with the same admission, invocation, scoring, and visibility contracts as public cases. No hosted service is involved. `docs/BRING_YOUR_OWN_CORPUS.md` documents the path as the code implements it and collects the gaps. Jev intake assistance is not implemented. The guidance below still governs.
+**Status: the local library/CLI workflow exists and is documented.** `scaneval corpus init`, `add-snapshot`, `import`, `validate`, `approve`, `admit`, and `disposition` carry a supplied artifact (a legacy case record, a fix commit, a finding, or an internal document) into a namespaced draft pack with the same admission, invocation, scoring, and visibility contracts as public cases. No hosted service is involved. `docs/BRING_YOUR_OWN_CORPUS.md` documents the path as the code implements it and collects the gaps. Jev intake assistance is not implemented. The guidance below still governs.
 
 - Organizations should be able to supply existing security fixes, GitHub commits/issues, prior findings, or internal documents through a local library/CLI workflow. Do not require a hosted service.
 - Use a namespaced, versioned private pack with the same admission, invocation, scoring, and visibility contracts as public cases.
@@ -161,22 +161,22 @@ python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
 python -m pytest -q
-sastbench demo results/claude-pilot-demo
-sastbench replay results/claude-pilot-demo --output results/claude-pilot-replay.json
+scaneval demo results/claude-pilot-demo
+scaneval replay results/claude-pilot-demo --output results/claude-pilot-replay.json
 cmp results/claude-pilot-demo/evaluation.json results/claude-pilot-replay.json
 
 # Offline, no network and no model: replay a preserved pilot bundle.
-sastbench replay corpus/pilot/runs/2026-09-20-semgrep/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
-sastbench review status corpus/pilot/runs/2026-09-20-semgrep/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
+scaneval replay corpus/pilot/runs/2026-09-20-semgrep/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
+scaneval review status corpus/pilot/runs/2026-09-20-semgrep/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
 ```
 
 The replay prints `review state draft` on stderr and `review status` prints `draft`. Both are correct and must stay correct until a human approval is actually recorded. Reproducing the runs themselves needs the network, and the harness run needs live model calls; the commands are in `docs/PILOT.md`.
 
 Output paths must be new. Run `npm ci` then `npm test` from `sdk/typescript`. Validate both enabled/disabled observer behavior and failure paths. Do not reclassify a failing test as legacy merely to make the suite pass.
 
-The earlier temporary Python environment is `/private/tmp/sastbench-build.5DpOoK/venv`. It may be removed or contain an older installed wheel, so reinstall the current checkout if using it. Do not treat ephemeral paths as package requirements.
+The earlier temporary Python environment is `/private/tmp/scaneval-build.5DpOoK/venv`. It may be removed or contain an older installed wheel, so reinstall the current checkout if using it. Do not treat ephemeral paths as package requirements.
 
-The mounted external drive holds research data at `/Volumes/Untitled/sastbench-research/2026-09-19/`. Verify it is mounted before writing.
+The mounted external drive holds research data at `/Volumes/Untitled/sastbench-research/2026-09-19/` (that directory keeps its original name on disk; it is an external path, not a project identifier). Verify it is mounted before writing.
 
 Do not put the source cache on that drive. It is formatted exFAT, which carries no POSIX permission bits, so git reports every checked-out tree as modified and `verify_cached_snapshot` refuses the entry: the immutable-cache guarantee cannot hold there. Measured on 2026-09-20 by copying one cache entry onto it: the entry was refused with "has local modifications", and the copy generated 462 AppleDouble `._` files, which is the same interference that earlier confused setuptools. Reformatting that volume to APFS would remove both problems; until then keep `.repos` and any git checkout on the internal disk and use the drive only for archives that need no file modes.
 

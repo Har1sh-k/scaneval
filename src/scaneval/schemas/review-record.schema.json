@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sastbench.dev/schemas/v2/review-record.schema.json",
-  "title": "SASTbench review record",
+  "$id": "https://scaneval.dev/schemas/v2/review-record.schema.json",
+  "title": "ScanEval review record",
   "description": "Evaluator-side sidecar that says who produced a decisions file and whether it is a draft or a recorded human review. It binds to the decisions by hash; scoring never reads it.",
   "type": "object", "additionalProperties": false,
   "required": ["schema_version", "run_id", "decisions_sha256", "plan_sha256", "state", "created_at", "reviews", "notes"],

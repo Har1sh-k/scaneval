@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sastbench.dev/schema/case.schema.json",
-  "title": "SASTbench Case Definition",
-  "description": "Schema for a SASTbench benchmark case with region-level annotations",
+  "$id": "https://scaneval.dev/schema/case.schema.json",
+  "title": "ScanEval Case Definition",
+  "description": "Schema for a ScanEval benchmark case with region-level annotations",
   "type": "object",
   "required": [
     "schemaVersion",

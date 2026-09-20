@@ -1,4 +1,4 @@
-"""SASTbench scoring engine.
+"""ScanEval scoring engine.
 
 Implements the official V1 scoring rules:
 - True positive: finding overlaps a vulnerable region with correct canonical kind

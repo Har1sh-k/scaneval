@@ -1,5 +1,5 @@
 {
-  "name": "SASTbench",
+  "name": "ScanEval",
   "version": "1.0.0-dev",
   "description": "Benchmark for evaluating SAST tools on agentic and general-purpose codebases",
   "releaseBar": {

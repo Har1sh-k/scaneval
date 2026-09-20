@@ -1,6 +1,6 @@
-# Creating a SASTbench Adapter
+# Creating a ScanEval Adapter
 
-This guide covers everything needed to build an adapter that connects a security scanner to the SASTbench benchmark harness. Use it as a reference or as a prompt to generate a new adapter.
+This guide covers everything needed to build an adapter that connects a security scanner to the ScanEval benchmark harness. Use it as a reference or as a prompt to generate a new adapter.
 
 If you want another agent to implement the adapter for you, use the repo-local skill at [../skills/scaneval-adapter-authoring/SKILL.md](../skills/scaneval-adapter-authoring/SKILL.md).
 
@@ -12,7 +12,7 @@ An adapter is a Python module that:
 
 1. Invokes a scanner on a directory of source code
 2. Parses the scanner's native output
-3. Maps scanner-specific rule IDs to SASTbench canonical vulnerability kinds
+3. Maps scanner-specific rule IDs to ScanEval canonical vulnerability kinds
 4. Normalizes findings into a standard dict format with file path and line range
 5. Returns the normalized findings to the benchmark runner
 
@@ -116,7 +116,7 @@ Stored in the results JSON for reproducibility. Defaults to "1.0.0" if not set.
 
 ## Canonical kinds
 
-SASTbench currently uses six canonical vulnerability kinds for scoring. Every finding must be mapped to one of these or to `"unmapped"`:
+ScanEval currently uses six canonical vulnerability kinds for scoring. Every finding must be mapped to one of these or to `"unmapped"`:
 
 | Canonical kind       | What it covers                           | Capability family |
 |----------------------|------------------------------------------|-------------------|
@@ -323,7 +323,7 @@ Same finding format applies. Handle API timeouts and auth errors gracefully.
 
 ## Severity mapping
 
-Map the scanner's severity values to SASTbench's four levels:
+Map the scanner's severity values to ScanEval's four levels:
 
 ```python
 def severity_map(scanner_severity: str) -> str:
@@ -408,7 +408,7 @@ python scripts/run.py --scanner <name> --track core
 | Path is absolute instead of relative to scan_root | Strip the scan_root prefix |
 | Scanner not on PATH in subprocess | Use full path or add to env PATH |
 | On Windows, `npx`/`npm` need `.cmd` suffix | Check `sys.platform == "win32"` |
-| Line numbers are 0-indexed | Add 1 — SASTbench uses 1-indexed lines |
+| Line numbers are 0-indexed | Add 1 — ScanEval uses 1-indexed lines |
 | Scanner modifies scanned code | Clean up with `git checkout` or `shutil.rmtree` |
 | Scanner writes state files in scan_root | Clean up `.scanner-state/` dirs after reading findings |
 | Scanner only supports one language | Return `[]` for unsupported languages |
@@ -438,7 +438,7 @@ Before submitting an adapter:
 
 ## PR mode support (optional)
 
-SASTbench supports a PR simulation mode that compares base (clean) and head (vulnerable) trees. Adapters can optionally implement native PR review support.
+ScanEval supports a PR simulation mode that compares base (clean) and head (vulnerable) trees. Adapters can optionally implement native PR review support.
 
 ### Optional: scan_pr_with_metadata
 

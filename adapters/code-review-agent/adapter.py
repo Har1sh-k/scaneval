@@ -1,4 +1,4 @@
-"""SASTbench adapter for code-review-agent.
+"""ScanEval adapter for code-review-agent.
 
 Runs the LLM-powered code review agent on a case directory and normalizes
 findings to the benchmark's canonical format. The agent outputs structured
@@ -17,7 +17,7 @@ _cr_env = os.environ.get("CODE_REVIEW_AGENT_DIR", "").strip()
 if _cr_env:
     CODE_REVIEW_AGENT_DIR = Path(_cr_env)
 else:
-    # Try to find it as a sibling of the sast-bench repo
+    # Try to find it as a sibling of the scaneval repo
     _repo_root = Path(__file__).resolve().parent.parent.parent
     CODE_REVIEW_AGENT_DIR = Path("")  # fallback: will fail gracefully
     for _candidate_path in [

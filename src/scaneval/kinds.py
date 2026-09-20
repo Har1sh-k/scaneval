@@ -16,7 +16,7 @@ _CWE = re.compile(r"CWE-(\d+)", re.IGNORECASE)
 
 @lru_cache(maxsize=1)
 def load_mapping() -> dict:
-    resource = files("sastbench").joinpath("mappings", "kinds.json")
+    resource = files("scaneval").joinpath("mappings", "kinds.json")
     return json.loads(resource.read_text(encoding="utf-8"))
 
 

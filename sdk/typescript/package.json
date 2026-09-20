@@ -1,8 +1,8 @@
 {
-  "name": "@sastbench/observer-sdk",
+  "name": "@scaneval/observer",
   "version": "0.1.0-experimental",
   "private": true,
-  "description": "Experimental, opt-in observer protocol emitter for SASTbench harnesses",
+  "description": "Experimental, opt-in observer protocol emitter for ScanEval harnesses",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

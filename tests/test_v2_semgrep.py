@@ -15,10 +15,10 @@ import sys
 
 import pytest
 
-from sastbench.adapters import semgrep as semgrep_module
-from sastbench.adapters.base import AdapterError, CommandResult, SystemSpec
-from sastbench.contracts import _require_relative_path as validate_relative_path
-from sastbench.adapters.semgrep import (SemgrepAdapter, _dotted_prefixes, import_semgrep_results,
+from scaneval.adapters import semgrep as semgrep_module
+from scaneval.adapters.base import AdapterError, CommandResult, SystemSpec
+from scaneval.contracts import _require_relative_path as validate_relative_path
+from scaneval.adapters.semgrep import (SemgrepAdapter, _dotted_prefixes, import_semgrep_results,
                                         semgrep_version)
 
 
@@ -189,7 +189,7 @@ def test_semgrep_dotted_prefix_agrees_with_semgreps_own_prefix_function():
     # semgrep.rule_lang.convert_config_id_to_prefix builds, or the machine path survives in
     # native_rule_id. Nothing is executed here, the function is imported and called.
     rule_lang = pytest.importorskip("semgrep.rule_lang")
-    for directory in ["/Users/x/.sastbench/rules/python", "/tmp/rule cache (1)/rules__abc",
+    for directory in ["/Users/x/.scaneval/rules/python", "/tmp/rule cache (1)/rules__abc",
                       "/.cache/rules", ".rulecache/rules", "../.rulecache/rules", "/a/b",
                       "/tmp/we\\ird/rules"]:
         expected = rule_lang.convert_config_id_to_prefix(str(Path(directory) / "shell.yaml"))

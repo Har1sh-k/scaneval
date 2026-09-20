@@ -1,4 +1,4 @@
-"""SASTbench Full Track repo setup.
+"""ScanEval Full Track repo setup.
 
 Clones and pins real-world repositories at their vulnerable commits
 for Full Track benchmark cases.

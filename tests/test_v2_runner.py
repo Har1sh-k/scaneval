@@ -14,12 +14,12 @@ import subprocess
 
 import pytest
 
-from sastbench import cases
-from sastbench.adapters.base import Adapter, AdapterError, NativeOutcome
-from sastbench.cli import main
-from sastbench.contracts import ContractError, canonical_json, canonical_sha256, load_document
-from sastbench.materialize import MaterializationError
-from sastbench.runner import MANIFEST_NAME, _write_new, _write_new_text, run_from_config
+from scaneval import cases
+from scaneval.adapters.base import Adapter, AdapterError, NativeOutcome
+from scaneval.cli import main
+from scaneval.contracts import ContractError, canonical_json, canonical_sha256, load_document
+from scaneval.materialize import MaterializationError
+from scaneval.runner import MANIFEST_NAME, _write_new, _write_new_text, run_from_config
 
 
 CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
@@ -472,12 +472,12 @@ def test_an_adapter_module_that_is_not_installed_is_a_skipped_system(tmp_path, u
     write_config(config_path, systems=[system_entry("fake-a", "fake"), system_entry("absent-b", "absent")])
 
     def resolve(name: str):
-        raise ModuleNotFoundError(f"No module named 'sastbench.adapters.{name}'")
+        raise ModuleNotFoundError(f"No module named 'scaneval.adapters.{name}'")
 
-    monkeypatch.setattr("sastbench.runner.get_adapter", resolve)
+    monkeypatch.setattr("scaneval.runner.get_adapter", resolve)
     manifest = run_from_config(config_path, tmp_path / "out", clock=CLOCK, adapters={"fake": FakeAdapter()})
 
-    reason = "ModuleNotFoundError: No module named 'sastbench.adapters.absent'"
+    reason = "ModuleNotFoundError: No module named 'scaneval.adapters.absent'"
     assert manifest["status"] == "completed"
     assert manifest["systems"][1] == {"system_id": "absent-b", "adapter": "absent", "adapter_version": None,
                                       "preparation": {}, "skipped_reason": reason}

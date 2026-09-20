@@ -15,8 +15,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from sastbench.contracts import ContractError, canonical_sha256
-from sastbench.scoring import score
+from scaneval.contracts import ContractError, canonical_sha256
+from scaneval.scoring import score
 
 
 HASH = "sha256:" + "a" * 64

@@ -1,4 +1,4 @@
-// SASTbench driver for the securevibes-agent / Fieldglass engine family.
+// ScanEval driver for the securevibes-agent / Fieldglass engine family.
 //
 // It runs the harness's own engine (runRuntimeScan) unchanged, injecting only the
 // harness's default model runner wrapped by the opt-in observer. It records what the
@@ -7,7 +7,7 @@
 // findings the engine finally wrote. Retries inside the harness runner, candidate
 // creation, validation, and filtering are not observable here and are declared so.
 //
-// Invoked by sastbench.adapters.llm_harness with the harness's own tsx:
+// Invoked by scaneval.adapters.llm_harness with the harness's own tsx:
 //   <harness>/node_modules/.bin/tsx llm_harness_driver.mts --config <driver-config.json>
 
 import { appendFileSync, readFileSync, writeFileSync, existsSync } from "node:fs";

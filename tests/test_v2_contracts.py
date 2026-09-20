@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from sastbench.contracts import (
+from scaneval.contracts import (
     ContractError,
     canonical_json,
     canonical_sha256,
@@ -513,7 +513,7 @@ def test_load_document_refuses_a_document_nested_past_the_recursion_limit_naming
 
 def test_the_blank_value_rule_is_the_one_the_write_paths_apply():
     """contracts.is_stated and cases._is_stated must answer alike; neither may drift alone."""
-    from sastbench.cases import _is_stated
+    from scaneval.cases import _is_stated
 
     values = ["", " ", "\t", "\u200b", "\u200b\ufeff", "\xad", "\u2028", "\x00",
               "R. Eviewer", " R. Eviewer ", "\u200bR", "0", 5, None, ["R. Eviewer"]]

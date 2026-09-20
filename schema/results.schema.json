@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sastbench.dev/schema/results.schema.json",
-  "title": "SASTbench Results",
-  "description": "Schema for normalized scanner results from a SASTbench run",
+  "$id": "https://scaneval.dev/schema/results.schema.json",
+  "title": "ScanEval Results",
+  "description": "Schema for normalized scanner results from a ScanEval run",
   "type": "object",
   "required": [
     "schemaVersion",
@@ -21,7 +21,7 @@
     },
     "benchmarkVersion": {
       "type": "string",
-      "description": "SASTbench version used for this run"
+      "description": "ScanEval version used for this run"
     },
     "mode": {
       "type": "string",

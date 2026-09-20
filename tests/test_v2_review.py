@@ -1,7 +1,7 @@
 """Review workflow: routing proposes candidates only, and approval stays explicit.
 
 These tests build the small v2 records inline and exercise the public review API.
-Packs are built through :mod:`sastbench.cases` so the fixtures are real contract
+Packs are built through :mod:`scaneval.cases` so the fixtures are real contract
 documents. No scanner, model, network call, or sleep is involved.
 """
 
@@ -13,10 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from sastbench import cases, review
-from sastbench.cli import main
-from sastbench.contracts import ContractError, canonical_json, canonical_sha256, validate_document
-from sastbench.review import (
+from scaneval import cases, review
+from scaneval.cli import main
+from scaneval.contracts import ContractError, canonical_json, canonical_sha256, validate_document
+from scaneval.review import (
     CANDIDATE_REASON,
     PENDING_REASON,
     _assert_draft_only,
@@ -28,7 +28,7 @@ from sastbench.review import (
     review_status,
     write_evaluator_records,
 )
-from sastbench.scoring import score
+from scaneval.scoring import score
 
 
 HASH = "sha256:" + "a" * 64
@@ -780,16 +780,16 @@ def test_approval_refuses_a_reviewer_name_made_only_of_blank_characters(reviewer
 
 
 def test_the_reviewer_name_rule_is_the_one_the_case_pack_workflow_applies():
-    from sastbench import cases as cases_module
-    from sastbench import review as review_module
+    from scaneval import cases as cases_module
+    from scaneval import review as review_module
 
     assert review_module._is_stated is cases_module._is_stated
 
 
 def test_a_record_replaced_through_a_symlink_keeps_the_temporary_files_own_mode(tmp_path):
     """The record and the pack go through one mode helper, so neither adopts a link target's mode."""
-    from sastbench import cli as cli_module
-    from sastbench import review as review_module
+    from scaneval import cli as cli_module
+    from scaneval import review as review_module
 
     assert cli_module._keep_mode is review_module._keep_mode
 

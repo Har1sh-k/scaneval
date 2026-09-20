@@ -1,7 +1,7 @@
 """Own-harness adapter for the securevibes-agent / Fieldglass engine family.
 
 The harness runs unchanged through its own engine entry point inside its own ``tsx``.
-SASTbench only injects the harness's default model runner wrapped by the observer SDK
+ScanEval only injects the harness's default model runner wrapped by the observer SDK
 and a progress reporter, then imports the finding records the engine wrote. Findings
 are file-level; this importer keeps them file-level and never invents line ranges.
 """

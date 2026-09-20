@@ -1,4 +1,4 @@
-"""Validation and canonicalization helpers for SASTbench v2 contracts."""
+"""Validation and canonicalization helpers for ScanEval v2 contracts."""
 
 from __future__ import annotations
 
@@ -64,8 +64,8 @@ def is_stated(value: Any) -> bool:
     non-empty string. Both tests must pass. This judges characters only: it says nothing about
     whether a name belongs to a person or a reason explains anything.
 
-    :func:`sastbench.cases._is_stated` applies the same rule one layer up, where the write paths
-    live; the copy here exists because :mod:`sastbench.cases` imports this module and not the
+    :func:`scaneval.cases._is_stated` applies the same rule one layer up, where the write paths
+    live; the copy here exists because :mod:`scaneval.cases` imports this module and not the
     other way round, and a test pins the two functions to the same answers.
     """
     if not isinstance(value, str) or not value.strip():
@@ -77,7 +77,7 @@ def _schema(kind: str) -> dict[str, Any]:
     if kind not in CONTRACT_KINDS:
         expected = ", ".join(sorted(CONTRACT_KINDS))
         raise ContractError(f"unknown contract kind {kind!r}; expected one of: {expected}")
-    resource = files("sastbench").joinpath("schemas", f"{kind}.schema.json")
+    resource = files("scaneval").joinpath("schemas", f"{kind}.schema.json")
     return json.loads(resource.read_text(encoding="utf-8"))
 
 

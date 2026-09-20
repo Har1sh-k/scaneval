@@ -22,7 +22,7 @@ import subprocess
 
 import pytest
 
-from sastbench.observer import CaptureState, EVENT_TYPES, Observer, create_jsonl_sink
+from scaneval.observer import CaptureState, EVENT_TYPES, Observer, create_jsonl_sink
 
 
 ROOT = Path(__file__).resolve().parents[1]

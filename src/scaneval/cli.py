@@ -1,8 +1,8 @@
 """Local validation, saved-output scoring, deterministic replay, and the corpus-to-run workflow.
 
 The evaluation commands (validate, score, replay, report, demo) stay offline and read saved
-documents only. The corpus, plan, review, and run commands drive :mod:`sastbench.cases`,
-:mod:`sastbench.materialize`, :mod:`sastbench.review`, and :mod:`sastbench.runner`; this module
+documents only. The corpus, plan, review, and run commands drive :mod:`scaneval.cases`,
+:mod:`scaneval.materialize`, :mod:`scaneval.review`, and :mod:`scaneval.runner`; this module
 holds no pack, planning, routing, execution, or scoring logic of its own.
 
 Boundaries this module keeps. No command infers approval: ``corpus approve`` and ``review
@@ -20,7 +20,7 @@ What each command writes:
   or the whole new one. The previous version is not kept, and a pack whose status is no longer
   ``draft`` is refused unless ``--new-version`` opens a new draft version of it.
 - ``evaluator/review-record.json`` is replaced the same way by ``review record`` and
-  ``review approve``, through the one replace function :mod:`sastbench.review` uses. Both
+  ``review approve``, through the one replace function :mod:`scaneval.review` uses. Both
   refuse a bundle reached through a symlink before writing.
 - Everything else is create-only: an existing output path is refused, never overwritten.
 
@@ -71,7 +71,7 @@ from .scoring import score
 
 
 # These mirror the case-pack contract enums so the CLI can reject a typo early. The schema in
-# sastbench/schemas stays authoritative: every value below is validated again on the way in.
+# scaneval/schemas stays authoritative: every value below is validated again on the way in.
 LANGUAGES = ("python", "typescript", "javascript", "go", "rust")
 WORKLOADS = ("conventional_application", "conventional_automation", "ai_assisted_application",
              "agentic_application")
@@ -106,7 +106,7 @@ def _read_json(path: Path) -> dict:
     """Load a supplied JSON artifact that has no contract of its own. Content is data, not truth.
 
     Every way the parser can refuse the text is named as a refusal carrying *path*, the same way
-    :func:`sastbench.contracts.load_document` names a contract file: bytes that are not UTF-8 and
+    :func:`scaneval.contracts.load_document` names a contract file: bytes that are not UTF-8 and
     malformed syntax raise a :class:`ValueError` subclass, an integer literal longer than the
     interpreter's ``int_max_str_digits`` limit raises a bare :class:`ValueError`, and a document
     nested past the recursion limit raises :class:`RecursionError`. None of them should reach the
@@ -123,7 +123,7 @@ def _read_json(path: Path) -> dict:
 
 
 def _create_pack(path: Path, pack: dict) -> None:
-    """Claim *path* exclusively, then let :func:`sastbench.cases.save_pack` write the pack into it."""
+    """Claim *path* exclusively, then let :func:`scaneval.cases.save_pack` write the pack into it."""
     with path.open("x", encoding="utf-8", newline="\n"):
         pass
     cases.save_pack(path, pack)
@@ -138,7 +138,7 @@ def _save_pack(path: Path, pack: dict) -> None:
     version history belongs in the repository, not in a backup copy this command leaves behind.
     A symlink at *path* is replaced rather than written through, and the regular file that
     replaces it keeps the owner-only mode of the temporary file rather than the mode of the
-    symlink's target: permissions are carried over by :func:`sastbench.review._keep_mode`, which
+    symlink's target: permissions are carried over by :func:`scaneval.review._keep_mode`, which
     every replaced review record goes through as well. *path* is expected to already exist,
     because every caller loads the pack from it first; :func:`_create_pack` is what writes a new
     one.
@@ -236,7 +236,7 @@ def _legacy_document(path: Path) -> dict:
     This checks structure, not truth: it says nothing about whether the record's regions,
     identifiers, or dates are correct, and every value it accepts still enters the pack as
     draft evidence. It exists so a malformed file is reported as a refusal naming the file
-    rather than raising out of :func:`sastbench.cases.draft_case_from_legacy` as a traceback,
+    rather than raising out of :func:`scaneval.cases.draft_case_from_legacy` as a traceback,
     so every refusal here names the file. Fields the migration does not read are left alone,
     and the schema check in ``cases`` remains the authority on the case this produces.
 
@@ -484,7 +484,7 @@ def _corpus_validate(args: argparse.Namespace) -> int:
     cached = materialize.fetch_snapshot(snapshot["repository"]["url"], snapshot["commit"], cache_root)
     if trial is None:
         # Created only now, so a failed fetch leaves no empty temporary directory behind.
-        trial = Path(tempfile.mkdtemp(prefix="sastbench-trial-")) / args.snapshot_id
+        trial = Path(tempfile.mkdtemp(prefix="scaneval-trial-")) / args.snapshot_id
     record = materialize.export_snapshot(cached, trial)
     materialize.write_provenance(trial, record)
     outcomes = cases.mechanical_checks(pack, args.snapshot_id, trial / "source", record["trial"]["tree_hash"])
@@ -500,7 +500,7 @@ def _corpus_validate(args: argparse.Namespace) -> int:
         return 0
     unchecked = [outcome["case_id"] for outcome in outcomes if not outcome["passed"]]
     if unchecked:
-        print(f"sastbench: mechanical checks failed for {len(unchecked)} case(s): "
+        print(f"scaneval: mechanical checks failed for {len(unchecked)} case(s): "
               f"{', '.join(unchecked)}; the results are recorded in the pack", file=sys.stderr)
         return 1
     return 0
@@ -627,17 +627,17 @@ def _run(args: argparse.Namespace) -> int:
     incomplete = [invocation["invocation_id"] for invocation in manifest["invocations"]
                   if invocation["status"] in INCOMPLETE_INVOCATION_STATUSES]
     if incomplete:
-        print(f"sastbench: no usable scan from {len(incomplete)} invocation(s): "
+        print(f"scaneval: no usable scan from {len(incomplete)} invocation(s): "
               f"{', '.join(incomplete)}", file=sys.stderr)
     if manifest["status"] != "completed":
-        print(f"sastbench: the run manifest status is {manifest['status']}", file=sys.stderr)
+        print(f"scaneval: the run manifest status is {manifest['status']}", file=sys.stderr)
     return 1 if incomplete or manifest["status"] != "completed" else 0
 
 
 def _warn_unreviewed(state: str) -> None:
     """Say on stderr that a bundle carries no recorded review. The report itself is unchanged."""
     if state in UNREVIEWED_REVIEW_STATES:
-        print(f"sastbench: warning: review record is {state}; this report shows unreviewed decisions, "
+        print(f"scaneval: warning: review record is {state}; this report shows unreviewed decisions, "
               "not benchmark evidence", file=sys.stderr)
 
 
@@ -814,7 +814,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "report":
                 _warn_unreviewed(review_state)
             elif args.command == "replay" and review_state != APPROVED_REVIEW_STATE:
-                print(f"sastbench: review state {review_state}: these numbers come from decisions with "
+                print(f"scaneval: review state {review_state}: these numbers come from decisions with "
                       "no recorded human approval", file=sys.stderr)
             record = score(plan, result, decisions)
             content = (render_report(record, result, plan, review_state=review_state)
@@ -826,5 +826,5 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except (ContractError, MaterializationError, AdapterError, ExecutionError, RuntimeError,
             OSError, UnicodeError) as exc:
-        print(f"sastbench: {exc}", file=sys.stderr)
+        print(f"scaneval: {exc}", file=sys.stderr)
         return 2

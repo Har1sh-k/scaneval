@@ -28,10 +28,10 @@ from pathlib import Path
 import sys
 
 try:
-    from sastbench.observer import Observer, create_jsonl_sink
+    from scaneval.observer import Observer, create_jsonl_sink
 except ModuleNotFoundError:  # a plain checkout with nothing installed
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-    from sastbench.observer import Observer, create_jsonl_sink
+    from scaneval.observer import Observer, create_jsonl_sink
 
 
 # Fixed so the printed output is reproducible. A real harness passes the real clock.

@@ -1,4 +1,4 @@
-# SASTbench Result Validation Reference
+# ScanEval Result Validation Reference
 
 ## Table of Contents
 

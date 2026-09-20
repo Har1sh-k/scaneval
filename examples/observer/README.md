@@ -19,7 +19,7 @@ harness passes the real clock and times real work.
 **Pick the emitter that matches the language the harness is written in, not the language of the
 repository being scanned.** A TypeScript agent scanning a Python repository emits with the
 TypeScript SDK; a Python agent scanning a TypeScript repository emits with
-`sastbench.observer`. The trace records what the harness did, so it is written in the harness's
+`scaneval.observer`. The trace records what the harness did, so it is written in the harness's
 own process, and the scanned tree's language never enters into it. A harness that spans both
 languages runs one emitter per producer and gives each its own `producer_id`; the shared
 `run_id` is what joins those traces afterwards.

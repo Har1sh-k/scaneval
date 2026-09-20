@@ -19,7 +19,7 @@ import sys
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
 
-from sastbench.observer import (
+from scaneval.observer import (
     CAPTURE_STATUSES,
     EVENT_CATEGORIES,
     EVENT_TYPES,
@@ -37,15 +37,15 @@ SCHEMA = json.loads((ROOT / "schema/v2/trace-event.schema.json").read_text())
 FIXTURE = json.loads((ROOT / "schema/v2/fixtures/trace-event-v2.json").read_text())
 GAP = "observer instrumentation failure"
 EVALUATOR_MODULES = (
-    "sastbench.contracts",
-    "sastbench.scoring",
-    "sastbench.cli",
-    "sastbench.runner",
-    "sastbench.execution",
-    "sastbench.cases",
-    "sastbench.review",
-    "sastbench.report",
-    "sastbench.adapters",
+    "scaneval.contracts",
+    "scaneval.scoring",
+    "scaneval.cli",
+    "scaneval.runner",
+    "scaneval.execution",
+    "scaneval.cases",
+    "scaneval.review",
+    "scaneval.report",
+    "scaneval.adapters",
 )
 
 
@@ -629,8 +629,8 @@ def test_exported_constants_match_the_wire_schema():
 
 def test_importing_the_observer_does_not_import_the_evaluator():
     program = (
-        "import json, sys; import sastbench.observer; "
-        "print(json.dumps(sorted(m for m in sys.modules if m.startswith('sastbench'))))"
+        "import json, sys; import scaneval.observer; "
+        "print(json.dumps(sorted(m for m in sys.modules if m.startswith('scaneval'))))"
     )
     completed = subprocess.run(
         [sys.executable, "-c", program], capture_output=True, text=True, cwd=str(ROOT),
@@ -639,4 +639,4 @@ def test_importing_the_observer_does_not_import_the_evaluator():
     assert completed.returncode == 0, completed.stderr
     loaded = json.loads(completed.stdout)
     assert not [name for name in loaded if name in EVALUATOR_MODULES]
-    assert loaded == [name for name in loaded if name == "sastbench" or name.startswith("sastbench.observer")]
+    assert loaded == [name for name in loaded if name == "scaneval" or name.startswith("scaneval.observer")]

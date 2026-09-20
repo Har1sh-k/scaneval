@@ -7,8 +7,8 @@ from importlib import import_module
 from .base import Adapter, AdapterError, NativeOutcome, SystemSpec
 
 _REGISTRY = {
-    "semgrep": ("sastbench.adapters.semgrep", "SemgrepAdapter"),
-    "llm-harness": ("sastbench.adapters.llm_harness", "LlmHarnessAdapter"),
+    "semgrep": ("scaneval.adapters.semgrep", "SemgrepAdapter"),
+    "llm-harness": ("scaneval.adapters.llm_harness", "LlmHarnessAdapter"),
 }
 
 

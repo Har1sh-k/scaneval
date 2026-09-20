@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from sastbench.cases import (
+from scaneval.cases import (
     accepted_paths_for_targets,
     add_case,
     add_snapshot,
@@ -28,7 +28,7 @@ from sastbench.cases import (
     save_pack,
     set_disposition,
 )
-from sastbench.contracts import ContractError, validate_document
+from scaneval.contracts import ContractError, validate_document
 
 
 CLOCK = lambda: datetime(2026, 9, 20, 17, 0, tzinfo=timezone.utc)  # noqa: E731
@@ -194,7 +194,7 @@ def test_legacy_migration_keeps_regions_as_draft_evidence(tmp_path):
     case = draft_case_from_legacy(legacy, case_id="oauth2-proxy-cve-2025-54576", snapshot_id="widget-abc",
                                   legacy_path="cases/full/real_world_generic/SB-GO-RG-001/case.json",
                                   workload="conventional_application", component_role="infrastructure", represents=REPRESENTS)
-    pack = new_pack("sastbench.public", "pilot", "x")
+    pack = new_pack("scaneval.public", "pilot", "x")
     add_snapshot(pack, SNAPSHOT)
     add_case(pack, case)
     assert case["validation"]["review_state"] == "draft" and case["validation"]["level"] is None

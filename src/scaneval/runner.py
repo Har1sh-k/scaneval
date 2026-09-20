@@ -10,7 +10,7 @@ Layout, all evaluator-side; a scanner only ever sees a private workspace copy of
       invocations/<id>/      one invocation bundle per input, system, and repetition
 
 A scanner is handed a private workspace copy of one export and writes its raw output and any
-trace into staging directories inside that workspace; :mod:`sastbench.execution` moves them
+trace into staging directories inside that workspace; :mod:`scaneval.execution` moves them
 into the invocation bundle once the scan returns or raises. No path handed to an adapter
 resolves inside this run directory.
 

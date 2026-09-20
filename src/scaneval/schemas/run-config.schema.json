@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sastbench.dev/schemas/v2/run-config.schema.json",
-  "title": "SASTbench run configuration",
+  "$id": "https://scaneval.dev/schemas/v2/run-config.schema.json",
+  "title": "ScanEval run configuration",
   "description": "Frozen description of one evaluation run: which pack snapshots to materialize, which systems to invoke, how often, and under which declared limits. Contains no labels and no credentials.",
   "type": "object", "additionalProperties": false,
   "required": ["schema_version", "run_id", "pack", "inputs", "systems", "repetitions", "timeout_seconds", "trace_mode", "network_policy"],

@@ -1,6 +1,6 @@
-# SASTbench Adapters
+# ScanEval Adapters
 
-Each adapter lives in `adapters/<scanner-name>/adapter.py` and normalizes scanner output into the SASTbench finding format.
+Each adapter lives in `adapters/<scanner-name>/adapter.py` and normalizes scanner output into the ScanEval finding format.
 
 Use [CREATING_AN_ADAPTER.md](./CREATING_AN_ADAPTER.md) for the full adapter contract.
 
@@ -67,7 +67,7 @@ def scan_pr_with_metadata(
     ...
 ```
 
-If `scan_pr_with_metadata` is absent, SASTbench falls back to base-tree plus head-tree synthesis in PR mode.
+If `scan_pr_with_metadata` is absent, ScanEval falls back to base-tree plus head-tree synthesis in PR mode.
 
 ## Official adapters
 

@@ -6,7 +6,7 @@ the result of the operation it observes. It monkeypatches nothing, opens no file
 thread, and makes no network call: a harness must emit at its own model-client, tool-dispatch,
 context-selection, and finding-lifecycle boundaries for anything to be recorded at all.
 
-It is also independent of the evaluator. Importing :mod:`sastbench.observer` must not pull in
+It is also independent of the evaluator. Importing :mod:`scaneval.observer` must not pull in
 the contracts, scoring, runner, execution, review, report, or adapter modules, so a harness can
 depend on the emitter without acquiring the machinery that judges it. That boundary is pinned
 by a test.

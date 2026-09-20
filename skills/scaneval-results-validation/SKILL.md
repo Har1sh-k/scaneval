@@ -1,11 +1,11 @@
 ---
 name: scaneval-results-validation
-description: Verify claimed SASTbench benchmark or PR-mode results. Use when an agent needs to rerun a scanner, confirm the exact scanner version and rule set, inspect results JSON and raw artifacts, distinguish valid runs from scanner or environment failures, and update docs or PR text with reproducible metrics.
+description: Verify claimed ScanEval benchmark or PR-mode results. Use when an agent needs to rerun a scanner, confirm the exact scanner version and rule set, inspect results JSON and raw artifacts, distinguish valid runs from scanner or environment failures, and update docs or PR text with reproducible metrics.
 ---
 
-# SASTbench Results Validation
+# ScanEval Results Validation
 
-Validate claimed SASTbench numbers before repeating them in docs, PRs, or comments.
+Validate claimed ScanEval numbers before repeating them in docs, PRs, or comments.
 
 Use this skill for:
 

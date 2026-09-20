@@ -13,7 +13,7 @@ to. Section 9 collects the gaps.
 Two conventions used throughout:
 
 ```sh
-SB=/Users/hk/Documents/GitHub/sast-bench/.venv/bin/sastbench   # or `sastbench` on PATH
+SB=/Users/hk/Documents/GitHub/scaneval/.venv/bin/scaneval   # or `scaneval` on PATH
 BYOC=/private/tmp/byoc                                          # the organization's working directory
 ```
 
@@ -35,8 +35,8 @@ case records, and admission decisions. `corpus init` creates one.
 | Namespaced | `namespace` matches `^[a-z0-9]+(\.[a-z0-9-]+)*$`, for example `acme.security`. `pack_id` matches `^[a-z0-9][a-z0-9-]*$`. |
 | Versioned | `version` is any non-empty string. `status` is `draft`, `reviewed`, or `released`. A pack that is not a draft is refused for edits unless `--new-version` opens a new draft version of it. |
 | Pinned | Every snapshot names a repository URL and a full 40-hex commit. The export's content hash (`tree_hash`) is recorded when mechanical checks run against it. |
-| Same contract | `src/sastbench/schemas/case-pack.schema.json` is the one contract for public and organization-owned packs. There is no private variant of the schema. |
-| Same evaluation | `sastbench plan`, `sastbench run`, `sastbench review`, `sastbench score`, `sastbench replay`, and `sastbench report` do not ask whether a pack is public. Adapters, the observer trace mode, and `sastbench.scoring.score` are shared. |
+| Same contract | `src/scaneval/schemas/case-pack.schema.json` is the one contract for public and organization-owned packs. There is no private variant of the schema. |
+| Same evaluation | `scaneval plan`, `scaneval run`, `scaneval review`, `scaneval score`, `scaneval replay`, and `scaneval report` do not ask whether a pack is public. Adapters, the observer trace mode, and `scaneval.scoring.score` are shared. |
 | Organization controlled | Every file the CLI writes is a local file you name. The only network use is `git fetch` of the snapshot URL you declared and of an adapter's pinned ruleset URL, plus whatever a model-backed adapter does with its provider. |
 
 Nothing in a pack is ever copied into a scanner workspace. The scanner receives a private
@@ -49,7 +49,7 @@ workspace copy of one exported source tree and a scan request that carries no la
  "schema_version":"2.0","system":{"id":"semgrep-local-rules"},"trace_mode":"off"}
 ```
 
-Three checks in the code keep pack material out of that tree. `sastbench.cases` never writes
+Three checks in the code keep pack material out of that tree. `scaneval.cases` never writes
 outside the pack. Every command that names a path it may write refuses a path inside a
 materialized trial directory, which is recognized by a `provenance.json` file beside a `source`
 directory. The runner refuses a scanner workspace that resolves inside the run output, the source
@@ -58,7 +58,7 @@ cache, or an exported input.
 ```
 $ $SB plan --pack "$BYOC/pack.json" --snapshot-id reporting-main --tree-hash "$TREE" \
       --output "$BYOC/trials/reporting-main/source/plan.json"
-sastbench: refusing to write /private/tmp/byoc/trials/reporting-main/source/plan.json inside the
+scaneval: refusing to write /private/tmp/byoc/trials/reporting-main/source/plan.json inside the
 trial directory /private/tmp/byoc/trials/reporting-main; evaluator plans, packs, and decisions
 stay outside an exported input tree
 exit=2
@@ -168,7 +168,7 @@ $SB corpus validate "$BYOC/pack.json" \
 ```
 
 ```
-sastbench: mechanical checks failed for 2 case(s): acme-report-fix, acme-report-incident; the results are recorded in the pack
+scaneval: mechanical checks failed for 2 case(s): acme-report-fix, acme-report-incident; the results are recorded in the pack
 Exported reporting-main to /private/tmp/byoc/trials/reporting-main (sha256:2ae31545c1e6cde1b334fb37c174c5d1071533ead71f95a755a6c86a8ba8c184)
 acme-report-shell: pass (mechanically_checked, level L1)
 acme-report-fix: fail (draft, level None); failed: locations_exist_in_snapshot
@@ -220,7 +220,7 @@ repository. Once the status is not `draft`, every pack-changing command refuses 
 
 ```
 $ $SB corpus disposition "$BYOC/pack-released.json" --case-id acme-report-incident --value exclude --reason "..."
-sastbench: pack status is released, not draft; changing it needs --new-version <version>, which opens a new draft version of this pack
+scaneval: pack status is released, not draft; changing it needs --new-version <version>, which opens a new draft version of this pack
 exit=2
 
 $ $SB corpus disposition "$BYOC/pack-released.json" --case-id acme-report-incident --value exclude --reason "..." --new-version 1.1.0-draft
@@ -242,7 +242,7 @@ The evaluation step is section 6.
 required:
 
 ```
-sastbench corpus import: error: one of the arguments --legacy-case --fix-commit --finding --document is required
+scaneval corpus import: error: one of the arguments --legacy-case --fix-commit --finding --document is required
 ```
 
 | Flag | Evidence `origin` | Evidence `kind` | `reference` | Accepted locations |
@@ -336,19 +336,19 @@ Only an explicitly named human reviewer can raise a case beyond L1. `corpus appr
 
 ```
 $ $SB corpus approve "$BYOC/pack.json" --case-id acme-report-shell --reviewer "   " --role curator --level L2 --note "x"
-sastbench: approval requires an explicit reviewer name; the tool never supplies one
+scaneval: approval requires an explicit reviewer name; the tool never supplies one
 exit=2
 
 $ $SB corpus approve "$BYOC/pack.json" --case-id acme-report-fix --reviewer "R. Mehta" --role independent_reviewer --level L3 --note "x"
-sastbench: case acme-report-fix has not passed mechanical checks; run corpus validate first
+scaneval: case acme-report-fix has not passed mechanical checks; run corpus validate first
 exit=2
 
 $ $SB corpus approve "$BYOC/pack.json" --case-id acme-report-shell --reviewer "P. Adeyemi" --role curator --level L3 --note "x"
-sastbench: L3/L4 labels require an independent_reviewer decision
+scaneval: L3/L4 labels require an independent_reviewer decision
 exit=2
 
 $ $SB corpus approve "$BYOC/pack.json" --case-id acme-report-allegation --reviewer "R. Mehta" --role independent_reviewer --level L3 --note "x"
-sastbench: L3/L4 require disposition validate
+scaneval: L3/L4 require disposition validate
 exit=2
 ```
 
@@ -362,7 +362,7 @@ would leave an approved L3 case off `validate` is refused and the pack is left u
 
 ```
 $ $SB corpus disposition "$BYOC/pack.json" --case-id acme-report-shell --value needs_evidence --reason "reopening"
-sastbench: case acme-report-shell: L3 requires disposition validate, not needs_evidence
+scaneval: case acme-report-shell: L3 requires disposition validate, not needs_evidence
 exit=2
 ```
 
@@ -424,8 +424,8 @@ admission before evaluation, enforce it by checking the pack, not by relying on 
 
 ### The run configuration
 
-`sastbench run CONFIG --output DIR` executes one frozen configuration. The contract is
-`src/sastbench/schemas/run-config.schema.json`.
+`scaneval run CONFIG --output DIR` executes one frozen configuration. The contract is
+`src/scaneval/schemas/run-config.schema.json`.
 
 | Field | Required | Meaning |
 |---|---|---|
@@ -525,7 +525,7 @@ unimplemented input profile still leaves a manifest:
 
 ```
 $ $SB run "$BYOC/run-blinded.json" --output "$BYOC/runs/blinded" --workspace-root "$BYOC/workspaces"
-sastbench: metadata blinding unavailable: no reviewed replacement map was supplied
+scaneval: metadata blinding unavailable: no reviewed replacement map was supplied
 exit=2
 
 $ jq -c '{status, failure}' "$BYOC/runs/blinded/run-manifest.json"
@@ -565,7 +565,7 @@ A reviewed plan behaves the same way until a person resolves the decisions. The 
 reported `plan=reviewed review=draft`, `targets_detected: 0`, and `pending_matching_count: 1`. The
 plan's scope says the labels were reviewed. It says nothing about whether the matching was.
 
-`sastbench plan` builds the same plan outside a run, which is useful for seeing what would be
+`scaneval plan` builds the same plan outside a run, which is useful for seeing what would be
 planned before spending a scan:
 
 ```sh
@@ -675,7 +675,7 @@ These are limits of the current implementation, not guarantees about your enviro
 | Credentials | `--url`, `--historical-url`, and `--repo` refuse a URL whose authority carries userinfo, except the bare `git` user of an ssh clone URL. The run configuration has no credential field. Scanner subprocesses receive only `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR`, `TERM`, `USER`, `SHELL` unless the adapter adds more. | The check reads the URL authority only: a token in a path, a query, or an scp-style `git@host:path` address is not detected. The `llm-harness` adapter adds `NODE_OPTIONS`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, and `XDG_CONFIG_HOME` to that passthrough, so provider keys in your environment do reach that harness process. |
 | Traces | `trace_mode` is `off`, `metadata`, or `content`. Metadata mode omits content. Content mode stores a cloned, redacted copy of metadata and content, including the outgoing model request, in the bundle's `trace/` directory. | Content-mode traces therefore contain the source that was sent to the model. Treat a content-mode bundle as source material, with the same handling rules. The default redactor replaces common credential-looking keys; it is not a secret scanner. |
 | Directory separation | Evaluator files live in `evaluator/` and in the pack; the scanner receives a private workspace copy of one export. The trial-path check refuses writing evaluator material inside an exported tree, and the runner refuses a workspace inside evaluator storage. | These compare resolved paths. They follow no bind mount or hard link, and they are not a sandbox. Directory separation documents the evaluator boundary; it does not enforce it. |
-| Exported trees | The export carries tracked regular files only, strips `.git`, `.securevibes`, `.sastbench`, and `.repos`, records skipped submodules and symlinks, and records retained instruction files such as `CLAUDE.md` or `AGENTS.md` as identity cues. | It is not a sandbox, and instruction files stay in the tree under the `standard` profile. |
+| Exported trees | The export carries tracked regular files only, strips `.git`, `.securevibes`, `.scaneval`, and `.repos`, records skipped submodules and symlinks, and records retained instruction files such as `CLAUDE.md` or `AGENTS.md` as identity cues. | It is not a sandbox, and instruction files stay in the tree under the `standard` profile. |
 | Pack edits | A pack is replaced atomically through a temporary file and a rename, keeping the previous permission bits. | No previous version is kept on disk. Keep the pack under version control if you need history or a correction trail. |
 
 ## 9. What is not implemented yet
@@ -706,7 +706,7 @@ These are limits of the current implementation, not guarantees about your enviro
 
 ## Verification note
 
-Every command and every output in this guide was produced with `sastbench 2.0.0a1` on 2026-09-20,
+Every command and every output in this guide was produced with `scaneval 2.0.0a1` on 2026-09-20,
 against a throwaway pack under `/private/tmp/byoc` whose snapshot source and whose Semgrep ruleset
 were both local `git init` repositories. Nothing in the transcript reached the network. Re-check
 these behaviors against the current checkout rather than treating this guide as a guarantee.
