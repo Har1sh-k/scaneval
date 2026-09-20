@@ -844,3 +844,207 @@ def test_a_rewritten_pack_keeps_its_file_permissions(tmp_path, capsys, checked_p
                  "--reason", "evidence reviewed"]) == 0
 
     assert pack.stat().st_mode & 0o777 == 0o644
+
+
+def test_review_approve_refuses_a_bundle_reached_through_a_symlink(tmp_path, capsys, checked_pack):
+    bundle = make_bundle(tmp_path, checked_pack)
+    assert main(["review", "init", str(bundle), "--pack", str(checked_pack["pack"])]) == 0
+    capsys.readouterr()
+    record_path = bundle / "evaluator" / "review-record.json"
+    before = record_path.read_bytes()
+    linked_bundle = tmp_path / "linked-bundle"
+    linked_bundle.symlink_to(bundle, target_is_directory=True)
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(tmp_path, target_is_directory=True)
+
+    code, _, err = cli(capsys, "review", "approve", str(linked_bundle), "--reviewer", "R. Eviewer",
+                       "--note", "read them")
+    assert code == 2 and "symlinked directory" in err
+
+    code, _, err = cli(capsys, "review", "approve", str(linked_parent / "bundle"),
+                       "--reviewer", "R. Eviewer", "--note", "read them")
+    assert code == 2 and "symlink in the path" in err
+
+    assert record_path.read_bytes() == before
+    assert load_document(record_path, "review-record")["state"] == "draft"
+    assert not list((bundle / "evaluator").glob("*.tmp"))
+
+
+def test_review_status_refuses_a_bundle_path_that_is_not_a_directory(tmp_path, capsys, checked_pack):
+    bundle = make_bundle(tmp_path, checked_pack)
+    capsys.readouterr()
+
+    code, out, err = cli(capsys, "review", "status", str(bundle / "result.json"))
+    assert code == 2 and "not a bundle directory" in err and out == ""
+
+    code, _, err = cli(capsys, "review", "status", str(tmp_path / "absent-bundle"))
+    assert code == 2 and "not a bundle directory" in err
+
+    code, out, _ = cli(capsys, "review", "status", str(bundle))
+    assert code == 0 and out.strip() == "missing"
+
+
+def test_import_refuses_a_fix_commit_repository_that_carries_credentials(tmp_path, capsys, upstream):
+    pack = pack_with_snapshot(tmp_path, upstream)
+    capsys.readouterr()
+    before = pack.read_bytes()
+
+    code, _, err = cli(capsys, *import_argv(pack, "case-fix", "--fix-commit", "a" * 40, "--repo",
+                                            "https://user:token@example.invalid/acme/widget.git"))
+    assert code == 2 and "--repo carries credentials in the URL authority" in err
+    assert pack.read_bytes() == before and read_pack(pack)["cases"] == []
+
+    code, _, _ = cli(capsys, *import_argv(pack, "case-fix", "--fix-commit", "a" * 40, "--repo",
+                                          "ssh://git@example.invalid/acme/widget.git"))
+    assert code == 0
+    assert case_by_id(pack, "case-fix")["evidence"][0]["reference"] == \
+        "ssh://git@example.invalid/acme/widget.git@" + "a" * 40
+
+
+def test_add_snapshot_accepts_an_ssh_url_whose_only_userinfo_is_the_git_account(tmp_path, capsys, upstream):
+    repo, commit = upstream
+    pack = tmp_path / "pack.json"
+    assert main(init_argv(pack)) == 0
+    capsys.readouterr()
+
+    accepted = snapshot_argv(pack, repo, commit)
+    accepted[accepted.index("--url") + 1] = "ssh://git@example.invalid/acme/widget.git"
+    code, _, _ = cli(capsys, *accepted)
+    assert code == 0
+    assert read_pack(pack)["snapshots"][0]["repository"]["url"] == "ssh://git@example.invalid/acme/widget.git"
+
+    refused = snapshot_argv(pack, repo, commit, "snap-b")
+    refused[refused.index("--url") + 1] = "ssh://git:token@example.invalid/acme/widget.git"
+    code, _, err = cli(capsys, *refused)
+    assert code == 2 and "--url carries credentials in the URL authority" in err
+    assert [snapshot["snapshot_id"] for snapshot in read_pack(pack)["snapshots"]] == ["snap-a"]
+
+
+def test_run_refuses_an_output_directory_inside_a_trial_directory(tmp_path, capsys, checked_pack):
+    config = write_config(tmp_path)
+    trial = tmp_path / "trial" / "snap-a"
+    assert (trial / "provenance.json").is_file() and (trial / "source").is_dir()
+    output = trial / "source" / "out"
+    capsys.readouterr()
+
+    code, _, err = cli(capsys, "run", str(config), "--output", str(output))
+    assert code == 2 and "inside the trial directory" in err
+    assert not output.exists()
+
+
+def test_evaluation_outputs_are_refused_inside_a_trial_directory(tmp_path, capsys, checked_pack):
+    trial = tmp_path / "trial" / "snap-a"
+    demo = tmp_path / "demo"
+    assert main(["demo", str(demo)]) == 0
+    capsys.readouterr()
+    evaluator = demo / "evaluator"
+
+    refused = {
+        "demo": ["demo", str(trial / "source" / "fixture")],
+        "replay": ["replay", str(demo), "--output", str(trial / "replay.json")],
+        "report": ["report", str(demo), "--output", str(trial / "source" / "report.html")],
+        "score": ["score", "--plan", str(evaluator / "plan.json"), "--result", str(demo / "result.json"),
+                  "--decisions", str(evaluator / "decisions.json"), "--output", str(trial / "score.json")],
+    }
+    for argv in refused.values():
+        code, _, err = cli(capsys, *argv)
+        assert code == 2 and "inside the trial directory" in err
+
+    assert not (trial / "source" / "fixture").exists()
+    assert not (trial / "replay.json").exists() and not (trial / "score.json").exists()
+    assert not (trial / "source" / "report.html").exists()
+
+
+def test_corpus_validate_refuses_a_trial_root_inside_a_trial_directory(tmp_path, capsys, checked_pack):
+    pack = checked_pack["pack"]
+    nested = tmp_path / "trial" / "snap-a" / "source" / "nested"
+    capsys.readouterr()
+
+    code, _, err = cli(capsys, "corpus", "validate", str(pack), "--snapshot-id", "snap-a",
+                       "--cache-root", str(tmp_path / "second-cache"), "--trial-root", str(nested))
+    assert code == 2 and "inside the trial directory" in err
+    assert not nested.exists() and not (tmp_path / "second-cache").exists()
+
+
+def legacy_record(**fields) -> dict:
+    """A minimal legacy v1 record; every test below breaks exactly one of its shapes."""
+    return {"id": "legacy-1", "caseType": "real-world", "title": "shell injection",
+            "canonicalKind": "command_injection", **fields}
+
+
+@pytest.mark.parametrize("fields, message", [
+    ({"regions": {"path": "src/app.py"}}, "regions must be a list"),
+    ({"regions": ["src/app.py"]}, "regions[0] must be a JSON object"),
+    ({"regions": [{"startLine": 5, "endLine": 5}]}, "regions[0] must carry a non-blank path string"),
+    ({"regions": [{"path": 5, "endLine": 5}]}, "regions[0] must carry a non-blank path string"),
+    ({"regions": [{"path": "src/app.py", "startLine": "5", "endLine": 9}]}, "startLine must be an integer"),
+    ({"regions": [{"path": "src/app.py", "startLine": True, "endLine": 9}]}, "startLine must be an integer"),
+    ({"regions": [{"path": "src/app.py", "startLine": 0, "endLine": 9}]}, "startLine must be an integer"),
+    ({"regions": [{"path": "src/app.py", "startLine": 5, "endLine": 0}]}, "endLine must be an integer"),
+    ({"realWorld": ["CVE-2026-0001"]}, "realWorld must be a JSON object"),
+    ({"realWorld": {"disclosure": "2026-01-01"}}, "realWorld.disclosure must be a JSON object"),
+    ({"realWorld": {"repo": ["acme/widget"]}}, "realWorld.repo must be a string"),
+])
+def test_import_refuses_a_malformed_legacy_record_without_a_traceback(tmp_path, capsys, upstream,
+                                                                     fields, message):
+    pack = pack_with_snapshot(tmp_path, upstream)
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps(legacy_record(**fields)) + "\n", encoding="utf-8")
+    capsys.readouterr()
+
+    code, _, err = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
+    assert code == 2 and message in err
+    assert err.startswith("sastbench: ") and "Traceback" not in err
+    assert str(legacy) in err
+    assert read_pack(pack)["cases"] == []
+
+
+def test_import_refuses_a_legacy_repository_url_that_carries_credentials(tmp_path, capsys, upstream):
+    pack = pack_with_snapshot(tmp_path, upstream)
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps(legacy_record(
+        realWorld={"repo": "https://user:token@example.invalid/acme/widget", "fixCommit": "c" * 40},
+        regions=[{"id": "r1", "path": "src/app.py", "startLine": 5, "endLine": 5}])) + "\n",
+        encoding="utf-8")
+    capsys.readouterr()
+
+    code, _, err = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
+    assert code == 2 and "realWorld.repo carries credentials in the URL authority" in err
+    assert read_pack(pack)["cases"] == []
+
+
+def test_import_accepts_a_well_formed_legacy_record_with_file_only_regions(tmp_path, capsys, upstream):
+    pack = pack_with_snapshot(tmp_path, upstream)
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps(legacy_record(
+        realWorld={"repo": "ssh://git@example.invalid/acme/widget", "fixCommit": "c" * 40},
+        regions=[{"id": "r1", "path": "src/app.py", "label": "sink"}])) + "\n", encoding="utf-8")
+    capsys.readouterr()
+
+    code, _, _ = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
+    assert code == 0
+    [location] = case_by_id(pack, "case-legacy")["target"]["accepted_locations"]
+    assert location["path"] == "src/app.py" and "start_line" not in location
+
+
+def test_new_version_is_stripped_and_refused_when_it_repeats_the_current_version(tmp_path, capsys,
+                                                                                checked_pack):
+    pack = checked_pack["pack"]
+    release_pack(pack)
+    before = pack.read_bytes()
+    admit = ["corpus", "admit", str(pack), "--case-id", "case-finding", "--decision", "admitted",
+             "--by", "J. Curator", "--reason", "pilot slice"]
+
+    code, _, err = cli(capsys, *admit, "--new-version", "  1.0.0  ")
+    assert code == 2 and "already carries" in err
+    assert pack.read_bytes() == before
+
+    code, _, err = cli(capsys, *admit, "--new-version", "   ")
+    assert code == 2 and "non-blank version" in err
+    assert pack.read_bytes() == before
+
+    code, _, _ = cli(capsys, *admit, "--new-version", "  1.1.0-draft  ")
+    assert code == 0
+    document = read_pack(pack)
+    assert document["version"] == "1.1.0-draft" and document["status"] == "draft"
+    assert "version 1.0.0 (status released) reopened as 1.1.0-draft (status draft)" in document["notes"]

@@ -51,7 +51,7 @@ def render_report(record: dict, result: dict, plan: dict, review_state=None) -> 
     m = record["metrics"]
     disclaimer = {
         "diagnostic": "Diagnostic fixture only. No scanner or model was run. These are not real-world performance results.",
-        "draft": "Draft labels. Targets and controls are mechanically checked drafts (L1/L2) without independent human review; "
+        "draft": "Draft labels. Targets and controls come from a draft plan and are not independently reviewed; "
                  "matching decisions may be unreviewed. Use for pipeline diagnostics only, not as benchmark evidence.",
         "reviewed": "Saved-output evaluation. Review decisions and validation levels are supplied by the evaluator, not certified by this report.",
     }[record["scope"]]

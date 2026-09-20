@@ -213,3 +213,49 @@ def test_report_without_a_review_state_renders_exactly_the_bundled_page(tmp_path
     assert html.count('<p class="notice">') == 1
     for _state, sentence in REVIEW_BANNERS:
         assert sentence not in html
+
+
+from sastbench.scoring import score  # noqa: E402  (appended draft-wording tests)
+
+
+DRAFT_BANNER = ("Draft labels. Targets and controls come from a draft plan and are not "
+                "independently reviewed; matching decisions may be unreviewed. Use for pipeline "
+                "diagnostics only, not as benchmark evidence.")
+DRAFT_WARNING = "Draft labels (not independently reviewed): pipeline diagnostics, not benchmark evidence."
+
+
+def draft_documents(tmp_path: Path) -> tuple[dict, dict, dict]:
+    """The demo bundle's documents with the plan relabelled draft, keeping every real level.
+
+    A draft plan carries the validation level each item actually has, so neither the warning
+    nor the banner may name one.
+    """
+    bundle = run_demo(tmp_path)
+    plan, result, decisions = (
+        json.loads((bundle / name).read_text(encoding="utf-8"))
+        for name in ("evaluator/plan.json", "result.json", "evaluator/decisions.json")
+    )
+    plan["scope"] = "draft"
+    for item in plan["targets"] + plan["controls"]:
+        item["validation_level"] = "L1"
+    return plan, result, decisions
+
+
+def test_a_draft_plan_warns_without_naming_validation_levels(tmp_path):
+    plan, result, decisions = draft_documents(tmp_path)
+
+    record = score(plan, result, decisions)
+
+    assert DRAFT_WARNING in record["warnings"]
+    assert not any("L1" in warning or "L2" in warning for warning in record["warnings"])
+
+
+def test_the_draft_report_banner_names_no_validation_levels(tmp_path):
+    plan, result, decisions = draft_documents(tmp_path)
+    record = score(plan, result, decisions)
+
+    html = render_report(record, result, plan)
+
+    assert f'<p class="notice">{DRAFT_BANNER}</p>' in html
+    assert "L1/L2" not in html and "mechanically checked drafts" not in html
+    assert DRAFT_WARNING in html

@@ -20,8 +20,14 @@ What each command writes:
   or the whole new one. The previous version is not kept, and a pack whose status is no longer
   ``draft`` is refused unless ``--new-version`` opens a new draft version of it.
 - ``evaluator/review-record.json`` is replaced the same way by ``review record`` and
-  ``review approve``.
+  ``review approve``. Both refuse a bundle reached through a symlink before writing.
 - Everything else is create-only: an existing output path is refused, never overwritten.
+
+No command writes inside a materialized trial directory: the output path of ``plan``, ``run``,
+``demo``, ``score``, ``replay`` and ``report``, and the directory ``corpus validate`` exports a
+snapshot into, are each refused when a trial's ``provenance.json`` and ``source`` sit above
+them. That keeps evaluator material out of the tree a scanner is handed; it is a check on the
+path, not an isolation boundary.
 
 Exit codes. 2 means the command could not be carried out: a usage or contract error, a refused
 overwrite, a failed fetch or export. 1 means the command ran and reports a negative result: a
@@ -44,6 +50,7 @@ from .demo import SOURCE, demo_documents
 from .execution import ExecutionError
 from .materialize import MaterializationError
 from .report import render_report
+from .review import _keep_mode, _refuse_symlinked_dirs
 from .scoring import score
 
 
@@ -77,16 +84,6 @@ def _write_new(path: Path, content: str) -> None:
 
 def _json(value: dict) -> str:
     return canonical_json(value) + "\n"
-
-
-def _keep_mode(temporary: Path, existing: Path) -> None:
-    """Give *temporary* the permissions of the file it is about to replace.
-
-    A temporary file is created owner-only, so a replacement that skipped this would quietly
-    narrow who can read the document. This copies permission bits only, not ownership, and not
-    any access control the filesystem keeps elsewhere.
-    """
-    os.chmod(temporary, existing.stat().st_mode & 0o777)
 
 
 def _replace_json(path: Path, value: dict) -> None:
@@ -171,8 +168,14 @@ def _pack_for_change(args: argparse.Namespace) -> dict:
                 f"pack status is {pack['status']}, not draft; changing it needs "
                 "--new-version <version>, which opens a new draft version of this pack")
         return pack
-    if not version.strip():
+    version = version.strip()
+    if not version:
         raise ContractError("--new-version requires a non-blank version")
+    if version == pack["version"]:
+        raise ContractError(
+            f"--new-version {version} is the version this pack already carries; a new version "
+            "must be a different string, so the reopened pack is distinguishable from the one "
+            "plans and reports already cite")
     pack["notes"].append(
         f"version {pack['version']} (status {pack['status']}) reopened as {version} (status draft)")
     pack["version"] = version
@@ -183,14 +186,62 @@ def _pack_for_change(args: argparse.Namespace) -> dict:
 def _reject_credentials(option: str, url: str) -> None:
     """Refuse a URL whose authority carries userinfo, so a pack never records a credential.
 
+    One userinfo is allowed: the bare user ``git`` with no password, which is how an ssh clone
+    URL names the git account rather than a secret. Anything else in the authority, including
+    ``git`` with a password, is refused.
+
     This reads the authority of the URL only. It does not find a token in a path, a query, or a
     fragment, does not recognize an scp-style ssh address such as ``git@host:path`` as carrying
     userinfo, and it says nothing about whether the URL resolves or what it points at.
     """
-    if "@" in urlsplit(url).netloc:
+    userinfo, marker, _host = urlsplit(url).netloc.rpartition("@")
+    if marker and userinfo != "git":
         raise ContractError(
             f"{option} carries credentials in the URL authority; supply a URL without userinfo "
             "and keep the credential in the git or network configuration")
+
+
+def _legacy_line(value, label: str) -> None:
+    """Refuse a legacy line number that is not an integer of at least 1. ``True`` is not 1."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ContractError(f"{label} must be an integer of at least 1, not {value!r}")
+
+
+def _legacy_document(path: Path) -> dict:
+    """Load a legacy v1 case record and refuse the shapes the migration cannot read.
+
+    This checks structure, not truth: it says nothing about whether the record's regions,
+    identifiers, or dates are correct, and every value it accepts still enters the pack as
+    draft evidence. It exists so a malformed file is reported as a refusal naming the file
+    rather than raising out of :func:`sastbench.cases.draft_case_from_legacy` as a traceback.
+    Fields the migration does not read are left alone, and the schema check in ``cases``
+    remains the authority on the case this produces.
+    """
+    legacy = _read_json(path)
+    real = legacy.get("realWorld")
+    if real is not None and not isinstance(real, dict):
+        raise ContractError(f"{path}: realWorld must be a JSON object")
+    disclosure = (real or {}).get("disclosure")
+    if disclosure is not None and not isinstance(disclosure, dict):
+        raise ContractError(f"{path}: realWorld.disclosure must be a JSON object")
+    repository = (real or {}).get("repo")
+    if repository is not None:
+        if not isinstance(repository, str):
+            raise ContractError(f"{path}: realWorld.repo must be a string")
+        _reject_credentials(f"{path}: realWorld.repo", repository)
+    regions = legacy.get("regions", [])
+    if not isinstance(regions, list):
+        raise ContractError(f"{path}: regions must be a list of region objects")
+    for index, region in enumerate(regions):
+        label = f"{path}: regions[{index}]"
+        if not isinstance(region, dict):
+            raise ContractError(f"{label} must be a JSON object")
+        if not isinstance(region.get("path"), str) or not region["path"].strip():
+            raise ContractError(f"{label} must carry a non-blank path string")
+        for key in ("startLine", "endLine"):
+            if region.get(key) is not None:
+                _legacy_line(region[key], f"{label}.{key}")
+    return legacy
 
 
 def _finding_lines(finding: dict, source: Path) -> dict:
@@ -221,11 +272,16 @@ def _finding_lines(finding: dict, source: Path) -> dict:
 def _refuse_trial_path(output: Path) -> None:
     """Refuse an output path that lies inside a materialized trial directory.
 
-    A trial holds the exported source a scanner is handed, so a plan written anywhere inside one
-    would put evaluator labels where the scanned tree lives. A trial is recognized by a
-    ``provenance.json`` file beside a ``source`` directory; any other directory is left alone.
-    The comparison resolves symlinks in the path but follows no bind mount or hard link, so it
-    catches the obvious mistake and is not an isolation boundary.
+    A trial holds the exported source a scanner is handed, so anything this tool writes inside
+    one would put evaluator material where the scanned tree lives. Every command that names an
+    output path checks it: ``plan``, ``run``, ``demo``, the ``--output`` of ``score``,
+    ``replay`` and ``report``, and the trial ``corpus validate`` is about to export into. A
+    trial is recognized by a ``provenance.json`` file beside a ``source`` directory; any other
+    directory is left alone. Only the parents of *output* are examined: a path that is itself a
+    trial root is not caught by its own marker, which is why ``corpus validate`` checks the
+    snapshot directory it would create rather than ``--trial-root`` itself. The comparison
+    resolves symlinks in the path but follows no bind mount or hard link, so it catches the
+    obvious mistake and is not an isolation boundary.
     """
     for directory in output.expanduser().resolve().parents:
         if (directory / TRIAL_MARKER).is_file() and (directory / TRIAL_SOURCE).is_dir():
@@ -242,6 +298,7 @@ def load_bundle(directory: Path) -> tuple[dict, dict, dict]:
 
 
 def _demo(directory: Path) -> None:
+    _refuse_trial_path(directory)
     documents = demo_documents()
     record = score(documents["plan"], documents["result"], documents["decisions"])
     directory.mkdir(parents=True, exist_ok=False)
@@ -297,6 +354,7 @@ def _supplied_artifact(args: argparse.Namespace) -> dict:
     if args.fix_commit:
         if not args.repo:
             raise ContractError("--fix-commit requires --repo; the reference is recorded as '<repo>@<sha>'")
+        _reject_credentials("--repo", args.repo)
         return {**common, "kind": args.kind or "unmapped",
                 "description": args.description or f"Imported fix commit {args.fix_commit} for {args.case_id}.",
                 "evidence": [cases.evidence(
@@ -333,7 +391,7 @@ def _corpus_import(args: argparse.Namespace) -> int:
     pack = _pack_for_change(args)
     if args.legacy_case:
         case = cases.draft_case_from_legacy(
-            _read_json(args.legacy_case), case_id=args.case_id, snapshot_id=args.snapshot_id,
+            _legacy_document(args.legacy_case), case_id=args.case_id, snapshot_id=args.snapshot_id,
             legacy_path=str(args.legacy_case), workload=args.workload,
             component_role=args.component_role, represents=args.represents)
     else:
@@ -359,6 +417,7 @@ def _corpus_validate(args: argparse.Namespace) -> int:
     trial = None
     if args.trial_root is not None:
         trial = args.trial_root / args.snapshot_id
+        _refuse_trial_path(trial)
         if trial.exists() or trial.is_symlink():
             raise ContractError(
                 f"trial directory already exists: {trial}; export every snapshot into a new directory")
@@ -457,12 +516,18 @@ def _review_approve(args: argparse.Namespace) -> int:
     if record is None:
         raise ContractError(f"no review record in {args.bundle}; run 'review init' first")
     approved = review.approve_review(record, decisions, plan, reviewer=args.reviewer, note=args.note)
-    _replace_json(args.bundle / review.EVALUATOR_DIR / review.RECORD_FILE, approved)
+    # Loading refused a symlinked bundle already; this is the check that guards the write,
+    # which is the only thing this command overwrites.
+    bundle = _refuse_symlinked_dirs(args.bundle)
+    _replace_json(bundle / review.EVALUATOR_DIR / review.RECORD_FILE, approved)
     print(f"Review record state: {approved['state']} ({len(approved['reviews'])} recorded reviews)")
     return 0
 
 
 def _review_status(args: argparse.Namespace) -> int:
+    if not args.bundle.is_dir():
+        raise ContractError(f"{args.bundle} is not a bundle directory; review status reads "
+                            "evaluator/review-record.json inside one")
     print(review.review_status(args.bundle))
     return 0
 
@@ -473,6 +538,7 @@ def _review(args: argparse.Namespace) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    _refuse_trial_path(args.output)
     manifest = runner.run_from_config(
         args.config, args.output, workspace_root=args.workspace_root,
         only_systems=set(args.only_system) if args.only_system else None,
@@ -656,6 +722,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command in ("corpus", "plan", "review", "run"):
             return {"corpus": _corpus, "plan": _plan, "review": _review, "run": _run}[args.command](args)
         else:
+            if args.output:
+                _refuse_trial_path(args.output)
             if args.command == "score":
                 plan = load_document(args.plan, "evaluation-plan")
                 result = load_document(args.result, "scan-result")

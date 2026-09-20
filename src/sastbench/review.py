@@ -78,12 +78,48 @@ def _write_new(path: Path, content: str) -> None:
         handle.write(content)
 
 
+def _keep_mode(temporary: Path, existing: Path) -> None:
+    """Give *temporary* the permissions of the file it is about to replace.
+
+    A temporary file is created owner-only, so a replacement that skipped this would quietly
+    narrow who can read the document. This copies permission bits only, not ownership, and not
+    any access control the filesystem keeps elsewhere. :mod:`sastbench.cli` uses this same
+    helper, so a replaced pack and a replaced review record keep their modes the same way.
+    """
+    os.chmod(temporary, existing.stat().st_mode & 0o777)
+
+
+def _refuse_symlinked_dirs(bundle_dir: str | PathLike[str]) -> Path:
+    """Refuse a bundle reached through a symlink, and return it as a :class:`~pathlib.Path`.
+
+    Three spellings are refused: a symlinked bundle directory, a symlinked ``evaluator``
+    directory inside it, and a bundle whose resolved path differs from its absolute path,
+    which is how a symlink higher up the path shows itself. This keeps a write from landing
+    outside the directory the caller named, and the reading functions here use it too so a
+    status or a load reports on the bundle that was asked for. It refuses symlinks on that
+    path and nothing else: it is not an isolation boundary and says nothing about hard links,
+    bind mounts, a directory swapped after the check, or where the files a bundle already
+    holds point. A path spelled with ``..`` or ``.`` segments also resolves differently from
+    its absolute form and is refused, so name the bundle plainly.
+    """
+    bundle = Path(bundle_dir)
+    for directory in (bundle, bundle / EVALUATOR_DIR):
+        if directory.is_symlink():
+            raise ContractError(f"refusing to write through a symlinked directory at {directory}")
+    if bundle.resolve() != bundle.absolute():
+        raise ContractError(
+            f"refusing to use {bundle}: a symlink in the path leads to {bundle.resolve()}; "
+            "name the bundle by its real path")
+    return bundle
+
+
 def _replace_document(path: Path, document: dict) -> None:
     """Replace one document atomically through a temporary file in its own directory.
 
     This is the only overwrite in this module. It does not merge, keep a backup, or copy
     the previous version anywhere, and it replaces a symlink sitting at *path* rather than
-    writing through it.
+    writing through it. A replaced regular file's permission bits are copied onto the
+    temporary file first; the permissions of a symlink's target are not.
     """
     handle = tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", newline="\n", dir=str(path.parent),
@@ -92,6 +128,8 @@ def _replace_document(path: Path, document: dict) -> None:
     try:
         with handle:
             handle.write(_document(document))
+        if path.is_file() and not path.is_symlink():
+            _keep_mode(Path(handle.name), path)
         os.replace(handle.name, path)
     except BaseException:
         Path(handle.name).unlink(missing_ok=True)
@@ -208,12 +246,17 @@ def record_decisions(bundle_dir: str | PathLike[str], *, clock: Callable[[], dat
 
     The tool does not validate the human's verdicts beyond that contract: an ``accepted``
     match or a ``quiet`` control assessment is copied into the record's scope untouched and
-    unread, and the fresh record is a draft, so re-drafting never carries an earlier
-    approval forward. The record is replaced only when no record exists or the existing one
-    is stale; a record that still binds to these decisions and this plan is kept and the
-    call is refused, so an approval already on disk is never overwritten by this function.
+    unread. The fresh record is a draft, so re-drafting never carries an approval forward:
+    the reviews an existing record holds are copied into the new draft as history, each one
+    still naming the decisions hash it was recorded against, and the state returns to
+    ``draft`` because none of them was given for the decisions now on disk. Notes are not
+    carried forward; the new record holds the notes this call supplies. The record is
+    replaced only when no record exists or the existing one is stale; a record that still
+    binds to these decisions and this plan is kept and the call is refused, so an approval
+    already on disk is never overwritten by this function. A bundle reached through a
+    symlink is refused before anything is read or written.
     """
-    bundle = Path(bundle_dir)
+    bundle = _refuse_symlinked_dirs(bundle_dir)
     evaluator = bundle / EVALUATOR_DIR
     plan = load_document(evaluator / PLAN_FILE, PLAN_KIND)
     decisions = load_document(evaluator / DECISIONS_FILE, DECISIONS_KIND)
@@ -235,6 +278,10 @@ def record_decisions(bundle_dir: str | PathLike[str], *, clock: Callable[[], dat
         if (existing["decisions_sha256"] == record["decisions_sha256"]
                 and existing["plan_sha256"] == record["plan_sha256"]):
             raise ContractError(RECORD_CURRENT)
+        # Keep the reviewer entries as history. The state stays draft, so a record that
+        # was approved before the edit no longer claims approval of what is on disk now.
+        record = validate_document(
+            RECORD_KIND, {**record, "reviews": deepcopy(existing["reviews"])})
     _replace_document(record_path, record)
     return record
 
@@ -243,16 +290,19 @@ def approve_review(record: dict, decisions: dict, plan: dict, *, reviewer: str, 
                    clock: Callable[[], datetime] | None = None) -> dict:
     """Return a new record carrying one explicit human approval of *decisions* under *plan*.
 
-    The reviewer name comes from the caller and is stored verbatim. This function does not
-    authenticate the reviewer, check their independence, or verify that anything was read;
-    it records a claim of review and refuses one whose record no longer matches the
-    decisions, the plan, or the run it would approve. The original *record* is not modified,
-    and nothing is written to disk.
+    The reviewer name comes from the caller and is stored verbatim; anything that is not a
+    non-blank string is refused rather than coerced. This function does not authenticate the
+    reviewer, check their independence, or verify that anything was read; it records a claim
+    of review and refuses one whose record no longer matches the decisions, the plan, or the
+    run it would approve, or whose decisions and plan bind to different inputs. The original
+    *record* is not modified, and nothing is written to disk. Reviews the record already
+    carries stay in place: this appends one entry and does not re-check the older ones.
     """
     validate_document(RECORD_KIND, record)
     validate_document(DECISIONS_KIND, decisions)
     validate_document(PLAN_KIND, plan)
-    if not reviewer or not reviewer.strip():
+    _assert_binds_to_plan(plan, decisions)
+    if not isinstance(reviewer, str) or not reviewer.strip():
         raise ContractError("approval requires an explicit reviewer name; the tool never supplies one")
     digest = canonical_sha256(decisions)
     if record["decisions_sha256"] != digest:
@@ -273,10 +323,11 @@ def write_evaluator_records(bundle_dir: str | PathLike[str], plan: dict, decisio
                             record: dict) -> dict[str, Path]:
     """Write ``evaluator/{plan,decisions,review-record}.json`` beside an invocation bundle.
 
-    Nothing is overwritten. An existing ``plan.json`` is kept when it is byte-identical to
-    the canonical plan, because a bundle written by the runner already carries one; any
-    other existing file, a symlink in their place, a symlinked bundle or evaluator
-    directory, or a differing plan refuses the whole write before a byte is written. The
+    Nothing is overwritten. An existing ``plan.json`` is kept when it loads as the same plan
+    by canonical hash, because a bundle written by the runner already carries one; a file
+    whose bytes differ only in spacing is therefore kept as it stands rather than rewritten.
+    Any other existing file, a symlink in their place, a bundle reached through a symlink,
+    or a plan that hashes differently refuses the whole write before a byte is written. The
     three documents must also agree with each other: mismatched input hashes, run ids, or
     record hashes are refused the same way.
 
@@ -298,11 +349,8 @@ def write_evaluator_records(bundle_dir: str | PathLike[str], plan: dict, decisio
     if record["plan_sha256"] != canonical_sha256(plan):
         raise ContractError("the review record does not bind to this plan")
 
-    bundle = Path(bundle_dir)
+    bundle = _refuse_symlinked_dirs(bundle_dir)
     evaluator = bundle / EVALUATOR_DIR
-    for directory in (bundle, evaluator):
-        if directory.is_symlink():
-            raise ContractError(f"refusing to write through a symlinked directory at {directory}")
     paths = {"plan": evaluator / PLAN_FILE, "decisions": evaluator / DECISIONS_FILE,
              "record": evaluator / RECORD_FILE}
     plan_text = _document(plan)
@@ -310,7 +358,9 @@ def write_evaluator_records(bundle_dir: str | PathLike[str], plan: dict, decisio
     if paths["plan"].is_symlink():
         raise ContractError(f"refusing to follow a symlink at {paths['plan']}")
     if paths["plan"].exists():
-        if paths["plan"].read_bytes() != plan_text.encode("utf-8"):
+        # Compare the documents, not their bytes: review_status binds by canonical hash too,
+        # so a plan that only differs in spacing is the same plan to every later check.
+        if canonical_sha256(load_document(paths["plan"], PLAN_KIND)) != canonical_sha256(plan):
             raise ContractError(
                 f"{paths['plan']} holds a different plan; decisions must be filed against the planned targets")
         keep_plan = True
@@ -340,14 +390,15 @@ def write_evaluator_records(bundle_dir: str | PathLike[str], plan: dict, decisio
 def review_status(bundle_dir: str | PathLike[str]) -> str:
     """Report ``missing``, ``stale``, or the record's own state for one bundle.
 
-    ``stale`` means the decisions file or the plan changed after the record was written,
-    which is the only tampering this can see: it does not check the result, the source tree,
-    or the pack the plan came from. A ``human_approved`` state is the record's own
-    assertion, not a verified one, and a bundle with no record is unreviewed, not rejected.
-    A record beside an unreadable or invalid plan or decisions file raises instead of
-    reporting a state.
+    ``stale`` means the decisions file or the plan changed after the record was written, or
+    that the two no longer bind to the same input hash, which is the only tampering this can
+    see: it does not check the result, the source tree, or the pack the plan came from. A
+    ``human_approved`` state is the record's own assertion, not a verified one, and a bundle
+    with no record is unreviewed, not rejected. A record beside an unreadable or invalid plan
+    or decisions file raises instead of reporting a state, and so does a bundle reached
+    through a symlink.
     """
-    evaluator = Path(bundle_dir) / EVALUATOR_DIR
+    evaluator = _refuse_symlinked_dirs(bundle_dir) / EVALUATOR_DIR
     record_path = evaluator / RECORD_FILE
     if not record_path.is_file():
         return "missing"
@@ -358,6 +409,8 @@ def review_status(bundle_dir: str | PathLike[str]) -> str:
         return "stale"
     if record["plan_sha256"] != canonical_sha256(plan):
         return "stale"
+    if decisions["input_hash"] != plan["input_hash"]:
+        return "stale"
     return record["state"]
 
 
@@ -366,9 +419,10 @@ def load_evaluator(bundle_dir: str | PathLike[str]) -> tuple[dict, dict, dict | 
 
     Loading validates each document against its contract. It does not check that the three
     agree with each other or with ``result.json``; use :func:`review_status` for staleness
-    and :func:`sastbench.scoring.score` for the result binding.
+    and :func:`sastbench.scoring.score` for the result binding. A bundle reached through a
+    symlink is refused rather than read.
     """
-    evaluator = Path(bundle_dir) / EVALUATOR_DIR
+    evaluator = _refuse_symlinked_dirs(bundle_dir) / EVALUATOR_DIR
     plan = load_document(evaluator / PLAN_FILE, PLAN_KIND)
     decisions = load_document(evaluator / DECISIONS_FILE, DECISIONS_KIND)
     record_path = evaluator / RECORD_FILE

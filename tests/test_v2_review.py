@@ -579,3 +579,157 @@ def test_assert_draft_only_refuses_a_hand_built_human_verdict():
     quiet["control_assessments"][0]["decision"] = "quiet"
     with pytest.raises(ContractError, match="control decisions must stay"):
         _assert_draft_only(quiet)
+
+
+def approved_bundle(tmp_path: Path) -> tuple[Path, dict, dict, dict]:
+    """A bundle whose record on disk carries one recorded approval of the decisions beside it."""
+    bundle, plan, result, decisions = written_bundle(tmp_path)
+    (bundle / "result.json").write_text(canonical_json(result) + "\n", encoding="utf-8")
+    approved = approve_review(load_evaluator(bundle)[2], decisions, plan, reviewer="A. Reviewer",
+                              note="read both routed candidates", clock=CLOCK)
+    (bundle / "evaluator" / "review-record.json").write_text(
+        canonical_json(approved) + "\n", encoding="utf-8")
+    assert review_status(bundle) == "human_approved"
+    return bundle, plan, decisions, approved
+
+
+def hand_edit_decisions(bundle: Path, decisions: dict) -> dict:
+    """Accept one routed candidate in the decisions file, the way a reviewer would in an editor."""
+    edited = json.loads(canonical_json(decisions))
+    edited["claim_matches"][0]["decision"] = "accepted"
+    edited["claim_matches"][0]["reason"] = "read the sink by hand and accepted the match"
+    (bundle / "evaluator" / "decisions.json").write_text(
+        canonical_json(edited) + "\n", encoding="utf-8")
+    return edited
+
+
+def test_record_decisions_keeps_earlier_reviews_in_the_new_draft_record(tmp_path):
+    bundle, plan, decisions, approved = approved_bundle(tmp_path)
+    edited = hand_edit_decisions(bundle, decisions)
+
+    redrafted = record_decisions(bundle, clock=LATER, notes=["re-drafted after a hand edit"])
+
+    assert redrafted["state"] == "draft"
+    assert redrafted["reviews"] == approved["reviews"]
+    assert [entry["reviewer"] for entry in redrafted["reviews"]] == ["A. Reviewer"]
+    # The carried entry still names the decisions it was recorded against, not the edited ones.
+    assert redrafted["reviews"][0]["decisions_sha256"] == canonical_sha256(decisions)
+    assert redrafted["decisions_sha256"] == canonical_sha256(edited)
+    assert redrafted["plan_sha256"] == canonical_sha256(plan)
+    assert redrafted["notes"] == ["re-drafted after a hand edit"]
+    assert review_status(bundle) == "draft"
+    assert (bundle / "evaluator" / "review-record.json").read_bytes() == \
+        (canonical_json(redrafted) + "\n").encode("utf-8")
+
+
+def test_record_decisions_refuses_a_bundle_reached_through_a_symlink(tmp_path):
+    bundle, _plan, _result, decisions = written_bundle(tmp_path)
+    hand_edit_decisions(bundle, decisions)
+    record_path = bundle / "evaluator" / "review-record.json"
+    before = record_path.read_bytes()
+    linked_bundle = tmp_path / "linked-bundle"
+    linked_bundle.symlink_to(bundle, target_is_directory=True)
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(tmp_path, target_is_directory=True)
+
+    with pytest.raises(ContractError, match="symlinked directory"):
+        record_decisions(linked_bundle, clock=LATER)
+
+    with pytest.raises(ContractError, match="symlink in the path"):
+        record_decisions(linked_parent / "bundle", clock=LATER)
+
+    assert record_path.read_bytes() == before
+    assert not list((bundle / "evaluator").glob("*.tmp"))
+
+
+def test_record_decisions_keeps_the_permissions_of_the_record_it_replaces(tmp_path):
+    bundle, _plan, _result, decisions = written_bundle(tmp_path)
+    record_path = bundle / "evaluator" / "review-record.json"
+    record_path.chmod(0o644)
+    hand_edit_decisions(bundle, decisions)
+
+    record_decisions(bundle, clock=LATER)
+
+    assert record_path.stat().st_mode & 0o777 == 0o644
+
+
+def mismatched_record(plan: dict, decisions: dict) -> dict:
+    """A hand-built record binding *plan* and *decisions*, which name different input hashes."""
+    record = {**review_record(make_plan(input_hash=decisions["input_hash"]), decisions, clock=CLOCK),
+              "plan_sha256": canonical_sha256(plan)}
+    assert record["decisions_sha256"] == canonical_sha256(decisions)
+    return validate_document("review-record", record)
+
+
+def decisions_at(input_hash: str) -> dict:
+    return draft_decisions(make_plan(input_hash=input_hash),
+                           make_result(default_claims(), input_hash=input_hash), default_pack())
+
+
+def test_approval_refuses_decisions_and_a_plan_bound_to_different_inputs():
+    plan = make_plan()
+    decisions = decisions_at(OTHER_HASH)
+    record = mismatched_record(plan, decisions)
+
+    with pytest.raises(ContractError, match="different input hashes"):
+        approve_review(record, decisions, plan, reviewer="A. Reviewer", note="", clock=LATER)
+
+    assert record["state"] == "draft" and record["reviews"] == []
+
+
+@pytest.mark.parametrize("reviewer", [None, 7, ["A. Reviewer"]])
+def test_approval_refuses_a_reviewer_name_that_is_not_a_string(reviewer):
+    plan = make_plan()
+    decisions = draft_decisions(plan, make_result(default_claims()), default_pack())
+    record = review_record(plan, decisions, clock=CLOCK)
+
+    with pytest.raises(ContractError, match="explicit reviewer"):
+        approve_review(record, decisions, plan, reviewer=reviewer, note="", clock=LATER)
+
+    assert record["state"] == "draft"
+
+
+def test_status_is_stale_when_the_decisions_and_the_plan_name_different_inputs(tmp_path):
+    plan = make_plan()
+    decisions = decisions_at(OTHER_HASH)
+    record = mismatched_record(plan, decisions)
+    evaluator = tmp_path / "bundle" / "evaluator"
+    evaluator.mkdir(parents=True)
+    for name, document in (("plan.json", plan), ("decisions.json", decisions),
+                           ("review-record.json", record)):
+        (evaluator / name).write_text(canonical_json(document) + "\n", encoding="utf-8")
+
+    assert review_status(tmp_path / "bundle") == "stale"
+
+
+def test_status_and_load_evaluator_refuse_a_bundle_reached_through_a_symlink(tmp_path):
+    bundle, _plan, _result, _decisions = written_bundle(tmp_path)
+    linked_bundle = tmp_path / "linked-bundle"
+    linked_bundle.symlink_to(bundle, target_is_directory=True)
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(tmp_path, target_is_directory=True)
+
+    for reached in (review_status, load_evaluator):
+        with pytest.raises(ContractError, match="symlinked directory"):
+            reached(linked_bundle)
+        with pytest.raises(ContractError, match="symlink in the path"):
+            reached(linked_parent / "bundle")
+
+    assert review_status(bundle) == "draft"
+
+
+def test_write_keeps_a_plan_whose_bytes_differ_but_whose_document_is_the_same(tmp_path):
+    plan = make_plan()
+    decisions = draft_decisions(plan, make_result(default_claims()), default_pack())
+    record = review_record(plan, decisions, clock=CLOCK)
+    evaluator = tmp_path / "bundle" / "evaluator"
+    evaluator.mkdir(parents=True)
+    spaced = json.dumps(plan, indent=2, ensure_ascii=False, sort_keys=False) + "\n"
+    assert spaced != canonical_json(plan) + "\n"
+    (evaluator / "plan.json").write_text(spaced, encoding="utf-8")
+
+    write_evaluator_records(tmp_path / "bundle", plan, decisions, record)
+
+    # The file is kept as it stands, not rewritten into canonical form.
+    assert (evaluator / "plan.json").read_text(encoding="utf-8") == spaced
+    assert review_status(tmp_path / "bundle") == "draft"
