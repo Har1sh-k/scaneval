@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import re
+import unicodedata
 from importlib.resources import files
 from os import PathLike
 from typing import Any
@@ -48,6 +49,28 @@ def canonical_sha256(value: Any) -> str:
         raise ContractError(f"value is not canonical UTF-8 JSON: {exc}") from exc
     digest = hashlib.sha256(encoded).hexdigest()
     return f"sha256:{digest}"
+
+
+# Space, separator, format, and control characters: a string made only of these says nothing.
+_BLANK_CATEGORIES = frozenset({"Zs", "Zl", "Zp", "Cf", "Cc"})
+
+
+def is_stated(value: Any) -> bool:
+    """True when *value* is a string that both survives stripping and holds a non-blank character.
+
+    Blank here means Unicode category ``Zs`` (spaces), ``Zl``/``Zp`` (line and paragraph
+    separators), ``Cf`` (zero-width and directional marks), or ``Cc`` (control characters), so a
+    name made only of U+200B zero-width spaces is not a name even though stripping it leaves a
+    non-empty string. Both tests must pass. This judges characters only: it says nothing about
+    whether a name belongs to a person or a reason explains anything.
+
+    :func:`sastbench.cases._is_stated` applies the same rule one layer up, where the write paths
+    live; the copy here exists because :mod:`sastbench.cases` imports this module and not the
+    other way round, and a test pins the two functions to the same answers.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return False
+    return any(unicodedata.category(ch) not in _BLANK_CATEGORIES for ch in value)
 
 
 def _schema(kind: str) -> dict[str, Any]:
@@ -213,8 +236,12 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
     ``human_approved`` case makes the same claim about its check sets as a mechanically checked
     one unless it raises ``checks_failed``, and it cannot stand under a latest review that
     rejected it. A snapshot whose recorded checks say its hash was confirmed must carry that
-    hash. These compare recorded fields with each other: none of them reads source, a reviewer,
-    or a scanner, so a pack that passes here is consistent, not correct.
+    hash. Every recorded review names a reviewer and every admission names who decided it, by
+    the same :func:`is_stated` rule the write paths apply, so a hand-edited pack cannot claim a
+    review or an admission by an unnamed person. These compare recorded fields with each other:
+    none of them reads source, a reviewer, or a scanner, so a pack that passes here is
+    consistent, not correct. A stated name is a string with a character in it; whether it names
+    a real person who did the work is outside anything this file can see.
     """
     snapshots = [snapshot["snapshot_id"] for snapshot in document["snapshots"]]
     _unique(snapshots, "snapshot_id")
@@ -247,6 +274,11 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
         validation = case["validation"]
         state = validation["review_state"]
         reviews = validation["reviews"]
+        for index, review in enumerate(reviews):
+            if not is_stated(review["reviewer"]):
+                raise ContractError(
+                    f"{label}: a recorded review must name its reviewer; "
+                    f"validation.reviews[{index}].reviewer is blank")
         approvals = [r for r in reviews if r["decision"] == "approve"]
         referenced = [target["snapshot_id"]] + [control["snapshot_id"] for control in case["controls"]]
         unchecked = sorted({snapshot for snapshot in referenced
@@ -296,12 +328,26 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
     _unique(target_ids, "target_id")
     _unique(control_ids, "control_id")
     case_ids = {case["case_id"] for case in document["cases"]}
-    for admission in document["admissions"]:
+    for index, admission in enumerate(document["admissions"]):
         if admission["case_id"] not in case_ids:
             raise ContractError(f"admission references unknown case {admission['case_id']}")
+        if not is_stated(admission["by"]):
+            raise ContractError(
+                f"a recorded admission must name who decided it; admissions[{index}].by is blank")
 
 
 def _validate_review_record(document: dict[str, Any]) -> None:
+    """Check what the record asserts about itself; it says nothing about the decisions' quality.
+
+    Every recorded review names a reviewer, by the same :func:`is_stated` rule the write paths
+    apply, so a hand-edited record cannot report an approval by an unnamed person. An approved
+    record carries at least one review and its latest review binds to the current decisions
+    hash. Whether the named person read anything is outside what this can see.
+    """
+    for index, review in enumerate(document["reviews"]):
+        if not is_stated(review["reviewer"]):
+            raise ContractError(
+                f"a recorded review must name its reviewer; reviews[{index}].reviewer is blank")
     if document["state"] == "human_approved":
         if not document["reviews"]:
             raise ContractError("human_approved review records need at least one review entry")
@@ -383,12 +429,19 @@ def validate_document(kind: str, document: dict[str, Any]) -> dict[str, Any]:
 def load_document(path: str | PathLike[str], kind: str) -> dict[str, Any]:
     """Load a JSON object from *path* and validate it as *kind*.
 
-    A file that cannot be opened or read, whose bytes are not UTF-8, or whose text is not JSON
-    is refused as a :class:`ContractError` naming *path*, so a caller reporting the failure can
-    say which file it was. A non-UTF-8 file raises :class:`UnicodeDecodeError`, which is a
-    :class:`ValueError` and not a :class:`json.JSONDecodeError`, so it is caught here by name
-    rather than by the JSON error alone. Anything the document itself violates is reported by
-    :func:`validate_document`, whose messages name the field, not the file.
+    A file that cannot be opened or read, whose bytes are not UTF-8, or whose text the JSON
+    parser will not turn into a value is refused as a :class:`ContractError` naming *path*, so a
+    caller reporting the failure can say which file it was. Reading is why :class:`ValueError`
+    is caught whole rather than by subclass: a non-UTF-8 file raises :class:`UnicodeDecodeError`,
+    malformed syntax raises :class:`json.JSONDecodeError`, an integer literal longer than
+    :func:`sys.get_int_max_str_digits` (4300 digits unless the interpreter was told otherwise;
+    this module does not change that limit) raises a bare :class:`ValueError`, and the hooks here
+    raise :class:`ContractError` for a duplicate key or a non-finite constant. A document nested
+    past the interpreter's recursion limit raises :class:`RecursionError`, which is not a
+    :class:`ValueError` at all, so it is named too rather than escaping as the
+    :class:`RuntimeError` it also is. Anything the document itself violates is reported by
+    :func:`validate_document`, whose messages name the field, not the file; that call sits
+    outside this ``try`` so its messages are not rewritten to look like a read failure.
     """
 
     try:
@@ -398,6 +451,6 @@ def load_document(path: str | PathLike[str], kind: str) -> dict[str, Any]:
                 object_pairs_hook=_strict_object,
                 parse_constant=_reject_json_constant,
             )
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         raise ContractError(f"could not load {path}: {exc}") from exc
     return validate_document(kind, document)

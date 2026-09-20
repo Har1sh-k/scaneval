@@ -29,11 +29,13 @@ status`` resolve the bundle path and report on the bundle it reaches, so a bundl
 a symlinked parent is read rather than refused. They write nothing into the bundle.
 
 No command writes inside a materialized trial directory: the output path of ``plan``, ``run``,
-``demo``, ``score``, ``replay`` and ``report``, the pack path of ``corpus init``, the bundle
-argument of ``review init``, ``review record`` and ``review approve``, and the directory
-``corpus validate`` exports a snapshot into, are each refused when a trial's ``provenance.json``
-and ``source`` sit in them or above them. That keeps evaluator material out of the tree a
-scanner is handed; it is a check on the path, not an isolation boundary.
+``demo``, ``score``, ``replay`` and ``report``, the pack path of ``corpus init`` and of every
+corpus command that rewrites a pack, the bundle argument of all four ``review`` subcommands, and
+the directory ``corpus validate`` exports a snapshot into, are each refused when a trial's
+``provenance.json`` and ``source`` sit in them or above them. That keeps evaluator material out
+of the tree a scanner is handed; it is a check on the path, not an isolation boundary. ``review
+status`` is checked although it only reads, so the ``review`` group is uniform; the other
+read-only commands read whatever path they are given.
 
 Exit codes. 2 means the command could not be carried out: a usage or contract error, a refused
 overwrite, a failed fetch or export. 1 means the command ran and reports a negative result: a
@@ -51,6 +53,9 @@ from urllib.parse import urlsplit
 
 from . import __version__, cases, materialize, review, runner
 from .adapters.base import AdapterError
+# _is_stated is imported rather than re-implemented so a blank value is judged by one rule here,
+# in cases, and in review: a string made only of zero-width or control characters is not a value.
+from .cases import _is_stated
 from .contracts import CONTRACT_KINDS, ContractError, canonical_json, load_document
 from .demo import SOURCE, demo_documents
 from .execution import ExecutionError
@@ -98,11 +103,19 @@ def _json(value: dict) -> str:
 
 
 def _read_json(path: Path) -> dict:
-    """Load a supplied JSON artifact that has no contract of its own. Content is data, not truth."""
+    """Load a supplied JSON artifact that has no contract of its own. Content is data, not truth.
+
+    Every way the parser can refuse the text is named as a refusal carrying *path*, the same way
+    :func:`sastbench.contracts.load_document` names a contract file: bytes that are not UTF-8 and
+    malformed syntax raise a :class:`ValueError` subclass, an integer literal longer than the
+    interpreter's ``int_max_str_digits`` limit raises a bare :class:`ValueError`, and a document
+    nested past the recursion limit raises :class:`RecursionError`. None of them should reach the
+    caller as a traceback or as an unnamed file.
+    """
     try:
         with open(path, encoding="utf-8") as handle:
             value = json.load(handle)
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         raise ContractError(f"could not load {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise ContractError(f"{path} must contain a JSON object")
@@ -148,12 +161,18 @@ def _save_pack(path: Path, pack: dict) -> None:
 def _pack_for_change(args: argparse.Namespace) -> dict:
     """Load the pack a command is about to rewrite, applying ``--new-version`` when it is given.
 
+    This is the one door to a pack this tool rewrites, so the trial-directory check on
+    ``args.pack`` sits here and covers every command that goes through it. It runs before the
+    pack is read, so a pack named inside an exported source tree is refused whether or not a file
+    is there.
+
     A pack that is no longer a draft is what plans, manifests, and reports already cite by
     version and hash, so this refuses to edit one in place. ``--new-version`` opens a new draft
     version instead and records the version and status it came from in the pack notes. Reopening
     a pack changes nothing else: it re-checks nothing, approves nothing, and withdraws no
     recorded review or admission.
     """
+    _refuse_trial_path(args.pack)
     pack = cases.load_pack(args.pack)
     version = getattr(args, "new_version", None)
     if version is None:
@@ -163,7 +182,7 @@ def _pack_for_change(args: argparse.Namespace) -> dict:
                 "--new-version <version>, which opens a new draft version of this pack")
         return pack
     version = version.strip()
-    if not version:
+    if not _is_stated(version):
         raise ContractError("--new-version requires a non-blank version")
     if version == pack["version"]:
         raise ContractError(
@@ -251,7 +270,7 @@ def _legacy_document(path: Path) -> dict:
         if not isinstance(repository, str):
             raise ContractError(f"{path}: realWorld.repo must be a string")
         _reject_credentials(f"{path}: realWorld.repo", repository)
-    if real.get("fixCommit") and not (isinstance(repository, str) and repository.strip()):
+    if real.get("fixCommit") and not _is_stated(repository):
         raise ContractError(f"{path}: realWorld.fixCommit needs realWorld.repo as a non-blank "
                             "string; the fix evidence is recorded as '<repo>@<sha>'")
     regions = legacy.get("regions", [])
@@ -261,7 +280,7 @@ def _legacy_document(path: Path) -> dict:
         label = f"{path}: regions[{index}]"
         if not isinstance(region, dict):
             raise ContractError(f"{label} must be a JSON object")
-        if not isinstance(region.get("path"), str) or not region["path"].strip():
+        if not _is_stated(region.get("path")):
             raise ContractError(f"{label} must carry a non-blank path string")
         bounds = [key for key in ("startLine", "endLine") if key in region]
         if len(bounds) == 1:
@@ -305,9 +324,15 @@ def _refuse_trial_path(output: Path) -> None:
     A trial holds the exported source a scanner is handed, so anything this tool writes inside
     one would put evaluator material where the scanned tree lives. Every command that names a
     path it may write checks it: ``plan``, ``run``, ``demo``, the ``--output`` of ``score``,
-    ``replay`` and ``report``, the pack ``corpus init`` creates, the bundle ``review init``,
-    ``review record`` and ``review approve`` write into, and the trial ``corpus validate`` is
-    about to export into. A trial is recognized by a ``provenance.json`` file beside a
+    ``replay`` and ``report``, the pack ``corpus init`` creates, the pack every corpus command
+    that rewrites one is given (``add-snapshot``, ``import``, ``validate --snapshot-id``,
+    ``approve``, ``admit``, ``disposition``, all through :func:`_pack_for_change`), the bundle
+    ``review init``, ``review record`` and ``review approve`` write into, and the trial ``corpus
+    validate`` is about to export into. ``review status`` checks the bundle it reads as well, so
+    every ``review`` subcommand refuses the same paths. Commands that only read are otherwise
+    not checked: a bundle handed to ``replay`` or ``report``, a pack that is only summarized by
+    ``corpus validate`` or read by ``plan`` and ``review init``, and a supplied artifact are read
+    wherever they sit. A trial is recognized by a ``provenance.json`` file beside a
     ``source`` directory; any other directory is left alone. *output* itself is examined along
     with its parents, so a bundle that is itself a trial root is refused as well as one sitting
     under one; a path that does not exist yet carries no marker and is judged by its parents
@@ -567,7 +592,12 @@ def _review_approve(args: argparse.Namespace) -> int:
 
 
 def _review_status(args: argparse.Namespace) -> int:
-    """Print the review state of one bundle. This reads; it writes nothing and approves nothing."""
+    """Print the review state of one bundle. This reads; it writes nothing and approves nothing.
+
+    The bundle is refused inside a trial directory the way the writing review commands refuse
+    one, so no spelling of ``review`` treats an exported source tree as a place a bundle lives.
+    """
+    _refuse_trial_path(args.bundle)
     if not args.bundle.is_dir():
         raise ContractError(f"{args.bundle} is not a bundle directory; review status reads "
                             "evaluator/review-record.json inside one")

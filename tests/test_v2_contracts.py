@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
 
 import pytest
 
@@ -9,6 +10,7 @@ from sastbench.contracts import (
     ContractError,
     canonical_json,
     canonical_sha256,
+    is_stated,
     load_document,
     validate_document,
 )
@@ -463,3 +465,70 @@ def test_load_document_refuses_a_utf_8_byte_order_mark_naming_the_file(tmp_path)
 
     with pytest.raises(ContractError, match="could not load"):
         load_document(path, "scan-request")
+
+
+
+def review_record(state: str = "human_approved") -> dict:
+    """One recorded human approval of a decisions file, bound to it by hash."""
+    return {
+        "schema_version": "2.0",
+        "run_id": "run-1",
+        "decisions_sha256": HASH,
+        "plan_sha256": HASH,
+        "state": state,
+        "created_at": "2026-09-20T15:00:00+00:00",
+        "reviews": [{"reviewer": "R. Eviewer", "at": "2026-09-20T15:00:00+00:00",
+                     "decisions_sha256": HASH, "note": "read every routed claim"}],
+        "notes": [],
+    }
+
+
+def test_load_document_refuses_an_integer_literal_the_parser_will_not_read_naming_the_file(tmp_path):
+    """An over-long integer literal raises a bare ValueError, which is not a JSON decode error."""
+    path = tmp_path / "request.json"
+    digits = "1" * (sys.get_int_max_str_digits() + 1)
+    payload = json.dumps(scan_request()).replace('"timeout_seconds": 60', f'"timeout_seconds": {digits}')
+    path.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(ContractError) as refusal:
+        load_document(path, "scan-request")
+
+    assert str(path) in str(refusal.value) and "could not load" in str(refusal.value)
+    assert isinstance(refusal.value.__cause__, ValueError)
+    assert not isinstance(refusal.value.__cause__, json.JSONDecodeError)
+
+
+def test_load_document_refuses_a_document_nested_past_the_recursion_limit_naming_the_file(tmp_path):
+    """Deep nesting raises RecursionError, a RuntimeError the CLI would otherwise report unnamed."""
+    path = tmp_path / "request.json"
+    depth = 200_000
+    path.write_text("[" * depth + "]" * depth, encoding="utf-8")
+
+    with pytest.raises(ContractError) as refusal:
+        load_document(path, "scan-request")
+
+    assert str(path) in str(refusal.value) and "could not load" in str(refusal.value)
+    assert isinstance(refusal.value.__cause__, RecursionError)
+
+
+def test_the_blank_value_rule_is_the_one_the_write_paths_apply():
+    """contracts.is_stated and cases._is_stated must answer alike; neither may drift alone."""
+    from sastbench.cases import _is_stated
+
+    values = ["", " ", "\t", "\u200b", "\u200b\ufeff", "\xad", "\u2028", "\x00",
+              "R. Eviewer", " R. Eviewer ", "\u200bR", "0", 5, None, ["R. Eviewer"]]
+    assert [is_stated(value) for value in values] == [_is_stated(value) for value in values]
+    assert is_stated("R. Eviewer") and is_stated("\u200bR")
+    assert not is_stated("\u200b") and not is_stated("\u2028") and not is_stated(5)
+
+
+@pytest.mark.parametrize("reviewer", ["\u200b", "\u200b\ufeff", "\xad", "   "])
+@pytest.mark.parametrize("state", ["draft", "human_approved"])
+def test_a_review_record_cannot_report_a_review_by_an_unnamed_person(state, reviewer):
+    """A hand-edited record whose reviewer is only zero-width characters names nobody."""
+    document = review_record(state)
+    assert validate_document("review-record", document) is document
+
+    document["reviews"][0]["reviewer"] = reviewer
+    with pytest.raises(ContractError, match="must name its reviewer"):
+        validate_document("review-record", document)

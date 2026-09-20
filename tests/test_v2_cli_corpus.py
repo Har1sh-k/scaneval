@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 import pytest
@@ -1339,3 +1340,194 @@ def test_review_approve_refuses_a_reviewer_name_made_only_of_format_characters(t
     assert code == 2 and "explicit reviewer name" in err
     assert record_path.read_bytes() == before
     assert load_document(record_path, "review-record")["state"] == "draft"
+
+
+def test_every_corpus_command_that_rewrites_a_pack_refuses_one_inside_a_trial_directory(tmp_path, capsys,
+                                                                                        checked_pack):
+    """A pack a command would rewrite is evaluator material, so it never lives in exported source."""
+    trial = tmp_path / "trial" / "snap-a"
+    assert (trial / "provenance.json").is_file() and (trial / "source").is_dir()
+    planted = trial / "source" / "pack.json"
+    planted.write_bytes(checked_pack["pack"].read_bytes())
+    before = planted.read_bytes()
+    capsys.readouterr()
+
+    mutating = {
+        "add-snapshot": snapshot_argv(planted, checked_pack["repo"], checked_pack["commit"], "snap-b"),
+        "import": import_argv(planted, "case-second", "--finding", str(write_finding(tmp_path))),
+        "validate": ["corpus", "validate", str(planted), "--snapshot-id", "snap-a",
+                     "--cache-root", str(tmp_path / "planted-cache"),
+                     "--trial-root", str(tmp_path / "planted-trial")],
+        "approve": ["corpus", "approve", str(planted), "--case-id", "case-finding",
+                    "--reviewer", "R. Eviewer", "--role", "curator", "--level", "L2",
+                    "--note", "structural review"],
+        "admit": ["corpus", "admit", str(planted), "--case-id", "case-finding", "--decision",
+                  "admitted", "--by", "J. Curator", "--reason", "pilot slice"],
+        "disposition": ["corpus", "disposition", str(planted), "--case-id", "case-finding",
+                        "--value", "validate", "--reason", "evidence reviewed"],
+    }
+    for argv in mutating.values():
+        code, _, err = cli(capsys, *argv)
+        assert code == 2 and "inside the trial directory" in err
+        assert err.startswith("sastbench: ") and "Traceback" not in err
+        assert planted.read_bytes() == before
+    assert not (tmp_path / "planted-cache").exists() and not (tmp_path / "planted-trial").exists()
+
+    # The read-only spelling writes nothing, so it still summarizes a pack wherever it sits.
+    code, out, _ = cli(capsys, "corpus", "validate", str(planted))
+    assert code == 0 and json.loads(out)["pack_id"] == "cli-pilot"
+
+
+def test_review_status_refuses_a_bundle_inside_a_trial_directory(tmp_path, capsys, checked_pack):
+    """Every review subcommand treats a trial directory the same way, reading ones included."""
+    trial = tmp_path / "trial" / "snap-a"
+    planted = trial / "source" / "bundle"
+    planted.mkdir(parents=True)
+    capsys.readouterr()
+
+    code, out, err = cli(capsys, "review", "status", str(planted))
+    assert code == 2 and "inside the trial directory" in err and out == ""
+    assert err.startswith("sastbench: ") and "Traceback" not in err
+
+    code, out, err = cli(capsys, "review", "status", str(trial))
+    assert code == 2 and "which is itself the trial directory" in err and out == ""
+
+    outside = make_bundle(tmp_path, checked_pack)
+    capsys.readouterr()
+    code, out, _ = cli(capsys, "review", "status", str(outside))
+    assert code == 0 and out.strip() == "missing"
+
+
+def test_new_version_refuses_a_value_made_only_of_zero_width_characters(tmp_path, capsys, checked_pack):
+    """A version made only of format characters is not a version a plan or report could cite."""
+    pack = checked_pack["pack"]
+    release_pack(pack)
+    before = pack.read_bytes()
+    capsys.readouterr()
+
+    for version in ("\u200b", " \u200b\ufeff ", "\xad"):
+        code, _, err = cli(capsys, "corpus", "admit", str(pack), "--case-id", "case-finding",
+                           "--decision", "admitted", "--by", "J. Curator", "--reason", "pilot slice",
+                           "--new-version", version)
+        assert code == 2 and "non-blank version" in err
+        assert pack.read_bytes() == before
+
+
+@pytest.mark.parametrize("fields, message", [
+    ({"regions": [{"path": "\u200b", "startLine": 5, "endLine": 5}]},
+     "regions[0] must carry a non-blank path string"),
+    ({"regions": [{"path": "\xad "}]}, "regions[0] must carry a non-blank path string"),
+    ({"realWorld": {"fixCommit": "c" * 40, "repo": "\u200b\ufeff"}},
+     "realWorld.fixCommit needs realWorld.repo"),
+], ids=["region-path", "region-path-format-characters", "fix-commit-repository"])
+def test_import_refuses_legacy_values_made_only_of_zero_width_characters(tmp_path, capsys, upstream,
+                                                                        fields, message):
+    """Stripping leaves these non-empty, so the blank rule is the character rule, not truthiness."""
+    pack = pack_with_snapshot(tmp_path, upstream)
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps(legacy_record(**fields)) + "\n", encoding="utf-8")
+    capsys.readouterr()
+
+    code, _, err = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
+    assert code == 2 and message in err
+    assert err.startswith("sastbench: ") and "Traceback" not in err
+    assert read_pack(pack)["cases"] == []
+
+
+def deep_json(depth: int = 200_000) -> str:
+    """Nested past any recursion limit: the parser raises RecursionError rather than a value."""
+    return "[" * depth + "]" * depth
+
+
+def long_integer_json() -> str:
+    """One integer literal past int_max_str_digits: the parser raises a bare ValueError."""
+    digits = "1" * (sys.get_int_max_str_digits() + 1)
+    return '{"allegation": "shell", "path": "src/app.py", "start_line": ' + digits + ', "end_line": 5}'
+
+
+@pytest.mark.parametrize("text", [deep_json(), long_integer_json()],
+                         ids=["nested-too-deep", "integer-too-long"])
+def test_a_supplied_finding_the_parser_cannot_read_is_refused_naming_the_file(tmp_path, capsys,
+                                                                             upstream, text):
+    pack = pack_with_snapshot(tmp_path, upstream)
+    finding = tmp_path / "unreadable-finding.json"
+    finding.write_text(text, encoding="utf-8")
+    capsys.readouterr()
+
+    code, _, err = cli(capsys, *import_argv(pack, "case-finding", "--finding", str(finding)))
+    assert code == 2 and f"could not load {finding}" in err
+    assert err.startswith("sastbench: ") and "Traceback" not in err
+    assert read_pack(pack)["cases"] == []
+
+
+@pytest.mark.parametrize("text", [deep_json(), long_integer_json()],
+                         ids=["nested-too-deep", "integer-too-long"])
+def test_a_contract_file_the_parser_cannot_read_is_refused_naming_the_file(tmp_path, capsys, text):
+    path = tmp_path / "unreadable-pack.json"
+    path.write_text(text, encoding="utf-8")
+    capsys.readouterr()
+
+    code, _, err = cli(capsys, "validate", "case-pack", str(path))
+    assert code == 2 and f"could not load {path}" in err
+    assert err.startswith("sastbench: ") and "Traceback" not in err
+
+
+def test_a_hand_edited_pack_cannot_claim_a_review_or_an_admission_by_an_unnamed_person(tmp_path, capsys,
+                                                                                       checked_pack):
+    """The write paths refuse a blank name; the contract must refuse one a text editor put there."""
+    pack = checked_pack["pack"]
+    assert main(["corpus", "disposition", str(pack), "--case-id", "case-finding", "--value",
+                 "validate", "--reason", "evidence reviewed; worth validating"]) == 0
+    assert main(["corpus", "approve", str(pack), "--case-id", "case-finding", "--reviewer",
+                 "R. Eviewer", "--role", "independent_reviewer", "--level", "L3",
+                 "--note", "read the source"]) == 0
+    assert main(["corpus", "admit", str(pack), "--case-id", "case-finding", "--decision", "admitted",
+                 "--by", "J. Curator", "--reason", "pilot slice"]) == 0
+    reviewed = tmp_path / "reviewed-plan.json"
+    assert main(["plan", "--pack", str(pack), "--snapshot-id", "snap-a", "--tree-hash",
+                 checked_pack["tree_hash"], "--output", str(reviewed)]) == 0
+    assert load_document(reviewed, "evaluation-plan")["scope"] == "reviewed"
+    capsys.readouterr()
+
+    document = read_pack(pack)
+    document["cases"][0]["validation"]["reviews"][0]["reviewer"] = "\u200b"
+    pack.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    code, _, err = cli(capsys, "validate", "case-pack", str(pack))
+    assert code == 2 and "must name its reviewer" in err and "Traceback" not in err
+
+    unnamed = tmp_path / "unnamed-plan.json"
+    code, _, err = cli(capsys, "plan", "--pack", str(pack), "--snapshot-id", "snap-a", "--tree-hash",
+                       checked_pack["tree_hash"], "--output", str(unnamed))
+    assert code == 2 and "must name its reviewer" in err
+    assert not unnamed.exists()
+
+    document["cases"][0]["validation"]["reviews"][0]["reviewer"] = "R. Eviewer"
+    document["admissions"][0]["by"] = "\u200b\ufeff"
+    pack.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    code, _, err = cli(capsys, "validate", "case-pack", str(pack))
+    assert code == 2 and "must name who decided it" in err and "Traceback" not in err
+
+
+def test_a_hand_edited_review_record_cannot_report_an_approval_by_an_unnamed_person(tmp_path, capsys,
+                                                                                    checked_pack):
+    bundle = make_bundle(tmp_path, checked_pack)
+    assert main(["review", "init", str(bundle), "--pack", str(checked_pack["pack"])]) == 0
+    assert main(["review", "approve", str(bundle), "--reviewer", "R. Eviewer",
+                 "--note", "read every routed claim"]) == 0
+    record_path = bundle / "evaluator" / "review-record.json"
+    capsys.readouterr()
+
+    code, out, _ = cli(capsys, "review", "status", str(bundle))
+    assert code == 0 and out.strip() == "human_approved"
+
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["reviews"][0]["reviewer"] = "\u200b"
+    record_path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    code, out, err = cli(capsys, "review", "status", str(bundle))
+    assert code == 2 and "must name its reviewer" in err and "human_approved" not in out
+
+    code, _, err = cli(capsys, "replay", str(bundle))
+    assert code == 2 and "must name its reviewer" in err and "Traceback" not in err
