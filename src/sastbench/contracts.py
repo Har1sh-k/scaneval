@@ -15,7 +15,7 @@ from jsonschema import Draft202012Validator
 
 CONTRACT_KINDS = frozenset(
     {"scan-request", "scan-result", "evaluation-plan", "review-decisions", "execution-record",
-     "case-pack", "review-record", "run-config"}
+     "case-pack", "review-record", "run-config", "run-manifest"}
 )
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
 
@@ -140,13 +140,21 @@ def _validate_scan_result(document: dict[str, Any]) -> None:
 
 
 def _validate_evaluation_plan(document: dict[str, Any]) -> None:
+    """Scope carries draft status; a draft plan keeps each item's real validation level.
+
+    A draft plan may therefore carry an L3 or L4 item: the scope, not a rewritten level, says
+    the plan as a whole is not reviewed evidence. A reviewed plan stays L3/L4 only, and a
+    diagnostic plan stays fixture only.
+    """
     _unique([target["target_id"] for target in document["targets"]], "target_id")
     _unique([control["control_id"] for control in document["controls"]], "control_id")
     levels = [item["validation_level"] for item in document["targets"]]
     levels += [item["validation_level"] for item in document["controls"]]
-    allowed = {"reviewed": {"L3", "L4"}, "draft": {"L1", "L2"}, "diagnostic": {"fixture"}}[document["scope"]]
+    allowed = {"reviewed": {"L3", "L4"}, "draft": {"L1", "L2", "L3", "L4"},
+               "diagnostic": {"fixture"}}[document["scope"]]
     if any(level not in allowed for level in levels):
-        label = {"reviewed": "L3 or L4", "draft": "L1 or L2", "diagnostic": "fixture"}[document["scope"]]
+        label = {"reviewed": "L3 or L4", "draft": "L1, L2, L3, or L4",
+                 "diagnostic": "fixture"}[document["scope"]]
         raise ContractError(f"{document['scope']} plans may only use {label} validation")
 
 
@@ -236,6 +244,38 @@ def _validate_run_config(document: dict[str, Any]) -> None:
     _unique([item["snapshot_id"] for item in document["inputs"]], "inputs.snapshot_id")
 
 
+def _validate_run_manifest(document: dict[str, Any]) -> None:
+    """Check what the manifest asserts about itself; it says nothing about scan correctness.
+
+    A failed run carries its failure, a completed run carries none, a skipped invocation has a
+    reason and no bundle, and an invocation that ran has a bundle and no reason. Paths are
+    checked for portability only: this does not open them or confirm that a bundle exists.
+    """
+    failed = document["status"] == "failed"
+    if failed and "failure" not in document:
+        raise ContractError("a failed run manifest must record its failure")
+    if not failed and "failure" in document:
+        raise ContractError("only a failed run manifest may record a failure")
+    _unique([item["snapshot_id"] for item in document["inputs"]], "inputs.snapshot_id")
+    _unique([system["system_id"] for system in document["systems"]], "systems.system_id")
+    _unique([row["invocation_id"] for row in document["invocations"]], "invocation_id")
+    for index, item in enumerate(document["inputs"]):
+        _require_relative_path(item["provenance_path"], f"inputs[{index}].provenance_path")
+    for index, row in enumerate(document["invocations"]):
+        label = f"invocations[{index}]"
+        if row["status"] == "skipped":
+            if row["bundle_path"] is not None:
+                raise ContractError(f"{label}: a skipped invocation has no bundle")
+            if row["skipped_reason"] is None:
+                raise ContractError(f"{label}: a skipped invocation must record why it was skipped")
+        else:
+            if row["bundle_path"] is None:
+                raise ContractError(f"{label}: an invocation that ran must record its bundle path")
+            if row["skipped_reason"] is not None:
+                raise ContractError(f"{label}: an invocation that ran is not skipped")
+            _require_relative_path(row["bundle_path"], f"{label}.bundle_path")
+
+
 _RUNTIME_VALIDATORS = {
     "case-pack": _validate_case_pack,
     "review-record": _validate_review_record,
@@ -245,6 +285,7 @@ _RUNTIME_VALIDATORS = {
     "scan-result": _validate_scan_result,
     "evaluation-plan": _validate_evaluation_plan,
     "review-decisions": _validate_review_decisions,
+    "run-manifest": _validate_run_manifest,
 }
 
 

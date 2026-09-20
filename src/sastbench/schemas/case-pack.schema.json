@@ -122,8 +122,10 @@
     },
     "check": {
       "type": "object", "additionalProperties": false, "required": ["check", "result", "at", "detail"],
+      "description": "One mechanical (L1) check result. snapshot_id names the snapshot the check was run against; it is absent only on check sets recorded before results were attributed per snapshot.",
       "properties": {"check": {"type": "string", "minLength": 1}, "result": {"enum": ["pass", "fail", "skipped"]},
-                     "at": {"type": "string", "minLength": 1}, "detail": {"type": "string"}}
+                     "at": {"type": "string", "minLength": 1}, "detail": {"type": "string"},
+                     "snapshot_id": {"$ref": "#/$defs/id"}}
     },
     "case": {
       "type": "object", "additionalProperties": false,
@@ -167,6 +169,7 @@
             "level": {"enum": [null, "L1", "L2", "L3", "L4"]},
             "review_state": {"enum": ["draft", "mechanically_checked", "human_approved"]},
             "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+            "checks_failed": {"type": "boolean", "description": "Absent by default. Set when a mechanical check set failed for a snapshot this case references after the case was human approved: the recorded review and level stand, and planning leaves the case out until a correction decision resolves it."},
             "reviews": {"type": "array", "items": {"$ref": "#/$defs/review"}}
           }
         },

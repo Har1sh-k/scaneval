@@ -7,7 +7,7 @@
   "properties": {
     "schema_version": {"const": "2.0"},
     "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-    "scope": {"enum": ["diagnostic", "draft", "reviewed"]},
+    "scope": {"enum": ["diagnostic", "draft", "reviewed"], "description": "Whether the plan's labels are diagnostic fixtures, drafts, or independently reviewed. Scope alone carries draft status: a draft plan may carry L1, L2, L3, or L4 items and keeps each item's real level, a reviewed plan may carry only L3 and L4, and a diagnostic plan only fixtures."},
     "provenance": {
       "type": "object", "additionalProperties": false,
       "required": ["namespace", "pack_id", "pack_version", "pack_sha256", "snapshot_id", "mode"],

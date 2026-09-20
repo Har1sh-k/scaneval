@@ -117,6 +117,63 @@ def review_decisions() -> dict:
     }
 
 
+def run_manifest(status: str = "completed") -> dict:
+    """One completed run of one input by one system. A failed manifest adds its failure."""
+    manifest = {
+        "schema_version": "2.0",
+        "run_id": "run-1",
+        "status": status,
+        "created_at": "2026-09-20T15:00:00+00:00",
+        "config_sha256": HASH,
+        "pack": {
+            "namespace": "test", "pack_id": "pilot", "version": "0.1.0-draft", "status": "draft",
+            "snapshots": 1, "cases": 1,
+            "review_states": {"draft": 0, "mechanically_checked": 1, "human_approved": 0},
+            "dispositions": {"validate": 0, "needs_evidence": 1, "extended_regression": 0, "exclude": 0},
+            "sha256": HASH,
+        },
+        "selection": {"only_inputs": None, "only_systems": None,
+                      "excluded_inputs": [], "excluded_systems": []},
+        "inputs": [
+            {
+                "snapshot_id": "snap-a", "tree_hash": HASH,
+                "provenance_path": "inputs/snap-a/provenance.json",
+                "mechanical_checks": [
+                    {
+                        "case_id": "case-a", "passed": True, "review_state": "mechanically_checked",
+                        "level": "L1",
+                        "checks": [{"check": "snapshot_hash_recorded", "result": "pass",
+                                    "at": "2026-09-20T15:00:00+00:00", "detail": HASH,
+                                    "snapshot_id": "snap-a"}],
+                    }
+                ],
+            }
+        ],
+        "systems": [{"system_id": "fake-a", "adapter": "fake", "adapter_version": "1.0.0",
+                     "preparation": {"ruleset": "none"}, "skipped_reason": None}],
+        "invocations": [
+            {
+                "invocation_id": "snap-a__fake-a__r1", "input_id": "snap-a", "system_id": "fake-a",
+                "repetition": 1, "status": "success", "claim_records": 1, "plan_scope": "draft",
+                "targets_assigned": 1, "targets_detected": 0, "pending_matching_count": 1,
+                "bundle_path": "invocations/snap-a__fake-a__r1", "review_state": "draft",
+                "skipped_reason": None,
+            }
+        ],
+        "warnings": [],
+    }
+    if status == "failed":
+        manifest["failure"] = {"type": "RuntimeError", "message": "the adapter crashed"}
+    return manifest
+
+
+def skipped_invocation() -> dict:
+    return {"invocation_id": "snap-a__broken-b__r1", "input_id": "snap-a", "system_id": "broken-b",
+            "repetition": 1, "status": "skipped", "claim_records": None, "plan_scope": None,
+            "targets_assigned": None, "targets_detected": None, "pending_matching_count": None,
+            "bundle_path": None, "review_state": None, "skipped_reason": "ruleset checkout is missing"}
+
+
 @pytest.mark.parametrize(
     ("kind", "factory"),
     [
@@ -124,6 +181,7 @@ def review_decisions() -> dict:
         ("scan-result", scan_result),
         ("evaluation-plan", evaluation_plan),
         ("review-decisions", review_decisions),
+        ("run-manifest", run_manifest),
     ],
 )
 def test_valid_documents_return_same_object(kind, factory):
@@ -138,6 +196,7 @@ def test_valid_documents_return_same_object(kind, factory):
         ("scan-result", scan_result),
         ("evaluation-plan", evaluation_plan),
         ("review-decisions", review_decisions),
+        ("run-manifest", run_manifest),
     ],
 )
 def test_versions_are_strict(kind, factory):
@@ -240,6 +299,68 @@ def test_validation_levels_follow_plan_scope():
     diagnostic["controls"][0]["validation_level"] = "L4"
     with pytest.raises(ContractError):
         validate_document("evaluation-plan", diagnostic)
+
+
+@pytest.mark.parametrize("level", ["L1", "L2", "L3", "L4"])
+def test_a_draft_plan_keeps_every_real_validation_level(level):
+    """Scope carries draft status, so a draft plan may report a reviewed item at its own level."""
+    draft = evaluation_plan("draft")
+    draft["targets"][0]["validation_level"] = level
+    draft["controls"][0]["validation_level"] = level
+    assert validate_document("evaluation-plan", draft) is draft
+    draft["controls"][0]["validation_level"] = "fixture"
+    with pytest.raises(ContractError, match="draft plans may only use L1, L2, L3, or L4"):
+        validate_document("evaluation-plan", draft)
+
+
+def test_run_manifest_failure_and_skip_records_must_agree_with_the_status():
+    completed = run_manifest()
+    completed["failure"] = {"type": "RuntimeError", "message": "x"}
+    with pytest.raises(ContractError, match="only a failed run manifest"):
+        validate_document("run-manifest", completed)
+    failed = run_manifest("failed")
+    del failed["failure"]
+    with pytest.raises(ContractError, match="must record its failure"):
+        validate_document("run-manifest", failed)
+
+    document = run_manifest()
+    document["invocations"].append(skipped_invocation())
+    assert validate_document("run-manifest", document) is document
+    document["invocations"][1]["bundle_path"] = "invocations/snap-a__broken-b__r1"
+    with pytest.raises(ContractError, match="a skipped invocation has no bundle"):
+        validate_document("run-manifest", document)
+
+    document = run_manifest()
+    document["invocations"].append({**skipped_invocation(), "skipped_reason": None})
+    with pytest.raises(ContractError, match="must record why it was skipped"):
+        validate_document("run-manifest", document)
+
+
+def test_run_manifest_invocations_are_unique_and_carry_portable_paths():
+    document = run_manifest()
+    document["invocations"].append(copy.deepcopy(document["invocations"][0]))
+    with pytest.raises(ContractError, match="invocation_id values must be unique"):
+        validate_document("run-manifest", document)
+
+    document = run_manifest()
+    document["invocations"][0]["bundle_path"] = "/tmp/invocations/snap-a__fake-a__r1"
+    with pytest.raises(ContractError, match="bundle_path must be a relative path"):
+        validate_document("run-manifest", document)
+
+    document = run_manifest()
+    document["inputs"][0]["provenance_path"] = "../provenance.json"
+    with pytest.raises(ContractError, match="provenance_path must be a relative path"):
+        validate_document("run-manifest", document)
+
+    document = run_manifest()
+    document["invocations"][0]["skipped_reason"] = "skipped after all"
+    with pytest.raises(ContractError, match="is not skipped"):
+        validate_document("run-manifest", document)
+
+    document = run_manifest()
+    document["invocations"][0]["bundle_path"] = None
+    with pytest.raises(ContractError, match="must record its bundle path"):
+        validate_document("run-manifest", document)
 
 
 def test_decision_uniqueness_and_control_reference_rules():

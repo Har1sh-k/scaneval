@@ -3,6 +3,12 @@
 A pack is evaluator-side data. Nothing in it is ever copied into a scanner workspace.
 Code can create drafts and run mechanical (L1) checks; only a recorded human review can
 raise a case beyond that, and the plan builder degrades to the lowest state present.
+
+Mechanical checks are recorded per snapshot, so a case spanning a vulnerable and a fixed
+snapshot reaches L1 only once every snapshot it references has passed. Nothing here reads
+source semantics, establishes a root cause, infers a reviewer, or withdraws a human review:
+a check that fails after approval is recorded and keeps the case out of a plan, and the
+recorded review state and level stay exactly as the reviewer left them.
 """
 
 from __future__ import annotations
@@ -18,6 +24,8 @@ from .contracts import ContractError, canonical_json, canonical_sha256, load_doc
 
 PACK_KIND = "case-pack"
 LEVELS = ("L1", "L2", "L3", "L4")
+DISPOSITIONS = ("validate", "needs_evidence", "extended_regression", "exclude")
+REVIEWED_LEVELS = ("L3", "L4")
 _ALIAS = re.compile(r"^(CVE-\d{4}-\d{4,}|GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4})$")
 _REPRESENTS = re.compile(r"^This case tests .+ under .+, and adds .+", re.DOTALL)
 
@@ -182,20 +190,61 @@ def _count_lines(path: Path) -> int:
         return sum(1 for _ in handle)
 
 
+def referenced_snapshots(case: dict) -> list[str]:
+    """Every snapshot a case needs checked: its target's snapshot, then each control's."""
+    ordered = [case["target"]["snapshot_id"]] + [control["snapshot_id"] for control in case["controls"]]
+    unique: list[str] = []
+    for snapshot_id in ordered:
+        if snapshot_id not in unique:
+            unique.append(snapshot_id)
+    return unique
+
+
+def _recorded_check_state(case: dict, snapshot_id: str) -> str | None:
+    """``pass`` or ``fail`` for one snapshot's recorded check set; ``None`` when none is recorded.
+
+    Checks recorded before check sets carried a ``snapshot_id`` belong to no snapshot and are
+    ignored here rather than deleted, so they neither promote nor demote a case.
+    """
+    recorded = [check for check in case["validation"]["checks"] if check.get("snapshot_id") == snapshot_id]
+    if not recorded:
+        return None
+    return "pass" if all(check["result"] == "pass" for check in recorded) else "fail"
+
+
 def mechanical_checks(pack: dict, snapshot_id: str, source_dir: Path, tree_hash: str,
                       *, clock: Callable[[], datetime] | None = None) -> list[dict]:
-    """Run L1 checks for every case on *snapshot_id* against an exported tree; record results in the pack."""
+    """Run L1 checks against one exported tree for every case that references *snapshot_id*.
+
+    Results are recorded per snapshot: this replaces only the check set carrying *snapshot_id*
+    and leaves every other snapshot's results in place, so checking two snapshots of one case
+    in either order ends in the same state. A case becomes ``mechanically_checked`` (L1) only
+    once every snapshot it references has a recorded passing check set.
+
+    A failing set demotes a ``mechanically_checked`` case to ``draft``. For a ``human_approved``
+    case it records ``validation.checks_failed`` and leaves the review state and level untouched,
+    because code never withdraws a human review; :func:`build_plan` then keeps that case out of
+    the plan with a note. The flag is cleared only when every referenced snapshot passes again.
+
+    These checks establish artifacts, paths, and ranges. They do not parse or read the code,
+    establish a root cause, or approve anything, so they never raise a case past L1. A snapshot
+    whose pack record already carries a different tree hash is not rewritten: every case on it
+    records a failing ``snapshot_hash_recorded`` check instead, and both :func:`build_plan` and
+    the runner still refuse that input.
+    """
     snapshot = snapshot_by_id(pack, snapshot_id)
-    if snapshot.get("tree_hash") and snapshot["tree_hash"] != tree_hash:
-        raise ContractError(f"snapshot {snapshot_id} tree hash {snapshot['tree_hash']} != materialized {tree_hash}")
-    snapshot["tree_hash"] = tree_hash
+    declared = snapshot.get("tree_hash")
+    hash_agrees = not declared or declared == tree_hash
+    if hash_agrees:
+        snapshot["tree_hash"] = tree_hash
     now = _now(clock)
     outcomes = []
     for case in cases_for_snapshot(pack, snapshot_id):
         checks = []
 
         def check(name: str, passed: bool, detail: str) -> None:
-            checks.append({"check": name, "result": "pass" if passed else "fail", "at": now, "detail": detail})
+            checks.append({"check": name, "result": "pass" if passed else "fail", "at": now,
+                           "detail": detail, "snapshot_id": snapshot_id})
 
         locations = [(case["target"]["target_id"], loc) for loc in case["target"]["accepted_locations"]
                      if case["target"]["snapshot_id"] == snapshot_id]
@@ -214,14 +263,23 @@ def mechanical_checks(pack: dict, snapshot_id: str, source_dir: Path, tree_hash:
         check("aliases_well_formed", all(_ALIAS.match(a) for a in aliases), ", ".join(aliases) or "no aliases")
         check("represents_statement", bool(_REPRESENTS.match(case["represents"])), "template: This case tests ... under ..., and adds ...")
         check("evidence_recorded", bool(case["evidence"]), f"{len(case['evidence'])} evidence records")
-        check("snapshot_hash_recorded", True, tree_hash)
+        check("snapshot_hash_recorded", hash_agrees,
+              tree_hash if hash_agrees else f"pack records {declared}; this export is {tree_hash}")
         validation = case["validation"]
-        validation["checks"] = [c for c in validation["checks"] if not c["at"] == now] + checks
+        validation["checks"] = [c for c in validation["checks"]
+                                if c.get("snapshot_id") != snapshot_id] + checks
         passed = all(c["result"] == "pass" for c in checks)
-        if validation["review_state"] == "draft" and passed:
+        states = [_recorded_check_state(case, referenced) for referenced in referenced_snapshots(case)]
+        every_snapshot_passed = all(state == "pass" for state in states)
+        if validation["review_state"] == "human_approved":
+            if "fail" in states:
+                validation["checks_failed"] = True
+            elif every_snapshot_passed:
+                validation.pop("checks_failed", None)
+        elif every_snapshot_passed:
             validation["review_state"] = "mechanically_checked"
             validation["level"] = "L1"
-        elif validation["review_state"] == "mechanically_checked" and not passed:
+        elif "fail" in states and validation["review_state"] == "mechanically_checked":
             validation["review_state"] = "draft"
             validation["level"] = None
         outcomes.append({"case_id": case["case_id"], "passed": passed, "checks": checks,
@@ -232,15 +290,25 @@ def mechanical_checks(pack: dict, snapshot_id: str, source_dir: Path, tree_hash:
 
 def approve_case(pack: dict, case_id: str, *, reviewer: str, role: str, level: str, note: str,
                  clock: Callable[[], datetime] | None = None) -> dict:
-    """Record an explicit human review. The tool never infers approval."""
+    """Record one explicit human review of a case label.
+
+    The reviewer name comes from the caller and is stored verbatim; a blank or whitespace-only
+    name is refused, because an unnamed approval is not an approval. This does not authenticate
+    the reviewer, check their independence, or verify that anything was read, and it records a
+    claim of review rather than establishing the label.
+    """
     if level not in LEVELS:
         raise ContractError(f"level must be one of {LEVELS}")
+    if not reviewer or not reviewer.strip():
+        raise ContractError("approval requires an explicit reviewer name; the tool never supplies one")
     case = case_by_id(pack, case_id)
     validation = case["validation"]
     if validation["review_state"] == "draft":
         raise ContractError(f"case {case_id} has not passed mechanical checks; run corpus validate first")
-    if level in ("L3", "L4") and role != "independent_reviewer":
+    if level in REVIEWED_LEVELS and role != "independent_reviewer":
         raise ContractError("L3/L4 labels require an independent_reviewer decision")
+    if level in REVIEWED_LEVELS and case["disposition"]["value"] != "validate":
+        raise ContractError("L3/L4 require disposition validate")
     review = {"reviewer": reviewer, "role": role, "decision": "approve", "level": level, "at": _now(clock), "note": note}
     validation["reviews"].append(review)
     validation["review_state"] = "human_approved"
@@ -249,9 +317,51 @@ def approve_case(pack: dict, case_id: str, *, reviewer: str, role: str, level: s
     return review
 
 
+def set_disposition(pack: dict, case_id: str, value: str, reason: str) -> dict:
+    """Record a screening-disposition change and the stated reason for it.
+
+    A disposition is a screening decision about whether a candidate is worth validating. It is
+    not a label, an approval, or an admission, and changing it neither re-runs a check nor
+    alters a recorded review. The previous value stays visible in the case notes.
+    """
+    if value not in DISPOSITIONS:
+        raise ContractError(f"disposition must be one of {DISPOSITIONS}")
+    if not reason or not reason.strip():
+        raise ContractError("a disposition change requires a non-blank reason")
+    case = case_by_id(pack, case_id)
+    previous = case["disposition"]["value"]
+    case["disposition"] = {"value": value, "reason": reason}
+    case["notes"].append(f"disposition changed from {previous} to {value}: {reason}")
+    validate_document(PACK_KIND, pack)
+    return case["disposition"]
+
+
+def latest_admission(pack: dict, case_id: str) -> dict | None:
+    """The last admission record for *case_id* by list order, or ``None`` when there is none.
+
+    Order in the list is the only ordering used; timestamps are recorded text and are not parsed
+    or sorted here.
+    """
+    latest = None
+    for admission in pack["admissions"]:
+        if admission["case_id"] == case_id:
+            latest = admission
+    return latest
+
+
 def admit_case(pack: dict, case_id: str, *, decision: str, by: str, reason: str,
                clock: Callable[[], datetime] | None = None) -> dict:
+    """Append one admission decision made by a named person, with a stated reason.
+
+    The name and reason come from the caller and are stored verbatim; blank or whitespace-only
+    values are refused. This records who decided, not that the decision is correct, and it does
+    not change a case's review state or level.
+    """
     case_by_id(pack, case_id)
+    if not by or not by.strip():
+        raise ContractError("an admission decision requires an explicit name; the tool never supplies one")
+    if not reason or not reason.strip():
+        raise ContractError("an admission decision requires a non-blank reason")
     admission = {"case_id": case_id, "decision": decision, "by": by, "at": _now(clock), "reason": reason}
     pack["admissions"].append(admission)
     validate_document(PACK_KIND, pack)
@@ -267,18 +377,35 @@ def plan_scope(cases: list[dict]) -> str:
 
 
 def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "full") -> tuple[dict, list[str]]:
-    """Targets and controls for one materialized input. Draft cases without checks are left out, visibly."""
+    """Targets and controls for one materialized input, with every exclusion stated in the notes.
+
+    A case is planned only when its disposition is not ``exclude``, no check set failed after
+    approval, its latest admission decision is not ``rejected``, and it passed mechanical checks
+    on every snapshot it references. Planned items keep their real validation level; the plan's
+    scope, not a rewritten level, says whether the labels are reviewed drafts.
+
+    This builds a plan. It does not approve, admit, re-check, or correct anything, and a case
+    left out here is unplanned for this input, not judged wrong.
+    """
     snapshot = snapshot_by_id(pack, snapshot_id)
     if snapshot.get("tree_hash") and snapshot["tree_hash"] != tree_hash:
         raise ContractError(f"snapshot {snapshot_id} tree hash does not match the materialized input")
     notes: list[str] = []
     included: list[dict] = []
     for case in cases_for_snapshot(pack, snapshot_id):
-        state = case["validation"]["review_state"]
+        case_id = case["case_id"]
+        validation = case["validation"]
+        admission = latest_admission(pack, case_id)
         if case["disposition"]["value"] == "exclude":
-            notes.append(f"{case['case_id']}: excluded by disposition ({case['disposition']['reason']})")
-        elif state == "draft" or case["validation"]["level"] is None:
-            notes.append(f"{case['case_id']}: draft without passed mechanical checks; not planned")
+            notes.append(f"{case_id}: excluded by disposition ({case['disposition']['reason']})")
+        elif validation.get("checks_failed"):
+            notes.append(f"{case_id}: excluded because a mechanical check set failed after approval; "
+                         "the recorded review stands and needs a correction decision")
+        elif admission is not None and admission["decision"] == "rejected":
+            notes.append(f"{case_id}: excluded by the latest admission decision "
+                         f"(rejected by {admission['by']}: {admission['reason']})")
+        elif validation["review_state"] == "draft" or validation["level"] is None:
+            notes.append(f"{case_id}: draft without passed mechanical checks; not planned")
         else:
             included.append(case)
     scope = plan_scope(included)
@@ -298,11 +425,6 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
                 controls.append(entry)
     if scope == "reviewed" and not (targets or controls):
         scope = "draft"
-    if scope == "draft":
-        for item in targets + controls:
-            if item["validation_level"] in ("L3", "L4"):
-                item["validation_level"] = "L2"
-                notes.append(f"{item.get('target_id') or item.get('control_id')}: reported at L2 inside a draft plan")
     plan = {
         "schema_version": "2.0", "input_hash": tree_hash, "scope": scope,
         "targets": targets, "controls": controls,
