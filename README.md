@@ -1,12 +1,23 @@
 # SASTbench
 
-> The current runner and historical scores use legacy scoring. [Design decisions](docs/DESIGN_DECISIONS.md#4-scoring-without-exhaustive-repository-labels) and [evaluation math](docs/EVALUATION_MATH.md) specify the proposed replacement, which is not implemented yet. Repositories for the first public-workload release remain under selection.
+> The initial replacement core is available as an offline alpha: contract validation, saved-output scoring/replay, an HTML report, and an experimental TypeScript observer SDK. See [initial build](docs/INITIAL_BUILD.md). The existing `scripts/` runner and historical scores still use legacy scoring. The broader [design](docs/DESIGN_DECISIONS.md) is not fully implemented; repositories for the first public-workload release remain under selection.
 
 > Can your scanner find real vulnerabilities without flagging authorized capabilities?
 
 SASTbench evaluates whether static analyzers find real vulnerabilities at an acceptable review cost. The proposed [workload scope](docs/DESIGN_DECISIONS.md#workload-classification) covers conventional applications, conventional automation, AI-assisted applications, and agentic applications, with separate scorecards. The current corpus is agentic-heavy; existing `agentic`/`generic` CLI profiles are legacy selections, not the proposed workflow classifications.
 
-## What SASTbench Is and Is Not
+## Try the new evaluation core
+
+```bash
+python -m pip install -e ".[dev]"
+sastbench demo results/diagnostic-demo
+sastbench replay results/diagnostic-demo --output results/diagnostic-replay.json
+# Open results/diagnostic-demo/report.html locally.
+```
+
+This uses fabricated evaluator fixtures, not a live scanner or admitted CVEs. It tests scoring rules without model calls. Output paths must be new. The [SDK guide](docs/OBSERVER_SDK.md) covers opt-in harness visibility and capture limits.
+
+## Legacy runner: what gets scored
 
 **What gets scored:**
 SASTbench measures whether a static analyzer can detect annotated vulnerable code regions (true positives) without flooding the user with false positives on nearby code.
@@ -25,7 +36,7 @@ The legacy Capability FP Rate currently covers six synthetic safe regions, not a
 - End-to-end agent runtime exploits
 - General non-security code quality
 
-## Quick Start
+## Legacy runner quick start
 
 ```bash
 # Install the harness plus pytest
@@ -69,7 +80,7 @@ PR simulation mode is documented in [docs/PR_MODE.md](docs/PR_MODE.md).
 - Python 3.11+
 - Git (required for `scripts/setup_repos.py`)
 
-The benchmark harness itself only uses the Python standard library. Scanner CLIs are optional and can be installed separately or via the `official-adapters` extra.
+The new core uses `jsonschema` for contract validation. The legacy runner uses the Python standard library. Scanner CLIs are optional and can be installed separately or via the `official-adapters` extra.
 
 ### Full Track Snapshots
 
