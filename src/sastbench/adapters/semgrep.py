@@ -3,7 +3,9 @@
 The ruleset is a git commit of a rules repository fetched into the immutable cache. The
 preparation records the commit, the git tree of that commit, the number of rule files, and
 one aggregate hash over the ``{path: content hash}`` map of those files. Per-file hashes are
-computed to build that aggregate but are not kept in the preparation record. Live ``p/...``
+computed to build that aggregate but are not kept in the preparation record. Only plain files
+inside the pinned checkout are read: a symlink under a configured ruleset directory is refused
+rather than followed, so the recorded hash describes that commit's own content. Live ``p/...``
 registry configs are refused because they are moving targets, not pins.
 """
 
@@ -43,12 +45,24 @@ def _binary(spec: SystemSpec) -> str:
 
 
 def semgrep_version(binary: str, raw_dir: Path, timeout_seconds: float = 60) -> str:
-    result = run_command([binary, "--version"], cwd=raw_dir, timeout_seconds=timeout_seconds,
-                         env=build_env(), stdout_path=raw_dir / "semgrep-version.txt",
-                         stderr_path=raw_dir / "semgrep-version.stderr.txt")
-    if result.exit_code != 0:
-        raise AdapterError(f"semgrep --version failed: {tail_text(result.stderr_path)}")
-    return (raw_dir / "semgrep-version.txt").read_text(encoding="utf-8").strip()
+    """Record ``semgrep --version`` under *raw_dir* and return the recorded string.
+
+    A non-zero exit or timeout, and an output file that cannot be written or read, are setup
+    failures raised as ``AdapterError``. Bytes that are not UTF-8 are replaced rather than
+    raising, so the returned string can contain replacement characters: an undecodable version
+    banner is a provenance defect, not a reason to abandon the run before it starts.
+    """
+    stdout_path = raw_dir / "semgrep-version.txt"
+    try:
+        result = run_command([binary, "--version"], cwd=raw_dir, timeout_seconds=timeout_seconds,
+                             env=build_env(), stdout_path=stdout_path,
+                             stderr_path=raw_dir / "semgrep-version.stderr.txt")
+        if result.exit_code != 0:
+            raise AdapterError(f"semgrep --version failed: {tail_text(result.stderr_path)}")
+        text = stdout_path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise AdapterError(f"semgrep --version output under {raw_dir} could not be recorded: {exc}") from exc
+    return text.strip()
 
 
 def _shape(value: Any) -> str:
@@ -71,7 +85,17 @@ def _dotted_prefixes(directories) -> list[str]:
     for directory in directories or ():
         if not isinstance(directory, (str, Path)):
             continue
-        segments = str(directory).replace("\\", "/").strip("/").split("/")
+        path = Path(directory)
+        # pathlib splits the path, so a backslash separates components only on a platform whose
+        # os.sep is a backslash. On POSIX a directory literally named "we\ird" stays one
+        # component and the backslash is deleted by the sanitizer below, which is what Semgrep
+        # does with it.
+        segments = list(path.parts)
+        if path.anchor and segments:
+            # Semgrep drops the leading separator; a Windows drive anchor ("C:\") keeps only the
+            # characters the sanitizer leaves.
+            head = _RULE_ID_DROPPED.sub("", path.anchor)
+            segments = ([head] if head else []) + segments[1:]
         # Segments that sanitize away entirely stay as empty segments, which is what Semgrep
         # produces: it sanitizes the already joined string.
         dotted = ".".join(_RULE_ID_DROPPED.sub("", segment) for segment in segments)
@@ -115,9 +139,14 @@ def import_semgrep_results(payload: dict, *, artifact_id: str = ARTIFACT_JSON,
 
     Every unexpected JSON shape raises ``AdapterError`` naming the offending field; no other
     exception type is raised for payload content. This does not assign truth labels, split
-    bundled findings, invent locations, or recover a rule id from a check_id that carries a
-    path prefix none of the supplied directories match: such an id is kept verbatim and a note
-    records that it was not shortened.
+    bundled findings, invent locations, or recover a rule id from a check_id whose path prefix
+    none of the supplied directories match: such an id is kept verbatim.
+
+    Whether an unshortened id is also *noted* is a heuristic keyed on the supplied roots'
+    leading segments: the note fires only when the id's first segment is one of those segments
+    (the last segment of each root is excluded, being the language or category directory that
+    legitimately opens a rule id). So the note can miss a machine path that came from a root
+    nobody supplied, and it can flag an id that carries no path at all.
     """
     claims: list[dict] = []
     notes: list[str] = []
@@ -131,10 +160,16 @@ def import_semgrep_results(payload: dict, *, artifact_id: str = ARTIFACT_JSON,
     login_gated = False
     for index, item in enumerate(results, start=1):
         _require(isinstance(item, dict), f"semgrep JSON result {index} is a {_shape(item)}, not an object")
-        extra = item.get("extra") or {}
+        # Absent means empty; a present value of any other type is a shape error, so a
+        # falsy non-object (0, "", []) is reported rather than silently read as {}.
+        extra = item.get("extra")
+        if extra is None:
+            extra = {}
         _require(isinstance(extra, dict),
                  f"semgrep JSON result {index} has extra as a {_shape(extra)}, not an object")
-        metadata = extra.get("metadata") or {}
+        metadata = extra.get("metadata")
+        if metadata is None:
+            metadata = {}
         _require(isinstance(metadata, dict),
                  f"semgrep JSON result {index} has extra.metadata as a {_shape(metadata)}, not an object")
         raw_cwe = metadata.get("cwe")
@@ -268,6 +303,8 @@ class SemgrepAdapter(Adapter):
         if any(p.startswith("p/") or p.startswith("r/") for p in paths):
             raise AdapterError("registry rulesets are not pins; use a rules repository commit")
         for entry in paths:
+            if "\x00" in entry:
+                raise AdapterError(f"ruleset path {entry!r} contains a NUL byte and cannot name a directory")
             relative = Path(entry)
             if relative.is_absolute() or ".." in relative.parts:
                 raise AdapterError(f"ruleset path {entry!r} must stay inside the checkout: no absolute paths and no '..'")
@@ -279,7 +316,10 @@ class SemgrepAdapter(Adapter):
         config_dirs: list[str] = []
         hashes: dict[str, str] = {}
         for entry in paths:
-            directory = (root / entry).resolve()
+            try:
+                directory = (root / entry).resolve()
+            except (OSError, ValueError) as exc:
+                raise AdapterError(f"ruleset path {entry!r} could not be resolved under {root}: {exc}") from exc
             # Resolution follows symlinks, so this also refuses a checked-in symlink that
             # points out of the pinned checkout. Keeping every rule file under the root is
             # what makes the recorded tree hash describe the pinned commit and nothing else.
@@ -289,8 +329,26 @@ class SemgrepAdapter(Adapter):
                 raise AdapterError(f"ruleset path {entry!r} is not a directory in {root}")
             config_dirs.append(str(directory))
             for rule_file in sorted(directory.rglob("*")):
-                if rule_file.suffix in {".yaml", ".yml"} and rule_file.is_file() and not rule_file.name.startswith("."):
-                    hashes[rule_file.relative_to(root).as_posix()] = sha256_file(rule_file)[0]
+                # Every symlink under the directory is refused, not followed. rglob does not
+                # descend into a symlinked directory, so rules Semgrep would load through one
+                # would be missing from this hash; a symlinked rule file is followed by both
+                # rglob and Semgrep and can point anywhere on the machine. Neither is content
+                # the pinned commit holds at this path.
+                if rule_file.is_symlink():
+                    raise AdapterError(
+                        f"ruleset path {entry!r} contains the symlink {rule_file.relative_to(root).as_posix()!r}; "
+                        "a pinned ruleset must be plain files inside the checkout")
+                if (rule_file.suffix not in {".yaml", ".yml"} or rule_file.name.startswith(".")
+                        or not rule_file.is_file()):
+                    continue
+                try:
+                    resolved = rule_file.resolve()
+                except (OSError, ValueError) as exc:
+                    raise AdapterError(f"rule file {rule_file} could not be resolved: {exc}") from exc
+                if root not in resolved.parents:
+                    raise AdapterError(f"rule file {rule_file.relative_to(root).as_posix()!r} resolves to {resolved}, "
+                                       f"outside the pinned checkout {root}")
+                hashes[rule_file.relative_to(root).as_posix()] = sha256_file(rule_file)[0]
         if not hashes:
             raise AdapterError("ruleset contains no rule files")
         return {
@@ -356,9 +414,11 @@ class SemgrepAdapter(Adapter):
             scanned, scanned_reported = _path_list(payload, "scanned")
             skipped, _ = _path_list(payload, "skipped")
             reported_version = str(payload.get("version", ""))
-        except (AdapterError, OSError, AttributeError, TypeError, LookupError, ValueError) as exc:
-            # Every unexpected JSON shape lands here: the run produced something this adapter
-            # cannot read as a result, which is never an empty successful scan.
+        except (AdapterError, OSError, AttributeError, TypeError, LookupError, ValueError,
+                RecursionError) as exc:
+            # Every unexpected JSON shape lands here, nesting deep enough to exhaust the JSON
+            # parser's recursion included: the run produced something this adapter cannot read
+            # as a result, which is never an empty successful scan.
             message = (f"semgrep output at {stdout.name} could not be read as a result payload: {exc}; "
                        f"exit code {result.exit_code}; stderr: {tail_text(stderr)}")
             return NativeOutcome(status="error", exit_code=result.exit_code,

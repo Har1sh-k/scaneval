@@ -17,7 +17,8 @@ import pytest
 
 from sastbench.adapters import semgrep as semgrep_module
 from sastbench.adapters.base import AdapterError, SystemSpec
-from sastbench.adapters.semgrep import SemgrepAdapter, _dotted_prefixes, import_semgrep_results
+from sastbench.adapters.semgrep import (SemgrepAdapter, _dotted_prefixes, import_semgrep_results,
+                                        semgrep_version)
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -32,11 +33,19 @@ RULE_YAML = (
     "    patterns:\n      - pattern: subprocess.$F(..., shell=True, ...)\n")
 
 
-def pinned_rules_repo(tmp_path: Path, *, escape_symlink: bool = False) -> tuple[Path, str]:
-    """A tiny git repository holding one pinned Semgrep rule, as an offline ruleset source."""
+def pinned_rules_repo(tmp_path: Path, *, escape_symlink: bool = False,
+                      rule_symlink: str | None = None) -> tuple[Path, str]:
+    """A tiny git repository holding one pinned Semgrep rule, as an offline ruleset source.
+
+    ``rule_symlink`` checks in ``python/linked.yaml`` as a symlink to that literal target, the
+    way a rules repository can carry one: git stores the target string and recreates it on
+    checkout, so the link is relative to wherever the pinned checkout lands.
+    """
     rules = tmp_path / "rules-repo"
     (rules / "python").mkdir(parents=True)
     (rules / "python" / "shell.yaml").write_text(RULE_YAML, encoding="utf-8")
+    if rule_symlink is not None:
+        os.symlink(rule_symlink, rules / "python" / "linked.yaml")
     if escape_symlink:
         # A checked-in symlink that leaves the checkout once it is resolved.
         (rules / "escape").symlink_to("..")
@@ -52,14 +61,18 @@ semgrep_required = pytest.mark.skipif(
     reason="semgrep binary not installed")
 
 
-def fake_semgrep(tmp_path: Path, stdout_text: str, exit_code: int) -> Path:
-    """A stand-in binary that answers ``--version`` and then writes *stdout_text* verbatim."""
+def fake_semgrep(tmp_path: Path, stdout_text: str, exit_code: int, *,
+                 version_bytes: bytes = b"9.9.9\n") -> Path:
+    """A stand-in binary that answers ``--version`` and then writes *stdout_text* verbatim.
+
+    ``--version`` answers with raw bytes, so a banner that is not valid UTF-8 can be exercised.
+    """
     script = tmp_path / "fake-semgrep"
     script.write_text(
         f"#!{sys.executable}\n"
         "import sys\n"
         "if '--version' in sys.argv:\n"
-        "    print('9.9.9')\n"
+        f"    sys.stdout.buffer.write({version_bytes!r})\n"
         "    raise SystemExit(0)\n"
         f"sys.stdout.write({stdout_text!r})\n"
         f"raise SystemExit({exit_code})\n", encoding="utf-8")
@@ -73,13 +86,14 @@ def fake_preparation(tmp_path: Path) -> dict:
             "ruleset_root": str(tmp_path / "rules")}
 
 
-def scan_with_fake(tmp_path: Path, stdout_text: str, exit_code: int, *, config=None, preparation=None):
+def scan_with_fake(tmp_path: Path, stdout_text: str, exit_code: int, *, config=None, preparation=None,
+                   version_bytes: bytes = b"9.9.9\n"):
     source = tmp_path / "source"
     source.mkdir()
     (source / "app.py").write_text("import subprocess\n", encoding="utf-8")
     raw = tmp_path / "raw"
     raw.mkdir()
-    settings = {"binary": str(fake_semgrep(tmp_path, stdout_text, exit_code))}
+    settings = {"binary": str(fake_semgrep(tmp_path, stdout_text, exit_code, version_bytes=version_bytes))}
     settings.update(config or {})
     spec = SystemSpec("semgrep-fake", "semgrep", settings)
     outcome = SemgrepAdapter().scan(request={}, source_dir=source, raw_dir=raw, spec=spec,
@@ -100,6 +114,22 @@ def test_semgrep_dotted_prefix_drops_the_characters_semgrep_drops():
     # Longest first, and a directory that sanitizes away entirely is not a usable prefix.
     assert _dotted_prefixes(["/a/b", "/a"]) == ["a.b.", "a."]
     assert _dotted_prefixes(["/", "."]) == []
+
+
+@pytest.mark.skipif(os.sep != "/", reason="POSIX path-separator semantics")
+def test_semgrep_dotted_prefix_keeps_a_posix_directory_named_with_a_backslash():
+    # On POSIX a backslash is an ordinary filename character, not a separator, so Semgrep keeps
+    # "we\\ird" as one path component and deletes the backslash while sanitizing. Splitting on
+    # the backslash here would build "tmp.we.ird.rules.", which never matches the check_id and
+    # leaves the machine path in native_rule_id.
+    assert _dotted_prefixes(["/tmp/we\\ird/rules"]) == ["tmp.weird.rules."]
+    payload = {"results": [
+        {"check_id": "tmp.weird.rules.python.probe.subprocess-shell", "path": "app.py",
+         "start": {"line": 1}, "end": {"line": 1}, "extra": {"message": "m", "metadata": {}}},
+    ]}
+    claims, notes = import_semgrep_results(payload, ruleset_roots=["/tmp/we\\ird/rules"])
+    assert claims[0]["native_rule_id"] == "python.probe.subprocess-shell"
+    assert notes == []
 
 
 def test_semgrep_import_strips_a_root_whose_directory_name_has_a_space():
@@ -140,6 +170,45 @@ def test_semgrep_import_does_not_note_a_plain_unprefixed_rule_id():
     # also ends the config directory, which is not evidence of a leaked machine path.
     assert [claim["native_rule_id"] for claim in claims] == ["custom.rule", "python.lang.security.audit.eval"]
     assert notes == []
+
+
+@pytest.mark.parametrize("extra, fragment", [
+    (0, "result 1 has extra as a int"),
+    ([], "result 1 has extra as a list"),
+    ("", "result 1 has extra as a str"),
+    (False, "result 1 has extra as a bool"),
+    ({"metadata": 0}, "extra.metadata as a int"),
+    ({"metadata": []}, "extra.metadata as a list"),
+    ({"metadata": ""}, "extra.metadata as a str"),
+])
+def test_semgrep_import_rejects_a_falsy_non_object_extra_or_metadata(extra, fragment):
+    # A present value of the wrong type is a shape error even when it is falsy. Coercing it to
+    # an empty object would read a malformed result as one that simply carries no metadata, and
+    # its missing cwe list would then look like an honest absence.
+    payload = {"results": [{"check_id": "a", "path": "p", "start": {"line": 1}, "end": {"line": 1},
+                            "extra": extra}]}
+    with pytest.raises(AdapterError, match=fragment):
+        import_semgrep_results(payload)
+
+
+def test_semgrep_import_treats_an_absent_or_null_extra_as_empty():
+    payload = {"results": [
+        {"check_id": "a", "path": "p", "start": {"line": 1}, "end": {"line": 1}},
+        {"check_id": "b", "path": "p", "start": {"line": 2}, "end": {"line": 2}, "extra": None},
+        {"check_id": "c", "path": "p", "start": {"line": 3}, "end": {"line": 3}, "extra": {"metadata": None}},
+    ]}
+    claims, notes = import_semgrep_results(payload)
+    # No message, so the allegation falls back to the check_id; no metadata, so no native_cwe.
+    assert [claim["allegation"] for claim in claims] == ["a", "b", "c"]
+    assert not any("native_cwe" in claim for claim in claims)
+    assert notes == []
+
+
+def test_semgrep_import_docstring_calls_the_unmatched_prefix_note_a_heuristic():
+    doc = import_semgrep_results.__doc__ or ""
+    assert "heuristic" in doc and "leading segments" in doc
+    # The limits of that heuristic are stated, not implied.
+    assert "can miss" in doc and "can flag an id that carries no path" in doc
 
 
 @pytest.mark.parametrize("payload, fragment", [
@@ -257,6 +326,60 @@ def test_semgrep_prepare_refuses_a_ruleset_path_that_escapes_through_a_symlink(t
         SemgrepAdapter().prepare(spec, tmp_path / "cache")
 
 
+def test_semgrep_prepare_refuses_a_symlinked_rule_file_inside_an_allowed_directory(tmp_path):
+    # The ruleset path itself is fine; the symlink sits inside it. rglob yields the link and
+    # is_file() follows it, so without this refusal a rule file from outside the pinned commit
+    # would be hashed into the recorded tree hash and loaded by Semgrep.
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "evil.yaml").write_text(RULE_YAML, encoding="utf-8")
+    rules, commit = pinned_rules_repo(tmp_path, rule_symlink="../../../outside/evil.yaml")
+    spec = SystemSpec("s", "semgrep", {"ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}})
+    with pytest.raises(AdapterError, match="contains the symlink") as raised:
+        SemgrepAdapter().prepare(spec, tmp_path / "cache")
+    assert "'python'" in str(raised.value) and "python/linked.yaml" in str(raised.value)
+
+
+def test_semgrep_prepare_refuses_a_rule_file_resolving_outside_the_checkout(tmp_path, monkeypatch):
+    # Defense in depth behind the symlink refusal: with is_symlink() answering False, the
+    # resolved location of every hashed rule file still has to sit under the pinned root.
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "evil.yaml").write_text(RULE_YAML, encoding="utf-8")
+    rules, commit = pinned_rules_repo(tmp_path, rule_symlink="../../../outside/evil.yaml")
+    monkeypatch.setattr(Path, "is_symlink", lambda self: False)
+    spec = SystemSpec("s", "semgrep", {"ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}})
+    with pytest.raises(AdapterError, match="outside the pinned checkout") as raised:
+        SemgrepAdapter().prepare(spec, tmp_path / "cache")
+    assert "python/linked.yaml" in str(raised.value)
+
+
+def test_semgrep_prepare_rejects_a_ruleset_path_containing_a_nul_byte(tmp_path):
+    # A NUL byte cannot name a directory, and resolving it raises ValueError rather than the
+    # adapter's own error, so it is refused before anything is fetched.
+    rules, commit = pinned_rules_repo(tmp_path)
+    spec = SystemSpec("s", "semgrep", {"ruleset": {"url": str(rules), "commit": commit, "paths": ["py\x00thon"]}})
+    with pytest.raises(AdapterError, match="NUL byte"):
+        SemgrepAdapter().prepare(spec, tmp_path / "cache")
+    assert not (tmp_path / "cache").exists()
+
+
+def test_semgrep_prepare_reports_a_path_resolution_failure_as_an_adapter_error(tmp_path, monkeypatch):
+    # resolve() raises ValueError for a path the platform cannot represent. That is a setup
+    # failure named after the offending entry, not an exception type escaping the adapter.
+    rules, commit = pinned_rules_repo(tmp_path)
+    real_resolve = Path.resolve
+
+    def refuse(self, *args, **kwargs):
+        if self.name == "python":
+            raise ValueError("embedded null byte")
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", refuse)
+    spec = SystemSpec("s", "semgrep", {"ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}})
+    with pytest.raises(AdapterError, match="could not be resolved") as raised:
+        SemgrepAdapter().prepare(spec, tmp_path / "cache")
+    assert "'python'" in str(raised.value)
+
+
 def test_semgrep_prepare_records_an_aggregate_tree_hash_and_no_per_file_hashes(tmp_path):
     rules, commit = pinned_rules_repo(tmp_path)
     spec = SystemSpec("s", "semgrep", {"ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}})
@@ -267,6 +390,42 @@ def test_semgrep_prepare_records_an_aggregate_tree_hash_and_no_per_file_hashes(t
     # The module docstring must describe what is actually recorded.
     doc = semgrep_module.__doc__ or ""
     assert "aggregate hash" in doc and "not kept in the preparation record" in doc
+
+
+def test_semgrep_scan_reports_deeply_nested_json_as_unparseable_output(tmp_path):
+    # Nesting deep enough to exhaust the JSON parser's recursion raises RecursionError, which is
+    # output this adapter cannot read, not an empty successful scan.
+    depth = 20000
+    stdout_text = "[" * depth + "]" * depth
+    outcome, raw = scan_with_fake(tmp_path, stdout_text, 0)
+    assert outcome.status == "error" and outcome.claims == []
+    assert outcome.error["code"] == "unparseable_output"
+    assert "could not be read as a result payload" in outcome.error["message"]
+    # The invocation record stays intact: the command and both raw artifacts are still reported.
+    assert outcome.command[1:4] == ["scan", "--json", "--metrics=off"]
+    assert [artifact["id"] for artifact in outcome.artifacts] == ["semgrep-json", "semgrep-stderr"]
+    assert (raw / "semgrep.json").read_text(encoding="utf-8") == stdout_text
+
+
+def test_semgrep_scan_records_an_undecodable_version_banner_without_failing(tmp_path):
+    # A version banner that is not valid UTF-8 is a provenance defect, not a reason to abandon
+    # the run: the bytes are kept verbatim in the raw artifact and the recorded string replaces
+    # what it cannot decode.
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["app.py"]}, "errors": []})
+    outcome, raw = scan_with_fake(tmp_path, payload, 0, version_bytes=b"9.9.9-\xff\xfe\n")
+    assert outcome.status == "success"
+    assert outcome.tool_versions["semgrep"] == "9.9.9-\ufffd\ufffd"
+    assert (raw / "semgrep-version.txt").read_bytes() == b"9.9.9-\xff\xfe\n"
+
+
+def test_semgrep_version_reports_an_unwritable_output_file_as_an_adapter_error(tmp_path):
+    # An OSError while recording the version is a setup failure, not an OSError escaping the
+    # adapter into the runner.
+    raw = tmp_path / "raw"
+    (raw / "semgrep-version.txt").mkdir(parents=True)
+    binary = fake_semgrep(tmp_path, "", 0)
+    with pytest.raises(AdapterError, match="could not be recorded"):
+        semgrep_version(str(binary), raw)
 
 
 # --- empty and partially reported scans -------------------------------------------------
