@@ -36,6 +36,15 @@ HARNESS_PRESETS: dict[str, dict[str, Any]] = {
     },
 }
 _ARRAY = re.compile(r"^\[(.*)\]$")
+# What each harness route asks its model CLI to allow. Recorded as the harness's own
+# declaration; this adapter never verifies that the CLI honored it, and it observes no
+# tool call either way, so these strings explain an unavailable category rather than
+# standing in for one.
+TOOL_POLICY = {
+    "pi": "the whole tool surface is disabled with --no-tools.",
+    "claude": "network and spawn tools are denied with --disallowedTools; file tools such as Read and Bash remain permitted inside an isolated working directory.",
+    "mock": "no model process is spawned, so no tool surface exists.",
+}
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -135,9 +144,32 @@ def import_harness_findings(findings_dir: Path, *, harness: str, artifact_id: st
     return claims, notes
 
 
+def capture_status(trace_mode: str, routes: list[str], *, has_summary: bool) -> dict[str, str]:
+    """Per-category capture availability for one harness run.
+
+    Tool dispatch is ``unavailable`` on every real route: it happens inside the model CLI
+    this adapter spawns, so no tool event is observed and the absence of one establishes
+    nothing about whether a tool ran. Only the mock runner, which spawns no process at
+    all, makes the concept inapplicable. Model events are ``partial`` at best because the
+    harness retries inside its own runner, below the observed boundary.
+    """
+    request_capture = {"off": "unavailable", "metadata": "partial", "content": "partial"}[trace_mode]
+    traced = trace_mode != "off"
+    return {
+        "model_requests": request_capture,
+        "model_responses": request_capture,
+        "tool_calls": "not_applicable" if routes == ["mock"] else "unavailable",
+        "context_selection": "partial" if traced else "unavailable",
+        "finding_submitted": "complete" if (traced and has_summary) else "unavailable",
+        "finding_candidate": "unavailable",
+        "finding_validation": "unavailable",
+        "finding_filtered": "unavailable",
+    }
+
+
 class LlmHarnessAdapter(Adapter):
     name = "llm-harness"
-    adapter_version = "2.0.0"
+    adapter_version = "2.1.0"
     requires_git = True
     supported_languages = frozenset({"python", "javascript", "typescript", "go", "rust"})
     env_passthrough = ("NODE_OPTIONS", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "XDG_CONFIG_HOME")
@@ -232,15 +264,17 @@ class LlmHarnessAdapter(Adapter):
         summary = output.get("summary") if isinstance(output, dict) else None
         trace = output.get("trace") if isinstance(output, dict) else None
         capture_state = (trace or {}).get("state") if isinstance(trace, dict) else None
-        request_capture = {"off": "unavailable", "metadata": "partial", "content": "partial"}[trace_mode]
-        capture = {
-            "model_requests": request_capture, "model_responses": request_capture,
-            "tool_calls": "not_applicable", "context_selection": "partial" if trace_mode != "off" else "unavailable",
-            "finding_submitted": "complete" if (trace_mode != "off" and summary) else "unavailable",
-            "finding_candidate": "unavailable", "finding_validation": "unavailable", "finding_filtered": "unavailable",
-        }
+        routes = sorted({str(route) for route in (output.get("observed_routes") or [])}) if isinstance(output, dict) else []
+        mock_only = routes == ["mock"]
+        capture = capture_status(trace_mode, routes, has_summary=bool(summary))
         notes = list(import_notes)
         notes.append("Model requests are captured per logical harness call; retries inside the harness runner and token usage are not observable at this boundary.")
+        for route in routes:
+            policy = TOOL_POLICY.get(route)
+            if policy:
+                notes.append(f"Declared tool policy on the {route} route: {policy} This is the argv the harness built, not an observation of what the CLI did.")
+        if not mock_only:
+            notes.append("Tool dispatch was not observed: it happens inside the model CLI subprocess. Absence of tool events is not evidence that no tool ran.")
         notes.append("Harness findings are file-level; no line ranges were inferred.")
         model_identity = {"requested": str(spec.config["model"]), "resolved": None, "verification": "unverified",
                           "notes": ["The pi/claude CLI path does not report the served model; only the requested route is known."]}

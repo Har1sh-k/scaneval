@@ -129,11 +129,16 @@ async function main(): Promise<void> {
 
   let modelCalls = 0;
   let modelFailures = 0;
+  // Which CLI actually served each call. The tool policy differs by route, and neither
+  // route's tool dispatch happens in this process, so this records what was asked for,
+  // never what the CLI did with it.
+  const observedRoutes = new Set<string>();
   const observedRunner: PiRunner = {
     async runPi(options) {
       modelCalls += 1;
       const callId = `call-${modelCalls}`;
       const view = describeInvocation(options as unknown as Record<string, unknown>, resolveBinary);
+      observedRoutes.add(config.runner === "mock" ? "mock" : view.route);
       const requestedModel = view.model;
       const began = Date.now();
       await observer.emit({
@@ -263,6 +268,7 @@ async function main(): Promise<void> {
     wall_ms: Date.now() - started,
     model_calls: modelCalls,
     model_call_failures: modelFailures,
+    observed_routes: [...observedRoutes].sort(),
     progress_notes: progressNotes,
     summary,
     error: failure,
@@ -272,7 +278,10 @@ async function main(): Promise<void> {
       events_written: eventsWritten,
       state: observer.getState(),
       flush_timed_out: flushTimedOut,
-      unavailable: ["finding.candidate", "finding.validation", "finding.filtered", "model retries inside the harness runner", "token usage"],
+      unavailable: ["tool.start", "tool.end", "finding.candidate", "finding.validation", "finding.filtered",
+                    "model retries inside the harness runner", "token usage"],
+      tool_dispatch_note: "Tool dispatch happens inside the model CLI subprocess, which this driver spawns but "
+        + "cannot see into. No tool event is emitted, and no absence of tool use is established.",
     },
   };
   writeFileSync(config.output_path, JSON.stringify(output, null, 2));

@@ -10,7 +10,13 @@ import pytest
 
 from sastbench.adapters import get_adapter
 from sastbench.adapters.base import AdapterError, SystemSpec
-from sastbench.adapters.llm_harness import HARNESS_PRESETS, import_harness_findings, parse_frontmatter
+from sastbench.adapters.llm_harness import (
+    HARNESS_PRESETS,
+    TOOL_POLICY,
+    capture_status,
+    import_harness_findings,
+    parse_frontmatter,
+)
 from sastbench.contracts import load_document
 from sastbench.execution import PreparedInput, run_invocation
 from sastbench.materialize import hash_exported_tree
@@ -167,3 +173,56 @@ def test_metadata_mode_omits_prompt_content(tmp_path):
     on_result = load_document(bundle / "result.json", "scan-result")
     off_result = load_document(off / "result.json", "scan-result")
     assert [c["claim_id"] for c in on_result["claims"]] == [c["claim_id"] for c in off_result["claims"]], "tracing must not change findings"
+
+
+@pytest.mark.parametrize("routes", [["claude"], ["pi"], ["claude", "pi"], ["unknown"], []])
+def test_tool_dispatch_is_unavailable_on_every_real_route(routes):
+    capture = capture_status("content", routes, has_summary=True)
+
+    assert capture["tool_calls"] == "unavailable", "an unobserved tool surface is not an absent one"
+    assert capture["finding_candidate"] == "unavailable"
+    assert capture["finding_validation"] == "unavailable"
+    assert capture["finding_filtered"] == "unavailable"
+
+
+def test_only_the_mock_runner_makes_tool_dispatch_inapplicable():
+    assert capture_status("content", ["mock"], has_summary=True)["tool_calls"] == "not_applicable"
+    assert capture_status("content", ["mock", "claude"], has_summary=True)["tool_calls"] == "unavailable"
+
+
+@pytest.mark.parametrize("mode,expected", [("off", "unavailable"), ("metadata", "partial"), ("content", "partial")])
+def test_model_events_are_never_complete_because_retries_are_below_the_boundary(mode, expected):
+    capture = capture_status(mode, ["claude"], has_summary=True)
+
+    assert capture["model_requests"] == capture["model_responses"] == expected
+    assert capture["context_selection"] == ("unavailable" if mode == "off" else "partial")
+    assert capture["finding_submitted"] == ("unavailable" if mode == "off" else "complete")
+    assert capture_status(mode, ["claude"], has_summary=False)["finding_submitted"] == "unavailable"
+
+
+def test_every_declared_tool_policy_says_who_declared_it():
+    assert set(TOOL_POLICY) == {"pi", "claude", "mock"}
+    assert "--no-tools" in TOOL_POLICY["pi"]
+    assert "file tools" in TOOL_POLICY["claude"] and "remain permitted" in TOOL_POLICY["claude"]
+
+
+def test_mock_run_records_the_mock_route_and_its_policy_note(tmp_path):
+    root = SECUREVIBES
+    if not (root / "node_modules" / ".bin" / "tsx").exists():
+        pytest.skip("securevibes-agent checkout not available")
+    adapter = get_adapter("llm-harness")
+    spec = SystemSpec("sv-mock-routes", "llm-harness", {"harness": "securevibes-agent", "root": str(root),
+                                                        "model": "test/mock-llm", "runner": "mock",
+                                                        "qmd_profile": "lite", "llm_max_files": 3})
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    bundle = run_invocation(prepared=_prepared(tmp_path), adapter=adapter, spec=spec, preparation=preparation,
+                            out_dir=tmp_path / "out", run_id="run-routes", timeout_seconds=600,
+                            trace_mode="content", clock=CLOCK)
+    execution = load_document(bundle / "execution.json", "execution-record")
+    output = json.loads((bundle / "raw" / "driver-output.json").read_text(encoding="utf-8"))
+
+    assert output["observed_routes"] == ["mock"]
+    assert "tool.start" in output["trace"]["unavailable"] and "tool.end" in output["trace"]["unavailable"]
+    assert execution["capture"]["tool_calls"] == "not_applicable"
+    assert any("no model process is spawned" in note for note in execution["notes"])
+    assert execution["adapter"]["version"] == "2.1.0"
