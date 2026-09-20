@@ -14,7 +14,7 @@ from jsonschema import Draft202012Validator
 
 
 CONTRACT_KINDS = frozenset(
-    {"scan-request", "scan-result", "evaluation-plan", "review-decisions"}
+    {"scan-request", "scan-result", "evaluation-plan", "review-decisions", "execution-record"}
 )
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
 
@@ -166,7 +166,18 @@ def _validate_review_decisions(document: dict[str, Any]) -> None:
             raise ContractError("quiet assessments must have no claim_ids")
 
 
+def _validate_execution_record(document: dict[str, Any]) -> None:
+    for index, artifact in enumerate(document["raw_artifacts"]):
+        _require_relative_path(artifact["path"], f"raw_artifacts[{index}].path")
+    trace = document.get("trace")
+    if trace and trace.get("path") is not None:
+        _require_relative_path(trace["path"], "trace.path")
+    if document["status"] == "timeout" and not document["timed_out"]:
+        raise ContractError("status 'timeout' requires timed_out to be true")
+
+
 _RUNTIME_VALIDATORS = {
+    "execution-record": _validate_execution_record,
     "scan-request": _validate_scan_request,
     "scan-result": _validate_scan_result,
     "evaluation-plan": _validate_evaluation_plan,

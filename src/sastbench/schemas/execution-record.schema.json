@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sastbench.dev/schemas/v2/execution-record.schema.json",
+  "title": "SASTbench execution record",
+  "description": "Evaluator-side record of one scanner invocation: status, timing, versions, declared policy, capture availability, and preparation provenance.",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "run_id", "invocation_id", "input_id", "system_id", "repetition", "adapter", "versions",
+               "status", "exit_code", "timed_out", "command", "started_at", "finished_at", "wall_seconds", "timeout_seconds",
+               "tool_versions", "model_identity", "system_config", "network_policy", "environment", "capture", "trace",
+               "provenance", "preparation", "unsupported_languages", "error", "import_error", "notes", "raw_artifacts"],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "invocation_id": {"type": "string", "minLength": 1},
+    "input_id": {"type": "string", "minLength": 1},
+    "system_id": {"type": "string", "minLength": 1},
+    "repetition": {"type": "integer", "minimum": 1},
+    "adapter": {"type": "object", "additionalProperties": false, "required": ["name", "version"],
+                "properties": {"name": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}}},
+    "versions": {"type": "object", "additionalProperties": {"type": "string"}},
+    "status": {"enum": ["success", "partial", "unsupported", "error", "timeout"]},
+    "exit_code": {"type": ["integer", "null"]},
+    "timed_out": {"type": "boolean"},
+    "command": {"type": "array", "items": {"type": "string"}},
+    "started_at": {"type": "string", "minLength": 1},
+    "finished_at": {"type": "string", "minLength": 1},
+    "wall_seconds": {"type": "number", "minimum": 0},
+    "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
+    "tool_versions": {"type": "object", "additionalProperties": {"type": "string"}},
+    "model_identity": {
+      "type": ["object", "null"], "additionalProperties": false, "required": ["requested", "resolved", "verification"],
+      "properties": {
+        "requested": {"type": ["string", "null"]},
+        "resolved": {"type": ["string", "null"]},
+        "verification": {"enum": ["unverified", "self_reported", "verified", "not_applicable"]},
+        "notes": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "system_config": {"type": "object"},
+    "network_policy": {
+      "type": "object", "additionalProperties": false, "required": ["declared", "enforced", "note"],
+      "properties": {"declared": {"enum": ["none", "model_provider_only", "unrestricted"]},
+                     "enforced": {"type": "boolean"}, "note": {"type": "string"}}
+    },
+    "environment": {"type": "object", "additionalProperties": false, "required": ["passthrough"],
+                    "properties": {"passthrough": {"type": "array", "items": {"type": "string"}}}},
+    "capture": {"type": "object", "additionalProperties": {"enum": ["complete", "partial", "redacted", "unavailable", "not_applicable"]}},
+    "trace": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["path", "events", "mode", "capture_gap", "dropped_events"],
+      "properties": {"path": {"type": ["string", "null"]}, "events": {"type": ["integer", "null"], "minimum": 0},
+                     "mode": {"enum": ["metadata", "content"]}, "capture_gap": {"type": ["boolean", "null"]},
+                     "dropped_events": {"type": ["integer", "null"], "minimum": 0}}
+    },
+    "provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["tree_hash", "provenance_sha256", "profile", "synthetic_history", "source_modified", "modified_paths", "captured_state_dirs"],
+      "properties": {
+        "tree_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "provenance_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "profile": {"enum": ["standard", "metadata_blinded"]},
+        "synthetic_history": {"type": ["object", "null"]},
+        "source_modified": {"type": "boolean"},
+        "modified_paths": {"type": "array", "items": {"type": "string"}},
+        "captured_state_dirs": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "preparation": {"type": "object"},
+    "unsupported_languages": {"type": "array", "items": {"type": "string"}},
+    "error": {"type": ["object", "null"], "additionalProperties": false, "required": ["code", "message"],
+              "properties": {"code": {"type": "string"}, "message": {"type": "string"}}},
+    "import_error": {"type": ["string", "null"]},
+    "notes": {"type": "array", "items": {"type": "string"}},
+    "raw_artifacts": {"type": "array", "items": {
+      "type": "object", "additionalProperties": false, "required": ["id", "path", "sha256"],
+      "properties": {"id": {"type": "string", "minLength": 1}, "path": {"type": "string", "minLength": 1},
+                     "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}}}
+  }
+}

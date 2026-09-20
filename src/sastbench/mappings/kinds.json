@@ -1,0 +1,38 @@
+{
+  "mapping_version": "1.0.0",
+  "description": "Versioned native-to-canonical kind mapping. Importers preserve the native rule, class, and CWE identity on every claim; unmapped kinds stay unmapped rather than being dropped or guessed from titles.",
+  "canonical_kinds": [
+    "command_injection",
+    "path_traversal",
+    "ssrf",
+    "auth_bypass",
+    "authz_bypass",
+    "sql_injection"
+  ],
+  "unmapped_kind": "unmapped",
+  "cwe": {
+    "CWE-77": "command_injection",
+    "CWE-78": "command_injection",
+    "CWE-22": "path_traversal",
+    "CWE-23": "path_traversal",
+    "CWE-36": "path_traversal",
+    "CWE-918": "ssrf",
+    "CWE-287": "auth_bypass",
+    "CWE-306": "auth_bypass",
+    "CWE-862": "authz_bypass",
+    "CWE-863": "authz_bypass",
+    "CWE-89": "sql_injection",
+    "CWE-564": "sql_injection"
+  },
+  "harness_classes": {
+    "commandinjection": "command_injection",
+    "codeexec": "command_injection",
+    "pathtraversal": "path_traversal",
+    "sandboxescape": "path_traversal",
+    "ssrf": "ssrf",
+    "requestforgery": "ssrf",
+    "authbypass": "auth_bypass",
+    "brokenauthz": "authz_bypass",
+    "sqlinjection": "sql_injection"
+  }
+}

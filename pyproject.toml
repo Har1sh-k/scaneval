@@ -21,7 +21,7 @@ sastbench = "sastbench.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-sastbench = ["schemas/*.json"]
+sastbench = ["schemas/*.json", "mappings/*.json"]
 
 [project.optional-dependencies]
 dev = [
