@@ -35,8 +35,14 @@ mechanism.
 | `semgrep-oss-1.177.0-rules-40b8c63f` | Semgrep OSS, a conventional rule engine | Binary 1.177.0; rules are a git checkout of `semgrep/semgrep-rules` at `40b8c63f`, 618 rule files across the python, javascript, typescript and go trees. No registry download, metrics off. |
 | `securevibes-agent-claude-sonnet-5-bootstrap` | The own harness, an LLM-backed scanner, run in its `bootstrap` mode through its own engine entry point | Harness at `c918011`, package `0.1.0`; model route `anthropic/claude-sonnet-5`, served by the `claude` CLI; at most 40 files sent to the model. |
 
-Semgrep ran on all three inputs. The harness ran on Fastify only, which is the smallest
-input and the case whose mechanism is most specific.
+Both systems ran on all three inputs.
+
+The Semgrep records in this repository were produced by this build. The harness records
+were produced before the project was renamed, and run bundles bind to each other by
+content hash, so they were not relabeled. They are kept locally under `results/` rather
+than committed; their figures are reported below and their bundles are available on the
+machine that produced them. Later harness runs use a cheaper model route, so repeating
+them will not reproduce these numbers exactly.
 
 ## Execution results
 
@@ -47,7 +53,14 @@ Every invocation completed. These are execution facts, not detection results.
 | Semgrep | oauth2-proxy | success | 49 | 16.9 s | 6 |
 | Semgrep | FastMCP | success | 166 | 25.8 s | 0 |
 | Semgrep | Fastify | success | 66 | 18.0 s | 6 |
+| Harness | oauth2-proxy | success | 6 | 950 s | 0 |
+| Harness | FastMCP | success | 4 | 1070 s | 0 |
 | Harness | Fastify | success | 3 | 729.5 s | 1 |
+
+The two systems differ by about twenty times in volume and a thousand times in wall time.
+Semgrep produced 281 claims across the three inputs in 61 seconds and made no model call.
+The harness produced 13 claims in 46 minutes across 66 model calls, and captured 145 trace
+events with no capture gap in any run.
 
 A routed candidate means only that a claim's primary location path is an accepted
 location path of the target. Routing is a queue for human review. It is not a match, and
@@ -76,9 +89,18 @@ has not been made. Read this as the contrast the benchmark exists to put in fron
 reviewer, not as a detection.
 
 On oauth2-proxy, Semgrep's six routed candidates were five shared-URL-struct mutation
-warnings and one open-redirect warning, none about path-versus-URI matching. On FastMCP
-nothing routed at all: Semgrep produced 166 claims, none of them in the file the case
-names.
+warnings and one open-redirect warning, none about path-versus-URI matching. The harness
+produced six claims on that input and none routed: they concern provider group validation,
+forwarded-header parsing, CSRF cookie handling, header injection and cookie entropy, not
+the skip-auth matching surface the case names.
+
+On FastMCP nothing routed from either system. Semgrep produced 166 claims, none in the
+file the case names. The harness produced four, one of which describes the case's
+mechanism but at a different file than the accepted location, so it did not route. That
+claim has been referred to private human review under the disclosure boundary in the
+design, and is deliberately not described here, in the corpus, or in any trace. Nothing
+about it is a benchmark result, and no part of it may be published before that review
+reaches a decision.
 
 Claim kinds show the mapping honestly. All 49 oauth2-proxy claims and all 66 Fastify
 claims mapped to `unmapped` because their rules carry no CWE in the six benchmark
@@ -160,7 +182,7 @@ Replaying a bundle offline reproduces its evaluation byte for byte, and prints a
 because the decisions carry no recorded human approval:
 
 ```sh
-scaneval replay corpus/pilot/runs/2026-09-20-semgrep/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
+scaneval replay corpus/pilot/runs/semgrep-oss-1.177.0/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
 # scaneval: review state draft: these numbers come from decisions with no recorded human approval
 ```
 
