@@ -1,10 +1,14 @@
 # SASTbench
 
-> The initial replacement core is available as an offline alpha: contract validation, saved-output scoring/replay, an HTML report, and an experimental TypeScript observer SDK. See [initial build](docs/INITIAL_BUILD.md). The existing `scripts/` runner and historical scores still use legacy scoring. The broader [design](docs/DESIGN_DECISIONS.md) is not fully implemented; repositories for the first public-workload release remain under selection.
+> The replacement core is an alpha (`2.0.0a1`) that now runs end to end: versioned contracts, case packs with mechanical checks and explicit human approval, an immutable source cache and pinned snapshot export, an invocation runner, two real adapters (pinned Semgrep OSS and the own LLM harness), an observer connection at the harness model boundary, a review workflow, saved-output scoring and offline replay, and an HTML report. See [initial build](docs/INITIAL_BUILD.md) for what it does and does not do, and [the pilot report](docs/PILOT.md) for the first real runs.
+>
+> **No benchmark result exists.** Every case in the repository is a draft, no matching decision has been approved, and confirmed detection is zero. The preserved pilot runs are pipeline demonstrations, not measurements of any scanner.
+>
+> The existing `scripts/` runner and historical scores still use legacy scoring and are labeled legacy throughout this file. The broader [design](docs/DESIGN_DECISIONS.md) is not fully implemented; repositories for the first public-workload release remain under selection.
 
 > Can your scanner find real vulnerabilities without flagging authorized capabilities?
 
-SASTbench evaluates whether static analyzers find real vulnerabilities at an acceptable review cost. The proposed [workload scope](docs/DESIGN_DECISIONS.md#workload-classification) covers conventional applications, conventional automation, AI-assisted applications, and agentic applications, with separate scorecards. The current corpus is agentic-heavy; existing `agentic`/`generic` CLI profiles are legacy selections, not the proposed workflow classifications.
+SASTbench evaluates whether static analyzers find real vulnerabilities at an acceptable review cost. The proposed [workload scope](docs/DESIGN_DECISIONS.md#workload-classification) covers conventional applications, conventional automation, AI-assisted applications, and agentic applications, with separate scorecards. The legacy `cases/` corpus is agentic-heavy, and its `agentic`/`generic` CLI profiles are legacy selections, not the proposed workflow classifications. The new core's corpus is the draft pilot pack under `corpus/pilot/`, which covers three cases and no controls.
 
 ## Try the new evaluation core
 
@@ -16,6 +20,47 @@ sastbench replay results/diagnostic-demo --output results/diagnostic-replay.json
 ```
 
 This uses fabricated evaluator fixtures, not a live scanner or admitted CVEs. It tests scoring rules without model calls. Output paths must be new. The [SDK guide](docs/OBSERVER_SDK.md) covers opt-in harness visibility and capture limits.
+
+Replay one of the preserved pilot bundles offline, with no network and no model call:
+
+```bash
+sastbench replay corpus/pilot/runs/2026-09-20-semgrep/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
+# sastbench: review state draft: these numbers come from decisions with no recorded human approval
+```
+
+That warning is the accurate state of every bundle in this repository.
+
+### Evaluation core commands
+
+| Command | What it does |
+|---|---|
+| `sastbench validate <kind> <path>` | Validate one of nine versioned contracts: `scan-request`, `scan-result`, `execution-record`, `evaluation-plan`, `review-decisions`, `review-record`, `case-pack`, `run-config`, `run-manifest`. |
+| `sastbench demo <new dir>` | Create the fabricated conformance bundle. No scanner or model runs. |
+| `sastbench score --plan --result --decisions` | Score separately stored records. |
+| `sastbench replay <bundle>` | Recompute a saved bundle offline. |
+| `sastbench report <bundle> --output` | Render a standalone HTML report for a saved bundle. |
+| `sastbench corpus init\|add-snapshot\|import\|validate\|approve\|admit\|disposition` | Build and mechanically check an evaluator-side case pack, and record explicit human reviews, admissions, and dispositions. |
+| `sastbench plan --pack --snapshot-id --tree-hash --output` | Build one evaluation plan for a materialized input. |
+| `sastbench run <config> --output <new dir>` | Execute one frozen run configuration into a new run directory. |
+| `sastbench review init\|record\|approve\|status` | Draft, re-draft, approve, and inspect the review of one invocation bundle. |
+
+Only `corpus validate --snapshot-id` and `run` reach the network; what `run` contacts depends on the configured systems. Everything else is offline. Exit code `2` means the command could not be carried out, `1` means it ran and reports a negative result, `0` means it ran and reports nothing wrong, which is not a statement that any label or decision is correct.
+
+Guides: [initial build](docs/INITIAL_BUILD.md) for the current build and its limits, [pilot report](docs/PILOT.md) for the first real runs, [bring your own corpus](docs/BRING_YOUR_OWN_CORPUS.md) for the organization-owned pack path, [design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) for the destination.
+
+### Evaluation core status
+
+| Area | State |
+|---|---|
+| Contracts, scoring, replay, report | Implemented |
+| Case packs, mechanical (L1) checks, plan generation | Implemented |
+| Source cache, pinned export, provenance | Implemented; `standard` profile only, `metadata_blinded` refused |
+| Invocation runner, bundles, run manifest | Implemented for full scans |
+| Adapters | `semgrep` (pinned local rules) and `llm-harness` (own harness) |
+| Observer connection | Model boundary of the own harness only; tool dispatch and the finding lifecycle before submission are unavailable |
+| Review workflow | Machine drafts route candidates; approval requires an explicit reviewer name |
+| Reviewed labels, admitted cases, controls | **None.** Every case is draft, no control is defined |
+| Corpus aggregation, precision sampling, promotion gates, trace viewer, SARIF import, native PR mode, enforced isolation | Not implemented |
 
 ## Legacy runner: what gets scored
 
@@ -78,11 +123,12 @@ PR simulation mode is documented in [docs/PR_MODE.md](docs/PR_MODE.md).
 ### Requirements
 
 - Python 3.11+
-- Git (required for `scripts/setup_repos.py`)
+- Git (required by `scripts/setup_repos.py`, and by the new core's source cache and pinned export)
+- Node.js, only for the observer SDK and the own-harness adapter
 
-The new core uses `jsonschema` for contract validation. The legacy runner uses the Python standard library. Scanner CLIs are optional and can be installed separately or via the `official-adapters` extra.
+The new core uses `jsonschema` for contract validation. The legacy runner uses the Python standard library. Scanner CLIs are optional and can be installed separately or via the `official-adapters` extra. The `llm-harness` adapter additionally needs a local checkout of the harness and a built observer SDK (`npm ci && npm run build` in `sdk/typescript`).
 
-### Full Track Snapshots
+### Legacy Full Track snapshots
 
 Full Track cases reference pinned snapshots under `.repos/`. Populate them with:
 
@@ -98,7 +144,7 @@ After setup, validate the full benchmark surface with:
 python scripts/validate.py --track full
 ```
 
-### PR Simulation Mode
+### Legacy PR simulation mode
 
 SASTbench also supports benchmarked PR simulation with:
 
@@ -116,11 +162,11 @@ python scripts/verify_pr_strict.py
 
 PR simulation (`baseCommit`/`headCommit`) and remediation verification (`fixCommit`/`fixValidation`) are separate concerns. PR mode runtime does not use `fixCommit`. See [docs/PR_MODE.md](docs/PR_MODE.md#pr-pair-verification-vs-remediation-verification) for details.
 
-### LLM Model Tracking
+### Legacy LLM model tracking
 
 Adapters for LLM-backed scanners can expose an `LLM_MODEL` constant. When present, results JSON includes `scanner.llmModel` and the model is printed at run start. Set via environment variable (e.g. `SECUREVIBES_LLM_MODEL`).
 
-### Model-Specific Benchmarks (knowledge-cutoff gating)
+### Legacy model-specific benchmarks (knowledge-cutoff gating)
 
 Prior exposure to advisories or fixes can affect LLM-backed scanner performance. The legacy runner's knowledge-cutoff gate aims to reduce one exposure route; it does not establish absence of memorization. The design retains credit for correct findings regardless of prior knowledge and uses freshness as a reporting slice.
 
@@ -161,7 +207,9 @@ Run benchmark self-tests from the repo root with:
 python -m pytest -q
 ```
 
-### Smoke Tests for Official Adapters
+One suite covers both the evaluation core (`tests/test_v2*`) and the legacy runner. Two legacy snapshot tests skip when their checkouts are unavailable. No real CVE is silently imported and no paid model evaluation runs during these tests.
+
+### Legacy smoke tests for official adapters
 
 Verify your scanner installation works before running the full benchmark:
 
@@ -175,12 +223,12 @@ python scripts/run.py --scanner bandit --track core --case-id SB-PY-SV-001
 
 Both should show `TARGET HIT` for SB-PY-SV-001 (SSRF in reference fetcher).
 
-## Tracks
+## Legacy tracks
 
 - **Core Track**: Self-contained, vendored cases. 5-minute quickstart, deterministic runs.
 - **Full Track**: Core Track plus pinned snapshots from real public repositories.
 
-## Profiles
+## Legacy profiles
 
 Cases carry an `agentic` boolean. The `--profile` flag filters runs by profile:
 
@@ -190,18 +238,22 @@ Cases carry an `agentic` boolean. The `--profile` flag filters runs by profile:
 
 Legacy cases without an `agentic` field are treated as agentic.
 
-## Status
+## Legacy corpus status
+
+These counts describe the legacy `cases/` tree scored by `scripts/run.py`. They are not the new core's corpus, which is the draft pilot pack under `corpus/pilot/`.
 
 - **17 Core Track** cases (synthetic vulnerable, capability safe, mixed intent)
 - **189 Full Track** cases: 156 real-world disclosed (agentic) + 33 real-world generic (non-agentic)
 - **206 total cases** across Python, TypeScript, Rust, Swift, Go, Java, and Clojure
 
-## Official Adapters
+## Legacy official adapters
 
 - `semgrep`
 - `bandit`
 
-## Baseline Reference Results
+The new core's adapters are separate: `semgrep` against a pinned local rules checkout, and `llm-harness` for the own harness.
+
+## Legacy baseline reference results
 
 Historical legacy results measured on March 24, 2026 against the synthetic Core Track. They are not results under the proposed scoring design. Capability FP Rate uses six annotated synthetic safe regions; the composite Agentic Score is retained here only as a historical field.
 
@@ -220,7 +272,7 @@ If you want another agent to work on this repo, use these repo-local skills:
 - [skills/sastbench-results-validation/SKILL.md](skills/sastbench-results-validation/SKILL.md): verify claimed benchmark or PR-mode results, rerun scanners, confirm the exact rule set used, and distinguish valid runs from environment or scanner failures.
 - [skills/sastbench-adapter-authoring/SKILL.md](skills/sastbench-adapter-authoring/SKILL.md): build or update a SASTbench scanner adapter, including rule mapping, metadata capture, PR-mode support, tests, and harness validation.
 
-## V1 Canonical Vulnerability Kinds
+## Legacy V1 canonical vulnerability kinds
 
 | Kind | Capability Surface |
 |------|--------------------|
@@ -231,7 +283,7 @@ If you want another agent to work on this repo, use these repo-local skills:
 | `authz_bypass` | Enforcing per-identity permission scopes |
 | `sql_injection` | Querying and mutating data stores |
 
-## Scoring
+## Legacy scoring labels
 
 This section describes legacy report labels. The replacement [scoring contract](docs/DESIGN_DECISIONS.md#4-scoring-without-exhaustive-repository-labels) separates known-target detection, reviewed precision, controls, and operational outcomes without a composite score.
 
@@ -260,7 +312,7 @@ PR mode uses a different top-level summary:
 
 See [docs/PR_MODE.md](docs/PR_MODE.md) for the full PR-mode model and output schema.
 
-## OWASP Agentic Top 10 Alignment
+## Legacy OWASP Agentic Top 10 alignment
 
 SASTbench cases are mapped to the [OWASP Top 10 for Agentic Applications for 2026](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) as a reporting crosswalk. Each case carries a `standards.owaspAgenticTop10` field with primary and optional secondary ASI category labels. This mapping enables filtering and aggregating results by OWASP category without changing how the benchmark scores findings.
 
@@ -276,8 +328,8 @@ These directories are created at runtime and excluded from git via `.gitignore`:
 
 | Directory | Created by | Contents |
 |-----------|-----------|----------|
-| `results/` | `scripts/run.py` | Results JSON, HTML reports, raw scanner artifacts |
-| `.repos/` | `scripts/setup_repos.py` | Cloned real-world repo snapshots for Full Track |
+| `results/` | `scripts/run.py`, `sastbench demo` | Results JSON, HTML reports, raw scanner artifacts |
+| `.repos/` | `scripts/setup_repos.py`, `sastbench corpus validate`, `sastbench run` | Legacy Full Track snapshots and the new core's immutable source cache |
 | `.securevibes/` | securevibes-agent scanner | Scanner knowledge-base state (cleaned up by adapter) |
 | `.claude/` | Some LLM-backed scanners | Scanner config/skills state (cleaned up by adapter) |
 | `__pycache__/` | Python | Bytecode cache |
@@ -292,14 +344,21 @@ sastbench/
 |- manifest.json
 |- LICENSE
 |- pyproject.toml
-|- schema/            # JSON schemas for cases and results
-|- taxonomy/          # Canonical kinds, capabilities, languages
+|- src/sastbench/     # Evaluation core: contracts, cases, materialize, runner,
+|  |                  # execution, review, scoring, report, CLI
+|  |- schemas/        # The nine versioned JSON contracts
+|  `- adapters/       # semgrep, llm-harness, and the harness driver
+|- sdk/typescript/    # Opt-in observer emitter
+|- corpus/pilot/      # Draft pilot pack, frozen run configs, preserved runs
+|- docs/              # Design, math, initial build, pilot, guides
+|- schema/            # Legacy JSON schemas for cases and results, plus schema/v2 trace events
+|- taxonomy/          # Legacy canonical kinds, capabilities, languages
 |- cases/
-|  |- core/           # Synthetic vendored cases
-|  `- full/           # Real-world disclosed cases
-|- adapters/          # Scanner adapters (semgrep, bandit, etc.)
-|- scripts/           # run, validate, report
-`- tests/             # Benchmark self-tests
+|  |- core/           # Legacy synthetic vendored cases
+|  `- full/           # Legacy real-world disclosed cases
+|- adapters/          # Legacy scanner adapters (semgrep, bandit, etc.)
+|- scripts/           # Legacy run, validate, report
+`- tests/             # Benchmark self-tests (new core and legacy)
 ```
 
 ## License

@@ -1,6 +1,6 @@
 # Claude continuation prompt
 
-Continue implementing SASTbench in this repository. An initial offline evaluator and experimental observer SDK already exist. Audit and extend them; do not restart from an empty project or treat the complete design as implemented.
+Continue implementing SASTbench in this repository. An offline evaluator, a case-pack workflow, a live invocation runner, two real adapters, an observer connection to the own harness, and a review workflow already exist. Audit and extend them; do not restart from an empty project or treat the complete design as implemented.
 
 ## Start here
 
@@ -13,15 +13,27 @@ Existing implementation commits:
 - `0e04a84`: deterministic saved-output evaluator, versioned contracts, CLI, report, and conformance tests.
 - `82c88ca`: opt-in TypeScript observer SDK, event contract, capture safeguards, and tests.
 - `53be6af`: repository inventory and CVE candidate research. These are research leads, not admitted labels.
+- `e5ad383`: immutable source cache and pinned snapshot export.
+- `2c8b735`: invocation runner, adapter protocol, and the pinned Semgrep adapter.
+- `5ca9935`: own-harness adapter with the observer wrapped around the model boundary.
+- `48494c9`: case-pack contracts, mechanical checks, and plan generation.
+- `8a1453e`: draft review decisions, review records, and explicit approval.
+- `fbdad50`, `59e25d1`: frozen run-configuration execution and the `corpus`, `plan`, `review`, `run` commands.
+- `d36d4a8`, `c47a434`, `c2830d3`, `ca53346`, `16726ec`: the draft pilot pack with its fix-hunk evidence, the two preserved pilot runs, and the pilot report.
+- `f9fb52a`, `fa3b3f1`: private-pack case identifiers and the bring-your-own-corpus guide.
+
+Run `git log --oneline` before relying on this list; work was landing while it was written.
 
 Read these files before planning implementation:
 
 1. `docs/DESIGN_DECISIONS.md`: intended product behavior and agreed boundaries.
 2. `docs/EVALUATION_MATH.md`: scoring definitions, missing-data treatment, and reporting rules.
 3. `docs/INITIAL_BUILD.md`: what this branch actually implements and what is missing.
-4. `docs/OBSERVER_SDK.md`: event integration, passivity, flushing, and capture limitations.
-5. `docs/REPOSITORY_INVENTORY.md` and `docs/CVE_CORPUS_SHORTLIST.md`: source leads and candidate dossiers.
-6. `src/sastbench/`, `sdk/typescript/`, `schema/v2/`, and `tests/test_v2*`: current code and executable invariants.
+4. `docs/PILOT.md`: the first real runs, their execution facts, and what they do not establish.
+5. `docs/OBSERVER_SDK.md`: event integration, passivity, flushing, and capture limitations.
+6. `docs/BRING_YOUR_OWN_CORPUS.md`: the organization-owned pack path as the code implements it.
+7. `docs/REPOSITORY_INVENTORY.md` and `docs/CVE_CORPUS_SHORTLIST.md`: source leads and candidate dossiers.
+8. `src/sastbench/`, `sdk/typescript/`, `schema/v2/`, `corpus/pilot/`, and `tests/test_v2*`: current code, preserved runs, and executable invariants.
 
 The design and math describe the destination. The initial-build guide and inspected code describe current capabilities. Do not silently change a design decision to accommodate a shortcut in the alpha implementation.
 
@@ -36,32 +48,48 @@ The first release evaluates public workloads. Do not claim that public-case resu
 ## Current implementation
 
 - Python package `sastbench`, alpha version `2.0.0a1`.
-- `sastbench validate`, `score`, `replay`, `report`, and `demo` commands.
+- `sastbench validate`, `score`, `replay`, `report`, `demo`, `corpus`, `plan`, `review`, and `run` commands. `corpus` has `init`, `add-snapshot`, `import`, `validate`, `approve`, `admit`, `disposition`; `review` has `init`, `record`, `approve`, `status`.
 - `evaluate(plan, saved_result, frozen_decisions)` library entry point. This does not run an agent.
-- Strict JSON contracts for scanner requests/results and evaluator plans/review decisions.
+- Nine strict JSON contracts: `scan-request`, `scan-result`, `execution-record`, `evaluation-plan`, `review-decisions`, `review-record`, `case-pack`, `run-config`, `run-manifest`.
+- Case packs with pinned snapshots, drafted cases, six mechanical (L1) checks per snapshot, recorded human approvals, admissions, and dispositions. Plan generation degrades to the lowest label state present.
+- Immutable source cache and pinned snapshot export with a recorded tree hash, stripped controller state, recorded instruction files, and preparation provenance. Only the `standard` profile is implemented; `metadata_blinded` is refused rather than downgraded.
+- An invocation runner that executes a frozen run configuration, freezes the pack copy, prepares each input, invokes each system per input per repetition into its own bundle, and writes a run manifest. A failure after the output directory exists writes a `failed` manifest rather than losing what finished.
+- Two real adapters: `semgrep` against a pinned local rules checkout with no registry download, and `llm-harness` running the securevibes-agent/Fieldglass engine through its own entry point. Only the securevibes-agent preset has been exercised against a live model, in `bootstrap` mode.
+- The TypeScript observer is connected to the own harness through `src/sastbench/adapters/llm_harness_driver.mts`, which wraps the harness's default model runner and emits model request/response, context selection from the harness's own progress notes, and finding submission.
+- A review workflow: machine-drafted decisions routed by accepted location path, all unresolved; `review record` re-drafts after a human edits the decisions; `review approve` records one explicit human approval bound to the saved result.
 - One-input scoring against all assigned targets and controls, with exact-duplicate handling, first-hit ranks, budgeted/full-output recall, unranked diagnostics, and completed-control bounds.
 - A fabricated conformance demo and standalone HTML score report. No real scanner runs in the demo.
 - A TypeScript observer emitter with explicit model/tool/context/finding events, recording modes, redaction of supplied copies, failure isolation, capture-gap state, and `flush()`.
+- Two preserved real runs under `corpus/pilot/runs/`, described in `docs/PILOT.md`. They are pipeline demonstrations, not results.
 - Legacy `scripts/` and adapters remain unchanged and continue using old semantics. Do not assume their output or behavior conforms to the new contracts.
 
-Last verified: 234 Python tests passed, 2 legacy snapshot tests skipped because their checkouts were unavailable; 13 TypeScript tests passed. Package installation and wheel/resource loading were smoke-tested. Recheck these counts on the current checkout rather than treating them as permanent guarantees.
+Last verified on this checkout: 663 Python tests passed, 2 legacy snapshot tests skipped because their checkouts were unavailable; 13 TypeScript tests passed. The Python count moved during the session that recorded it, so treat it as a floor and recheck on the current checkout rather than as a permanent guarantee.
+
+**The corpus remains draft.** The pilot pack `corpus/pilot/pack.json` holds three cases, all `mechanically_checked` at L1 with disposition `needs_evidence` and no admission record. Every plan built from it therefore has `draft` scope, every matching decision in the preserved runs is `unresolved`, and confirmed detection is zero. Do not present any number from this repository as a detection result.
 
 Important limitations:
 
-- Matching is supplied through frozen evaluator decisions. The code does not establish root-cause correctness from arbitrary scanner prose.
-- A declared L3/L4 field is not proof of independent review. Case evidence and admission records still need implementation.
-- Saved-result hashing is not source-tree verification, a digital signature, or sandbox enforcement. The demo's input hash uses a path/content map.
-- No live own-harness adapter, native/SARIF importer, exporter, isolation policy, multi-model planner, trace viewer, corpus aggregation, pair aggregation, precision sampling, or promotion gate is implemented in the new core.
-- The TypeScript emitter is not connected to SecureVibes or RunSortie. Importing it alone observes nothing.
+- Matching is supplied through frozen evaluator decisions. The code does not establish root-cause correctness from arbitrary scanner prose. Routing proposes candidates by accepted location path only; path equality is not an allegation.
+- A declared L3/L4 field is not proof of independent review. Case evidence records and admission decisions exist as contracts and commands, but no case has been reviewed or admitted.
+- Mechanical checks establish artifacts, paths, and ranges. They do not parse source, establish a root cause, or approve anything, so no check raises a case past L1.
+- Saved-result hashing is not source-tree verification, a digital signature, or sandbox enforcement. The demo's input hash uses a path/content map. A `human_approved` review record is the record's own assertion, not a verified one.
+- Directory separation and the path checks that keep evaluator material out of a trial directory are documented boundaries, not isolation. The declared network policy is recorded and never enforced by this package.
+- The observer connection captures the model boundary of the own harness only. Tool dispatch is `unavailable` on every real route because it happens inside the model CLI subprocess; an unavailable category establishes nothing about whether that activity happened. Candidate creation, validation, and filtering are unavailable, and token usage and in-runner retries are not observable at that boundary.
+- No native/SARIF importer for saved vendor output, exporter, enforced isolation policy, multi-model planner, trace viewer, corpus aggregation, pair aggregation, precision sampling, promotion gate, native PR mode through an adapter, metadata blinding, or semantic duplicate review is implemented.
 - Control rates use completed observations. `observed_false_allegations` separately retains explicit reviewed allegations from incomplete output; do not erase those observations or include incomplete scans in a completed-only denominator.
+- The pilot pack defines no controls, so control rates are N/A rather than zero and no fixed-state snapshot has been prepared.
 
 ## Immediate objective
 
-Deliver the next small end-to-end slice: one real prepared input, an actual scanner invocation, preserved native findings, reviewer-backed scoring, observable harness events where available, and offline replay. Exercise an organization-owned case pack through the same interface. Grow the case set after that path works.
+The end-to-end slice is built and exercised: three prepared inputs, four real scanner invocations across two systems, preserved native output, machine-drafted decisions, observed harness model events, and offline replay. `docs/PILOT.md` records it. The organization-owned pack path runs through the same interface and is documented in `docs/BRING_YOUR_OWN_CORPUS.md`.
+
+What is missing is the human half. The next objective is to turn the preserved runs into reviewed evidence: human review of the routed candidates through `sastbench review record` and `sastbench review approve`, and independent review of the three case labels to L3 through `sastbench corpus approve` and `sastbench corpus admit`. That is the only path to a non-zero recall and the only path out of draft scope. After that, prepare fixed-state snapshots so the cases have property-specific negative controls, then run the own harness on the remaining inputs with repetitions before any comparison between systems.
 
 Start with a short plan grounded in the existing code. Use the milestones below, but complete and test one vertical slice before expanding the platform.
 
 ### 1. Select and prepare a small real-case pilot
+
+**Status: a first pilot pack exists and is draft.** `corpus/pilot/pack.json` holds three cases on three pinned snapshots: Go, Python, and JavaScript; conventional application, agentic application, conventional application. Every commit was verified against its repository. All three are `mechanically_checked` at L1 with disposition `needs_evidence`, none is admitted, and there is no Rust case, no conventional-automation case, no AI-assisted-application case, and no control of any kind. Next step: independent review of these three labels to L3, then coverage of the missing language and workload cells. The guidance below still governs every case added.
 
 - Initial language scope is Python, TypeScript/JavaScript, Go, and Rust. Count the language of the vulnerable implementation, not the repository's frontend or wrappers. Do not add more languages just to enlarge the corpus.
 - The inventory contains 103 source leads and the shortlist contains 30 candidates. Verify exact versions, source, fixes, and assumptions before using any candidate. Neither a CVE identifier nor a maintainer patch automatically validates our snapshot-specific scoring label.
@@ -77,6 +105,8 @@ Start with a short plan grounded in the existing code. Use the milestones below,
 
 ### 2. Materialize and invoke once per applicable input
 
+**Status: built for full scans.** `sastbench.materialize` keeps the cache immutable and exports a pinned snapshot with a recorded tree hash and provenance; `sastbench.runner` groups execution by prepared input, system, and repetition, and scores every planned target and control from one output. Raw output, exit status, timeout and partial behavior, tool and ruleset versions, model identity, configuration, timing, usage, and per-category capture are all preserved in the execution record. Still missing: enforced network and filesystem policy (the declared policy is recorded only), the `metadata_blinded` profile, native PR mode, and repetitions greater than one in practice. The guidance below still governs.
+
 - Keep the source cache immutable. Export a pinned snapshot to an isolated trial directory and record exact hashes and preparation provenance.
 - Group execution by actual prepared input, scan scope, configuration, and repetition. Score every applicable target/control from that output rather than rescanning separately for each CVE.
 - Shared versions can cover multiple vulnerable targets. Later planned snapshots can supply repaired controls for earlier targets, but only when the repair and scope are validated. A CVE range alone does not establish that control.
@@ -86,6 +116,8 @@ Start with a short plan grounded in the existing code. Use the milestones below,
 - Preserve raw output, exit status, timeout/partial behavior, tool/ruleset versions, resolved model identity, configuration, timing, usage, and capture availability. Do not turn execution errors into empty successful scans.
 
 ### 3. Add the first real adapter and observer integration
+
+**Status: both adapters exist and the observer is connected.** The own harness is `/Users/hk/Documents/GitHub/securevibes-agent`, run unchanged through its own engine entry point inside its own `tsx`; the driver injects only the harness's default model runner wrapped by the observer plus a progress reporter, and no patch to that repository was needed. The pinned conventional scanner path is Semgrep OSS against a local rules checkout, independent of Inspect and Harbor. Finding submission is linked by the harness's own finding ids. Still missing: tool-dispatch visibility (it happens inside the model CLI subprocess), the candidate, validation, and filtering stages, token usage, tracing-on/off parity tests against a live route, and native PR mode. The guidance below still governs, in particular the rule that an unobserved category is never reported as an absence.
 
 - Inspect the available own-harness repository first. A likely local starting point is `/Users/hk/Documents/GitHub/securevibes-agent`; verify its existence, actual invocation, and output structure. Do not invent a RunSortie command or assume its API matches SecureVibes. If the preferred first harness is ambiguous after inspection, ask one concise question.
 - Keep the harness's agent loop intact. Prefer shared model-client/tool-dispatch boundaries or existing callbacks. Request authorization before editing another repository and keep any integration patch separate.
@@ -98,6 +130,8 @@ Start with a short plan grounded in the existing code. Use the milestones below,
 
 ### 4. Preserve scoring boundaries
 
+**Status: enforced in the current scorer and contracts. These are standing constraints, not a milestone to close.** Do not relax any of them to make a later feature simpler.
+
 - One atomic claim can hit at most one canonical target. Exact duplicates add review burden but no target credit.
 - Location plus category alone does not establish the right security allegation. Distinguish the affected input/authority and deployment assumptions when necessary. Safely bound `search` is not a hit for vulnerable `sort` at the same endpoint.
 - Unknown findings remain unknown, not automatic false positives. Correct additional issues require review and a later versioned label decision, not a tool-specific recall denominator change.
@@ -108,6 +142,8 @@ Start with a short plan grounded in the existing code. Use the milestones below,
 - Freeze evaluator decisions and artifacts for comparisons. Never let an engineering agent edit the scorer or held-out labels to manufacture improvement.
 
 ### 5. Bring-your-own-case path
+
+**Status: the local library/CLI workflow exists and is documented.** `sastbench corpus init`, `add-snapshot`, `import`, `validate`, `approve`, `admit`, and `disposition` carry a supplied artifact (a legacy case record, a fix commit, a finding, or an internal document) into a namespaced draft pack with the same admission, invocation, scoring, and visibility contracts as public cases. No hosted service is involved. `docs/BRING_YOUR_OWN_CORPUS.md` documents the path as the code implements it and collects the gaps. Jev intake assistance is not implemented. The guidance below still governs.
 
 - Organizations should be able to supply existing security fixes, GitHub commits/issues, prior findings, or internal documents through a local library/CLI workflow. Do not require a hosted service.
 - Use a namespaced, versioned private pack with the same admission, invocation, scoring, and visibility contracts as public cases.
@@ -128,7 +164,13 @@ python -m pytest -q
 sastbench demo results/claude-pilot-demo
 sastbench replay results/claude-pilot-demo --output results/claude-pilot-replay.json
 cmp results/claude-pilot-demo/evaluation.json results/claude-pilot-replay.json
+
+# Offline, no network and no model: replay a preserved pilot bundle.
+sastbench replay corpus/pilot/runs/2026-09-20-semgrep/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
+sastbench review status corpus/pilot/runs/2026-09-20-semgrep/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
 ```
+
+The replay prints `review state draft` on stderr and `review status` prints `draft`. Both are correct and must stay correct until a human approval is actually recorded. Reproducing the runs themselves needs the network, and the harness run needs live model calls; the commands are in `docs/PILOT.md`.
 
 Output paths must be new. Run `npm ci` then `npm test` from `sdk/typescript`. Validate both enabled/disabled observer behavior and failure paths. Do not reclassify a failing test as legacy merely to make the suite pass.
 
