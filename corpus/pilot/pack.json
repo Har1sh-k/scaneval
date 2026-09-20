@@ -183,6 +183,14 @@
           "reference": "git: 9ffafad4b2d2f9f7668e5504565f356a7c047b77^ == f4b33b64bd66ad28e9b0d63bea51837b83c00ca1",
           "note": "Verified 2026-09-20 with a shallow fetch; the pinned vulnerable snapshot is the direct parent of the fix.",
           "retrieved": "2026-09-20"
+        },
+        {
+          "evidence_id": "fix-hunks",
+          "origin": "public_advisory_and_maintainer_fix",
+          "kind": "source_inspection",
+          "reference": "git diff 9ffafad4^..9ffafad4 -- oauthproxy.go pkg/requests/util/util.go",
+          "note": "Verified 2026-09-20: oauthproxy.go line 583 changes route.pathRegex.MatchString(requestutil.GetRequestURI(req)) to GetRequestPath(req), and util.go gains GetRequestPath, which parses the URI and returns only its path component. Both repaired sites fall inside the accepted locations carried over from the legacy record, and the diff confirms the root cause is the full-URI match rather than the regex itself.",
+          "retrieved": "2026-09-20"
         }
       ],
       "disclosure": {
@@ -335,6 +343,14 @@
           "kind": "other",
           "reference": "docs/CVE_CORPUS_SHORTLIST.md#03-fastmcp",
           "note": "Research dossier; files named there are inspection starting points, not accepted regions."
+        },
+        {
+          "evidence_id": "fix-hunks",
+          "origin": "public_advisory_and_maintainer_fix",
+          "kind": "source_inspection",
+          "reference": "git diff 40bdfb6b^..40bdfb6b -- src/fastmcp/utilities/openapi/director.py",
+          "note": "Verified 2026-09-20: the fix imports quote and replaces url_path.replace(placeholder, str(param_value)) with quote(str(param_value), safe='').replace('.', '%2E') inside RequestDirector._build_url (two hunks, 8 changed lines, plus 129 lines of new tests in tests/utilities/openapi/test_director.py). The repaired line is the unencoded substitution the accepted location covers.",
+          "retrieved": "2026-09-20"
         }
       ],
       "disclosure": {
@@ -487,6 +503,14 @@
           "kind": "source_inspection",
           "reference": "git ls-remote refs/tags/v5.12.1 -> 7d196a998c422062a3aaa3f8041db91ad576cea0; refs/tags/v5.12.2 -> 942a2be8704244db778f8db9a0bb4951b8825156",
           "note": "Tag SHAs recorded 2026-09-20; fix parent 0c170ca1 on main has package version 6.0.0-alpha.2, so the release line was pinned instead.",
+          "retrieved": "2026-09-20"
+        },
+        {
+          "evidence_id": "fix-hunks",
+          "origin": "public_advisory_and_maintainer_fix",
+          "kind": "source_inspection",
+          "reference": "git diff d66ebd12^..d66ebd12 -- lib/four-oh-four.js",
+          "note": "Verified 2026-09-20: the fix removes 23 lines from lib/four-oh-four.js across six hunks and adds 77 lines to test/404s.test.js plus 24 to test/router-options.test.js. The changed file is the accepted location. The diff is against main, whose package version is 6.0.0-alpha.2, so its line numbers do not map onto the pinned v5.12.1 tree; the accepted location is therefore file-level and the backport into v5.12.2 remains unverified.",
           "retrieved": "2026-09-20"
         }
       ],
