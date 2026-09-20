@@ -36,7 +36,20 @@ PACK_KIND = "case-pack"
 LEVELS = ("L1", "L2", "L3", "L4")
 DISPOSITIONS = ("validate", "needs_evidence", "extended_regression", "exclude")
 REVIEWED_LEVELS = ("L3", "L4")
-_ALIAS = re.compile(r"^(CVE-\d{4}-\d{4,}|GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4})$")
+# A public identifier must be well formed, so a typo in a CVE or GHSA id is caught. Any other
+# identifier shape is accepted: a private pack names its cases by internal ticket or review id,
+# and the design states a CVE is neither required nor sufficient.
+_PUBLIC_ALIAS = re.compile(r"^(CVE-\d{4}-\d{4,}|GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4})$")
+_PUBLIC_ALIAS_PREFIX = re.compile(r"^(CVE|GHSA)[-_]", re.IGNORECASE)
+
+
+def alias_problem(alias: str) -> str | None:
+    """Return why *alias* is unusable as an identifier, or None when it is fine."""
+    if not isinstance(alias, str) or not alias.strip():
+        return "an identifier cannot be blank"
+    if _PUBLIC_ALIAS_PREFIX.match(alias) and not _PUBLIC_ALIAS.match(alias):
+        return f"{alias} is not a well formed CVE or GHSA identifier"
+    return None
 _REPRESENTS = re.compile(r"^This case tests .+ under .+, and adds .+", re.DOTALL)
 _TREE_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -273,8 +286,14 @@ def draft_case_from_legacy(legacy: dict, *, case_id: str, snapshot_id: str, lega
     items = [evidence("legacy-record", origin="legacy_case_record", kind="other", reference=legacy_path,
                       note=f"Legacy case {legacy.get('id')} ({legacy.get('caseType')}); prior draft regions, not v2-reviewed labels.")]
     if real.get("fixCommit"):
-        items.append(evidence("fix-commit", origin="public_advisory_and_maintainer_fix", kind="fix_commit",
-                              reference=f"{real.get('repo')}@{real['fixCommit']}", note="Fix commit named by the legacy record."))
+        # Only an advisory in the record makes this a public advisory plus maintainer fix. A fix
+        # commit alone is a fix without an advisory, which is the ordinary shape of an internal one.
+        advised = bool(real.get("ghsa") or real.get("cve"))
+        items.append(evidence("fix-commit",
+                              origin="public_advisory_and_maintainer_fix" if advised else "fix_without_advisory",
+                              kind="fix_commit", reference=f"{real.get('repo')}@{real['fixCommit']}",
+                              note="Fix commit named by the legacy record."
+                                   + ("" if advised else " The record names no advisory, so no public disclosure is claimed.")))
     if real.get("ghsa"):
         items.append(evidence("ghsa", origin="public_advisory_and_maintainer_fix", kind="ghsa_advisory",
                               reference=f"https://github.com/advisories/{real['ghsa']}", note=""))
@@ -402,7 +421,9 @@ def mechanical_checks(pack: dict, snapshot_id: str, source_dir: Path, tree_hash:
                         bad_ranges.append(f"{owner}:{loc['path']}:{loc['end_line']}")
             check("line_ranges_within_files", not bad_ranges, ", ".join(bad_ranges) or "all ranges within file length")
             aliases = case["canonical_target"]["aliases"]
-            check("aliases_well_formed", all(_ALIAS.match(a) for a in aliases), ", ".join(aliases) or "no aliases")
+            problems = [problem for problem in (alias_problem(alias) for alias in aliases) if problem]
+            check("aliases_well_formed", not problems,
+                  "; ".join(problems) if problems else (", ".join(aliases) or "no aliases"))
             check("represents_statement", bool(_REPRESENTS.match(case["represents"])), "template: This case tests ... under ..., and adds ...")
             check("evidence_recorded", bool(case["evidence"]), f"{len(case['evidence'])} evidence records")
             check("snapshot_hash_recorded", hash_agrees,

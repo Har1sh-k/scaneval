@@ -678,3 +678,53 @@ def test_a_snapshot_whose_hash_disagrees_keeps_its_recorded_hash_and_plans_nothi
     assert validate_document("case-pack", pack) is pack
     with pytest.raises(ContractError, match="tree hash does not match the materialized input"):
         build_plan(pack, "widget-abc", other)
+
+
+@pytest.mark.parametrize("alias", ["INTERNAL-1234", "SEC-REVIEW-2026-07", "incident/2026-04-11", "JIRA SEC 88"])
+def test_a_private_pack_may_name_its_cases_by_internal_identifier(tmp_path, alias):
+    """A CVE is neither required nor sufficient, so an internal id must not block L1."""
+    pack = make_pack()
+    case_by_id(pack, "widget-shell")["canonical_target"]["aliases"] = [alias]
+
+    outcome = mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)[0]
+
+    assert outcome["passed"] is True, outcome["checks"]
+    assert outcome["review_state"] == "mechanically_checked" and outcome["level"] == "L1"
+
+
+@pytest.mark.parametrize("alias,problem", [
+    ("CVE-2026-1", "not a well formed"),
+    ("GHSA-abc-def-ghi", "not a well formed"),
+    ("cve_2026_0001", "not a well formed"),
+    ("   ", "cannot be blank"),
+])
+def test_a_malformed_public_identifier_still_fails_the_check(tmp_path, alias, problem):
+    pack = make_pack()
+    case_by_id(pack, "widget-shell")["canonical_target"]["aliases"] = [alias]
+
+    outcome = mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)[0]
+
+    assert outcome["passed"] is False
+    failed = [c for c in outcome["checks"] if c["check"] == "aliases_well_formed"]
+    assert failed and failed[0]["result"] == "fail" and problem in failed[0]["detail"]
+
+
+def test_a_legacy_fix_commit_without_an_advisory_is_not_a_public_disclosure():
+    legacy = {"id": "SB-INT-001", "caseType": "internal", "canonicalKind": "auth_bypass", "title": "internal fix",
+              "description": "found in review", "regions": [],
+              "realWorld": {"repo": "acme/widget", "fixCommit": "d" * 40}}
+
+    case = draft_case_from_legacy(legacy, case_id="internal-1", snapshot_id="widget-abc",
+                                  legacy_path="cases/internal.json", workload="conventional_application",
+                                  component_role="application", represents=REPRESENTS)
+
+    fix = [e for e in case["evidence"] if e["evidence_id"] == "fix-commit"][0]
+    assert fix["origin"] == "fix_without_advisory"
+    assert "names no advisory" in fix["note"]
+    assert case["canonical_target"]["aliases"] == []
+
+    advised = draft_case_from_legacy({**legacy, "realWorld": {**legacy["realWorld"], "cve": "CVE-2025-54576"}},
+                                     case_id="public-1", snapshot_id="widget-abc", legacy_path="cases/public.json",
+                                     workload="conventional_application", component_role="application",
+                                     represents=REPRESENTS)
+    assert [e for e in advised["evidence"] if e["evidence_id"] == "fix-commit"][0]["origin"] == "public_advisory_and_maintainer_fix"
