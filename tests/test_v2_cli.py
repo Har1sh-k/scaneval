@@ -152,3 +152,64 @@ def test_diagnostic_report_has_prominent_fixture_banner(tmp_path):
     assert '<p class="notice">Diagnostic fixture only.' in report
     assert "No scanner or model was run." in report
     assert "not real-world performance results" in report
+
+
+from sastbench.report import render_report  # noqa: E402  (appended report-banner tests)
+
+
+REVIEW_BANNERS = [
+    ("human_approved", "Decisions: recorded human review (human_approved)."),
+    ("draft", "Decisions: machine-drafted, all unresolved; no human review recorded."),
+    ("stale", "Decisions or plan changed after the review record was written; "
+              "the recorded review no longer applies."),
+    ("missing", "No review record accompanies these decisions."),
+]
+
+
+def bundle_documents(bundle: Path) -> tuple[dict, dict, dict]:
+    """The scored record, result, and plan a bundle already holds on disk."""
+    record, result, plan = (
+        json.loads((bundle / name).read_text(encoding="utf-8"))
+        for name in ("evaluation.json", "result.json", "evaluator/plan.json")
+    )
+    return record, result, plan
+
+
+def report_documents(tmp_path: Path) -> tuple[dict, dict, dict]:
+    """The same three documents from a fresh diagnostic bundle."""
+    return bundle_documents(run_demo(tmp_path))
+
+
+@pytest.mark.parametrize("state, sentence", REVIEW_BANNERS)
+def test_report_renders_one_review_state_banner_under_the_scope_disclaimer(tmp_path, state, sentence):
+    record, result, plan = report_documents(tmp_path)
+
+    html = render_report(record, result, plan, review_state=state)
+
+    assert f'</p><p class="notice">{sentence}</p>' in html
+    assert html.count('<p class="notice">') == 2
+    for _other, other_sentence in REVIEW_BANNERS:
+        assert other_sentence == sentence or other_sentence not in html
+
+
+def test_report_escapes_an_unrecognized_review_state_and_calls_it_unreviewed(tmp_path):
+    record, result, plan = report_documents(tmp_path)
+
+    html = render_report(record, result, plan, review_state='<img src=x onerror="alert(1)">')
+
+    assert '<img src=x onerror=' not in html
+    assert '&lt;img src=x onerror=' in html
+    assert "treat these decisions as unreviewed" in html
+
+
+def test_report_without_a_review_state_renders_exactly_the_bundled_page(tmp_path):
+    bundle = run_demo(tmp_path)
+    record, result, plan = bundle_documents(bundle)
+
+    html = render_report(record, result, plan)
+
+    assert html == (bundle / "report.html").read_text(encoding="utf-8")
+    assert html == render_report(record, result, plan, review_state=None)
+    assert html.count('<p class="notice">') == 1
+    for _state, sentence in REVIEW_BANNERS:
+        assert sentence not in html

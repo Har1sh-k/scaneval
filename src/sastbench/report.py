@@ -3,6 +3,14 @@
 from html import escape
 
 
+REVIEW_NOTICES = {
+    "draft": "Decisions: machine-drafted, all unresolved; no human review recorded.",
+    "stale": "Decisions or plan changed after the review record was written; "
+             "the recorded review no longer applies.",
+    "missing": "No review record accompanies these decisions.",
+}
+
+
 def _show(value):
     if value is None:
         return "N/A"
@@ -11,8 +19,35 @@ def _show(value):
     return escape(str(value))
 
 
-def render_report(record: dict, result: dict, plan: dict) -> str:
-    """Render data as escaped text. No scripts, CDN, source links or raw HTML."""
+def _review_notice(review_state) -> str:
+    """One notice paragraph for a review state, or nothing at all when none was supplied.
+
+    The state is reported, not checked: this says what a review record on disk claims about
+    the decisions, never whether a human actually reviewed them, and an unrecognized state
+    is shown as unreviewed rather than guessed at.
+    """
+    if review_state is None:
+        return ""
+    state = escape(str(review_state))
+    if review_state == "human_approved":
+        text = "Decisions: recorded human review (" + state + ")."
+    else:
+        text = REVIEW_NOTICES.get(
+            review_state,
+            "Review state " + state + " is not one this report recognizes; "
+            "treat these decisions as unreviewed.",
+        )
+    return f'<p class="notice">{text}</p>'
+
+
+def render_report(record: dict, result: dict, plan: dict, review_state=None) -> str:
+    """Render data as escaped text. No scripts, CDN, source links or raw HTML.
+
+    ``review_state`` adds one notice about the bundle's review record, as
+    :func:`sastbench.review.review_status` reports it. Omitting it renders exactly the same
+    page as before; supplying it adds a statement about the record, not a verification of
+    it, and no value of it changes a metric on this page.
+    """
     m = record["metrics"]
     disclaimer = {
         "diagnostic": "Diagnostic fixture only. No scanner or model was run. These are not real-world performance results.",
@@ -47,6 +82,7 @@ def render_report(record: dict, result: dict, plan: dict) -> str:
         f"{':' + str(c['primary_location']['start_line']) if 'start_line' in c['primary_location'] else ' (file only)'}</td></tr>"
         for c in result["claims"]
     )
+    review_notice = _review_notice(review_state)
     hashes = "".join(f"<dt>{escape(k)}</dt><dd><code>{escape(record[k])}</code></dd>"
                      for k in ("input_hash", "result_sha256", "plan_sha256", "decisions_sha256"))
     return f'''<!doctype html>
@@ -58,7 +94,7 @@ h1,h2,h3{{line-height:1.2}} h2{{margin-top:2em}} .notice{{border-left:4px solid 
 table{{border-collapse:collapse;width:100%;margin:16px 0}} th,td{{padding:10px;border:1px solid #ccd3da;text-align:left;vertical-align:top}}
 th{{background:#edf1f5}} .scroll{{overflow-x:auto}} code{{overflow-wrap:anywhere}} dd{{margin:0 0 12px}} .muted{{color:#526170}}
 </style></head><body>
-<h1>SASTbench: saved evaluation</h1><p class="notice">{disclaimer}</p>
+<h1>SASTbench: saved evaluation</h1><p class="notice">{disclaimer}</p>{review_notice}
 <p>System: <strong>{escape(record['system_id'])}</strong> · Run: {escape(record['run_id'])} · Status: {escape(record['status'])}</p>
 <h2>Detection and review burden</h2>
 <p>Full-output recall: <strong>{_show(m['known_target_recall'])}</strong> ({m['targets_detected']}/{m['targets_assigned']} targets on this input).</p>
