@@ -21,7 +21,7 @@ import shutil
 import subprocess
 from typing import Callable
 
-from .contracts import canonical_json, canonical_sha256
+from .contracts import ContractError, canonical_json, canonical_sha256
 
 
 SCHEMA_VERSION = "2.0"
@@ -301,9 +301,21 @@ def prepare_synthetic_history(source_dir: Path, *, message: str = "snapshot") ->
 
 
 def write_provenance(trial_dir: Path, record: dict) -> Path:
+    """Write the preparation record beside the export, refusing to overwrite an existing file.
+
+    The record is serialized and encoded before the file is created, so a record canonical JSON
+    or UTF-8 cannot represent raises :class:`~sastbench.contracts.ContractError` and leaves no
+    empty file behind for a reader to mistake for provenance. A lone UTF-16 surrogate is the
+    case that survives serialization and fails only on encoding.
+    """
     path = trial_dir / "provenance.json"
-    with path.open("x", encoding="utf-8", newline="\n") as handle:
-        handle.write(canonical_json(record) + "\n")
+    text = canonical_json(record) + "\n"
+    try:
+        payload = text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ContractError(f"provenance record is not canonical UTF-8 JSON: {exc}") from exc
+    with path.open("xb") as handle:
+        handle.write(payload)
     return path
 
 

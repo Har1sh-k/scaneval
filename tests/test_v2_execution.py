@@ -12,15 +12,19 @@ import sys
 
 import pytest
 
+from sastbench import execution as execution_module
 from sastbench.adapters import get_adapter
 from sastbench.adapters.base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command
 from sastbench.adapters.semgrep import SemgrepAdapter, import_semgrep_results
 from sastbench.contracts import ContractError, load_document, validate_document
 from sastbench.execution import ExecutionError, PreparedInput, _write_new, invocation_id, run_invocation
-from sastbench.materialize import hash_exported_tree
+from sastbench.materialize import hash_exported_tree, sha256_file
 
 
 CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
+# A lone UTF-16 surrogate: canonical JSON keeps it and every contract check passes it, but UTF-8
+# cannot encode it, so it only fails at the moment the bytes are produced.
+LONE_SURROGATE = chr(0xD800)
 
 
 def prepared_input(tmp_path: Path, *, languages=("python",)) -> PreparedInput:
@@ -315,6 +319,210 @@ def test_writing_a_document_canonical_json_cannot_represent_creates_no_file(tmp_
         _write_new(path, {"claims": {"c1"}})
 
     assert not path.exists()
+
+
+def test_a_document_utf8_cannot_encode_creates_no_file(tmp_path):
+    """The encoding must fail before the file exists; an empty result.json reads as a record."""
+    path = tmp_path / "result.json"
+
+    with pytest.raises(ContractError, match="not canonical UTF-8 JSON"):
+        _write_new(path, {"claims": [{"allegation": f"lone surrogate {LONE_SURROGATE}"}]})
+
+    assert not path.exists()
+
+
+def test_a_claim_utf8_cannot_encode_is_a_recorded_violation_not_a_half_written_bundle(tmp_path):
+    """The claim passes every contract check, so the encoding refusal is what gets recorded."""
+    bundle = run(tmp_path, OutcomeAdapter(lambda outcome: _with(
+        outcome, claims=[{**outcome.claims[0], "allegation": f"lone surrogate {LONE_SURROGATE}"}])))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "outcome_contract_violation"
+    assert "could not be encoded" in result["error"]["message"]
+    assert execution["error"] == result["error"]
+    assert (bundle / "result.json").stat().st_size > 0
+    assert (bundle / "execution.json").stat().st_size > 0
+    assert (bundle / "raw" / "native.json").is_file()
+
+
+def test_an_import_failure_builds_its_error_record_from_known_good_fields_only(tmp_path):
+    """Spreading the refused result carried its own violation into the record reporting it."""
+    bundle = run(tmp_path, OutcomeAdapter(lambda outcome: _with(
+        outcome, usage={"input_tokens": 1.5, "cost_usd": 4.0, "setup_seconds": 2})))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "import_contract_violation"
+    assert "input_tokens" in execution["import_error"]
+    assert result["usage"] == {"wall_seconds": execution["wall_seconds"], "cost_usd": None}
+    # The refused usage is gone from the result, and so are the artifacts it carried; the
+    # execution record still says what the scan wrote.
+    assert "raw_artifacts" not in result
+    assert execution["raw_artifacts"][0]["path"] == "raw/native.json"
+    assert (bundle / "raw" / "native.json").is_file()
+
+
+def test_an_error_record_the_result_contract_refuses_is_still_recorded_as_an_error(tmp_path, monkeypatch):
+    """The guard on the rebuilt record: a refusal there must not escape as an exception.
+
+    Building the record from known-good fields makes this unreachable through an adapter, so the
+    contract is refused directly to prove the second refusal still writes a bundle.
+    """
+    real_validate = execution_module.validate_document
+    refused_statuses: list[str] = []
+
+    def refusing(kind: str, document: dict) -> dict:
+        if kind == "scan-result" and (document.get("error") or {}).get("code") != "outcome_contract_violation":
+            refused_statuses.append(document["status"])
+            raise ContractError("usage.input_tokens: 1.5 is not of type 'integer'")
+        return real_validate(kind, document)
+
+    monkeypatch.setattr(execution_module, "validate_document", refusing)
+    bundle = run(tmp_path, FakeAdapter())
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert refused_statuses == ["success", "error"]
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "outcome_contract_violation"
+    assert "error record was refused too" in result["error"]["message"]
+    assert execution["error"] == result["error"]
+    assert (bundle / "raw" / "native.json").is_file()
+
+
+class HostileAdapter(FakeAdapter):
+    """Writes real raw output, then reports an outcome that breaks the bundle after the scan."""
+
+    def __init__(self, hostility: str):
+        super().__init__()
+        self.hostility = hostility
+
+    def scan(self, **kwargs):
+        outcome = super().scan(**kwargs)
+        raw_dir = kwargs["raw_dir"]
+        if self.hostility == "directory-artifact":
+            (raw_dir / "dump").mkdir()
+            outcome.artifacts = [{"id": "dump", "path": raw_dir / "dump"}]
+        if self.hostility == "state-squat":
+            (raw_dir / "harness-state" / "fakestate").mkdir(parents=True)
+        if self.hostility == "cyclic-claim":
+            claim = outcome.claims[0]
+            claim["related_locations"] = []
+            claim["related_locations"].append(claim)
+        if self.hostility == "deep-claim":
+            nested: dict = {"path": "app.py"}
+            for _ in range(3000):
+                nested = {"path": "app.py", "nested": nested}
+            outcome.claims[0]["related_locations"] = [nested]
+        return outcome
+
+
+@pytest.mark.parametrize(
+    ("hostility", "fragment"),
+    [("directory-artifact", "IsADirectoryError"),
+     ("state-squat", "harness state could not be captured"),
+     ("cyclic-claim", "RecursionError"),
+     ("deep-claim", "RecursionError")],
+    ids=["directory-artifact", "state-squat", "cyclic-claim", "deep-claim"],
+)
+def test_a_post_scan_failure_the_adapter_caused_is_a_recorded_violation(tmp_path, hostility, fragment):
+    """Each of these raised out of run_invocation, losing the invocation and its raw output."""
+    bundle = run(tmp_path, HostileAdapter(hostility))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "outcome_contract_violation"
+    assert fragment in result["error"]["message"]
+    assert execution["error"] == result["error"] and execution["raw_artifacts"] == []
+    # The scanner's own output is preserved: only the outcome it reported was discarded.
+    assert (bundle / "raw" / "native.json").read_text(encoding="utf-8").startswith('{"findings"')
+
+
+def test_staged_output_that_cannot_be_moved_into_the_bundle_is_a_recorded_violation(tmp_path, monkeypatch):
+    """A move that fails is recorded; raising there would lose the invocation entirely."""
+    real_move = execution_module._move_into_bundle
+
+    def failing(staging: Path, destination: Path) -> None:
+        if destination.name == "raw":
+            raise OSError("Cross-device link is not permitted")
+        real_move(staging, destination)
+
+    monkeypatch.setattr(execution_module, "_move_into_bundle", failing)
+    bundle = run(tmp_path, FakeAdapter())
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["error"]["code"] == "outcome_contract_violation"
+    assert "staged output could not be moved into the bundle" in result["error"]["message"]
+    assert "raw: OSError: Cross-device link is not permitted" in result["error"]["message"]
+    assert execution["raw_artifacts"] == [] and not (bundle / "raw").exists()
+
+
+def test_a_trace_path_outside_the_staging_area_is_not_counted(tmp_path):
+    """The count described a file the run never staged, recorded beside a null trace path."""
+    elsewhere = tmp_path / "elsewhere.jsonl"
+    elsewhere.write_text('{"type":"model_request"}\n{"type":"finding"}\n', encoding="utf-8")
+
+    class OutsideTraceAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            outcome.trace_path = elsewhere
+            return outcome
+
+    bundle = run(tmp_path, OutsideTraceAdapter(), trace_mode="metadata")
+
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["status"] == "success"
+    assert execution["trace"] == {"path": None, "events": None, "mode": "metadata",
+                                  "capture_gap": None, "dropped_events": None}
+    assert "declared trace file is outside the bundle; it was not read or counted" in execution["notes"]
+
+
+def test_an_artifact_symlink_out_of_the_bundle_is_refused_rather_than_hashed(tmp_path):
+    """Following the link would record a hash of a file this bundle does not contain."""
+    secret = tmp_path / "secret.txt"
+    secret.write_text("not part of the scan output\n", encoding="utf-8")
+
+    class LinkingAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            link = kwargs["raw_dir"] / "link.json"
+            link.symlink_to(secret)
+            outcome.artifacts = [{"id": "native", "path": kwargs["raw_dir"] / "native.json"},
+                                 {"id": "link", "path": link}]
+            return outcome
+
+    bundle = run(tmp_path, LinkingAdapter())
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "success"
+    assert [artifact["id"] for artifact in result["raw_artifacts"]] == ["native"]
+    assert sha256_file(secret)[0] not in [artifact["sha256"] for artifact in result["raw_artifacts"]]
+    assert "declared artifact is a symbolic link and was not followed: link" in execution["notes"]
+    assert (bundle / "raw" / "link.json").is_symlink()
+
+
+def test_an_adapter_version_the_record_cannot_carry_writes_no_bundle_documents(tmp_path):
+    """The execution record copies the adapter's own version, so a float makes it unwritable.
+
+    The runner vets these attributes when it prepares a system, so this path is what remains for
+    a direct call: an explicit failure with no half-written bundle.
+    """
+
+    class FloatVersionAdapter(FakeAdapter):
+        adapter_version = 1.0
+
+    with pytest.raises(ExecutionError, match="the invocation could not be recorded"):
+        run(tmp_path, FloatVersionAdapter())
+
+    bundle = tmp_path / "out" / invocation_id("input-a", "fake-sys", 1)
+    assert (bundle / "request.json").is_file()
+    assert not (bundle / "result.json").exists() and not (bundle / "execution.json").exists()
 
 
 def test_a_scanner_gets_an_export_for_source_while_a_ruleset_path_may_be_in_the_cache(tmp_path):

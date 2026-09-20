@@ -19,10 +19,13 @@ from sastbench.adapters.base import Adapter, AdapterError, NativeOutcome
 from sastbench.cli import main
 from sastbench.contracts import ContractError, canonical_json, canonical_sha256, load_document
 from sastbench.materialize import MaterializationError
-from sastbench.runner import MANIFEST_NAME, _write_new, run_from_config
+from sastbench.runner import MANIFEST_NAME, _write_new, _write_new_text, run_from_config
 
 
 CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
+# A lone UTF-16 surrogate: canonical JSON keeps it and every contract check passes it, but UTF-8
+# cannot encode it, so it only fails at the moment the bytes are produced.
+LONE_SURROGATE = chr(0xD800)
 VULNERABLE = "import subprocess\n\n\ndef run(cmd):\n    return subprocess.run(cmd, shell=True)\n"
 REPAIRED = "import subprocess\n\n\ndef run(cmd):\n    return subprocess.run(cmd, shell=False)\n"
 REPRESENTS = ("This case tests caller-controlled shell command construction under a trusted-argument "
@@ -627,6 +630,55 @@ def test_a_document_canonical_json_cannot_represent_leaves_no_file_behind(tmp_pa
         _write_new(path, {"warnings": {"a", "b"}})
 
     assert not path.exists()
+
+
+def test_a_document_utf8_cannot_encode_leaves_no_file_behind(tmp_path):
+    """The encoding must fail before the file exists; an empty file would read as a record."""
+    path = tmp_path / "run-manifest.json"
+
+    with pytest.raises(ContractError, match="is not UTF-8 text"):
+        _write_new(path, {"warnings": [f"lone surrogate {LONE_SURROGATE}"]})
+
+    assert not path.exists()
+
+    report = tmp_path / "report.html"
+    with pytest.raises(ContractError, match="is not UTF-8 text"):
+        _write_new_text(report, f"<p>lone surrogate {LONE_SURROGATE}</p>")
+
+    assert not report.exists()
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value", "shown"),
+    [("name", "", "''"), ("adapter_version", 1.0, "1.0")],
+    ids=["empty-name", "float-version"],
+)
+def test_an_adapter_identity_the_records_cannot_carry_is_a_skipped_system(tmp_path, upstream, attribute,
+                                                                          value, shown):
+    """The manifest and every execution record copy these two attributes verbatim.
+
+    An adapter declaring a float version made every one of its execution records unwritable, so
+    vetting it at preparation time is what keeps that from failing the whole run.
+    """
+    repo, commit = upstream
+    write_pack(tmp_path / "pack.json", repo, commit)
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake"), system_entry("odd-b", "odd")])
+    odd = type("OddIdentityAdapter", (FakeAdapter,), {attribute: value})()
+    out = tmp_path / "out"
+
+    manifest = run_from_config(config_path, out, clock=CLOCK, adapters={"fake": FakeAdapter(), "odd": odd})
+
+    assert manifest["status"] == "completed" and odd.prepared == 0 and odd.calls == 0
+    assert manifest["systems"][1]["skipped_reason"] == (
+        f"AdapterError: odd.{attribute} must be a non-empty string, not {shown}; the run manifest "
+        "and every execution record copy it verbatim")
+    assert manifest["systems"][1]["adapter_version"] == (None if attribute == "adapter_version" else "1.0.0")
+    assert manifest["systems"][1]["preparation"] == {}
+    assert [(row["system_id"], row["status"]) for row in manifest["invocations"]] == [
+        ("fake-a", "success"), ("odd-b", "skipped")]
+    assert load_document(out / MANIFEST_NAME, "run-manifest") == manifest
+    assert not (out / "invocations" / "snap-a__odd-b__r1").exists()
 
 
 @pytest.mark.parametrize(

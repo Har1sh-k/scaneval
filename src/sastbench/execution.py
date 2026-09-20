@@ -13,10 +13,12 @@ Bundle layout (all evaluator-side; the scanner only ever sees a private workspac
 are moved into the bundle once it returns or raises, so no path handed to an adapter resolves
 inside the run directory and declared artifact paths are re-rooted before they are hashed.
 
-An outcome that breaks the adapter contract, an execution record the contract refuses, and a
-trace file that is not UTF-8 text are all recorded failures: the bundle then holds an error
-result and an execution record carrying the message, never a successful result beside a
-missing execution record. The staged raw output is preserved either way.
+An outcome that breaks the adapter contract, an execution record the contract refuses, a trace
+file that is not UTF-8 text, and anything raised while capturing harness state, moving the
+staged directories, collecting artifacts, or serializing what the adapter reported are all
+recorded failures: the bundle then holds an error result and an execution record carrying the
+message, never a successful result beside a missing execution record. The staged raw output is
+preserved either way.
 
 Directory separation documents the boundary; it does not enforce it. Network and
 filesystem policy are declared here and must be enforced outside this process.
@@ -47,6 +49,15 @@ class ExecutionError(RuntimeError):
     """The invocation could not be set up or recorded."""
 
 
+class _BundleRefused(Exception):
+    """The bundle documents cannot be written as built; the message names the refusal.
+
+    Raised only inside :func:`run_invocation`, which then discards the adapter's outcome and
+    records the refusal itself. It never leaves this module: a refusal that survives the rebuild
+    becomes an :class:`ExecutionError` and no document is written.
+    """
+
+
 @dataclass(frozen=True)
 class PreparedInput:
     input_id: str
@@ -67,15 +78,32 @@ def _now(clock: Callable[[], datetime] | None) -> str:
     return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
+def _canonical_bytes(value: dict) -> bytes:
+    """The exact UTF-8 bytes of one canonical JSON document.
+
+    A lone UTF-16 surrogate survives :func:`canonical_json` and every contract check but cannot
+    be encoded, so the encoding happens here, before any file exists, rather than inside an open
+    file where it would leave an empty record behind.
+    """
+    text = canonical_json(value) + "\n"
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ContractError(f"value is not canonical UTF-8 JSON: {exc}") from exc
+
+
+def _write_new_bytes(path: Path, payload: bytes) -> None:
+    with path.open("xb") as handle:
+        handle.write(payload)
+
+
 def _write_new(path: Path, value: dict) -> None:
     """Write one canonical JSON document, refusing to overwrite an existing path.
 
-    The document is serialized before the file is created, so a value canonical JSON cannot
-    represent leaves no empty file behind for a reader to mistake for a record.
+    The document is serialized and encoded before the file is created, so a value canonical JSON
+    or UTF-8 cannot represent leaves no empty file behind for a reader to mistake for a record.
     """
-    text = canonical_json(value) + "\n"
-    with path.open("x", encoding="utf-8", newline="\n") as handle:
-        handle.write(text)
+    _write_new_bytes(path, _canonical_bytes(value))
 
 
 def build_request(run_id: str, prepared: PreparedInput, spec: SystemSpec, *, timeout_seconds: float,
@@ -96,6 +124,21 @@ def build_request(run_id: str, prepared: PreparedInput, spec: SystemSpec, *, tim
 def _failure_message(exc: BaseException) -> str:
     """The exception's own type name and message, for a recorded failure."""
     return f"{type(exc).__name__}: {str(exc) or repr(exc)}"[:2000]
+
+
+def _resolves_inside(path: Path, base: Path) -> bool:
+    """True when *path* resolves inside *base*, every symbolic link on the way followed first.
+
+    Used to refuse a path an adapter reported that leaves the bundle through a link. It compares
+    resolved paths only: it does not follow bind mounts or hard links, so it catches the obvious
+    escape and is not an isolation boundary.
+    """
+    try:
+        resolved = path.resolve()
+        root = base.resolve()
+    except OSError:
+        return False
+    return resolved == root or resolved.is_relative_to(root)
 
 
 def _move_into_bundle(staging: Path, destination: Path) -> None:
@@ -149,19 +192,27 @@ def _read_trace(outcome: NativeOutcome, staged_areas: list[tuple[Path, Path, Pat
                 trace_mode: str, bundle: Path) -> dict:
     """Count the events in the staged trace file and record where it landed.
 
-    A missing trace file is an unavailable count, not a failure. A file that is not UTF-8 text
-    raises, because a count taken from bytes this cannot decode would be an invented number.
+    Only a file this bundle actually holds is read: a trace path that is a symbolic link, or that
+    resolves outside the bundle, is refused with a note and no count, because a number taken from
+    a file the run never staged would describe something the bundle does not contain. A missing
+    trace file is an unavailable count, not a failure. A file that is not UTF-8 text raises,
+    because a count taken from bytes this cannot decode would be an invented number.
     """
     events_path = (_rebase(Path(outcome.trace_path), staged_areas) if outcome.trace_path
                    else trace_dir / "events.jsonl")
     count = None
     recorded_trace_path = None
-    if events_path.exists():
-        count = sum(1 for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip())
+    if events_path.is_symlink():
+        outcome.notes.append("declared trace file is a symbolic link; it was not read or counted")
+    elif not _resolves_inside(events_path, bundle):
+        outcome.notes.append("declared trace file is outside the bundle; it was not read or counted")
+    elif events_path.exists():
         try:
             recorded_trace_path = events_path.relative_to(bundle).as_posix()
         except ValueError:
             outcome.notes.append("trace file left outside the bundle; its path is not recorded")
+        else:
+            count = sum(1 for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip())
     return {"path": recorded_trace_path, "events": count, "mode": trace_mode,
             "capture_gap": (outcome.capture_state or {}).get("capture_gap"),
             "dropped_events": (outcome.capture_state or {}).get("dropped_events")}
@@ -237,6 +288,20 @@ def _violation_outcome(message: str) -> NativeOutcome:
         notes=[f"The adapter outcome was discarded: {message}"[:2000]])
 
 
+def _error_result(run_id: str, system_id: str, input_hash: str, wall: float, error: dict) -> dict:
+    """A scan result carrying an explicit error and nothing the adapter supplied.
+
+    Only fields the scan request already validated and this module computed are used, so a value
+    the adapter reported cannot carry its own contract violation into the record that reports
+    the refusal. The raw artifacts stay in the execution record, which is where a failed import
+    leaves the evidence of what the scan wrote.
+    """
+    return {"schema_version": "2.0", "run_id": run_id, "system_id": system_id,
+            "input_hash": input_hash, "status": "error", "claims": [], "ranking": "unranked",
+            "bundles_resolved": True, "usage": {"wall_seconds": round(wall, 3), "cost_usd": None},
+            "error": error}
+
+
 def run_invocation(
     *,
     prepared: PreparedInput,
@@ -254,13 +319,22 @@ def run_invocation(
 ) -> Path:
     """Execute one invocation and return its bundle directory. Never overwrites.
 
-    ``result.json`` and ``execution.json`` are written only once both documents validate, so a
-    bundle never holds a successful result beside a missing execution record. An outcome this
-    module cannot read, an execution record the contract refuses, and a trace file that is not
-    UTF-8 text all end as an error result carrying code ``outcome_contract_violation`` and a
-    message naming what was wrong. The adapter's own outcome is discarded in that case, because
-    nothing in it can be trusted to describe the scan; the raw output it had already written is
-    still staged into the bundle.
+    ``result.json`` and ``execution.json`` are written only once both documents validate and
+    encode, so a bundle never holds a successful result beside a missing execution record. An
+    outcome this module cannot read, an execution record the contract refuses, a trace file that
+    is not UTF-8 text, and any failure while capturing harness state, moving the staged
+    directories into the bundle, collecting or hashing declared artifacts, or serializing what
+    the adapter reported all end as an error result carrying code ``outcome_contract_violation``
+    and a message naming what was wrong. The adapter's own outcome is discarded in that case,
+    because nothing in it can be trusted to describe the scan; the raw output it had already
+    written is still staged into the bundle where the failure allowed it.
+
+    Two things are narrower than they look. When the post-scan re-hash of the source fails, the
+    comparison never completed, so the provenance reports no observed modification and the
+    violation names the failed re-hash. And an adapter whose own ``name`` or ``adapter_version``
+    is not a non-empty string makes the execution record unwritable: that raises
+    :class:`ExecutionError` with nothing written, which is why :mod:`sastbench.runner` checks
+    those attributes when it prepares a system rather than when it invokes one.
     """
     if network_policy not in NETWORK_POLICIES:
         raise ExecutionError(f"unknown network policy {network_policy!r}")
@@ -292,6 +366,8 @@ def run_invocation(
     violation: str | None = None
     before: dict[str, str] = {}
     after: dict[str, str] = {}
+    captured_state: list[str] = []
+    move_failures: list[str] = []
     try:
         staging_raw.mkdir()
         if staging_trace is not None:
@@ -323,21 +399,41 @@ def run_invocation(
                 # An outcome this module cannot read is a recorded failure too, checked here so
                 # that nothing further reads an attribute the adapter did not really supply.
                 violation = _outcome_violation(outcome)
-        captured_state = []
-        for name in sorted(state_dirs):
-            state_path = source / name
-            if state_path.exists():
-                destination = staging_raw / "harness-state" / name.lstrip(".")
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(state_path, destination, symlinks=False)
-                captured_state.append(name)
-        after = _file_map(source, state_dirs)
+        try:
+            for name in sorted(state_dirs):
+                state_path = source / name
+                if state_path.exists():
+                    destination = staging_raw / "harness-state" / name.lstrip(".")
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(state_path, destination, symlinks=False)
+                    captured_state.append(name)
+        except Exception as exc:
+            # The scanner owns both ends of this copy: the state directory it wrote and the
+            # staging path it may have created there first. A failure is a recorded violation,
+            # never a crash of the run, and the directories copied before it stay recorded.
+            violation = violation or f"harness state could not be captured: {_failure_message(exc)}"
+        try:
+            after = _file_map(source, state_dirs)
+        except Exception as exc:
+            # The comparison never completed, so nothing is claimed about the source: `before`
+            # stands in for `after`, the provenance reports no observed modification, and the
+            # violation says the re-hash failed.
+            after = dict(before)
+            violation = violation or f"the source tree could not be re-hashed: {_failure_message(exc)}"
     finally:
         try:
             for staged, _resolved, final in staged_areas:
-                _move_into_bundle(staged, final)
+                try:
+                    _move_into_bundle(staged, final)
+                except Exception as exc:
+                    # A staged directory that cannot be moved is recorded below rather than
+                    # raised here, where it would replace whatever failure is already in flight.
+                    move_failures.append(f"{final.name}: {_failure_message(exc)}")
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
+    if move_failures:
+        violation = violation or ("staged output could not be moved into the bundle: "
+                                  + "; ".join(move_failures))
     wall = time.monotonic() - started
     finished_at = _now(clock)
     modified = sorted(set(before) ^ set(after) | {p for p in before if p in after and before[p] != after[p]})
@@ -348,6 +444,14 @@ def run_invocation(
         raw_artifacts: list[dict] = []
         for artifact in outcome.artifacts:
             path = _rebase(Path(artifact["path"]), staged_areas)
+            if path.is_symlink():
+                # A link is never followed and never hashed: what it points at is not the file
+                # this bundle preserved, and need not be inside the bundle at all.
+                outcome.notes.append(f"declared artifact is a symbolic link and was not followed: {artifact['id']}")
+                continue
+            if path.exists() and not _resolves_inside(path, bundle):
+                outcome.notes.append(f"declared artifact resolves outside the bundle: {artifact['id']}")
+                continue
             if not path.exists():
                 outcome.notes.append(f"declared artifact missing: {artifact['id']}")
                 continue
@@ -374,11 +478,19 @@ def run_invocation(
         try:
             validate_document("scan-result", result)
         except ContractError as exc:
-            # A normalization that violates the contract is a failed import, not a quiet empty success.
+            # A normalization that violates the contract is a failed import, not a quiet empty
+            # success. The replacement is built from known-good fields only: spreading the
+            # refused document would carry its usage or artifacts, and their violation with
+            # them, straight into the record that reports the refusal.
             import_error = str(exc)
-            result = {**result, "status": "error", "claims": [], "ranking": "unranked", "bundles_resolved": True,
-                      "error": {"code": "import_contract_violation", "message": import_error[:2000]}}
-            validate_document("scan-result", result)
+            result = _error_result(run_id, spec.system_id, prepared.tree_hash, wall,
+                                   {"code": "import_contract_violation", "message": import_error[:2000]})
+            try:
+                validate_document("scan-result", result)
+            except ContractError as refusal:
+                raise _BundleRefused(
+                    f"scan result violates its contract and its error record was refused too: "
+                    f"{refusal}") from refusal
         execution = {
             "schema_version": "2.0", "run_id": run_id, "invocation_id": bundle.name,
             "input_id": prepared.input_id, "system_id": spec.system_id, "repetition": repetition,
@@ -405,6 +517,31 @@ def run_invocation(
         }
         return result, execution
 
+    def finished_documents() -> tuple[bytes, bytes]:
+        """The exact bytes of both bundle documents, built, validated, and encoded together.
+
+        Every way the documents can fail to be written is a :class:`_BundleRefused` naming it:
+        anything raised while collecting or hashing declared artifacts, a scan result the
+        contract refuses even as an explicit error record, an execution record the contract
+        refuses, and a document holding text UTF-8 cannot encode. Nothing is written until both
+        documents survive all of it.
+        """
+        try:
+            result, execution = build_documents()
+        except _BundleRefused:
+            raise
+        except Exception as exc:
+            raise _BundleRefused(
+                f"the bundle documents could not be built: {_failure_message(exc)}") from exc
+        try:
+            validate_document("execution-record", execution)
+        except ContractError as exc:
+            raise _BundleRefused(f"execution record violates its contract: {exc}") from exc
+        try:
+            return _canonical_bytes(result), _canonical_bytes(execution)
+        except ContractError as exc:
+            raise _BundleRefused(f"the bundle documents could not be encoded: {exc}") from exc
+
     if violation is None and trace_dir is not None:
         try:
             trace_record = _read_trace(outcome, staged_areas, trace_dir, trace_mode, bundle)
@@ -416,16 +553,19 @@ def run_invocation(
     if violation is not None:
         outcome = _violation_outcome(violation)
         trace_record = _empty_trace(trace_mode) if trace_dir is not None else None
-    result, execution = build_documents()
     try:
-        validate_document("execution-record", execution)
-    except ContractError as exc:
-        # The record the outcome produced is not writable, so the outcome is discarded and the
-        # refusal itself becomes the recorded failure; the result never stays a success.
-        outcome = _violation_outcome(f"execution record violates its contract: {exc}")
+        result_bytes, execution_bytes = finished_documents()
+    except _BundleRefused as refused:
+        # The documents the outcome produced are not writable, so the outcome is discarded and
+        # the refusal itself becomes the recorded failure; the result never stays a success.
+        outcome = _violation_outcome(str(refused))
         trace_record = _empty_trace(trace_mode) if trace_dir is not None else None
-        result, execution = build_documents()
-        validate_document("execution-record", execution)
-    _write_new(bundle / "result.json", result)
-    _write_new(bundle / "execution.json", execution)
+        try:
+            result_bytes, execution_bytes = finished_documents()
+        except _BundleRefused as again:
+            # Nothing the adapter supplied is left in these documents, so the refusal is about
+            # the invocation itself; writing half a bundle would be worse than writing none.
+            raise ExecutionError(f"the invocation could not be recorded: {again}") from again
+    _write_new_bytes(bundle / "result.json", result_bytes)
+    _write_new_bytes(bundle / "execution.json", execution_bytes)
     return bundle

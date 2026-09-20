@@ -71,8 +71,15 @@ class _PreparedSystem:
     skipped: str | None
 
     def summary(self) -> dict:
+        """What the manifest records about this system.
+
+        ``adapter_version`` is the adapter's own value only when it is a non-empty string, which
+        is what the manifest contract allows; an adapter declaring anything else is a skipped
+        system whose reason names the offending value, and its version is recorded as unknown.
+        """
+        version = getattr(self.adapter, "adapter_version", None)
         return {"system_id": self.spec.system_id, "adapter": self.spec.adapter,
-                "adapter_version": self.adapter.adapter_version if self.adapter is not None else None,
+                "adapter_version": version if isinstance(version, str) and version else None,
                 "preparation": self.preparation, "skipped_reason": self.skipped}
 
 
@@ -81,20 +88,39 @@ def _now(clock: Callable[[], datetime] | None) -> str:
     return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
+def _utf8(text: str, label: str) -> bytes:
+    """The UTF-8 bytes of *text*, refused before any file is created.
+
+    A lone UTF-16 surrogate survives :func:`canonical_json` and every contract check but cannot
+    be encoded, so the encoding happens here rather than inside an open file, where it would
+    leave an empty record behind.
+    """
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ContractError(f"{label} is not UTF-8 text: {exc}") from exc
+
+
 def _write_new(path: Path, value: dict) -> None:
     """Write one canonical JSON document, refusing to overwrite an existing path.
 
-    The document is serialized before the file is created, so a value canonical JSON cannot
-    represent leaves no empty file behind for a reader to mistake for a record.
+    The document is serialized and encoded before the file is created, so a value canonical JSON
+    or UTF-8 cannot represent leaves no empty file behind for a reader to mistake for a record.
     """
-    text = canonical_json(value) + "\n"
-    with path.open("x", encoding="utf-8", newline="\n") as handle:
-        handle.write(text)
+    payload = _utf8(canonical_json(value) + "\n", "the canonical JSON document")
+    with path.open("xb") as handle:
+        handle.write(payload)
 
 
 def _write_new_text(path: Path, content: str) -> None:
-    with path.open("x", encoding="utf-8", newline="\n") as handle:
-        handle.write(content)
+    """Write one text file, refusing to overwrite an existing path.
+
+    The text is encoded before the file is created, for the same reason the JSON writer above
+    encodes first: an empty file would read as a report this run never produced.
+    """
+    payload = _utf8(content, f"the content of {path.name}")
+    with path.open("xb") as handle:
+        handle.write(payload)
 
 
 def _relative(path: Path, out_dir: Path) -> str:
@@ -228,13 +254,32 @@ def _prepare_input(entry: dict, pack: dict, out_dir: Path, cache_root: Path,
     return prepared, summary
 
 
+def _vet_adapter_identity(spec: SystemSpec, adapter: Adapter) -> None:
+    """Refuse an adapter whose own name or version no record here can carry.
+
+    The manifest and every execution record copy ``adapter.name`` and ``adapter.adapter_version``
+    verbatim, and both contracts require a non-empty string, so an adapter declaring anything
+    else (a float version, say) would make each of its execution records unwritable. Checking the
+    attributes here turns that into one skipped system with a reason instead of a failed run.
+    This checks the two attributes the records copy; it says nothing about whether the adapter
+    scans correctly or reports its real version.
+    """
+    for attribute in ("name", "adapter_version"):
+        value = getattr(adapter, attribute, None)
+        if not isinstance(value, str) or not value:
+            raise AdapterError(
+                f"{spec.adapter}.{attribute} must be a non-empty string, not {value!r}; the run "
+                "manifest and every execution record copy it verbatim")
+
+
 def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
                     adapters: dict[str, Adapter] | None) -> tuple[_PreparedSystem, list[str]]:
     """Resolve one system's adapter and run its preparation phase once.
 
-    Any failure resolving or preparing the adapter is recorded as a skip carrying the
+    Any failure resolving, vetting, or preparing the adapter is recorded as a skip carrying the
     exception's own type name and message, whether it failed as an adapter, while materializing
-    what it needs, on the filesystem, or because its module is not installed. A preparation that
+    what it needs, on the filesystem, because its module is not installed, or because its own
+    name or version is not something the manifest and execution records can carry. A preparation that
     returns something other than a record is a preparation failure too, and so is one holding a
     value the manifest cannot carry: the record goes into the manifest verbatim, so a value
     canonical JSON cannot represent, or a non-finite number, would make the whole manifest
@@ -254,6 +299,9 @@ def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
             adapter = adapters[spec.adapter]
         else:
             adapter = get_adapter(spec.adapter)
+        # Checked before the preparation phase runs: a system this run cannot record is not one
+        # to spend a checkout or a download on.
+        _vet_adapter_identity(spec, adapter)
         prepared = adapter.prepare(spec, cache_root)
         if not isinstance(prepared, dict):
             raise AdapterError(

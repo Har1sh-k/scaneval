@@ -10,7 +10,7 @@ import subprocess
 
 import pytest
 
-from sastbench.contracts import canonical_sha256
+from sastbench.contracts import ContractError, canonical_sha256
 from sastbench.materialize import (
     MaterializationError,
     cache_key,
@@ -182,6 +182,21 @@ def test_inspect_commit_reports_parent_and_dates_without_caching(tmp_path, upstr
     assert not list(tmp_path.glob("sastbench-inspect-*"))
     with pytest.raises(MaterializationError, match="full 40-hex SHA"):
         inspect_commit(str(repo), "HEAD")
+
+
+def test_a_provenance_record_utf8_cannot_encode_leaves_no_file_behind(tmp_path):
+    """A lone UTF-16 surrogate survives canonical JSON and fails only when the bytes are made.
+
+    The refusal must come before the file exists: an empty provenance.json would read as a
+    preparation record for an export nothing can verify.
+    """
+    trial = tmp_path / "trial"
+    trial.mkdir()
+
+    with pytest.raises(ContractError, match="not canonical UTF-8 JSON"):
+        write_provenance(trial, {"note": f"lone surrogate {chr(0xD800)}"})
+
+    assert not (trial / "provenance.json").exists()
 
 
 def test_instruction_cue_detection_covers_assistant_files_only():
