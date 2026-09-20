@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sastbench.dev/schema/v2/trace-event.schema.json",
+  "title": "SASTbench observer trace event v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_id", "run_id", "producer_id", "sequence", "type", "category", "capture_status", "timestamp", "metadata"],
+  "properties": {
+    "schema_version": { "const": "2.0" }, "event_id": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "minLength": 1 }, "producer_id": { "type": "string", "minLength": 1 },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "type": { "enum": ["model.request", "model.response", "tool.start", "tool.end", "context.selection", "finding.candidate", "finding.validation", "finding.filtered", "finding.submitted", "observer.error"] },
+    "category": { "enum": ["model", "tool", "context", "finding", "observer"] },
+    "capture_status": { "enum": ["complete", "partial", "redacted", "unavailable"] },
+    "timestamp": { "type": "string", "format": "date-time" }, "parent_event_id": { "type": "string" },
+    "call_id": { "type": "string" }, "attempt_id": { "type": "string" }, "candidate_id": { "type": "string" }, "claim_id": { "type": "string" },
+    "duration_ms": { "type": "number", "minimum": 0 }, "metadata": { "type": "object" }, "content": { "type": "object" }
+  }
+}

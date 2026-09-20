@@ -1,0 +1,23 @@
+{
+  "name": "@sastbench/observer-sdk",
+  "version": "0.1.0-experimental",
+  "private": true,
+  "description": "Experimental, opt-in observer protocol emitter for SASTbench harnesses",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}
