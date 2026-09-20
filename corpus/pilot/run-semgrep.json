@@ -1,0 +1,35 @@
+{
+  "schema_version": "2.0",
+  "run_id": "pilot-2026-09-20-semgrep",
+  "pack": "pack.json",
+  "cache_root": "../../.repos",
+  "inputs": [
+    {"snapshot_id": "oauth2-proxy-f4b33b64", "profile": "standard"},
+    {"snapshot_id": "fastmcp-c861862a", "profile": "standard"},
+    {"snapshot_id": "fastify-v5.12.1", "profile": "standard"}
+  ],
+  "systems": [
+    {
+      "system_id": "semgrep-oss-1.177.0-rules-40b8c63f",
+      "adapter": "semgrep",
+      "config": {
+        "ruleset": {
+          "url": "https://github.com/semgrep/semgrep-rules.git",
+          "commit": "40b8c63f75dc7c22c8a77482d73bfb864b146f7e",
+          "paths": ["python", "javascript", "typescript", "go"]
+        },
+        "rule_timeout_seconds": 30,
+        "jobs": 4
+      },
+      "network_policy": "none"
+    }
+  ],
+  "repetitions": 1,
+  "timeout_seconds": 1800,
+  "trace_mode": "off",
+  "network_policy": "none",
+  "notes": [
+    "Pinned conventional scanner run. Semgrep OSS with a local checkout of semgrep-rules at one commit; no registry download, metrics off.",
+    "Rust rules are absent from the pinned ruleset; no Rust input is in this pilot."
+  ]
+}

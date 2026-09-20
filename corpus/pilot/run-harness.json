@@ -1,0 +1,40 @@
+{
+  "schema_version": "2.0",
+  "run_id": "pilot-2026-09-20-harness",
+  "pack": "pack.json",
+  "cache_root": "../../.repos",
+  "inputs": [
+    {"snapshot_id": "oauth2-proxy-f4b33b64", "profile": "standard"},
+    {"snapshot_id": "fastmcp-c861862a", "profile": "standard"},
+    {"snapshot_id": "fastify-v5.12.1", "profile": "standard"}
+  ],
+  "systems": [
+    {
+      "system_id": "securevibes-agent-claude-sonnet-5-bootstrap",
+      "adapter": "llm-harness",
+      "model_id": "anthropic/claude-sonnet-5",
+      "config": {
+        "harness": "securevibes-agent",
+        "root": "/Users/hk/Documents/GitHub/securevibes-agent",
+        "model": "anthropic/claude-sonnet-5",
+        "mode": "bootstrap",
+        "runner": "default",
+        "qmd_profile": "lite",
+        "llm_max_files": 40,
+        "llm_timeout_ms": 180000,
+        "flush_timeout_ms": 30000
+      },
+      "network_policy": "model_provider_only"
+    }
+  ],
+  "repetitions": 1,
+  "timeout_seconds": 3600,
+  "trace_mode": "content",
+  "network_policy": "model_provider_only",
+  "notes": [
+    "Own-harness run through the harness's own engine with the observer wrapped around its default model runner.",
+    "Model route anthropic/claude-sonnet-5 resolves to the claude CLI under the local claude.ai login; per-call cost is not metered and is recorded as unknown.",
+    "llm_max_files bounds the files the harness sends to the model; qmd is absent on this machine so the harness reports a lite runtime profile.",
+    "Content-mode traces stay local; they contain the source shipped to the model."
+  ]
+}
