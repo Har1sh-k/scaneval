@@ -381,7 +381,15 @@ def validate_document(kind: str, document: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_document(path: str | PathLike[str], kind: str) -> dict[str, Any]:
-    """Load a JSON object from *path* and validate it as *kind*."""
+    """Load a JSON object from *path* and validate it as *kind*.
+
+    A file that cannot be opened or read, whose bytes are not UTF-8, or whose text is not JSON
+    is refused as a :class:`ContractError` naming *path*, so a caller reporting the failure can
+    say which file it was. A non-UTF-8 file raises :class:`UnicodeDecodeError`, which is a
+    :class:`ValueError` and not a :class:`json.JSONDecodeError`, so it is caught here by name
+    rather than by the JSON error alone. Anything the document itself violates is reported by
+    :func:`validate_document`, whose messages name the field, not the file.
+    """
 
     try:
         with open(path, encoding="utf-8") as handle:
@@ -390,6 +398,6 @@ def load_document(path: str | PathLike[str], kind: str) -> dict[str, Any]:
                 object_pairs_hook=_strict_object,
                 parse_constant=_reject_json_constant,
             )
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ContractError(f"could not load {path}: {exc}") from exc
     return validate_document(kind, document)

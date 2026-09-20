@@ -442,3 +442,24 @@ def test_load_document_rejects_duplicate_object_keys(tmp_path):
 def test_unknown_contract_kind_is_a_contract_error():
     with pytest.raises(ContractError):
         validate_document("labels", {})
+
+
+def test_load_document_refuses_a_file_whose_bytes_are_not_utf_8_naming_it(tmp_path):
+    """A non-UTF-8 file raises UnicodeDecodeError, which is a ValueError and not a JSON error."""
+    path = tmp_path / "request.json"
+    path.write_bytes(json.dumps(scan_request()).encode("utf-8").replace(b"run-1", b"run-\xff"))
+
+    with pytest.raises(ContractError) as refusal:
+        load_document(path, "scan-request")
+
+    assert str(path) in str(refusal.value) and "utf-8" in str(refusal.value)
+    assert isinstance(refusal.value.__cause__, UnicodeDecodeError)
+
+
+def test_load_document_refuses_a_utf_8_byte_order_mark_naming_the_file(tmp_path):
+    """A BOM decodes but is not JSON, so the refusal still names the file rather than escaping."""
+    path = tmp_path / "request.json"
+    path.write_bytes(b"\xef\xbb\xbf" + json.dumps(scan_request()).encode("utf-8"))
+
+    with pytest.raises(ContractError, match="could not load"):
+        load_document(path, "scan-request")

@@ -762,3 +762,48 @@ def test_status_and_load_evaluator_read_a_symlinked_parent_when_the_guard_is_off
     # The guard is opt-out, not gone: the default still refuses the same spelling.
     with pytest.raises(ContractError, match="does not resolve to itself"):
         review_status(reached)
+
+
+# Every one of these survives str.strip, so only the Unicode category rule refuses them.
+@pytest.mark.parametrize("reviewer", ["\u200b", "\ufeff\u200b", "\xad", "\x01"])
+def test_approval_refuses_a_reviewer_name_made_only_of_blank_characters(reviewer):
+    """A name that survives ``strip`` but holds no stated character is still not a name."""
+    plan = make_plan()
+    decisions = draft_decisions(plan, make_result(default_claims()), default_pack())
+    record = review_record(plan, decisions, clock=CLOCK)
+    assert reviewer.strip() == reviewer
+
+    with pytest.raises(ContractError, match="explicit reviewer"):
+        approve_review(record, decisions, plan, reviewer=reviewer, note="", clock=LATER)
+
+    assert record["state"] == "draft" and record["reviews"] == []
+
+
+def test_the_reviewer_name_rule_is_the_one_the_case_pack_workflow_applies():
+    from sastbench import cases as cases_module
+    from sastbench import review as review_module
+
+    assert review_module._is_stated is cases_module._is_stated
+
+
+def test_a_record_replaced_through_a_symlink_keeps_the_temporary_files_own_mode(tmp_path):
+    """The record and the pack go through one mode helper, so neither adopts a link target's mode."""
+    from sastbench import cli as cli_module
+    from sastbench import review as review_module
+
+    assert cli_module._keep_mode is review_module._keep_mode
+
+    bundle, _plan, _result, decisions = written_bundle(tmp_path)
+    record_path = bundle / "evaluator" / "review-record.json"
+    target = tmp_path / "real-record.json"
+    record_path.rename(target)
+    target.chmod(0o666)
+    record_path.symlink_to(target)
+    before = target.read_bytes()
+    hand_edit_decisions(bundle, decisions)
+
+    record_decisions(bundle, clock=LATER)
+
+    assert not record_path.is_symlink() and record_path.is_file()
+    assert record_path.stat().st_mode & 0o777 == 0o600
+    assert target.stat().st_mode & 0o777 == 0o666 and target.read_bytes() == before

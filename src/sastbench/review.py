@@ -30,7 +30,9 @@ import posixpath
 import tempfile
 from typing import Any, Callable, Iterable
 
-from .cases import accepted_paths_for_targets, pack_sha256
+# _is_stated is imported rather than re-implemented so a reviewer name is judged by one rule
+# across the tool: what corpus approve refuses, review approve refuses the same way.
+from .cases import _is_stated, accepted_paths_for_targets, pack_sha256
 from .contracts import ContractError, canonical_json, canonical_sha256, load_document, validate_document
 
 
@@ -79,14 +81,19 @@ def _write_new(path: Path, content: str) -> None:
 
 
 def _keep_mode(temporary: Path, existing: Path) -> None:
-    """Give *temporary* the permissions of the file it is about to replace.
+    """Give *temporary* the permissions of the regular file it is about to replace.
 
     A temporary file is created owner-only, so a replacement that skipped this would quietly
-    narrow who can read the document. This copies permission bits only, not ownership, and not
-    any access control the filesystem keeps elsewhere. :mod:`sastbench.cli` uses this same
-    helper, so a replaced pack and a replaced review record keep their modes the same way.
+    narrow who can read the document. Bits are copied only when *existing* is a regular file
+    that is not a symlink: when the name reaches a symlink, a directory, or nothing at all, the
+    replacement keeps the owner-only mode of the temporary file rather than adopting the mode of
+    whatever that name currently leads to. This copies permission bits only, not ownership, and
+    not any access control the filesystem keeps elsewhere. :mod:`sastbench.cli` calls this same
+    function before it renames a pack into place, so a replaced pack and a replaced review
+    record follow exactly this rule, symlinked paths included.
     """
-    os.chmod(temporary, existing.stat().st_mode & 0o777)
+    if existing.is_file() and not existing.is_symlink():
+        os.chmod(temporary, existing.stat().st_mode & 0o777)
 
 
 def _refuse_symlinked_dirs(bundle_dir: str | PathLike[str]) -> Path:
@@ -132,8 +139,8 @@ def _replace_document(path: Path, document: dict) -> None:
     This is the only overwrite in this module, and :mod:`sastbench.cli` routes ``review
     approve`` through it, so every replacement of a review record behaves the same way. It does
     not merge, keep a backup, or copy the previous version anywhere, and it replaces a symlink
-    sitting at *path* rather than writing through it. A replaced regular file's permission bits
-    are copied onto the temporary file first; the permissions of a symlink's target are not.
+    sitting at *path* rather than writing through it. Permission bits are carried over by
+    :func:`_keep_mode`, which copies them from a regular file and from nothing else.
     """
     handle = tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", newline="\n", dir=str(path.parent),
@@ -142,8 +149,7 @@ def _replace_document(path: Path, document: dict) -> None:
     try:
         with handle:
             handle.write(_document(document))
-        if path.is_file() and not path.is_symlink():
-            _keep_mode(Path(handle.name), path)
+        _keep_mode(Path(handle.name), path)
         os.replace(handle.name, path)
     except BaseException:
         Path(handle.name).unlink(missing_ok=True)
@@ -317,7 +323,9 @@ def approve_review(record: dict, decisions: dict, plan: dict, *, reviewer: str, 
     """Return a new record carrying one explicit human approval of *decisions* under *plan*.
 
     The reviewer name comes from the caller and is stored verbatim; anything that is not a
-    non-blank string is refused rather than coerced. This function does not authenticate the
+    non-blank string is refused rather than coerced, by the same rule
+    :mod:`sastbench.cases` applies to a reviewer name, so a name made only of zero-width or
+    other format characters is refused here too. This function does not authenticate the
     reviewer, check their independence, or verify that anything was read; it records a claim
     of review and refuses one whose record no longer matches the decisions, the plan, or the
     run it would approve, or whose decisions and plan bind to different inputs. The original
@@ -328,7 +336,7 @@ def approve_review(record: dict, decisions: dict, plan: dict, *, reviewer: str, 
     validate_document(DECISIONS_KIND, decisions)
     validate_document(PLAN_KIND, plan)
     _assert_binds_to_plan(plan, decisions)
-    if not isinstance(reviewer, str) or not reviewer.strip():
+    if not _is_stated(reviewer):
         raise ContractError("approval requires an explicit reviewer name; the tool never supplies one")
     digest = canonical_sha256(decisions)
     if record["decisions_sha256"] != digest:

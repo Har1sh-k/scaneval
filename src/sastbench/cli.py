@@ -32,8 +32,8 @@ No command writes inside a materialized trial directory: the output path of ``pl
 ``demo``, ``score``, ``replay`` and ``report``, the pack path of ``corpus init``, the bundle
 argument of ``review init``, ``review record`` and ``review approve``, and the directory
 ``corpus validate`` exports a snapshot into, are each refused when a trial's ``provenance.json``
-and ``source`` sit above them. That keeps evaluator material out of the tree a scanner is
-handed; it is a check on the path, not an isolation boundary.
+and ``source`` sit in them or above them. That keeps evaluator material out of the tree a
+scanner is handed; it is a check on the path, not an isolation boundary.
 
 Exit codes. 2 means the command could not be carried out: a usage or contract error, a refused
 overwrite, a failed fetch or export. 1 means the command ran and reports a negative result: a
@@ -123,8 +123,12 @@ def _save_pack(path: Path, pack: dict) -> None:
     concurrent reader sees the old pack or the new one and never a half-written file, and an
     invalid pack raises before the old file is touched. The previous version is not kept here:
     version history belongs in the repository, not in a backup copy this command leaves behind.
-    A symlink at *path* is replaced rather than written through. *path* must already exist: this
-    replaces a pack, and :func:`_create_pack` is what writes a new one.
+    A symlink at *path* is replaced rather than written through, and the regular file that
+    replaces it keeps the owner-only mode of the temporary file rather than the mode of the
+    symlink's target: permissions are carried over by :func:`sastbench.review._keep_mode`, which
+    every replaced review record goes through as well. *path* is expected to already exist,
+    because every caller loads the pack from it first; :func:`_create_pack` is what writes a new
+    one.
     """
     handle = tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", newline="\n", dir=str(path.parent),
@@ -183,8 +187,18 @@ def _reject_credentials(option: str, url: str) -> None:
     This reads the authority of the URL only. It does not find a token in a path, a query, or a
     fragment, does not recognize an scp-style ssh address such as ``git@host:path`` as carrying
     userinfo, and it says nothing about whether the URL resolves or what it points at.
+
+    A string :func:`~urllib.parse.urlsplit` cannot split at all, such as one with an unclosed
+    ``[`` in its authority, is refused here naming *option*. The authority was never read, so
+    this refusal says the URL could not be checked for credentials, not that it carries none.
     """
-    userinfo, marker, _host = urlsplit(url).netloc.rpartition("@")
+    try:
+        netloc = urlsplit(url).netloc
+    except ValueError as exc:
+        raise ContractError(
+            f"{option} is not a URL this tool can read ({exc}), so its authority could not be "
+            "checked for credentials; supply a URL that parses") from exc
+    userinfo, marker, _host = netloc.rpartition("@")
     if marker and userinfo != "git":
         raise ContractError(
             f"{option} carries credentials in the URL authority; supply a URL without userinfo "
@@ -209,15 +223,18 @@ def _legacy_document(path: Path) -> dict:
 
     The strings the migration copies into a case must already be strings: an identifier, kind,
     title, or description of another type would become an alias or a description that misstates
-    the record, and a ``cve`` or ``ghsa`` key present as ``null`` is refused rather than read as
-    absent, so a record that meant to name one is corrected instead of quietly losing it. A line
-    bound present as ``null`` counts as present, because dropping it would silently widen the
-    region to the whole file, and a fix commit without a repository is refused because the
-    evidence reference it would produce is ``'<repo>@<sha>'``.
+    the record, and a ``canonicalKind``, ``title``, ``description``, ``cve``, ``ghsa``, or
+    ``fixCommit`` key present as ``null`` is refused rather than read as absent, so a record
+    that meant to name one is corrected instead of quietly losing it. ``canonicalKind`` in
+    particular is read with a default by the migration, so a present ``null`` would defeat that
+    default and fail later against the case schema instead of here. A line bound present as
+    ``null`` counts as present, because dropping it would silently widen the region to the whole
+    file, and a fix commit without a repository is refused because the evidence reference it
+    would produce is ``'<repo>@<sha>'``.
     """
     legacy = _read_json(path)
     for key in ("canonicalKind", "title", "description"):
-        if legacy.get(key) is not None and not isinstance(legacy[key], str):
+        if key in legacy and not isinstance(legacy[key], str):
             raise ContractError(f"{path}: {key} must be a string")
     real = legacy.get("realWorld")
     if real is not None and not isinstance(real, dict):
@@ -226,7 +243,7 @@ def _legacy_document(path: Path) -> dict:
     disclosure = real.get("disclosure")
     if disclosure is not None and not isinstance(disclosure, dict):
         raise ContractError(f"{path}: realWorld.disclosure must be a JSON object")
-    for key in ("cve", "ghsa"):
+    for key in ("cve", "ghsa", "fixCommit"):
         if key in real and not isinstance(real[key], str):
             raise ContractError(f"{path}: realWorld.{key} must be a string")
     repository = real.get("repo")
@@ -291,17 +308,20 @@ def _refuse_trial_path(output: Path) -> None:
     ``replay`` and ``report``, the pack ``corpus init`` creates, the bundle ``review init``,
     ``review record`` and ``review approve`` write into, and the trial ``corpus validate`` is
     about to export into. A trial is recognized by a ``provenance.json`` file beside a
-    ``source`` directory; any other directory is left alone. Only the parents of *output* are
-    examined: a path that is itself a trial root is not caught by its own marker, which is why
-    ``corpus validate`` checks the snapshot directory it would create rather than
-    ``--trial-root`` itself. The comparison resolves symlinks in the path but follows no bind
-    mount or hard link, so it catches the obvious mistake and is not an isolation boundary.
+    ``source`` directory; any other directory is left alone. *output* itself is examined along
+    with its parents, so a bundle that is itself a trial root is refused as well as one sitting
+    under one; a path that does not exist yet carries no marker and is judged by its parents
+    alone. The comparison resolves symlinks in the path but follows no bind mount or hard link,
+    so it catches the obvious mistake and is not an isolation boundary.
     """
-    for directory in output.expanduser().resolve().parents:
+    resolved = output.expanduser().resolve()
+    for directory in (resolved, *resolved.parents):
         if (directory / TRIAL_MARKER).is_file() and (directory / TRIAL_SOURCE).is_dir():
+            where = ("which is itself the trial directory" if directory == resolved
+                     else f"inside the trial directory {directory}")
             raise ContractError(
-                f"refusing to write {output} inside the trial directory {directory}; evaluator "
-                "plans, packs, and decisions stay outside an exported input tree")
+                f"refusing to write {output} {where}; evaluator plans, packs, and decisions "
+                "stay outside an exported input tree")
 
 
 def load_bundle(directory: Path) -> tuple[dict, dict, dict]:

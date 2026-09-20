@@ -1133,9 +1133,16 @@ def test_review_commands_refuse_a_bundle_inside_a_trial_directory(tmp_path, caps
     ({"realWorld": {"ghsa": ["GHSA-aaaa-bbbb-cccc"]}}, "realWorld.ghsa must be a string"),
     ({"realWorld": {"fixCommit": "c" * 40}}, "realWorld.fixCommit needs realWorld.repo"),
     ({"realWorld": {"fixCommit": "c" * 40, "repo": "   "}}, "realWorld.fixCommit needs realWorld.repo"),
+    ({"realWorld": {"fixCommit": True, "repo": "acme/widget"}}, "realWorld.fixCommit must be a string"),
+    ({"realWorld": {"fixCommit": ["c" * 40], "repo": "acme/widget"}}, "realWorld.fixCommit must be a string"),
+    ({"realWorld": {"fixCommit": 7, "repo": "acme/widget"}}, "realWorld.fixCommit must be a string"),
+    ({"realWorld": {"fixCommit": None, "repo": "acme/widget"}}, "realWorld.fixCommit must be a string"),
     ({"canonicalKind": ["command_injection"]}, "canonicalKind must be a string"),
+    ({"canonicalKind": None}, "canonicalKind must be a string"),
     ({"title": 7}, "title must be a string"),
+    ({"title": None}, "title must be a string"),
     ({"description": {"text": "shell injection"}}, "description must be a string"),
+    ({"description": None}, "description must be a string"),
     ({"regions": [{"path": "src/app.py", "startLine": 5}]}, "must be supplied together"),
     ({"regions": [{"path": "src/app.py", "endLine": None}]}, "must be supplied together"),
     ({"regions": [{"path": "src/app.py", "startLine": 5, "endLine": None}]},
@@ -1157,3 +1164,178 @@ def test_import_refuses_further_legacy_shapes_the_migration_cannot_read(tmp_path
     assert err.startswith("sastbench: ") and "Traceback" not in err
     assert str(legacy) in err
     assert read_pack(pack)["cases"] == []
+
+
+UNPARSABLE_URL = "https://[::1/acme/widget.git"
+
+
+def test_a_snapshot_url_that_cannot_be_parsed_is_refused_naming_the_flag(tmp_path, capsys, upstream):
+    repo, commit = upstream
+    pack = tmp_path / "pack.json"
+    assert main(init_argv(pack)) == 0
+    capsys.readouterr()
+    before = pack.read_bytes()
+
+    unparsable = snapshot_argv(pack, repo, commit)
+    unparsable[unparsable.index("--url") + 1] = UNPARSABLE_URL
+    code, _, err = cli(capsys, *unparsable)
+    assert code == 2 and "--url is not a URL this tool can read" in err
+    assert "Invalid IPv6 URL" in err and "could not be checked for credentials" in err
+    assert err.startswith("sastbench: ") and "Traceback" not in err
+
+    code, _, err = cli(capsys, *snapshot_argv(pack, repo, commit),
+                       "--historical-url", UNPARSABLE_URL)
+    assert code == 2 and "--historical-url is not a URL this tool can read" in err
+    assert err.startswith("sastbench: ") and "Traceback" not in err
+
+    assert pack.read_bytes() == before and read_pack(pack)["snapshots"] == []
+
+
+def test_an_import_repository_url_that_cannot_be_parsed_is_refused_naming_the_flag(tmp_path, capsys,
+                                                                                  upstream):
+    pack = pack_with_snapshot(tmp_path, upstream)
+    capsys.readouterr()
+    before = pack.read_bytes()
+
+    code, _, err = cli(capsys, *import_argv(pack, "case-fix", "--fix-commit", "a" * 40,
+                                            "--repo", UNPARSABLE_URL))
+    assert code == 2 and "--repo is not a URL this tool can read" in err
+    assert err.startswith("sastbench: ") and "Traceback" not in err
+    assert pack.read_bytes() == before and read_pack(pack)["cases"] == []
+
+
+def test_a_legacy_repository_url_that_cannot_be_parsed_is_refused_naming_the_record(tmp_path, capsys,
+                                                                                    upstream):
+    pack = pack_with_snapshot(tmp_path, upstream)
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps(legacy_record(
+        realWorld={"repo": UNPARSABLE_URL, "fixCommit": "c" * 40})) + "\n",
+        encoding="utf-8")
+    capsys.readouterr()
+
+    code, _, err = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
+    assert code == 2 and "realWorld.repo is not a URL this tool can read" in err
+    assert str(legacy) in err
+    assert err.startswith("sastbench: ") and "Traceback" not in err
+    assert read_pack(pack)["cases"] == []
+
+
+def test_import_never_stringifies_a_legacy_fix_commit_into_an_evidence_reference(tmp_path, capsys,
+                                                                                 upstream):
+    pack = pack_with_snapshot(tmp_path, upstream)
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps(legacy_record(
+        realWorld={"repo": "ssh://git@example.invalid/acme/widget", "fixCommit": True})) + "\n",
+        encoding="utf-8")
+    capsys.readouterr()
+
+    code, _, err = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
+    assert code == 2 and "realWorld.fixCommit must be a string" in err
+    assert read_pack(pack)["cases"] == []
+    assert "@True" not in pack.read_text(encoding="utf-8")
+
+
+def test_a_document_that_is_not_utf_8_is_refused_naming_the_file(tmp_path, capsys, checked_pack):
+    broken = tmp_path / "broken-pack.json"
+    broken.write_bytes(b'{"schema_version": "2.\xff0", "namespace": "org.example"}\n')
+    bundle = make_bundle(tmp_path, checked_pack)
+    (bundle / "result.json").write_bytes(b'{"schema_version": "2.\xff0"}\n')
+    capsys.readouterr()
+
+    refused = {
+        "validate": ["validate", "case-pack", str(broken)],
+        "corpus validate": ["corpus", "validate", str(broken)],
+        "corpus approve": ["corpus", "approve", str(broken), "--case-id", "case-finding",
+                           "--reviewer", "R. Eviewer", "--role", "curator", "--level", "L2",
+                           "--note", "structural review"],
+    }
+    for argv in refused.values():
+        code, _, err = cli(capsys, *argv)
+        assert code == 2 and f"could not load {broken}" in err
+        assert "utf-8" in err and "Traceback" not in err
+        assert err.startswith("sastbench: ")
+
+    code, _, err = cli(capsys, "replay", str(bundle))
+    assert code == 2 and f"could not load {bundle / 'result.json'}" in err
+    assert err.startswith("sastbench: ") and "utf-8" in err and "Traceback" not in err
+
+
+def test_review_commands_refuse_a_bundle_that_is_itself_a_trial_directory(tmp_path, capsys,
+                                                                         checked_pack):
+    trial = tmp_path / "trial" / "snap-a"
+    assert (trial / "provenance.json").is_file() and (trial / "source").is_dir()
+    before = sorted(path.name for path in trial.iterdir())
+    capsys.readouterr()
+
+    refused = {
+        "init": ["review", "init", str(trial), "--pack", str(checked_pack["pack"])],
+        "record": ["review", "record", str(trial)],
+        "approve": ["review", "approve", str(trial), "--reviewer", "R. Eviewer", "--note", "n"],
+    }
+    for argv in refused.values():
+        code, _, err = cli(capsys, *argv)
+        assert code == 2 and "which is itself the trial directory" in err
+        assert err.startswith("sastbench: ") and "Traceback" not in err
+
+    assert not (trial / "evaluator").exists()
+    assert sorted(path.name for path in trial.iterdir()) == before
+
+
+def test_writing_commands_refuse_an_output_that_is_itself_a_trial_directory(tmp_path, capsys,
+                                                                           checked_pack):
+    trial = tmp_path / "trial" / "snap-a"
+    config = write_config(tmp_path)
+    before = sorted(path.name for path in trial.iterdir())
+    capsys.readouterr()
+
+    for argv in (["demo", str(trial)], ["run", str(config), "--output", str(trial)]):
+        code, _, err = cli(capsys, *argv)
+        assert code == 2 and "which is itself the trial directory" in err
+        assert err.startswith("sastbench: ") and "Traceback" not in err
+
+    assert sorted(path.name for path in trial.iterdir()) == before
+    assert not (trial / "evaluator").exists() and not (trial / "invocations").exists()
+
+
+def test_a_pack_replaced_through_a_symlink_does_not_take_the_permissions_it_points_at(tmp_path,
+                                                                                      capsys,
+                                                                                      checked_pack):
+    from sastbench import cli as cli_module
+    from sastbench import review as review_module
+
+    # The pack file and the review record are replaced by one helper, so the two cannot drift.
+    assert cli_module._keep_mode is review_module._keep_mode
+
+    target = checked_pack["pack"]
+    target.chmod(0o666)
+    linked = tmp_path / "linked-pack.json"
+    linked.symlink_to(target)
+    capsys.readouterr()
+
+    assert main(["corpus", "disposition", str(linked), "--case-id", "case-finding",
+                 "--value", "validate", "--reason", "evidence reviewed"]) == 0
+
+    # os.replace puts a regular file where the link was; it keeps the temporary file's own
+    # owner-only mode rather than widening itself to the mode of the file the link pointed at.
+    assert not linked.is_symlink() and linked.is_file()
+    assert linked.stat().st_mode & 0o777 == 0o600
+    assert target.stat().st_mode & 0o777 == 0o666
+    assert read_pack(linked)["cases"][0]["disposition"]["value"] == "validate"
+    assert read_pack(target)["cases"][0]["disposition"]["value"] == "needs_evidence"
+
+
+@pytest.mark.parametrize("reviewer", ["\u200b", "\u200b\u200b\ufeff", "\xad"])
+def test_review_approve_refuses_a_reviewer_name_made_only_of_format_characters(tmp_path, capsys,
+                                                                               checked_pack,
+                                                                               reviewer):
+    bundle = make_bundle(tmp_path, checked_pack)
+    assert main(["review", "init", str(bundle), "--pack", str(checked_pack["pack"])]) == 0
+    record_path = bundle / "evaluator" / "review-record.json"
+    before = record_path.read_bytes()
+    capsys.readouterr()
+
+    code, _, err = cli(capsys, "review", "approve", str(bundle), "--reviewer", reviewer,
+                       "--note", "read them")
+    assert code == 2 and "explicit reviewer name" in err
+    assert record_path.read_bytes() == before
+    assert load_document(record_path, "review-record")["state"] == "draft"
