@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sastbench.dev/schemas/v2/review-decisions.schema.json",
+  "title": "SASTbench review decisions",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "run_id", "input_hash", "result_sha256", "claim_matches", "control_assessments"],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "result_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "claim_matches": {"type": "array", "items": {"$ref": "#/$defs/claim_match"}},
+    "control_assessments": {"type": "array", "items": {"$ref": "#/$defs/control_assessment"}}
+  },
+  "$defs": {
+    "claim_match": {
+      "type": "object", "additionalProperties": false,
+      "required": ["claim_id", "target_id", "decision", "reason"],
+      "properties": {
+        "claim_id": {"type": "string", "minLength": 1},
+        "target_id": {"type": "string", "minLength": 1},
+        "decision": {"enum": ["accepted", "rejected", "unresolved"]},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "control_assessment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["control_id", "decision", "claim_ids", "reason"],
+      "properties": {
+        "control_id": {"type": "string", "minLength": 1},
+        "decision": {"enum": ["false_allegation", "quiet", "unresolved"]},
+        "claim_ids": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "reason": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

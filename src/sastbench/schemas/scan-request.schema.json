@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sastbench.dev/schemas/v2/scan-request.schema.json",
+  "title": "SASTbench scan request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "input", "system", "limits", "trace_mode"],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tree_hash", "root", "languages", "mode", "profile"],
+      "properties": {
+        "tree_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "root": {"type": "string", "minLength": 1},
+        "languages": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"enum": ["python", "typescript", "javascript", "go", "rust"]}
+        },
+        "mode": {"enum": ["full", "pr"]},
+        "profile": {"enum": ["standard", "metadata_blinded"]},
+        "pr": {
+          "type": "object", "additionalProperties": false,
+          "required": ["base", "head"],
+          "properties": {
+            "base": {"type": "string", "minLength": 1},
+            "head": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "system": {
+      "type": "object", "additionalProperties": false, "required": ["id"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "model_id": {"type": "string", "minLength": 1},
+        "model_revision": {"type": "string", "minLength": 1}
+      }
+    },
+    "limits": {
+      "type": "object", "additionalProperties": false, "required": ["timeout_seconds"],
+      "properties": {
+        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "max_turns": {"type": "integer", "minimum": 1}
+      }
+    },
+    "trace_mode": {"enum": ["off", "metadata", "content"]}
+  }
+}
