@@ -203,38 +203,44 @@
           {
             "check": "locations_exist_in_snapshot",
             "result": "pass",
-            "at": "2026-09-20T06:36:44+00:00",
-            "detail": "2 locations found"
+            "at": "2026-09-20T08:37:12+00:00",
+            "detail": "2 locations found",
+            "snapshot_id": "oauth2-proxy-f4b33b64"
           },
           {
             "check": "line_ranges_within_files",
             "result": "pass",
-            "at": "2026-09-20T06:36:44+00:00",
-            "detail": "all ranges within file length"
+            "at": "2026-09-20T08:37:12+00:00",
+            "detail": "all ranges within file length",
+            "snapshot_id": "oauth2-proxy-f4b33b64"
           },
           {
             "check": "aliases_well_formed",
             "result": "pass",
-            "at": "2026-09-20T06:36:44+00:00",
-            "detail": "CVE-2025-54576, GHSA-7rh7-c77v-6434"
+            "at": "2026-09-20T08:37:12+00:00",
+            "detail": "CVE-2025-54576, GHSA-7rh7-c77v-6434",
+            "snapshot_id": "oauth2-proxy-f4b33b64"
           },
           {
             "check": "represents_statement",
             "result": "pass",
-            "at": "2026-09-20T06:36:44+00:00",
-            "detail": "template: This case tests ... under ..., and adds ..."
+            "at": "2026-09-20T08:37:12+00:00",
+            "detail": "template: This case tests ... under ..., and adds ...",
+            "snapshot_id": "oauth2-proxy-f4b33b64"
           },
           {
             "check": "evidence_recorded",
             "result": "pass",
-            "at": "2026-09-20T06:36:44+00:00",
-            "detail": "5 evidence records"
+            "at": "2026-09-20T08:37:12+00:00",
+            "detail": "5 evidence records",
+            "snapshot_id": "oauth2-proxy-f4b33b64"
           },
           {
             "check": "snapshot_hash_recorded",
             "result": "pass",
-            "at": "2026-09-20T06:36:44+00:00",
-            "detail": "sha256:aab29bfad6368fa4f4f5e5fa5724cc37aaba6e46b80062032df74e2d8d6c1426"
+            "at": "2026-09-20T08:37:12+00:00",
+            "detail": "sha256:aab29bfad6368fa4f4f5e5fa5724cc37aaba6e46b80062032df74e2d8d6c1426",
+            "snapshot_id": "oauth2-proxy-f4b33b64"
           }
         ],
         "reviews": []
@@ -349,38 +355,44 @@
           {
             "check": "locations_exist_in_snapshot",
             "result": "pass",
-            "at": "2026-09-20T06:36:45+00:00",
-            "detail": "1 locations found"
+            "at": "2026-09-20T08:37:13+00:00",
+            "detail": "1 locations found",
+            "snapshot_id": "fastmcp-c861862a"
           },
           {
             "check": "line_ranges_within_files",
             "result": "pass",
-            "at": "2026-09-20T06:36:45+00:00",
-            "detail": "all ranges within file length"
+            "at": "2026-09-20T08:37:13+00:00",
+            "detail": "all ranges within file length",
+            "snapshot_id": "fastmcp-c861862a"
           },
           {
             "check": "aliases_well_formed",
             "result": "pass",
-            "at": "2026-09-20T06:36:45+00:00",
-            "detail": "CVE-2026-32871, GHSA-vv7q-7jx5-f767"
+            "at": "2026-09-20T08:37:13+00:00",
+            "detail": "CVE-2026-32871, GHSA-vv7q-7jx5-f767",
+            "snapshot_id": "fastmcp-c861862a"
           },
           {
             "check": "represents_statement",
             "result": "pass",
-            "at": "2026-09-20T06:36:45+00:00",
-            "detail": "template: This case tests ... under ..., and adds ..."
+            "at": "2026-09-20T08:37:13+00:00",
+            "detail": "template: This case tests ... under ..., and adds ...",
+            "snapshot_id": "fastmcp-c861862a"
           },
           {
             "check": "evidence_recorded",
             "result": "pass",
-            "at": "2026-09-20T06:36:45+00:00",
-            "detail": "5 evidence records"
+            "at": "2026-09-20T08:37:13+00:00",
+            "detail": "5 evidence records",
+            "snapshot_id": "fastmcp-c861862a"
           },
           {
             "check": "snapshot_hash_recorded",
             "result": "pass",
-            "at": "2026-09-20T06:36:45+00:00",
-            "detail": "sha256:a6a93cb57b8e3171bd0c6190b73515eeecfd7ce571cff0593df175a3e94ba713"
+            "at": "2026-09-20T08:37:13+00:00",
+            "detail": "sha256:a6a93cb57b8e3171bd0c6190b73515eeecfd7ce571cff0593df175a3e94ba713",
+            "snapshot_id": "fastmcp-c861862a"
           }
         ],
         "reviews": []
@@ -496,38 +508,44 @@
           {
             "check": "locations_exist_in_snapshot",
             "result": "pass",
-            "at": "2026-09-20T06:36:45+00:00",
-            "detail": "1 locations found"
+            "at": "2026-09-20T08:37:13+00:00",
+            "detail": "1 locations found",
+            "snapshot_id": "fastify-v5.12.1"
           },
           {
             "check": "line_ranges_within_files",
             "result": "pass",
-            "at": "2026-09-20T06:36:45+00:00",
-            "detail": "all ranges within file length"
+            "at": "2026-09-20T08:37:13+00:00",
+            "detail": "all ranges within file length",
+            "snapshot_id": "fastify-v5.12.1"
           },
           {
             "check": "aliases_well_formed",
             "result": "pass",
-            "at": "2026-09-20T06:36:45+00:00",
-            "detail": "CVE-2026-76169, GHSA-p68q-wchp-6fh7"
+            "at": "2026-09-20T08:37:13+00:00",
+            "detail": "CVE-2026-76169, GHSA-p68q-wchp-6fh7",
+            "snapshot_id": "fastify-v5.12.1"
           },
           {
             "check": "represents_statement",
             "result": "pass",
-            "at": "2026-09-20T06:36:45+00:00",
-            "detail": "template: This case tests ... under ..., and adds ..."
+            "at": "2026-09-20T08:37:13+00:00",
+            "detail": "template: This case tests ... under ..., and adds ...",
+            "snapshot_id": "fastify-v5.12.1"
           },
           {
             "check": "evidence_recorded",
             "result": "pass",
-            "at": "2026-09-20T06:36:45+00:00",
-            "detail": "5 evidence records"
+            "at": "2026-09-20T08:37:13+00:00",
+            "detail": "5 evidence records",
+            "snapshot_id": "fastify-v5.12.1"
           },
           {
             "check": "snapshot_hash_recorded",
             "result": "pass",
-            "at": "2026-09-20T06:36:45+00:00",
-            "detail": "sha256:a3554a9499f76544d02d706b0df69c2220da3aff2b66e77a5a744486b047a9e7"
+            "at": "2026-09-20T08:37:13+00:00",
+            "detail": "sha256:a3554a9499f76544d02d706b0df69c2220da3aff2b66e77a5a744486b047a9e7",
+            "snapshot_id": "fastify-v5.12.1"
           }
         ],
         "reviews": []
