@@ -9,6 +9,11 @@ Layout, all evaluator-side; a scanner only ever sees a private workspace copy of
       inputs/<snapshot>/     exported source tree plus preparation provenance beside it
       invocations/<id>/      one invocation bundle per input, system, and repetition
 
+A scanner is handed a private workspace copy of one export and writes its raw output and any
+trace into staging directories inside that workspace; :mod:`sastbench.execution` moves them
+into the invocation bundle once the scan returns or raises. No path handed to an adapter
+resolves inside this run directory.
+
 Boundaries this module keeps. It never edits the source pack on disk: mechanical check
 results land only in the frozen copy, and that copy is written exactly once, after every
 input is prepared and checked and before the first invocation, so no file here is ever
@@ -16,10 +21,12 @@ rewritten. It never writes labels, plans, decisions, or pack data inside an expo
 tree. It never approves anything, so every decisions file it writes is a machine draft; a
 plan's scope follows the label state already recorded in the pack, which means a pack
 carrying independent reviews yields a reviewed plan and a freshly checked one yields a draft
-plan. It records the declared network policy without enforcing it, and it produces
-single-invocation numbers only: no corpus weighting, repeated-run uncertainty, promotion
-gate, or cross-system comparison is computed here. A failed invocation stays a failed
-invocation and is never rewritten as an empty successful scan.
+plan. Once the output directory exists, every later failure is recorded: a manifest with
+status ``failed`` is written before the exception leaves this module. It records the declared
+network policy without enforcing it, and it produces single-invocation numbers only: no corpus
+weighting, repeated-run uncertainty, promotion gate, or cross-system comparison is computed
+here. A failed invocation stays a failed invocation and is never rewritten as an empty
+successful scan.
 """
 
 from __future__ import annotations
@@ -46,7 +53,6 @@ MANIFEST_KIND = "run-manifest"
 DEFAULT_CACHE_ROOT = ".repos"
 SCHEMA_VERSION = "2.0"
 PLAN_MODE = "full"
-PREPARATION_FAILURES = (AdapterError, materialize.MaterializationError, OSError)
 
 
 @dataclass(frozen=True)
@@ -156,6 +162,32 @@ def _check_workspace_root(workspace_root: Path | None, out_dir: Path, cache_root
                 "a workspace outside the evaluator's directories")
 
 
+def _check_cache_root(cache_root: Path, out_dir: Path) -> None:
+    """Refuse a source cache that overlaps the run output directory.
+
+    A cache inside the output would be exported, hashed, and removed along with the run; an
+    output inside the cache would write run artifacts into storage this module treats as
+    immutable. The comparison is by resolved path only: it does not follow bind mounts or hard
+    links, so it guards against the obvious mistake and is not an isolation boundary.
+    """
+    cache = _resolved(cache_root)
+    out = _resolved(out_dir)
+    if _inside(cache, out):
+        raise ContractError(
+            f"cache_root {cache} resolves inside the run output directory ({out}); keep the "
+            "immutable source cache outside the run output")
+    if _inside(out, cache):
+        raise ContractError(
+            f"the run output directory {out} resolves inside cache_root ({cache}); write the run "
+            "somewhere outside the immutable source cache")
+
+
+def _check_input_snapshots(pack: dict, inputs: list[dict]) -> None:
+    """Refuse a configured input the pack does not declare, before anything is written."""
+    for entry in inputs:
+        cases.snapshot_by_id(pack, entry["snapshot_id"])
+
+
 def _prepare_input(entry: dict, pack: dict, out_dir: Path, cache_root: Path,
                    clock: Callable[[], datetime] | None) -> tuple[execution.PreparedInput, dict, list[str]]:
     """Fetch, export, verify, and mechanically check one configured input.
@@ -192,10 +224,12 @@ def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
                     adapters: dict[str, Adapter] | None) -> tuple[_PreparedSystem, list[str]]:
     """Resolve one system's adapter and run its preparation phase once.
 
-    An adapter that cannot be resolved or prepared is recorded as skipped with its own message,
-    whether it failed as an adapter, while materializing what it needs, or on the filesystem.
-    It does not abort the run, no invocation of it is attempted, and a skipped system never
-    becomes an empty successful scan.
+    Any failure resolving or preparing the adapter is recorded as a skip carrying the
+    exception's own type name and message, whether it failed as an adapter, while materializing
+    what it needs, on the filesystem, or because its module is not installed. A preparation that
+    returns something other than a record is a preparation failure too, because the manifest
+    records what preparation produced. None of this aborts the run, no invocation of a skipped
+    system is attempted, and a skipped system never becomes an empty successful scan.
     """
     spec = SystemSpec(entry["system_id"], entry["adapter"], dict(entry["config"]),
                       entry.get("model_id"), entry.get("model_revision"))
@@ -208,10 +242,15 @@ def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
             adapter = adapters[spec.adapter]
         else:
             adapter = get_adapter(spec.adapter)
-        preparation = adapter.prepare(spec, cache_root)
-    except PREPARATION_FAILURES as exc:
+        prepared = adapter.prepare(spec, cache_root)
+        if not isinstance(prepared, dict):
+            raise AdapterError(
+                f"{spec.adapter}.prepare returned {type(prepared).__name__}; a preparation phase "
+                "must report what it prepared as a record")
+        preparation = prepared
+    except Exception as exc:
         preparation = {}
-        skipped = _message(exc)
+        skipped = f"{type(exc).__name__}: {_message(exc)}"
         warnings.append(f"{spec.system_id}: not invoked ({skipped})")
     policy = entry.get("network_policy", default_policy)
     return _PreparedSystem(spec, adapter, preparation, policy, skipped), warnings
@@ -222,8 +261,9 @@ def _evaluate_bundle(bundle: Path, pack: dict, prepared: execution.PreparedInput
     """Plan, draft review decisions, score, and report one finished invocation bundle.
 
     Every decision written here is a machine draft, so no claim earns confirmed detection
-    credit on this path. The plan's scope is whatever the pack's recorded label state supports;
-    nothing here changes that state.
+    credit on this path, and the report says so: it carries the review record's own state, which
+    is what that record claims rather than a verification of it. The plan's scope is whatever the
+    pack's recorded label state supports; nothing here changes that state.
     """
     plan, notes = cases.build_plan(pack, prepared.input_id, prepared.tree_hash, mode=PLAN_MODE)
     result = load_document(bundle / "result.json", "scan-result")
@@ -232,7 +272,8 @@ def _evaluate_bundle(bundle: Path, pack: dict, prepared: execution.PreparedInput
     review.write_evaluator_records(bundle, plan, decisions, record)
     evaluation = scoring.score(plan, result, decisions)
     _write_new(bundle / "evaluation.json", evaluation)
-    _write_new_text(bundle / "report.html", report.render_report(evaluation, result, plan))
+    _write_new_text(bundle / "report.html",
+                    report.render_report(evaluation, result, plan, review_state=record["state"]))
     return plan, record, evaluation, notes
 
 
@@ -275,11 +316,13 @@ def run_from_config(
     than a silently empty run, and what was narrowed away is recorded in the manifest.
     ``out_dir`` must not exist, and ``workspace_root`` must be outside it.
 
-    Colliding invocation ids and a workspace inside evaluator storage are refused before the
-    output directory is created. If an invocation raises, a manifest with status ``failed``
-    records the failure and the invocations that finished, and the exception is re-raised; if
-    writing that partial manifest itself fails, that error propagates with the original as its
-    context.
+    An input snapshot the pack does not declare, colliding invocation ids, a cache root that
+    overlaps the output directory, and a workspace inside evaluator storage are all refused
+    before the output directory is created, so a refused run writes nothing at all. Once that
+    directory exists, any failure (preparing an input, preparing an adapter, or running an
+    invocation) writes a manifest with status ``failed`` recording what had finished, and the
+    exception is re-raised; if writing that partial manifest itself fails, that error propagates
+    with the original as its context.
 
     This does not approve any label, does not retry or rerun a failed invocation, does not
     aggregate across inputs or systems, and does not enforce the declared network policy.
@@ -295,6 +338,8 @@ def run_from_config(
     inputs = _selected(config["inputs"], "snapshot_id", only_inputs, "inputs")
     systems = _selected(config["systems"], "system_id", only_systems, "systems")
     _check_invocation_ids(inputs, systems, config["repetitions"])
+    _check_input_snapshots(pack, inputs)
+    _check_cache_root(cache_root, out_dir)
     _check_workspace_root(workspace_root, out_dir, cache_root,
                           [out_dir / "inputs" / entry["snapshot_id"] for entry in inputs])
 
@@ -310,30 +355,32 @@ def run_from_config(
     }
 
     out_dir.mkdir(parents=True, exist_ok=False)
-    _write_new(out_dir / "run-config.json", config)
 
     warnings: list[str] = []
     prepared_inputs: list[execution.PreparedInput] = []
     manifest_inputs: list[dict] = []
-    for entry in inputs:
-        prepared, summary, input_warnings = _prepare_input(entry, pack, out_dir, cache_root, clock)
-        prepared_inputs.append(prepared)
-        manifest_inputs.append(summary)
-        warnings.extend(input_warnings)
-
-    # The pack is frozen once, here: every input has been checked and nothing is invoked yet.
-    evaluator_dir = out_dir / "evaluator"
-    evaluator_dir.mkdir()
-    _write_new(evaluator_dir / "pack.json", pack)
-
     prepared_systems: list[_PreparedSystem] = []
-    for entry in systems:
-        system, system_warnings = _prepare_system(entry, cache_root, config["network_policy"], adapters)
-        prepared_systems.append(system)
-        warnings.extend(system_warnings)
-
     invocations: list[dict] = []
+    # Everything from here on is inside the run directory, so every failure is recorded there.
     try:
+        _write_new(out_dir / "run-config.json", config)
+
+        for entry in inputs:
+            prepared, summary, input_warnings = _prepare_input(entry, pack, out_dir, cache_root, clock)
+            prepared_inputs.append(prepared)
+            manifest_inputs.append(summary)
+            warnings.extend(input_warnings)
+
+        # The pack is frozen once, here: every input has been checked and nothing is invoked yet.
+        evaluator_dir = out_dir / "evaluator"
+        evaluator_dir.mkdir()
+        _write_new(evaluator_dir / "pack.json", pack)
+
+        for entry in systems:
+            system, system_warnings = _prepare_system(entry, cache_root, config["network_policy"], adapters)
+            prepared_systems.append(system)
+            warnings.extend(system_warnings)
+
         for prepared in prepared_inputs:
             for system in prepared_systems:
                 spec = system.spec

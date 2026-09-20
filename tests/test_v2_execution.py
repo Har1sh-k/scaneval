@@ -51,6 +51,8 @@ class FakeAdapter(Adapter):
         (source_dir / ".fakestate" / "notes.md").write_text("harness state\n", encoding="utf-8")
         if self.behavior == "raise":
             raise AdapterError("binary exploded")
+        if self.behavior == "crash":
+            raise RuntimeError("the harness died mid scan")
         if self.behavior == "modify":
             (source_dir / "app.py").write_text("changed by scanner\n", encoding="utf-8")
         if self.behavior == "git":
@@ -125,7 +127,8 @@ def test_unsupported_language_is_not_executed_and_stays_visible(tmp_path):
 def test_adapter_failure_and_contract_violation_never_become_empty_success(tmp_path):
     bundle = run(tmp_path, FakeAdapter("raise"))
     result = json.loads((bundle / "result.json").read_text(encoding="utf-8"))
-    assert result["status"] == "error" and result["error"] == {"code": "adapter_failure", "message": "binary exploded"}
+    assert result["status"] == "error"
+    assert result["error"] == {"code": "adapter_failure", "message": "AdapterError: binary exploded"}
     assert (bundle / "raw" / "native.json").exists()
 
     bundle = run(tmp_path / "second", FakeAdapter("bad-claim"))
@@ -135,6 +138,53 @@ def test_adapter_failure_and_contract_violation_never_become_empty_success(tmp_p
     assert result["error"]["code"] == "import_contract_violation"
     assert "relative path" in execution["import_error"]
     assert execution["raw_artifacts"][0]["path"] == "raw/native.json"
+
+
+def test_an_unexpected_adapter_exception_is_an_error_with_its_raw_directory_preserved(tmp_path):
+    """A crash that is not an AdapterError is still a recorded error, never a lost invocation."""
+    bundle = run(tmp_path, FakeAdapter("crash"))
+
+    result = json.loads((bundle / "result.json").read_text(encoding="utf-8"))
+    execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"] == {"code": "adapter_failure",
+                               "message": "RuntimeError: the harness died mid scan"}
+    assert execution["status"] == "error" and execution["error"] == result["error"]
+    # The raw output the adapter had already written is staged out of the workspace anyway.
+    assert (bundle / "raw" / "native.json").read_text(encoding="utf-8").startswith('{"findings"')
+    assert (bundle / "raw" / "harness-state" / "fakestate" / "notes.md").is_file()
+
+
+def test_no_path_handed_to_the_adapter_is_inside_the_run_directory(tmp_path):
+    """raw/ and trace/ are staged in the private workspace and moved into the bundle after scan."""
+    seen: dict[str, Path] = {}
+
+    class RecordingAdapter(FakeAdapter):
+        def scan(self, *, request, source_dir, raw_dir, spec, preparation, timeout_seconds,
+                 trace_mode, trace_dir):
+            seen.update({"source_dir": Path(source_dir), "raw_dir": Path(raw_dir),
+                         "trace_dir": Path(trace_dir)})
+            (trace_dir / "events.jsonl").write_text('{"type":"model_request"}\n', encoding="utf-8")
+            outcome = super().scan(request=request, source_dir=source_dir, raw_dir=raw_dir, spec=spec,
+                                   preparation=preparation, timeout_seconds=timeout_seconds,
+                                   trace_mode=trace_mode, trace_dir=trace_dir)
+            outcome.trace_path = trace_dir / "events.jsonl"
+            return outcome
+
+    out = (tmp_path / "out").resolve()
+    bundle = run(tmp_path, RecordingAdapter(), trace_mode="metadata")
+
+    assert set(seen) == {"source_dir", "raw_dir", "trace_dir"}
+    for name, path in seen.items():
+        assert not path.resolve().is_relative_to(out), f"{name} was handed inside the run directory"
+        assert not path.exists(), f"{name} outlived the private workspace"
+
+    result = json.loads((bundle / "result.json").read_text(encoding="utf-8"))
+    execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))
+    assert result["raw_artifacts"][0]["path"] == "raw/native.json"
+    assert (bundle / "raw" / "native.json").is_file()
+    assert execution["trace"]["path"] == "trace/events.jsonl" and execution["trace"]["events"] == 1
+    assert (bundle / "trace" / "events.jsonl").is_file()
 
 
 def test_timeout_is_recorded_as_timeout_with_partial_artifacts(tmp_path):

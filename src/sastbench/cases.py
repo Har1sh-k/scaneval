@@ -13,13 +13,23 @@ recorded review state and level stay exactly as the reviewer left them.
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any, Callable
+import unicodedata
 
-from .contracts import ContractError, canonical_json, canonical_sha256, load_document, validate_document
+from .contracts import (
+    ContractError,
+    canonical_json,
+    canonical_sha256,
+    load_document,
+    recorded_check_state,
+    validate_document,
+)
 
 
 PACK_KIND = "case-pack"
@@ -44,6 +54,44 @@ def field_state(state: str, reason: str = "") -> dict:
 
 def not_reviewed() -> dict:
     return field_state("not_reviewed")
+
+
+# Space, format, and control characters: a string made only of these says nothing.
+_BLANK_CATEGORIES = frozenset({"Zs", "Cf", "Cc"})
+
+
+def _is_stated(value: Any) -> bool:
+    """True when *value* is a string holding at least one character that is not blank.
+
+    Blank here means Unicode category ``Zs`` (spaces), ``Cf`` (zero-width and directional
+    marks), or ``Cc`` (control characters), so a name made only of U+200B zero-width spaces is
+    not a name even though stripping it leaves a non-empty string. This judges characters only:
+    it says nothing about whether a name belongs to a person or a reason explains anything.
+    """
+    return isinstance(value, str) and any(unicodedata.category(ch) not in _BLANK_CATEGORIES for ch in value)
+
+
+def _require_stated(value: Any, message: str) -> str:
+    if not _is_stated(value):
+        raise ContractError(message)
+    return value
+
+
+def _apply_validated(pack: dict, mutate: Callable[[dict], Any]) -> Any:
+    """Apply *mutate* to a deep copy of *pack*, validate it, and only then swap it in.
+
+    A refused change leaves *pack* exactly as it was, because the mutation never touched it.
+    On success the validated copy replaces the pack's contents in place, so the caller's
+    pack reference stays valid while references taken to nested objects beforehand point at
+    the superseded copy. Validation checks the document against the contract; it does not
+    check that the change was a good idea.
+    """
+    candidate = copy.deepcopy(pack)
+    result = mutate(candidate)
+    validate_document(PACK_KIND, candidate)
+    pack.clear()
+    pack.update(candidate)
+    return result
 
 
 def new_pack(namespace: str, pack_id: str, description: str, *, version: str = "0.1.0-draft",
@@ -92,12 +140,16 @@ def cases_for_snapshot(pack: dict, snapshot_id: str) -> list[dict]:
 
 
 def add_snapshot(pack: dict, snapshot: dict) -> dict:
+    """Record one pinned snapshot. A snapshot the contract refuses leaves the pack unchanged."""
     if any(existing["snapshot_id"] == snapshot["snapshot_id"] for existing in pack["snapshots"]):
         raise ContractError(f"snapshot {snapshot['snapshot_id']} already exists")
-    record = {"tree_hash": None, "git_tree": None, "role": "vulnerable", **snapshot}
-    pack["snapshots"].append(record)
-    validate_document(PACK_KIND, pack)
-    return record
+    record = copy.deepcopy({"tree_hash": None, "git_tree": None, "role": "vulnerable", **snapshot})
+
+    def mutate(candidate: dict) -> dict:
+        candidate["snapshots"].append(record)
+        return record
+
+    return _apply_validated(pack, mutate)
 
 
 def draft_case(case_id: str, *, snapshot_id: str, kind: str, description: str, represents: str,
@@ -132,11 +184,16 @@ def draft_case(case_id: str, *, snapshot_id: str, kind: str, description: str, r
 
 
 def add_case(pack: dict, case: dict) -> dict:
+    """Record one case. A case the contract refuses leaves the pack unchanged."""
     if any(existing["case_id"] == case["case_id"] for existing in pack["cases"]):
         raise ContractError(f"case {case['case_id']} already exists")
-    pack["cases"].append(case)
-    validate_document(PACK_KIND, pack)
-    return case
+    record = copy.deepcopy(case)
+
+    def mutate(candidate: dict) -> dict:
+        candidate["cases"].append(record)
+        return record
+
+    return _apply_validated(pack, mutate)
 
 
 def evidence(evidence_id: str, *, origin: str, kind: str, reference: str, note: str = "",
@@ -149,10 +206,61 @@ def evidence(evidence_id: str, *, origin: str, kind: str, reference: str, note: 
     return item
 
 
+def _legacy_mapping(value: Any, label: str) -> dict:
+    """The legacy object at *label*, or an empty one when it is absent."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ContractError(f"legacy {label} must be a JSON object, not {type(value).__name__}")
+    return value
+
+
+def _legacy_line(region: dict, key: str, index: int) -> int:
+    value = region[key]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ContractError(
+            f"legacy region {index}: {key} must be an integer line number of at least 1, not {value!r}")
+    return value
+
+
+def _legacy_locations(legacy: dict) -> list[dict]:
+    """Legacy regions as candidate locations, refusing a shape this cannot read faithfully.
+
+    A malformed region is refused rather than guessed at or silently dropped: a region with
+    one line bound, a non-integer bound, or no path would otherwise become a location that
+    claims less, or something other, than the legacy record said.
+    """
+    regions = legacy.get("regions", [])
+    if not isinstance(regions, list):
+        raise ContractError(f"legacy regions must be a list of region objects, not {type(regions).__name__}")
+    locations = []
+    for index, region in enumerate(regions):
+        if not isinstance(region, dict):
+            raise ContractError(f"legacy region {index} must be a JSON object, not {type(region).__name__}")
+        path = region.get("path")
+        if not isinstance(path, str) or not path:
+            raise ContractError(f"legacy region {index} must name its path as a non-empty string")
+        location = {"path": path, "role": "other",
+                    "note": f"legacy region {region.get('id')} label={region.get('label')} capability={region.get('capability')}"}
+        bounds = [key for key in ("startLine", "endLine") if key in region]
+        if len(bounds) == 1:
+            raise ContractError(
+                f"legacy region {index}: startLine and endLine must be supplied together; got only {bounds[0]}")
+        if bounds:
+            location.update({"start_line": _legacy_line(region, "startLine", index),
+                             "end_line": _legacy_line(region, "endLine", index)})
+        locations.append(location)
+    return locations
+
+
 def draft_case_from_legacy(legacy: dict, *, case_id: str, snapshot_id: str, legacy_path: str,
                            workload: str, component_role: str, represents: str) -> dict:
-    """Migrate a legacy v1 case as draft evidence. Regions become candidate locations, not labels."""
-    real = legacy.get("realWorld") or {}
+    """Migrate a legacy v1 case as draft evidence. Regions become candidate locations, not labels.
+
+    The legacy record is read, not trusted: a shape this cannot read faithfully is refused with
+    a :class:`ContractError` instead of producing a case that misstates it.
+    """
+    real = _legacy_mapping(legacy.get("realWorld"), "realWorld")
     aliases = [value for value in (real.get("cve"), real.get("ghsa")) if value]
     items = [evidence("legacy-record", origin="legacy_case_record", kind="other", reference=legacy_path,
                       note=f"Legacy case {legacy.get('id')} ({legacy.get('caseType')}); prior draft regions, not v2-reviewed labels.")]
@@ -165,14 +273,8 @@ def draft_case_from_legacy(legacy: dict, *, case_id: str, snapshot_id: str, lega
     if real.get("cve"):
         items.append(evidence("cve", origin="public_advisory_and_maintainer_fix", kind="cve_record",
                               reference=f"https://www.cve.org/CVERecord?id={real['cve']}", note=""))
-    locations = []
-    for region in legacy.get("regions", []):
-        location = {"path": region["path"], "role": "other",
-                    "note": f"legacy region {region.get('id')} label={region.get('label')} capability={region.get('capability')}"}
-        if "startLine" in region and "endLine" in region:
-            location.update({"start_line": int(region["startLine"]), "end_line": int(region["endLine"])})
-        locations.append(location)
-    disclosure = legacy.get("realWorld", {}).get("disclosure") or {}
+    locations = _legacy_locations(legacy)
+    disclosure = _legacy_mapping(real.get("disclosure"), "realWorld.disclosure")
     return draft_case(
         case_id, snapshot_id=snapshot_id, kind=legacy.get("canonicalKind", "unmapped"),
         description=legacy.get("description") or legacy.get("title") or case_id, represents=represents,
@@ -186,8 +288,29 @@ def draft_case_from_legacy(legacy: dict, *, case_id: str, snapshot_id: str, lega
 
 
 def _count_lines(path: Path) -> int:
+    """Count the newline-separated lines of *path*, reading its bytes and nothing else."""
     with path.open("rb") as handle:
         return sum(1 for _ in handle)
+
+
+def exported_file_paths(source_dir: Path) -> set[str]:
+    """Every regular file under *source_dir*, as exact POSIX-relative paths.
+
+    Declared paths are compared against this listing rather than probed on the filesystem, so
+    a path whose case differs from the file on disk fails on a case-insensitive filesystem
+    exactly as it does on a case-sensitive one. Symbolic links and ``.git`` contents are left
+    out, which is what an export holds anyway.
+    """
+    listing: set[str] = set()
+    for directory, dirnames, filenames in os.walk(source_dir):
+        dirnames[:] = [name for name in dirnames if name != ".git"]
+        base = Path(directory)
+        for name in filenames:
+            path = base / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            listing.add(path.relative_to(source_dir).as_posix())
+    return listing
 
 
 def referenced_snapshots(case: dict) -> list[str]:
@@ -201,15 +324,14 @@ def referenced_snapshots(case: dict) -> list[str]:
 
 
 def _recorded_check_state(case: dict, snapshot_id: str) -> str | None:
-    """``pass`` or ``fail`` for one snapshot's recorded check set; ``None`` when none is recorded.
+    """One case's recorded check state for *snapshot_id*: ``pass``, ``fail``, or ``None``."""
+    return recorded_check_state(case["validation"]["checks"], snapshot_id)
 
-    Checks recorded before check sets carried a ``snapshot_id`` belong to no snapshot and are
-    ignored here rather than deleted, so they neither promote nor demote a case.
-    """
-    recorded = [check for check in case["validation"]["checks"] if check.get("snapshot_id") == snapshot_id]
-    if not recorded:
-        return None
-    return "pass" if all(check["result"] == "pass" for check in recorded) else "fail"
+
+def _unchecked_snapshots(case: dict) -> list[str]:
+    """Referenced snapshots without a recorded passing check set, in reference order."""
+    return [snapshot for snapshot in referenced_snapshots(case)
+            if _recorded_check_state(case, snapshot) != "pass"]
 
 
 def mechanical_checks(pack: dict, snapshot_id: str, source_dir: Path, tree_hash: str,
@@ -221,16 +343,18 @@ def mechanical_checks(pack: dict, snapshot_id: str, source_dir: Path, tree_hash:
     in either order ends in the same state. A case becomes ``mechanically_checked`` (L1) only
     once every snapshot it references has a recorded passing check set.
 
-    A failing set demotes a ``mechanically_checked`` case to ``draft``. For a ``human_approved``
-    case it records ``validation.checks_failed`` and leaves the review state and level untouched,
-    because code never withdraws a human review; :func:`build_plan` then keeps that case out of
-    the plan with a note. The flag is cleared only when every referenced snapshot passes again.
+    A referenced snapshot that failed, or that has no recorded check set at all, demotes a
+    ``mechanically_checked`` case to ``draft``. For a ``human_approved`` case the same situation
+    records ``validation.checks_failed`` and leaves the review state and level untouched, because
+    code never withdraws a human review; :func:`build_plan` then keeps that case out of the plan
+    with a note. The flag is cleared only when every referenced snapshot passes again.
 
-    These checks establish artifacts, paths, and ranges. They do not parse or read the code,
-    establish a root cause, or approve anything, so they never raise a case past L1. A snapshot
-    whose pack record already carries a different tree hash is not rewritten: every case on it
-    records a failing ``snapshot_hash_recorded`` check instead, and both :func:`build_plan` and
-    the runner still refuse that input.
+    These checks establish artifacts, paths, and ranges. Declared paths are compared against an
+    exact listing of the exported tree, and file bytes are read only to count lines: nothing here
+    parses source, establishes a root cause, or approves anything, so no check raises a case past
+    L1. A snapshot whose pack record already carries a different tree hash is not rewritten: every
+    case on it records a failing ``snapshot_hash_recorded`` check instead, and both
+    :func:`build_plan` and the runner still refuse that input.
     """
     snapshot = snapshot_by_id(pack, snapshot_id)
     declared = snapshot.get("tree_hash")
@@ -238,6 +362,7 @@ def mechanical_checks(pack: dict, snapshot_id: str, source_dir: Path, tree_hash:
     if hash_agrees:
         snapshot["tree_hash"] = tree_hash
     now = _now(clock)
+    present = exported_file_paths(source_dir)
     outcomes = []
     for case in cases_for_snapshot(pack, snapshot_id):
         checks = []
@@ -250,12 +375,12 @@ def mechanical_checks(pack: dict, snapshot_id: str, source_dir: Path, tree_hash:
                      if case["target"]["snapshot_id"] == snapshot_id]
         locations += [(control["control_id"], loc) for control in case["controls"]
                       if control["snapshot_id"] == snapshot_id for loc in control["locations"]]
-        missing = [loc["path"] for _, loc in locations if not (source_dir / loc["path"]).is_file()]
+        missing = [loc["path"] for _, loc in locations if loc["path"] not in present]
         check("locations_exist_in_snapshot", not missing and bool(locations),
               "missing: " + ", ".join(missing) if missing else ("no locations declared" if not locations else f"{len(locations)} locations found"))
         bad_ranges = []
         for owner, loc in locations:
-            if "start_line" in loc and (source_dir / loc["path"]).is_file():
+            if "start_line" in loc and loc["path"] in present:
                 if loc["end_line"] > _count_lines(source_dir / loc["path"]):
                     bad_ranges.append(f"{owner}:{loc['path']}:{loc['end_line']}")
         check("line_ranges_within_files", not bad_ranges, ", ".join(bad_ranges) or "all ranges within file length")
@@ -269,17 +394,18 @@ def mechanical_checks(pack: dict, snapshot_id: str, source_dir: Path, tree_hash:
         validation["checks"] = [c for c in validation["checks"]
                                 if c.get("snapshot_id") != snapshot_id] + checks
         passed = all(c["result"] == "pass" for c in checks)
-        states = [_recorded_check_state(case, referenced) for referenced in referenced_snapshots(case)]
-        every_snapshot_passed = all(state == "pass" for state in states)
+        every_snapshot_passed = not _unchecked_snapshots(case)
         if validation["review_state"] == "human_approved":
-            if "fail" in states:
-                validation["checks_failed"] = True
-            elif every_snapshot_passed:
+            # A snapshot that failed and one that was never checked are both missing evidence
+            # for this label, so both raise the flag; only code, never a reviewer, is overruled.
+            if every_snapshot_passed:
                 validation.pop("checks_failed", None)
+            else:
+                validation["checks_failed"] = True
         elif every_snapshot_passed:
             validation["review_state"] = "mechanically_checked"
             validation["level"] = "L1"
-        elif "fail" in states and validation["review_state"] == "mechanically_checked":
+        elif validation["review_state"] == "mechanically_checked":
             validation["review_state"] = "draft"
             validation["level"] = None
         outcomes.append({"case_id": case["case_id"], "passed": passed, "checks": checks,
@@ -292,29 +418,32 @@ def approve_case(pack: dict, case_id: str, *, reviewer: str, role: str, level: s
                  clock: Callable[[], datetime] | None = None) -> dict:
     """Record one explicit human review of a case label.
 
-    The reviewer name comes from the caller and is stored verbatim; a blank or whitespace-only
-    name is refused, because an unnamed approval is not an approval. This does not authenticate
-    the reviewer, check their independence, or verify that anything was read, and it records a
-    claim of review rather than establishing the label.
+    The reviewer name comes from the caller and is stored verbatim; a name holding no character
+    beyond spaces, zero-width marks, or control characters is refused, because an unnamed
+    approval is not an approval. This does not authenticate the reviewer, check their
+    independence, or verify that anything was read, and it records a claim of review rather than
+    establishing the label. A refused approval leaves the pack unchanged.
     """
     if level not in LEVELS:
         raise ContractError(f"level must be one of {LEVELS}")
-    if not reviewer or not reviewer.strip():
-        raise ContractError("approval requires an explicit reviewer name; the tool never supplies one")
+    _require_stated(reviewer, "approval requires an explicit reviewer name; the tool never supplies one")
     case = case_by_id(pack, case_id)
-    validation = case["validation"]
-    if validation["review_state"] == "draft":
+    if case["validation"]["review_state"] == "draft":
         raise ContractError(f"case {case_id} has not passed mechanical checks; run corpus validate first")
     if level in REVIEWED_LEVELS and role != "independent_reviewer":
         raise ContractError("L3/L4 labels require an independent_reviewer decision")
     if level in REVIEWED_LEVELS and case["disposition"]["value"] != "validate":
         raise ContractError("L3/L4 require disposition validate")
     review = {"reviewer": reviewer, "role": role, "decision": "approve", "level": level, "at": _now(clock), "note": note}
-    validation["reviews"].append(review)
-    validation["review_state"] = "human_approved"
-    validation["level"] = level
-    validate_document(PACK_KIND, pack)
-    return review
+
+    def mutate(candidate: dict) -> dict:
+        validation = case_by_id(candidate, case_id)["validation"]
+        validation["reviews"].append(dict(review))
+        validation["review_state"] = "human_approved"
+        validation["level"] = level
+        return validation["reviews"][-1]
+
+    return _apply_validated(pack, mutate)
 
 
 def set_disposition(pack: dict, case_id: str, value: str, reason: str) -> dict:
@@ -323,17 +452,23 @@ def set_disposition(pack: dict, case_id: str, value: str, reason: str) -> dict:
     A disposition is a screening decision about whether a candidate is worth validating. It is
     not a label, an approval, or an admission, and changing it neither re-runs a check nor
     alters a recorded review. The previous value stays visible in the case notes.
+
+    A change the contract refuses leaves the pack unchanged, which includes moving an approved
+    L3 or L4 case off ``validate``: that label was approved on the screening decision behind it,
+    so withdrawing the decision under a standing approval needs a review decision, not this call.
     """
     if value not in DISPOSITIONS:
         raise ContractError(f"disposition must be one of {DISPOSITIONS}")
-    if not reason or not reason.strip():
-        raise ContractError("a disposition change requires a non-blank reason")
-    case = case_by_id(pack, case_id)
-    previous = case["disposition"]["value"]
-    case["disposition"] = {"value": value, "reason": reason}
-    case["notes"].append(f"disposition changed from {previous} to {value}: {reason}")
-    validate_document(PACK_KIND, pack)
-    return case["disposition"]
+    _require_stated(reason, "a disposition change requires a non-blank reason")
+    previous = case_by_id(pack, case_id)["disposition"]["value"]
+
+    def mutate(candidate: dict) -> dict:
+        case = case_by_id(candidate, case_id)
+        case["disposition"] = {"value": value, "reason": reason}
+        case["notes"].append(f"disposition changed from {previous} to {value}: {reason}")
+        return case["disposition"]
+
+    return _apply_validated(pack, mutate)
 
 
 def latest_admission(pack: dict, case_id: str) -> dict | None:
@@ -353,19 +488,21 @@ def admit_case(pack: dict, case_id: str, *, decision: str, by: str, reason: str,
                clock: Callable[[], datetime] | None = None) -> dict:
     """Append one admission decision made by a named person, with a stated reason.
 
-    The name and reason come from the caller and are stored verbatim; blank or whitespace-only
-    values are refused. This records who decided, not that the decision is correct, and it does
-    not change a case's review state or level.
+    The name and reason come from the caller and are stored verbatim; a value holding no
+    character beyond spaces, zero-width marks, or control characters is refused. This records
+    who decided, not that the decision is correct, and it does not change a case's review state
+    or level. A refused decision leaves the pack unchanged.
     """
     case_by_id(pack, case_id)
-    if not by or not by.strip():
-        raise ContractError("an admission decision requires an explicit name; the tool never supplies one")
-    if not reason or not reason.strip():
-        raise ContractError("an admission decision requires a non-blank reason")
+    _require_stated(by, "an admission decision requires an explicit name; the tool never supplies one")
+    _require_stated(reason, "an admission decision requires a non-blank reason")
     admission = {"case_id": case_id, "decision": decision, "by": by, "at": _now(clock), "reason": reason}
-    pack["admissions"].append(admission)
-    validate_document(PACK_KIND, pack)
-    return admission
+
+    def mutate(candidate: dict) -> dict:
+        candidate["admissions"].append(dict(admission))
+        return candidate["admissions"][-1]
+
+    return _apply_validated(pack, mutate)
 
 
 def plan_scope(cases: list[dict]) -> str:
@@ -380,9 +517,11 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
     """Targets and controls for one materialized input, with every exclusion stated in the notes.
 
     A case is planned only when its disposition is not ``exclude``, no check set failed after
-    approval, its latest admission decision is not ``rejected``, and it passed mechanical checks
-    on every snapshot it references. Planned items keep their real validation level; the plan's
-    scope, not a rewritten level, says whether the labels are reviewed drafts.
+    approval, its latest admission decision is not ``rejected``, and the pack records a passing
+    mechanical check set for every snapshot it references. The check state is read per snapshot,
+    so a case approved on one snapshot is still left out while another snapshot it references is
+    unchecked or failing. Planned items keep their real validation level; the plan's scope, not a
+    rewritten level, says whether the labels are reviewed drafts.
 
     This builds a plan. It does not approve, admit, re-check, or correct anything, and a case
     left out here is unplanned for this input, not judged wrong.
@@ -406,6 +545,9 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
                          f"(rejected by {admission['by']}: {admission['reason']})")
         elif validation["review_state"] == "draft" or validation["level"] is None:
             notes.append(f"{case_id}: draft without passed mechanical checks; not planned")
+        elif _unchecked_snapshots(case):
+            notes.append(f"{case_id}: no recorded passing mechanical check set for snapshot(s) "
+                         f"{', '.join(_unchecked_snapshots(case))}; not planned")
         else:
             included.append(case)
     scope = plan_scope(included)

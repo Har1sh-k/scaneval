@@ -9,6 +9,10 @@ Bundle layout (all evaluator-side; the scanner only ever sees a private workspac
       raw/              stdout, stderr, native artifacts, captured harness state
       trace/            observer events when the adapter captured any
 
+``raw/`` and ``trace/`` are staged inside the private workspace while the scanner runs and
+are moved into the bundle once it returns or raises, so no path handed to an adapter resolves
+inside the run directory and declared artifact paths are re-rooted before they are hashed.
+
 Directory separation documents the boundary; it does not enforce it. Network and
 filesystem policy are declared here and must be enforced outside this process.
 """
@@ -24,7 +28,7 @@ import time
 from typing import Callable
 
 from . import __version__
-from .adapters.base import Adapter, AdapterError, NativeOutcome, SystemSpec
+from .adapters.base import Adapter, NativeOutcome, SystemSpec
 from .contracts import ContractError, canonical_json, canonical_sha256, validate_document
 from .kinds import mapping_version
 from .materialize import hash_exported_tree, prepare_synthetic_history, sha256_file
@@ -78,6 +82,40 @@ def build_request(run_id: str, prepared: PreparedInput, spec: SystemSpec, *, tim
     return validate_document("scan-request", request)
 
 
+def _failure_message(exc: BaseException) -> str:
+    """The exception's own type name and message, for a recorded failure."""
+    return f"{type(exc).__name__}: {str(exc) or repr(exc)}"[:2000]
+
+
+def _move_into_bundle(staging: Path, destination: Path) -> None:
+    """Move one staged directory out of the private workspace and into the bundle.
+
+    A staging directory the adapter removed is recreated empty at the destination, so the
+    bundle always holds the directory the execution record describes.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if staging.exists():
+        shutil.move(str(staging), str(destination))
+    else:
+        destination.mkdir(parents=True, exist_ok=True)
+
+
+def _rebase(path: Path, areas: list[tuple[Path, Path, Path]]) -> Path:
+    """Re-root a path the adapter reported in a staging area to its place in the bundle.
+
+    Both the staging path as handed out and its resolved form are tried, because an adapter may
+    report either. A path in no staging area is returned unchanged rather than guessed at.
+    """
+    for staged, resolved, final in areas:
+        for base in (staged, resolved):
+            try:
+                relative = path.relative_to(base)
+            except ValueError:
+                continue
+            return final / relative
+    return path
+
+
 def _file_map(source_dir: Path, ignore_top_level: frozenset[str]) -> dict[str, str]:
     hashes: dict[str, str] = {}
     for path in sorted(source_dir.rglob("*")):
@@ -115,16 +153,21 @@ def run_invocation(
     bundle = out_dir / invocation_id(prepared.input_id, spec.system_id, repetition)
     bundle.mkdir(parents=True, exist_ok=False)
     raw_dir = bundle / "raw"
-    raw_dir.mkdir()
-    trace_dir = None
-    if trace_mode != "off":
-        trace_dir = bundle / "trace"
-        trace_dir.mkdir()
+    trace_dir = bundle / "trace" if trace_mode != "off" else None
     request = build_request(run_id, prepared, spec, timeout_seconds=timeout_seconds, trace_mode=trace_mode)
     _write_new(bundle / "request.json", request)
 
     state_dirs = frozenset(getattr(adapter, "state_dirs", ()))
     workspace = Path(tempfile.mkdtemp(prefix="sastbench-trial-", dir=str(workspace_root) if workspace_root else None))
+    # The scanner writes into the workspace, never into the run directory; both staged
+    # directories are moved into the bundle below, whether the scan returns or raises.
+    resolved_workspace = workspace.resolve()
+    staging_raw = workspace / "raw"
+    staging_trace = None
+    staged_areas = [(staging_raw, resolved_workspace / "raw", raw_dir)]
+    if trace_dir is not None:
+        staging_trace = workspace / "trace"
+        staged_areas.append((staging_trace, resolved_workspace / "trace", trace_dir))
     started_at = _now(clock)
     started = time.monotonic()
     synthetic = None
@@ -132,6 +175,9 @@ def run_invocation(
     before: dict[str, str] = {}
     after: dict[str, str] = {}
     try:
+        staging_raw.mkdir()
+        if staging_trace is not None:
+            staging_trace.mkdir()
         source = workspace / "source"
         shutil.copytree(prepared.source_dir, source, symlinks=False)
         before = _file_map(source, state_dirs)
@@ -147,34 +193,46 @@ def run_invocation(
                                     notes=["Unsupported work stays in the denominator; nothing was executed."])
         else:
             try:
-                outcome = adapter.scan(request=request, source_dir=source, raw_dir=raw_dir, spec=spec,
+                outcome = adapter.scan(request=request, source_dir=source, raw_dir=staging_raw, spec=spec,
                                        preparation=preparation, timeout_seconds=timeout_seconds,
-                                       trace_mode=trace_mode, trace_dir=trace_dir)
-            except AdapterError as exc:
+                                       trace_mode=trace_mode, trace_dir=staging_trace)
+            except Exception as exc:
+                # Any failure inside the adapter is a recorded error with its own type name,
+                # never an empty successful scan and never a crash of the whole run.
                 outcome = NativeOutcome(status="error", exit_code=None, command=[],
-                                        error={"code": "adapter_failure", "message": str(exc)[:2000]})
+                                        error={"code": "adapter_failure", "message": _failure_message(exc)})
         captured_state = []
         for name in sorted(state_dirs):
             state_path = source / name
             if state_path.exists():
-                destination = raw_dir / "harness-state" / name.lstrip(".")
+                destination = staging_raw / "harness-state" / name.lstrip(".")
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(state_path, destination, symlinks=False)
                 captured_state.append(name)
         after = _file_map(source, state_dirs)
     finally:
-        shutil.rmtree(workspace, ignore_errors=True)
+        try:
+            for staged, _resolved, final in staged_areas:
+                _move_into_bundle(staged, final)
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
     wall = time.monotonic() - started
     finished_at = _now(clock)
 
     raw_artifacts = []
     for artifact in outcome.artifacts:
-        path = Path(artifact["path"])
+        path = _rebase(Path(artifact["path"]), staged_areas)
         if not path.exists():
             outcome.notes.append(f"declared artifact missing: {artifact['id']}")
             continue
-        raw_artifacts.append({"id": artifact["id"], "path": path.relative_to(bundle).as_posix(),
-                              "sha256": sha256_file(path)[0]})
+        try:
+            relative = path.relative_to(bundle).as_posix()
+        except ValueError:
+            # An artifact the adapter left outside its staging areas is reported, not copied:
+            # this records what the scan produced, and never moves files it was not handed.
+            outcome.notes.append(f"declared artifact outside the bundle: {artifact['id']}")
+            continue
+        raw_artifacts.append({"id": artifact["id"], "path": relative, "sha256": sha256_file(path)[0]})
     usage = {key: value for key, value in outcome.usage.items() if key in _USAGE_KEYS and value is not None}
     usage["wall_seconds"] = round(wall, 3)
     if "cost_usd" not in usage:
@@ -200,11 +258,17 @@ def run_invocation(
     modified = sorted(set(before) ^ set(after) | {p for p in before if p in after and before[p] != after[p]})
     trace_record = None
     if trace_dir is not None:
-        events_path = outcome.trace_path if outcome.trace_path else trace_dir / "events.jsonl"
+        events_path = (_rebase(Path(outcome.trace_path), staged_areas) if outcome.trace_path
+                       else trace_dir / "events.jsonl")
         count = None
+        recorded_trace_path = None
         if events_path.exists():
             count = sum(1 for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip())
-        trace_record = {"path": events_path.relative_to(bundle).as_posix() if events_path.exists() else None,
+            try:
+                recorded_trace_path = events_path.relative_to(bundle).as_posix()
+            except ValueError:
+                outcome.notes.append("trace file left outside the bundle; its path is not recorded")
+        trace_record = {"path": recorded_trace_path,
                         "events": count, "mode": trace_mode,
                         "capture_gap": (outcome.capture_state or {}).get("capture_gap"),
                         "dropped_events": (outcome.capture_state or {}).get("dropped_events")}

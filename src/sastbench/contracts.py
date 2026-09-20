@@ -103,6 +103,20 @@ def _unique(values: list[str], label: str) -> None:
         raise ContractError(f"{label} values must be unique")
 
 
+def recorded_check_state(checks: list[dict[str, Any]], snapshot_id: str) -> str | None:
+    """``pass`` or ``fail`` for one snapshot's recorded check set; ``None`` when none is recorded.
+
+    A check set is every recorded check carrying *snapshot_id*, and it passes only when all of
+    them passed. Checks recorded before check sets carried a ``snapshot_id`` belong to no
+    snapshot and are ignored here rather than deleted, so they neither promote nor demote a
+    case. Nothing is re-run: this reads what the pack already records.
+    """
+    recorded = [check for check in checks if check.get("snapshot_id") == snapshot_id]
+    if not recorded:
+        return None
+    return "pass" if all(check["result"] == "pass" for check in recorded) else "fail"
+
+
 def _validate_scan_request(document: dict[str, Any]) -> None:
     request_input = document["input"]
     _require_relative_path(request_input["root"], "input.root")
@@ -186,6 +200,14 @@ def _validate_execution_record(document: dict[str, Any]) -> None:
 
 
 def _validate_case_pack(document: dict[str, Any]) -> None:
+    """Check what a pack asserts about its own label states; it never re-runs a check.
+
+    ``mechanically_checked`` is the L1 state and claims a passing check set for every snapshot
+    the case references, ``checks_failed`` belongs only to an approved case whose checks later
+    failed, and an L3/L4 label belongs only to a case screened as worth validating. These
+    compare recorded fields with each other: none of them reads source, a reviewer, or a
+    scanner, so a pack that passes here is consistent, not correct.
+    """
     snapshots = [snapshot["snapshot_id"] for snapshot in document["snapshots"]]
     _unique(snapshots, "snapshot_id")
     known = set(snapshots)
@@ -214,15 +236,36 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
             if missing:
                 raise ContractError(f"{label}: control {control['control_id']} references unknown evidence {sorted(missing)}")
         validation = case["validation"]
+        state = validation["review_state"]
         approvals = [r for r in validation["reviews"] if r["decision"] == "approve"]
-        if validation["review_state"] == "human_approved" and not approvals:
+        if state == "human_approved" and not approvals:
             raise ContractError(f"{label}: human_approved requires at least one recorded approving review")
-        if validation["review_state"] == "human_approved" and validation["level"] is None:
+        if state == "human_approved" and validation["level"] is None:
             raise ContractError(f"{label}: human_approved requires a validation level")
-        if validation["level"] in ("L3", "L4") and validation["review_state"] != "human_approved":
+        if validation["level"] in ("L3", "L4") and state != "human_approved":
             raise ContractError(f"{label}: {validation['level']} requires human_approved review state")
-        if validation["review_state"] == "draft" and validation["level"] is not None:
+        if state == "draft" and validation["level"] is not None:
             raise ContractError(f"{label}: draft cases cannot carry a validation level")
+        if "checks_failed" in validation and state != "human_approved":
+            raise ContractError(
+                f"{label}: checks_failed records a check set that failed after approval, so it "
+                f"belongs only to a human_approved case, not to a {state} one")
+        if state == "mechanically_checked":
+            if validation["level"] != "L1":
+                raise ContractError(
+                    f"{label}: mechanically_checked is the L1 state; level {validation['level']!r} "
+                    "needs a recorded human review")
+            referenced = [target["snapshot_id"]] + [control["snapshot_id"] for control in case["controls"]]
+            unchecked = sorted({snapshot for snapshot in referenced
+                                if recorded_check_state(validation["checks"], snapshot) != "pass"})
+            if unchecked:
+                raise ContractError(
+                    f"{label}: mechanically_checked requires a recorded passing check set for every "
+                    f"referenced snapshot; missing or failed for: {', '.join(unchecked)}")
+        if validation["level"] in ("L3", "L4") and case["disposition"]["value"] != "validate":
+            raise ContractError(
+                f"{label}: {validation['level']} requires disposition validate, not "
+                f"{case['disposition']['value']}")
     _unique(target_ids, "target_id")
     _unique(control_ids, "control_id")
     case_ids = {case["case_id"] for case in document["cases"]}

@@ -74,9 +74,9 @@ def write_pack(path: Path, repo: Path, commit: str, *, tree_hash: str | None = N
 
 
 def write_config(path: Path, *, systems: list[dict], run_id: str = "run-pilot", repetitions: int = 1,
-                 inputs: list[dict] | None = None) -> dict:
+                 inputs: list[dict] | None = None, cache_root: str = "cache") -> dict:
     config = {
-        "schema_version": "2.0", "run_id": run_id, "pack": "pack.json", "cache_root": "cache",
+        "schema_version": "2.0", "run_id": run_id, "pack": "pack.json", "cache_root": cache_root,
         "inputs": inputs or [{"snapshot_id": "snap-a"}], "systems": systems, "repetitions": repetitions,
         "timeout_seconds": 60, "trace_mode": "off", "network_policy": "none",
     }
@@ -229,11 +229,11 @@ def test_draft_decisions_stay_unresolved_and_earn_no_detection_credit(tmp_path, 
     evaluation = json.loads((bundle / "evaluation.json").read_text(encoding="utf-8"))
     assert evaluation["metrics"]["targets_detected"] == 0
     assert evaluation["metrics"]["pending_matching_count"] == 1
-    assert "Draft labels (L1/L2, not independently reviewed): pipeline diagnostics, not benchmark evidence." \
+    assert "Draft labels (not independently reviewed): pipeline diagnostics, not benchmark evidence." \
         in evaluation["warnings"]
     report = (bundle / "report.html").read_text(encoding="utf-8")
     assert '<p class="notice">Draft labels.' in report
-    assert "without independent human review" in report
+    assert "not independently reviewed" in report
 
 
 def test_bundle_evaluation_is_byte_identical_to_an_offline_replay(tmp_path, pilot):
@@ -282,13 +282,14 @@ def test_an_adapter_that_cannot_prepare_is_skipped_while_the_other_system_still_
                                adapters={"fake": working, "broken": broken})
 
     assert working.calls == 1 and broken.calls == 0
-    assert [system["skipped_reason"] for system in manifest["systems"]] == [None, "ruleset checkout is missing"]
+    reason = "AdapterError: ruleset checkout is missing"
+    assert [system["skipped_reason"] for system in manifest["systems"]] == [None, reason]
     assert manifest["systems"][1]["adapter_version"] == "1.0.0" and manifest["systems"][1]["preparation"] == {}
     statuses = [(row["system_id"], row["status"], row["bundle_path"]) for row in manifest["invocations"]]
     assert statuses == [("fake-a", "success", "invocations/snap-a__fake-a__r1"),
                         ("broken-b", "skipped", None)]
-    assert manifest["invocations"][1]["skipped_reason"] == "ruleset checkout is missing"
-    assert "broken-b: not invoked (ruleset checkout is missing)" in manifest["warnings"]
+    assert manifest["invocations"][1]["skipped_reason"] == reason
+    assert f"broken-b: not invoked ({reason})" in manifest["warnings"]
     assert not (out / "invocations" / "snap-a__broken-b__r1").exists()
 
 
@@ -329,11 +330,12 @@ def test_a_system_whose_preparation_fails_is_skipped_while_the_others_run(tmp_pa
 
     manifest = run_from_config(config_path, out, clock=CLOCK, adapters={"fake": working, "broken": broken})
 
+    reason = f"{failure.__name__}: {message}"
     assert working.calls == 1 and broken.calls == 0
-    assert [system["skipped_reason"] for system in manifest["systems"]] == [None, message]
+    assert [system["skipped_reason"] for system in manifest["systems"]] == [None, reason]
     assert [(row["system_id"], row["status"], row["bundle_path"]) for row in manifest["invocations"]] == [
         ("fake-a", "success", "invocations/snap-a__fake-a__r1"), ("broken-b", "skipped", None)]
-    assert f"broken-b: not invoked ({message})" in manifest["warnings"]
+    assert f"broken-b: not invoked ({reason})" in manifest["warnings"]
     assert not (out / "invocations" / "snap-a__broken-b__r1").exists()
     assert manifest["status"] == "completed"
 
@@ -363,8 +365,30 @@ def test_a_workspace_root_inside_evaluator_storage_is_refused(tmp_path, pilot):
     assert pilot["adapter"].prepared == 0
 
 
-def test_a_crash_on_the_second_invocation_leaves_a_failed_manifest_listing_the_first(tmp_path, upstream):
-    """A run that raises still records what finished, and the failure is not a scan outcome."""
+def test_an_interrupt_on_the_second_invocation_leaves_a_failed_manifest_listing_the_first(tmp_path, upstream):
+    """A run stopped part way still records what finished, and the failure is not a scan outcome."""
+    repo, commit = upstream
+    write_pack(tmp_path / "pack.json", repo, commit)
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake"), system_entry("crash-b", "crash")])
+    interrupted = FakeAdapter(scan_exception=KeyboardInterrupt("the operator stopped the run"))
+    out = tmp_path / "out"
+
+    with pytest.raises(KeyboardInterrupt, match="the operator stopped the run"):
+        run_from_config(config_path, out, clock=CLOCK, adapters={"fake": FakeAdapter(), "crash": interrupted})
+
+    manifest = load_document(out / MANIFEST_NAME, "run-manifest")
+    assert manifest["status"] == "failed"
+    assert manifest["failure"] == {"type": "KeyboardInterrupt", "message": "the operator stopped the run"}
+    assert [(row["invocation_id"], row["status"]) for row in manifest["invocations"]] == [
+        ("snap-a__fake-a__r1", "success")]
+    assert [system["system_id"] for system in manifest["systems"]] == ["fake-a", "crash-b"]
+    assert (out / "invocations" / "snap-a__fake-a__r1" / "evaluation.json").is_file()
+    assert not (out / "invocations" / "snap-a__crash-b__r1" / "result.json").exists()
+
+
+def test_an_adapter_exception_is_an_error_invocation_and_the_run_still_completes(tmp_path, upstream):
+    """A scanner that crashes yields a recorded error bundle, not a lost or empty invocation."""
     repo, commit = upstream
     write_pack(tmp_path / "pack.json", repo, commit)
     config_path = tmp_path / "run-config.json"
@@ -372,17 +396,121 @@ def test_a_crash_on_the_second_invocation_leaves_a_failed_manifest_listing_the_f
     crashing = FakeAdapter(scan_exception=RuntimeError("the harness died mid scan"))
     out = tmp_path / "out"
 
-    with pytest.raises(RuntimeError, match="the harness died mid scan"):
-        run_from_config(config_path, out, clock=CLOCK, adapters={"fake": FakeAdapter(), "crash": crashing})
+    manifest = run_from_config(config_path, out, clock=CLOCK,
+                               adapters={"fake": FakeAdapter(), "crash": crashing})
+
+    assert manifest["status"] == "completed"
+    assert [(row["invocation_id"], row["status"]) for row in manifest["invocations"]] == [
+        ("snap-a__fake-a__r1", "success"), ("snap-a__crash-b__r1", "error")]
+    result = load_document(out / "invocations" / "snap-a__crash-b__r1" / "result.json", "scan-result")
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"] == {"code": "adapter_failure",
+                               "message": "RuntimeError: the harness died mid scan"}
+
+
+def test_a_failing_export_leaves_a_failed_manifest_and_never_invokes_a_system(tmp_path, upstream):
+    """Metadata blinding is unavailable in this build, so preparing that input fails the run."""
+    repo, commit = upstream
+    write_pack(tmp_path / "pack.json", repo, commit)
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake")],
+                 inputs=[{"snapshot_id": "snap-a", "profile": "metadata_blinded"}])
+    adapter = FakeAdapter()
+    out = tmp_path / "out"
+
+    with pytest.raises(MaterializationError, match="metadata blinding unavailable"):
+        run_from_config(config_path, out, clock=CLOCK, adapters={"fake": adapter})
 
     manifest = load_document(out / MANIFEST_NAME, "run-manifest")
     assert manifest["status"] == "failed"
-    assert manifest["failure"] == {"type": "RuntimeError", "message": "the harness died mid scan"}
-    assert [(row["invocation_id"], row["status"]) for row in manifest["invocations"]] == [
-        ("snap-a__fake-a__r1", "success")]
-    assert [system["system_id"] for system in manifest["systems"]] == ["fake-a", "crash-b"]
-    assert (out / "invocations" / "snap-a__fake-a__r1" / "evaluation.json").is_file()
-    assert not (out / "invocations" / "snap-a__crash-b__r1" / "result.json").exists()
+    assert manifest["failure"]["type"] == "MaterializationError"
+    assert "metadata blinding unavailable" in manifest["failure"]["message"]
+    assert manifest["inputs"] == [] and manifest["invocations"] == [] and manifest["systems"] == []
+    assert adapter.prepared == 0 and adapter.calls == 0
+    assert not (out / "evaluator" / "pack.json").exists()
+
+
+def test_an_input_snapshot_the_pack_does_not_declare_is_refused_before_the_output_exists(tmp_path, pilot):
+    """The configuration names the snapshot; only the pack can say what that snapshot is."""
+    config_path = tmp_path / "absent-input.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake")], inputs=[{"snapshot_id": "snap-z"}])
+    out = tmp_path / "out"
+
+    with pytest.raises(ContractError, match="unknown snapshot 'snap-z'"):
+        run_from_config(config_path, out, clock=CLOCK, workspace_root=pilot["workspace"],
+                        adapters={"fake": pilot["adapter"]})
+
+    assert not out.exists()
+    assert pilot["adapter"].prepared == 0 and pilot["adapter"].calls == 0
+
+
+def test_a_cache_root_overlapping_the_output_is_refused_before_the_output_exists(tmp_path, pilot):
+    """The immutable source cache and the run output may not contain one another."""
+    inside = tmp_path / "inside.json"
+    write_config(inside, systems=[system_entry("fake-a", "fake")], cache_root="out/cache")
+    out = tmp_path / "out"
+    with pytest.raises(ContractError, match="cache_root .* resolves inside the run output directory"):
+        run_from_config(inside, out, clock=CLOCK, adapters={"fake": pilot["adapter"]})
+    assert not out.exists()
+
+    with pytest.raises(ContractError, match="resolves inside cache_root"):
+        run_from_config(pilot["config_path"], tmp_path / "cache" / "run", clock=CLOCK,
+                        adapters={"fake": pilot["adapter"]})
+    assert not (tmp_path / "cache" / "run").exists()
+    assert pilot["adapter"].prepared == 0
+
+
+def test_an_adapter_module_that_is_not_installed_is_a_skipped_system(tmp_path, upstream, monkeypatch):
+    """Resolution failure is a skip with its own type and message, never an empty scan."""
+    repo, commit = upstream
+    write_pack(tmp_path / "pack.json", repo, commit)
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake"), system_entry("absent-b", "absent")])
+
+    def resolve(name: str):
+        raise ModuleNotFoundError(f"No module named 'sastbench.adapters.{name}'")
+
+    monkeypatch.setattr("sastbench.runner.get_adapter", resolve)
+    manifest = run_from_config(config_path, tmp_path / "out", clock=CLOCK, adapters={"fake": FakeAdapter()})
+
+    reason = "ModuleNotFoundError: No module named 'sastbench.adapters.absent'"
+    assert manifest["status"] == "completed"
+    assert manifest["systems"][1] == {"system_id": "absent-b", "adapter": "absent", "adapter_version": None,
+                                      "preparation": {}, "skipped_reason": reason}
+    assert [(row["system_id"], row["status"]) for row in manifest["invocations"]] == [
+        ("fake-a", "success"), ("absent-b", "skipped")]
+    assert f"absent-b: not invoked ({reason})" in manifest["warnings"]
+
+
+def test_a_preparation_that_reports_no_record_is_a_skipped_system(tmp_path, upstream):
+    """The manifest records what preparation produced, so a non-record preparation is a failure."""
+    repo, commit = upstream
+    write_pack(tmp_path / "pack.json", repo, commit)
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("odd-a", "odd")])
+
+    class OddAdapter(FakeAdapter):
+        def prepare(self, spec, cache_root):
+            self.prepared += 1
+            return "ruleset ready"
+
+    manifest = run_from_config(config_path, tmp_path / "out", clock=CLOCK, adapters={"odd": OddAdapter()})
+
+    [system] = manifest["systems"]
+    assert system["preparation"] == {}
+    assert system["skipped_reason"] == ("AdapterError: odd.prepare returned str; a preparation "
+                                        "phase must report what it prepared as a record")
+    assert [row["status"] for row in manifest["invocations"]] == ["skipped"]
+
+
+def test_the_bundle_report_carries_the_machine_drafted_review_banner(tmp_path, pilot):
+    """The runner writes the decisions, so the report states that no human reviewed them."""
+    out = tmp_path / "out"
+    run(pilot, out)
+
+    html = (out / "invocations" / "snap-a__fake-a__r1" / "report.html").read_text(encoding="utf-8")
+    assert '<p class="notice">Decisions: machine-drafted, all unresolved; no human review recorded.</p>' in html
+    assert "recorded human review" not in html
 
 
 def test_the_manifest_records_which_inputs_and_systems_the_run_covered(tmp_path, upstream):

@@ -18,6 +18,7 @@ from sastbench.cases import (
     case_by_id,
     draft_case,
     draft_case_from_legacy,
+    dump_json,
     evidence,
     latest_admission,
     load_pack,
@@ -41,6 +42,8 @@ SNAPSHOT = {
 REPRESENTS = "This case tests shell interpolation of a request parameter under a default deployment, and adds a Python command-injection target."
 FIXED_SNAPSHOT = {**SNAPSHOT, "snapshot_id": "widget-fixed", "commit": "e" * 40, "role": "fixed",
                   "reference": "maintainer fix commit"}
+LATER_SNAPSHOT = {**SNAPSHOT, "snapshot_id": "widget-later", "commit": "f" * 40, "role": "fixed",
+                  "reference": "a later maintainer release"}
 FIXED_HASH = "sha256:" + "d" * 64
 
 
@@ -166,9 +169,10 @@ def test_plan_degrades_to_draft_and_needs_explicit_approval_for_reviewed(tmp_pat
     admit_case(pack, "widget-shell", decision="admitted", by="second", reason="pilot", clock=CLOCK)
     assert pack["admissions"][0]["decision"] == "admitted"
 
-    pack["cases"][0]["disposition"] = {"value": "exclude", "reason": "duplicate target"}
-    plan, notes = build_plan(pack, "widget-abc", HASH)
-    assert plan["targets"] == [] and plan["scope"] == "draft" and any("excluded" in note for note in notes)
+    with pytest.raises(ContractError, match="requires disposition validate"):
+        set_disposition(pack, "widget-shell", "exclude", "duplicate target")
+    assert case_by_id(pack, "widget-shell")["disposition"]["value"] == "validate", \
+        "a refused disposition change leaves the screening decision the approval rests on"
 
 
 def test_approval_requires_prior_mechanical_checks():
@@ -205,20 +209,21 @@ def test_blank_reviewer_and_admission_names_are_refused(tmp_path):
     """A name that is empty after stripping is not a name, so it cannot record a human decision."""
     pack = make_pack()
     mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)
-    for reviewer in ("", "   ", "\t\n"):
+    for reviewer in ("", "   ", "\t\n", "\u200b", "\ufeff\u200e", "\u00a0"):
         with pytest.raises(ContractError, match="explicit reviewer name"):
             approve_case(pack, "widget-shell", reviewer=reviewer, role="curator", level="L1",
                          note="n", clock=CLOCK)
     assert pack["cases"][0]["validation"]["reviews"] == []
 
-    for by in ("", "  "):
+    for by in ("", "  ", "\u200b", "\u00a0\u200e"):
         with pytest.raises(ContractError, match="explicit name"):
             admit_case(pack, "widget-shell", decision="admitted", by=by, reason="pilot", clock=CLOCK)
     with pytest.raises(ContractError, match="non-blank reason"):
         admit_case(pack, "widget-shell", decision="admitted", by="J. Curator", reason="   ", clock=CLOCK)
     assert pack["admissions"] == []
-    with pytest.raises(ContractError, match="non-blank reason"):
-        set_disposition(pack, "widget-shell", "validate", " ")
+    for reason in (" ", "\u200b"):
+        with pytest.raises(ContractError, match="non-blank reason"):
+            set_disposition(pack, "widget-shell", "validate", reason)
     assert pack["cases"][0]["disposition"]["value"] == "needs_evidence"
 
 
@@ -334,3 +339,217 @@ def test_a_draft_plan_keeps_a_reviewed_level_instead_of_rewriting_it(tmp_path):
     assert {target["target_id"]: target["validation_level"] for target in plan["targets"]} == {
         "T-widget-shell": "L4", "T-widget-path": "L1"}
     validate_document("evaluation-plan", plan)
+
+
+def later_control(case_id: str = "widget-shell") -> dict:
+    """A second fixed-target control, on a snapshot no mechanical check has covered."""
+    return {**fixed_control(case_id), "control_id": f"C-{case_id}-later", "snapshot_id": "widget-later",
+            "description": "The later release still passes the command as an argument list."}
+
+
+def test_an_excluded_disposition_keeps_a_checked_case_out_of_the_plan(tmp_path):
+    """Screening the case out is a stated decision, and the plan says which decision it was."""
+    pack = make_pack()
+    mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)
+    set_disposition(pack, "widget-shell", "exclude", "duplicate of an admitted target")
+
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["targets"] == [] and plan["scope"] == "draft"
+    assert any("excluded by disposition (duplicate of an admitted target)" in note for note in notes)
+
+
+def test_a_case_is_not_planned_while_any_referenced_snapshot_is_unchecked(tmp_path):
+    """L1 covers the case, not one snapshot of it, so an unchecked snapshot withdraws planning."""
+    pack = two_snapshot_pack()
+    source = export(tmp_path)
+    mechanical_checks(pack, "widget-abc", source, HASH, clock=CLOCK)
+    mechanical_checks(pack, "widget-fixed", source, FIXED_HASH, clock=CLOCK)
+    set_disposition(pack, "widget-shell", "validate", "evidence reviewed")
+    approve_case(pack, "widget-shell", reviewer="R. Eviewer", role="independent_reviewer", level="L3",
+                 note="label established", clock=CLOCK)
+    plan, _ = build_plan(pack, "widget-abc", HASH)
+    assert [target["target_id"] for target in plan["targets"]] == ["T-widget-shell"]
+
+    # A control is added on a snapshot no check has ever covered: the approval stands and says
+    # nothing about that snapshot, so the case is unplanned until it is checked.
+    add_snapshot(pack, LATER_SNAPSHOT)
+    case_by_id(pack, "widget-shell")["controls"].append(later_control())
+
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["targets"] == [] and plan["controls"] == []
+    assert any("no recorded passing mechanical check set for snapshot(s) widget-later" in note
+               for note in notes)
+
+    outcomes = mechanical_checks(pack, "widget-abc", source, HASH, clock=CLOCK)
+    validation = case_by_id(pack, "widget-shell")["validation"]
+    assert outcomes[0]["passed"] is True, "this snapshot's own check set still passes"
+    assert validation["review_state"] == "human_approved" and validation["level"] == "L3"
+    assert validation["checks_failed"] is True
+
+
+def test_a_mechanically_checked_case_returns_to_draft_when_a_new_snapshot_is_unchecked(tmp_path):
+    pack = make_pack()
+    source = export(tmp_path)
+    mechanical_checks(pack, "widget-abc", source, HASH, clock=CLOCK)
+    assert case_by_id(pack, "widget-shell")["validation"]["review_state"] == "mechanically_checked"
+
+    add_snapshot(pack, FIXED_SNAPSHOT)
+    case_by_id(pack, "widget-shell")["controls"].append(fixed_control())
+    mechanical_checks(pack, "widget-abc", source, HASH, clock=CLOCK)
+
+    validation = case_by_id(pack, "widget-shell")["validation"]
+    assert validation["review_state"] == "draft" and validation["level"] is None
+    assert "checks_failed" not in validation, "code demotes its own state instead of flagging one"
+    mechanical_checks(pack, "widget-fixed", source, FIXED_HASH, clock=CLOCK)
+    assert case_by_id(pack, "widget-shell")["validation"]["review_state"] == "mechanically_checked"
+
+
+def test_a_declared_path_whose_case_differs_from_the_export_is_missing(tmp_path):
+    """Paths are compared against an exact listing, so this fails on any filesystem."""
+    pack = make_pack()
+    source = export(tmp_path)
+    case_by_id(pack, "widget-shell")["target"]["accepted_locations"][0]["path"] = "src/App.py"
+
+    outcomes = mechanical_checks(pack, "widget-abc", source, HASH, clock=CLOCK)
+
+    assert outcomes[0]["passed"] is False
+    details = {check["check"]: check["detail"] for check in outcomes[0]["checks"]}
+    results = {check["check"]: check["result"] for check in outcomes[0]["checks"]}
+    assert results["locations_exist_in_snapshot"] == "fail"
+    assert details["locations_exist_in_snapshot"] == "missing: src/App.py"
+    assert results["line_ranges_within_files"] == "pass", "a missing file has no range to exceed"
+    assert case_by_id(pack, "widget-shell")["validation"]["review_state"] == "draft"
+
+
+def test_the_contract_rejects_label_states_that_contradict_the_recorded_checks(tmp_path):
+    pack = two_snapshot_pack()
+    source = export(tmp_path)
+    mechanical_checks(pack, "widget-abc", source, HASH, clock=CLOCK)
+    mechanical_checks(pack, "widget-fixed", source, FIXED_HASH, clock=CLOCK)
+    assert validate_document("case-pack", pack) is pack
+
+    broken = json.loads(json.dumps(pack))
+    broken["cases"][0]["validation"]["checks"] = [
+        check for check in broken["cases"][0]["validation"]["checks"]
+        if check["snapshot_id"] != "widget-fixed"]
+    with pytest.raises(ContractError, match="missing or failed for: widget-fixed"):
+        validate_document("case-pack", broken)
+
+    broken = json.loads(json.dumps(pack))
+    for check in broken["cases"][0]["validation"]["checks"]:
+        if check["snapshot_id"] == "widget-fixed":
+            check["result"] = "fail"
+    with pytest.raises(ContractError, match="missing or failed for: widget-fixed"):
+        validate_document("case-pack", broken)
+
+    broken = json.loads(json.dumps(pack))
+    for check in broken["cases"][0]["validation"]["checks"]:
+        check.pop("snapshot_id")
+    with pytest.raises(ContractError, match="missing or failed for: widget-abc, widget-fixed"):
+        validate_document("case-pack", broken)
+
+    broken = json.loads(json.dumps(pack))
+    broken["cases"][0]["validation"]["level"] = "L2"
+    with pytest.raises(ContractError, match="mechanically_checked is the L1 state"):
+        validate_document("case-pack", broken)
+
+    broken = json.loads(json.dumps(pack))
+    broken["cases"][0]["validation"]["checks_failed"] = True
+    with pytest.raises(ContractError, match="belongs only to a human_approved case"):
+        validate_document("case-pack", broken)
+
+
+def test_the_contract_rejects_a_reviewed_level_on_a_case_screened_out(tmp_path):
+    pack = make_pack()
+    mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)
+    set_disposition(pack, "widget-shell", "validate", "evidence reviewed")
+    approve_case(pack, "widget-shell", reviewer="R. Eviewer", role="independent_reviewer", level="L4",
+                 note="build and tests reviewed", clock=CLOCK)
+
+    for value in ("needs_evidence", "extended_regression", "exclude"):
+        broken = json.loads(json.dumps(pack))
+        broken["cases"][0]["disposition"] = {"value": value, "reason": "screened out after approval"}
+        with pytest.raises(ContractError, match=f"L4 requires disposition validate, not {value}"):
+            validate_document("case-pack", broken)
+
+
+def test_a_refused_change_leaves_the_pack_exactly_as_it_was(tmp_path):
+    """Every pack change is applied to a copy first, so a refusal writes nothing at all."""
+    pack = make_pack()
+    mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)
+    before = dump_json(pack)
+
+    with pytest.raises(ContractError):
+        add_snapshot(pack, {**SNAPSHOT, "snapshot_id": "widget-two", "commit": "not-a-sha"})
+    assert dump_json(pack) == before
+
+    with pytest.raises(ContractError):
+        add_case(pack, draft_case(
+            "widget-range", snapshot_id="widget-abc", kind="path_traversal", description="d",
+            represents=REPRESENTS, workload="conventional_application", component_role="application",
+            aliases=[], evidence=[evidence("n", origin="research_note", kind="source_inspection",
+                                           reference="src/app.py")],
+            accepted_locations=[{"path": "src/app.py", "start_line": 9, "end_line": 2, "role": "sink"}]))
+    assert dump_json(pack) == before
+
+    # The role is refused by the contract rather than by an argument check, so the review has
+    # already been appended to the copy when validation fails.
+    with pytest.raises(ContractError):
+        approve_case(pack, "widget-shell", reviewer="R. Eviewer", role="peer", level="L1", note="",
+                     clock=CLOCK)
+    assert dump_json(pack) == before
+    assert case_by_id(pack, "widget-shell")["validation"]["reviews"] == []
+
+    with pytest.raises(ContractError, match="explicit name"):
+        admit_case(pack, "widget-shell", decision="admitted", by="\u200b", reason="pilot", clock=CLOCK)
+    assert dump_json(pack) == before
+
+
+LEGACY = {
+    "id": "SB-GO-RG-001", "caseType": "real_world_generic", "canonicalKind": "auth_bypass",
+    "title": "skip regex on full URI", "description": "regex matched path plus query",
+    "regions": [{"id": "R1", "path": "oauthproxy.go", "startLine": 582, "endLine": 590,
+                 "label": "vulnerable", "capability": "authentication"}],
+    "realWorld": {"repo": "oauth2-proxy/oauth2-proxy", "fixCommit": "9" * 40,
+                  "disclosure": {"ghsaPublished": "2025-07-30", "fixCommitDate": "2025-07-29"}},
+}
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("regions", {"R1": {"path": "a.go"}}, "must be a list of region objects"),
+        ("regions", [["oauthproxy.go", 1, 2]], "must be a JSON object"),
+        ("regions", [{"id": "R1"}], "must name its path as a non-empty string"),
+        ("regions", [{"id": "R1", "path": ""}], "must name its path as a non-empty string"),
+        ("regions", [{"id": "R1", "path": 7}], "must name its path as a non-empty string"),
+        ("regions", [{"path": "a.go", "startLine": 5}], "supplied together; got only startLine"),
+        ("regions", [{"path": "a.go", "endLine": 5}], "supplied together; got only endLine"),
+        ("regions", [{"path": "a.go", "startLine": True, "endLine": 5}], "integer line number"),
+        ("regions", [{"path": "a.go", "startLine": "5", "endLine": 9}], "integer line number"),
+        ("regions", [{"path": "a.go", "startLine": 0, "endLine": 9}], "integer line number"),
+        ("regions", [{"path": "a.go", "startLine": 1, "endLine": 2.5}], "integer line number"),
+        ("realWorld", "CVE-2025-54576", "realWorld must be a JSON object"),
+        ("realWorld", {"disclosure": []}, "realWorld.disclosure must be a JSON object"),
+    ],
+)
+def test_a_legacy_record_this_cannot_read_faithfully_is_refused(field, value, message):
+    """A malformed legacy shape is refused, never guessed at or silently dropped."""
+    legacy = {**LEGACY, field: value}
+    with pytest.raises(ContractError, match=message):
+        draft_case_from_legacy(legacy, case_id="legacy-case", snapshot_id="widget-abc",
+                               legacy_path="cases/full/x/case.json", workload="conventional_application",
+                               component_role="infrastructure", represents=REPRESENTS)
+
+
+def test_a_legacy_record_without_regions_or_a_real_world_block_still_migrates():
+    case = draft_case_from_legacy({"id": "SB-1", "title": "t", "description": "d"},
+                                  case_id="legacy-bare", snapshot_id="widget-abc",
+                                  legacy_path="cases/full/x/case.json",
+                                  workload="conventional_application", component_role="application",
+                                  represents=REPRESENTS)
+    assert case["target"]["accepted_locations"] == []
+    assert case["canonical_target"]["aliases"] == []
+    assert case["disclosure"] == {"earliest_public_artifact": None, "cve_published": None,
+                                  "ghsa_published": None, "fix_commit_date": None,
+                                  "note": "Dates copied from the legacy record; earliest public artifact not yet established."}
