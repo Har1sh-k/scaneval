@@ -182,7 +182,7 @@ Replaying a bundle offline reproduces its evaluation byte for byte, and prints a
 because the decisions carry no recorded human approval:
 
 ```sh
-scaneval replay corpus/pilot/runs/semgrep-oss-1.177.0/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
+scaneval replay <your run directory>/invocations/<invocation id>
 # scaneval: review state draft: these numbers come from decisions with no recorded human approval
 ```
 

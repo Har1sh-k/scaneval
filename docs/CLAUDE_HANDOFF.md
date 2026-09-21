@@ -166,7 +166,7 @@ scaneval replay results/claude-pilot-demo --output results/claude-pilot-replay.j
 cmp results/claude-pilot-demo/evaluation.json results/claude-pilot-replay.json
 
 # Offline, no network and no model: replay a preserved pilot bundle.
-scaneval replay corpus/pilot/runs/semgrep-oss-1.177.0/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
+scaneval replay <your run directory>/invocations/<invocation id>
 scaneval review status corpus/pilot/runs/semgrep-oss-1.177.0/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
 ```
 

@@ -21,10 +21,10 @@ scaneval replay results/diagnostic-demo --output results/diagnostic-replay.json
 
 This uses fabricated evaluator fixtures, not a live scanner or admitted CVEs. It tests scoring rules without model calls. Output paths must be new. The [SDK guide](docs/OBSERVER_SDK.md) covers opt-in harness visibility and capture limits.
 
-Replay one of the preserved pilot bundles offline, with no network and no model call:
+Replay a bundle offline, with no network and no model call. No run is committed to this repository, so produce one first with `scaneval run`, then replay it from wherever you wrote it:
 
 ```bash
-scaneval replay corpus/pilot/runs/semgrep-oss-1.177.0/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
+scaneval replay <your run directory>/invocations/<invocation id>
 # scaneval: review state draft: these numbers come from decisions with no recorded human approval
 ```
 
