@@ -24,7 +24,7 @@ npm install
 npm run build
 ```
 
-The build output is conventional `dist/` JavaScript plus declarations (`dist/index.js`, `dist/index.d.ts`), and the package is ESM only (`"type": "module"`). Depend on it with a file specifier (`npm install file:../sast-bench/sdk/typescript`) or import the build output directly:
+The build output is conventional `dist/` JavaScript plus declarations (`dist/index.js`, `dist/index.d.ts`), and the package is ESM only (`"type": "module"`). Depend on it with a file specifier (`npm install file:../scaneval/sdk/typescript`) or import the build output directly:
 
 ```ts
 import { MAX_PAYLOAD_DEPTH, Observer, createJsonlSink } from "@scaneval/observer";
