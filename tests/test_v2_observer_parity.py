@@ -40,9 +40,10 @@ representational limits are excluded from the byte comparison rather than hidden
 float in a payload writes as ``1.0`` from Python and ``1`` from JavaScript, a payload key that
 looks like an array index sorts ahead of its siblings in JavaScript only, and a timestamp cannot
 carry sub-millisecond precision in either language because the TypeScript ``Clock`` hands back a
-``Date``. Two capture-state divergences are open rather than excluded, and each has a strict
-``xfail`` test of its own naming what has to change to close it. All of them are recorded in
-``docs/OBSERVER_SDK.md``.
+``Date``. Those three are representational limits of the two languages, not defects, and they
+are excluded from the byte comparison by name rather than by loosening it. Every behavioral
+divergence found by review has been closed, so both exclusion sets below are empty. All of this
+is recorded in ``docs/OBSERVER_SDK.md``.
 
 Nothing here calls a model, reaches the network, sleeps, or reads a real clock. The TypeScript
 side is a throwaway driver written into a temporary directory and run under node against the
@@ -1002,32 +1003,15 @@ DEGRADED_EVENTS = [
 ]
 
 # Scenarios whose ``dropped_events`` counters do not yet agree. Every one of them fails in a way
-# that degrades an event without losing it: a clock read, an ID read, or an elapsed-time read
-# that raised. The Python emitter counts those as capture gaps only, because the event was still
-# delivered; the TypeScript emitter's single ``markGap`` helper increments the dropped counter
-# for them too. ``capture_gap``, ``last_sink_error``, the recorded flags and the emitted bytes do
-# agree in every one of them, so only the counter is excluded, and only here.
-# ``test_dropped_events_still_diverges_for_failures_that_lose_no_event`` is the strict xfail that
-# keeps this list from quietly becoming permanent.
-DIVERGENT_DROPPED_EVENTS = frozenset(
-    {
-        "clock-throws",
-        "id-factory-throws",
-        "operation-monotonic-throws-at-start",
-        "operation-monotonic-throws-at-end",
-        "operation-monotonic-steps-backwards",
-        "operation-monotonic-returns-nan",
-        "operation-forced-duration-is-dropped",
-        "operation-clock-throws-on-completion",
-    }
-)
+## Both emitters once disagreed on two capture-state facts: whether a failure that degrades an
+# event without losing it counts as a dropped event, and whether an observer with no sink has
+# lost anything. Both were closed by bringing the TypeScript emitter in line with the Python
+# one, so these exclusion sets are empty and every scenario is compared in full. They stay as
+# named, asserted constants rather than being deleted, so reopening a divergence means writing
+# a scenario name here in a diff rather than silently loosening a comparison.
+DIVERGENT_DROPPED_EVENTS: frozenset[str] = frozenset()
 
-# Scenarios whose whole capture state diverges. A recording observer with no sink builds events
-# that reach nobody: Python counts each one as a lost event, the TypeScript emitter returns the
-# event and records nothing at all.
-# ``test_a_sinkless_observer_reports_the_same_capture_state_in_both_languages`` is the strict
-# xfail over exactly this.
-DIVERGENT_CAPTURE_STATE = frozenset({"no-sink-builder-mode"})
+DIVERGENT_CAPTURE_STATE: frozenset[str] = frozenset()
 
 
 def interleaved(rejections: dict) -> list[dict]:
@@ -1274,7 +1258,6 @@ def test_the_python_emitter_reproduces_the_shared_v2_fixture_byte_for_byte():
     assert "real credential" not in json.dumps(emitted)
     # This observer has no sink, so it is being used as a builder and the event it returned
     # reached nobody. Python records that honestly as one lost event rather than a clean state.
-    # The TypeScript emitter does not; see DIVERGENT_CAPTURE_STATE and the strict xfail below.
     assert observer.get_state() == CaptureState(
         dropped_events=1, capture_gap=True, last_sink_error=GAP_MESSAGE
     )
@@ -1397,7 +1380,7 @@ def test_both_emitters_assign_the_same_sequence_numbers_and_event_ids(matrix_pai
 def test_both_emitters_report_the_same_capture_state_for_every_matrix_case(matrix_pairs):
     """``capture_gap`` and ``last_sink_error`` everywhere, ``dropped_events`` outside two lists.
 
-    The two exclusion lists are named constants with a strict xfail each, so a divergence stays
+    The two exclusion lists are named constants, empty today, so a reopened divergence stays
     a divergence rather than becoming a quiet allowance. Everything not named in them is
     compared field for field.
     """
@@ -2017,22 +2000,10 @@ def test_the_parity_matrix_covers_every_input_shape_the_contract_names():
 
 
 @needs_node
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "open divergence, verified 2026-09-20: a failure that degrades an event without losing "
-        "it (a clock read, an ID read, or an elapsed-time read that raised) increments "
-        "dropped_events in the TypeScript emitter and not in Python. The TypeScript Observer "
-        "has one markGap helper that both flags the gap and counts a drop; closing this splits "
-        "it the way Python splits _mark_gap from _lost_event, so that dropped_events counts "
-        "only events that reached no sink. Fixing the TypeScript emitter is what closes this, "
-        "not relaxing the test. See the known divergences section of docs/OBSERVER_SDK.md."
-    ),
-)
 def test_dropped_events_still_diverges_for_failures_that_lose_no_event(
     matrix_pairs, operation_pairs
 ):
-    """The one counter the two emitters do not yet agree on, held open by a strict xfail."""
+    """The counter the two emitters once disagreed on, now compared in every scenario."""
     for name in sorted(DIVERGENT_DROPPED_EVENTS):
         pair = matrix_pairs.get(name) or operation_pairs.get(name)
         assert pair is not None, name
@@ -2041,16 +2012,6 @@ def test_dropped_events_still_diverges_for_failures_that_lose_no_event(
 
 
 @needs_node
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "open divergence, verified 2026-09-20: a recording observer with no sink builds events "
-        "that reach nobody. Python counts each as a lost event and reports a capture gap; the "
-        "TypeScript emitInternal returns the event and records nothing when this.sink is unset. "
-        "Closing this means counting that loss in TypeScript. See the known divergences section "
-        "of docs/OBSERVER_SDK.md."
-    ),
-)
 def test_a_sinkless_observer_reports_the_same_capture_state_in_both_languages(matrix_pairs):
     """Builder mode is a real use, and an event nobody received is a loss in both languages."""
     python_case, node_case = matrix_pairs["no-sink-builder-mode"]
@@ -2061,20 +2022,6 @@ def test_a_sinkless_observer_reports_the_same_capture_state_in_both_languages(ma
 
 
 @needs_node
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "open divergence, verified 2026-09-20: the Python constructor refuses three wiring "
-        "mistakes that the TypeScript constructor accepts. An unknown recording mode raises "
-        "ValueError in Python and is recorded as though it were a content-less mode in "
-        "TypeScript; a sink with no callable write raises in Python and becomes one lost event "
-        "per emit in TypeScript; a generator-function sink raises in Python and, in TypeScript, "
-        "writes nothing at all while reporting a clean capture state, which is the worst of the "
-        "three because it is silent. Closing this means validating options.mode and options.sink "
-        "in the TypeScript constructor the way Python's __init__ and _normalize_sink do. See the "
-        "known divergences section of docs/OBSERVER_SDK.md."
-    ),
-)
 def test_both_constructors_refuse_the_same_wiring_mistakes(tmp_path):
     """Wiring is checked once, at construction, so a harness author fixes it before a run.
 

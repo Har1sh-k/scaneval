@@ -60,7 +60,10 @@ test("all emitter helper failures become capture gaps", async () => {
   assert.equal(await observer.emit(event()), undefined);
   assert.equal(await observer.emit(event({ metadata: cyclic })), undefined);
   assert.equal(observer.getState().capture_gap, true);
-  assert.ok(observer.getState().dropped_events >= 4);
+  // Two emits, each lost before its event could be built. The ID factory failures in the
+  // constructor degraded nothing that was delivered, so they flag the gap without counting a
+  // loss, which is the line Python draws between _mark_gap and _lost_event.
+  assert.equal(observer.getState().dropped_events, 2);
 });
 
 test("credential redaction excludes token counters and handles __proto__ safely", async () => {
@@ -277,7 +280,9 @@ test("a monotonic source that steps backwards costs the duration, not the comple
   assert.equal(completion.capture_status, "partial");
   assert.equal(completion.metadata.observer_capture_gap, true);
   assert.equal(completion.metadata.tool, "grep");
-  assert.equal(observer.getState().dropped_events, 1);
+  // The completion event was delivered, without its duration, so the unmeasurable span is a
+  // capture gap rather than a lost event.
+  assert.deepEqual(observer.getState(), { dropped_events: 0, capture_gap: true, last_sink_error: "observer instrumentation failure" });
 });
 
 test("a clock that throws during observeAsync omits the duration instead of writing a zero", async () => {
@@ -296,8 +301,9 @@ test("a clock that throws during observeAsync omits the duration instead of writ
   assert.equal(completion.metadata.observer_capture_gap, true);
   assert.equal(completion.timestamp, "1970-01-01T00:00:00.000Z");
   // One gap for the start event's clock read, one for the failed elapsed read, one for the
-  // completion event's clock read. None of them is a fabricated measurement.
-  assert.equal(observer.getState().dropped_events, 3);
+  // completion event's clock read. None of them is a fabricated measurement, and none lost an
+  // event: both events reached the sink, so the drop counter stays at zero.
+  assert.deepEqual(observer.getState(), { dropped_events: 0, capture_gap: true, last_sink_error: "observer instrumentation failure" });
 });
 
 test("close refuses later events as counted capture gaps", async () => {
@@ -359,7 +365,8 @@ test("duration_ms must be a safe integer count of milliseconds", async () => {
   assert.equal(Object.keys(plain(wide.at(-1))).includes("duration_ms"), false);
   assert.equal(wide.at(-1).capture_status, "partial");
   assert.equal(wide.at(-1).metadata.observer_capture_gap, true);
-  assert.equal(measured.getState().dropped_events, 1);
+  // A span the wire cannot carry exactly is a gap on a delivered event, not a lost one.
+  assert.deepEqual(measured.getState(), { dropped_events: 0, capture_gap: true, last_sink_error: "observer instrumentation failure" });
 });
 
 test("an event built while instrumentation failed is downgraded to partial and marked", async () => {
@@ -372,7 +379,9 @@ test("an event built while instrumentation failed is downgraded to partial and m
   assert.equal(degraded.timestamp, "1970-01-01T00:00:00.000Z");
   assert.equal(degraded.capture_status, "partial");
   assert.equal(degraded.metadata.observer_capture_gap, true);
-  assert.equal(observer.getState().dropped_events, 1);
+  // The clock read that failed marked this event and flagged the gap. The event still reached
+  // the sink, so nothing was lost and nothing is counted.
+  assert.deepEqual(observer.getState(), { dropped_events: 0, capture_gap: true, last_sink_error: "observer instrumentation failure" });
   const healthy = await observer.emit({ type: "model.response", capture_status: "complete", metadata: { model: "x" } });
   assert.equal(healthy.capture_status, "complete");
   assert.equal(healthy.metadata.observer_capture_gap, undefined);
@@ -398,4 +407,96 @@ test("the Clock interface cannot carry sub-millisecond precision", async () => {
   assert.equal(seen[0].timestamp, seen[1].timestamp);
   assert.deepEqual([seen[0].sequence, seen[1].sequence], [0, 1]);
   assert.deepEqual(observer.getState(), { dropped_events: 0, capture_gap: false, last_sink_error: null });
+});
+
+test("dropped_events counts only events that reached no sink", async () => {
+  // A clock, an ID factory, or an elapsed-time source that fails leaves a delivered event
+  // carrying a fabricated or absent field. The event is marked, the gap is flagged, and the
+  // counter is left alone, because counting it would report a loss that did not happen and
+  // hide the ones that did. Python splits _mark_gap from _lost_event over exactly this.
+  const seen = [];
+  const degraded = new Observer({
+    mode: "content", sink: { write: e => seen.push(e) }, runId: "r", producerId: "p",
+    idFactory: { next: () => { throw new Error("ids"); } },
+    clock: { now: () => { throw new Error("clock"); } },
+    monotonic: { now: () => { throw new Error("monotonic"); } },
+  });
+  const marked = await degraded.emit({ type: "model.request", capture_status: "complete", metadata: { model: "x" } });
+  assert.equal(seen.length, 1);
+  assert.equal(marked.event_id, "event-fallback-1");
+  assert.equal(marked.timestamp, "1970-01-01T00:00:00.000Z");
+  assert.equal(marked.capture_status, "partial");
+  assert.equal(marked.metadata.observer_capture_gap, true);
+  assert.deepEqual(degraded.getState(), { dropped_events: 0, capture_gap: true, last_sink_error: "observer instrumentation failure" });
+  // An unmeasurable span is the same shape: both boundary events are delivered, so the failed
+  // elapsed-time reads flag gaps and cost the duration, never a lost event.
+  const done = duration_ms => ({ type: "tool.end", capture_status: "complete", duration_ms, metadata: {} });
+  assert.equal(await degraded.observeAsync({ type: "tool.start", capture_status: "complete", metadata: {} }, done, done, async () => "value"), "value");
+  await degraded.flush();
+  assert.equal(seen.length, 3);
+  assert.equal(seen.at(-1).capture_status, "partial");
+  assert.equal(degraded.getState().dropped_events, 0);
+  // The counter is not simply switched off: a failure that really did lose an event still
+  // counts, and so does one that never reached a sink at all.
+  const lost = new Observer({ mode: "content", sink: { write: () => { throw new Error("disk full"); } }, clock: clock(), idFactory: ids() });
+  assert.ok(await lost.emit(event()));
+  assert.equal(await lost.emit(event({ duration_ms: -1 })), undefined);
+  assert.equal(lost.getState().dropped_events, 2);
+});
+
+test("a recording observer with no sink counts every event it builds as lost", async () => {
+  // Builder mode is a real use, so the event is still built and returned; only the accounting
+  // changes. Python's _write counts the same loss, because a state reporting zero for events
+  // nobody received would be a black hole.
+  const builder = new Observer({ mode: "content", idFactory: ids(), clock: clock(), runId: "r", producerId: "p" });
+  const built = await builder.emit(event());
+  assert.ok(built);
+  assert.equal(built.event_id, "event-1"); assert.equal(built.sequence, 0);
+  // The event itself is not marked: it was built cleanly and simply reached nobody, so the
+  // loss belongs in the capture state rather than in the event's own metadata.
+  assert.equal(built.capture_status, "redacted");
+  assert.equal(built.metadata.observer_capture_gap, undefined);
+  assert.deepEqual(builder.getState(), { dropped_events: 1, capture_gap: true, last_sink_error: "observer instrumentation failure" });
+  // One loss per event, and the previous loss never leaks into the next event's marking.
+  const second = await builder.emit(event());
+  assert.equal(second.sequence, 1);
+  assert.equal(second.metadata.observer_capture_gap, undefined);
+  assert.equal(builder.getState().dropped_events, 2);
+  // A sink explicitly handed as null is the same builder mode, not a wiring mistake.
+  const nulled = new Observer({ mode: "content", sink: null });
+  assert.ok(await nulled.emit(event()));
+  assert.equal(nulled.getState().dropped_events, 1);
+  // Off mode has no sink either, but it records nothing, so it has lost nothing to count.
+  const quiet = new Observer({ mode: "off" });
+  assert.equal(await quiet.emit(event()), undefined);
+  assert.deepEqual(quiet.getState(), { dropped_events: 0, capture_gap: false, last_sink_error: null });
+});
+
+test("the constructor refuses the wiring mistakes the Python constructor refuses", async () => {
+  // Wiring is a programming mistake, fixed once before a run, so it throws here rather than
+  // degrading every event during one. Python raises on the same three, and nothing during a
+  // scan raises in either language.
+  assert.throws(() => new Observer({ mode: "not-a-mode", sink: { write: () => {} } }), /unknown recording mode/);
+  assert.throws(() => new Observer({ mode: "content", sink: {} }), /callable write/);
+  assert.throws(() => new Observer({ mode: "content", sink: { *write(e) { yield e; } } }), /generator function/);
+  assert.throws(() => new Observer({ mode: "content", sink: { async *write(e) { yield e; } } }), /generator function/);
+  assert.throws(() => new Observer({ mode: "content", sink: function* (e) { yield e; } }), /generator function/);
+  // Reading write can run a caller's getter, so a failure there is reported as an unusable
+  // sink rather than escaping the constructor as whatever it threw.
+  assert.throws(() => new Observer({ mode: "content", sink: { get write() { throw new Error("hostile getter"); } } }), /sink cannot be used/);
+  // The mode is checked first and an unknown one is refused with or without a sink; it can
+  // never be off, so no mode's privileges excuse it.
+  assert.throws(() => new Observer({ mode: "not-a-mode" }), /unknown recording mode/);
+  assert.throws(() => new Observer({ mode: "metadata", sink: 7 }), /callable write/);
+  // Off mode reads nothing off the sink it was handed, not even that one property, so a sink
+  // a recording mode would refuse is simply never looked at.
+  let reads = 0;
+  const quiet = new Observer({ mode: "off", sink: { get write() { reads += 1; return function* () {}; } } });
+  assert.equal(await quiet.emit(event()), undefined);
+  assert.equal(reads, 0);
+  // Usable wiring still constructs, sync sink, async sink, and no sink at all.
+  assert.ok(new Observer({ mode: "content", sink: { write: () => {} } }));
+  assert.ok(new Observer({ mode: "content", sink: { write: async () => {} } }));
+  assert.ok(new Observer({ mode: "content", sink: createJsonlSink(() => {}) }));
+  assert.ok(new Observer({ mode: "content" }));
 });

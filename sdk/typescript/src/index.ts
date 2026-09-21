@@ -24,6 +24,19 @@
  * Every instrumentation failure, including a thrown value that is not an Error, becomes a
  * visible capture gap. A gap says the trace is incomplete; an absent event is not evidence
  * of absent activity.
+ *
+ * `dropped_events` counts events that reached no sink, and nothing else. A clock read, an ID
+ * read, or an elapsed-time read that failed sets `capture_gap` and marks the event it degraded,
+ * but it does not increment the counter, because the event was still delivered: counting it
+ * there would report a loss that did not happen and hide the ones that did. A recording
+ * observer with no sink is the opposite case and is counted, because every event it builds
+ * reaches nobody. Python draws the same line, between `_mark_gap` and `_lost_event`.
+ *
+ * Wiring mistakes are refused at construction rather than degraded at runtime: an unknown
+ * recording mode, a sink with no callable `write`, and a sink or a `write` that is a generator
+ * function each throw from the constructor, exactly as the Python `__init__` and
+ * `_normalize_sink` raise on them. A harness author fixes wiring once, before a run; nothing
+ * during a scan raises.
  */
 export const SCHEMA_VERSION = "2.0" as const;
 /**
@@ -124,9 +137,10 @@ export interface Clock {
  *
  * A source that steps backwards, throws, or returns something that is not a finite number
  * makes the span unmeasurable: the completion event is still emitted, `duration_ms` is
- * omitted, the event is downgraded to `partial` and marked with `observer_capture_gap`, and
- * one capture gap is counted. The emitter never writes an invented duration, because an
- * omitted one says the span is unknown while a fabricated one would be read as a measurement.
+ * omitted, the event is downgraded to `partial` and marked with `observer_capture_gap`, and a
+ * capture gap is reported. No lost event is counted for it, because the completion event was
+ * still delivered. The emitter never writes an invented duration, because an omitted one says
+ * the span is unknown while a fabricated one would be read as a measurement.
  *
  * When no source is injected, elapsed time is derived from the injected `Clock` if there is
  * one, so a test with a fixed clock measures against that clock, and otherwise from
@@ -139,6 +153,13 @@ export interface Monotonic {
 export interface IdFactory {
   next(prefix: string): string;
 }
+/**
+ * An object a harness owns that accepts one finished event. `write` may be sync or async.
+ *
+ * It is vetted once, at construction, and only in a recording mode: a sink whose `write` is not
+ * callable, and a sink or a `write` that is a generator function, are refused there rather than
+ * left to fail per event. Off mode reads nothing off it at all. See `Observer`.
+ */
 export interface TraceSink {
   write(event: TraceEvent): void | Promise<void>;
 }
@@ -148,9 +169,14 @@ export interface TraceSink {
  * `last_sink_error` is always present and is `null` until something fails, mirroring the
  * Python default of `None`, so a state snapshot from either language compares field for
  * field. It names the failure class rather than quoting an exception, because a sink's
- * error text can carry the payload it failed to write. `dropped_events` counts
- * instrumentation failures, not scanner findings; zero is not a claim that the harness
- * emitted everything it should have.
+ * error text can carry the payload it failed to write.
+ *
+ * `dropped_events` counts events that reached no sink, not scanner findings and not
+ * instrumentation failures in general: a clock, ID, or elapsed-time read that failed sets
+ * `capture_gap` and marks the event it degraded, but that event was delivered, so it is not
+ * counted here. `capture_gap` is therefore the broader flag, and it can be true while the
+ * counter is zero. Zero is not a claim that the harness emitted everything it should have; it
+ * only says nothing the harness did emit was lost here.
  */
 export interface CaptureState {
   dropped_events: number;
@@ -180,6 +206,10 @@ const captureStatuses = new Set<CaptureStatus>([
   "redacted",
   "unavailable",
 ]);
+/* The modes the wire contract names, spelled in the order the Python tuple spells them. A mode
+   outside this set is a wiring mistake, refused at construction rather than read as some
+   content-less recording mode nobody asked for. */
+const recordingModes = new Set<RecordingMode>(["off", "metadata", "content"]);
 /* Lifecycle links, in the order the wire contract lists them. */
 const idFields = [
   "parent_event_id",
@@ -335,6 +365,60 @@ function defaultMonotonic(): Monotonic {
   }
   return { now: () => Date.now() / 1000 };
 }
+/* The two prototypes every generator function and async generator function is built on, read
+   once from generators this module owns. Classifying a caller's function by comparing its
+   prototype runs none of the caller's code, which is the point: Python reads `__call__` off the
+   type for the same reason. `instanceof` and `Symbol.toStringTag` would both consult properties
+   a caller can define. */
+const generatorFunctionPrototype = Object.getPrototypeOf(function* () {});
+const asyncGeneratorFunctionPrototype = Object.getPrototypeOf(async function* () {});
+/**
+ * True when calling `target` would return an iterator instead of writing anything.
+ *
+ * A generator function and an async generator function are the same wiring mistake: calling
+ * either builds an iterator nobody drives, so the sink writes nothing and reports no loss,
+ * which is the quietest way for a trace to be empty. This is the analogue of the Python
+ * `_is_generator_callable`.
+ */
+function isGeneratorCallable(target: unknown): boolean {
+  if (typeof target !== "function") return false;
+  const prototype = Object.getPrototypeOf(target);
+  return prototype === generatorFunctionPrototype ||
+    prototype === asyncGeneratorFunctionPrototype;
+}
+/**
+ * Vet the one callable a sink exposes, or throw. Called only in a recording mode.
+ *
+ * These are wiring mistakes, not runtime failures, so they are refused here, at construction,
+ * the way the Python `_normalize_sink` refuses them: a harness author fixes wiring once, before
+ * a run, while nothing during a scan may raise. Left to runtime, a sink with no callable
+ * `write` costs one lost event per emit and a generator function costs every event in silence,
+ * with a capture state that still reads clean. Reading `write` can run a caller's getter, so a
+ * failure there is reported as an unusable sink rather than allowed out of the constructor as
+ * whatever it threw.
+ */
+function vetSink(sink: unknown): TraceSink {
+  if (isGeneratorCallable(sink)) {
+    throw new TypeError(
+      "sink must not be a generator function: calling one returns an iterator and writes nothing",
+    );
+  }
+  let write: unknown;
+  try {
+    write = (sink as { write?: unknown } | null)?.write;
+  } catch {
+    throw new TypeError("reading sink.write threw, so the sink cannot be used");
+  }
+  if (typeof write !== "function") {
+    throw new TypeError("sink must expose a callable write method");
+  }
+  if (isGeneratorCallable(write)) {
+    throw new TypeError(
+      "sink.write must not be a generator function: calling one returns an iterator and writes nothing",
+    );
+  }
+  return sink as TraceSink;
+}
 export interface ObserverOptions {
   mode?: RecordingMode;
   sink?: TraceSink;
@@ -345,6 +429,27 @@ export interface ObserverOptions {
   idFactory?: IdFactory;
   redactor?: Redactor;
 }
+/**
+ * Emits trace events a harness hands it, and never anything it was not handed.
+ *
+ * Every option is optional. `mode` defaults to `off`, which makes `emit` a no-op; `metadata`
+ * stores events without content; `content` stores a copied, redacted content payload as well.
+ * An unknown mode and an unusable sink both throw here, at construction, because a harness
+ * author fixes wiring once at wiring time and nothing during a scan raises. An unusable sink is
+ * one whose `write` is not callable, one whose `write` is a generator or async generator
+ * function, and the sink itself being such a function: calling one of those returns an iterator
+ * and writes nothing. The mode is checked before anything else, and an unknown mode is by
+ * definition not `off`, so there is no mode in which a misspelled one is tolerated. In `off`
+ * mode the sink is not inspected at all, not even for that `write` property: a getter there is
+ * caller code, and an observer that records nothing must run none of it.
+ *
+ * A recording mode with no sink at all is allowed and is not silent: `emit` still builds the
+ * event and resolves with it, so the observer can be used as a builder, but every event it
+ * builds reached nobody and is counted as a lost event in `CaptureState`. That is the
+ * deliberate half of the choice: the returned event is a real use, and a state reporting zero
+ * for events nobody received would be a black hole. The Python `Observer` makes the same two
+ * choices.
+ */
 export class Observer {
   private sequence = 0;
   private fallbackSequence = 0;
@@ -355,6 +460,10 @@ export class Observer {
     capture_gap: false,
     last_sink_error: null,
   };
+  /* Every gap, counted as a loss or not, so `emitInternal` can tell that instrumentation failed
+     while an event was being built even when that failure lost no event. It is not reported:
+     `CaptureState` carries the three fields Python's carries and no fourth. */
+  private gaps = 0;
   private readonly mode: RecordingMode;
   private readonly sink?: TraceSink;
   private readonly clock: Clock;
@@ -364,8 +473,19 @@ export class Observer {
   readonly runId: string;
   readonly producerId: string;
   constructor(options: ObserverOptions = {}) {
-    this.mode = options.mode ?? "off";
-    this.sink = options.sink;
+    // The mode is settled first, as in Python, and an unknown one is refused outright: it can
+    // never be `off`, so there is no mode whose privileges could excuse it.
+    const mode = options.mode ?? "off";
+    if (!recordingModes.has(mode)) {
+      throw new TypeError(`unknown recording mode: ${JSON.stringify(options.mode)}`);
+    }
+    this.mode = mode;
+    // Off mode reads nothing off the caller's sink, not even a property: a descriptor there is
+    // caller code, and an observer that records nothing must run none of it. An absent sink is
+    // builder mode, which is allowed and counts each built event as a lost one.
+    this.sink = mode === "off" || options.sink === undefined || options.sink === null
+      ? undefined
+      : vetSink(options.sink);
     this.clock = options.clock ?? { now: () => new Date() };
     // The same choice the Python emitter makes: the injected monotonic source, else the
     // injected clock read as seconds, else a real monotonic source.
@@ -416,7 +536,7 @@ export class Observer {
   /**
    * Flush, then refuse later events. It closes no caller resource.
    *
-   * This is the analogue of the Python `aclose`. After it, `emit` counts a capture gap and
+   * This is the analogue of the Python `aclose`. After it, `emit` counts a lost event and
    * resolves undefined instead of writing, so an event that arrives after the run it belongs
    * to is visible as loss rather than silently postdating that run. In `off` mode there is
    * nothing to close and a later emit still records nothing, gap included. Calling it twice is
@@ -426,10 +546,23 @@ export class Observer {
     await this.flush();
     this.isClosed = true;
   }
+  /**
+   * Capture broke here, but no event was lost by it.
+   *
+   * The clock, the ID factory, and the elapsed-time source reach here: their failure leaves a
+   * delivered event carrying a fabricated or absent field, which `emitInternal` marks in the
+   * event itself. Counting it in `dropped_events` would claim a loss that did not happen, so
+   * this is the half of the Python split that `_mark_gap` is, and `lostEvent` is the other.
+   */
   private markGap(): void {
-    this.state.dropped_events += 1;
+    this.gaps += 1;
     this.state.capture_gap = true;
     this.state.last_sink_error = gapMessage;
+  }
+  /** One event reached no sink. Counted once, by whichever guard owns that loss. */
+  private lostEvent(): void {
+    this.markGap();
+    this.state.dropped_events += 1;
   }
   private nextId(prefix: string): string {
     try {
@@ -475,7 +608,8 @@ export class Observer {
    * Whole milliseconds between two reads, or undefined when the span cannot be measured.
    *
    * A failed read, a non-finite span, a source that went backwards, and a span too large to be
-   * a safe integer all yield undefined and one capture gap. The emitter never invents a
+   * a safe integer all yield undefined and one capture gap, which counts no lost event: the
+   * completion event is still emitted, without the duration. The emitter never invents a
    * duration: an omitted one says the span is unknown, a fabricated one would be read as a
    * measurement.
    */
@@ -513,7 +647,11 @@ export class Observer {
    * It resolves for every input. An event the wire contract refuses, a redactor, clock, ID
    * factory or sink that throws anything at all, a payload that is not JSON or is nested too
    * deeply, and an emit after `close` are all capture gaps, so instrumentation cannot become
-   * the caller's exception. In off mode this resolves undefined without touching the clock,
+   * the caller's exception. The ones that stopped the event reaching a sink are counted in
+   * `dropped_events` as well; a failure that only degraded a delivered event, such as a clock
+   * read that threw, is a gap on that event and is not counted. An observer in a recording
+   * mode with no sink still builds and resolves with the event, and counts each one as lost,
+   * because it reached nobody. In off mode this resolves undefined without touching the clock,
    * the ID factory, the redactor, or the sink, and without counting a gap even when the
    * observer is closed, because an observer that records nothing has lost nothing.
    */
@@ -526,13 +664,14 @@ export class Observer {
   ): Promise<TraceEvent | undefined> {
     if (this.mode === "off") return Promise.resolve(undefined);
     if (this.isClosed) {
-      this.markGap();
+      // The event arrived after the run it belongs to and reaches no sink, so it is a loss.
+      this.lostEvent();
       return Promise.resolve(undefined);
     }
     const write = this.emitInternal(input, dropDuration).catch(() => {
       // emitInternal already handles its own failures; this guarantees the contract holds
       // even if that ever stops being true, rather than rejecting into a caller's await.
-      this.markGap();
+      this.lostEvent();
       return undefined;
     });
     this.pending.add(write);
@@ -637,7 +776,11 @@ export class Observer {
    * when instrumentation failed while this event was being built, the event is downgraded to
    * `partial` unless it is already `unavailable` and its metadata is marked with
    * `observer_capture_gap`, so a reader cannot take a fabricated ID, an epoch timestamp, or a
-   * missing duration for a measurement.
+   * missing duration for a measurement. "Instrumentation failed while building this" is read
+   * off `gaps`, every gap whether or not it lost an event, rather than off `dropped_events`,
+   * which the degrading failures deliberately no longer touch; Python compares its own `_gaps`
+   * for the same reason. A build that failed, a write that threw, and an event nobody was
+   * there to receive are the losses, and each is counted once.
    */
   private async emitInternal(
     input: EventInput,
@@ -645,7 +788,7 @@ export class Observer {
   ): Promise<TraceEvent | undefined> {
     if (this.mode === "off") return undefined;
     let event: TraceEvent;
-    const gapsBefore = this.state.dropped_events;
+    const gapsBefore = this.gaps;
     try {
       const snapshot = this.snapshot(input);
       if (dropDuration) delete snapshot["duration_ms"];
@@ -693,7 +836,7 @@ export class Observer {
         metadata: stored,
         ...(content ? { content: content.value as JsonObject } : {}),
       };
-      if (dropDuration || this.state.dropped_events > gapsBefore) {
+      if (dropDuration || this.gaps > gapsBefore) {
         if (event.capture_status !== "unavailable") {
           event.capture_status = "partial";
         }
@@ -705,28 +848,34 @@ export class Observer {
         });
       }
     } catch {
-      this.markGap();
+      this.lostEvent();
       return undefined;
     }
-    if (!this.sink) return event;
+    if (!this.sink) {
+      // A recording mode with no sink. The event was built, spent a sequence number and an ID,
+      // and reached nobody, so it is a lost event rather than a clean state. It is still
+      // returned, because builder mode is a real use; only the accounting says so.
+      this.lostEvent();
+      return event;
+    }
     try {
       await this.sink.write(event);
     } catch {
-      this.markGap();
+      this.lostEvent();
     }
     return event;
   }
   /**
    * Build an event from a caller's callback and emit it without awaiting the write.
    *
-   * The callback is caller code. Anything it throws, Error or not, is a capture gap here and
-   * never reaches the operation being observed.
+   * The callback is caller code. Anything it throws, Error or not, loses that event and is a
+   * counted capture gap here, and never reaches the operation being observed.
    */
   private emitDetached(build: () => EventInput): void {
     try {
       void this.emit(build());
     } catch {
-      this.markGap();
+      this.lostEvent();
     }
   }
   /**
@@ -735,7 +884,9 @@ export class Observer {
    * When the span could not be measured the builder is told so, by being handed undefined, and
    * any `duration_ms` it returns anyway is dropped from the event, which is still emitted,
    * downgraded to `partial`, and marked with `observer_capture_gap`. The gap for the failed
-   * measurement was already counted once by the read that failed.
+   * measurement was already flagged once by the read that failed, and it counts no loss because
+   * the completion event is still delivered. A builder that throws is the other case: that
+   * event reaches nobody, so it is counted.
    */
   private emitCompletion(
     build: (durationMs: number | undefined) => EventInput,
@@ -745,7 +896,7 @@ export class Observer {
       const elapsed = this.elapsedMs(began);
       void this.emitEvent(build(elapsed), elapsed === undefined);
     } catch {
-      this.markGap();
+      this.lostEvent();
     }
   }
   /**
