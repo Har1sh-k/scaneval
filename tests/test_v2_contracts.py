@@ -532,3 +532,37 @@ def test_a_review_record_cannot_report_a_review_by_an_unnamed_person(state, revi
     document["reviews"][0]["reviewer"] = reviewer
     with pytest.raises(ContractError, match="must name its reviewer"):
         validate_document("review-record", document)
+
+
+def test_a_claim_cannot_cite_a_raw_artifact_the_result_does_not_declare():
+    """Referential integrity for evidence: a cited artifact id must be one this result registers.
+
+    Without it a claim could name an artifact nobody can open while the result still read
+    success with resolved bundles, so an allegation could rest on evidence that does not exist.
+    """
+    document = scan_result()
+    document["claims"][0]["raw_artifact_id"] = "native-json"
+    with pytest.raises(ContractError, match="does not declare in raw_artifacts"):
+        validate_document("scan-result", document)
+
+    document["raw_artifacts"] = [{"id": "native-json", "path": "raw/native.json",
+                                  "sha256": "sha256:" + "c" * 64}]
+    assert validate_document("scan-result", document) is document
+
+    # The reference stays checked when the artifact list is non-empty but names something else.
+    document["claims"][1]["raw_artifact_id"] = "stderr"
+    with pytest.raises(ContractError, match="claim-2"):
+        validate_document("scan-result", document)
+
+
+def test_a_claim_that_cites_no_raw_artifact_is_still_accepted():
+    """Citing an artifact is optional; citing one that is not declared is not.
+
+    An adapter with no per-claim raw record to point at, or none at all, still produces a valid
+    result: the contract constrains the reference it makes, not whether it makes one.
+    """
+    document = scan_result()
+    assert "raw_artifacts" not in document
+    assert validate_document("scan-result", document) is document
+    document["raw_artifacts"] = [{"id": "only", "path": "raw/only.json", "sha256": "sha256:" + "d" * 64}]
+    assert validate_document("scan-result", document) is document

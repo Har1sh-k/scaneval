@@ -1809,3 +1809,229 @@ def test_a_timing_hook_that_cannot_be_checked_never_stops_an_async_operation():
     assert observer.get_state() == CaptureState(
         dropped_events=0, capture_gap=True, last_sink_error=GAP
     )
+
+
+def test_closing_a_write_suspended_mid_flight_counts_one_lost_event_not_two():
+    """One lost event counts once, even when the emitter tears the suspended write down itself.
+
+    ``_drive`` closes a write it could not finish, which raises ``GeneratorExit`` inside the
+    coroutine that was awaiting the sink. That guard used to record the loss and then the path
+    that closed it recorded the same loss again, so one event that reached no sink was reported
+    as two dropped events. A close is not the write failing: it is the emitter discarding a
+    write whose loss the closing path is already counting, so the guard re-raises it now.
+    """
+    written: list[dict] = []
+
+    async def sink(event):
+        loop = asyncio.get_running_loop()
+        # Queue a stop, so the private loop gives up while this write is still suspended.
+        # Nothing sleeps here: the stop is scheduled, not timed, and the wait never settles.
+        loop.call_soon(loop.stop)
+        await asyncio.Event().wait()
+        written.append(event)
+
+    observer = Observer(mode="metadata", sink=sink, clock=clock(), id_factory=ids())
+    assert observer.emit(**event_fields()) is not None
+    assert written == []
+    # One event, one loss. Two would say the trace lost an event the harness never emitted.
+    assert observer.get_state() == CaptureState(
+        dropped_events=1, capture_gap=True, last_sink_error=GAP
+    )
+    observer.close()
+    assert observer.get_state().dropped_events == 1
+
+
+def test_aflush_lets_a_cancellation_aimed_at_the_caller_through():
+    """A cancellation of the awaiting task is the caller's, not a capture gap to swallow.
+
+    ``aflush`` documents a caller-applied timeout as the mitigation for a sink that never
+    returns, and a timeout works by cancelling the task that awaits it. Catching that
+    cancellation, marking a gap and returning normally defeated exactly that mitigation: the
+    awaiting task finished as though the writes had settled. ``gather`` hands a cancelled write
+    back in its results rather than raising it, so a cancellation raised out of that await is
+    the caller's and is re-raised unchanged.
+    """
+
+    async def scenario():
+        observer = Observer(
+            mode="metadata", sink=never_settling_sink(), clock=clock(), id_factory=ids()
+        )
+        assert observer.emit(**event_fields()) is not None
+        # One turn starts the write, one lets the flush reach its gather. Neither sleeps.
+        await asyncio.sleep(0)
+        flush = asyncio.ensure_future(observer.aflush())
+        await asyncio.sleep(0)
+        flush.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await flush
+        assert flush.cancelled()
+        # The cancellation took the write with it, so the event reached nobody: counted once,
+        # by the guard inside the write that saw the cancellation arrive.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return observer.get_state()
+
+    assert asyncio.run(scenario()) == CaptureState(
+        dropped_events=1, capture_gap=True, last_sink_error=GAP
+    )
+
+
+def test_a_caller_timeout_around_aclose_reports_a_timeout_and_still_closes():
+    """The mitigation the docstring prescribes, run end to end against a sink that never returns.
+
+    The deadline is already past when the block is entered, so the timeout fires on the next
+    turn of the loop and nothing waits on real time. A swallowed cancellation used to make this
+    block finish quietly, which is the harness being told capture completed when it did not.
+    """
+
+    async def scenario():
+        observer = Observer(
+            mode="metadata", sink=never_settling_sink(), clock=clock(), id_factory=ids()
+        )
+        assert observer.emit(**event_fields()) is not None
+        await asyncio.sleep(0)
+        loop = asyncio.get_running_loop()
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout_at(loop.time()):
+                await observer.aclose()
+        # The caller asked for a close and gets one: a late event is refused rather than
+        # allowed to postdate the run, and the state reports the write the timeout cancelled.
+        assert observer.closed
+        assert observer.emit(**event_fields()) is None
+        await asyncio.sleep(0)
+        return observer.get_state()
+
+    state = asyncio.run(scenario())
+    assert state.capture_gap is True
+    assert state.last_sink_error == GAP
+    # The cancelled write and the emit refused after the close, each counted once.
+    assert state.dropped_events == 2
+
+
+def test_a_sink_that_returns_an_undriven_generator_counts_every_event_as_lost():
+    """A write that hands back an iterator wrote nothing, so the event reached nobody.
+
+    The wiring guards classify a callable, so they catch a writer or a sink that *is* a
+    generator function. One that merely returns a generator passes both ``create_jsonl_sink``
+    and the constructor, runs none of its body, raises nothing, and used to leave a capture
+    state reading clean while every event was lost. It is caught at write time now, on the
+    value the sink handed back, in both languages.
+    """
+    lines: list[str] = []
+
+    def write_line(line):
+        # An ordinary function that returns a generator: calling it runs none of this body.
+        return (lines.append(line) for _ in (0,))
+
+    # Still accepted at wiring time: no check on a callable can see what it will return.
+    sink = create_jsonl_sink(write_line)
+    observer = Observer(mode="metadata", sink=sink, clock=clock(), id_factory=ids())
+    assert observer.emit(**event_fields()) is not None
+    assert lines == []
+    assert observer.get_state() == CaptureState(
+        dropped_events=1, capture_gap=True, last_sink_error=GAP
+    )
+    # One loss per event it swallowed, not one for the wiring.
+    assert observer.emit(**event_fields()) is not None
+    assert observer.get_state().dropped_events == 2
+
+    def generator_returning_sink(event):
+        return (event for _ in (0,))
+
+    bare = Observer(mode="metadata", sink=generator_returning_sink, clock=clock(), id_factory=ids())
+    assert bare.emit(**event_fields()) is not None
+    assert bare.get_state() == CaptureState(
+        dropped_events=1, capture_gap=True, last_sink_error=GAP
+    )
+
+    def async_generator_returning_sink(event):
+        async def stream():
+            yield event
+
+        return stream()
+
+    streamed = Observer(
+        mode="metadata", sink=async_generator_returning_sink, clock=clock(), id_factory=ids()
+    )
+    assert streamed.emit(**event_fields()) is not None
+    assert streamed.get_state() == CaptureState(
+        dropped_events=1, capture_gap=True, last_sink_error=GAP
+    )
+
+
+def test_a_sink_returning_an_awaitable_is_still_driven_not_counted_as_a_generator():
+    """The control for the check above: an awaitable write still runs and loses nothing.
+
+    A generator :func:`types.coroutine` marked is a generator object and an awaitable at once,
+    so it is driven, exactly as ``await`` would drive it, rather than read as an iterator
+    nobody consumes.
+    """
+    written: list[dict] = []
+
+    async def async_sink(event):
+        written.append(event)
+
+    observer = Observer(mode="metadata", sink=async_sink, clock=clock(), id_factory=ids())
+    assert observer.emit(**event_fields()) is not None
+    observer.flush()
+    assert [event["type"] for event in written] == ["model.request"]
+    assert observer.get_state() == CaptureState()
+
+    @types.coroutine
+    def marked(event):
+        written.append(event)
+        return
+        yield  # pragma: no cover - makes this a generator function
+
+    def returns_a_marked_awaitable(event):
+        # A generator object that ``await`` accepts. It is a generator and an awaitable at
+        # once, so the write-time check must read it as the awaitable it is and drive it.
+        return marked(event)
+
+    driven = Observer(
+        mode="metadata", sink=returns_a_marked_awaitable, clock=clock(), id_factory=ids()
+    )
+    assert driven.emit(**event_fields()) is not None
+    driven.flush()
+    assert len(written) == 2
+    assert driven.get_state() == CaptureState()
+
+
+def test_a_timing_hook_that_raises_an_interrupt_stops_the_operation_as_documented():
+    """The one exception to "a timing hook costs at most the duration", stated rather than hidden.
+
+    ``_read_monotonic`` re-raises the caller's own ``KeyboardInterrupt`` and ``SystemExit``, and
+    the first read is taken before the operation runs, so a hook that raises one of those does
+    stop the work it was wired in to measure. The class docstring used to claim that a timing
+    hook never stops that operation, which is false for exactly this hook.
+    """
+    seen, sink = recorder()
+    ran: list[str] = []
+
+    def interrupting():
+        raise KeyboardInterrupt("operator")
+
+    observer = Observer(mode="metadata", sink=sink, clock=clock(), monotonic=interrupting)
+    with pytest.raises(KeyboardInterrupt):
+        observer.observe(
+            TOOL_START, completion, lambda error, duration: completion(duration),
+            lambda: ran.append("ran"),
+        )
+    # The start event was written before the read that interrupted, and the operation never ran,
+    # so there is no completion event either.
+    assert ran == []
+    assert [event["type"] for event in seen] == ["tool.start"]
+
+    # Every other failure from the same hook is contained, which is the rest of the claim.
+    ordinary = Observer(mode="metadata", sink=sink, clock=clock(), monotonic=raising("monotonic"))
+    assert ordinary.observe(
+        TOOL_START, completion, lambda error, duration: completion(duration),
+        lambda: ran.append("ran"),
+    ) is None
+    assert ran == ["ran"]
+
+    # The docstring names the exception instead of claiming it away.
+    claim = " ".join(Observer.__doc__.split())
+    assert "A timing hook costs at most that duration and a capture gap, with one exception" in claim
+    assert "KeyboardInterrupt" in claim and "SystemExit" in claim
+    assert "it never stops the operation it was wired in to measure from running" not in claim

@@ -514,3 +514,36 @@ test("createJsonlSink refuses the generator writers the constructor refuses", ()
   assert.equal(typeof createJsonlSink(line => lines.push(line)).write, "function");
   assert.equal(typeof createJsonlSink(async line => { lines.push(line); }).write, "function");
 });
+
+test("a write that returns an undriven generator is a lost event, not clean capture", async () => {
+  // The wiring guard classifies a callable, so it catches a writer or sink that IS a generator
+  // function. One that merely RETURNS a generator passes createJsonlSink and the constructor,
+  // runs none of its body, throws nothing, and used to leave a capture state reading clean
+  // while every event was lost: the quietest way for a trace to be empty. It is caught at
+  // write time now, on the value the write handed back, and Python's _write counts the same
+  // loss on the same shapes.
+  const lines = [];
+  const sink = createJsonlSink((line) => (function* () { lines.push(line); })());
+  const observer = new Observer({ mode: "metadata", sink, idFactory: ids(), clock: clock() });
+  assert.ok(await observer.emit(event()));
+  assert.deepEqual(lines, []);
+  assert.deepEqual(observer.getState(), { dropped_events: 1, capture_gap: true, last_sink_error: "observer instrumentation failure" });
+  // One loss per event it swallowed, not one for the wiring.
+  assert.ok(await observer.emit(event()));
+  assert.equal(observer.getState().dropped_events, 2);
+  // An async generator is the same silence in the other shape.
+  const streamed = new Observer({ mode: "metadata", sink: { write: (e) => (async function* () { yield e; })() }, idFactory: ids(), clock: clock() });
+  assert.ok(await streamed.emit(event()));
+  assert.deepEqual(streamed.getState(), { dropped_events: 1, capture_gap: true, last_sink_error: "observer instrumentation failure" });
+  // The control: writes that really do write are untouched, sync and async alike, and neither
+  // is read as an iterator nobody drives.
+  const written = [];
+  const plain = new Observer({ mode: "metadata", sink: { write: (e) => { written.push(e); } }, idFactory: ids(), clock: clock() });
+  assert.ok(await plain.emit(event()));
+  const awaited = new Observer({ mode: "metadata", sink: { write: async (e) => { written.push(e); } }, idFactory: ids(), clock: clock() });
+  assert.ok(await awaited.emit(event()));
+  await awaited.flush();
+  assert.equal(written.length, 2);
+  assert.deepEqual(plain.getState(), { dropped_events: 0, capture_gap: false, last_sink_error: null });
+  assert.deepEqual(awaited.getState(), { dropped_events: 0, capture_gap: false, last_sink_error: null });
+});

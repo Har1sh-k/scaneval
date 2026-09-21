@@ -166,7 +166,7 @@ def test_semgrep_dotted_prefix_keeps_a_posix_directory_named_with_a_backslash():
         {"check_id": "tmp.weird.rules.python.probe.subprocess-shell", "path": "app.py",
          "start": {"line": 1}, "end": {"line": 1}, "extra": {"message": "m", "metadata": {}}},
     ]}
-    claims, notes = import_semgrep_results(payload, ruleset_roots=["/tmp/we\\ird/rules"])
+    claims, notes, _lost = import_semgrep_results(payload, ruleset_roots=["/tmp/we\\ird/rules"])
     assert claims[0]["native_rule_id"] == "python.probe.subprocess-shell"
     assert notes == []
 
@@ -201,7 +201,7 @@ def test_semgrep_import_strips_a_dot_prefixed_root_from_the_rule_id():
         {"check_id": "rulecache.rules.python.probe.subprocess-shell", "path": "app.py",
          "start": {"line": 1}, "end": {"line": 1}, "extra": {"message": "m", "metadata": {}}},
     ]}
-    claims, notes = import_semgrep_results(payload, ruleset_roots=["../.rulecache/rules"])
+    claims, notes, _lost = import_semgrep_results(payload, ruleset_roots=["../.rulecache/rules"])
     assert claims[0]["native_rule_id"] == "python.probe.subprocess-shell"
     assert notes == []
 
@@ -212,7 +212,7 @@ def test_semgrep_import_strips_a_root_whose_directory_name_has_a_space():
          "start": {"line": 3, "col": 1}, "end": {"line": 3, "col": 9},
          "extra": {"message": "shell=True", "severity": "WARNING", "metadata": {}}},
     ]}
-    claims, notes = import_semgrep_results(payload, ruleset_roots=["/tmp/rule cache (1)/rules__abc"])
+    claims, notes, _lost = import_semgrep_results(payload, ruleset_roots=["/tmp/rule cache (1)/rules__abc"])
     assert claims[0]["native_rule_id"] == "python.probe.subprocess-shell"
     assert notes == []
 
@@ -224,7 +224,7 @@ def test_semgrep_import_notes_an_unmatched_path_like_prefix():
         {"check_id": "tmp.other-cache.rules.python.probe.b", "path": "app.py",
          "start": {"line": 2}, "end": {"line": 2}, "extra": {"message": "m", "metadata": {}}},
     ]}
-    claims, notes = import_semgrep_results(payload, ruleset_roots=["/tmp/cache/rules__abc"])
+    claims, notes, _lost = import_semgrep_results(payload, ruleset_roots=["/tmp/cache/rules__abc"])
     # The id is kept verbatim rather than guessed at, but the leak is recorded once per prefix.
     assert [claim["native_rule_id"] for claim in claims] == ["tmp.other-cache.rules.python.probe.a",
                                                              "tmp.other-cache.rules.python.probe.b"]
@@ -239,7 +239,7 @@ def test_semgrep_import_does_not_note_a_plain_unprefixed_rule_id():
         {"check_id": "python.lang.security.audit.eval", "path": "app.py", "start": {"line": 2}, "end": {"line": 2},
          "extra": {"message": "m", "metadata": {}}},
     ]}
-    claims, notes = import_semgrep_results(payload, config_dirs=["/tmp/cache/rules__abc/python"])
+    claims, notes, _lost = import_semgrep_results(payload, config_dirs=["/tmp/cache/rules__abc/python"])
     # Neither id carries the config path, and the language segment that opens the second one
     # also ends the config directory, which is not evidence of a leaked machine path.
     assert [claim["native_rule_id"] for claim in claims] == ["custom.rule", "python.lang.security.audit.eval"]
@@ -271,7 +271,7 @@ def test_semgrep_import_treats_an_absent_or_null_extra_as_empty():
         {"check_id": "b", "path": "p", "start": {"line": 2}, "end": {"line": 2}, "extra": None},
         {"check_id": "c", "path": "p", "start": {"line": 3}, "end": {"line": 3}, "extra": {"metadata": None}},
     ]}
-    claims, notes = import_semgrep_results(payload)
+    claims, notes, _lost = import_semgrep_results(payload)
     # No message, so the allegation falls back to the check_id; no metadata, so no native_cwe.
     assert [claim["allegation"] for claim in claims] == ["a", "b", "c"]
     assert not any("native_cwe" in claim for claim in claims)
@@ -303,7 +303,7 @@ def test_semgrep_import_accepts_null_optional_strings_as_absent():
     # Absent and null stay absences: only a present value of the wrong type is a shape error.
     payload = {"results": [{"check_id": "a", "path": "p", "start": {"line": 1}, "end": {"line": 1},
                             "extra": {"message": None, "severity": None, "fingerprint": None, "lines": None}}]}
-    claims, notes = import_semgrep_results(payload)
+    claims, notes, _lost = import_semgrep_results(payload)
     assert claims[0]["allegation"] == "a"
     assert "native_severity" not in claims[0] and "native_id" not in claims[0]
     assert "evidence_text" not in claims[0] and notes == []
@@ -328,7 +328,7 @@ def test_semgrep_import_keeps_a_posix_file_name_containing_a_backslash():
         {"check_id": "a", "path": "we\\ird.py", "start": {"line": 1}, "end": {"line": 1}, "extra": {}},
         {"check_id": "b", "path": "src/we\\ird.py", "start": {"line": 1}, "end": {"line": 1}, "extra": {}},
     ]}
-    claims, _ = import_semgrep_results(payload)
+    claims, _notes, _lost = import_semgrep_results(payload)
     assert [claim["primary_location"]["path"] for claim in claims] == ["we\\ird.py", "src/we\\ird.py"]
 
 
@@ -341,9 +341,9 @@ def test_semgrep_import_keeps_a_posix_file_name_containing_a_backslash():
 def test_semgrep_import_leaves_a_posix_path_spelling_alone(raw_path, expected):
     payload = {"results": [{"check_id": "a", "path": raw_path, "start": {"line": 1}, "end": {"line": 1},
                             "extra": {}}]}
-    claims, notes = import_semgrep_results(payload)
+    claims, notes, lost = import_semgrep_results(payload)
     assert claims[0]["primary_location"]["path"] == expected
-    assert notes == []
+    assert notes == [] and lost == 0
 
 
 @pytest.mark.parametrize("raw_path, expected", [
@@ -358,7 +358,7 @@ def test_semgrep_import_translates_separators_when_the_platform_uses_backslashes
     monkeypatch.setattr(semgrep_module, "_NATIVE_SEPARATOR", "\\")
     payload = {"results": [{"check_id": "a", "path": raw_path, "start": {"line": 1}, "end": {"line": 1},
                             "extra": {}}]}
-    claims, _ = import_semgrep_results(payload)
+    claims, _notes, _lost = import_semgrep_results(payload)
     assert claims[0]["primary_location"]["path"] == expected
 
 
@@ -374,7 +374,7 @@ def test_semgrep_import_drops_leading_dot_segments_without_making_the_path_absol
     # path naming a different file, which the scan-result contract then refuses outright.
     payload = {"results": [{"check_id": "a", "path": raw_path, "start": {"line": 1}, "end": {"line": 1},
                             "extra": {}}]}
-    claims, notes = import_semgrep_results(payload)
+    claims, notes, _lost = import_semgrep_results(payload)
     assert claims[0]["primary_location"]["path"] == expected
     assert notes == []
 
@@ -389,12 +389,13 @@ def test_semgrep_import_reports_a_path_that_cannot_be_relative_instead_of_rewrit
                             "extra": {}},
                            {"check_id": "b", "path": "app.py", "start": {"line": 2}, "end": {"line": 2},
                             "extra": {}}]}
-    claims, notes = import_semgrep_results(payload)
+    claims, notes, lost = import_semgrep_results(payload)
     # The usable result is still imported and keeps its own result index in the claim id.
     assert [claim["claim_id"] for claim in claims] == ["c2"]
     assert claims[0]["primary_location"]["path"] == "app.py"
     assert len(notes) == 1 and repr(raw_path) in notes[0]
     assert "no claim was recorded" in notes[0] and "result 1:" in notes[0]
+    assert lost == 1, "a result semgrep reported that yields no claim is import loss"
 
 
 def test_semgrep_import_returns_paths_the_scan_result_contract_accepts():
@@ -406,11 +407,11 @@ def test_semgrep_import_returns_paths_the_scan_result_contract_accepts():
                            for index, raw_path in enumerate([".//app.py", "./", "..", "/etc/passwd", "src/app.py",
                                                              "../x.py", "C:\\proj\\app.py", "app\x00.py",
                                                              "we\\ird.py"])]}
-    claims, notes = import_semgrep_results(payload)
+    claims, notes, lost = import_semgrep_results(payload)
     for claim in claims:
         validate_relative_path(claim["primary_location"]["path"], "primary_location.path")
     assert [claim["primary_location"]["path"] for claim in claims] == ["app.py", "src/app.py", "we\\ird.py"]
-    assert len(notes) == 6
+    assert len(notes) == 6 and lost == 6
 
 
 def test_semgrep_import_reports_a_windows_absolute_path_as_unusable(monkeypatch):
@@ -420,9 +421,10 @@ def test_semgrep_import_reports_a_windows_absolute_path_as_unusable(monkeypatch)
     for raw_path in ("C:\\proj\\app.py", "\\\\server\\share\\app.py"):
         payload = {"results": [{"check_id": "a", "path": raw_path, "start": {"line": 1}, "end": {"line": 1},
                                 "extra": {}}]}
-        claims, notes = import_semgrep_results(payload)
+        claims, notes, lost = import_semgrep_results(payload)
         assert claims == []
         assert len(notes) == 1 and "absolute" in notes[0] and repr(raw_path) in notes[0]
+        assert lost == 1
 
 
 def test_semgrep_import_still_reports_a_bad_shape_in_a_result_whose_path_is_unusable():
@@ -1020,3 +1022,65 @@ def test_semgrep_real_binary_matches_a_rule_id_from_a_dot_prefixed_cache_root(tm
     raw_check_id = json.loads((raw / "semgrep.json").read_text(encoding="utf-8"))["results"][0]["check_id"]
     # The dot really is gone from what Semgrep emitted, which is why keeping it never matched.
     assert raw_check_id == "rulecache.rules.python.probe.subprocess-shell"
+
+
+# --- import loss ------------------------------------------------------------------------
+
+
+UNPLACEABLE = {"check_id": "probe.rule", "path": "/etc/passwd", "start": {"line": 1}, "end": {"line": 1},
+               "extra": {"message": "a finding ScanEval cannot place", "severity": "WARNING", "metadata": {}}}
+PLACEABLE = {"check_id": "probe.rule", "path": "app.py", "start": {"line": 1}, "end": {"line": 1},
+             "extra": {"message": "a finding ScanEval can place", "severity": "WARNING", "metadata": {}}}
+
+
+def test_a_lost_semgrep_result_forces_partial_with_unresolved_bundles_and_an_import_loss_error(tmp_path):
+    """A result that yielded no claim is a finding Semgrep reported and ScanEval did not deliver.
+
+    It used to be dropped with a note while the scan still reported success with resolved
+    bundles, so a run that lost a finding during import could still earn silence credit.
+    """
+    payload = {"version": "9.9.9", "paths": {"scanned": ["app.py"]}, "errors": [],
+               "results": [PLACEABLE, UNPLACEABLE]}
+    outcome, _ = scan_with_fake(tmp_path, json.dumps(payload), 0)
+
+    assert outcome.status == "partial" and outcome.bundles_resolved is False
+    assert outcome.error["code"] == "import_loss"
+    assert "1 semgrep result(s) could not be imported" in outcome.error["message"]
+    assert "/etc/passwd" in outcome.error["message"]
+    assert [claim["claim_id"] for claim in outcome.claims] == ["c1"]
+    assert any("Import loss: 1 result(s)" in note for note in outcome.notes)
+
+
+def test_an_import_that_lost_nothing_stays_a_success_with_resolved_bundles(tmp_path):
+    """The control: every reported result became a claim, so nothing about the run is degraded."""
+    payload = {"version": "9.9.9", "paths": {"scanned": ["app.py"]}, "errors": [], "results": [PLACEABLE]}
+    outcome, _ = scan_with_fake(tmp_path, json.dumps(payload), 0)
+
+    assert outcome.status == "success" and outcome.bundles_resolved is True
+    assert outcome.error is None and [claim["claim_id"] for claim in outcome.claims] == ["c1"]
+    assert not any("Import loss" in note for note in outcome.notes)
+
+
+def test_import_loss_travels_with_a_failure_the_run_already_had(tmp_path):
+    """A run that already failed keeps its own error code and names the loss beside it.
+
+    The loss still clears ``bundles_resolved``, so the scoring contract refuses quiet credit
+    whichever branch the outcome took.
+    """
+    payload = {"version": "9.9.9", "paths": {"scanned": ["app.py"]},
+               "errors": [{"level": "error", "message": "Rule timeout on app.py"}],
+               "results": [PLACEABLE, UNPLACEABLE]}
+    outcome, _ = scan_with_fake(tmp_path, json.dumps(payload), 0)
+
+    assert outcome.status == "partial" and outcome.bundles_resolved is False
+    assert outcome.error["code"] == "scan_errors"
+    assert "Rule timeout on app.py" in outcome.error["message"]
+    assert "1 semgrep result(s) could not be imported" in outcome.error["message"]
+
+
+def test_the_semgrep_loss_contract_matches_the_harness_one():
+    """Both importers report loss the same way, so the caller degrades both the same way."""
+    assert semgrep_module.SemgrepImport._fields == ("claims", "notes", "lost")
+    doc = " ".join((import_semgrep_results.__doc__ or "").split())
+    assert "it is counted in ``lost``" in doc
+    assert "neither completeness nor quiet credit" in doc

@@ -166,8 +166,18 @@ def _validate_location(location: dict[str, Any], label: str) -> None:
 
 
 def _validate_scan_result(document: dict[str, Any]) -> None:
+    """Check claim ids, locations, ranking, and that every cited raw artifact is declared.
+
+    A claim's ``raw_artifact_id`` is the evidence the claim rests on, so it must name one of
+    the ``raw_artifacts`` entries this same result declares. A reference to an id the result
+    does not register points at nothing the bundle holds, and it is refused here rather than in
+    any one adapter, so no importer can hand out a citation the bundle cannot honor. This
+    checks the reference only: whether the declared artifact's bytes support the allegation is
+    a review question that nothing in this file can see.
+    """
     claims = document["claims"]
     _unique([claim["claim_id"] for claim in claims], "claim_id")
+    declared = {artifact["id"] for artifact in document.get("raw_artifacts", [])}
     native = document["ranking"] == "native"
     for index, claim in enumerate(claims, start=1):
         _validate_location(claim["primary_location"], f"claims[{index - 1}].primary_location")
@@ -179,6 +189,12 @@ def _validate_scan_result(document: dict[str, Any]) -> None:
             raise ContractError("native claim ranks must be contiguous and match array order")
         if not native and "rank" in claim:
             raise ContractError("unranked claims must omit rank")
+        reference = claim.get("raw_artifact_id")
+        if reference is not None and reference not in declared:
+            known = ", ".join(sorted(declared)) or "none"
+            raise ContractError(
+                f"claim {claim['claim_id']!r} cites raw_artifact_id {reference!r}, which this "
+                f"result does not declare in raw_artifacts; declared ids: {known}")
     for index, artifact in enumerate(document.get("raw_artifacts", [])):
         _require_relative_path(artifact["path"], f"raw_artifacts[{index}].path")
 

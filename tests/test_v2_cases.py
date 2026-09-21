@@ -19,6 +19,7 @@ from scaneval.cases import (
     approve_case,
     build_plan,
     case_by_id,
+    checked_tree_hash,
     draft_case,
     draft_case_from_legacy,
     dump_json,
@@ -26,6 +27,7 @@ from scaneval.cases import (
     label_digest,
     latest_admission,
     latest_approving_review,
+    latest_review,
     load_pack,
     mechanical_checks,
     new_pack,
@@ -874,6 +876,47 @@ def test_editing_an_approved_target_leaves_it_outside_the_recorded_review(tmp_pa
     assert approval_is_current(case_by_id(pack, "widget-shell")) is False
 
 
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("represents",), "This case tests a path join under a default deployment, and adds a traversal target."),
+        (("workload",), "agentic_application"),
+        (("component_role",), "library_sdk"),
+        (("canonical_target", "kind"), "path_traversal"),
+        (("canonical_target", "variant_family"), "widget-other-family"),
+        (("canonical_target", "aliases"), ["CVE-2026-0001", "CVE-2026-0002"]),
+        (("coverage_signature", "guard_failure"), "no quoting anywhere on this path"),
+    ],
+    ids=["represents", "workload", "component-role", "canonical-kind", "variant-family",
+         "aliases", "coverage-signature"],
+)
+def test_editing_an_approved_case_label_field_leaves_it_outside_the_recorded_review(tmp_path, path, value):
+    """A reviewer approves what the case claims to be, so the case-level label fields bind too."""
+    pack = approved_pack(tmp_path)
+    field = case_by_id(pack, "widget-shell")
+    for key in path[:-1]:
+        field = field[key]
+    field[path[-1]] = value
+
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "draft" and plan["targets"] == []
+    assert any("the labels changed after the review" in note for note in notes)
+    assert approval_is_current(case_by_id(pack, "widget-shell")) is False
+
+
+def test_reordering_aliases_is_not_a_change_to_the_labels(tmp_path):
+    """Aliases name the same case in any order, so the digest reads them as a set, as it does controls."""
+    pack = approved_pack(tmp_path)
+    before = label_digest(case_by_id(pack, "widget-shell"))
+
+    case_by_id(pack, "widget-shell")["canonical_target"]["aliases"].reverse()
+
+    assert label_digest(case_by_id(pack, "widget-shell")) == before
+    assert approval_is_current(case_by_id(pack, "widget-shell")) is True
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "reviewed" and notes == []
+
+
 def test_a_pack_whose_labels_changed_after_approval_is_refused_a_reviewed_scope_plan(tmp_path):
     """The edited pack still loads, because the review is a record; it just plans nothing reviewed."""
     pack = approved_pack(tmp_path)
@@ -976,3 +1019,105 @@ def test_a_rejecting_review_does_not_carry_a_level(tmp_path):
 
     with pytest.raises(ContractError, match="requires at least one recorded approving review"):
         validate_document("case-pack", broken)
+
+
+def test_editing_a_snapshot_tree_hash_cannot_retarget_a_standing_approval(tmp_path):
+    """Reproduces the retargeted approval: the checks ran against one tree, the snapshot names another."""
+    pack = approved_pack(tmp_path)
+    other = "sha256:" + "c" * 64
+    assert checked_tree_hash(case_by_id(pack, "widget-shell"), "widget-abc") == HASH
+
+    pack["snapshots"][0]["tree_hash"] = other
+    assert validate_document("case-pack", pack) is pack, "the pack is still a consistent record"
+
+    plan, notes = build_plan(pack, "widget-abc", other)
+    assert plan["scope"] == "draft" and plan["targets"] == [] and plan["controls"] == []
+    assert any("widget-shell: excluded because the recorded checks for snapshot(s) widget-abc ran "
+               "against a different tree" in note for note in notes)
+    validation = case_by_id(pack, "widget-shell")["validation"]
+    assert validation["review_state"] == "human_approved" and validation["level"] == "L3", \
+        "code never withdraws a human review"
+
+    # Re-running the checks against the tree the snapshot now names is what plans it again.
+    pack["snapshots"][0]["tree_hash"] = HASH
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "reviewed" and notes == []
+
+
+def test_a_check_set_that_does_not_say_which_tree_it_ran_against_is_not_planned(tmp_path):
+    """Dropping the record of the tree leaves five passing checks bound to no export at all."""
+    pack = approved_pack(tmp_path)
+    document = json.loads(json.dumps(pack))
+    validation = document["cases"][0]["validation"]
+    del validation["checked_trees"]
+    validation["checks"] = [check for check in validation["checks"]
+                            if check["check"] != "snapshot_hash_recorded"]
+    assert validate_document("case-pack", document) is document
+
+    plan, notes = build_plan(document, "widget-abc", HASH)
+
+    assert plan["scope"] == "draft" and plan["targets"] == []
+    assert any("do not say which tree they ran against" in note for note in notes)
+    assert checked_tree_hash(document["cases"][0], "widget-abc") is None
+
+
+def test_a_check_set_recorded_before_checked_trees_is_read_from_its_detail(tmp_path):
+    """An older record kept the hash in the detail only; it is read there, not rewritten."""
+    pack = approved_pack(tmp_path)
+    document = json.loads(json.dumps(pack))
+    del document["cases"][0]["validation"]["checked_trees"]
+    assert validate_document("case-pack", document) is document
+
+    assert checked_tree_hash(document["cases"][0], "widget-abc") == HASH
+    plan, notes = build_plan(document, "widget-abc", HASH)
+    assert plan["scope"] == "reviewed" and notes == []
+
+    other = "sha256:" + "c" * 64
+    document["snapshots"][0]["tree_hash"] = other
+    plan, notes = build_plan(document, "widget-abc", other)
+    assert plan["targets"] == []
+    assert any("ran against a different tree" in note for note in notes)
+
+
+def test_a_trailing_unresolved_review_is_the_operative_one_and_stops_planning(tmp_path):
+    """Reopening the question withdraws the case from planning; the approval stays recorded."""
+    pack = approved_pack(tmp_path)
+    assert build_plan(pack, "widget-abc", HASH)[0]["scope"] == "reviewed"
+
+    case_by_id(pack, "widget-shell")["validation"]["reviews"].append(
+        {"reviewer": "A. Djudicator", "role": "adjudicator", "decision": "unresolved", "level": "L3",
+         "at": "2026-09-20T18:00:00+00:00", "note": "reopened: the deployment assumption is unclear"})
+    assert validate_document("case-pack", pack) is pack, "the reopening is a record, not a contradiction"
+
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "draft" and plan["targets"] == [] and plan["controls"] == []
+    assert any("the latest recorded review reopened the question" in note for note in notes)
+    validation = case_by_id(pack, "widget-shell")["validation"]
+    assert validation["review_state"] == "human_approved" and validation["level"] == "L3"
+    assert [review["decision"] for review in validation["reviews"]] == ["approve", "unresolved"]
+    assert latest_review(case_by_id(pack, "widget-shell"))["decision"] == "unresolved"
+    assert latest_approving_review(case_by_id(pack, "widget-shell"))["reviewer"] == "R. Eviewer", \
+        "the approval stays findable in the history it belongs to"
+    assert approval_is_current(case_by_id(pack, "widget-shell")) is False
+
+    # A review of the labels as they stand is what settles the question and plans the case again.
+    approve_case(pack, "widget-shell", reviewer="S. Econd", role="independent_reviewer", level="L3",
+                 note="assumption settled", clock=CLOCK)
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "reviewed" and notes == []
+
+
+def test_a_trailing_rejecting_review_is_also_the_operative_one(tmp_path):
+    """The contract refuses this pack at load; planning refuses it too, on the pack in memory."""
+    pack = approved_pack(tmp_path)
+    case_by_id(pack, "widget-shell")["validation"]["reviews"].append(
+        {"reviewer": "A. Djudicator", "role": "adjudicator", "decision": "reject", "level": "L3",
+         "at": "2026-09-20T18:00:00+00:00", "note": "evidence withdrawn"})
+
+    with pytest.raises(ContractError, match="latest recorded review rejected"):
+        validate_document("case-pack", pack)
+
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "draft" and plan["targets"] == []
+    assert any("the latest recorded review rejected this case" in note for note in notes)
+    assert approval_is_current(case_by_id(pack, "widget-shell")) is False

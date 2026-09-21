@@ -22,7 +22,9 @@ preserved either way.
 
 A source the scanner modified is a changed execution condition rather than a scanner failure,
 and it is recorded as one: the result keeps the claims but goes partial with unresolved bundles,
-so it cannot stand as a clean observation of the frozen input it binds to.
+so it cannot stand as a clean observation of the frozen input it binds to. :func:`_input_tree`
+is the single definition of what that source is, used both for the hash the result binds to and
+for the before/after comparison, so neither can cover a path the other ignores.
 
 Directory separation documents the boundary; it does not enforce it. Network and
 filesystem policy are declared here and must be enforced outside this process.
@@ -45,7 +47,7 @@ from . import __version__
 from .adapters.base import Adapter, NativeOutcome, SystemSpec
 from .contracts import ContractError, canonical_json, canonical_sha256, validate_document
 from .kinds import mapping_version
-from .materialize import hash_exported_tree, prepare_synthetic_history, sha256_file
+from .materialize import prepare_synthetic_history, sha256_file, tree_hash
 
 
 NETWORK_POLICIES = ("none", "model_provider_only", "unrestricted")
@@ -205,14 +207,36 @@ def _rebase(path: Path, areas: list[tuple[Path, Path, Path]]) -> Path:
     return path
 
 
-def _file_map(source_dir: Path, ignore_top_level: frozenset[str]) -> dict[str, str]:
+def _input_tree(source_dir: Path, state_dirs: frozenset[str]) -> dict[str, str]:
+    """The one definition of the input tree: ``{relative path: content hash}``.
+
+    Two things need this map and must not disagree about it: the hash compared against
+    ``prepared.tree_hash`` before the scan, and the before/after comparison that decides
+    ``source_modified``. Both are computed from this function, so a path one of them counts
+    cannot be a path the other ignores.
+
+    Excluded, and why. Symbolic links and anything that is not a regular file, because they
+    have no content of their own to hash. Any path with a ``.git`` component, because this
+    module writes one itself when an adapter requires git
+    (:func:`~scaneval.materialize.prepare_synthetic_history`), so counting it would report the
+    runner's own bookkeeping as a scanner modification. Each of the adapter's declared
+    *state_dirs*, because they are the scanner's private scratch space, are preserved separately
+    under ``raw/harness-state/``, and exist only because the scanner created them.
+
+    That last exclusion is sound only while the exported input contains no such directory
+    itself. :func:`run_invocation` establishes that by comparing this map's hash against
+    ``prepared.tree_hash``, which :func:`~scaneval.materialize.hash_exported_tree` computed over
+    the whole export: an input that ships one of the adapter's state directories cannot produce
+    a matching hash here, so it is refused rather than scanned with bytes the input hash covers
+    left outside the modification check.
+    """
     hashes: dict[str, str] = {}
     for path in sorted(source_dir.rglob("*")):
         if path.is_symlink() or not path.is_file():
             continue
         rel = path.relative_to(source_dir).as_posix()
         parts = rel.split("/")
-        if parts[0] in ignore_top_level or ".git" in parts:
+        if parts[0] in state_dirs or ".git" in parts:
             continue
         hashes[rel] = sha256_file(path)[0]
     return hashes
@@ -369,12 +393,21 @@ def run_invocation(
     because nothing in it can be trusted to describe the scan; the raw output it had already
     written is still staged into the bundle where the failure allowed it.
 
+    A claim citing a ``raw_artifact_id`` this bundle does not register is one of those refused
+    documents: the scan-result contract enforces the reference, so an id the adapter invented,
+    and an id whose artifact was dropped here for being a link, missing, or outside the bundle,
+    both end as an error result carrying code ``import_contract_violation`` rather than as a
+    success pointing at evidence nobody can open.
+
     A source the scan itself changed is a condition change, not a scanner failure: when the
     workspace source differs after the scan, an outcome that still carries claims is recorded as
     ``partial`` with ``bundles_resolved`` false and, unless the adapter already named a failure of
     its own, error code ``source_modified``. The claims stay, the modified paths stay in the
     provenance, and nothing about the scanner's competence is asserted; what is withdrawn is the
-    result's claim to be a clean observation of the frozen input.
+    result's claim to be a clean observation of the frozen input. What counts as the source for
+    that comparison is :func:`_input_tree`, which is also what the pre-scan hash check covers, so
+    the watched tree and the hashed tree are the same tree; an input that already holds one of
+    the adapter's state directories fails that check and is refused before the scanner runs.
 
     Two things are narrower than they look. When the post-scan re-hash of the source fails, the
     comparison never completed, so the provenance reports no observed modification and the
@@ -424,10 +457,19 @@ def run_invocation(
             staging_trace.mkdir()
         source = workspace / "source"
         shutil.copytree(prepared.source_dir, source, symlinks=False)
-        before = _file_map(source, state_dirs)
-        actual = hash_exported_tree(source)["tree_hash"]
+        before = _input_tree(source, state_dirs)
+        actual = tree_hash(before)
         if actual != prepared.tree_hash:
-            raise ExecutionError(f"workspace tree hash {actual} does not match prepared input {prepared.tree_hash}")
+            # The hash is taken over the same map the modification check uses, so a mismatch
+            # also catches an input that already holds one of the adapter's state directories:
+            # those bytes are inside prepared.tree_hash and outside the modification check, so
+            # the scan is refused rather than run with part of its input unwatched.
+            collision = sorted(name for name in state_dirs if (source / name).exists())
+            detail = (f"; the exported input already contains adapter state directories "
+                      f"({', '.join(collision)}), which are excluded from the input tree and so "
+                      f"cannot be part of a matching hash") if collision else ""
+            raise ExecutionError(f"workspace tree hash {actual} does not match prepared input "
+                                 f"{prepared.tree_hash}{detail}")
         if adapter.requires_git and not (source / ".git").exists():
             synthetic = prepare_synthetic_history(source)
         if unsupported:
@@ -463,7 +505,7 @@ def run_invocation(
             # never a crash of the run, and the directories copied before it stay recorded.
             violation = violation or f"harness state could not be captured: {_failure_message(exc)}"
         try:
-            after = _file_map(source, state_dirs)
+            after = _input_tree(source, state_dirs)
         except Exception as exc:
             # The comparison never completed, so nothing is claimed about the source: `before`
             # stands in for `after`, the provenance reports no observed modification, and the

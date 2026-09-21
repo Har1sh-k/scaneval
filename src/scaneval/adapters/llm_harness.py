@@ -9,11 +9,18 @@ A record the importer cannot read is import loss, not a detail: it is counted, a
 count above zero degrades the outcome to ``partial`` with unresolved bundles and error
 code ``import_loss``, so a scan that emitted a finding ScanEval could not read can earn
 neither completeness nor silence credit for it.
+
+Only records this scan produced are imported. The findings directory is snapshotted before
+the harness process starts, and a record already present with the same bytes is left out, so
+a finding record the repository under test shipped cannot be counted as a detection. That
+establishes that the bytes are new to the workspace, not that the harness's model wrote them.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -115,7 +122,9 @@ class HarnessImport(NamedTuple):
     ``lost`` is the number of records the importer could not turn into a claim, for any
     reason. It is part of the contract rather than a note because the caller must degrade
     the outcome when it is above zero: a record ScanEval dropped is a finding the scanner
-    did emit, so the scan cannot stand as a complete or quiet observation.
+    did emit, so the scan cannot stand as a complete or quiet observation. A directory
+    listing that failed contributes 1, so ``lost`` is a floor rather than an exact count
+    whenever a note says a listing failed.
     """
 
     claims: list[dict]
@@ -124,9 +133,71 @@ class HarnessImport(NamedTuple):
     lost: int
 
 
+class FindingsBaseline(NamedTuple):
+    """What the harness findings directory held before the scan ran.
+
+    ``digests`` maps each ``*.md`` file name present beforehand to the SHA-256 of its bytes,
+    or to ``None`` when the file was there but could not be read. ``established`` is false
+    when the directory could not be listed at all, which is not the same as an empty
+    directory: nothing can then be attributed to the scan.
+    """
+
+    digests: dict[str, str | None]
+    established: bool
+    note: str | None
+
+
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _list_markdown(directory: Path) -> tuple[list[str], str | None, bool]:
+    """Sorted ``*.md`` names in *directory*, a note naming any failure, and whether it exists.
+
+    Enumeration is explicit rather than delegated to :meth:`Path.glob`, which swallows the
+    ``OSError`` the directory walk raises and would make an unreadable directory
+    indistinguishable from an empty one. The third value is false only when the directory is
+    absent; a directory that exists and cannot be listed returns true with a note, so the
+    caller counts the records it could not see instead of reporting none.
+    """
+    try:
+        with os.scandir(directory) as entries:
+            names = sorted(entry.name for entry in entries)
+    except FileNotFoundError:
+        return [], None, False
+    except NotADirectoryError:
+        return [], "the findings path is not a directory", True
+    except OSError as exc:
+        return [], f"the findings directory could not be listed ({exc.strerror or exc})", True
+    return [name for name in names if name.endswith(".md")], None, True
+
+
+def snapshot_findings(findings_dir: Path) -> FindingsBaseline:
+    """Record the finding records present before the scan, so the import can exclude them.
+
+    Call this before the harness process starts. Each ``*.md`` file is hashed; one that cannot
+    be read is recorded with a ``None`` digest, which no content hash equals, so the importer
+    treats it as pre-existing rather than as something the scan produced. A directory that
+    cannot be listed yields ``established`` false, and the importer then attributes nothing to
+    the scan instead of guessing.
+    """
+    names, note, exists = _list_markdown(findings_dir)
+    if not exists:
+        return FindingsBaseline({}, True, None)
+    if note:
+        return FindingsBaseline({}, False, note)
+    digests: dict[str, str | None] = {}
+    for name in names:
+        try:
+            digests[name] = _digest((findings_dir / name).read_bytes())
+        except OSError:
+            digests[name] = None
+    return FindingsBaseline(digests, True, None)
+
+
 def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix: str,
-                            stage_dir: Path) -> HarnessImport:
-    """Stage ``findings/*.md`` and translate each one into a file-only claim.
+                            stage_dir: Path, baseline: FindingsBaseline) -> HarnessImport:
+    """Stage the ``findings/*.md`` records this scan produced and translate each into a claim.
 
     A finding record is a ``*.md`` file in *findings_dir*, which is what the harness's own
     reader treats as one. Each imported record is copied into *stage_dir* and registered as its
@@ -134,26 +205,62 @@ def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix
     id, so every claim points at a hash-backed record the bundle holds rather than at a name
     nothing registers. A record that is not a regular file, cannot be read, carries no id,
     carries an unusable ``file_path``, or cannot be staged yields no claim and is counted in
-    ``lost`` as well as noted. The full native allegation text is preserved; line ranges are
-    never invented.
+    ``lost`` as well as noted. The directory is listed explicitly, so a listing that fails is
+    counted and noted rather than read as an empty directory. The full native allegation text
+    is preserved; line ranges are never invented.
+
+    Provenance. *baseline* is :func:`snapshot_findings` taken before the harness process
+    started, and a record whose name and bytes are both in it is not imported: it was already
+    in the exported input, so importing it would credit the scan with a finding the repository
+    shipped. A name in the baseline whose bytes now differ is imported, because the scan
+    rewrote it. When the baseline could not be established, nothing is attributed to the scan
+    and every record is counted in ``lost``, since one of them may have been the scan's own.
+
+    What this does not prove. It establishes only that the bytes were not in the workspace
+    before the harness ran. It does not show that the harness's model produced them: anything
+    else with write access to the workspace during the scan could have. It also cannot tell a
+    record the harness rewrote byte-for-byte from one it left alone, so a planted record the
+    harness happened to re-emit unchanged is still excluded.
     """
     claims: list[dict] = []
     artifacts: list[dict] = []
     notes: list[str] = []
     lost = 0
-    if not findings_dir.is_dir():
+    names, listing_failure, exists = _list_markdown(findings_dir)
+    if not exists:
         return HarnessImport(claims, artifacts, ["no findings directory was written by the harness"], 0)
-    for path in sorted(findings_dir.glob("*.md")):
+    if listing_failure:
+        # A directory this could not read is not an empty one: an unknown number of records
+        # went unimported, so the loss count is 1 as a floor and the note says so.
+        return HarnessImport(claims, artifacts,
+                             [f"{listing_failure}; an unknown number of finding records was not imported"], 1)
+    if not baseline.established:
+        # Nothing separates a record the scan wrote from one the input shipped, so none is
+        # attributed to the scan and all of them are counted as lost.
+        note = baseline.note or "the findings directory could not be listed before the scan"
+        return HarnessImport(claims, artifacts,
+                             [f"finding record provenance could not be established ({note}); "
+                              f"{len(names)} record(s) were not imported"], max(len(names), 1))
+    for name in names:
+        path = findings_dir / name
         if path.is_symlink() or not path.is_file():
             lost += 1
             notes.append(f"{path.name}: finding record is not a regular file; not imported")
             continue
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            data = path.read_bytes()
         except OSError as exc:
             lost += 1
             notes.append(f"{path.name}: finding record could not be read ({exc.strerror}); not imported")
             continue
+        if name in baseline.digests and baseline.digests[name] in (None, _digest(data)):
+            # These bytes were in the exported input before the harness ran, so the scan did
+            # not produce this finding and cannot be credited with it. Not import loss: the
+            # record is not a claim the scanner made.
+            notes.append(f"{path.name}: this record was already in the exported input before the scan; "
+                         "not imported as a finding of this scan")
+            continue
+        text = data.decode("utf-8", errors="replace")
         record, body = parse_frontmatter(text)
         finding_id = str(record.get("id") or "")
         if not finding_id:
@@ -303,6 +410,10 @@ class LlmHarnessAdapter(Adapter):
             "output_path": str(raw_dir / "driver-output.json"), "progress_path": str(raw_dir / "driver-progress.log"),
             "flush_timeout_ms": int(spec.config.get("flush_timeout_ms", 30000)),
         }
+        state_dir = source_dir / preset["state_dir"]
+        # Taken before the harness process starts: whatever is in the findings directory now
+        # came with the exported input, not from this scan.
+        findings_baseline = snapshot_findings(state_dir / "findings")
         config_path = raw_dir / "driver-config.json"
         config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         (raw_dir / "driver-progress.log").write_text("", encoding="utf-8")
@@ -314,12 +425,13 @@ class LlmHarnessAdapter(Adapter):
                      {"id": "driver-stderr", "path": raw_dir / "driver-stderr.txt"},
                      {"id": "driver-progress", "path": raw_dir / "driver-progress.log"},
                      {"id": "driver-config", "path": config_path}]
-        state_dir = source_dir / preset["state_dir"]
         # The finding records live in the workspace too, so each imported one is copied into the
-        # staging directory and registered under the id its claim carries.
+        # staging directory and registered under the id its claim carries. Only records this
+        # scan produced are imported; the baseline above says which those are.
         imported = import_harness_findings(state_dir / "findings", harness=harness,
                                            artifact_prefix="harness-findings",
-                                           stage_dir=raw_dir / "harness-findings")
+                                           stage_dir=raw_dir / "harness-findings",
+                                           baseline=findings_baseline)
         claims = imported.claims
         artifacts.extend(imported.artifacts)
         # The harness writes its plan and scan log inside the workspace, which is removed once

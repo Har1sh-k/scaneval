@@ -29,8 +29,9 @@ evidence of absent activity.
 read, or an elapsed-time read that failed sets ``capture_gap`` and marks the event it degraded,
 but it does not increment the counter, because the event was still delivered: counting it there
 would report a loss that did not happen and hide the ones that did. A write queued on an event
-loop that is torn down before it runs, and one cancelled before it ever starts, are the
-opposite case, and are counted, because those events reached nobody.
+loop that is torn down before it runs, one cancelled before it ever starts, and one whose sink
+handed back an iterator nobody drives are the opposite case, and are counted, because those
+events reached nobody.
 
 The wire contract is shared with ``sdk/typescript``, so the two emitters accept and reject the
 same inputs and, where they once differed, the stricter rule is the shared one:
@@ -81,7 +82,7 @@ import json
 import math
 import re
 import time
-from types import GeneratorType
+from types import AsyncGeneratorType, GeneratorType
 from typing import Any, Protocol
 import uuid
 
@@ -211,9 +212,11 @@ class JsonlSink:
     is lost with a capture state that still reads clean. That is the classification
     :meth:`Observer._normalize_sink` already applies to a sink, applied one layer down to the
     writer a sink is built from, so the same wiring mistake is refused at creation in both
-    places rather than losing every line at runtime in one of them. Where those lines go, when
-    they are fsynced, and whether they are ever deleted are the caller's decisions, not this
-    class's.
+    places rather than losing every line at runtime in one of them. A writer that returns a
+    generator instead of being one cannot be classified from the outside and is not refused
+    here; :meth:`Observer._write` sees the iterator this ``write`` hands back and counts the
+    event as lost. Where those lines go, when they are fsynced, and whether they are ever
+    deleted are the caller's decisions, not this class's.
     """
 
     write_line: Callable[[str], Any]
@@ -235,7 +238,9 @@ def create_jsonl_sink(write_line: Callable[[str], Any]) -> JsonlSink:
     A generator-function writer raises here, at wiring time, exactly as one handed to the
     :class:`Observer` constructor does, because a writer that returns an iterator writes
     nothing and would cost every line in silence. The TypeScript ``createJsonlSink`` refuses
-    the same writer for the same reason.
+    the same writer for the same reason. A writer that is an ordinary function returning an
+    undriven generator is the same silence wearing a shape no wiring check can see, so it is
+    not refused here and is counted, event by event, by the observer that writes through it.
     """
     return JsonlSink(write_line)
 
@@ -446,6 +451,23 @@ def _is_generator_callable(target: Any) -> bool:
     return inspect.isgeneratorfunction(call) or inspect.isasyncgenfunction(call)
 
 
+def _is_undriven_generator(value: Any) -> bool:
+    """True for a generator a write handed back instead of writing, which nobody will drive.
+
+    The wiring guards classify a callable, so they see a writer or sink that *is* a generator
+    function. One that merely *returns* a generator is the same wiring mistake one layer in and
+    is invisible to them: calling such a function runs none of its body, the sink reports no
+    failure, and every event is lost behind a capture state that still reads clean. That shape
+    is caught here instead, at write time, on the value the sink returned.
+
+    The type is compared exactly, as :func:`_is_awaitable` compares it, so this reads none of
+    the caller's own code: neither generator type can be subclassed, and asking an object what
+    it is would run a property the caller wrote. A generator :func:`types.coroutine` marked is
+    awaitable and is driven, so it never reaches this test.
+    """
+    return type(value) is GeneratorType or type(value) is AsyncGeneratorType
+
+
 def _sink_target(sink: Any) -> Callable[[JsonObject], Any]:
     """Resolve the one callable a sink object exposes, running as little caller code as possible.
 
@@ -476,7 +498,10 @@ class Observer:
     fixes that once at wiring time; nothing during a scan raises. A generator function or async
     generator function is an unusable sink, including as the ``__call__`` of a callable object:
     calling one returns an iterator and writes nothing, which is a wiring mistake rather than a
-    runtime failure. In ``off`` mode the sink is not inspected at all, because it is never used.
+    runtime failure. That check is syntactic, so a sink that merely *returns* a generator passes
+    it; that shape is caught at write time instead, where the returned iterator is visible, and
+    each event it swallows is counted as a lost event. In ``off`` mode the sink is not inspected
+    at all, because it is never used.
 
     A recording mode with no sink at all is allowed and is not silent: :meth:`emit` still builds
     the event and returns it, so the observer can be used as a builder, but every event it
@@ -493,8 +518,12 @@ class Observer:
     ``monotonic`` explicitly. A duration that cannot be measured, because a read failed, a
     reading could not even be checked, the source went backwards, or the span exceeds the
     shared safe-integer bound, is omitted from the event and recorded as a capture gap rather
-    than invented. A timing hook costs at most that duration: it never stops the operation it
-    was wired in to measure from running.
+    than invented. A timing hook costs at most that duration and a capture gap, with one
+    exception: :class:`KeyboardInterrupt` and :class:`SystemExit` are the caller's own
+    interrupt and are re-raised where the hook raised them, so a hook that raises one of those
+    on the read taken before the operation starts does stop that operation from running. Every
+    other failure a timing hook can produce, including a reading the emitter cannot even check,
+    is contained and costs the duration alone.
 
     Synchronous harnesses need no event loop: :meth:`emit`, :meth:`observe`, :meth:`flush`, and
     :meth:`close` are ordinary methods, and a sink that returns an awaitable is driven to
@@ -735,7 +764,13 @@ class Observer:
         A sink that never returns makes this wait forever. That is deliberate: the emitter
         imposes no timeout, because cancelling a harness's write is a policy decision only the
         caller can make. Apply your own timeout around this call and report the result as
-        incomplete capture.
+        incomplete capture: a :class:`asyncio.CancelledError` delivered to the task awaiting
+        this coroutine, by a timeout or by anything else, is re-raised unchanged, because it is
+        aimed at the caller and swallowing it would defeat the one mitigation this docstring
+        prescribes. ``gather`` here collects a cancelled write into its results rather than
+        raising it, so a cancellation that does come out of that await is the caller's, never a
+        write's. Whatever the cancellation settles, the writes it left unsettled go back into
+        the pending set first, so the record of them survives it.
         """
         import asyncio
 
@@ -752,7 +787,12 @@ class Observer:
                 # Evidence first: an unsettled write goes back into the pending set so the
                 # failure cannot erase the record of what it failed to settle.
                 self._pending.update(write for write in batch if not write.done())
-                if isinstance(error, _INTERRUPTS):
+                if isinstance(error, (*_INTERRUPTS, asyncio.CancelledError)):
+                    # The caller's own cancellation, not a write's: ``return_exceptions=True``
+                    # hands a cancelled write back as a result, so nothing but a cancellation
+                    # of this await reaches here. Containing it would swallow the timeout a
+                    # caller wrapped around this call, which is the mitigation this coroutine
+                    # documents for a sink that never returns.
                     raise
                 self._mark_gap()
                 return
@@ -783,10 +823,18 @@ class Observer:
 
         The private loop is released here too, so neither closing path leaves the emitter's own
         resource open.
+
+        A cancellation delivered to the caller while the flush waits travels on out of here, as
+        it does out of :meth:`aflush`, so a timeout wrapped around this call reports as a
+        timeout. The observer is still closed and the private loop still released on the way
+        out, because a caller who cancelled a close asked for the close: leaving it open would
+        let a late event postdate the run in silence.
         """
-        await self.aflush()
-        self._closed = True
-        self._close_runner()
+        try:
+            await self.aflush()
+        finally:
+            self._closed = True
+            self._close_runner()
 
     def _reap_lost_writes(self) -> None:
         """Count writes that can never run, and forget writes that already settled.
@@ -1056,6 +1104,13 @@ class Observer:
             return
         if _is_awaitable(result):
             self._drive(result)
+        elif _is_undriven_generator(result):
+            # The sink returned an iterator rather than writing. Its body never ran, so the
+            # event reached nobody and is a lost event: the value written was never consumed,
+            # and an emitter that reported a clean state here would claim a delivery that never
+            # happened. The emitter does not drive it, because consuming a caller's stream is
+            # not instrumentation's to do.
+            self._lost_event()
 
     def _drive(self, awaitable: Any) -> None:
         """Finish an async write on this observer's own loop, or hand it to the caller's loop.
@@ -1135,13 +1190,25 @@ class Observer:
             pass
 
     async def _await_write(self, awaitable: Any) -> None:
+        """Await one write and contain its failure as a lost event, counted exactly once.
+
+        A cancelled write is a lost event, not an escape: a cancellation aimed at a write the
+        observer started must not travel out of instrumentation into the harness.
+
+        A :class:`GeneratorExit` is the one failure this must not count, because it is not the
+        write failing. It arrives only when something closes this coroutine while it is
+        suspended, and the emitter does that in :meth:`_drive`, on a path that is already
+        counting that same write as a lost event, so counting it here as well reported one lost
+        event as two. It is re-raised rather than swallowed, so the close finishes as the
+        language defines it and the loss is recorded once, by the guard that owns it.
+        """
         try:
             await awaitable
         except _INTERRUPTS:
             raise
+        except GeneratorExit:
+            raise
         except BaseException:
-            # A cancelled write is a lost event, not an escape: cancellation from a caller's
-            # sink must not travel out of instrumentation into the harness.
             self._lost_event()
 
     def _fail(self, error: BaseException) -> None:

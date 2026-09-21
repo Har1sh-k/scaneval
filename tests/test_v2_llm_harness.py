@@ -14,12 +14,14 @@ from scaneval.adapters.base import AdapterError, CommandResult, SystemSpec
 from scaneval.adapters.llm_harness import (
     HARNESS_PRESETS,
     TOOL_POLICY,
+    FindingsBaseline,
     capture_status,
     import_harness_findings,
     parse_frontmatter,
+    snapshot_findings,
 )
 from scaneval.contracts import canonical_sha256, load_document
-from scaneval.execution import PreparedInput, run_invocation
+from scaneval.execution import ExecutionError, PreparedInput, run_invocation
 from scaneval.materialize import hash_exported_tree
 from scaneval.scoring import score
 
@@ -65,12 +67,14 @@ def test_frontmatter_parser_handles_arrays_quoted_strings_and_numbers():
 def test_import_keeps_findings_file_only_with_full_native_text(tmp_path):
     findings = tmp_path / "findings"
     findings.mkdir()
+    baseline = snapshot_findings(findings)
     (findings / "a.md").write_text(FINDING, encoding="utf-8")
     (findings / "b.md").write_text(FINDING.replace("SV-AUTH-AUTHBYPASS-001", "SV-X-002").replace("./src/routes/admin.ts", "/abs/path.ts"), encoding="utf-8")
     (findings / "c.md").write_text("---\ntitle: no id\n---\nbody\n", encoding="utf-8")
     stage = tmp_path / "raw" / "harness-findings"
     imported = import_harness_findings(findings, harness="securevibes-agent",
-                                       artifact_prefix="harness-findings", stage_dir=stage)
+                                       artifact_prefix="harness-findings", stage_dir=stage,
+                                       baseline=baseline)
     assert imported.claims == [{
         "claim_id": "SV-AUTH-AUTHBYPASS-001", "allegation": "Route handler skips auth: token check missing",
         "kind": "auth_bypass", "primary_location": {"path": "src/routes/admin.ts"},
@@ -86,7 +90,8 @@ def test_import_keeps_findings_file_only_with_full_native_text(tmp_path):
     assert any("c.md" in note for note in imported.notes)
     assert imported.lost == 2, "a record that yields no claim is import loss, not a note on a clean scan"
     missing = import_harness_findings(tmp_path / "missing", harness="x", artifact_prefix="y",
-                                      stage_dir=tmp_path / "unused")
+                                      stage_dir=tmp_path / "unused",
+                                      baseline=snapshot_findings(tmp_path / "missing"))
     assert missing == ([], [], ["no findings directory was written by the harness"], 0)
     assert not (tmp_path / "unused").exists(), "nothing is staged when the harness wrote no findings"
 
@@ -94,12 +99,14 @@ def test_import_keeps_findings_file_only_with_full_native_text(tmp_path):
 def test_a_finding_record_that_is_not_a_regular_file_is_counted_as_import_loss(tmp_path):
     findings = tmp_path / "findings"
     findings.mkdir()
+    baseline = snapshot_findings(findings)
     (findings / "a.md").write_text(FINDING, encoding="utf-8")
     (findings / "link.md").symlink_to(findings / "a.md")
     (findings / "dir.md").mkdir()
     imported = import_harness_findings(findings, harness="securevibes-agent",
                                        artifact_prefix="harness-findings",
-                                       stage_dir=tmp_path / "raw" / "harness-findings")
+                                       stage_dir=tmp_path / "raw" / "harness-findings",
+                                       baseline=baseline)
 
     assert [claim["claim_id"] for claim in imported.claims] == ["SV-AUTH-AUTHBYPASS-001"]
     assert imported.lost == 2
@@ -426,3 +433,147 @@ def test_a_plan_record_that_is_not_a_regular_file_is_noted_rather_than_dropped(t
     assert result["status"] == "success", "a plan record is not a claim, so it does not degrade the scan"
     assert any("bootstrap-plan.md" in note and "not staged" in note for note in execution["notes"])
     assert "harness-bootstrap-plan.md" not in {artifact["id"] for artifact in execution["raw_artifacts"]}
+
+
+# --- provenance of the imported finding records ------------------------------------------
+
+
+PLANTED = FINDING.replace("SV-AUTH-AUTHBYPASS-001", "SV-PLANTED-000")
+
+
+def test_a_finding_record_the_input_already_shipped_is_not_imported_as_this_scan_s_finding(tmp_path):
+    """Importing whatever the directory holds at the end credited the scan with planted records.
+
+    The repository under test can ship a ``.securevibes/findings`` directory of its own. The
+    baseline taken before the scan is what separates those records from the ones this run wrote.
+    """
+    findings = tmp_path / "findings"
+    findings.mkdir()
+    (findings / "planted.md").write_text(PLANTED, encoding="utf-8")
+    baseline = snapshot_findings(findings)
+    (findings / "produced.md").write_text(FINDING, encoding="utf-8")
+
+    imported = import_harness_findings(findings, harness="securevibes-agent",
+                                       artifact_prefix="harness-findings",
+                                       stage_dir=tmp_path / "raw" / "harness-findings",
+                                       baseline=baseline)
+
+    assert [claim["claim_id"] for claim in imported.claims] == ["SV-AUTH-AUTHBYPASS-001"]
+    assert [artifact["id"] for artifact in imported.artifacts] == ["harness-findings/produced.md"]
+    assert imported.lost == 0, "a record the scan did not write is not a record the scan lost"
+    assert any("already in the exported input before the scan" in note for note in imported.notes)
+    assert not (tmp_path / "raw" / "harness-findings" / "planted.md").exists()
+
+
+def test_a_record_the_scan_rewrote_is_imported_even_though_its_name_was_already_there(tmp_path):
+    """Provenance is by bytes, not by name: new content under an old name is this scan's output."""
+    findings = tmp_path / "findings"
+    findings.mkdir()
+    (findings / "a.md").write_text(PLANTED, encoding="utf-8")
+    baseline = snapshot_findings(findings)
+    (findings / "a.md").write_text(FINDING, encoding="utf-8")
+
+    imported = import_harness_findings(findings, harness="securevibes-agent",
+                                       artifact_prefix="harness-findings",
+                                       stage_dir=tmp_path / "raw" / "harness-findings",
+                                       baseline=baseline)
+
+    assert [claim["claim_id"] for claim in imported.claims] == ["SV-AUTH-AUTHBYPASS-001"]
+    assert imported.lost == 0
+
+
+def test_a_findings_directory_that_cannot_be_listed_is_counted_and_noted(tmp_path):
+    """An enumeration failure used to read as an empty directory: no claims, no loss, no note.
+
+    ``Path.glob`` swallows the ``OSError`` the walk raises, so records the importer could not
+    even see contradicted the loss contract. The count is a floor, since the number of records
+    behind the failure is unknown.
+    """
+    findings = tmp_path / "findings"
+    findings.mkdir()
+    (findings / "a.md").write_text(FINDING, encoding="utf-8")
+    findings.chmod(0o000)
+    try:
+        imported = import_harness_findings(findings, harness="securevibes-agent",
+                                           artifact_prefix="harness-findings",
+                                           stage_dir=tmp_path / "raw" / "harness-findings",
+                                           baseline=snapshot_findings(findings))
+    finally:
+        findings.chmod(0o700)
+
+    assert imported.claims == [] and imported.artifacts == []
+    assert imported.lost == 1
+    assert any("could not be listed" in note and "unknown number" in note for note in imported.notes)
+
+
+def test_a_findings_path_that_is_not_a_directory_is_counted_and_noted(tmp_path):
+    """A regular file where the findings directory belongs is loss, not an empty harness run."""
+    findings = tmp_path / "findings"
+    findings.write_text("not a directory\n", encoding="utf-8")
+
+    imported = import_harness_findings(findings, harness="securevibes-agent",
+                                       artifact_prefix="harness-findings",
+                                       stage_dir=tmp_path / "raw" / "harness-findings",
+                                       baseline=snapshot_findings(findings))
+
+    assert imported.lost == 1
+    assert any("not a directory" in note for note in imported.notes)
+
+
+def test_a_baseline_that_could_not_be_established_attributes_nothing_to_the_scan(tmp_path):
+    """With no pre-scan listing, no record can be shown to be this scan's, so none is imported.
+
+    Every record is counted as lost instead, because one of them may have been the scan's own
+    and the outcome must not read as a complete or quiet observation.
+    """
+    findings = tmp_path / "findings"
+    findings.mkdir()
+    (findings / "a.md").write_text(FINDING, encoding="utf-8")
+    (findings / "b.md").write_text(PLANTED, encoding="utf-8")
+
+    imported = import_harness_findings(findings, harness="securevibes-agent",
+                                       artifact_prefix="harness-findings",
+                                       stage_dir=tmp_path / "raw" / "harness-findings",
+                                       baseline=FindingsBaseline({}, False, "the directory could not be listed"))
+
+    assert imported.claims == [] and imported.lost == 2
+    assert any("provenance could not be established" in note for note in imported.notes)
+
+
+def test_the_import_docstring_states_how_provenance_is_established_and_what_it_does_not_prove():
+    doc = " ".join((import_harness_findings.__doc__ or "").split())
+    assert "taken before the harness process started" in doc
+    assert "What this does not prove." in doc
+    assert "does not show that the harness's model produced them" in doc
+
+
+def test_an_input_that_ships_the_harness_state_directory_never_reaches_the_importer(tmp_path, monkeypatch):
+    """The outer layer: such an input is refused before the harness runs, so nothing is imported.
+
+    A repository that committed a ``.securevibes`` directory carries those bytes inside the
+    input hash the result would bind to, and the scanner would rewrite them. ``run_invocation``
+    refuses it. The baseline inside :func:`import_harness_findings` is the inner layer, for
+    records that appear in the directory after the run began.
+    """
+    prepared = _prepared(tmp_path)
+    findings = prepared.source_dir / HARNESS_PRESETS["securevibes-agent"]["state_dir"] / "findings"
+    findings.mkdir(parents=True)
+    (findings / "planted.md").write_text(PLANTED, encoding="utf-8")
+    prepared = PreparedInput(prepared.input_id, prepared.source_dir,
+                             hash_exported_tree(prepared.source_dir)["tree_hash"],
+                             prepared.languages, prepared.provenance)
+
+    root = _fake_harness_root(tmp_path)
+    sdk = tmp_path / "observer-sdk.js"
+    sdk.write_text("// stub\n", encoding="utf-8")
+    adapter = get_adapter("llm-harness")
+    spec = SystemSpec("sv-stub", "llm-harness", {
+        "harness": "securevibes-agent", "root": str(root), "model": "test/mock-llm",
+        "runner": "mock", "observer_sdk": str(sdk)})
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    _stub_driver(monkeypatch, {"good.md": FINDING})
+
+    with pytest.raises(ExecutionError, match=r"already contains adapter state directories \(\.securevibes\)"):
+        run_invocation(prepared=prepared, adapter=adapter, spec=spec, preparation=preparation,
+                       out_dir=tmp_path / "out", run_id="run-planted", timeout_seconds=60,
+                       trace_mode="off", network_policy="none", clock=CLOCK)

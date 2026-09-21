@@ -37,7 +37,10 @@
  * function each throw from the constructor, exactly as the Python `__init__` and
  * `_normalize_sink` raise on them, and `createJsonlSink` throws on a generator-function writer
  * for the same reason, as the Python `create_jsonl_sink` does. A harness author fixes wiring
- * once, before a run; nothing during a scan raises.
+ * once, before a run; nothing during a scan raises. Those checks are syntactic: a write that
+ * returns a generator rather than being one is invisible to them and is caught at write time,
+ * where the undriven iterator it handed back is counted as a lost event. Python draws that
+ * second line in the same place.
  */
 export const SCHEMA_VERSION = "2.0" as const;
 /**
@@ -387,6 +390,49 @@ function isGeneratorCallable(target: unknown): boolean {
   return prototype === generatorFunctionPrototype ||
     prototype === asyncGeneratorFunctionPrototype;
 }
+/* The prototypes every generator object and async generator object inherits, read once from
+   generators this module owns. A caller's `write` may RETURN one of these rather than being a
+   generator function, which `isGeneratorCallable` cannot see: that shape is only visible in the
+   value the write handed back. Comparing prototypes runs none of the caller's code, which is
+   why the value is not asked what it is. */
+const generatorObjectPrototype = Object.getPrototypeOf(
+  Object.getPrototypeOf((function* () {})()),
+);
+const asyncGeneratorObjectPrototype = Object.getPrototypeOf(
+  Object.getPrototypeOf((async function* () {})()),
+);
+/**
+ * True when a write handed back a generator instead of writing.
+ *
+ * The wiring guard classifies a callable, so a `write` that merely returns a generator passes
+ * it: calling such a function runs none of its body, the sink reports no failure, and every
+ * event is lost behind a capture state that still reads clean. That shape is caught here
+ * instead, at write time, and counted as a lost event, because the value written was never
+ * consumed. The emitter does not drive the iterator: consuming a caller's stream is not
+ * instrumentation's to do. Python's `_is_undriven_generator` makes the same call on the same
+ * two shapes, where the type can be compared exactly.
+ *
+ * The prototype chain is walked rather than the object questioned, because asking an object
+ * what it is reads properties a caller wrote and runs their code. That buys the guarantee at a
+ * stated price: a generator whose function's `prototype` was reassigned to a plain object
+ * carries no marker on its chain and is not recognized here, and no check that runs none of
+ * the caller's code can see it. The shape this catches is the one a harness actually writes.
+ */
+function isUndrivenGenerator(value: unknown): boolean {
+  if (
+    value === null ||
+    (typeof value !== "object" && typeof value !== "function")
+  ) return false;
+  let prototype = Object.getPrototypeOf(value as object);
+  while (prototype !== null) {
+    if (
+      prototype === generatorObjectPrototype ||
+      prototype === asyncGeneratorObjectPrototype
+    ) return true;
+    prototype = Object.getPrototypeOf(prototype);
+  }
+  return false;
+}
 /**
  * Vet the one callable a sink exposes, or throw. Called only in a recording mode.
  *
@@ -394,9 +440,11 @@ function isGeneratorCallable(target: unknown): boolean {
  * the way the Python `_normalize_sink` refuses them: a harness author fixes wiring once, before
  * a run, while nothing during a scan may raise. Left to runtime, a sink with no callable
  * `write` costs one lost event per emit and a generator function costs every event in silence,
- * with a capture state that still reads clean. Reading `write` can run a caller's getter, so a
- * failure there is reported as an unusable sink rather than allowed out of the constructor as
- * whatever it threw.
+ * with a capture state that still reads clean. The check is syntactic, so a `write` that
+ * returns a generator instead of being one passes it and is caught at write time by
+ * `isUndrivenGenerator` instead, where the returned iterator is visible. Reading `write` can
+ * run a caller's getter, so a failure there is reported as an unusable sink rather than
+ * allowed out of the constructor as whatever it threw.
  */
 function vetSink(sink: unknown): TraceSink {
   if (isGeneratorCallable(sink)) {
@@ -439,8 +487,11 @@ export interface ObserverOptions {
  * author fixes wiring once at wiring time and nothing during a scan raises. An unusable sink is
  * one whose `write` is not callable, one whose `write` is a generator or async generator
  * function, and the sink itself being such a function: calling one of those returns an iterator
- * and writes nothing. The mode is checked before anything else, and an unknown mode is by
- * definition not `off`, so there is no mode in which a misspelled one is tolerated. In `off`
+ * and writes nothing. A `write` that returns a generator rather than being one is the same
+ * silence in a shape no wiring check can see, so it constructs and is counted at write time,
+ * one lost event per event it swallowed. The mode is checked before anything else, and an
+ * unknown mode is by definition not `off`, so there is no mode in which a misspelled one is
+ * tolerated. In `off`
  * mode the sink is not inspected at all, not even for that `write` property: a getter there is
  * caller code, and an observer that records nothing must run none of it.
  *
@@ -860,7 +911,15 @@ export class Observer {
       return event;
     }
     try {
-      await this.sink.write(event);
+      const written: unknown = this.sink.write(event);
+      if (isUndrivenGenerator(written)) {
+        // The sink returned an iterator rather than writing. Its body never ran, so this event
+        // reached nobody: the value written was never consumed, and a state that still read
+        // clean here would claim a delivery that never happened.
+        this.lostEvent();
+        return event;
+      }
+      await written;
     } catch {
       this.lostEvent();
     }
@@ -941,7 +1000,10 @@ export class Observer {
  * line is never written, the sink reports no failure, and every event is lost in silence behind
  * a capture state that still reads clean. This is `isGeneratorCallable`, the classification
  * `vetSink` already applies to a sink, applied one layer down to the writer a sink is built
- * from. The Python `create_jsonl_sink` refuses the same writer for the same reason.
+ * from. The Python `create_jsonl_sink` refuses the same writer for the same reason. A writer
+ * that is an ordinary function returning an undriven generator cannot be classified from the
+ * outside and is not refused here: the observer writing through this sink sees the iterator
+ * that comes back and counts the event as lost.
  */
 export function createJsonlSink(
   writeLine: (line: string) => void | Promise<void>,

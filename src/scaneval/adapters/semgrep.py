@@ -27,6 +27,11 @@ Raw output files are create-only. ``semgrep.json``, ``semgrep.stderr.txt``,
 ``semgrep-version.txt`` and ``semgrep-version.stderr.txt`` are claimed with an exclusive
 create before the process starts, so an existing file under the supplied raw directory is a
 setup failure rather than silently replaced evidence.
+
+A result the importer cannot turn into a claim is import loss, not a detail: it is counted,
+and a count above zero degrades the outcome to ``partial`` with unresolved bundles and error
+code ``import_loss``, so a scan that reported a finding ScanEval could not read can earn
+neither completeness nor silence credit for it.
 """
 
 from __future__ import annotations
@@ -37,7 +42,7 @@ from pathlib import Path
 import re
 import shutil
 import sys
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..kinds import cwe_ids, kind_for_cwes, mapping_version
 from ..materialize import MaterializationError, fetch_snapshot, sha256_file, tree_hash
@@ -273,8 +278,23 @@ def _line_number(item: dict, index: int, key: str) -> int:
     return int(line)
 
 
+class SemgrepImport(NamedTuple):
+    """One import of a Semgrep JSON ``results`` array.
+
+    ``lost`` is the number of results the importer could not turn into a claim. It is part of
+    the return shape rather than a note, for the same reason
+    :class:`~scaneval.adapters.llm_harness.HarnessImport` carries one: the caller must degrade
+    the outcome when it is above zero, because a result ScanEval dropped is a finding Semgrep
+    did report, so the scan cannot stand as a complete or quiet observation of the input.
+    """
+
+    claims: list[dict]
+    notes: list[str]
+    lost: int
+
+
 def import_semgrep_results(payload: dict, *, artifact_id: str = ARTIFACT_JSON,
-                           ruleset_roots=(), config_dirs=()) -> tuple[list[dict], list[str]]:
+                           ruleset_roots=(), config_dirs=()) -> SemgrepImport:
     """Translate Semgrep JSON ``results`` into atomic claims without inventing evidence.
 
     ``ruleset_roots`` is the preferred input: stripping the rules checkout root leaves
@@ -304,7 +324,11 @@ def import_semgrep_results(payload: dict, *, artifact_id: str = ARTIFACT_JSON,
     drive-prefixed path, one that names nothing once its dot segments are removed, one that
     leaves the tree through ``..``, or one holding a NUL byte) is neither rewritten nor
     recorded: a claim location must be a relative path, so that result contributes a note
-    naming it and its reason instead of a claim.
+    naming it and its reason instead of a claim, and it is counted in ``lost``. ``lost`` is
+    every result Semgrep reported that did not become a claim, and the caller must degrade the
+    outcome when it is above zero: a dropped result is a finding Semgrep did report, so the
+    scan can earn neither completeness nor quiet credit for that file. A shape error is not
+    counted here at all, because it raises ``AdapterError`` and abandons the whole payload.
 
     Whether an unshortened id is also *noted* is a heuristic keyed on the supplied roots'
     leading segments: the note fires only when the id's first segment is one of those segments
@@ -314,6 +338,7 @@ def import_semgrep_results(payload: dict, *, artifact_id: str = ARTIFACT_JSON,
     """
     claims: list[dict] = []
     notes: list[str] = []
+    lost = 0
     _require(isinstance(payload, dict), f"semgrep JSON payload is a {_shape(payload)}, not an object")
     results = payload.get("results")
     if not isinstance(results, list):
@@ -395,7 +420,9 @@ def import_semgrep_results(payload: dict, *, artifact_id: str = ARTIFACT_JSON,
         if unusable:
             # Every field of the result was still read and type-checked above, so a malformed
             # payload is reported whether or not its location can be used; only the claim is
-            # left out, because a claim location has to be a relative path.
+            # left out, because a claim location has to be a relative path. Semgrep reported a
+            # finding here and ScanEval is delivering none, so it counts as import loss.
+            lost += 1
             notes.append(f"result {index}: path {raw_path!r} cannot be expressed as a path inside the scanned "
                          f"tree ({unusable}); no claim was recorded for it and the raw payload keeps the result "
                          "verbatim")
@@ -406,7 +433,7 @@ def import_semgrep_results(payload: dict, *, artifact_id: str = ARTIFACT_JSON,
                      "matches; native_rule_id keeps those ids verbatim and may contain a machine path")
     if login_gated:
         notes.append("Semgrep OSS omitted matched source text and fingerprints (requires login); evidence_text left absent")
-    return claims, notes
+    return SemgrepImport(claims, notes, lost)
 
 
 def _integer_config(spec: SystemSpec, key: str, default: int, minimum: int) -> int:
@@ -589,6 +616,13 @@ class SemgrepAdapter(Adapter):
         output files are created exclusively under *raw_dir*: a bad value, and an output file
         that is already there, are setup failures (``AdapterError``), not a scan whose output
         can be interpreted. Nothing under *raw_dir* is replaced.
+
+        A result Semgrep reported that the importer could not turn into a claim sets
+        ``bundles_resolved`` false for every outcome built after the import, names itself in
+        whichever failure message that branch already carries, and, where the run would
+        otherwise have been a clean success, makes the outcome ``partial`` with error code
+        ``import_loss``. A timeout and an unreadable payload return before the import, so
+        neither reports a loss count: nothing was imported at all.
         """
         binary = _binary(spec)
         rule_timeout = _integer_config(spec, "rule_timeout_seconds", 30, minimum=0)
@@ -627,11 +661,12 @@ class SemgrepAdapter(Adapter):
             ruleset_root = preparation.get("ruleset_root")
             # config_dirs stays as the fallback so a preparation recorded before ruleset_root
             # existed still keeps the cache path out of native_rule_id.
-            claims, notes = import_semgrep_results(
+            imported = import_semgrep_results(
                 payload,
                 ruleset_roots=(ruleset_root,) if isinstance(ruleset_root, str) and ruleset_root else (),
                 config_dirs=config_dirs,
             )
+            claims, notes = imported.claims, imported.notes
             fatal, malformed_errors = _error_entries(payload)
             scanned, scanned_reported = _path_list(payload, "scanned")
             skipped, _ = _path_list(payload, "skipped")
@@ -647,6 +682,21 @@ class SemgrepAdapter(Adapter):
                                  error={"code": "unparseable_output", "message": message[:2000]}, **base)
         base["notes"] = base["notes"] + notes
         base["tool_versions"]["semgrep_reported"] = reported_version
+        # Import loss leaves the claim set incomplete, so the bundles it delivers are not
+        # resolved: the scoring contract then refuses both completed-control and quiet credit.
+        base["bundles_resolved"] = imported.lost == 0
+        loss_message = None
+        if imported.lost:
+            loss_message = (f"{imported.lost} semgrep result(s) could not be imported: "
+                            + "; ".join(notes))[:2000]
+            base["notes"].append(
+                f"Import loss: {imported.lost} result(s) semgrep reported could not be imported, so "
+                "this scan can earn neither completeness nor quiet credit.")
+
+        def with_loss(message: str) -> str:
+            """The branch's own message, with the import loss named beside it."""
+            return f"{message}; {loss_message}"[:2000] if loss_message else message
+
         if malformed_errors:
             base["notes"].append(f"{malformed_errors} entries in the Semgrep errors array were not objects and "
                                  "could not be classified; see raw semgrep.json errors")
@@ -658,12 +708,12 @@ class SemgrepAdapter(Adapter):
                 # Nothing was scanned and nothing was reported: this run produced no output at
                 # all, so it is an error. Calling it partial would let a failed invocation read
                 # as a quiet negative result.
-                message = (f"semgrep exited {result.exit_code} with no scanned paths and no results"
-                           f"{detail}; stderr: {tail_text(stderr)}")
+                message = with_loss(f"semgrep exited {result.exit_code} with no scanned paths and no "
+                                    f"results{detail}; stderr: {tail_text(stderr)}")
                 return NativeOutcome(status="error", exit_code=result.exit_code, claims=[],
                                      error={"code": f"exit_{result.exit_code}", "message": message[:2000]}, **base)
-            message = (f"semgrep exited {result.exit_code} after scanning {len(scanned)} paths"
-                       f"{detail}; stderr: {tail_text(stderr)}")
+            message = with_loss(f"semgrep exited {result.exit_code} after scanning {len(scanned)} "
+                                f"paths{detail}; stderr: {tail_text(stderr)}")
             return NativeOutcome(status="partial", exit_code=result.exit_code, claims=claims,
                                  error={"code": f"exit_{result.exit_code}", "message": message[:2000]}, **base)
         if fatal:
@@ -674,16 +724,16 @@ class SemgrepAdapter(Adapter):
                 # Exit 0 does not make this a clean run: nothing was scanned and nothing was
                 # reported, so the invocation observed no source at all. Calling it partial
                 # would let a failed run read as a quiet negative result.
-                message = ("semgrep exited 0 with error-level diagnostics, no scanned paths and "
-                           f"no results{detail}; stderr: {tail_text(stderr)}")
+                message = with_loss("semgrep exited 0 with error-level diagnostics, no scanned paths "
+                                    f"and no results{detail}; stderr: {tail_text(stderr)}")
                 return NativeOutcome(status="error", exit_code=0, claims=[],
                                      error={"code": "scan_errors", "message": message[:2000]}, **base)
             # The same shape as every other failure message here: what the run did, the first
             # diagnostic when it carries one, and the stderr tail. Reporting the diagnostic
             # alone left an empty message whenever Semgrep sent an empty one, and dropped the
             # only other place the reason could be.
-            message = (f"semgrep exited 0 after scanning {len(scanned)} paths with {len(fatal)} error-level "
-                       f"diagnostics{detail}; stderr: {tail_text(stderr)}")
+            message = with_loss(f"semgrep exited 0 after scanning {len(scanned)} paths with {len(fatal)} "
+                                f"error-level diagnostics{detail}; stderr: {tail_text(stderr)}")
             return NativeOutcome(status="partial", exit_code=0, claims=claims,
                                  error={"code": "scan_errors", "message": message[:2000]}, **base)
         if skipped:
@@ -694,9 +744,14 @@ class SemgrepAdapter(Adapter):
         elif not scanned and not claims:
             # An explicit empty scanned list means Semgrep opened no file. Silence from a scan
             # that read nothing is missing evidence, not a clean negative control.
-            message = ("semgrep exited 0 having scanned no files and reported no results: Semgrep looked at no "
-                       "source at all, which its ignore rules, an empty tree, or a default-ignored directory "
-                       f"layout can cause; stderr: {tail_text(stderr)}")
+            message = with_loss("semgrep exited 0 having scanned no files and reported no results: Semgrep "
+                                "looked at no source at all, which its ignore rules, an empty tree, or a "
+                                f"default-ignored directory layout can cause; stderr: {tail_text(stderr)}")
             return NativeOutcome(status="error", exit_code=0, claims=[],
                                  error={"code": "nothing_scanned", "message": message[:2000]}, **base)
+        if loss_message:
+            # A scan whose results did not all survive the import is not a clean run: it is
+            # partial, and the count and the reason travel with it as an explicit error.
+            return NativeOutcome(status="partial", exit_code=0, claims=claims,
+                                 error={"code": "import_loss", "message": loss_message}, **base)
         return NativeOutcome(status="success", exit_code=0, claims=claims, **base)

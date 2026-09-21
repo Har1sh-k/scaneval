@@ -18,9 +18,10 @@ from scaneval import execution as execution_module
 from scaneval.adapters import get_adapter
 from scaneval.adapters.base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command
 from scaneval.adapters.semgrep import SemgrepAdapter, import_semgrep_results
-from scaneval.contracts import ContractError, load_document, validate_document
+from scaneval.contracts import ContractError, canonical_sha256, load_document, validate_document
 from scaneval.execution import ExecutionError, PreparedInput, _write_new, invocation_id, run_invocation
 from scaneval.materialize import hash_exported_tree, sha256_file
+from scaneval.scoring import score
 
 
 CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
@@ -466,7 +467,9 @@ class HostileAdapter(FakeAdapter):
         raw_dir = kwargs["raw_dir"]
         if self.hostility == "directory-artifact":
             (raw_dir / "dump").mkdir()
-            outcome.artifacts = [{"id": "dump", "path": raw_dir / "dump"}]
+            # Declared beside the real artifact the claim cites, not instead of it: a claim
+            # left citing a dropped artifact is a contract violation of its own, tested below.
+            outcome.artifacts.append({"id": "dump", "path": raw_dir / "dump"})
         if self.hostility == "state-squat":
             (raw_dir / "harness-state" / "fakestate").mkdir(parents=True)
         if self.hostility == "cyclic-claim":
@@ -503,13 +506,21 @@ def test_a_post_scan_failure_the_adapter_caused_is_a_recorded_violation(tmp_path
 
 
 def test_a_directory_declared_as_an_artifact_is_noted_rather_than_hashed(tmp_path):
-    """A directory has no bytes of its own, so it joins the symlink and the missing file as a note."""
+    """A directory has no bytes of its own, so it joins the symlink and the missing file as a note.
+
+    The directory is now declared alongside the regular file this adapter's claim cites, rather
+    than replacing it. Declaring it alone used to leave the claim citing ``native``, an id the
+    result no longer registered, and the bundle still read success; the scan-result contract
+    refuses that reference, so keeping the old fixture would test the dangling reference instead
+    of the unhashable directory this test is about.
+    """
     bundle = run(tmp_path, HostileAdapter("directory-artifact"))
 
     result = load_document(bundle / "result.json", "scan-result")
     execution = load_document(bundle / "execution.json", "execution-record")
     assert result["status"] == "success"
-    assert "raw_artifacts" not in result and execution["raw_artifacts"] == []
+    assert [artifact["id"] for artifact in result["raw_artifacts"]] == ["native"]
+    assert [artifact["id"] for artifact in execution["raw_artifacts"]] == ["native"]
     assert "declared artifact is not a regular file and was not hashed: dump" in execution["notes"]
     assert (bundle / "raw" / "dump").is_dir()
 
@@ -808,9 +819,9 @@ def test_semgrep_import_preserves_native_identity_and_never_invents_evidence():
         {"check_id": "custom.rule", "path": "lib/x.py", "start": {"line": 9, "col": 1}, "end": {"line": 8, "col": 1},
          "extra": {"message": "", "fingerprint": "abc123", "lines": "x = eval(y)", "metadata": {"cwe": "CWE-95: Eval"}}},
     ]}
-    claims, notes = import_semgrep_results(payload, config_dirs=["/tmp/cache/rules__abc/python"])
+    claims, notes, lost = import_semgrep_results(payload, config_dirs=["/tmp/cache/rules__abc/python"])
     payload["results"][0]["check_id"] = "tmp.cache.rules__abc.python.python.lang.security.audit.subprocess-shell-true"
-    claims, notes = import_semgrep_results(payload, config_dirs=["/tmp/cache/rules__abc/python"])
+    claims, notes, _lost = import_semgrep_results(payload, config_dirs=["/tmp/cache/rules__abc/python"])
     assert claims[0] == {"claim_id": "c1", "allegation": "shell=True is dangerous", "kind": "command_injection",
                          "primary_location": {"path": "src/app.py", "start_line": 3, "end_line": 4},
                          "native_rule_id": "python.lang.security.audit.subprocess-shell-true",
@@ -976,16 +987,16 @@ def test_semgrep_import_keeps_the_rule_id_relative_to_the_pinned_ruleset_root():
          "path": "pkg/proxy.go", "start": {"line": 12, "col": 1}, "end": {"line": 12, "col": 40},
          "extra": {"message": "shared url struct mutated", "severity": "ERROR", "metadata": {}}},
     ]}
-    claims, _ = import_semgrep_results(payload, ruleset_roots=["/Users/x/cache/rules__abc"])
+    claims, _notes, _lost = import_semgrep_results(payload, ruleset_roots=["/Users/x/cache/rules__abc"])
     assert claims[0]["native_rule_id"] == "go.lang.security.shared-url-struct-mutation"
     # The machine path is still absent, which is the property the config_dirs behavior had.
     assert "Users" not in claims[0]["native_rule_id"] and "cache" not in claims[0]["native_rule_id"]
 
     # A supplied root wins over config_dirs; config_dirs alone keeps its older, narrower behavior.
-    claims, _ = import_semgrep_results(payload, ruleset_roots=["/Users/x/cache/rules__abc"],
+    claims, _notes, _lost = import_semgrep_results(payload, ruleset_roots=["/Users/x/cache/rules__abc"],
                                        config_dirs=["/Users/x/cache/rules__abc/go"])
     assert claims[0]["native_rule_id"] == "go.lang.security.shared-url-struct-mutation"
-    claims, _ = import_semgrep_results(payload, config_dirs=["/Users/x/cache/rules__abc/go"])
+    claims, _notes, _lost = import_semgrep_results(payload, config_dirs=["/Users/x/cache/rules__abc/go"])
     assert claims[0]["native_rule_id"] == "lang.security.shared-url-struct-mutation"
 
 
@@ -1039,3 +1050,211 @@ def test_semgrep_zero_exit_with_fatal_diagnostics_after_scanning_stays_partial(t
     assert outcome.exit_code == 0 and outcome.error["code"] == "scan_errors"
     assert "Rule timeout on app.py" in outcome.error["message"]
     assert [claim["native_rule_id"] for claim in outcome.claims] == ["probe.rule"]
+
+
+# --- referential integrity of cited evidence --------------------------------------------
+
+
+class CitingAdapter(FakeAdapter):
+    """Declares one real artifact and makes its claim cite the id named at construction."""
+
+    def __init__(self, cited: str, *, declare: bool = True):
+        super().__init__()
+        self.cited = cited
+        self.declare = declare
+
+    def scan(self, **kwargs):
+        raw_dir = kwargs["raw_dir"]
+        native = raw_dir / "native.json"
+        native.write_text('{"findings": []}\n', encoding="utf-8")
+        artifacts = [{"id": "native", "path": native}] if self.declare else []
+        return NativeOutcome(
+            status="success", exit_code=0, command=["citing", "scan"],
+            claims=[{"claim_id": "c1", "allegation": "shell=True with caller-controlled cmd",
+                     "kind": "command_injection",
+                     "primary_location": {"path": "app.py", "start_line": 3, "end_line": 3},
+                     "raw_artifact_id": self.cited}],
+            artifacts=artifacts)
+
+
+def test_a_claim_citing_an_artifact_the_bundle_never_registered_is_a_recorded_import_failure(tmp_path):
+    """A claim's evidence must exist: an invented artifact id is a failed import, not a success.
+
+    The dangling reference used to survive untouched, so the bundle read success with
+    bundles_resolved true while the claim pointed at a record nobody could open.
+    """
+    bundle = run(tmp_path, CitingAdapter("nothing-here"))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "import_contract_violation"
+    assert "nothing-here" in result["error"]["message"]
+    assert execution["import_error"] is not None and "nothing-here" in execution["import_error"]
+    # The scanner's own output is still preserved; only the outcome it reported was refused.
+    assert (bundle / "raw" / "native.json").is_file()
+
+
+def test_a_claim_citing_an_artifact_dropped_while_collecting_is_a_recorded_import_failure(tmp_path):
+    """The artifact was declared, but the bundle could not hash it, so the citation dangles too.
+
+    ``build_documents`` drops a declared artifact that is missing, a link, or outside the
+    bundle. A claim still citing it names an id the result does not register, which the
+    scan-result contract now refuses.
+    """
+    bundle = run(tmp_path, CitingAdapter("native", declare=False))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    assert result["status"] == "error"
+    assert result["error"]["code"] == "import_contract_violation"
+    assert "'native'" in result["error"]["message"]
+
+
+def test_a_claim_citing_a_declared_artifact_is_untouched(tmp_path):
+    """The control for the two tests above: a citation the bundle honors stays a clean success."""
+    bundle = run(tmp_path, CitingAdapter("native"))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    assert result["status"] == "success" and result["bundles_resolved"] is True
+    assert result["claims"][0]["raw_artifact_id"] == "native"
+    assert [artifact["id"] for artifact in result["raw_artifacts"]] == ["native"]
+
+
+# --- one definition of the input tree ---------------------------------------------------
+
+
+def test_the_input_tree_is_the_same_tree_the_exported_hash_covers(tmp_path):
+    """``_input_tree`` with nothing excluded must select exactly what ``hash_exported_tree`` does.
+
+    The two used to disagree: the modification check excluded the adapter's state directories
+    and the hash did not, so a scanner writing into one changed the hashed tree without being
+    reported as having modified the source. They are pinned to each other here.
+    """
+    tree = tmp_path / "tree"
+    (tree / "src").mkdir(parents=True)
+    (tree / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (tree / ".fakestate").mkdir()
+    (tree / ".fakestate" / "notes.md").write_text("scanner scratch\n", encoding="utf-8")
+    (tree / ".git").mkdir()
+    (tree / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (tree / "link.py").symlink_to(tree / "src" / "app.py")
+
+    full = execution_module._input_tree(tree, frozenset())
+    assert sorted(full) == [".fakestate/notes.md", "src/app.py"], "no .git, no symlink"
+    assert execution_module.tree_hash(full) == hash_exported_tree(tree)["tree_hash"]
+    assert hash_exported_tree(tree)["file_count"] == len(full)
+
+    carved = execution_module._input_tree(tree, frozenset({".fakestate"}))
+    assert sorted(carved) == ["src/app.py"]
+    assert execution_module.tree_hash(carved) != hash_exported_tree(tree)["tree_hash"]
+
+
+def test_an_input_that_already_holds_an_adapter_state_directory_is_refused(tmp_path):
+    """The carve-out for state directories is only sound while the input carries none.
+
+    ``prepared.tree_hash`` covers the whole export, and the pre-scan check now hashes the same
+    map the modification check watches, so an input shipping ``.fakestate`` cannot match and is
+    refused before the scanner runs instead of having those bytes rewritten unwatched.
+    """
+    prepared = prepared_input(tmp_path)
+    (prepared.source_dir / ".fakestate").mkdir()
+    (prepared.source_dir / ".fakestate" / "planted.md").write_text("shipped by the repo\n", encoding="utf-8")
+    prepared = PreparedInput(prepared.input_id, prepared.source_dir,
+                             hash_exported_tree(prepared.source_dir)["tree_hash"],
+                             prepared.languages, prepared.provenance)
+
+    with pytest.raises(ExecutionError, match=r"already contains adapter state directories \(\.fakestate\)"):
+        run(tmp_path, FakeAdapter(), prepared)
+
+
+def test_a_scanner_writing_only_its_state_directory_is_not_reported_as_modifying_the_source(tmp_path):
+    """The state directory the scanner creates is its own scratch space, preserved separately.
+
+    It is outside the input tree on both sides of the comparison now, rather than outside one
+    of them, so this stays a clean observation of the frozen input and the captured state is
+    still recorded.
+    """
+    bundle = run(tmp_path, FakeAdapter())
+
+    execution = load_document(bundle / "execution.json", "execution-record")
+    result = load_document(bundle / "result.json", "scan-result")
+    assert execution["provenance"]["source_modified"] is False
+    assert execution["provenance"]["captured_state_dirs"] == [".fakestate"]
+    assert result["status"] == "success"
+    assert (bundle / "raw" / "harness-state" / "fakestate" / "notes.md").is_file()
+
+
+def test_the_input_tree_docstring_names_what_it_excludes_and_why():
+    doc = " ".join((execution_module._input_tree.__doc__ or "").split())
+    assert "one definition of the input tree" in doc
+    assert "``.git`` component" in doc and "state_dirs*" in doc
+    assert "scanner's private scratch space" in doc
+
+
+# --- neither failure mode can buy silence credit -----------------------------------------
+
+
+def _quiet_plan(result: dict) -> tuple[dict, dict]:
+    """One capability-safe control the reviewer assessed as quiet, over *result*."""
+    plan = {
+        "schema_version": "2.0", "input_hash": result["input_hash"], "scope": "diagnostic",
+        "targets": [{"target_id": "T1", "description": "the planted root cause",
+                     "validation_level": "fixture"}],
+        "controls": [{"control_id": "C1", "description": "safe capability",
+                      "type": "capability_safe", "validation_level": "fixture"}],
+        "review_budgets": [3],
+    }
+    decisions = {
+        "schema_version": "2.0", "run_id": result["run_id"], "input_hash": result["input_hash"],
+        "result_sha256": canonical_sha256(result),
+        "claim_matches": [],
+        "control_assessments": [{"control_id": "C1", "decision": "quiet", "claim_ids": [],
+                                 "reason": "the scanner said nothing about the safe capability"}],
+    }
+    return plan, decisions
+
+
+def test_neither_a_dangling_artifact_reference_nor_a_semgrep_import_loss_earns_silence_credit(tmp_path):
+    """Both defects reach scoring as something other than a clean success, so quiet pays nothing.
+
+    A scan that cites evidence the bundle never registered, and a Semgrep run that lost a
+    result during import, both used to reach the scorer as ``success`` with resolved bundles
+    and collect full credit for saying nothing about the safe capability.
+    """
+    dangling = load_document(run(tmp_path / "a", CitingAdapter("nothing-here")) / "result.json",
+                             "scan-result")
+    assert dangling["status"] == "error" and dangling["error"]["code"] == "import_contract_violation"
+    plan, decisions = _quiet_plan(dangling)
+    report = score(plan, dangling, decisions)
+    controls = report["metrics"]["controls"]["capability_safe"]
+    assert controls["completed"] == 0 and controls["resolved"] == 0
+    assert controls["assessable_mass"] == 0.0 and report["metrics"]["completed"] is False
+    assert "Incomplete or failed execution cannot establish a successful negative control." in report["warnings"]
+
+    payload = {"version": "9.9.9", "paths": {"scanned": ["app.py"]}, "errors": [], "results": [
+        {"check_id": "probe.rule", "path": "app.py", "start": {"line": 1}, "end": {"line": 1},
+         "extra": {"message": "a finding ScanEval can place", "severity": "WARNING", "metadata": {}}},
+        {"check_id": "probe.rule", "path": "/etc/passwd", "start": {"line": 1}, "end": {"line": 1},
+         "extra": {"message": "a finding ScanEval cannot place", "severity": "WARNING", "metadata": {}}},
+    ]}
+    lossy = load_document(_semgrep_bundle(tmp_path / "b", payload) / "result.json", "scan-result")
+    assert lossy["status"] == "partial" and lossy["bundles_resolved"] is False
+    assert lossy["error"]["code"] == "import_loss" and "1 semgrep result(s)" in lossy["error"]["message"]
+    assert [claim["claim_id"] for claim in lossy["claims"]] == ["c1"]
+    plan, decisions = _quiet_plan(lossy)
+    report = score(plan, lossy, decisions)
+    controls = report["metrics"]["controls"]["capability_safe"]
+    assert controls["completed"] == 0 and controls["resolved"] == 0
+    assert controls["assessable_mass"] == 0.0 and report["metrics"]["claims_delivered"] is None
+    assert "Unresolved bundles: claim budgets and total atomic-claim burden are pending." in report["warnings"]
+
+
+def _semgrep_bundle(tmp_path: Path, payload: dict, exit_code: int = 0) -> Path:
+    """One real invocation bundle from the Semgrep adapter driven by the fake binary."""
+    prepared = prepared_input(tmp_path)
+    spec = SystemSpec("semgrep-fake", "semgrep", {"binary": str(fake_semgrep(tmp_path, payload, exit_code))})
+    preparation = {"ruleset": {"commit": "a" * 40, "tree_hash": "sha256:" + "b" * 64},
+                   "config_dirs": [str(tmp_path / "rules" / "python")],
+                   "ruleset_root": str(tmp_path / "rules")}
+    return run_invocation(prepared=prepared, adapter=SemgrepAdapter(), spec=spec, preparation=preparation,
+                          out_dir=tmp_path / "out", run_id="run-semgrep", clock=CLOCK)
