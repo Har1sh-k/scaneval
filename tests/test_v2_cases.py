@@ -1,7 +1,9 @@
-"""Case packs: drafts stay drafts, mechanical checks stop at L1, approval is explicit, plans degrade."""
+"""Case packs: drafts stay drafts, mechanical checks stop at L1, approval is explicit and covers
+the labels it named, and plans degrade."""
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -13,6 +15,7 @@ from scaneval.cases import (
     add_case,
     add_snapshot,
     admit_case,
+    approval_is_current,
     approve_case,
     build_plan,
     case_by_id,
@@ -20,7 +23,9 @@ from scaneval.cases import (
     draft_case_from_legacy,
     dump_json,
     evidence,
+    label_digest,
     latest_admission,
+    latest_approving_review,
     load_pack,
     mechanical_checks,
     new_pack,
@@ -57,6 +62,20 @@ def fixed_control(case_id: str = "widget-shell") -> dict:
         "assumptions": ["Default deployment."],
         "ruled_out_allegation": "Caller-controlled shell interpolation at this call site.",
         "locations": [{"path": "src/app.py", "start_line": 3, "end_line": 3, "role": "operation"}],
+        "evidence_ids": ["fix"],
+    }
+
+
+def safe_control(control_id: str = "C-widget-shell-safe") -> dict:
+    """A capability-safe control on the vulnerable snapshot, the one already checked and approved."""
+    return {
+        "control_id": control_id, "snapshot_id": "widget-abc", "type": "capability_safe",
+        "description": "The admin helper runs a fixed argument list.",
+        "property": "No caller-supplied string reaches a shell at this call site.",
+        "allowed_actors_inputs": "Operators on the host.",
+        "assumptions": ["Default deployment."],
+        "ruled_out_allegation": "Caller-controlled shell interpolation in the admin helper.",
+        "locations": [{"path": "src/app.py", "start_line": 1, "end_line": 1, "role": "operation"}],
         "evidence_ids": ["fix"],
     }
 
@@ -728,3 +747,232 @@ def test_a_legacy_fix_commit_without_an_advisory_is_not_a_public_disclosure():
                                      workload="conventional_application", component_role="application",
                                      represents=REPRESENTS)
     assert [e for e in advised["evidence"] if e["evidence_id"] == "fix-commit"][0]["origin"] == "public_advisory_and_maintainer_fix"
+
+
+def approved_pack(tmp_path: Path) -> dict:
+    """One checked case, screened as worth validating and approved at L3 by an independent reviewer."""
+    pack = make_pack()
+    mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)
+    set_disposition(pack, "widget-shell", "validate", "evidence reviewed")
+    approve_case(pack, "widget-shell", reviewer="R. Eviewer", role="independent_reviewer", level="L3",
+                 note="label established", clock=CLOCK)
+    return pack
+
+
+def test_an_approval_records_the_digest_of_the_labels_it_covers(tmp_path):
+    """The review names the content it read, so what it covers can be checked rather than assumed."""
+    pack = approved_pack(tmp_path)
+    case = case_by_id(pack, "widget-shell")
+
+    review = latest_approving_review(case)
+    assert review["labels_sha256"] == label_digest(case)
+    assert approval_is_current(case) is True
+    assert label_digest(case).startswith("sha256:")
+    # The digest covers the labels, not the record around them: evidence, disposition, notes, and
+    # the recorded reviews and checks say where a label came from, not what it alleges.
+    before = label_digest(case)
+    case["notes"].append("a curator's note")
+    case["evidence"].append(evidence("second", origin="research_note", kind="source_inspection",
+                                     reference="src/app.py"))
+    assert label_digest(case) == before
+    assert approval_is_current(case) is True
+    # Writing a label field back with the value it already holds is not a change either.
+    case["target"]["description"] = "cmd reaches subprocess with shell=True"
+    assert label_digest(case) == before and approval_is_current(case) is True
+
+
+def test_a_control_added_after_approval_cannot_ride_on_that_approval(tmp_path):
+    """Reproduces the inherited approval: a new control is outside every review recorded so far."""
+    pack = approved_pack(tmp_path)
+    plan, _ = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "reviewed" and [t["target_id"] for t in plan["targets"]] == ["T-widget-shell"]
+
+    case_by_id(pack, "widget-shell")["controls"].append(safe_control())
+    assert validate_document("case-pack", pack) is pack, "the pack is still a consistent record"
+
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "draft" and plan["targets"] == [] and plan["controls"] == []
+    assert any("widget-shell: excluded because the labels changed after the review" in note
+               for note in notes)
+    validation = case_by_id(pack, "widget-shell")["validation"]
+    assert validation["review_state"] == "human_approved" and validation["level"] == "L3", \
+        "code never withdraws a human review"
+    assert [review["reviewer"] for review in validation["reviews"]] == ["R. Eviewer"], \
+        "a review is a historical fact and is not erased"
+    assert approval_is_current(case_by_id(pack, "widget-shell")) is False
+
+    # A second review, of the labels as they now stand, is what plans the new control.
+    approve_case(pack, "widget-shell", reviewer="S. Econd", role="independent_reviewer", level="L3",
+                 note="the control was read too", clock=CLOCK)
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "reviewed" and notes == []
+    assert [(c["control_id"], c["validation_level"]) for c in plan["controls"]] == [
+        ("C-widget-shell-safe", "L3")]
+
+
+def test_removing_or_renaming_a_control_also_leaves_the_approval_behind(tmp_path):
+    """Adding is not the only edit: dropping or renaming a control changes what was reviewed."""
+    pack = approved_pack(tmp_path)
+    case_by_id(pack, "widget-shell")["controls"].append(safe_control())
+    approve_case(pack, "widget-shell", reviewer="S. Econd", role="independent_reviewer", level="L3",
+                 note="the control was read too", clock=CLOCK)
+    assert build_plan(pack, "widget-abc", HASH)[0]["scope"] == "reviewed"
+
+    renamed = copy.deepcopy(pack)
+    case_by_id(renamed, "widget-shell")["controls"][0]["control_id"] = "C-widget-shell-other"
+    plan, notes = build_plan(renamed, "widget-abc", HASH)
+    assert plan["scope"] == "draft" and plan["controls"] == []
+    assert any("the labels changed after the review" in note for note in notes)
+
+    dropped = copy.deepcopy(pack)
+    case_by_id(dropped, "widget-shell")["controls"] = []
+    plan, notes = build_plan(dropped, "widget-abc", HASH)
+    assert plan["scope"] == "draft" and plan["targets"] == []
+    assert any("the labels changed after the review" in note for note in notes)
+
+
+def test_reordering_controls_is_not_a_change_to_the_labels(tmp_path):
+    """The digest reads the controls as a set keyed by id, so list order alone is not content."""
+    pack = approved_pack(tmp_path)
+    case_by_id(pack, "widget-shell")["controls"].extend(
+        [safe_control(), safe_control("C-widget-shell-safe-2")])
+    approve_case(pack, "widget-shell", reviewer="S. Econd", role="independent_reviewer", level="L3",
+                 note="both controls were read", clock=CLOCK)
+    before = label_digest(case_by_id(pack, "widget-shell"))
+
+    case_by_id(pack, "widget-shell")["controls"].reverse()
+
+    assert label_digest(case_by_id(pack, "widget-shell")) == before
+    assert approval_is_current(case_by_id(pack, "widget-shell")) is True
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "reviewed" and notes == []
+    assert {c["control_id"] for c in plan["controls"]} == {"C-widget-shell-safe", "C-widget-shell-safe-2"}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("kind", "path_traversal"),
+        ("description", "a mechanism nobody reviewed"),
+        ("affected_input_or_authority", "the cmd parameter of POST /run"),
+        ("accepted_locations", [{"path": "src/app.py", "start_line": 2, "end_line": 2, "role": "sink"}]),
+        ("assumptions", ["The admin console is exposed to the internet."]),
+        ("matching_rules", ["Accept any claim naming src/app.py."]),
+    ],
+    ids=["kind", "description", "affected-input", "accepted-locations", "assumptions",
+         "matching-rules"],
+)
+def test_editing_an_approved_target_leaves_it_outside_the_recorded_review(tmp_path, field, value):
+    """Reproduces the edited target: every label field the reviewer read is bound to the approval."""
+    pack = approved_pack(tmp_path)
+
+    case_by_id(pack, "widget-shell")["target"][field] = value
+
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "draft" and plan["targets"] == []
+    assert any("the labels changed after the review" in note for note in notes)
+    assert approval_is_current(case_by_id(pack, "widget-shell")) is False
+
+
+def test_a_pack_whose_labels_changed_after_approval_is_refused_a_reviewed_scope_plan(tmp_path):
+    """The edited pack still loads, because the review is a record; it just plans nothing reviewed."""
+    pack = approved_pack(tmp_path)
+    case_by_id(pack, "widget-shell")["target"]["description"] = "a mechanism nobody reviewed"
+    path = tmp_path / "pack.json"
+    save_pack(path, pack)
+    loaded = load_pack(path)
+
+    plan, notes = build_plan(loaded, "widget-abc", HASH)
+
+    assert plan["scope"] == "draft" and plan["targets"] == [] and plan["controls"] == []
+    assert any("the labels changed after the review" in note for note in notes)
+    assert case_by_id(loaded, "widget-shell")["validation"]["reviews"][-1]["level"] == "L3"
+    # Restoring exactly what was reviewed brings the approval back: the digest reads content,
+    # not a sequence of edits.
+    case_by_id(loaded, "widget-shell")["target"]["description"] = "cmd reaches subprocess with shell=True"
+    plan, notes = build_plan(loaded, "widget-abc", HASH)
+    assert plan["scope"] == "reviewed" and notes == []
+
+
+def test_an_approval_recorded_before_digests_covers_no_current_labels(tmp_path):
+    """A review that never named the content it read cannot be shown to cover these labels."""
+    pack = approved_pack(tmp_path)
+    document = json.loads(json.dumps(pack))
+    for review in document["cases"][0]["validation"]["reviews"]:
+        del review["labels_sha256"]
+
+    assert validate_document("case-pack", document) is document, "an older pack still loads"
+
+    plan, notes = build_plan(document, "widget-abc", HASH)
+    assert plan["scope"] == "draft" and plan["targets"] == []
+    assert any("does not say which label content it covered" in note for note in notes)
+    assert approval_is_current(document["cases"][0]) is False
+
+
+PILOT_PACK = Path(__file__).resolve().parents[1] / "corpus" / "pilot" / "pack.json"
+
+
+@pytest.mark.skipif(not PILOT_PACK.is_file(), reason="no pilot pack in this checkout")
+def test_the_shipped_pilot_pack_still_loads_and_still_plans():
+    """The pilot pack predates the digest field and is draft, so nothing there needs rewriting."""
+    pack = load_pack(PILOT_PACK)
+
+    assert pack_summary(pack)["review_states"]["human_approved"] == 0
+    for snapshot in pack["snapshots"]:
+        plan, notes = build_plan(pack, snapshot["snapshot_id"], snapshot["tree_hash"])
+        assert plan["scope"] == "draft"
+        assert plan["targets"] or plan["controls"], notes
+        assert not any("after the review" in note for note in notes)
+
+
+def test_the_contract_refuses_a_level_no_recorded_approval_carries(tmp_path):
+    """Loading an edited pack must enforce the level the CLI enforces at approval time."""
+    pack = make_pack()
+    mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)
+    set_disposition(pack, "widget-shell", "validate", "evidence reviewed")
+    approve_case(pack, "widget-shell", reviewer="C. Urator", role="curator", level="L2",
+                 note="structure reviewed", clock=CLOCK)
+    assert validate_document("case-pack", pack) is pack
+
+    for claimed in ("L3", "L4"):
+        broken = json.loads(json.dumps(pack))
+        broken["cases"][0]["validation"]["level"] = claimed
+        with pytest.raises(ContractError,
+                           match=f"requires an approving review recorded at {claimed} or higher"):
+            validate_document("case-pack", broken)
+
+    approve_case(pack, "widget-shell", reviewer="R. Eviewer", role="independent_reviewer", level="L3",
+                 note="label established", clock=CLOCK)
+    raised = json.loads(json.dumps(pack))
+    raised["cases"][0]["validation"]["level"] = "L4"
+    with pytest.raises(ContractError, match="requires an approving review recorded at L4 or higher"):
+        validate_document("case-pack", raised)
+
+    # Levels are ordered, so the L3 approval does carry a lower claimed level.
+    lowered = json.loads(json.dumps(pack))
+    lowered["cases"][0]["validation"]["level"] = "L2"
+    assert validate_document("case-pack", lowered) is lowered
+
+
+@pytest.mark.parametrize("role", ["curator", "adjudicator"])
+def test_the_contract_refuses_a_reviewed_level_no_independent_reviewer_approved(tmp_path, role):
+    """L3 and L4 rest on an independent review, so a hand-edited role cannot supply one."""
+    pack = approved_pack(tmp_path)
+
+    broken = json.loads(json.dumps(pack))
+    broken["cases"][0]["validation"]["reviews"][0]["role"] = role
+
+    with pytest.raises(ContractError, match="requires an approving review at L3 or higher by an "
+                                            "independent_reviewer"):
+        validate_document("case-pack", broken)
+
+
+def test_a_rejecting_review_does_not_carry_a_level(tmp_path):
+    """Only an approving review carries a level; a rejection records the opposite decision."""
+    pack = approved_pack(tmp_path)
+
+    broken = json.loads(json.dumps(pack))
+    broken["cases"][0]["validation"]["reviews"][0]["decision"] = "unresolved"
+
+    with pytest.raises(ContractError, match="requires at least one recorded approving review"):
+        validate_document("case-pack", broken)

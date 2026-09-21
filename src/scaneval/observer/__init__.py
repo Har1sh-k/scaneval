@@ -16,6 +16,20 @@ sink costs a trace event and never the run being observed. ``dropped_events`` co
 that reached no sink; a failure that only degraded an event sets ``capture_gap`` and marks that
 event instead, because the event was still delivered.
 
+The guard covers checking what a hook returned as well as calling it, so a monotonic source
+whose reading cannot even be converted to a number costs the duration and a capture gap rather
+than the operation it was wired in to measure. An awaitable an observed operation returns is
+run exactly as the caller's own ``await`` would run it, in every mode, because an operation
+instrumentation quietly left unexecuted would be a behavior change rather than an observation.
+A write that reached no sink is counted whether it failed, was cancelled before it ever
+started, or was stranded by a loop closed before it could run: an event nobody received must
+never read as a complete trace.
+
+Wiring mistakes are refused once, at wiring time, rather than degraded through a whole run:
+:func:`create_jsonl_sink` refuses a generator-function line writer exactly as the
+:class:`Observer` constructor refuses a generator-function sink, because calling one returns an
+iterator and writes nothing.
+
 :data:`MAX_PAYLOAD_DEPTH` is exported because it is part of the shared contract rather than an
 implementation detail: both emitters refuse a metadata or content payload nested deeper than
 that many containers, so a harness can check its own payloads against the same number.

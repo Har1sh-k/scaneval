@@ -19,6 +19,8 @@ CONTRACT_KINDS = frozenset(
      "case-pack", "review-record", "run-config", "run-manifest"}
 )
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
+# Validation levels are ordered, so an approval at a higher level carries a lower claimed one.
+_LEVEL_RANK = {"L1": 1, "L2": 2, "L3": 3, "L4": 4}
 
 
 class ContractError(ValueError):
@@ -235,13 +237,19 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
     failed, and an L3/L4 label belongs only to a case screened as worth validating. A
     ``human_approved`` case makes the same claim about its check sets as a mechanically checked
     one unless it raises ``checks_failed``, and it cannot stand under a latest review that
-    rejected it. A snapshot whose recorded checks say its hash was confirmed must carry that
-    hash. Every recorded review names a reviewer and every admission names who decided it, by
-    the same :func:`is_stated` rule the write paths apply, so a hand-edited pack cannot claim a
-    review or an admission by an unnamed person. These compare recorded fields with each other:
-    none of them reads source, a reviewer, or a scanner, so a pack that passes here is
-    consistent, not correct. A stated name is a string with a character in it; whether it names
-    a real person who did the work is outside anything this file can see.
+    rejected it. Its level must be one a recorded approving review carries: an approval at that
+    level or higher, and for L3 or L4 one of those approvals must be by an ``independent_reviewer``,
+    so a hand-edited level cannot claim a review nobody recorded. A snapshot whose recorded checks
+    say its hash was confirmed must carry that hash. Every recorded review names a reviewer and
+    every admission names who decided it, by the same :func:`is_stated` rule the write paths
+    apply, so a hand-edited pack cannot claim a review or an admission by an unnamed person.
+    Whether a recorded approval still covers the labels as they stand is a planning question,
+    answered by :func:`scaneval.cases.approval_is_current`, not a consistency one: a pack whose
+    labels changed after a review is still a truthful record of that review and loads here.
+    These compare recorded fields with each other: none of them reads source, a reviewer, or a
+    scanner, so a pack that passes here is consistent, not correct. A stated name is a string
+    with a character in it; whether it names a real person who did the work is outside anything
+    this file can see.
     """
     snapshots = [snapshot["snapshot_id"] for snapshot in document["snapshots"]]
     _unique(snapshots, "snapshot_id")
@@ -304,6 +312,18 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
                 f"{label}: human_approved requires a recorded passing check set for every referenced "
                 f"snapshot, or validation.checks_failed to record that one failed; missing or failed "
                 f"for: {', '.join(unchecked)}")
+        if state == "human_approved" and validation["level"] is not None:
+            claimed = validation["level"]
+            carried = [r for r in approvals if _LEVEL_RANK[r["level"]] >= _LEVEL_RANK[claimed]]
+            if not carried:
+                recorded = ", ".join(sorted({r["level"] for r in approvals})) or "none"
+                raise ContractError(
+                    f"{label}: level {claimed} requires an approving review recorded at {claimed} or "
+                    f"higher; the recorded approvals are at {recorded}")
+            if claimed in ("L3", "L4") and not any(r["role"] == "independent_reviewer" for r in carried):
+                raise ContractError(
+                    f"{label}: {claimed} requires an approving review at {claimed} or higher by an "
+                    "independent_reviewer; no recorded approval carries that role")
         if validation["level"] in ("L3", "L4") and state != "human_approved":
             raise ContractError(f"{label}: {validation['level']} requires human_approved review state")
         if state == "draft" and validation["level"] is not None:

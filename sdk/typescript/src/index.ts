@@ -35,8 +35,9 @@
  * Wiring mistakes are refused at construction rather than degraded at runtime: an unknown
  * recording mode, a sink with no callable `write`, and a sink or a `write` that is a generator
  * function each throw from the constructor, exactly as the Python `__init__` and
- * `_normalize_sink` raise on them. A harness author fixes wiring once, before a run; nothing
- * during a scan raises.
+ * `_normalize_sink` raise on them, and `createJsonlSink` throws on a generator-function writer
+ * for the same reason, as the Python `create_jsonl_sink` does. A harness author fixes wiring
+ * once, before a run; nothing during a scan raises.
  */
 export const SCHEMA_VERSION = "2.0" as const;
 /**
@@ -932,9 +933,23 @@ export class Observer {
     return value;
   }
 }
-/** Adapt a caller-owned JSONL writer; the SDK never opens files automatically. */
+/**
+ * Adapt a caller-owned JSONL writer; the SDK never opens files automatically.
+ *
+ * A generator or async generator function is refused here, at creation, exactly as the
+ * constructor refuses a sink that is one: calling it returns an iterator nobody drives, so the
+ * line is never written, the sink reports no failure, and every event is lost in silence behind
+ * a capture state that still reads clean. This is `isGeneratorCallable`, the classification
+ * `vetSink` already applies to a sink, applied one layer down to the writer a sink is built
+ * from. The Python `create_jsonl_sink` refuses the same writer for the same reason.
+ */
 export function createJsonlSink(
   writeLine: (line: string) => void | Promise<void>,
 ): TraceSink {
+  if (isGeneratorCallable(writeLine)) {
+    throw new TypeError(
+      "jsonl writeLine must not be a generator function: calling one returns an iterator and writes nothing",
+    );
+  }
   return { write: (event) => writeLine(JSON.stringify(event) + "\n") };
 }

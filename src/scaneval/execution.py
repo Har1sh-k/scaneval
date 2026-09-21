@@ -20,6 +20,10 @@ recorded failures: the bundle then holds an error result and an execution record
 message, never a successful result beside a missing execution record. The staged raw output is
 preserved either way.
 
+A source the scanner modified is a changed execution condition rather than a scanner failure,
+and it is recorded as one: the result keeps the claims but goes partial with unresolved bundles,
+so it cannot stand as a clean observation of the frozen input it binds to.
+
 Directory separation documents the boundary; it does not enforce it. Network and
 filesystem policy are declared here and must be enforced outside this process.
 """
@@ -365,6 +369,13 @@ def run_invocation(
     because nothing in it can be trusted to describe the scan; the raw output it had already
     written is still staged into the bundle where the failure allowed it.
 
+    A source the scan itself changed is a condition change, not a scanner failure: when the
+    workspace source differs after the scan, an outcome that still carries claims is recorded as
+    ``partial`` with ``bundles_resolved`` false and, unless the adapter already named a failure of
+    its own, error code ``source_modified``. The claims stay, the modified paths stay in the
+    provenance, and nothing about the scanner's competence is asserted; what is withdrawn is the
+    result's claim to be a clean observation of the frozen input.
+
     Two things are narrower than they look. When the post-scan re-hash of the source fails, the
     comparison never completed, so the provenance reports no observed modification and the
     violation names the failed re-hash. And an adapter whose own ``name`` or ``adapter_version``
@@ -600,6 +611,24 @@ def run_invocation(
             # A trace this module cannot read as UTF-8 text is a recorded failure, not a
             # silently missing count beside an otherwise successful result.
             violation = f"trace file could not be read as UTF-8 text: {_failure_message(exc)}"
+
+    if violation is None and modified and outcome.status in ("success", "partial"):
+        # The scanner changed the tree it was given, so what it scanned is no longer the frozen
+        # input the result binds to. Only a status that still carries claims is touched: an
+        # error, a timeout, and an unsupported outcome already claim no observation at all.
+        outcome.status = "partial"
+        outcome.bundles_resolved = False
+        outcome.notes.append(
+            f"The exported source changed during the scan ({len(modified)} path(s): "
+            f"{', '.join(modified[:3])}); this result is not a clean observation of "
+            f"{prepared.tree_hash}.")
+        # An outcome that already named its own failure keeps that code: the note above, the
+        # partial status, and the provenance carry the changed condition.
+        outcome.error = outcome.error or {
+            "code": "source_modified",
+            "message": (f"the scanner modified {len(modified)} path(s) of the exported source "
+                        f"during the scan ({', '.join(modified[:3])}); the result is not a clean "
+                        f"observation of the frozen input")[:2000]}
 
     if violation is not None:
         outcome = _violation_outcome(violation)

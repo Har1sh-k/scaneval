@@ -29,8 +29,8 @@ evidence of absent activity.
 read, or an elapsed-time read that failed sets ``capture_gap`` and marks the event it degraded,
 but it does not increment the counter, because the event was still delivered: counting it there
 would report a loss that did not happen and hide the ones that did. A write queued on an event
-loop that is torn down before it runs is the opposite case, and is counted, because that event
-reached nobody.
+loop that is torn down before it runs, and one cancelled before it ever starts, are the
+opposite case, and are counted, because those events reached nobody.
 
 The wire contract is shared with ``sdk/typescript``, so the two emitters accept and reject the
 same inputs and, where they once differed, the stricter rule is the shared one:
@@ -81,6 +81,7 @@ import json
 import math
 import re
 import time
+from types import GeneratorType
 from typing import Any, Protocol
 import uuid
 
@@ -152,6 +153,12 @@ _EPOCH_TIMESTAMP = "1970-01-01T00:00:00.000Z"
 _INTERRUPTS = (KeyboardInterrupt, SystemExit)
 _MISSING = object()
 
+# ``CO_ITERABLE_COROUTINE``, the code flag :func:`types.coroutine` sets so ``await`` accepts a
+# generator. Spelled as the literal the interpreter uses rather than imported from ``inspect``,
+# so classifying a value costs no import and reads nothing off the caller's object beyond a
+# generator's own code flags.
+_CO_ITERABLE_COROUTINE = 0x100
+
 JsonObject = dict[str, Any]
 Redactor = Callable[[str, Any, "tuple[str, ...]"], Any]
 
@@ -182,10 +189,10 @@ class CaptureState:
     A write started inside a caller's event loop and not yet finished is neither counted nor
     reported here: it is not lost, and awaiting :meth:`Observer.aflush` is what settles it into
     either a delivered event or a counted loss. A write whose loop is torn down before it runs
-    is counted, because that event reached nobody. The three fields are the ones the TypeScript
-    emitter's capture state carries, so a reader joins the two by name. Zero dropped events is
-    not a claim that the harness emitted everything it should have: it only says nothing the
-    harness did emit was lost here.
+    and a write cancelled before it ever starts are both counted, because those events reached
+    nobody. The three fields are the ones the TypeScript emitter's capture state carries, so a
+    reader joins the two by name. Zero dropped events is not a claim that the harness emitted
+    everything it should have: it only says nothing the harness did emit was lost here.
     """
 
     dropped_events: int = 0
@@ -198,31 +205,62 @@ class JsonlSink:
     """Adapts a caller-owned line writer. The SDK never opens or closes a file itself.
 
     ``write_line`` receives one serialized event with a trailing newline and may be either a
-    plain callable or a coroutine function. Where those lines go, when they are fsynced, and
-    whether they are ever deleted are the caller's decisions, not this class's.
+    plain callable or a coroutine function. A generator function, or a callable object whose
+    ``__call__`` is one, is refused here rather than accepted: calling one returns an iterator
+    nobody drives, so the line is never written, the sink reports no failure, and every event
+    is lost with a capture state that still reads clean. That is the classification
+    :meth:`Observer._normalize_sink` already applies to a sink, applied one layer down to the
+    writer a sink is built from, so the same wiring mistake is refused at creation in both
+    places rather than losing every line at runtime in one of them. Where those lines go, when
+    they are fsynced, and whether they are ever deleted are the caller's decisions, not this
+    class's.
     """
 
     write_line: Callable[[str], Any]
+
+    def __post_init__(self) -> None:
+        if _is_generator_callable(self.write_line):
+            raise ValueError(
+                "jsonl write_line must not be a generator function: calling one returns an "
+                "iterator and writes nothing"
+            )
 
     def write(self, event: JsonObject) -> Any:
         return self.write_line(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
 def create_jsonl_sink(write_line: Callable[[str], Any]) -> JsonlSink:
-    """Wrap a caller-owned line writer as a sink. Opens nothing and captures no global stream."""
+    """Wrap a caller-owned line writer as a sink. Opens nothing and captures no global stream.
+
+    A generator-function writer raises here, at wiring time, exactly as one handed to the
+    :class:`Observer` constructor does, because a writer that returns an iterator writes
+    nothing and would cost every line in silence. The TypeScript ``createJsonlSink`` refuses
+    the same writer for the same reason.
+    """
     return JsonlSink(write_line)
 
 
 def _is_awaitable(value: Any) -> bool:
-    """True for coroutines, futures, and tasks, decided the way ``await`` itself decides.
+    """True for coroutines, futures, tasks, and iterable coroutines, as ``await`` decides it.
 
     The test is for ``__await__`` on the type, never on the instance. ``await`` resolves that
     name as a type slot, so an instance attribute named ``__await__`` is not awaitable however
     it looks, and reading the name off the instance would both answer differently than the
     language does and run caller code: a property or a ``__getattr__`` on an operation's return
     value is the caller's code, and instrumentation must not run it merely to classify the
-    value. Deliberately false for async generators, which define ``__aiter__`` instead.
+    value.
+
+    A generator marked by :func:`types.coroutine` is the one shape ``await`` accepts with no
+    ``__await__`` slot at all, so it is matched on the flag the interpreter itself reads.
+    Missing it meant :meth:`Observer.observe_async` handed such an awaitable straight back,
+    unrun, where the caller's own ``await`` would have run it: instrumentation decided whether
+    the caller's work happened, which is the one thing it may never do. The flag is read only
+    once the value is exactly a generator, a type that cannot be subclassed and whose
+    ``gi_code`` is an interpreter-level slot, so this still runs none of the caller's code.
+    Deliberately false for async generators, which define ``__aiter__`` instead.
     """
+    if type(value) is GeneratorType:
+        return bool(value.gi_code.co_flags & _CO_ITERABLE_COROUTINE)
     return any("__await__" in base.__dict__ for base in type(value).__mro__)
 
 
@@ -452,9 +490,11 @@ class Observer:
     defaults to :func:`time.monotonic`. It never falls back to ``clock``: a wall clock can be
     adjusted backwards or forwards between two reads, so measuring a span with one would record
     an elapsed time that never elapsed. A fixture that needs a pinned duration injects
-    ``monotonic`` explicitly. A duration that cannot be measured, because a read failed, the
-    source went backwards, or the span exceeds the shared safe-integer bound, is omitted from
-    the event and recorded as a capture gap rather than invented.
+    ``monotonic`` explicitly. A duration that cannot be measured, because a read failed, a
+    reading could not even be checked, the source went backwards, or the span exceeds the
+    shared safe-integer bound, is omitted from the event and recorded as a capture gap rather
+    than invented. A timing hook costs at most that duration: it never stops the operation it
+    was wired in to measure from running.
 
     Synchronous harnesses need no event loop: :meth:`emit`, :meth:`observe`, :meth:`flush`, and
     :meth:`close` are ordinary methods, and a sink that returns an awaitable is driven to
@@ -634,9 +674,12 @@ class Observer:
 
         The operation is called, and its result is awaited only when it is awaitable, so a
         plain value works too. Awaitable is decided on the result's type, the way ``await``
-        decides it, so classifying the result runs none of the caller's own code: in ``off``
-        mode this is as much a pass-through as the synchronous :meth:`observe`, which reads
-        nothing off the value at all. An async generator is not awaitable: it is returned
+        decides it, which includes a generator :func:`types.coroutine` marked: that awaitable
+        is run here exactly as the caller's own ``await`` would have run it, because an
+        operation the observer quietly left unexecuted would be a behavior change and not
+        instrumentation. Classifying the result runs none of the caller's own code, so in
+        ``off`` mode this is as much a pass-through as the synchronous :meth:`observe`, which
+        reads nothing off the value at all. An async generator is not awaitable: it is returned
         untouched and the duration covers only the call that created it, never the stream a
         caller later consumes. The awaited value is returned unchanged and an exception is
         re-raised as the original object. An unmeasurable duration is omitted and recorded as a
@@ -683,6 +726,12 @@ class Observer:
         very writes it failed to settle. Those writes are still the other loop's to run, and
         they are counted as lost only once that loop is gone.
 
+        A write that was cancelled before it started is counted here: it never reached the
+        guard inside :meth:`_await_write` that would have recorded it, and it is out of the
+        pending set that :meth:`_reap_lost_writes` reads, so nothing else would ever count an
+        event that reached no sink. A write cancelled after it started counted itself, and a
+        write that failed counted itself, so neither is counted twice.
+
         A sink that never returns makes this wait forever. That is deliberate: the emitter
         imposes no timeout, because cancelling a harness's write is a policy decision only the
         caller can make. Apply your own timeout around this call and report the result as
@@ -698,7 +747,7 @@ class Observer:
                 return
             self._pending.difference_update(batch)
             try:
-                await asyncio.gather(*batch, return_exceptions=True)
+                results = await asyncio.gather(*batch, return_exceptions=True)
             except BaseException as error:
                 # Evidence first: an unsettled write goes back into the pending set so the
                 # failure cannot erase the record of what it failed to settle.
@@ -707,6 +756,13 @@ class Observer:
                     raise
                 self._mark_gap()
                 return
+            for result in results:
+                if isinstance(result, asyncio.CancelledError):
+                    # A write cancelled before it started never reached :meth:`_await_write`,
+                    # so nothing inside it recorded the loss, and this batch is already out of
+                    # the pending set where :meth:`_reap_lost_writes` would have found it. The
+                    # event reached no sink: count it here or it is lost in silence.
+                    self._lost_event()
 
     def close(self) -> None:
         """Flush, then refuse later events. Not a coroutine, and it closes no caller resource.
@@ -740,6 +796,8 @@ class Observer:
         reached no sink, nobody else will ever count it, and a capture state that still read
         clean would be claiming a delivery that never happened. A write cancelled before it
         started is the same loss: :meth:`_await_write` never ran, so it never recorded itself.
+        That loss is counted once, here or in :meth:`_write_settled`, by whichever of the two
+        takes the write out of the pending set first.
         """
         for write in tuple(self._pending):
             try:
@@ -761,6 +819,35 @@ class Observer:
                     self._lost_event()
             elif unusable:
                 self._pending.discard(write)
+                self._lost_event()
+
+    def _write_settled(self, task: Any, awaitable: Any) -> None:
+        """Account for one queued write that has finished, however it finished.
+
+        A write cancelled before :meth:`_await_write` could run records nothing itself: the
+        wrapper coroutine is closed at its first line, so no guard inside it ever runs, and
+        simply forgetting the task here, as this callback once did, left an event that reached
+        no sink behind a capture state reading zero dropped events and no gap. An event nobody
+        received is a lost event whoever cancelled it, so it is counted, once, by whichever of
+        this callback and :meth:`_reap_lost_writes` takes the task out of the pending set.
+
+        The write the wrapper never awaited is closed whether or not this call is the one that
+        counted it, because an un-awaited coroutine becomes a ``RuntimeWarning`` in the
+        caller's process at collection time and instrumentation that failed must not also print
+        into a harness's output. Closing a finished or already closed awaitable does nothing.
+        """
+        try:
+            cancelled = task.cancelled()
+        except _INTERRUPTS:
+            raise
+        except BaseException:
+            # A task the emitter cannot even ask about is not one it can claim was delivered.
+            cancelled = True
+        if cancelled:
+            self._discard(awaitable)
+        if task in self._pending:
+            self._pending.discard(task)
+            if cancelled:
                 self._lost_event()
 
     @staticmethod
@@ -990,7 +1077,11 @@ class Observer:
                 self._fail_lost(error)
                 return
             self._pending.add(task)
-            task.add_done_callback(self._pending.discard)
+
+            def settled(finished: Any, write: Any = awaitable) -> None:
+                self._write_settled(finished, write)
+
+            task.add_done_callback(settled)
             return
         runner = self._runner()
         if runner is None:
@@ -1106,13 +1197,29 @@ class Observer:
         except BaseException as error:
             self._fail(error)
             return None
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            self._mark_gap()
+        return self._checked_monotonic(value)
+
+    def _checked_monotonic(self, value: Any) -> float | None:
+        """Classify one reading, containing whatever checking it raises.
+
+        Checking a reading is as much caller code as taking it: :func:`math.isfinite` and
+        :class:`float` both run a subclass's ``__float__`` and both raise on an integer too
+        large to convert to a float, and an unchecked raise here travelled out of
+        :meth:`observe` before the operation ran, so a timing hook could abort the very work it
+        was there to observe. Instrumentation may cost a duration and a capture gap; it may
+        never cost the operation. Only a caller's own interrupt still travels out.
+        """
+        try:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                self._mark_gap()
+                return None
+            if not math.isfinite(value):
+                self._mark_gap()
+                return None
+            return float(value)
+        except BaseException as error:
+            self._fail(error)
             return None
-        if not math.isfinite(value):
-            self._mark_gap()
-            return None
-        return float(value)
 
     def _elapsed_ms(self, began: float | None) -> int | None:
         """Whole milliseconds between two reads, or None when the span cannot be measured.
@@ -1156,10 +1263,13 @@ def _is_duration(value: Any) -> bool:
 
 
 async def _resolve(value: Any) -> Any:
-    """Await an awaitable, pass anything else back untouched. Never iterates a generator.
+    """Await an awaitable, pass anything else back untouched. Never iterates a stream.
 
-    What counts as awaitable is decided on the type, so a value that merely looks awaitable
-    from the outside is handed back rather than probed; nothing of the caller's runs here.
+    What counts as awaitable is :func:`_is_awaitable`, which answers as ``await`` answers, so a
+    value that merely looks awaitable from the outside is handed back rather than probed and a
+    generator :func:`types.coroutine` marked is awaited rather than handed back unrun; nothing
+    of the caller's runs here either way. A plain generator, an iterator, and an async
+    generator are streams and are passed through, never consumed.
     """
     if _is_awaitable(value):
         return await value

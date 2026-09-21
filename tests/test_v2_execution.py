@@ -94,6 +94,13 @@ class FakeAdapter(Adapter):
                    "native_rule_id": "fake.rule", "raw_artifact_id": "native"}]
         if self.behavior == "bad-claim":
             claims[0]["primary_location"]["path"] = "/etc/passwd"
+        if self.behavior == "modify-partial":
+            # A scanner that both degraded on its own and edited the source: the outcome already
+            # carries an error code, so the changed condition must not overwrite it.
+            (source_dir / "app.py").write_text("changed by scanner\n", encoding="utf-8")
+            return NativeOutcome(status="partial", exit_code=1, command=["fake", "scan"], claims=claims,
+                                 error={"code": "scanner_degraded", "message": "half the rules failed"},
+                                 artifacts=[{"id": "native", "path": native}])
         if self.behavior == "timeout":
             result = run_command([sys.executable, "-c", "import time; time.sleep(30)"], cwd=source_dir,
                                  timeout_seconds=0.5, env=build_env(), stdout_path=raw_dir / "out.txt",
@@ -144,6 +151,32 @@ def test_scanner_edits_to_source_are_detected(tmp_path):
     execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))
     assert execution["provenance"]["source_modified"] is True
     assert execution["provenance"]["modified_paths"] == ["app.py"]
+
+
+def test_a_modified_source_is_a_changed_condition_that_cannot_claim_a_clean_observation(tmp_path):
+    bundle = run(tmp_path, FakeAdapter("modify"))
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert result["status"] == "partial" and result["bundles_resolved"] is False
+    assert result["error"]["code"] == "source_modified" and "app.py" in result["error"]["message"]
+    assert execution["status"] == "partial" and execution["error"]["code"] == "source_modified"
+    # The condition changed; the scanner did not fail, so what it alleged is still reported.
+    assert [claim["claim_id"] for claim in result["claims"]] == ["c1"]
+    assert execution["provenance"]["source_modified"] is True
+    assert execution["provenance"]["modified_paths"] == ["app.py"]
+    assert any("not a clean observation" in note for note in execution["notes"])
+
+
+def test_a_modified_source_keeps_the_error_code_the_adapter_already_reported(tmp_path):
+    bundle = run(tmp_path, FakeAdapter("modify-partial"))
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert result["status"] == "partial" and result["bundles_resolved"] is False
+    assert result["error"]["code"] == "scanner_degraded"
+    assert any("not a clean observation" in note for note in execution["notes"])
+    assert execution["provenance"]["source_modified"] is True
 
 
 def test_unsupported_language_is_not_executed_and_stays_visible(tmp_path):

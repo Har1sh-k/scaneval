@@ -9,6 +9,12 @@ snapshot reaches L1 only once every snapshot it references has passed. Nothing h
 source semantics, establishes a root cause, infers a reviewer, or withdraws a human review:
 a check that fails after approval is recorded and keeps the case out of a plan, and the
 recorded review state and level stay exactly as the reviewer left them.
+
+An approval covers the label content it was recorded against, not the case id: each approving
+review carries :func:`label_digest` of the target and controls as they stood, so a label edited
+or a control added afterwards is outside every recorded review. Such a case keeps its reviews,
+because a review is a historical fact, and :func:`build_plan` leaves it out until a review
+covers the labels as they stand.
 """
 
 from __future__ import annotations
@@ -350,6 +356,103 @@ def referenced_snapshots(case: dict) -> list[str]:
     return unique
 
 
+def _label_projection(case: dict) -> dict:
+    """The label content of *case*: what a reviewer of its target and controls passed judgment on.
+
+    Only the fields that say what is being alleged are projected. The case identifier, its
+    evidence records, its disposition, its notes, and the recorded reviews and checks are left
+    out: those are provenance and process around the labels, and changing one of them does not
+    change what a reviewer read. Controls are projected in ``control_id`` order, which the
+    contract keeps unique pack-wide, so reordering the list alone is not a content change while
+    adding, removing, renaming, or editing a control is.
+    """
+    target = case["target"]
+    return {
+        "target": {
+            "target_id": target["target_id"],
+            "snapshot_id": target["snapshot_id"],
+            "kind": target["kind"],
+            "description": target["description"],
+            "affected_input_or_authority": target.get("affected_input_or_authority"),
+            "accepted_locations": target["accepted_locations"],
+            "assumptions": target["assumptions"],
+            "matching_rules": target["matching_rules"],
+        },
+        "controls": [
+            {
+                "control_id": control["control_id"],
+                "snapshot_id": control["snapshot_id"],
+                "type": control["type"],
+                "target_id": control.get("target_id"),
+                "description": control["description"],
+                "property": control["property"],
+                "allowed_actors_inputs": control["allowed_actors_inputs"],
+                "assumptions": control["assumptions"],
+                "ruled_out_allegation": control["ruled_out_allegation"],
+                "locations": control["locations"],
+            }
+            for control in sorted(case["controls"], key=lambda control: control["control_id"])
+        ],
+    }
+
+
+def label_digest(case: dict) -> str:
+    """The digest of one case's labels: its target and every control, canonically serialized.
+
+    A recorded approval carries this digest, so an approval is bound to the content it covered
+    rather than to the case it sits on. Adding, removing, or editing a control changes it, as
+    does editing the target's mechanism, description, affected input, accepted locations,
+    assumptions, or matching rules, so none of those can ride on an earlier review.
+
+    The snapshot each label names is projected too: moving a target or a control onto a
+    different snapshot changes what was reviewed exactly as editing its text does.
+    """
+    return canonical_sha256(_label_projection(case))
+
+
+def latest_approving_review(case: dict) -> dict | None:
+    """The last recorded review of *case* that approved it, by list order, or ``None``.
+
+    List order is the only ordering used; recorded timestamps are text and are not parsed here.
+    """
+    latest = None
+    for review in case["validation"]["reviews"]:
+        if review["decision"] == "approve":
+            latest = review
+    return latest
+
+
+def approval_is_current(case: dict) -> bool:
+    """True when the latest approving review covers the labels as they now stand.
+
+    False when the labels have changed since that review, when no review approved the case, and
+    when the latest approving review records no digest at all. A pack written before approvals
+    carried a digest therefore degrades to unplanned rather than silently claiming coverage: a
+    review that never named the content it read cannot be shown to cover this content. Nothing
+    is rewritten or withdrawn here; this reads what the pack records.
+    """
+    review = latest_approving_review(case)
+    if review is None or not review.get("labels_sha256"):
+        return False
+    return review["labels_sha256"] == label_digest(case)
+
+
+def _approval_gap(case: dict) -> str:
+    """Why the latest approving review does not cover the labels as they stand.
+
+    Said separately from :func:`approval_is_current` because the two gaps are different facts: a
+    review recorded before approvals carried a digest never said what it covered, while a review
+    that carries one covered content these labels no longer match.
+    """
+    review = latest_approving_review(case)
+    if review is None:
+        return "no recorded review approved this case"
+    if not review.get("labels_sha256"):
+        return ("the recorded review does not say which label content it covered, so nothing binds "
+                "it to these labels")
+    return "the labels changed after the review, which covers different label content"
+
+
 def _recorded_check_state(case: dict, snapshot_id: str) -> str | None:
     """One case's recorded check state for *snapshot_id*: ``pass``, ``fail``, or ``None``."""
     return recorded_check_state(case["validation"]["checks"], snapshot_id)
@@ -457,6 +560,11 @@ def approve_case(pack: dict, case_id: str, *, reviewer: str, role: str, level: s
                  clock: Callable[[], datetime] | None = None) -> dict:
     """Record one explicit human review of a case label.
 
+    The review carries :func:`label_digest` of the target and controls as they stand at approval
+    time, so it says which label content it covers. A later edit to those labels leaves the
+    review recorded and covering the old content, and :func:`build_plan` then leaves the case
+    out; approving again is what covers the new content.
+
     The reviewer name comes from the caller and is stored verbatim; a name holding no character
     beyond spaces, zero-width marks, or control characters is refused, because an unnamed
     approval is not an approval. This does not authenticate the reviewer, check their
@@ -473,7 +581,8 @@ def approve_case(pack: dict, case_id: str, *, reviewer: str, role: str, level: s
         raise ContractError("L3/L4 labels require an independent_reviewer decision")
     if level in REVIEWED_LEVELS and case["disposition"]["value"] != "validate":
         raise ContractError("L3/L4 require disposition validate")
-    review = {"reviewer": reviewer, "role": role, "decision": "approve", "level": level, "at": _now(clock), "note": note}
+    review = {"reviewer": reviewer, "role": role, "decision": "approve", "level": level, "at": _now(clock),
+              "note": note, "labels_sha256": label_digest(case)}
 
     def mutate(candidate: dict) -> dict:
         validation = case_by_id(candidate, case_id)["validation"]
@@ -556,11 +665,17 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
     """Targets and controls for one materialized input, with every exclusion stated in the notes.
 
     A case is planned only when its disposition is not ``exclude``, no check set failed after
-    approval, its latest admission decision is not ``rejected``, and the pack records a passing
-    mechanical check set for every snapshot it references. The check state is read per snapshot,
-    so a case approved on one snapshot is still left out while another snapshot it references is
+    approval, its latest admission decision is not ``rejected``, the pack records a passing
+    mechanical check set for every snapshot it references, and an approved case's labels are
+    still the ones its latest approving review covered. The check state is read per snapshot, so
+    a case approved on one snapshot is still left out while another snapshot it references is
     unchecked or failing. Planned items keep their real validation level; the plan's scope, not a
     rewritten level, says whether the labels are reviewed drafts.
+
+    An approved case whose labels no longer match its review (see :func:`approval_is_current`)
+    contributes no level to any plan: it is left out with a note rather than planned at the level
+    the review recorded, so a control added or a target edited after approval cannot reach a
+    reviewed-scope plan on that review. The review itself stands, untouched and still recorded.
 
     A snapshot that carries recorded mechanical checks but no tree hash is refused outright: the
     checks describe some exported tree, and without the hash nothing says it was this one.
@@ -596,6 +711,9 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
         elif _unchecked_snapshots(case):
             notes.append(f"{case_id}: no recorded passing mechanical check set for snapshot(s) "
                          f"{', '.join(_unchecked_snapshots(case))}; not planned")
+        elif validation["review_state"] == "human_approved" and not approval_is_current(case):
+            notes.append(f"{case_id}: excluded because {_approval_gap(case)}; the recorded review "
+                         "stands as recorded, and a review of the labels as they stand is needed")
         else:
             included.append(case)
     scope = plan_scope(included)

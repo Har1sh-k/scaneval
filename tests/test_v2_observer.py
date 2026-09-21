@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import types
 import warnings
 
 import pytest
@@ -352,6 +353,46 @@ def test_jsonl_sink_delegates_writing_to_the_caller():
     assert isinstance(create_jsonl_sink(lines.append), JsonlSink)
 
 
+def test_a_generator_function_line_writer_is_refused_when_the_sink_is_made():
+    """Calling a generator writer returns an iterator and writes nothing, so it is wiring.
+
+    Accepted, it costs every line in silence: the sink raises nothing, the capture state stays
+    clean, and the absence of the events reads as the absence of the activity. The Observer
+    constructor already refuses a sink shaped this way, and this is the same classification one
+    layer down, at the writer a JSONL sink is built from.
+    """
+    lines: list[str] = []
+
+    def generator_writer(line):
+        lines.append(line)
+        yield line
+
+    class GeneratorCallWriter:
+        def __call__(self, line):
+            lines.append(line)
+            yield line
+
+    async def async_generator_writer(line):
+        lines.append(line)
+        yield line
+
+    for unusable in (generator_writer, GeneratorCallWriter(), async_generator_writer):
+        with pytest.raises(ValueError):
+            create_jsonl_sink(unusable)
+        # The dataclass is exported, so the same mistake is refused through it as well.
+        with pytest.raises(ValueError):
+            JsonlSink(unusable)
+    # Nothing was written by the refused writers, and nothing was silently swallowed either.
+    assert lines == []
+
+    async def coroutine_writer(line):
+        lines.append(line)
+
+    # A plain callable and a coroutine function are both usable and still accepted.
+    assert isinstance(create_jsonl_sink(lines.append), JsonlSink)
+    assert isinstance(create_jsonl_sink(coroutine_writer), JsonlSink)
+
+
 def test_observe_returns_the_value_and_records_a_duration():
     seen, sink = recorder()
     ticks = iter([100.0, 100.01])
@@ -503,6 +544,64 @@ def test_observe_async_accepts_an_operation_that_returns_a_plain_value():
         )
 
     assert asyncio.run(scenario()) == "plain"
+
+
+def test_observe_async_runs_an_awaitable_that_types_coroutine_produced():
+    """``await`` runs this awaitable, so the observer must run it too, in every mode.
+
+    :func:`types.coroutine` marks a generator awaitable without giving its type an
+    ``__await__`` slot, which is the one shape the emitter used to miss: it handed the
+    generator straight back, unrun, so the operation the harness asked for never happened and
+    the caller got an object instead of a value. Instrumentation may cost a trace event; it may
+    never decide whether the caller's work runs.
+    """
+    runs: list[str] = []
+
+    @types.coroutine
+    def operation():
+        runs.append("ran")
+        return 42
+        yield  # never reached: the decorator needs a generator function to mark
+
+    async def scenario(observer):
+        return await observer.observe_async(
+            TOOL_START, completion, lambda error, duration: completion(duration), operation
+        )
+
+    off = Observer(mode="off", sink=raising("sink"), clock=raising("clock"))
+    seen, sink = recorder()
+    ticks = iter([100.0, 100.01])
+    recording = Observer(mode="metadata", sink=sink, clock=clock(), monotonic=lambda: next(ticks))
+    results = [asyncio.run(scenario(off)), asyncio.run(scenario(recording))]
+
+    # The operation ran exactly once per call and returned the same value with recording off
+    # and on, which is the whole of the pass-through guarantee.
+    assert results == [42, 42]
+    assert runs == ["ran", "ran"]
+    assert off.get_state() == CaptureState()
+    assert [event["type"] for event in seen] == ["tool.start", "tool.end"]
+    assert seen[1]["duration_ms"] == 10
+    assert recording.get_state() == CaptureState()
+
+
+def test_observe_async_still_passes_an_unmarked_generator_through_untouched():
+    """Only the flag ``await`` reads makes a generator awaitable; a stream stays a stream."""
+    observer = Observer(mode="metadata", sink=recorder()[1], clock=clock())
+
+    def chunks():
+        yield "one"
+        yield "two"
+
+    async def scenario(stream):
+        return await observer.observe_async(
+            TOOL_START, completion, lambda error, duration: completion(duration), lambda: stream
+        )
+
+    stream = chunks()
+    # Unmarked, this generator is a stream the caller drives, not work the emitter resolves,
+    # and the duration covers only the call that produced it.
+    assert asyncio.run(scenario(stream)) is stream
+    assert list(stream) == ["one", "two"]
 
 
 def test_a_synchronous_harness_completes_an_async_sink_without_an_event_loop():
@@ -1408,6 +1507,107 @@ def test_close_forgets_writes_whose_loop_is_already_gone():
     assert observer.get_state().dropped_events == 2
 
 
+def cancel_queued_writes(before):
+    """Cancel the write tasks emitted since ``before`` and report them. Nothing sleeps here."""
+    queued = asyncio.all_tasks() - before
+    for task in queued:
+        task.cancel()
+    return queued
+
+
+def test_a_write_cancelled_before_it_starts_is_a_counted_lost_event():
+    """A write that never ran reached no sink, so it is a loss, not a clean state.
+
+    Cancelling a task before its first step closes the wrapper coroutine at its first line, so
+    no guard inside it ever runs and nothing records the loss from the inside. The done
+    callback used to just forget the task, which left an event nobody received behind
+    ``dropped_events`` zero and no capture gap: absence of an event read as absence of an
+    action.
+    """
+    written: list[dict] = []
+
+    async def sink(event):
+        written.append(event)
+
+    async def scenario():
+        observer = Observer(mode="metadata", sink=sink, clock=clock(), id_factory=ids())
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            before = asyncio.all_tasks()
+            assert observer.emit(**event_fields()) is not None
+            queued = cancel_queued_writes(before)
+            assert len(queued) == 1
+            # Two turns of the loop: one delivers the cancellation, one runs the callback.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            cancelled = [task.cancelled() for task in queued]
+            queued.clear()
+            gc.collect()
+        return observer.get_state(), cancelled, [str(entry.message) for entry in caught]
+
+    state, cancelled, messages = asyncio.run(scenario())
+    assert cancelled == [True]
+    assert written == []
+    assert state == CaptureState(dropped_events=1, capture_gap=True, last_sink_error=GAP)
+    # The write the cancelled wrapper never awaited is closed, so instrumentation that failed
+    # does not also print a RuntimeWarning into the harness's output.
+    assert [message for message in messages if "never awaited" in message] == []
+
+
+def test_aflush_counts_a_write_cancelled_before_it_started():
+    """The same loss, reached through the flush that gathers the write instead.
+
+    ``aflush`` takes the batch out of the pending set before awaiting it, so the reaper and the
+    done callback can no longer see those writes: the cancellation gather reports is the only
+    evidence left that the event reached nobody, and counting it there is what keeps the two
+    paths agreeing.
+    """
+    written: list[dict] = []
+
+    async def sink(event):
+        written.append(event)
+
+    async def scenario():
+        observer = Observer(mode="metadata", sink=sink, clock=clock(), id_factory=ids())
+        before = asyncio.all_tasks()
+        assert observer.emit(**event_fields()) is not None
+        cancel_queued_writes(before)
+        await observer.aflush()
+        return observer.get_state()
+
+    assert written == []
+    assert asyncio.run(scenario()) == CaptureState(
+        dropped_events=1, capture_gap=True, last_sink_error=GAP
+    )
+
+
+def test_a_write_cancelled_after_it_started_is_counted_exactly_once():
+    """The guard inside the write records that loss, and no second path counts it again."""
+    started = []
+
+    async def sink(event):
+        started.append(event)
+        await asyncio.Event().wait()
+
+    async def scenario():
+        observer = Observer(mode="metadata", sink=sink, clock=clock(), id_factory=ids())
+        before = asyncio.all_tasks()
+        assert observer.emit(**event_fields()) is not None
+        # One turn lets the write start, so cancellation lands inside the guard rather than
+        # before it.
+        await asyncio.sleep(0)
+        queued = cancel_queued_writes(before)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        queued.clear()
+        return observer.get_state()
+
+    assert asyncio.run(scenario()) == CaptureState(
+        dropped_events=1, capture_gap=True, last_sink_error=GAP
+    )
+    assert len(started) == 1
+
+
 def test_last_sink_error_is_one_opaque_constant_for_every_failure():
     seen, sink = recorder()
     failing_sink = Observer(mode="content", sink=raising("disk full: /tmp/trace.jsonl"))
@@ -1542,6 +1742,70 @@ def test_an_elapsed_span_beyond_the_safe_integer_bound_is_omitted_not_written():
     assert seen[1]["metadata"]["measured"] is False
     assert seen[1]["capture_status"] == "partial"
     assert seen[1]["metadata"]["observer_capture_gap"] is True
+    assert observer.get_state() == CaptureState(
+        dropped_events=0, capture_gap=True, last_sink_error=GAP
+    )
+
+
+def test_a_timing_hook_the_emitter_cannot_check_never_stops_the_operation():
+    """Checking a reading is caller code too, so its failure costs the duration, not the work.
+
+    An integer too large to convert to a float raises ``OverflowError`` inside ``math.isfinite``
+    and ``float``, and that raise used to travel out of ``observe`` before the operation ran:
+    instrumentation aborted the work it was wired in to measure. It is contained now, and the
+    completion event is still written, without a duration and marked as a gap.
+    """
+
+    class UnconvertibleInt(int):
+        def __float__(self):
+            raise ValueError("this reading cannot be checked")
+
+    for unusable in (10**400, UnconvertibleInt(1)):
+        seen, sink = recorder()
+        ran: list[str] = []
+        observer = Observer(
+            mode="metadata", sink=sink, clock=clock(), monotonic=lambda: unusable
+        )
+
+        def operation():
+            ran.append("ran")
+            return "value"
+
+        assert observer.observe(
+            TOOL_START, completion, lambda error, duration: completion(duration), operation
+        ) == "value"
+        assert ran == ["ran"]
+        assert [event["type"] for event in seen] == ["tool.start", "tool.end"]
+        assert "duration_ms" not in seen[1]
+        assert seen[1]["metadata"]["measured"] is False
+        assert seen[1]["capture_status"] == "partial"
+        assert seen[1]["metadata"]["observer_capture_gap"] is True
+        # The event was delivered, so the failure is a gap and not a dropped event.
+        assert observer.get_state() == CaptureState(
+            dropped_events=0, capture_gap=True, last_sink_error=GAP
+        )
+
+
+def test_a_timing_hook_that_cannot_be_checked_never_stops_an_async_operation():
+    """The coroutine form contains the same reading the same way."""
+    seen, sink = recorder()
+    ran: list[str] = []
+    observer = Observer(mode="metadata", sink=sink, clock=clock(), monotonic=lambda: 10**400)
+
+    async def operation():
+        ran.append("ran")
+        return 42
+
+    async def scenario():
+        return await observer.observe_async(
+            TOOL_START, completion, lambda error, duration: completion(duration), operation
+        )
+
+    assert asyncio.run(scenario()) == 42
+    assert ran == ["ran"]
+    assert [event["type"] for event in seen] == ["tool.start", "tool.end"]
+    assert "duration_ms" not in seen[1]
+    assert seen[1]["capture_status"] == "partial"
     assert observer.get_state() == CaptureState(
         dropped_events=0, capture_gap=True, last_sink_error=GAP
     )

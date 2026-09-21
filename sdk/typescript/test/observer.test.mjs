@@ -500,3 +500,17 @@ test("the constructor refuses the wiring mistakes the Python constructor refuses
   assert.ok(new Observer({ mode: "content", sink: createJsonlSink(() => {}) }));
   assert.ok(new Observer({ mode: "content" }));
 });
+
+test("createJsonlSink refuses the generator writers the constructor refuses", () => {
+  // Calling a generator writer returns an iterator and writes nothing: accepted, it would cost
+  // every line in silence, with no thrown error and a capture state that still read clean.
+  // This is the constructor's own classification applied to the writer a sink is built from,
+  // and Python's create_jsonl_sink raises on the same writers.
+  const lines = [];
+  assert.throws(() => createJsonlSink(function* (line) { lines.push(line); yield line; }), /generator function/);
+  assert.throws(() => createJsonlSink(async function* (line) { lines.push(line); yield line; }), /generator function/);
+  assert.deepEqual(lines, []);
+  // A plain writer and a promise-returning writer are both usable and still accepted.
+  assert.equal(typeof createJsonlSink(line => lines.push(line)).write, "function");
+  assert.equal(typeof createJsonlSink(async line => { lines.push(line); }).write, "function");
+});
