@@ -68,10 +68,11 @@ reachable in history and a push would have carried them. The branch was unpushed
 history was rewritten with `git-filter-repo` to drop those paths before any push. A backup
 of the pre-rewrite `.git` was taken first.
 
-The Semgrep run under `corpus/pilot/runs/` is committed deliberately. It is rule-engine
-output over public repositories with no model content, it is small, and it is the only
-reproducible evidence of what the pipeline produces. `tests/test_v2_preserved_runs.py`
-holds it to the same standard as any other committed bundle.
+No run records are committed, the Semgrep ones included. They were kept at first because
+rule-engine output over public repositories carries no model content, then removed so the
+branch publishes no run record of any kind. `tests/test_v2_preserved_runs.py` still holds
+any bundle placed under `corpus/pilot/runs/` to the same standard, and skips when there is
+none.
 
 ### Run bundles were regenerated, never relabeled
 

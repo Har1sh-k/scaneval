@@ -6,8 +6,9 @@ replay. It is a pipeline demonstration, not a benchmark result. No case has been
 independently reviewed, no matching decision has been approved, and every number below is
 therefore either an execution fact or a zero by construction.
 
-The preserved records are under [`corpus/pilot/runs/`](../corpus/pilot/runs). Exported
-source trees are excluded; everything else each run produced is there.
+The run records are not committed. Every number below was read from the records this
+build produced, and the frozen run configurations in `corpus/pilot/` reproduce them. See
+"Reproducing the runs" below.
 
 ## What was evaluated
 

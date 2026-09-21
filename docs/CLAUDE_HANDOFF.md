@@ -4,7 +4,7 @@ Continue implementing ScanEval in this repository. An offline evaluator, a case-
 
 ## Start here
 
-Repository: `/Users/hk/Documents/GitHub/scaneval`.
+Repository: the `scaneval` checkout this document sits in.
 
 Working branch: `feat/evaluation-core`, created from `docs/design-decisions`. Inspect the current branch, status, and recent commits before editing. Do not reset, overwrite unrelated changes, or move back to `main`. Leave the untracked `docs/archive/` directory alone unless the user explicitly asks otherwise.
 
@@ -60,7 +60,7 @@ The first release evaluates public workloads. Do not claim that public-case resu
 - One-input scoring against all assigned targets and controls, with exact-duplicate handling, first-hit ranks, budgeted/full-output recall, unranked diagnostics, and completed-control bounds.
 - A fabricated conformance demo and standalone HTML score report. No real scanner runs in the demo.
 - A TypeScript observer emitter with explicit model/tool/context/finding events, recording modes, redaction of supplied copies, failure isolation, capture-gap state, and `flush()`.
-- Two preserved real runs under `corpus/pilot/runs/`, described in `docs/PILOT.md`. They are pipeline demonstrations, not results.
+- Three real runs, described in `docs/PILOT.md`. The records are not committed; the frozen run configurations in `corpus/pilot/` reproduce them. They are pipeline demonstrations, not results.
 - Legacy `scripts/` and adapters remain unchanged and continue using old semantics. Do not assume their output or behavior conforms to the new contracts.
 
 Last verified on this checkout: 663 Python tests passed, 2 legacy snapshot tests skipped because their checkouts were unavailable; 13 TypeScript tests passed. The Python count moved during the session that recorded it, so treat it as a floor and recheck on the current checkout rather than as a permanent guarantee.
@@ -117,9 +117,9 @@ Start with a short plan grounded in the existing code. Use the milestones below,
 
 ### 3. Add the first real adapter and observer integration
 
-**Status: both adapters exist and the observer is connected.** The own harness is `/Users/hk/Documents/GitHub/securevibes-agent`, run unchanged through its own engine entry point inside its own `tsx`; the driver injects only the harness's default model runner wrapped by the observer plus a progress reporter, and no patch to that repository was needed. The pinned conventional scanner path is Semgrep OSS against a local rules checkout, independent of Inspect and Harbor. Finding submission is linked by the harness's own finding ids. Still missing: tool-dispatch visibility (it happens inside the model CLI subprocess), the candidate, validation, and filtering stages, token usage, tracing-on/off parity tests against a live route, and native PR mode. The guidance below still governs, in particular the rule that an unobserved category is never reported as an absence.
+**Status: both adapters exist and the observer is connected.** The own harness is `~/Documents/GitHub/securevibes-agent`, run unchanged through its own engine entry point inside its own `tsx`; the driver injects only the harness's default model runner wrapped by the observer plus a progress reporter, and no patch to that repository was needed. The pinned conventional scanner path is Semgrep OSS against a local rules checkout, independent of Inspect and Harbor. Finding submission is linked by the harness's own finding ids. Still missing: tool-dispatch visibility (it happens inside the model CLI subprocess), the candidate, validation, and filtering stages, token usage, tracing-on/off parity tests against a live route, and native PR mode. The guidance below still governs, in particular the rule that an unobserved category is never reported as an absence.
 
-- Inspect the available own-harness repository first. A likely local starting point is `/Users/hk/Documents/GitHub/securevibes-agent`; verify its existence, actual invocation, and output structure. Do not invent a RunSortie command or assume its API matches SecureVibes. If the preferred first harness is ambiguous after inspection, ask one concise question.
+- Inspect the available own-harness repository first. A likely local starting point is `~/Documents/GitHub/securevibes-agent`; verify its existence, actual invocation, and output structure. Do not invent a RunSortie command or assume its API matches SecureVibes. If the preferred first harness is ambiguous after inspection, ask one concise question.
 - Keep the harness's agent loop intact. Prefer shared model-client/tool-dispatch boundaries or existing callbacks. Request authorization before editing another repository and keep any integration patch separate.
 - Instrument the actual outgoing model-visible context separately from system file/tool access. A search tool touching a file does not prove its contents reached the model.
 - Link finding candidate creation, validation, filtering, and final submission through stable IDs. Record only explanations the harness exposes. Never claim access to hidden reasoning or a definitive memory-versus-analysis verdict.
@@ -165,9 +165,9 @@ scaneval demo results/claude-pilot-demo
 scaneval replay results/claude-pilot-demo --output results/claude-pilot-replay.json
 cmp results/claude-pilot-demo/evaluation.json results/claude-pilot-replay.json
 
-# Offline, no network and no model: replay a preserved pilot bundle.
+# Offline, no network and no model: replay a run bundle you produced.
 scaneval replay <your run directory>/invocations/<invocation id>
-scaneval review status corpus/pilot/runs/semgrep-oss-1.177.0/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
+scaneval review status <your run directory>/invocations/<invocation id>
 ```
 
 The replay prints `review state draft` on stderr and `review status` prints `draft`. Both are correct and must stay correct until a human approval is actually recorded. Reproducing the runs themselves needs the network, and the harness run needs live model calls; the commands are in `docs/PILOT.md`.
