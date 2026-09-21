@@ -14,10 +14,13 @@ ID factory, redactor, event builder) and every sink write runs under a ``BaseExc
 the failure becomes a visible capture gap and only :class:`KeyboardInterrupt` and
 :class:`SystemExit` are re-raised, because those are the caller's own interrupt rather than an
 instrumentation defect. An :class:`asyncio.CancelledError` raised by a sink is a recorded gap,
-not an escape. One lost event counts once: the guard that owns a caller call records the loss,
-and the containment guards outside it re-raise an interrupt without counting it again. An
-interrupt raised inside a redactor, a caller's own Mapping, the clock, the ID factory, or the
-elapsed-time source travels on to the caller unchanged, but the event it stopped is counted as
+not an escape. One lost event counts once. While an event is being built, the guard that owns a
+caller call records the loss and the containment guards outside it re-raise an interrupt without
+counting it again. Once it reaches a sink the accounting belongs to one :class:`_Delivery` record
+per write, settled from a ``finally`` that every exit from that write crosses and settled only
+once, so a path that re-raises cannot skip the count and a path that notices late cannot repeat
+it. An interrupt raised inside a redactor, a caller's own Mapping, the clock, the ID factory, or
+the elapsed-time source travels on to the caller unchanged, but the event it stopped is counted as
 lost before it does: that event reached no sink, and a state reading clean would say the run
 ended having recorded everything it was handed. A payload that is not JSON, is
 cyclic, or is nested deeper than :data:`MAX_PAYLOAD_DEPTH`, a :class:`RecursionError` raised
@@ -58,6 +61,11 @@ same inputs and, where they once differed, the stricter rule is the shared one:
 * A payload nested deeper than :data:`MAX_PAYLOAD_DEPTH` containers is refused as a capture
   gap, so neither language accepts a payload the other refuses and neither recurses without a
   documented bound.
+* A string no UTF-8 sink could write is refused as a capture gap, in a payload value, a payload
+  key, and a link, run or producer ID alike. Python held an unpaired surrogate and copied it into
+  the line, where a real JSONL file failed to encode it and lost the event at the sink, while
+  JavaScript escaped it and wrote a line that parses. A surrogate pair spelling a real astral
+  character is text and both write it.
 * Keys are emitted in the order the wire schema declares them.
 
 A rejected event consumes no sequence number, no event ID, and no clock read in either language.
@@ -154,7 +162,18 @@ _GAP_KEY = "observer_capture_gap"
 _EPOCH_TIMESTAMP = "1970-01-01T00:00:00.000Z"
 
 _INTERRUPTS = (KeyboardInterrupt, SystemExit)
+# What a write guard re-raises instead of containing: the caller's own interrupt, and the
+# ``GeneratorExit`` the language raises inside a coroutine somebody closed. Neither is the
+# write failing, and neither may be swallowed, so the guard re-raises both and accounts for
+# the event on the way out rather than at the raise site.
+_UNCONTAINED = (KeyboardInterrupt, SystemExit, GeneratorExit)
 _MISSING = object()
+
+# The UTF-16 surrogate range. A code point in it is half of a surrogate pair rather than a
+# character, and no UTF-8 encoder will write one. Spelled as a pattern rather than a scan
+# over ``ord`` so checking a long payload string stays a single C-level search: this runs
+# over every string in every payload, and the copy it guards is already the hot path.
+_SURROGATE = re.compile("[\ud800-\udfff]")
 
 # ``CO_ITERABLE_COROUTINE``, the code flag :func:`types.coroutine` sets so ``await`` accepts a
 # generator. Spelled as the literal the interpreter uses rather than imported from ``inspect``,
@@ -284,14 +303,21 @@ def _running_loop() -> Any:
 def _copy_json(value: Any, seen: set[int] | None = None, depth: int = 1) -> Any:
     """Deep copy into plain JSON types, refusing anything that would not survive the wire.
 
-    Non-finite floats, cyclic structures, non-string object keys, objects that are not dicts,
-    lists, tuples, or JSON scalars, and containers nested deeper than :data:`MAX_PAYLOAD_DEPTH`
-    raise :class:`TypeError`. ``depth`` counts containers, and the payload object a caller
-    passed is the first, so the limit is a property of the payload rather than of this call.
+    Non-finite floats, cyclic structures, non-string object keys, a string or a key carrying an
+    unpaired surrogate, objects that are not dicts, lists, tuples, or JSON scalars, and
+    containers nested deeper than :data:`MAX_PAYLOAD_DEPTH` raise :class:`TypeError`. ``depth``
+    counts containers, and the payload object a caller passed is the first, so the limit is a
+    property of the payload rather than of this call.
     This is a copy, not a coercion: nothing is stringified or truncated to make it fit, because
     a silently reshaped payload would misdescribe the run it claims to observe.
     """
-    if value is None or isinstance(value, (str, bool)):
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        if not _is_encodable(value):
+            # Refused rather than escaped or replaced: a sink cannot encode it, and the two
+            # emitters would otherwise write different bytes for the same payload.
+            raise TypeError("JSON string carries an unpaired surrogate")
         return value
     if isinstance(value, int):
         return value
@@ -313,6 +339,8 @@ def _copy_json(value: Any, seen: set[int] | None = None, depth: int = 1) -> Any:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TypeError("non-string JSON object key")
+            if not _is_encodable(key):
+                raise TypeError("JSON object key carries an unpaired surrogate")
             copied[key] = _copy_json(item, seen, depth + 1)
         seen.discard(marker)
         return copied
@@ -430,8 +458,33 @@ def _require_aware(moment: Any) -> datetime:
     return moment
 
 
+def _is_encodable(text: str) -> bool:
+    """True when every code point in ``text`` is a character a UTF-8 sink can write.
+
+    Python stores code points, so any surrogate in a ``str`` is an unpaired one: there is no
+    pair to join it to, ``"\\ud83d\\ude00"`` is two surrogates and not an emoji, and encoding
+    either of them raises. Such a string survives :func:`json.dumps` unchanged and fails only
+    at the sink, where a real JSONL file cannot encode the line and the event is lost at write
+    time; JavaScript escapes the same code unit instead, so one payload would leave the two
+    emitters as different bytes. Both refuse it, and refusing it is the stricter shared rule:
+    the emitter never hands a sink a line UTF-8 cannot carry.
+
+    An astral character is one code point outside this range and is accepted. JavaScript
+    spells the same character as a surrogate pair of code units and accepts that pair, so a
+    payload either language can write is a payload both languages write identically.
+    """
+    return _SURROGATE.search(text) is None
+
+
 def _is_id(value: Any) -> bool:
-    return isinstance(value, str) and value != ""
+    """A usable id: a nonempty string of characters a UTF-8 sink can write.
+
+    The surrogate rule a payload string is held to is the rule every caller string on the wire
+    is held to, because a lone surrogate in a link ID, a run ID, or a producer ID costs the
+    same line the same way. Checking it here covers all three: the constructor, the ID factory,
+    and the link fields the wire contract validates all decide "is this a usable id" here.
+    """
+    return isinstance(value, str) and value != "" and _is_encodable(value)
 
 
 def _is_generator_callable(target: Any) -> bool:
@@ -487,6 +540,47 @@ def _sink_target(sink: Any) -> Callable[[JsonObject], Any]:
     if callable(sink):
         return sink
     raise ValueError("sink must be callable or expose a callable write method")
+
+
+class _Delivery:
+    """The outcome of exactly one write, and the only place a write's loss is counted.
+
+    A write ends in more ways than any one code path sees. The sink can return, hand back an
+    iterator nobody drives, raise, or raise the caller's own interrupt; a queued write can be
+    cancelled before its first step or after it, torn down with the loop it was queued on,
+    closed by the emitter while it is suspended, or settled by a flush a cancellation cut
+    short. Every one of those exits used to count its own loss, and each round of review found
+    a new exit that counted none or counted one twice. The counting lives here now:
+    :meth:`settle` holds the one statement that charges a write to ``dropped_events``, and
+    every exit from a write calls it.
+
+    The record takes each of its two transitions once. :meth:`confirm` is called on the single
+    path where the sink accepted the event. :meth:`settle` ends the write: it counts one lost
+    event unless the write was confirmed, and does nothing at all the second time it is called.
+    That is what makes it safe for an exit to settle a write another exit may already have
+    settled, so no path has to know what the others did. An event that reached no sink is
+    counted once however many paths notice it, and an event the sink accepted is never counted
+    at all, however the task that carried it was later marked.
+    """
+
+    __slots__ = ("_observer", "_confirmed", "_settled")
+
+    def __init__(self, observer: "Observer") -> None:
+        self._observer = observer
+        self._confirmed = False
+        self._settled = False
+
+    def confirm(self) -> None:
+        """The sink accepted this event. Called only where the write really came back."""
+        self._confirmed = True
+
+    def settle(self) -> None:
+        """End this write, counting one lost event unless the sink accepted it."""
+        if self._settled:
+            return
+        self._settled = True
+        if not self._confirmed:
+            self._observer._lost_event()
 
 
 class Observer:
@@ -572,7 +666,10 @@ class Observer:
         self._redactor = redactor if redactor is not None else default_redactor
         self._sequence = 0
         self._fallback_sequence = 0
-        self._pending: set[Any] = set()
+        # Each outstanding write, mapped to the record that owns its accounting. The map
+        # says only which writes are still outstanding; whether a write has been counted is
+        # the record's to say, so the two cannot disagree about the same write.
+        self._pending: dict[Any, _Delivery] = {}
         self._runner_loop: Any = None
         self._closed = False
         self._dropped_events = 0
@@ -747,9 +844,9 @@ class Observer:
         Writes started while an event loop was running belong to that loop and only it can run
         them: waiting for them from synchronous code would deadlock the loop, so this leaves
         them pending. A write in flight is not a lost event, and counting one as dropped would
-        report a loss that never happened; a write that fails counts itself, and a write whose
-        loop was torn down before it ran is counted here. An asynchronous harness must await
-        :meth:`aflush`.
+        report a loss that never happened; a write that failed settled its own record when it
+        ended, and a write whose loop was torn down before it ran is settled here. An
+        asynchronous harness must await :meth:`aflush`.
         """
         self._reap_lost_writes()
         self._close_runner()
@@ -760,19 +857,24 @@ class Observer:
         Only writes belonging to the loop this runs on are awaited. A write queued on a
         different loop is left pending rather than gathered: awaiting a future from another
         loop raises, and an emitter that let that raise would turn a harness's flush into an
-        instrumentation error and, by clearing the pending set first, destroy the record of the
+        instrumentation error and, by clearing the pending map first, destroy the record of the
         very writes it failed to settle. Those writes are still the other loop's to run, and
         they are counted as lost only once that loop is gone.
 
-        A write that was cancelled before it started is counted here: it never reached the
-        guard inside :meth:`_await_write` that would have recorded it, and it is out of the
-        pending set that :meth:`_reap_lost_writes` reads, so nothing else would ever count an
-        event that reached no sink. A write cancelled after it started counted itself, and a
-        write that failed counted itself, so neither is counted twice. That holds however the
-        gather ends. When it returns, the cancelled write is one of its results. When the
-        cancellation that settled the write also travels on out of this await, the gather
-        returns nothing at all, and the batch in hand is the last record of those writes, so
-        :meth:`_reap_batch` accounts for them before the cancellation is re-raised.
+        The pending map is read again on every turn, so a write another task starts while this
+        flush is suspended on its gather is gathered by the next turn rather than left for
+        nobody to await. A flush that returned with a write outstanding would tell a harness
+        capture had settled while an event was still on its way to the sink, which is what the
+        TypeScript ``flush`` did until both were made to drain rather than to await a snapshot.
+
+        Every write in a batch is settled once the gather returns, without asking how it
+        ended: a write the sink accepted confirmed its record before it finished, so settling
+        it costs nothing, and a write cancelled before its first step ran no guard of its own
+        and is out of the pending map :meth:`_reap_lost_writes` reads, so this is the only
+        place left that can count it. That holds however the gather ends. When a cancellation
+        that settled those writes travels on out of this await, the gather returns nothing at
+        all and the batch in hand is the last record of them, so :meth:`_reap_batch` settles
+        them before the cancellation is re-raised.
 
         A sink that never returns makes this wait forever. That is deliberate: the emitter
         imposes no timeout, because cancelling a harness's write is a policy decision only the
@@ -783,26 +885,34 @@ class Observer:
         prescribes. ``gather`` here collects a cancelled write into its results rather than
         raising it, so a cancellation that does come out of that await is the caller's, never a
         write's. Whatever the cancellation settles, the writes it left unsettled go back into
-        the pending set and the writes it settled as cancelled are counted, before it is
-        re-raised, so neither the record of them nor their loss dies with it.
+        the pending map and the writes it did settle are settled here, before it is re-raised,
+        so neither the record of them nor their loss dies with it.
         """
         import asyncio
 
         loop = _running_loop()
         while True:
             self._reap_lost_writes()
-            batch = tuple(write for write in self._pending if self._settles_on(write, loop))
+            batch = tuple(
+                (write, delivery)
+                for write, delivery in self._pending.items()
+                if self._settles_on(write, loop)
+            )
             if not batch:
+                # Nothing outstanding on this loop, including anything a write started while
+                # this flush was already waiting: the loop above re-reads the pending map
+                # rather than a snapshot of it, so a write that began during a gather is
+                # gathered by the next turn instead of being left for nobody to await.
                 return
-            self._pending.difference_update(batch)
+            for write, _ in batch:
+                self._pending.pop(write, None)
             try:
-                results = await asyncio.gather(*batch, return_exceptions=True)
+                await asyncio.gather(*(write for write, _ in batch), return_exceptions=True)
             except BaseException as error:
                 # Evidence first, before anything is re-raised: an unsettled write goes back
-                # into the pending set so the failure cannot erase the record of what it failed
-                # to settle, and a write this failure already settled as cancelled is counted,
-                # because this batch is out of the pending set and nothing else will ever see
-                # it again.
+                # into the pending map so the failure cannot erase the record of what it failed
+                # to settle, and a write this failure did settle is settled here, because this
+                # batch is out of the pending map and nothing else will ever see it again.
                 self._reap_batch(batch)
                 if isinstance(error, (*_INTERRUPTS, asyncio.CancelledError)):
                     # The caller's own cancellation, not a write's: ``return_exceptions=True``
@@ -813,13 +923,11 @@ class Observer:
                     raise
                 self._mark_gap()
                 return
-            for result in results:
-                if isinstance(result, asyncio.CancelledError):
-                    # A write cancelled before it started never reached :meth:`_await_write`,
-                    # so nothing inside it recorded the loss, and this batch is already out of
-                    # the pending set where :meth:`_reap_lost_writes` would have found it. The
-                    # event reached no sink: count it here or it is lost in silence.
-                    self._lost_event()
+            for _, delivery in batch:
+                # The gather returned, so every write in the batch is finished. Settling each
+                # record charges the ones that reached no sink and passes over the ones the
+                # sink accepted, so this needs to ask nothing about how any of them ended.
+                delivery.settle()
 
     def close(self) -> None:
         """Flush, then refuse later events. Not a coroutine, and it closes no caller resource.
@@ -856,20 +964,20 @@ class Observer:
             self._close_runner()
 
     def _reap_lost_writes(self) -> None:
-        """Count writes that can never run, and forget writes that already settled.
+        """Settle writes that can never run, and forget writes that already finished.
 
         A queued write is not lost while its loop can still run it, so a live one is left
-        pending and uncounted. Once that loop is closed the write can never run: the event
-        reached no sink, nobody else will ever count it, and a capture state that still read
+        pending and unsettled. Once that loop is closed the write can never run: the event
+        reached no sink, nobody else will ever see it, and a capture state that still read
         clean would be claiming a delivery that never happened. A write cancelled before it
-        started is the same loss: :meth:`_await_write` never ran, so it never recorded itself.
-        That loss is counted once, here or in :meth:`_write_settled`, by whichever of the two
-        takes the write out of the pending set first.
+        started is the same loss, because :meth:`_await_write` never ran to record it. Neither
+        case is asked about here: settling the record charges a write that reached no sink and
+        passes over one the sink accepted, and settling a record another path already settled
+        does nothing, so this and :meth:`_write_settled` can both reach the same write.
         """
-        for write in tuple(self._pending):
+        for write, delivery in tuple(self._pending.items()):
             try:
-                settled = write.done()
-                cancelled = settled and write.cancelled()
+                finished = write.done()
                 loop = write.get_loop()
                 unusable = loop is None or loop.is_closed()
             except _INTERRUPTS:
@@ -877,59 +985,58 @@ class Observer:
             except BaseException:
                 # A pending entry the emitter cannot even inspect is not a write it can claim
                 # was delivered.
-                self._pending.discard(write)
-                self._lost_event()
+                self._pending.pop(write, None)
+                delivery.settle()
                 continue
-            if settled:
-                self._pending.discard(write)
-                if cancelled:
-                    self._lost_event()
-            elif unusable:
-                self._pending.discard(write)
-                self._lost_event()
+            if finished or unusable:
+                self._pending.pop(write, None)
+                delivery.settle()
 
-    def _reap_batch(self, batch: tuple[Any, ...]) -> None:
-        """Account for a gathered batch a failure cut short: keep the unsettled, count the lost.
+    def _reap_batch(self, batch: tuple[tuple[Any, _Delivery], ...]) -> None:
+        """Account for a gathered batch a failure cut short: keep the unfinished, settle the rest.
 
-        A write that is still unsettled goes back into the pending set, because it is not lost
-        and only its loop can settle it. A write the failure settled as cancelled is a lost
-        event and is counted here, because :meth:`aflush` took this batch out of the pending
-        set before awaiting it: :meth:`_reap_lost_writes` can no longer see it,
-        :meth:`_write_settled` already declined to count it for the same reason, and a
-        cancellation delivered before the write's first step ran no guard inside it either.
-        Counting it anywhere else would count it twice; counting it nowhere left an event that
-        reached no sink behind a capture state reading zero dropped events and no gap. A write
-        that settled any other way counted itself and is neither kept nor counted again.
+        A write that has not finished goes back into the pending map, because it is not lost
+        and only its loop can settle it. A write the failure did finish is settled here,
+        because :meth:`aflush` took this batch out of the pending map before awaiting it:
+        :meth:`_reap_lost_writes` can no longer see it, and a cancellation delivered before the
+        write's first step ran no guard inside it either. Settling it here is safe whatever it
+        did, because a write the sink accepted confirmed its record and a record settled twice
+        counts once; settling it nowhere left an event that reached no sink behind a capture
+        state reading zero dropped events and no gap.
         """
-        for write in batch:
+        for write, delivery in batch:
             try:
-                settled = write.done()
-                cancelled = settled and write.cancelled()
+                finished = write.done()
             except _INTERRUPTS:
                 raise
             except BaseException:
                 # A write the emitter cannot even inspect is not one it can claim was delivered.
-                self._lost_event()
+                delivery.settle()
                 continue
-            if not settled:
-                self._pending.add(write)
-            elif cancelled:
-                self._lost_event()
+            if finished:
+                delivery.settle()
+            else:
+                self._pending[write] = delivery
 
-    def _write_settled(self, task: Any, awaitable: Any) -> None:
-        """Account for one queued write that has finished, however it finished.
+    def _write_settled(self, task: Any, awaitable: Any, delivery: _Delivery) -> None:
+        """Settle the record of one queued write that has finished, however it finished.
 
         A write cancelled before :meth:`_await_write` could run records nothing itself: the
         wrapper coroutine is closed at its first line, so no guard inside it ever runs, and
         simply forgetting the task here, as this callback once did, left an event that reached
-        no sink behind a capture state reading zero dropped events and no gap. An event nobody
-        received is a lost event whoever cancelled it, so it is counted, once, by whichever of
-        this callback and :meth:`_reap_lost_writes` takes the task out of the pending set.
+        no sink behind a capture state reading zero dropped events and no gap. Settling the
+        record covers that without asking how the task ended, which is what the asking got
+        wrong twice: a task whose sink accepted the event and then cancelled the task around it
+        was counted as a loss that never happened, and a task that raised inside the guard and
+        was then marked cancelled was counted twice. A confirmed record settles for nothing and
+        a record settled elsewhere settles for nothing, so this callback can be unconditional.
 
-        The write the wrapper never awaited is closed whether or not this call is the one that
-        counted it, because an un-awaited coroutine becomes a ``RuntimeWarning`` in the
-        caller's process at collection time and instrumentation that failed must not also print
-        into a harness's output. Closing a finished or already closed awaitable does nothing.
+        A cancelled task leaves the write the wrapper never awaited un-awaited, and an
+        un-awaited coroutine becomes a ``RuntimeWarning`` in the caller's process at collection
+        time, so it is closed here; closing a finished or already closed awaitable does nothing.
+        A task that ended in an exception has that exception read off it for the same reason:
+        asyncio logs one nobody retrieved, and the event it cost is already in the capture
+        state. Instrumentation that failed must not also print into a harness's output.
         """
         try:
             cancelled = task.cancelled()
@@ -940,10 +1047,20 @@ class Observer:
             cancelled = True
         if cancelled:
             self._discard(awaitable)
-        if task in self._pending:
-            self._pending.discard(task)
-            if cancelled:
-                self._lost_event()
+        else:
+            self._retrieve(task)
+        self._pending.pop(task, None)
+        delivery.settle()
+
+    @staticmethod
+    def _retrieve(task: Any) -> None:
+        """Read a finished write's exception, so asyncio logs no unretrieved one at collection."""
+        try:
+            task.exception()
+        except _INTERRUPTS:
+            raise
+        except BaseException:
+            pass
 
     @staticmethod
     def _settles_on(write: Any, loop: Any) -> bool:
@@ -1159,64 +1276,96 @@ class Observer:
         return requested
 
     def _write(self, event: JsonObject) -> None:
-        if self._sink is None:
-            # A recording mode with no sink. The event was built, spent a sequence number and
-            # an ID, and reached nobody, so it is a lost event rather than a clean state.
-            self._lost_event()
-            return
-        try:
-            result = self._sink(event)
-        except BaseException as error:
-            self._fail_lost(error)
-            return
-        if _is_awaitable(result):
-            self._drive(result)
-        elif _is_undriven_generator(result):
-            # The sink returned an iterator rather than writing. Its body never ran, so the
-            # event reached nobody and is a lost event: the value written was never consumed,
-            # and an emitter that reported a clean state here would claim a delivery that never
-            # happened. The emitter does not drive it, because consuming a caller's stream is
-            # not instrumentation's to do.
-            self._lost_event()
+        """Hand one event to the sink, and settle exactly one delivery record for it.
 
-    def _drive(self, awaitable: Any) -> None:
+        Every way out of this method passes through the ``finally``: a recording mode with no
+        sink at all, the sink returning, the sink raising, the sink handing back an iterator
+        nobody drives, and the caller's own interrupt on its way through. The record counts one
+        lost event unless something confirmed that the sink accepted this one, so an exit added
+        here later can neither forget the count nor repeat it.
+
+        A write handed to a task on a caller's loop is the one case the ``finally`` leaves alone,
+        because it is not over yet: :meth:`_drive` reports that the write is still outstanding,
+        and the task's done callback, a flush, or the reaper settles the same record when it
+        ends. A write driven on the private loop is over by the time :meth:`_drive` returns and
+        has already settled its own record, so the ``finally`` finds nothing left to count.
+        """
+        delivery = _Delivery(self)
+        outstanding = False
+        try:
+            if self._sink is None:
+                # A recording mode with no sink. The event was built, spent a sequence number
+                # and an ID, and reached nobody, so its record settles as a lost event.
+                return
+            result = self._sink(event)
+            if _is_awaitable(result):
+                outstanding = self._drive(result, delivery)
+            elif _is_undriven_generator(result):
+                # The sink returned an iterator rather than writing. Its body never ran, so the
+                # event reached nobody: the value written was never consumed, and an emitter
+                # that reported a clean state here would claim a delivery that never happened.
+                # The emitter does not drive it, because consuming a caller's stream is not
+                # instrumentation's to do.
+                return
+            else:
+                delivery.confirm()
+        except BaseException as error:
+            if isinstance(error, _INTERRUPTS):
+                raise
+        finally:
+            if not outstanding:
+                delivery.settle()
+
+    def _drive(self, awaitable: Any, delivery: _Delivery) -> bool:
         """Finish an async write on this observer's own loop, or hand it to the caller's loop.
+
+        True when the write is still outstanding: a task owns it now, and that task's done
+        callback, a flush, or the reaper settles ``delivery`` when it ends. Every other return
+        leaves the write over, settled either by the guard inside it or by :meth:`_write`, which
+        is why no branch here counts a loss of its own.
 
         Both failure paths close the wrapper coroutine as well as the write it wraps. Closing a
         coroutine never touches what it would have awaited, so discarding only one of the two
         leaves the other un-awaited, and an un-awaited coroutine becomes a ``RuntimeWarning``
         in the caller's process at collection time. Instrumentation that failed must not also
-        print into a harness's output.
+        print into a harness's output. Closing the wrapper is also what settles a write the
+        private loop refused to start at all: the close raises ``GeneratorExit`` inside a
+        suspended wrapper, which settles the record on its way out, and a wrapper that never
+        started closes without running, leaving the record for :meth:`_write` to settle.
         """
         loop = _running_loop()
-        writer = self._await_write(awaitable)
+        writer = self._await_write(awaitable, delivery)
         if loop is not None:
             try:
                 task = loop.create_task(writer)
             except BaseException as error:
                 self._discard(writer)
                 self._discard(awaitable)
-                self._fail_lost(error)
-                return
-            self._pending.add(task)
+                if isinstance(error, _INTERRUPTS):
+                    raise
+                return False
+            self._pending[task] = delivery
 
-            def settled(finished: Any, write: Any = awaitable) -> None:
-                self._write_settled(finished, write)
+            def settled(
+                finished: Any, write: Any = awaitable, record: _Delivery = delivery
+            ) -> None:
+                self._write_settled(finished, write, record)
 
             task.add_done_callback(settled)
-            return
+            return True
         runner = self._runner()
         if runner is None:
             self._discard(writer)
             self._discard(awaitable)
-            self._lost_event()
-            return
+            return False
         try:
             runner.run_until_complete(writer)
         except BaseException as error:
             self._discard(writer)
             self._discard(awaitable)
-            self._fail_lost(error)
+            if isinstance(error, _INTERRUPTS):
+                raise
+        return False
 
     def _runner(self) -> Any:
         """This observer's private event loop, created on first need and never installed.
@@ -1256,27 +1405,35 @@ class Observer:
         except BaseException:
             pass
 
-    async def _await_write(self, awaitable: Any) -> None:
-        """Await one write and contain its failure as a lost event, counted exactly once.
+    async def _await_write(self, awaitable: Any, delivery: _Delivery) -> None:
+        """Await one write and settle its record, whichever way the await ends.
+
+        The settlement sits in a ``finally``, so every exit this coroutine has crosses it: the
+        sink returning, the sink raising anything at all, a cancellation aimed at the write, the
+        caller's own :class:`KeyboardInterrupt` or :class:`SystemExit` travelling on unchanged,
+        and the :class:`GeneratorExit` raised here when the emitter closes a write it can no
+        longer run. That is the guarantee: the count is not at the raise sites, which is where
+        each round of review found one missing, but on the single path out of the ``try`` that
+        every raise site has to cross. Settling charges a lost event only when nothing confirmed
+        delivery, so a write whose sink returned costs nothing and a write another path also
+        settles is charged once.
 
         A cancelled write is a lost event, not an escape: a cancellation aimed at a write the
-        observer started must not travel out of instrumentation into the harness.
-
-        A :class:`GeneratorExit` is the one failure this must not count, because it is not the
-        write failing. It arrives only when something closes this coroutine while it is
-        suspended, and the emitter does that in :meth:`_drive`, on a path that is already
-        counting that same write as a lost event, so counting it here as well reported one lost
-        event as two. It is re-raised rather than swallowed, so the close finishes as the
-        language defines it and the loss is recorded once, by the guard that owns it.
+        observer started is contained here rather than travelling out of instrumentation into
+        the harness. An interrupt and a ``GeneratorExit`` are re-raised instead, the first
+        because it is the caller's own and the second because the language requires a closing
+        coroutine to finish closing, and the ``finally`` has already accounted for the event
+        either one cost.
         """
         try:
             await awaitable
-        except _INTERRUPTS:
-            raise
-        except GeneratorExit:
-            raise
-        except BaseException:
-            self._lost_event()
+        except BaseException as error:
+            if isinstance(error, _UNCONTAINED):
+                raise
+        else:
+            delivery.confirm()
+        finally:
+            delivery.settle()
 
     def _fail(self, error: BaseException) -> None:
         """Record a failure that degraded an event without losing it, and re-raise interrupts.
@@ -1302,7 +1459,12 @@ class Observer:
         self._last_sink_error = _GAP_MESSAGE
 
     def _lost_event(self) -> None:
-        """One event reached no sink. Counted once, by whichever guard owns that loss."""
+        """One event reached no sink.
+
+        Reached once per lost event: for a write, only from :meth:`_Delivery.settle`, which
+        takes that transition once; for an event that never got as far as a write, from the
+        guard that owned the caller call it died in.
+        """
         self._mark_gap()
         self._dropped_events += 1
 

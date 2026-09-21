@@ -295,6 +295,45 @@ def test_unserializable_and_cyclic_payloads_are_capture_gaps():
     assert observer.get_state().dropped_events == 4
 
 
+def test_a_string_no_utf8_sink_could_encode_is_refused_as_a_capture_gap():
+    """A lone surrogate is refused, because writing it loses the event at the sink instead.
+
+    Python holds an unpaired surrogate in a ``str`` and ``json.dumps`` copies it into the line
+    unchanged, so the failure lands on the caller's own file, as a ``UnicodeEncodeError`` out of
+    ``write_line``, one event at a time. JavaScript escapes the same code unit and writes a line
+    that parses, so one payload meant two things. The rule now is one rule, enforced where every
+    caller string enters the record: payload values, payload keys, and the link, run and producer
+    IDs are all refused when they carry a code point no UTF-8 encoder can write.
+    """
+    lone = "\ud800"
+    lines: list[str] = []
+    observer = Observer(mode="content", sink=create_jsonl_sink(lines.append), clock=clock())
+    assert observer.emit(**event_fields(metadata={"text": lone})) is None
+    assert observer.emit(**event_fields(metadata={"text": "ok"}, content={"text": lone})) is None
+    assert observer.emit(**event_fields(metadata={lone: "keyed"})) is None
+    assert observer.emit(**event_fields(metadata={"tool": "grep"}, call_id=lone)) is None
+    # The redactor's output is caller data too, and goes through the same copy.
+    smuggling = Observer(
+        mode="metadata",
+        sink=create_jsonl_sink(lines.append),
+        clock=clock(),
+        redactor=lambda key, value, path: lone if key == "smuggled" else value,
+    )
+    assert smuggling.emit(**event_fields(metadata={"smuggled": "x"})) is None
+    assert lines == []
+    assert observer.get_state() == CaptureState(
+        dropped_events=4, capture_gap=True, last_sink_error=GAP
+    )
+    assert smuggling.get_state().dropped_events == 1
+    # The control: a real astral character is one code point, not a surrogate, and is written.
+    # Its UTF-16 spelling is the surrogate pair the TypeScript emitter accepts for the same
+    # reason, so a payload either language can write is one both languages write identically.
+    astral = Observer(mode="content", sink=create_jsonl_sink(lines.append), clock=clock())
+    assert astral.emit(**event_fields(metadata={"clef \U0001d11e": "\U0001d11e"})) is not None
+    assert lines[0].encode("utf-8").decode("utf-8") == lines[0]
+    assert astral.get_state() == CaptureState()
+
+
 @pytest.mark.parametrize("extra", [
     pytest.param({"duration_ms": -1}, id="negative_duration"),
     pytest.param({"duration_ms": float("nan")}, id="non_finite_duration"),
@@ -649,6 +688,48 @@ def test_aflush_waits_for_pending_writes_and_records_their_rejection():
     asyncio.run(scenario())
 
 
+def test_aflush_waits_for_writes_started_while_it_was_already_waiting():
+    """A flush covers the writes that begin during it, not a snapshot taken when it started.
+
+    The pending set is read again on every turn of the loop, so a write another task starts
+    while the flush is suspended on its gather is gathered by the next turn rather than left for
+    nobody to await. A flush that resolved with that write outstanding would tell a harness that
+    capture had settled while an event was still on its way to the sink, and the TypeScript
+    ``flush`` awaited exactly such a snapshot until this rule was made one rule for both.
+    """
+    written: list[dict] = []
+
+    async def scenario():
+        gates = [asyncio.Event(), asyncio.Event()]
+        order: list[int] = []
+
+        async def sink(event):
+            index = len(order)
+            order.append(index)
+            await gates[index].wait()
+            written.append(event)
+
+        observer = Observer(mode="metadata", sink=sink, clock=clock(), id_factory=ids())
+        assert observer.emit(**event_fields()) is not None
+        # One turn starts the first write, one lets the flush reach its gather. Neither sleeps.
+        await asyncio.sleep(0)
+        flush = asyncio.ensure_future(observer.aflush())
+        await asyncio.sleep(0)
+        # Started after the flush read the pending set, and before it could return.
+        assert observer.emit(**event_fields()) is not None
+        gates[0].set()
+        for _ in range(4):
+            await asyncio.sleep(0)
+        # The first write is done and the second is not, so the flush must still be waiting.
+        assert (len(written), flush.done()) == (1, False)
+        gates[1].set()
+        await flush
+        return observer.get_state()
+
+    assert asyncio.run(scenario()) == CaptureState()
+    assert len(written) == 2
+
+
 def test_flush_inside_a_running_loop_leaves_pending_writes_for_aflush():
     async def scenario():
         released = asyncio.Event()
@@ -800,6 +881,51 @@ def test_a_keyboard_interrupt_from_a_sink_is_recorded_once_and_reaches_the_calle
     assert observer.get_state() == CaptureState(
         dropped_events=1, capture_gap=True, last_sink_error=GAP
     )
+
+
+def test_an_interrupt_out_of_a_queued_write_counts_the_event_it_lost():
+    """The interrupt travels on, and the event it stopped is counted on its way out.
+
+    Inside a running loop a write is a task, and an interrupt raised by the sink ends that task
+    and breaks out of the loop rather than returning through ``emit``. The guard inside the
+    write re-raised it, as it must, and counted nothing, so a run an operator stopped reported
+    that it had recorded everything it was handed. The count is in a ``finally`` now, which is
+    the one path every exit from a write crosses, so a re-raise costs its event exactly one
+    count whichever way it leaves.
+    """
+    written: list[dict] = []
+
+    def run(interrupt):
+        held: list[Observer] = []
+
+        async def sink(event):
+            raise interrupt
+
+        async def scenario():
+            observer = Observer(mode="metadata", sink=sink, clock=clock(), id_factory=ids())
+            held.append(observer)
+            assert observer.emit(**event_fields()) is not None
+            # Two turns: one runs the write, one delivers what it raised. Neither sleeps.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        with pytest.raises(type(interrupt)):
+            asyncio.run(scenario())
+        return held[0].get_state()
+
+    lost = CaptureState(dropped_events=1, capture_gap=True, last_sink_error=GAP)
+    assert run(KeyboardInterrupt("operator")) == lost
+    assert run(SystemExit(3)) == lost
+    assert written == []
+    # The synchronous path already counted this, and still counts it exactly once: the same
+    # rule, reached through the private loop rather than through a task.
+    def interrupting_sink(event):
+        raise KeyboardInterrupt("operator")
+
+    synchronous = Observer(mode="metadata", sink=interrupting_sink, clock=clock())
+    with pytest.raises(KeyboardInterrupt):
+        synchronous.emit(**event_fields())
+    assert synchronous.get_state() == lost
 
 
 def test_a_base_exception_from_a_caller_hook_never_leaves_observe():
@@ -1606,6 +1732,67 @@ def test_a_write_cancelled_after_it_started_is_counted_exactly_once():
         dropped_events=1, capture_gap=True, last_sink_error=GAP
     )
     assert len(started) == 1
+
+
+def test_a_sink_that_cancels_its_own_write_task_is_counted_once_and_only_when_lost():
+    """Whoever cancels a write, the event it carried is counted once, and only if it was lost.
+
+    A sink can cancel the task its own write runs on. Asking the task afterwards how it ended
+    answered for the write, and answered wrong twice. A sink that raised after requesting the
+    cancellation was counted by the guard that contained the raise and again by the callback
+    that saw a cancelled task: one event, two dropped events. A sink that took the event and
+    then cancelled its task was counted as a loss that never happened: the write reached the
+    sink, and ``dropped_events`` counts events that reached no sink. The delivery record settles
+    once and knows whether the sink accepted the event, so neither question is asked of the task
+    any more.
+    """
+    fields = event_fields()
+
+    def run(sink):
+        async def scenario():
+            observer = Observer(mode="metadata", sink=sink, clock=clock(), id_factory=ids())
+            assert observer.emit(**fields) is not None
+            for _ in range(4):
+                await asyncio.sleep(0)
+            return observer.get_state()
+
+        in_loop = asyncio.run(scenario())
+        # The same sink through the private loop a synchronous harness gets.
+        synchronous = Observer(mode="metadata", sink=sink, clock=clock(), id_factory=ids())
+        assert synchronous.emit(**fields) is not None
+        alone = synchronous.get_state()
+        synchronous.close()
+        assert in_loop == alone, (in_loop, alone)
+        return in_loop
+
+    written: list[dict] = []
+
+    async def cancel_then_raise(event):
+        asyncio.current_task().cancel()
+        raise RuntimeError("sink unavailable")
+
+    async def cancel_after_writing(event):
+        written.append(event)
+        asyncio.current_task().cancel()
+
+    async def cancel_then_wait(event):
+        asyncio.current_task().cancel()
+        await asyncio.Event().wait()
+        written.append(event)
+
+    # One event, one loss: the guard contained the failure and the cancelled task it left
+    # behind is not a second event.
+    assert run(cancel_then_raise) == CaptureState(
+        dropped_events=1, capture_gap=True, last_sink_error=GAP
+    )
+    # The write never reached the sink, so it is a loss, counted once.
+    assert run(cancel_then_wait) == CaptureState(
+        dropped_events=1, capture_gap=True, last_sink_error=GAP
+    )
+    assert written == []
+    # The sink took this one before cancelling, so nothing was lost and nothing is counted.
+    assert run(cancel_after_writing) == CaptureState()
+    assert [event["type"] for event in written] == ["model.request", "model.request"]
 
 
 def cancelled_during_flush(settle):

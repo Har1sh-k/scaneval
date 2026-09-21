@@ -6,6 +6,9 @@ import { MAX_PAYLOAD_DEPTH, Observer, createJsonlSink } from "../dist/index.js";
 const ids = () => { let i = 0; return { next: (prefix) => `${prefix}-${++i}` }; };
 const clock = () => { let i = 0; return { now: () => new Date(1_700_000_000_000 + i++ * 10) }; };
 const event = (extra = {}) => ({ type: "model.request", capture_status: "complete", metadata: { model: "x" }, content: { authorization: "keep-out", body: "hello" }, ...extra });
+// Let the microtask queue drain. Nothing sleeps and no timer is armed: each await is one turn,
+// and a promise-settling sink needs nothing else to make progress.
+const ticks = async (turns = 12) => { for (let i = 0; i < turns; i++) await Promise.resolve(); };
 
 test("off mode is a no-op", async () => {
   const seen = []; const observer = new Observer({ sink: { write: e => seen.push(e) } });
@@ -404,6 +407,68 @@ test("close refuses later events as counted capture gaps", async () => {
   await quiet.close();
   assert.equal(await quiet.emit(event()), undefined);
   assert.deepEqual(quiet.getState(), { dropped_events: 0, capture_gap: false, last_sink_error: null });
+});
+
+test("flush and close cover writes started while the flush was already waiting", async () => {
+  // flush used to await a snapshot of the pending set, so a write that started after that
+  // snapshot and before close set the closed flag was awaited by nobody: close resolved, the
+  // harness read a clean capture state, and an event was still on its way to the sink. The
+  // drain reads the set again on every turn now, which is what the Python aflush does with its
+  // pending map, so the two settle the same writes.
+  const releases = []; const written = [];
+  const sink = { write: (e) => new Promise((resolve) => { releases.push(() => { written.push(e); resolve(); }); }) };
+  const observer = new Observer({ mode: "metadata", sink, idFactory: ids(), clock: clock() });
+  assert.ok(observer.emit(event()));
+  let closed = false;
+  const closing = observer.close().then(() => { closed = true; });
+  await ticks();
+  // The first write settles, and a second starts in the same turn: the snapshot never had it.
+  releases[0]();
+  void observer.emit(event());
+  await ticks();
+  assert.deepEqual([closed, written.length], [false, 1]);
+  releases[1]();
+  await closing;
+  assert.deepEqual([closed, written.length, observer.closed], [true, 2, true]);
+  assert.deepEqual(observer.getState(), { dropped_events: 0, capture_gap: false, last_sink_error: null });
+  // The same rule for flush on its own: a write started during the drain is part of it.
+  const other = new Observer({ mode: "metadata", sink, idFactory: ids(), clock: clock() });
+  void other.emit(event());
+  let flushed = false;
+  const flushing = other.flush().then(() => { flushed = true; });
+  await ticks();
+  releases[2]();
+  void other.emit(event());
+  await ticks();
+  assert.deepEqual([flushed, written.length], [false, 3]);
+  releases[3]();
+  await flushing;
+  assert.deepEqual([flushed, written.length], [true, 4]);
+});
+
+test("a string no UTF-8 sink could encode is refused as a capture gap", async () => {
+  // JSON.stringify escapes a lone surrogate, so JavaScript wrote a line that parses while
+  // Python wrote the raw code point and lost the event inside the caller's own file, as a
+  // UnicodeEncodeError out of write_line. One payload, two outcomes. Both refuse it now, and
+  // the rule covers every caller string that reaches the wire, not only payload values.
+  const lone = "\uD800";
+  const lines = [];
+  const observer = new Observer({ mode: "content", sink: createJsonlSink(line => lines.push(line)), idFactory: ids(), clock: clock() });
+  assert.equal(await observer.emit(event({ metadata: { text: lone } })), undefined);
+  assert.equal(await observer.emit(event({ content: { text: lone } })), undefined);
+  assert.equal(await observer.emit(event({ metadata: { [lone]: "keyed" } })), undefined);
+  assert.equal(await observer.emit(event({ call_id: lone })), undefined);
+  const smuggling = new Observer({ mode: "metadata", sink: createJsonlSink(line => lines.push(line)), redactor: (key, value) => key === "smuggled" ? lone : value });
+  assert.equal(await smuggling.emit(event({ metadata: { smuggled: "x" } })), undefined);
+  assert.deepEqual(lines, []);
+  assert.deepEqual(observer.getState(), { dropped_events: 4, capture_gap: true, last_sink_error: "observer instrumentation failure" });
+  assert.equal(smuggling.getState().dropped_events, 1);
+  // The control: a surrogate PAIR is one real character, and both emitters write it.
+  const astral = new Observer({ mode: "content", sink: createJsonlSink(line => lines.push(line)), idFactory: ids(), clock: clock() });
+  assert.ok(await astral.emit(event({ metadata: { "clef \u{1D11E}": "\uD834\uDD1E" } })));
+  assert.equal(Buffer.from(lines[0], "utf8").toString("utf8"), lines[0]);
+  assert.ok(lines[0].includes("\u{1D11E}"));
+  assert.deepEqual(astral.getState(), { dropped_events: 0, capture_gap: false, last_sink_error: null });
 });
 
 test("payload nesting deeper than MAX_PAYLOAD_DEPTH is refused as a capture gap", async () => {

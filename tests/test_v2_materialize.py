@@ -18,6 +18,7 @@ from scaneval.materialize import (
     cache_key,
     export_snapshot,
     fetch_snapshot,
+    git_command,
     hash_exported_tree,
     prepare_synthetic_history,
     tree_hash,
@@ -286,3 +287,105 @@ def test_an_export_strips_every_harness_state_directory(tmp_path):
     assert record["stripped"] == [f"{name}/findings.md" for name in sorted(HARNESS_STATE_DIRS)]
     assert [path.name for path in source.iterdir()] == ["app.py"]
     assert record["trial"]["file_count"] == 1
+
+
+# --- area B: one hermetic environment for every git call ----------------------------------
+
+
+def test_every_git_invocation_is_built_hermetically(monkeypatch):
+    """The single place the rule lives: argv and environment for every git call this package makes.
+
+    Testing each call site separately is what let the last one be missed, so this pins the
+    builder itself: no ``GIT_*`` variable from the operator environment survives, global and
+    system configuration are off, and hooks and templates are off on the command line as well.
+    """
+    monkeypatch.setenv("GIT_DIR", "/somewhere/else/.git")
+    monkeypatch.setenv("GIT_WORK_TREE", "/somewhere/else")
+    monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i /operator/key")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Operator")
+
+    argv, env = git_command(["status", "--porcelain"])
+
+    assert argv[0] == "git" and argv[-2:] == ["status", "--porcelain"]
+    assert f"core.hooksPath={os.devnull}" in argv and "init.templateDir=" in argv
+    assert {name for name in env if name.startswith("GIT_")} == {
+        "GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_GLOBAL", "GIT_ATTR_NOSYSTEM", "GIT_TEMPLATE_DIR"}
+    assert env["GIT_CONFIG_GLOBAL"] == env["GIT_CONFIG_SYSTEM"] == os.devnull
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_TEMPLATE_DIR"] == ""
+    # Everything that is not git's own knob is passed through: ssh still finds ~/.ssh.
+    assert env["PATH"] == os.environ["PATH"] and env["HOME"] == os.environ["HOME"]
+
+
+def test_a_git_call_cannot_be_redirected_by_the_environment(tmp_path, monkeypatch):
+    """GIT_DIR and GIT_WORK_TREE were inherited, so this committed into an unrelated repository.
+
+    ``prepare_synthetic_history`` names the directory it is given, but git took the environment
+    first: with those variables set it reinitialized, staged, and committed into whatever they
+    pointed at, outside the trial workspace entirely. The identity went the same way, since
+    ``GIT_AUTHOR_NAME`` overrides the local configuration this sets, so the neutral identity the
+    record reports was a claim the operator environment could falsify.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    git("init", "-q", "-b", "main", cwd=outside)
+    (outside / "keep.txt").write_text("untouched\n", encoding="utf-8")
+    git("add", "-A", cwd=outside)
+    git("commit", "-q", "-m", "only commit", cwd=outside)
+    head_before = git("rev-parse", "HEAD", cwd=outside)
+    source = tmp_path / "trial" / "source"
+    source.mkdir(parents=True)
+    (source / "app.py").write_text("x = 1\n", encoding="utf-8")
+
+    for name, value in (("GIT_DIR", str(outside / ".git")), ("GIT_WORK_TREE", str(outside)),
+                        ("GIT_INDEX_FILE", str(outside / ".git" / "index")),
+                        ("GIT_AUTHOR_NAME", "Operator"), ("GIT_AUTHOR_EMAIL", "operator@example.com"),
+                        ("GIT_COMMITTER_NAME", "Operator"), ("GIT_COMMITTER_EMAIL", "operator@example.com")):
+        monkeypatch.setenv(name, value)
+    history = prepare_synthetic_history(source)
+    monkeypatch.undo()  # the checks below must not be redirected either
+
+    assert (source / ".git").is_dir(), "the history belongs to the directory the call named"
+    assert git("rev-parse", "HEAD", cwd=source) == history["commit"]
+    assert git("log", "--format=%an <%ae>", cwd=source).splitlines() == ["ScanEval <scaneval@localhost>"]
+    # The unrelated repository is exactly as it was: no commit, no staged file, nothing added.
+    assert git("rev-parse", "HEAD", cwd=outside) == head_before
+    assert git("status", "--porcelain", "--untracked-files=all", cwd=outside) == ""
+    assert sorted(p.name for p in outside.iterdir()) == [".git", "keep.txt"]
+
+
+def test_a_global_hook_or_template_cannot_run_inside_the_trial_workspace(tmp_path, monkeypatch):
+    """The operator's global git configuration reached the workspace and could write in it.
+
+    A global ``core.hooksPath``, or a global ``init.templateDir`` holding hooks, put a program in
+    the repository this creates, and git then ran it inside the trial workspace where it could
+    write into the exported source the runner is about to compare against its hash. ``--no-verify``
+    never covered this: it skips the pre-commit and commit-msg hooks, not ``post-commit``.
+    """
+    home = tmp_path / "home"
+    template_hooks = home / "template" / "hooks"
+    global_hooks = home / "hooks"
+    source = tmp_path / "trial" / "source"
+    source.mkdir(parents=True)
+    (source / "app.py").write_text("x = 1\n", encoding="utf-8")
+    for hooks in (template_hooks, global_hooks):
+        hooks.mkdir(parents=True)
+        hook = hooks / "post-commit"
+        hook.write_text(f"#!/bin/sh\necho ran > {source / 'HOOK-RAN.txt'}\n", encoding="utf-8")
+        hook.chmod(0o755)
+    (home / ".gitconfig").write_text(
+        f"[core]\n\thooksPath = {global_hooks}\n"
+        f"[init]\n\ttemplateDir = {home / 'template'}\n"
+        "[user]\n\tname = Operator\n\temail = operator@example.com\n", encoding="utf-8")
+    before = hash_exported_tree(source)
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "xdg"))
+    prepare_synthetic_history(source)
+    monkeypatch.undo()
+
+    assert not (source / "HOOK-RAN.txt").exists(), "a global hook ran inside the trial workspace"
+    assert not (source / ".git" / "hooks" / "post-commit").exists(), "the template was copied in"
+    assert hash_exported_tree(source) == before, "the exported source is not what it was"
+    assert git("log", "--format=%an <%ae>", cwd=source).splitlines() == ["ScanEval <scaneval@localhost>"]

@@ -10,11 +10,15 @@ from scaneval.contracts import (
     ContractError,
     canonical_json,
     canonical_sha256,
+    claimed_level_gap,
     covering_review,
+    effective_level,
     is_stated,
     label_digest,
     level_gap,
     load_document,
+    review_chain_digest,
+    review_chain_gap,
     validate_document,
 )
 
@@ -611,8 +615,23 @@ def test_one_review_earns_a_level_on_its_own_record(recorded, claimed, gap):
         assert measured is not None and gap in measured
 
 
-def test_the_covering_review_is_the_latest_one_that_names_these_labels():
-    """Every gate asks one review, so which review that is cannot depend on who is asking."""
+def record_history(case: dict, entries: list[dict]) -> list[dict]:
+    """Record *entries* on *case* as a verified chain, with the digest the history ends at.
+
+    A review is read as the last entry of a history, so a history that does not verify names no
+    operative review at all; a test recording one by hand has to chain it as the write path does.
+    """
+    reviews, head = chained([dict(entry) for entry in entries])
+    case["validation"]["reviews"] = reviews
+    if head is None:
+        case["validation"].pop("reviews_sha256", None)
+    else:
+        case["validation"]["reviews_sha256"] = head
+    return reviews
+
+
+def case_pack_fragment(commit: str = "a" * 40, tree_hash: str = HASH) -> tuple[dict, dict]:
+    """One pack holding one approved case, with only the fields these helpers read filled in."""
     case = {
         "case_id": "widget-shell", "represents": "r", "workload": "conventional_application",
         "component_role": "application", "model_involvement": {"state": "not_reviewed"},
@@ -623,24 +642,120 @@ def test_the_covering_review_is_the_latest_one_that_names_these_labels():
         "controls": [],
         "validation": {"level": "L3", "review_state": "human_approved", "checks": [], "reviews": []},
     }
-    digest = label_digest(case)
-    assert covering_review(case) is None, "no review is recorded"
+    pack = {"snapshots": [{"snapshot_id": "snap-a", "commit": commit, "tree_hash": tree_hash}],
+            "cases": [case]}
+    return pack, case
 
-    case["validation"]["reviews"].append({**review(), "labels_sha256": digest})
-    assert covering_review(case) is case["validation"]["reviews"][-1]
+
+def test_the_covering_review_is_the_latest_one_that_names_these_labels():
+    """Every gate asks one review, so which review that is cannot depend on who is asking."""
+    pack, case = case_pack_fragment()
+    digest = label_digest(pack, case)
+    assert covering_review(pack, case) is None, "no review is recorded"
+
+    approval = {**review(), "labels_sha256": digest}
+    record_history(case, [approval])
+    assert covering_review(pack, case) is case["validation"]["reviews"][-1]
 
     # Sorting the aliases is not a content change, so the same review still covers the labels.
     case["canonical_target"]["aliases"] = ["a", "b"]
-    assert label_digest(case) == digest and covering_review(case) is not None
+    assert label_digest(pack, case) == digest and covering_review(pack, case) is not None
 
     # A later review of any other decision is the operative one, and it covers nothing.
     for decision in ("unresolved", "reject"):
-        case["validation"]["reviews"].append({**review(decision=decision), "labels_sha256": digest})
-        assert covering_review(case) is None
-        case["validation"]["reviews"].pop()
+        record_history(case, [approval, {**review(decision=decision), "labels_sha256": digest}])
+        assert covering_review(pack, case) is None
 
     # An approval that names other content, or names none at all, covers nothing either.
-    case["validation"]["reviews"].append({**review(), "labels_sha256": "sha256:" + "f" * 64})
-    assert covering_review(case) is None
-    case["validation"]["reviews"][-1].pop("labels_sha256")
-    assert covering_review(case) is None
+    record_history(case, [{**review(), "labels_sha256": "sha256:" + "f" * 64}])
+    assert covering_review(pack, case) is None
+    stripped = {key: value for key, value in review().items() if key != "labels_sha256"}
+    record_history(case, [stripped])
+    assert covering_review(pack, case) is None
+
+    # A history that does not verify names no operative review, whatever its entries say.
+    record_history(case, [approval])
+    case["validation"]["reviews_sha256"] = "sha256:" + "e" * 64
+    assert covering_review(pack, case) is None
+
+
+@pytest.mark.parametrize(
+    ("commit", "tree_hash"),
+    [("b" * 40, HASH), ("a" * 40, "sha256:" + "c" * 64), ("b" * 40, None)],
+    ids=["repinned-commit", "different-export", "unpinned-export"],
+)
+def test_the_digest_covers_the_bytes_a_snapshot_stood_for(commit, tree_hash):
+    """An approval covers the exact bytes reviewed, so snapshot identity is inside the digest."""
+    pack, case = case_pack_fragment()
+    digest = label_digest(pack, case)
+    record_history(case, [{**review(), "labels_sha256": digest}])
+    assert covering_review(pack, case) is not None
+
+    repinned, moved = case_pack_fragment(commit=commit, tree_hash=tree_hash)
+    record_history(moved, [{**review(), "labels_sha256": digest}])
+
+    assert label_digest(repinned, moved) != digest
+    assert covering_review(repinned, moved) is None
+    assert effective_level(repinned, moved) is None
+
+
+def test_a_level_a_covering_review_does_not_establish_is_refused_in_either_direction():
+    """The covering review is the only source of the level, so a cached claim may only repeat it."""
+    pack, case = case_pack_fragment()
+    record_history(case, [{**review("L3"), "labels_sha256": label_digest(pack, case)}])
+    assert claimed_level_gap(case["validation"]["reviews"][-1], "L3") is None
+    assert effective_level(pack, case) == "L3"
+
+    # Below the review: the plan would read L3 from the review while the record claims L2, so the
+    # claim is measured against nothing any decision uses.
+    assert "cached copy" in claimed_level_gap(case["validation"]["reviews"][-1], "L2")
+    # Above it, and outside the role it needs: the older messages, unchanged.
+    assert "recorded at L3" in claimed_level_gap(case["validation"]["reviews"][-1], "L4")
+    curator = {**review("L4", role="curator"), "labels_sha256": label_digest(pack, case)}
+    assert "carries the role curator" in claimed_level_gap(curator, "L2"), \
+        "a review is measured against the level it records, not against a lower claim beside it"
+
+
+def chained(entries: list[dict]) -> tuple[list[dict], str | None]:
+    """The reviews as a verified chain, with the digest the history ends at."""
+    head = None
+    for entry in entries:
+        entry["chain_sha256"] = review_chain_digest(head, entry)
+        head = entry["chain_sha256"]
+    return entries, head
+
+
+def test_a_review_history_verifies_as_a_chain_with_a_recorded_end():
+    """Each entry commits to the one before it, and the head commits to where the history stops.
+
+    The chain catches an edit, a reordering, and a deletion from the middle; none of those leaves
+    the later entries chaining to anything that is still there. The recorded head catches the
+    deletion off the end, which the chain alone cannot see and which is the one that would restore
+    an approval by dropping the review that withdrew it.
+    """
+    reviews, head = chained([review("L3"), review("L3", decision="unresolved"),
+                             review("L4", role="curator")])
+    assert review_chain_gap(reviews, head) is None
+    assert review_chain_gap([], None) is None
+
+    assert "no chain_sha256" in review_chain_gap(
+        [{key: value for key, value in reviews[0].items() if key != "chain_sha256"}], head)
+
+    edited = copy.deepcopy(reviews)
+    edited[0]["note"] = "a note the reviewer did not write"
+    assert "does not chain to the review before it" in review_chain_gap(edited, head)
+
+    reordered = [copy.deepcopy(reviews[1]), copy.deepcopy(reviews[0]), copy.deepcopy(reviews[2])]
+    assert "does not chain to the review before it" in review_chain_gap(reordered, head)
+
+    middle = [copy.deepcopy(reviews[0]), copy.deepcopy(reviews[2])]
+    assert "does not chain to the review before it" in review_chain_gap(middle, head)
+
+    truncated = copy.deepcopy(reviews[:-1])
+    gap = review_chain_gap(truncated, head)
+    assert "a review was deleted from the end of it" in gap
+    assert review_chain_gap(truncated, truncated[-1]["chain_sha256"]) is None, \
+        "rebuilding the head is what it costs to delete one, and that is a deliberate act"
+
+    assert "nothing says where the recorded review history ends" in review_chain_gap(reviews, None)
+    assert "the history it names was deleted whole" in review_chain_gap([], head)

@@ -10,6 +10,13 @@ count above zero degrades the outcome to ``partial`` with unresolved bundles and
 code ``import_loss``, so a scan that emitted a finding ScanEval could not read can earn
 neither completeness nor silence credit for it.
 
+So is a record the importer never saw. The harness names the findings it wrote in its own
+summary, and :func:`reconcile_import` compares that self-report against the claims the import
+delivered: a finding the harness says it wrote that did not arrive is the same loss, counted
+the same way. Counting only what the importer could see made the worst case invisible, because
+a scan that lost every finding before the import left nothing to count and read as a clean
+success.
+
 Only records this scan produced are imported. The findings directory is snapshotted before
 the harness process starts, and a record already present with the same bytes is left out, so
 a finding record the repository under test shipped cannot be counted as a detection. That
@@ -28,7 +35,7 @@ import subprocess
 from typing import Any, NamedTuple
 
 from ..kinds import kind_for_harness_class
-from ..materialize import HARNESS_STATE_DIRS
+from ..materialize import HARNESS_STATE_DIRS, git_command
 from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command, tail_text
 
 
@@ -117,21 +124,48 @@ def _split_items(inner: str) -> list[str]:
     return [item for item in items if item.strip()]
 
 
+class LostRecord(NamedTuple):
+    """One finding record this scan produced that did not become a claim.
+
+    ``name`` is the record's file name, or the findings path itself when nothing could be
+    listed. ``finding_id`` is the id in its frontmatter when the importer got far enough to read
+    one, and ``None`` otherwise. That distinction is what :func:`reconcile_import` needs: a
+    record dropped under a known id explains a self-reported finding that never arrived, and one
+    dropped before its id could be read explains nothing in particular.
+    """
+
+    name: str
+    finding_id: str | None
+    reason: str
+
+    @property
+    def note(self) -> str:
+        """The note this loss reads as in the record: the id when there is one, else the name."""
+        return f"{self.finding_id or self.name}: {self.reason}"
+
+
 class HarnessImport(NamedTuple):
     """One import of the harness's own finding records.
 
-    ``lost`` is the number of records the importer could not turn into a claim, for any
-    reason. It is part of the contract rather than a note because the caller must degrade
-    the outcome when it is above zero: a record ScanEval dropped is a finding the scanner
-    did emit, so the scan cannot stand as a complete or quiet observation. A directory
-    listing that failed contributes 1, so ``lost`` is a floor rather than an exact count
-    whenever a note says a listing failed.
+    ``losses`` is every record the importer could not turn into a claim, for any reason. The
+    caller must degrade the outcome when there is one: a record ScanEval dropped is a finding
+    the scanner did emit, so the scan cannot stand as a complete or quiet observation. A
+    directory listing that failed contributes one entry, so the count is a floor rather than an
+    exact number whenever a loss says a listing failed.
+
+    ``lost`` is derived from ``losses`` rather than counted alongside it, so the count and the
+    list of reasons cannot disagree about how much was lost.
     """
 
     claims: list[dict]
     artifacts: list[dict]
     notes: list[str]
-    lost: int
+    losses: tuple[LostRecord, ...]
+
+    @property
+    def lost(self) -> int:
+        """How many finding records did not become claims."""
+        return len(self.losses)
 
 
 class FindingsBaseline(NamedTuple):
@@ -204,6 +238,30 @@ def snapshot_findings(findings_dir: Path) -> FindingsBaseline:
     return FindingsBaseline(digests, True, None)
 
 
+def stage_record(source: Path, destination: Path) -> str | None:
+    """Copy one harness record into the staging directory; return a failure message, never raise.
+
+    Every record this adapter stages goes through here: the finding records, whose failure is
+    import loss, and the plan records, whose failure is a note. That is the rule in one place: a
+    copy made to preserve evidence must not raise out of :meth:`LlmHarnessAdapter.scan`, where
+    it would discard every claim the importer had already built and turn the whole scan into an
+    adapter failure. The scanner owns both ends of this copy, so both ends can fail.
+
+    Only a regular file is copied. Both callers classify the record before they get here, but
+    the guard belongs to the copy as well: :func:`shutil.copyfile` follows a symbolic link and
+    would preserve a host file the scan never wrote, and opening a named pipe for reading would
+    block until something wrote to it, which nothing here ever does.
+    """
+    if source.is_symlink() or not source.is_file():
+        return "the record is not a regular file; it was not followed or copied"
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+    except OSError as exc:
+        return exc.strerror or str(exc)
+    return None
+
+
 def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix: str,
                             stage_dir: Path, baseline: FindingsBaseline) -> HarnessImport:
     """Stage the ``findings/*.md`` records this scan produced and translate each into a claim.
@@ -213,12 +271,12 @@ def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix
     own raw artifact under ``<artifact_prefix>/<file name>``, and the claim carries that same
     id, so every claim points at a hash-backed record the bundle holds rather than at a name
     nothing registers. A record that is not a regular file, cannot be read, carries no id,
-    carries an unusable ``file_path``, or cannot be staged yields no claim and is counted in
-    ``lost`` as well as noted. The directory is listed explicitly, so a listing that fails is
-    counted and noted rather than read as an empty directory, and a findings path that is itself
-    a symbolic link is one of those failures: nothing behind it is read, because it is not the
-    workspace this scan was handed. The full native allegation text is preserved; line ranges
-    are never invented.
+    carries an unusable ``file_path``, or cannot be staged yields no claim and becomes one
+    :class:`LostRecord`, which is both the loss and the note it reads as. The directory is listed
+    explicitly, so a listing that fails is counted and noted rather than read as an empty
+    directory, and a findings path that is itself a symbolic link is one of those failures:
+    nothing behind it is read, because it is not the workspace this scan was handed. The full
+    native allegation text is preserved; line ranges are never invented.
 
     Provenance. *baseline* is :func:`snapshot_findings` taken before the harness process
     started, and a record whose name and bytes are both in it is not imported: it was already
@@ -236,33 +294,40 @@ def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix
     claims: list[dict] = []
     artifacts: list[dict] = []
     notes: list[str] = []
-    lost = 0
+    losses: list[LostRecord] = []
+
+    def lose(name: str, finding_id: str | None, reason: str) -> None:
+        """Record one lost record once: the loss and the note it reads as come from one call."""
+        loss = LostRecord(name, finding_id, reason)
+        losses.append(loss)
+        notes.append(loss.note)
+
     names, listing_failure, exists = _list_markdown(findings_dir)
     if not exists:
-        return HarnessImport(claims, artifacts, ["no findings directory was written by the harness"], 0)
+        return HarnessImport(claims, artifacts, ["no findings directory was written by the harness"], ())
     if listing_failure:
         # A directory this could not read is not an empty one: an unknown number of records
-        # went unimported, so the loss count is 1 as a floor and the note says so.
-        return HarnessImport(claims, artifacts,
-                             [f"{listing_failure}; an unknown number of finding records was not imported"], 1)
+        # went unimported, so one loss is recorded as a floor and the note says so.
+        lose(findings_dir.name, None,
+             f"{listing_failure}; an unknown number of finding records was not imported")
+        return HarnessImport(claims, artifacts, notes, tuple(losses))
     if not baseline.established:
         # Nothing separates a record the scan wrote from one the input shipped, so none is
         # attributed to the scan and all of them are counted as lost.
         note = baseline.note or "the findings directory could not be listed before the scan"
-        return HarnessImport(claims, artifacts,
-                             [f"finding record provenance could not be established ({note}); "
-                              f"{len(names)} record(s) were not imported"], max(len(names), 1))
+        reason = f"finding record provenance could not be established ({note}); not imported"
+        for name in names or [findings_dir.name]:
+            lose(name, None, reason)
+        return HarnessImport(claims, artifacts, notes, tuple(losses))
     for name in names:
         path = findings_dir / name
         if path.is_symlink() or not path.is_file():
-            lost += 1
-            notes.append(f"{path.name}: finding record is not a regular file; not imported")
+            lose(path.name, None, "finding record is not a regular file; not imported")
             continue
         try:
             data = path.read_bytes()
         except OSError as exc:
-            lost += 1
-            notes.append(f"{path.name}: finding record could not be read ({exc.strerror}); not imported")
+            lose(path.name, None, f"finding record could not be read ({exc.strerror}); not imported")
             continue
         if name in baseline.digests and baseline.digests[name] in (None, _digest(data)):
             # These bytes were in the exported input before the harness ran, so the scan did
@@ -275,24 +340,20 @@ def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix
         record, body = parse_frontmatter(text)
         finding_id = str(record.get("id") or "")
         if not finding_id:
-            lost += 1
-            notes.append(f"{path.name}: no id in frontmatter; not imported")
+            lose(path.name, None, "no id in frontmatter; not imported")
             continue
         file_path = str(record.get("file_path") or "").replace("\\", "/")
         if file_path.startswith("./"):
             file_path = file_path[2:]
         if not file_path or file_path.startswith("/") or ".." in file_path.split("/"):
-            lost += 1
-            notes.append(f"{finding_id}: unusable file_path {file_path!r}; not imported, see the raw finding record")
+            lose(path.name, finding_id,
+                 f"unusable file_path {file_path!r}; not imported, see the raw finding record")
             continue
-        try:
-            stage_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(path, stage_dir / path.name)
-        except OSError as exc:
+        failure = stage_record(path, stage_dir / path.name)
+        if failure:
             # The claim would name an artifact the bundle does not hold, so the record is
             # counted as lost rather than imported against a copy that was never made.
-            lost += 1
-            notes.append(f"{finding_id}: finding record could not be staged ({exc.strerror}); not imported")
+            lose(path.name, finding_id, f"finding record could not be staged ({failure}); not imported")
             continue
         vulnerability_class = str(record.get("vulnerability_class") or "")
         title = str(record.get("title") or path.stem)
@@ -313,7 +374,118 @@ def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix
             claim["native_severity"] = severity
         claims.append(claim)
         artifacts.append({"id": claim["raw_artifact_id"], "path": stage_dir / path.name})
-    return HarnessImport(claims, artifacts, notes, lost)
+    return HarnessImport(claims, artifacts, notes, tuple(losses))
+
+
+class SelfReport(NamedTuple):
+    """What the harness says its own run wrote, read off the driver summary.
+
+    ``ids`` are the distinct finding ids it named in ``newFindings`` and ``updatedFindings``,
+    each of which the engine writes as one ``findings/*.md`` record. ``unnamed`` counts reported
+    entries carrying no usable id, which can still be compared by number. ``note`` names a
+    summary shape this could not read at all.
+    """
+
+    ids: tuple[str, ...]
+    unnamed: int
+    note: str | None
+
+    @property
+    def total(self) -> int:
+        """How many finding records the harness says this run wrote."""
+        return len(self.ids) + self.unnamed
+
+
+def read_self_report(summary: object) -> SelfReport:
+    """Read the harness's own count of the finding records it wrote.
+
+    A summary that names no findings yields an empty report, which asserts nothing: this is a
+    cross-check against a scanner's own words, not a guarantee. A summary whose ``newFindings``
+    or ``updatedFindings`` is a shape this cannot read yields a note instead of a number, for
+    the same reason: an unreadable self-report disagrees with nothing.
+    """
+    if not isinstance(summary, dict):
+        return SelfReport((), 0, None)
+    ids: list[str] = []
+    unnamed = 0
+    unreadable: list[str] = []
+    for key in ("newFindings", "updatedFindings"):
+        reported = summary.get(key)
+        if reported is None:
+            continue
+        if isinstance(reported, int) and not isinstance(reported, bool):
+            # Some summaries carry a count where others carry the records themselves.
+            unnamed += max(reported, 0)
+            continue
+        if not isinstance(reported, list):
+            unreadable.append(f"summary.{key} is a {type(reported).__name__}, not a list of findings")
+            continue
+        for entry in reported:
+            identifier = entry.get("id") if isinstance(entry, dict) else None
+            if isinstance(identifier, str) and identifier:
+                ids.append(identifier)
+            else:
+                unnamed += 1
+    return SelfReport(tuple(dict.fromkeys(ids)), unnamed, "; ".join(unreadable) or None)
+
+
+class ImportAccounting(NamedTuple):
+    """The one count of finding records this scan produced that did not arrive as claims.
+
+    Everything the outcome does about import loss reads this: the status, ``bundles_resolved``,
+    the error message, and the note. ``lost`` above zero means the scan can earn neither
+    completeness nor quiet credit.
+    """
+
+    lost: int
+    message: str | None
+    notes: tuple[str, ...]
+
+
+def reconcile_import(imported: HarnessImport, report: SelfReport) -> ImportAccounting:
+    """Reconcile what the harness says it wrote against what the importer could read.
+
+    The rule: a scanner self-report that disagrees with what we could read is evidence of loss,
+    not something to ignore. Counting only the records the importer could see left the worst
+    case invisible, because a scan whose findings all vanished before the import produced no
+    record to count and reached scoring as a clean success.
+
+    The arithmetic, and why it cannot count one record twice. Every record the importer read and
+    rejected is one loss, with its own reason. Against that, each finding the harness named is
+    accounted for when a claim carries its id, and each finding it reported without an id is
+    accounted for by any delivered claim the report did not name. What is left over is the
+    shortfall: findings the harness says it wrote that neither arrived nor are already counted
+    as a rejected record. A rejected record is assumed to be one of the reported findings, so a
+    record that was both reported and rejected is counted once, as a rejection with a reason.
+
+    The limits. This trusts the self-report only as a lower bound on what was written: a harness
+    that reports nothing, or reports a shape :func:`read_self_report` cannot read, produces no
+    shortfall, and a harness that under-reports hides the same way. The comparison is by id, so
+    a record the harness rewrote byte for byte is excluded by the import baseline and then shows
+    up here as a shortfall, which is the conservative direction: it was reported, and no claim
+    for it arrived.
+    """
+    delivered = {str(claim.get("claim_id") or "") for claim in imported.claims}
+    named_lost = {loss.finding_id for loss in imported.losses if loss.finding_id}
+    matched = sum(1 for identifier in report.ids if identifier in delivered)
+    absorbed = min(report.unnamed, max(len(delivered) - matched, 0))
+    shortfall = max(report.total - matched - absorbed - imported.lost, 0)
+    reasons = [loss.note for loss in imported.losses]
+    notes = [report.note] if report.note else []
+    if shortfall:
+        unattributed = [identifier for identifier in report.ids
+                        if identifier not in delivered and identifier not in named_lost]
+        detail = ", ".join(unattributed[:10]) if unattributed else "none of them carried an id"
+        reasons.append(f"the harness reported writing {report.total} finding record(s) and "
+                       f"{shortfall} of them did not arrive as claims ({detail})")
+    lost = imported.lost + shortfall
+    message = None
+    if lost:
+        message = (f"{lost} harness finding record(s) could not be imported: "
+                   + "; ".join(reasons))[:2000]
+        notes.append(f"Import loss: {lost} finding record(s) the harness wrote could not be "
+                     "imported, so this scan can earn neither completeness nor quiet credit.")
+    return ImportAccounting(lost, message, tuple(notes))
 
 
 def capture_status(trace_mode: str, routes: list[str], *, has_summary: bool,
@@ -395,8 +567,14 @@ class LlmHarnessAdapter(Adapter):
             raise AdapterError("config.model (harness model route) is required")
         head, dirty = None, None
         try:
-            head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, timeout=30).stdout.strip() or None
-            dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True, timeout=30).stdout.strip())
+            # Hermetic, like every other git call this package makes: an inherited GIT_DIR would
+            # otherwise make this record an unrelated repository's HEAD as the harness version.
+            head_argv, git_environment = git_command(["rev-parse", "HEAD"])
+            status_argv, _ = git_command(["status", "--porcelain"])
+            head = subprocess.run(head_argv, cwd=root, env=git_environment, capture_output=True,
+                                  text=True, timeout=30).stdout.strip() or None
+            dirty = bool(subprocess.run(status_argv, cwd=root, env=git_environment, capture_output=True,
+                                        text=True, timeout=30).stdout.strip())
         except (OSError, subprocess.TimeoutExpired):
             pass
         package_version = None
@@ -472,10 +650,16 @@ class LlmHarnessAdapter(Adapter):
                 # are plan records, not claims, so this does not degrade the scan status.
                 plan_notes.append(f"{name}: harness record is not a regular file; it was not staged as an artifact")
             elif written.is_file():
-                plans.mkdir(parents=True, exist_ok=True)
                 copied = plans / name
-                shutil.copyfile(written, copied)
-                artifacts.append({"id": f"harness-{name}", "path": copied})
+                failure = stage_record(written, copied)
+                if failure:
+                    # Contained, not raised: a plan record is evidence, and a copy that fails
+                    # must not discard the claims the importer already built. The scanner owns
+                    # the record and the directory it goes to, so it can break either.
+                    plan_notes.append(f"{name}: harness record could not be staged ({failure}); "
+                                      "it was not staged as an artifact")
+                else:
+                    artifacts.append({"id": f"harness-{name}", "path": copied})
         output: dict[str, Any] = {}
         try:
             output = json.loads((raw_dir / "driver-output.json").read_text(encoding="utf-8"))
@@ -487,13 +671,12 @@ class LlmHarnessAdapter(Adapter):
         routes = sorted({str(route) for route in (output.get("observed_routes") or [])}) if isinstance(output, dict) else []
         mock_only = routes == ["mock"]
         capture = capture_status(trace_mode, routes, has_summary=bool(summary), capture_state=capture_state)
-        notes = list(imported.notes) + plan_notes
-        loss_message = None
-        if imported.lost:
-            loss_message = (f"{imported.lost} harness finding record(s) could not be imported: "
-                            + "; ".join(imported.notes))[:2000]
-            notes.append(f"Import loss: {imported.lost} finding record(s) the harness wrote could not be "
-                         "imported, so this scan can earn neither completeness nor quiet credit.")
+        # One accounting of import loss, reconciling the records the importer could read against
+        # the findings the harness says it wrote. Every branch below reads this and nothing else:
+        # the status, the resolved-bundle flag, the error message, and the notes.
+        accounting = reconcile_import(imported, read_self_report(summary))
+        loss_message = accounting.message
+        notes = list(imported.notes) + plan_notes + list(accounting.notes)
         notes.append("Model requests are captured per logical harness call; retries inside the harness runner and token usage are not observable at this boundary.")
         for route in routes:
             policy = TOOL_POLICY.get(route)
@@ -513,23 +696,30 @@ class LlmHarnessAdapter(Adapter):
         # resolved: the scoring contract then refuses both completed-control and quiet credit.
         base = dict(command=argv, claims=claims, artifacts=artifacts, capture=capture, notes=notes,
                     model_identity=model_identity, usage=usage, trace_path=trace_path, capture_state=capture_state,
-                    bundles_resolved=imported.lost == 0,
+                    bundles_resolved=accounting.lost == 0,
                     tool_versions={"harness": f"{harness}@{preparation['harness'].get('git_head') or 'unknown'}",
                                    "harness_package": str(preparation["harness"].get("package_version")),
                                    "driver": str(output.get("driver_version", "unknown"))})
 
         def with_loss(message: str) -> str:
-            """The branch's own message, with the import loss named beside it."""
+            """The branch's own message, with the import loss named beside it.
+
+            Every branch that reports a message goes through here, so what was lost travels with
+            the outcome whichever way the run ended rather than only on the branches that
+            remembered to ask.
+            """
             return f"{message}; {loss_message}"[:2000] if loss_message else message
 
         if result.timed_out:
             return NativeOutcome(status="timeout", exit_code=None, timed_out=True,
-                                 error={"code": "timeout", "message": f"harness exceeded {timeout_seconds}s"}, **base)
+                                 error={"code": "timeout",
+                                        "message": with_loss(f"harness exceeded {timeout_seconds}s")}, **base)
         if not summary:
             failure = (output.get("error") or {}) if isinstance(output, dict) else {}
             message = failure.get("message") or tail_text(raw_dir / "driver-stderr.txt")
             return NativeOutcome(status="error", exit_code=result.exit_code,
-                                 error={"code": f"driver_exit_{result.exit_code}", "message": str(message)[:2000]}, **base)
+                                 error={"code": f"driver_exit_{result.exit_code}",
+                                        "message": with_loss(str(message)[:2000])}, **base)
         budget = summary.get("budget") or {}
         if isinstance(budget, dict) and "estimatedSpentUsd" in budget:
             notes.append(f"Harness cost estimate (not measured): {budget.get('estimatedSpentUsd')} USD "
@@ -542,7 +732,8 @@ class LlmHarnessAdapter(Adapter):
                      f"runtime_profile={summary.get('runtimeProfile')} degraded={summary.get('degraded')}")
         if result.exit_code not in (0, 2):
             return NativeOutcome(status="error", exit_code=result.exit_code,
-                                 error={"code": f"driver_exit_{result.exit_code}", "message": tail_text(raw_dir / "driver-stderr.txt")}, **base)
+                                 error={"code": f"driver_exit_{result.exit_code}",
+                                        "message": with_loss(tail_text(raw_dir / "driver-stderr.txt"))}, **base)
         if llm_calls and failed_calls >= llm_calls:
             return NativeOutcome(status="partial", exit_code=result.exit_code,
                                  error={"code": "llm_path_failed", "message": with_loss("every harness model call failed; findings come from deterministic passes only")}, **base)

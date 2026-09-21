@@ -4,10 +4,11 @@
  * It is behaviorally matched to the Python emitter in `src/scaneval/observer`: the two accept
  * and reject the same inputs, write the same keys in the wire schema's declaration order,
  * redact by the same ASCII key-name rule, decide "was this value replaced" by the same
- * strict-inequality rule, refuse the same payload nesting depth, and report the same capture
- * state fields. A rejected event consumes no sequence number, no event ID, and no clock read;
- * that is only safe because the rejection sets are identical, so the rule in `validInput` is a
- * contract rather than an implementation detail. Where the two once differed, the stricter rule
+ * strict-inequality rule, refuse the same payload nesting depth, refuse the same strings no
+ * UTF-8 sink could write, and report the same capture state fields. A rejected event consumes
+ * no sequence number, no event ID, and no clock read; that is only safe because the rejection
+ * sets are identical, so the rule in `validInput` is a contract rather than an implementation
+ * detail. Where the two once differed, the stricter rule
  * is now the shared one.
  *
  * The caller's input object is read exactly once, into a snapshot, and the snapshot is what is
@@ -31,6 +32,11 @@
  * there would report a loss that did not happen and hide the ones that did. A recording
  * observer with no sink is the opposite case and is counted, because every event it builds
  * reaches nobody. Python draws the same line, between `_mark_gap` and `_lost_event`.
+ *
+ * A flush settles the writes that begin while it is already waiting, not a snapshot of the set
+ * taken when it was called, and `close` drains and sets its closed flag in one loop: a close that
+ * resolved with a write outstanding would tell a harness capture had settled while an event was
+ * still on its way to the sink. The Python `aflush` re-reads its pending map for the same reason.
  *
  * Wiring mistakes are refused at construction rather than degraded at runtime: an unknown
  * recording mode, a sink with no callable `write`, and a sink or a `write` that is a generator
@@ -258,6 +264,25 @@ const secretKey =
   /^(?:api[_-]?key|authorization|credential(?:s)?|cookie(?:s)?|password|secret(?:s)?|token|private[_-]?key)$/i;
 const defaultRedactor: Redactor = (key, value) =>
   secretKey.test(key) ? "[REDACTED]" : value;
+/* A lone surrogate: a high surrogate with no low one after it, or a low one with no high one
+   before it. A JavaScript string is a sequence of UTF-16 code units, so a PAIR is one real
+   astral character and is left alone; only an unpaired half is not text at all. */
+const unpairedSurrogate =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+/**
+ * True when every code unit in `text` belongs to a character a UTF-8 sink can write.
+ *
+ * `JSON.stringify` escapes a lone surrogate as `\ud800`, so JavaScript would write a line that
+ * parses, while Python holds the same code point in its string, copies it straight through
+ * `json.dumps`, and only fails when a real JSONL file tries to encode it, losing the event at
+ * write time. One payload, two outcomes. Both emitters refuse it instead, which is the stricter
+ * shared rule: a payload the emitter cannot hand every sink is a capture gap, not a line that
+ * means one thing here and nothing there. Python spells the same check over code points, where
+ * every surrogate is by definition unpaired.
+ */
+function isEncodable(text: string): boolean {
+  return !unpairedSurrogate.test(text);
+}
 /** Python's `round`: a half goes to the even neighbour, so both languages write one integer. */
 function roundHalfToEven(value: number): number {
   const floor = Math.floor(value);
@@ -271,17 +296,24 @@ function roundHalfToEven(value: number): number {
  *
  * `depth` counts the containers already entered, so the payload object itself is checked at
  * depth 0 and nesting beyond `MAX_PAYLOAD_DEPTH` containers is refused. Non-finite numbers,
- * cycles, non-plain objects, and values that are not JSON are refused too. This is a copy, not
- * a coercion: nothing is stringified or truncated to make it fit.
+ * cycles, non-plain objects, values that are not JSON, and a string or key carrying an unpaired
+ * surrogate are refused too. This is a copy, not a coercion: nothing is stringified or truncated
+ * to make it fit.
  */
 function copyJson(
   value: JsonValue,
   seen = new WeakSet<object>(),
   depth = 0,
 ): JsonValue {
-  if (
-    value === null || typeof value === "string" || typeof value === "boolean"
-  ) return value;
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    // Refused rather than escaped: a lone surrogate is a line Python's sink cannot encode, and
+    // the two emitters would otherwise write different bytes for the same payload.
+    if (!isEncodable(value)) {
+      throw new TypeError("JSON string carries an unpaired surrogate");
+    }
+    return value;
+  }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new TypeError("non-finite JSON number");
     return value;
@@ -303,6 +335,9 @@ function copyJson(
   }
   const result = Object.create(null) as JsonObject;
   for (const key of Object.keys(value)) {
+    if (!isEncodable(key)) {
+      throw new TypeError("JSON object key carries an unpaired surrogate");
+    }
     Object.defineProperty(result, key, {
       value: copyJson(value[key], seen, depth + 1),
       enumerable: true,
@@ -590,16 +625,26 @@ export class Observer {
   /**
    * Wait for writes started by emit/observeAsync after the harness operation has finished.
    *
+   * It drains until the set is empty rather than awaiting one snapshot of it, because a write
+   * started while the flush was already waiting belongs to this flush too: awaiting a snapshot
+   * resolved with that write still outstanding, and a harness that read `getState` next saw a
+   * clean capture state for an event no sink had taken yet. The Python `aflush` loops over its
+   * pending map for the same reason, so the two settle the same set of writes.
+   *
    * A never-settling sink also makes flush wait forever. It never rejects: a write that
    * somehow failed is already a recorded gap, and an awaiting harness must not inherit an
    * instrumentation failure as its own error.
    */
   async flush(): Promise<void> {
-    await Promise.all(
-      [...this.pending].map((write) =>
-        write.then(() => undefined, () => undefined)
-      ),
-    );
+    while (this.pending.size > 0) {
+      const batch = [...this.pending];
+      await Promise.all(
+        batch.map((write) => write.then(() => undefined, () => undefined)),
+      );
+      // Each write removes itself as it settles; removing the batch here as well means the
+      // loop condition reads the set rather than racing the handlers that empty it.
+      for (const write of batch) this.pending.delete(write);
+    }
   }
   /**
    * Flush, then refuse later events. It closes no caller resource.
@@ -609,10 +654,18 @@ export class Observer {
    * to is visible as loss rather than silently postdating that run. In `off` mode there is
    * nothing to close and a later emit still records nothing, gap included. Calling it twice is
    * harmless. A sink the caller opened stays the caller's to close.
+   *
+   * The drain and the flag are one loop because `await` is a turn of the microtask queue:
+   * something scheduled in that turn can emit between the last drain and the flag, and a close
+   * that resolved there would report a finished run with a write still outstanding. Once the
+   * flag is set no further write can start, so the loop runs at most one more time. Python has
+   * no such gap, because nothing runs between its `aflush` returning and `_closed` being set.
    */
   async close(): Promise<void> {
-    await this.flush();
-    this.isClosed = true;
+    do {
+      await this.flush();
+      this.isClosed = true;
+    } while (this.pending.size > 0);
   }
   /**
    * Capture broke here, but no event was lost by it.
@@ -644,8 +697,16 @@ export class Observer {
       return prefix + "-fallback-" + (++this.fallbackSequence);
     }
   }
+  /**
+   * A usable id: a nonempty string of characters a UTF-8 sink can write.
+   *
+   * The surrogate rule a payload string is held to is the rule every caller string on the wire
+   * is held to, because a lone surrogate in a link ID, a run ID, or a producer ID costs the same
+   * line the same way. This is where all three are decided, as Python decides all three in
+   * `_is_id`.
+   */
   private validId(value: unknown): value is string {
-    return typeof value === "string" && value.length > 0;
+    return typeof value === "string" && value.length > 0 && isEncodable(value);
   }
   private now(): string {
     try {
@@ -840,7 +901,9 @@ export class Observer {
    * Python, and the event that is built is the event that was checked. Keys are written in the
    * order the wire schema declares them, link fields and `duration_ms` ahead of `metadata`, so
    * a JSONL line from either language reads as the schema does. Every failure, including a
-   * thrown value that is not an Error, becomes a capture gap. When `dropDuration` is set, or
+   * thrown value that is not an Error, becomes a capture gap, and an event that reached no sink
+   * is counted once, at one of two statements: the `catch` that owns the build, and the
+   * `finally` that every exit from the write crosses. When `dropDuration` is set, or
    * when instrumentation failed while this event was being built, the event is downgraded to
    * `partial` unless it is already `unavailable` and its metadata is marked with
    * `observer_capture_gap`, so a reader cannot take a fabricated ID, an epoch timestamp, or a
@@ -916,28 +979,37 @@ export class Observer {
         });
       }
     } catch {
+      // The one exit for an event that was never built. It reached no sink either, so it is
+      // counted here, and the write below never runs for it.
       this.lostEvent();
       return undefined;
     }
-    if (!this.sink) {
-      // A recording mode with no sink. The event was built, spent a sequence number and an ID,
-      // and reached nobody, so it is a lost event rather than a clean state. It is still
-      // returned, because builder mode is a real use; only the accounting says so.
-      this.lostEvent();
-      return event;
-    }
+    let delivered = false;
     try {
+      if (!this.sink) {
+        // A recording mode with no sink. The event was built, spent a sequence number and an
+        // ID, and reached nobody, so it is a lost event rather than a clean state. It is still
+        // returned, because builder mode is a real use; only the accounting says so.
+        return event;
+      }
       const written: unknown = this.sink.write(event);
       if (isUndrivenGenerator(written)) {
         // The sink returned an iterator rather than writing. Its body never ran, so this event
         // reached nobody: the value written was never consumed, and a state that still read
         // clean here would claim a delivery that never happened.
-        this.lostEvent();
         return event;
       }
       await written;
+      delivered = true;
     } catch {
-      this.lostEvent();
+      // Contained: a sink that threw or rejected still leaves a built event to return, and the
+      // `finally` below is what says the event it carried reached nobody.
+    } finally {
+      // Every exit from the write crosses this: no sink, an iterator instead of a write, a
+      // throw, a rejection, and the one path that delivered. That is the rule the Python
+      // `_Delivery` record enforces where there are more ways out, written here as the one
+      // statement a JavaScript write can reach it by.
+      if (!delivered) this.lostEvent();
     }
     return event;
   }

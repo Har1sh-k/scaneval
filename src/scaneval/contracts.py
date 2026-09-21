@@ -147,13 +147,105 @@ def recorded_check_state(checks: list[dict[str, Any]], snapshot_id: str) -> str 
     return "pass" if all(check["result"] == "pass" for check in recorded) else "fail"
 
 
-def _label_projection(case: dict[str, Any]) -> dict[str, Any]:
+def review_chain_digest(previous: str | None, review: dict[str, Any]) -> str:
+    """The chain value of *review* recorded after the review whose chain value is *previous*.
+
+    The digest covers every field of the review except the chain value itself, together with the
+    chain value of the one before it, so each entry commits to the whole history that precedes it.
+    ``None`` as *previous* starts a history.
+    """
+    entry = {key: value for key, value in review.items() if key != "chain_sha256"}
+    return canonical_sha256({"previous": previous, "review": entry})
+
+
+def review_chain_gap(reviews: list[dict[str, Any]], head: str | None) -> str | None:
+    """Why a recorded review history does not verify, or ``None`` when it does.
+
+    Every review carries ``chain_sha256``, which covers its own fields and the chain value of the
+    review before it, so the history is a chain rather than an array of entries that stand alone.
+    Editing any field of a review, reordering two of them, or deleting one from the middle leaves
+    every later entry chaining to something that is no longer there.
+
+    A chain alone does not catch a truncation, because the entries that remain still chain to each
+    other, and the deletion that matters is exactly that one: dropping the trailing review that
+    withdrew an approval would otherwise restore the approval under it. So the history also records
+    where it ends. ``validation.reviews_sha256`` is the chain value of the last review, present
+    exactly when there is a review, and a history that ends anywhere else is refused.
+
+    What all of that proves is narrow, and it is worth being exact about. Anyone who can edit the
+    pack can also recompute the chain and rewrite the head, so this is not a signature: it says
+    nothing about who recorded a review, whether they read anything, or whether an entry that
+    verifies was ever written by the person it names. What it removes is the quiet deletion. A
+    history cannot lose a review through an edit that looks like the file it came from; the entries
+    after it and the recorded end of the history have to be rebuilt deliberately, which is a
+    different act from deleting a line.
+
+    A review recorded without a chain value is refused too. An optional chain would be no chain at
+    all, because dropping the field is the same deletion the chain exists to make visible.
+    """
+    previous: str | None = None
+    for index, review in enumerate(reviews):
+        recorded = review.get("chain_sha256")
+        if not recorded:
+            return (f"validation.reviews[{index}] records no chain_sha256, so nothing binds it to "
+                    "the reviews recorded before it")
+        expected = review_chain_digest(previous, review)
+        if recorded != expected:
+            return (f"validation.reviews[{index}] does not chain to the review before it: it "
+                    f"records {recorded}, and the history as it now stands hashes to {expected}; a "
+                    "review was deleted, reordered, or edited")
+        previous = recorded
+    if previous is None:
+        if head is not None:
+            return (f"validation.reviews_sha256 records {head}, but this case records no review at "
+                    "all; the history it names was deleted whole")
+        return None
+    if head is None:
+        return ("validation.reviews_sha256 is missing, so nothing says where the recorded review "
+                "history ends and a review deleted from the end of it would leave no trace")
+    if head != previous:
+        return (f"validation.reviews_sha256 records {head}, but the recorded history ends at "
+                f"{previous}; a review was deleted from the end of it")
+    return None
+
+
+def _snapshot_identity(pack: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
+    """The identity of every snapshot *case* names: its commit and the export recorded for it.
+
+    A label points at bytes, so what a reviewer read is the label text together with the tree it
+    describes. Each referenced snapshot is projected by the two fields that say which bytes those
+    are, keyed by snapshot id, and a snapshot the pack does not declare is projected as ``None``:
+    a label naming a snapshot that is not there names no bytes at all, which is itself a change
+    from one that named a declared snapshot.
+
+    The repository is deliberately left out. A commit hash and an exported tree hash each name
+    bytes, so a snapshot moved to a mirror or a fork that holds the same commit and exports the
+    same tree is the content the reviewer read; where those bytes were fetched from is provenance,
+    which the snapshot record keeps and which no approval rests on.
+    """
+    declared = {snapshot["snapshot_id"]: snapshot for snapshot in pack["snapshots"]}
+    named = [case["target"]["snapshot_id"]] + [control["snapshot_id"] for control in case["controls"]]
+    identity: dict[str, Any] = {}
+    for snapshot_id in named:
+        snapshot = declared.get(snapshot_id)
+        identity[snapshot_id] = None if snapshot is None else {
+            "commit": snapshot["commit"], "tree_hash": snapshot.get("tree_hash")}
+    return identity
+
+
+def _label_projection(pack: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
     """The label content of *case*: what a reviewer of it passed judgment on.
 
     Only the fields that say what is being alleged are projected, and a reviewer approving a case
     approves what the case claims to be as well as where it claims it: the canonical target, the
     coverage signature, the represents statement, the workload, the component role, and whether a
     model was involved are projected alongside the target and the controls.
+
+    The snapshots those labels name are projected by identity rather than by name alone, because an
+    approval covers the exact bytes that were reviewed: each referenced snapshot contributes its
+    commit and the export hash the pack records for it (see :func:`_snapshot_identity`). Repinning a
+    snapshot to another commit, or recording a different export for it, therefore costs the approval
+    exactly as editing the target's text does.
 
     The case identifier, its evidence records, its disclosure dates, its disposition, its split,
     its notes, and the recorded reviews and checks are left out: those say where a label came from
@@ -179,6 +271,7 @@ def _label_projection(case: dict[str, Any]) -> dict[str, Any]:
             "variant_family": canonical["variant_family"],
             "aliases": sorted(canonical["aliases"]),
         },
+        "snapshots": _snapshot_identity(pack, case),
         "target": {
             "target_id": target["target_id"],
             "snapshot_id": target["snapshot_id"],
@@ -207,8 +300,8 @@ def _label_projection(case: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def label_digest(case: dict[str, Any]) -> str:
-    """The digest of one case's labels: what it claims to be, its target, and every control.
+def label_digest(pack: dict[str, Any], case: dict[str, Any]) -> str:
+    """The digest of one case's labels: what it claims to be, its target, controls, and bytes.
 
     A recorded approval carries this digest, so an approval is bound to the content it covered
     rather than to the case it sits on. Adding, removing, or editing a control changes it, as
@@ -217,36 +310,51 @@ def label_digest(case: dict[str, Any]) -> str:
     canonical kind, variant family, aliases, coverage signature, represents statement, workload,
     component role, or model involvement. None of those can ride on an earlier review.
 
-    The snapshot each label names is projected too: moving a target or a control onto a
-    different snapshot changes what was reviewed exactly as editing its text does.
+    The snapshots each label names are projected too, by commit and recorded tree hash as well as
+    by name: moving a target or a control onto a different snapshot changes what was reviewed, and
+    so does repinning a snapshot the label already named, because the review covered the bytes that
+    snapshot stood for and not the identifier.
 
-    This lives here rather than in :mod:`scaneval.cases` because both the planning gate and the
-    pack-load gate must ask the same question of the same content, and :mod:`scaneval.cases`
-    imports this module and not the other way round. :mod:`scaneval.cases` re-exports it.
+    This takes the pack because a snapshot's identity lives there rather than on the case. It lives
+    here rather than in :mod:`scaneval.cases` because both the planning gate and the pack-load gate
+    must ask the same question of the same content, and :mod:`scaneval.cases` imports this module
+    and not the other way round. :mod:`scaneval.cases` re-exports it.
     """
-    return canonical_sha256(_label_projection(case))
+    return canonical_sha256(_label_projection(pack, case))
 
 
-def covering_review(case: dict[str, Any]) -> dict[str, Any] | None:
+def covering_review(pack: dict[str, Any], case: dict[str, Any]) -> dict[str, Any] | None:
     """The one recorded review that approves *case* as its labels now stand, or ``None``.
 
     The latest recorded review is the operative one, so this is that review when it approved the
     case and carries :func:`label_digest` of these labels. ``None`` when a later review rejected
-    the case or reopened the question, when the labels changed after the approval, when no review
-    is recorded, and when the latest review records no digest at all: a review that never named
-    the content it read cannot be shown to cover this content.
+    the case or reopened the question, when the labels changed after the approval, when the
+    snapshots they name were repinned, when no review is recorded, and when the latest review
+    records no digest at all: a review that never named the content it read cannot be shown to
+    cover this content.
 
-    Every gate that asks whether an approval is in force asks this one review, so a plan and a
-    pack load cannot end up resting on two different reviews. Nothing is rewritten or withdrawn
-    here; this reads what the pack records.
+    ``None``, too, when the recorded history does not verify as a chain (see
+    :func:`review_chain_gap`). A review is read as the last entry of a history, so a history whose
+    entries no longer account for each other names no operative review at all: an approval is not
+    in force because the entry that withdrew it was deleted. That check lives here rather than
+    beside each gate so that no path can reach an approval without passing it, including planning
+    on a pack that never went through a load.
+
+    Every gate that asks whether an approval is in force asks this one review, and every level a
+    decision is made on is read from it (see :func:`effective_level`), so a plan and a pack load
+    cannot end up resting on two different reviews. Nothing is rewritten or withdrawn here; this
+    reads what the pack records.
     """
-    reviews = case["validation"]["reviews"]
+    validation = case["validation"]
+    reviews = validation["reviews"]
+    if review_chain_gap(reviews, validation.get("reviews_sha256")):
+        return None
     if not reviews:
         return None
     review = reviews[-1]
     if review["decision"] != "approve" or not review.get("labels_sha256"):
         return None
-    return review if review["labels_sha256"] == label_digest(case) else None
+    return review if review["labels_sha256"] == label_digest(pack, case) else None
 
 
 def level_gap(review: dict[str, Any], claimed: str | None) -> str | None:
@@ -256,6 +364,10 @@ def level_gap(review: dict[str, Any], claimed: str | None) -> str | None:
     and L4 rest on an independent review, so the one review being asked must itself carry that
     role: an independent approval elsewhere in the history was an approval of other content and
     earns nothing here. ``None`` for a case claiming no level, which has nothing to earn.
+
+    This answers what a review is capable of earning. It is not the question a gate asks about a
+    case, because a claim lower than the review is still a claim that disagrees with the only
+    record of the level; :func:`claimed_level_gap` asks that one.
     """
     if claimed is None:
         return None
@@ -267,6 +379,83 @@ def level_gap(review: dict[str, Any], claimed: str | None) -> str | None:
     if claimed in ("L3", "L4") and review["role"] != "independent_reviewer":
         return (f"the review covering these labels carries the role {review['role']}; {claimed} "
                 f"requires an approving review at {claimed} or higher by an independent_reviewer")
+    return None
+
+
+def claimed_level_gap(review: dict[str, Any], claimed: str | None) -> str | None:
+    """Why *claimed* is not the level *review* establishes, or ``None`` when it is.
+
+    Two things must hold, and both are asked of this one review. It must earn the level it is
+    itself recorded at, which for L3 and L4 means it was made by an ``independent_reviewer``: a
+    review recorded at a level its role does not support earns nothing, whatever a case claims
+    beside it. And the claim must be that level exactly. A claim below the review is as much a
+    disagreement as a claim above it, because the covering review is the only source of the level
+    and every gate reads the review rather than the claim: a case recorded at L2 under an L4 review
+    is planned at L4, so measuring the review against the L2 claim asks a question no decision
+    depends on. Levels stay ordered for :func:`level_gap`, which asks what a review can earn; this
+    asks whether a cached claim is the level that review established.
+    """
+    own = level_gap(review, review["level"])
+    if own:
+        return own
+    if claimed != review["level"]:
+        return level_gap(review, claimed) or (
+            f"validation.level records {claimed}, but the review covering these labels is recorded "
+            f"at {review['level']}; the recorded level is a cached copy of that review's level and "
+            "may not say anything else")
+    return None
+
+
+def recorded_level_gap(pack: dict[str, Any], case: dict[str, Any]) -> str | None:
+    """Why ``validation.level`` is not the level *case*'s own records establish, or ``None``.
+
+    ``validation.level`` is a cached claim, never a fact: the level of an approved case is the level
+    of the one review covering its labels, and the level of a checked case is the L1 its mechanical
+    state carries. This compares the cached value with that, so the two records of one fact cannot
+    disagree without the pack being refused and the case going unplanned.
+
+    A human approved case whose labels no recorded review covers is the one case with nothing to
+    compare against: no review speaks for this content, so nothing here establishes a level, the
+    case plans nothing whatever it claims, and :func:`_validate_case_pack` applies the weaker rule
+    that some recorded approval must at least carry the claim.
+    """
+    validation = case["validation"]
+    claimed = validation["level"]
+    state = validation["review_state"]
+    if state == "human_approved":
+        covering = covering_review(pack, case)
+        return None if covering is None else claimed_level_gap(covering, claimed)
+    if state == "mechanically_checked":
+        if claimed != "L1":
+            return (f"mechanically_checked is the L1 state; level {claimed!r} needs a recorded "
+                    "human review")
+        return None
+    if claimed is not None:
+        return "draft cases cannot carry a validation level"
+    return None
+
+
+def effective_level(pack: dict[str, Any], case: dict[str, Any]) -> str | None:
+    """The validation level *case* actually has, or ``None`` when nothing establishes one.
+
+    This is the single source of the level anywhere a decision is made: the level of the review
+    covering the labels as they stand for an approved case, ``L1`` for one the mechanical checks
+    have reached, and ``None`` for a draft. ``None`` too when the covering review does not earn the
+    level it records, when no review covers these labels, and when the cached ``validation.level``
+    disagrees with the review (see :func:`recorded_level_gap`), because a fact two records state
+    differently is established by neither.
+
+    Nothing reads ``validation.level`` to decide anything; it is compared with this and otherwise
+    only displayed. A case this returns ``None`` for is unplanned, not judged wrong.
+    """
+    if recorded_level_gap(pack, case) is not None:
+        return None
+    state = case["validation"]["review_state"]
+    if state == "human_approved":
+        covering = covering_review(pack, case)
+        return None if covering is None else covering["level"]
+    if state == "mechanically_checked":
+        return "L1"
     return None
 
 
@@ -378,17 +567,28 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
     one unless it raises ``checks_failed``, and it cannot stand under a latest review that
     rejected it.
 
-    Its level must be earned by the one review that covers the labels as they stand, which
-    :func:`covering_review` names and :func:`level_gap` measures: that review must itself be
-    recorded at the claimed level or higher, and for L3 or L4 must itself be by an
-    ``independent_reviewer``. An independent approval elsewhere in the history approved other
-    content and earns nothing here, so a case cannot be raised to a reviewed level by editing a
-    label, collecting a lesser approval of the edit, and resting the level on the older review.
+    ``validation.level`` is a cached claim and decides nothing. The level of an approved case is
+    the level of the one review covering its labels, which :func:`covering_review` names and
+    :func:`effective_level` reads, and the cached field must be exactly that level:
+    :func:`recorded_level_gap` refuses a pack where the two records of one fact disagree, in either
+    direction. A review recorded at L3 or L4 must itself be by an ``independent_reviewer`` to earn
+    what it records, so a claim recorded below such a review no longer hides a role the level does
+    not support. An independent approval elsewhere in the history approved other content and earns
+    nothing here, so a case cannot be raised to a reviewed level by editing a label, collecting a
+    lesser approval of the edit, and resting the level on the older review.
     :func:`scaneval.cases.approval_is_current` asks the same review the same question, so a plan
     and a pack load cannot rest on two different ones. When no recorded review covers the current
     labels the case plans nothing whatever it claims, and the weaker rule applies instead: the
     level must be one some recorded approval carries, so the pack still cannot claim a review
     nobody recorded.
+
+    The recorded reviews are a chain, not an array: each carries ``chain_sha256`` over its own
+    fields and the entry before it, ``validation.reviews_sha256`` records where the chain ends, and
+    :func:`review_chain_gap` refuses a history that does not verify either way. Deleting the review
+    that withdrew an approval therefore cannot quietly restore it, from the middle of the history or
+    off the end of it. That docstring says what this does and does not prove; in short, anyone who
+    can edit the pack can recompute the chain and the head, so it catches the quiet deletion rather
+    than a determined forger.
 
     Which export a check set read is recorded three times, and the three must agree: the
     ``checked_trees`` entry for the snapshot, the ``detail`` of that set's passing
@@ -450,6 +650,9 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
                 raise ContractError(
                     f"{label}: a recorded review must name its reviewer; "
                     f"validation.reviews[{index}].reviewer is blank")
+        chain = review_chain_gap(reviews, validation.get("reviews_sha256"))
+        if chain:
+            raise ContractError(f"{label}: {chain}")
         approvals = [r for r in reviews if r["decision"] == "approve"]
         referenced = [target["snapshot_id"]] + [control["snapshot_id"] for control in case["controls"]]
         unchecked = sorted({snapshot for snapshot in referenced
@@ -467,49 +670,43 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
                 f"{label}: human_approved requires a recorded passing check set for every referenced "
                 f"snapshot, or validation.checks_failed to record that one failed; missing or failed "
                 f"for: {', '.join(unchecked)}")
-        if state == "human_approved" and validation["level"] is not None:
-            claimed = validation["level"]
-            covering = covering_review(case)
-            if covering is not None:
-                # One review covers these labels, so that review alone earns the claimed level:
-                # an approval elsewhere in the history approved other content.
-                gap = level_gap(covering, claimed)
-                if gap:
-                    raise ContractError(f"{label}: {gap}")
-            else:
-                # No recorded review covers the labels as they stand, so planning leaves the case
-                # out whatever it claims. The level must still be one the history records, or the
-                # pack claims a review nobody recorded.
-                carried = [r for r in approvals if _LEVEL_RANK[r["level"]] >= _LEVEL_RANK[claimed]]
-                if not carried:
-                    recorded = ", ".join(sorted({r["level"] for r in approvals})) or "none"
-                    raise ContractError(
-                        f"{label}: level {claimed} requires an approving review recorded at {claimed} or "
-                        f"higher; the recorded approvals are at {recorded}")
-                if claimed in ("L3", "L4") and not any(r["role"] == "independent_reviewer" for r in carried):
-                    raise ContractError(
-                        f"{label}: {claimed} requires an approving review at {claimed} or higher by an "
-                        "independent_reviewer; no recorded approval carries that role")
         if validation["level"] in ("L3", "L4") and state != "human_approved":
             raise ContractError(f"{label}: {validation['level']} requires human_approved review state")
-        if state == "draft" and validation["level"] is not None:
-            raise ContractError(f"{label}: draft cases cannot carry a validation level")
+        # The cached level against the records that establish one. One review covers these labels,
+        # so that review alone says what the level is, and the cached field may only repeat it.
+        gap = recorded_level_gap(document, case)
+        if gap:
+            raise ContractError(f"{label}: {gap}")
+        if state == "human_approved" and covering_review(document, case) is None:
+            # No recorded review covers the labels as they stand, so planning leaves the case out
+            # whatever it claims. The level must still be one the history records, or the pack
+            # claims a review nobody recorded.
+            claimed = validation["level"]
+            carried = [r for r in approvals if _LEVEL_RANK[r["level"]] >= _LEVEL_RANK[claimed]]
+            if not carried:
+                recorded = ", ".join(sorted({r["level"] for r in approvals})) or "none"
+                raise ContractError(
+                    f"{label}: level {claimed} requires an approving review recorded at {claimed} or "
+                    f"higher; the recorded approvals are at {recorded}")
+            if claimed in ("L3", "L4") and not any(r["role"] == "independent_reviewer" for r in carried):
+                raise ContractError(
+                    f"{label}: {claimed} requires an approving review at {claimed} or higher by an "
+                    "independent_reviewer; no recorded approval carries that role")
         if "checks_failed" in validation and state != "human_approved":
             raise ContractError(
                 f"{label}: checks_failed records a check set that failed after approval, so it "
                 f"belongs only to a human_approved case, not to a {state} one")
-        if state == "mechanically_checked":
-            if validation["level"] != "L1":
-                raise ContractError(
-                    f"{label}: mechanically_checked is the L1 state; level {validation['level']!r} "
-                    "needs a recorded human review")
-            if unchecked:
-                raise ContractError(
-                    f"{label}: mechanically_checked requires a recorded passing check set for every "
-                    f"referenced snapshot; missing or failed for: {', '.join(unchecked)}")
-        if validation["level"] in ("L3", "L4") and case["disposition"]["value"] != "validate":
+        if state == "mechanically_checked" and unchecked:
             raise ContractError(
-                f"{label}: {validation['level']} requires disposition validate, not "
+                f"{label}: mechanically_checked requires a recorded passing check set for every "
+                f"referenced snapshot; missing or failed for: {', '.join(unchecked)}")
+        # The screening decision is measured against the level the case actually has. A stale claim
+        # no review covers establishes nothing, so it is measured instead: a pack may not record a
+        # reviewed level on a case screened out, whether or not anything plans it.
+        level = effective_level(document, case) or validation["level"]
+        if level in ("L3", "L4") and case["disposition"]["value"] != "validate":
+            raise ContractError(
+                f"{label}: {level} requires disposition validate, not "
                 f"{case['disposition']['value']}")
         # The three records of which export each check set read, compared with each other. These
         # run after the state rules so that a pack missing a check set is told that first: a

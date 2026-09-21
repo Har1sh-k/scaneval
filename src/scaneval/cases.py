@@ -11,18 +11,33 @@ a check that fails after approval is recorded and keeps the case out of a plan, 
 recorded review state and level stay exactly as the reviewer left them.
 
 An approval covers the label content it was recorded against, not the case id: each approving
-review carries :func:`label_digest` of what the case claims to be, its target, and its controls
-as they stood, so a label edited or a control added afterwards is outside every recorded review.
-Such a case keeps its reviews, because a review is a historical fact, and :func:`build_plan`
-leaves it out until a review covers the labels as they stand. The latest recorded review is the
-operative one: a later review that rejects the case or reopens the question withdraws it from
-planning while leaving the whole recorded history in place.
+review carries :func:`label_digest` of what the case claims to be, its target, its controls, and
+the identity of every snapshot those name, as they stood. A label edited, a control added, or a
+snapshot repinned afterwards is outside every recorded review, because an approval covers the exact
+bytes that were reviewed. Such a case keeps its reviews, because a review is a historical fact, and
+:func:`build_plan` leaves it out until a review covers the labels as they stand. The latest
+recorded review is the operative one: a later review that rejects the case or reopens the question
+withdraws it from planning while leaving the whole recorded history in place.
 
 One review covers the labels as they stand, and that one review answers every question about the
 approval. Whether the case is planned, how high it is planned, and whether a pack claiming that
 level loads at all are all read from it, so a case cannot be raised to a reviewed level by editing
 a label, collecting a lesser approval of the edit, and resting the level on an independent review
 of what the case used to say.
+
+No decision is made from ``validation.level``. Nothing plans a case, claims a level, or clears a
+gate on its word: it is a cached copy of the covering review's level, and
+:func:`scaneval.contracts.recorded_level_gap` refuses a pack whose copy disagrees with that review
+in either direction, so the two records of one fact cannot drift apart. A case recorded at L2 under
+an L4 curator approval is neither loaded nor planned, where before it loaded and planned at L4 with
+no independent reviewer behind it. Every decision reads
+:func:`scaneval.contracts.effective_level`, which is the covering review's own level.
+
+The recorded reviews are a chain rather than an array. Each carries ``chain_sha256`` over its own
+fields and the entry before it, and ``validation.reviews_sha256`` records where the chain ends, so
+deleting the review that withdrew an approval cannot quietly restore it, from the middle of the
+history or off the end; :func:`scaneval.contracts.review_chain_gap` says what that does and does
+not prove.
 
 Case identity stays outside the digest, because an identifier says where a label came from rather
 than what it alleges. Admissions are bound to content instead: each records the ``target_id`` it
@@ -53,11 +68,15 @@ from .contracts import (
     ContractError,
     canonical_json,
     canonical_sha256,
+    claimed_level_gap,
     covering_review,
+    effective_level,
     label_digest,
-    level_gap,
     load_document,
     recorded_check_state,
+    recorded_level_gap,
+    review_chain_digest,
+    review_chain_gap,
     validate_document,
 )
 
@@ -380,9 +399,9 @@ def referenced_snapshots(case: dict) -> list[str]:
     return unique
 
 
-# ``label_digest`` and ``covering_review`` live in :mod:`scaneval.contracts`, imported above and
-# re-exported here: the planning gates in this module and the pack-load gate there must ask the
-# same question of the same content, and that module cannot import this one.
+# ``label_digest``, ``covering_review``, and ``effective_level`` live in :mod:`scaneval.contracts`,
+# imported above and re-exported here: the planning gates in this module and the pack-load gate
+# there must ask the same question of the same content, and that module cannot import this one.
 
 
 def latest_review(case: dict) -> dict | None:
@@ -411,38 +430,43 @@ def latest_approving_review(case: dict) -> dict | None:
     return latest
 
 
-def approval_is_current(case: dict) -> bool:
-    """True when the one review covering these labels approves them and earns the claimed level.
+def approval_is_current(pack: dict, case: dict) -> bool:
+    """True when the one review covering these labels approves them and establishes their level.
 
     :func:`scaneval.contracts.covering_review` names that review: the latest recorded review, when
     it approved the case and carries the digest of the labels as they stand. False when a later
     review rejected the case or left the question unresolved, because the latest review is the
     operative one and a reopened question is not an approval. False when the labels have changed
-    since that approval, when no review approved the case, and when the approving review records
-    no digest at all. A pack written before approvals carried a digest therefore degrades to
-    unplanned rather than silently claiming coverage: a review that never named the content it read
-    cannot be shown to cover this content.
+    since that approval, which includes repinning a snapshot they name, when no review approved the
+    case, and when the approving review records no digest at all. A pack written before approvals
+    carried a digest therefore degrades to unplanned rather than silently claiming coverage: a
+    review that never named the content it read cannot be shown to cover this content.
 
-    False, too, when that one review does not itself earn ``validation.level``: a review recorded
-    below the claimed level, or a curator or adjudicator review under a claimed L3 or L4, leaves
-    the level resting on nothing that read this content. An independent approval elsewhere in the
-    history approved other content, so it cannot carry a level here, and the same question is asked
-    at pack load by :func:`scaneval.contracts._validate_case_pack`. Nothing is rewritten or
-    withdrawn here; this reads what the pack records.
+    False, too, when that one review does not establish ``validation.level``: a review recorded at a
+    level its role does not support earns nothing, and a cached level that disagrees with the review
+    in either direction is a second record of a fact the review alone holds (see
+    :func:`scaneval.contracts.recorded_level_gap`). The same question is asked at pack load by
+    :func:`scaneval.contracts._validate_case_pack`, so a plan and a load cannot disagree. Nothing is
+    rewritten or withdrawn here; this reads what the pack records.
     """
-    review = covering_review(case)
-    return review is not None and level_gap(review, case["validation"]["level"]) is None
+    return covering_review(pack, case) is not None and recorded_level_gap(pack, case) is None
 
 
-def _approval_gap(case: dict) -> str:
-    """Why the recorded reviews do not approve the labels as they stand at the level claimed.
+def _approval_gap(pack: dict, case: dict) -> str:
+    """Why the recorded reviews do not approve the labels as they stand at the level recorded.
 
     Said separately from :func:`approval_is_current` because the gaps are different facts: a later
     review may have reopened or rejected the case, a review recorded before approvals carried a
     digest never said what it covered, a review that carries one covered content these labels no
-    longer match, and a review that covers this content may still be recorded below the level or
-    outside the role the case claims.
+    longer match, and a review that covers this content may still be recorded at a level its role
+    does not support or beside a cached level that says something else. The recorded history may
+    also not verify at all, which is asked first: a history whose entries no longer account for
+    each other says nothing about the decisions inside it.
     """
+    validation = case["validation"]
+    chain = review_chain_gap(validation["reviews"], validation.get("reviews_sha256"))
+    if chain:
+        return f"the recorded review history does not verify: {chain}"
     review = latest_review(case)
     if review is None:
         return "no review is recorded for this case"
@@ -453,10 +477,10 @@ def _approval_gap(case: dict) -> str:
     if not review.get("labels_sha256"):
         return ("the recorded review does not say which label content it covered, so nothing binds "
                 "it to these labels")
-    covering = covering_review(case)
+    covering = covering_review(pack, case)
     if covering is None:
         return "the labels changed after the review, which covers different label content"
-    return (level_gap(covering, case["validation"]["level"])
+    return (claimed_level_gap(covering, case["validation"]["level"])
             or "the recorded approval does not stand for these labels")
 
 
@@ -560,6 +584,13 @@ def mechanical_checks(pack: dict, snapshot_id: str, source_dir: Path, tree_hash:
     case on it records a failing ``snapshot_hash_recorded`` check instead, and both
     :func:`build_plan` and the runner still refuse that input.
 
+    An approval covers the export that was reviewed, and that binding lives in one place: the
+    snapshot's identity is inside :func:`label_digest`, so re-running these checks against a
+    snapshot repinned to a different commit or export leaves every recorded approval covering
+    content the case no longer states, and :func:`build_plan` drops the case with the same note an
+    edited label earns. Nothing here withdraws the review, and no second flag records the same
+    fact: the digest already says the approval covers other bytes.
+
     Each check set also records the digest of the export it ran against, under that snapshot's id
     in ``validation.checked_trees``, beside the same digest in the ``detail`` of its passing
     ``snapshot_hash_recorded`` check. The two are records of one fact and must agree, and a pack
@@ -647,10 +678,18 @@ def approve_case(pack: dict, case_id: str, *, reviewer: str, role: str, level: s
                  clock: Callable[[], datetime] | None = None) -> dict:
     """Record one explicit human review of a case label.
 
-    The review carries :func:`label_digest` of the target and controls as they stand at approval
-    time, so it says which label content it covers. A later edit to those labels leaves the
-    review recorded and covering the old content, and :func:`build_plan` then leaves the case
-    out; approving again is what covers the new content.
+    The review carries :func:`label_digest` of the target, the controls, and the identity of the
+    snapshots they name as they stand at approval time, so it says which content it covers, down to
+    the export. A later edit to those labels, or a repin of one of those snapshots, leaves the
+    review recorded and covering the old content, and :func:`build_plan` then leaves the case out;
+    approving again is what covers the new content.
+
+    The review is also chained to the one before it by ``chain_sha256``, and becomes the history's
+    recorded end in ``validation.reviews_sha256`` (see
+    :func:`scaneval.contracts.review_chain_gap`), so the history it joins cannot later lose an entry
+    unnoticed, from the middle or off the end. ``validation.level`` is set to this review's level
+    and is a cached copy of it: the contract refuses a pack where the two disagree, and every
+    decision reads the review.
 
     The reviewer name comes from the caller and is stored verbatim; a name holding no character
     beyond spaces, zero-width marks, or control characters is refused, because an unnamed
@@ -669,11 +708,15 @@ def approve_case(pack: dict, case_id: str, *, reviewer: str, role: str, level: s
     if level in REVIEWED_LEVELS and case["disposition"]["value"] != "validate":
         raise ContractError("L3/L4 require disposition validate")
     review = {"reviewer": reviewer, "role": role, "decision": "approve", "level": level, "at": _now(clock),
-              "note": note, "labels_sha256": label_digest(case)}
+              "note": note, "labels_sha256": label_digest(pack, case)}
 
     def mutate(candidate: dict) -> dict:
         validation = case_by_id(candidate, case_id)["validation"]
-        validation["reviews"].append(dict(review))
+        recorded = dict(review)
+        previous = validation["reviews"][-1]["chain_sha256"] if validation["reviews"] else None
+        recorded["chain_sha256"] = review_chain_digest(previous, recorded)
+        validation["reviews"].append(recorded)
+        validation["reviews_sha256"] = recorded["chain_sha256"]
         validation["review_state"] = "human_approved"
         validation["level"] = level
         return validation["reviews"][-1]
@@ -754,21 +797,18 @@ def admit_case(pack: dict, case_id: str, *, decision: str, by: str, reason: str,
     return _apply_validated(pack, mutate)
 
 
-def planned_level(case: dict) -> str | None:
+def planned_level(pack: dict, case: dict) -> str | None:
     """The validation level a plan may claim for *case*, or ``None`` when it may claim none.
 
-    For an approved case this is the level of the one review that covers the labels as they stand,
-    not the separately stored ``validation.level``: the review records what a person read, while
-    the stored level is a field an edit can raise with no review behind it.
-    :func:`approval_is_current` has already established that the covering review is recorded at the
-    claimed level or higher, so reading the review never plans a case below what it claims. For a
-    case no review covers there is no level to claim. For an unapproved case the mechanical state's
-    own L1 is the level, and no review is involved.
+    This is :func:`scaneval.contracts.effective_level` and nothing else, so the plan, the pack load,
+    and the gates in between read one source. For an approved case that source is the one review
+    covering the labels as they stand, not the separately stored ``validation.level``: the review
+    records what a person read, while the stored level is a cached copy an edit can change. The two
+    must agree or the case has no level at all, so the plan can never carry a level above or below
+    the review that earned it. For a case no review covers there is no level to claim. For an
+    unapproved case the mechanical state's own L1 is the level, and no review is involved.
     """
-    if case["validation"]["review_state"] == "human_approved":
-        review = covering_review(case)
-        return review["level"] if review is not None else None
-    return case["validation"]["level"]
+    return effective_level(pack, case)
 
 
 def plan_scope(planned: list[tuple[dict, str]]) -> str:
@@ -801,14 +841,25 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
     That level is read from the review covering the labels rather than from ``validation.level``
     (see :func:`planned_level`), so the review deciding whether the case is planned is the same
     one deciding how high it is planned. An approved case whose labels no longer match its review,
-    or whose covering review was recorded below the level the case claims or outside the role that
-    level requires (see :func:`approval_is_current`), contributes no level to any plan: it is left
-    out with a note rather than planned at the level some earlier review recorded, so a control
-    added or a target edited after approval cannot reach a reviewed-scope plan on that review,
-    and neither can a lesser approval of the edit with an older independent review behind it. A
-    later review that rejected the case or reopened the question does the same, because the latest
-    recorded review is the operative one. The reviews themselves stand, untouched and still
-    recorded.
+    whose covering review is recorded at a level its role does not support, or whose cached
+    ``validation.level`` says anything other than that review's level (see
+    :func:`approval_is_current`), contributes no level to any plan: it is left out with a note
+    rather than planned at the level some earlier review recorded, so a control added or a target
+    edited after approval cannot reach a reviewed-scope plan on that review, and neither can a
+    lesser approval of the edit with an older independent review behind it, nor a case whose
+    recorded level was lowered to slip a curator approval past the role rule. A later review that
+    rejected the case or reopened the question does the same, because the latest recorded review is
+    the operative one. The reviews themselves stand, untouched and still recorded.
+
+    The labels a review covers include the identity of every snapshot they name, so a snapshot
+    repinned to another commit or another export leaves the case unplanned exactly as an edited
+    target does: an approval covers the bytes that were reviewed.
+
+    An approved case whose recorded review history does not verify as a chain is left out too, and
+    for the same reason it is refused at load: a history whose entries no longer account for each
+    other names no operative review, so nothing establishes that the approval still stands. That is
+    asked inside :func:`scaneval.contracts.covering_review`, which every gate here goes through, so
+    planning a pack that never went through a load cannot walk past it.
 
     A snapshot that carries recorded mechanical checks but no tree hash is refused outright: the
     checks describe some exported tree, and without the hash nothing says it was this one.
@@ -847,7 +898,7 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
         elif admission is not None and admission["decision"] == "rejected":
             notes.append(f"{case_id}: excluded by the latest admission decision "
                          f"(rejected by {admission['by']}: {admission['reason']})")
-        elif validation["review_state"] == "draft" or validation["level"] is None:
+        elif validation["review_state"] == "draft":
             notes.append(f"{case_id}: draft without passed mechanical checks; not planned")
         elif _unchecked_snapshots(case):
             notes.append(f"{case_id}: no recorded passing mechanical check set for snapshot(s) "
@@ -865,11 +916,16 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
             notes.append(f"{case_id}: excluded because the recorded checks for snapshot(s) "
                          f"{', '.join(_unbound_snapshots(case))} do not say which tree they ran "
                          "against; re-run the checks against the materialized input")
-        elif validation["review_state"] == "human_approved" and not approval_is_current(case):
-            notes.append(f"{case_id}: excluded because {_approval_gap(case)}; the recorded review "
-                         "stands as recorded, and a review of the labels as they stand is needed")
+        elif validation["review_state"] == "human_approved" and not approval_is_current(pack, case):
+            notes.append(f"{case_id}: excluded because {_approval_gap(pack, case)}; the recorded "
+                         "review stands as recorded, and a review of the labels as they stand is "
+                         "needed")
+        elif planned_level(pack, case) is None:
+            notes.append(f"{case_id}: excluded because nothing in the pack establishes a validation "
+                         f"level for it ({recorded_level_gap(pack, case) or 'no level is recorded'})"
+                         "; not planned")
         else:
-            included.append((case, planned_level(case)))
+            included.append((case, planned_level(pack, case)))
     scope = plan_scope(included)
     targets, controls = [], []
     for case, level in included:

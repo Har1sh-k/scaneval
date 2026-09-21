@@ -28,6 +28,11 @@ for the before/after comparison, so neither can cover a path the other ignores. 
 that cannot be walked is a failed observation rather than an empty one, so a scanner cannot hide
 what it wrote by making the directory it wrote in unreadable.
 
+No tree this module copies is ever copied through a symbolic link: :func:`_copy_tree_unresolved`
+is the one copy, for the exported input on the way in and for the scanner's state directory on
+the way out, and it preserves a link as a link or refuses one, so a link the scanner planted
+cannot pull a host file into the bundle.
+
 Directory separation documents the boundary; it does not enforce it. Network and
 filesystem policy are declared here and must be enforced outside this process.
 """
@@ -193,6 +198,36 @@ def _resolves_inside(path: Path, base: Path) -> bool:
     except (OSError, ValueError):
         return False
     return resolved == root or resolved.is_relative_to(root)
+
+
+def _copy_tree_unresolved(source: Path, destination: Path) -> list[str]:
+    """Copy one directory tree without following a symbolic link, and name the links it kept.
+
+    This is the one rule for every tree this module copies, into the private workspace and into
+    the bundle alike: a link is preserved as a link or refused, never resolved. Copying with
+    ``symlinks=False`` followed every link, so a scanner that planted one inside its state
+    directory, or planted one *as* its state directory, had the host file behind it copied into
+    the bundle as if the scan had produced it.
+
+    A link at the top is refused, because a state directory that is a link is not the directory
+    this run handed the scanner; the caller records the refusal. A link inside the tree is
+    recreated as a link, so the bundle records what the scanner left rather than the bytes it
+    pointed at, and the returned relative paths let the caller say so in the record.
+
+    The limits. A hard link is not a symbolic link and is copied as the file it is, and a link
+    preserved in the bundle may still resolve to a host path when someone later follows it by
+    hand; nothing here resolves one.
+    """
+    if source.is_symlink():
+        raise ExecutionError(f"{source} is a symbolic link, not a directory; it was not copied")
+    shutil.copytree(source, destination, symlinks=True)
+    links: list[str] = []
+    for parent, directories, files in os.walk(destination):
+        for name in directories + files:
+            path = Path(parent) / name
+            if path.is_symlink():
+                links.append(path.relative_to(destination).as_posix())
+    return sorted(links)
 
 
 def _move_into_bundle(staging: Path, destination: Path) -> None:
@@ -465,6 +500,13 @@ def run_invocation(
     removal that fails does not change what the scan observed, so it is not a violation: the
     execution record carries a note naming the directory still on disk, which is a leak an
     operator can find rather than one that was swallowed.
+
+    Harness state is captured without following a link. A state directory that is a symbolic
+    link, or that is not a directory at all, is left out of ``captured_state_dirs`` and named in
+    a note instead of copied through, because what lies behind it is not the scratch space this
+    run created; a link inside one is preserved as a link and counted in a note. None of that is
+    a violation of the outcome: nothing failed and no claim is affected, but the bundle says
+    plainly that it does not hold what the link pointed at.
     """
     if network_policy not in NETWORK_POLICIES:
         raise ExecutionError(f"unknown network policy {network_policy!r}")
@@ -498,13 +540,16 @@ def run_invocation(
     after: dict[str, str] = {}
     captured_state: list[str] = []
     move_failures: list[str] = []
+    capture_notes: list[str] = []
     cleanup_notes: list[str] = []
     try:
         staging_raw.mkdir()
         if staging_trace is not None:
             staging_trace.mkdir()
         source = workspace / "source"
-        shutil.copytree(prepared.source_dir, source, symlinks=False)
+        # No link is followed on the way in either: a link in the exported input stays a link,
+        # which keeps it outside the hashed tree exactly as :func:`_input_tree` leaves it.
+        _copy_tree_unresolved(prepared.source_dir, source)
         try:
             before = _input_tree(source, state_dirs)
         except OSError as exc:
@@ -549,11 +594,29 @@ def run_invocation(
         try:
             for name in sorted(state_dirs):
                 state_path = source / name
-                if state_path.exists():
-                    destination = staging_raw / "harness-state" / name.lstrip(".")
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(state_path, destination, symlinks=False)
-                    captured_state.append(name)
+                if state_path.is_symlink():
+                    # Checked before exists(), which follows the link and would report the
+                    # target. Nothing behind it is copied and it is not counted as captured
+                    # state: what a link points at is not the scratch space this run created
+                    # for the scanner, and following it would pull host files into the bundle.
+                    capture_notes.append(
+                        f"the harness state directory {name} is a symbolic link; it was not "
+                        "followed and nothing behind it was captured")
+                    continue
+                if not state_path.exists():
+                    continue
+                if not state_path.is_dir():
+                    capture_notes.append(
+                        f"the harness state path {name} is not a directory; it was not captured")
+                    continue
+                destination = staging_raw / "harness-state" / name.lstrip(".")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                links = _copy_tree_unresolved(state_path, destination)
+                captured_state.append(name)
+                if links:
+                    capture_notes.append(
+                        f"harness state {name} holds {len(links)} symbolic link(s), preserved "
+                        f"unresolved rather than copied through: {', '.join(links[:5])}")
         except Exception as exc:
             # The scanner owns both ends of this copy: the state directory it wrote and the
             # staging path it may have created there first. A failure is a recorded violation,
@@ -676,7 +739,11 @@ def run_invocation(
                            "captured_state_dirs": captured_state},
             "preparation": preparation, "unsupported_languages": unsupported,
             "error": result.get("error"), "import_error": import_error,
-            "notes": list(outcome.notes) + cleanup_notes, "raw_artifacts": raw_artifacts,
+            # The runner's own notes outlive a discarded outcome: a link refused where harness
+            # state belongs, and a workspace left on disk, are facts about this invocation
+            # rather than anything the adapter reported.
+            "notes": list(outcome.notes) + capture_notes + cleanup_notes,
+            "raw_artifacts": raw_artifacts,
         }
         return result, execution
 

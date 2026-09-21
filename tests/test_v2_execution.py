@@ -1469,3 +1469,98 @@ def test_a_result_is_never_written_without_the_execution_record_beside_it(tmp_pa
     assert not (bundle / "execution.json").exists()
     # The request and the scanner's own output stay; no temporary file is left behind either.
     assert sorted(entry.name for entry in bundle.iterdir()) == ["raw", "request.json"]
+
+
+# --- area B: no tree is copied through a symbolic link -------------------------------------
+
+
+def test_a_state_directory_that_is_a_symbolic_link_is_not_followed_into_the_bundle(tmp_path):
+    """The capture copied with ``symlinks=False``, so a link as the state directory was followed.
+
+    A scanner that replaced its own state directory with a link had every file behind it copied
+    into ``raw/harness-state/`` and preserved as if the scan had produced it, which is how host
+    files outside the workspace reached the bundle. The link is refused whole now: nothing behind
+    it is read, it is not counted as captured state, and the record says so.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "id_rsa").write_text("a host file the scan never produced\n", encoding="utf-8")
+
+    class LinkedStateAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            state = kwargs["source_dir"] / ".fakestate"
+            shutil.rmtree(state)
+            state.symlink_to(outside, target_is_directory=True)
+            return outcome
+
+    bundle = run(tmp_path, LinkedStateAdapter())
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "success", "a refused link is not a failure of the scan itself"
+    assert execution["provenance"]["captured_state_dirs"] == []
+    assert not (bundle / "raw" / "harness-state").exists()
+    assert any("symbolic link" in note and ".fakestate" in note for note in execution["notes"])
+    # Nothing behind the link was read, so the host file is nowhere in the bundle.
+    assert "id_rsa" not in json.dumps(execution)
+    assert not list(bundle.rglob("id_rsa"))
+    assert (outside / "id_rsa").is_file()
+
+
+def test_a_link_inside_the_captured_state_is_preserved_rather_than_resolved(tmp_path):
+    """The same copy, one level down: a link inside the state directory was followed too.
+
+    It is recreated as a link now, so the bundle records what the scanner left instead of the
+    bytes it pointed at, and the record counts the links it kept.
+    """
+    secret = tmp_path / "secret.txt"
+    secret.write_text("not part of the scan output\n", encoding="utf-8")
+
+    class LinkingStateAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            (kwargs["source_dir"] / ".fakestate" / "escape.txt").symlink_to(secret)
+            return outcome
+
+    bundle = run(tmp_path, LinkingStateAdapter())
+
+    execution = load_document(bundle / "execution.json", "execution-record")
+    captured = bundle / "raw" / "harness-state" / "fakestate"
+    assert execution["provenance"]["captured_state_dirs"] == [".fakestate"]
+    assert (captured / "notes.md").read_text(encoding="utf-8") == "harness state\n"
+    assert (captured / "escape.txt").is_symlink()
+    assert os.readlink(captured / "escape.txt") == str(secret)
+    assert any("preserved unresolved" in note and "escape.txt" in note for note in execution["notes"])
+
+
+def test_the_exported_input_is_copied_into_the_workspace_without_following_a_link(tmp_path):
+    """The other end of the same rule: the copy in must not resolve a link either.
+
+    Copying the export with ``symlinks=False`` turned a link in the input into a regular file
+    holding whatever it pointed at, which is content the input hash never covered.
+    """
+    secret = tmp_path / "secret.txt"
+    secret.write_text("not part of the exported input\n", encoding="utf-8")
+    prepared = prepared_input(tmp_path)
+    (prepared.source_dir / "link.py").symlink_to(secret)
+    # The link is outside the hashed tree on both sides, so the hash the input binds to is
+    # unchanged by it; what must not happen is the copy turning it into covered content.
+    prepared = PreparedInput(prepared.input_id, prepared.source_dir,
+                             hash_exported_tree(prepared.source_dir)["tree_hash"],
+                             prepared.languages, prepared.provenance)
+    seen: dict[str, object] = {}
+
+    class LookingAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            link = Path(kwargs["source_dir"]) / "link.py"
+            seen["is_symlink"] = link.is_symlink()
+            seen["target"] = os.readlink(link) if link.is_symlink() else link.read_text(encoding="utf-8")
+            return super().scan(**kwargs)
+
+    bundle = run(tmp_path, LookingAdapter(), prepared)
+
+    assert seen["is_symlink"] is True, "the copy resolved the link into a regular file"
+    assert seen["target"] == str(secret)
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["provenance"]["source_modified"] is False

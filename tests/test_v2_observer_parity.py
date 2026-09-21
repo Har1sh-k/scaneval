@@ -23,7 +23,8 @@ modes, an explicitly unavailable capture status, integral, non-integral, negativ
 null and beyond-safe-integer durations, a payload nested one container past the shared depth
 limit and one exactly at it, an unknown field name, a missing metadata, a metadata that is a list
 and one that is a string, an empty and a non-string link ID, a cyclic payload, a non-finite
-number inside a payload, credential-like and Unicode payload keys, a redactor that returns a
+number inside a payload, an unpaired surrogate in a payload and in a link ID against an astral
+character that is written, credential-like and Unicode payload keys, a redactor that returns a
 structurally equal copy of a container, a redactor that returns an equal copy of a scalar, a
 redactor that throws, a sink that throws an ordinary error, a sink that throws a value that is
 not an error, an ID factory that throws, a clock that throws, a clock that steps backwards, and
@@ -149,6 +150,9 @@ function materialize(value) {
         loop.self = loop;
         return loop;
       }
+      /* A lone high surrogate. JSON cannot carry one, so the plan spells it as a marker and
+         each language builds its own: one UTF-16 code unit here, one code point in Python. */
+      if (value.$special === "surrogate") return "\\uD800";
       if (value.$special === "nan") return NaN;
       if (value.$special === "inf") return Infinity;
       if (value.$special === "-inf") return -Infinity;
@@ -377,6 +381,8 @@ def materialize(value):
                 loop: dict = {}
                 loop["self"] = loop
                 return loop
+            if name == "surrogate":
+                return "\ud800"
             if name == "nan":
                 return float("nan")
             if name == "inf":
@@ -777,12 +783,15 @@ def nested_lists(containers: int) -> dict:
 
 
 CYCLE = {"$special": "cycle"}
+SURROGATE = {"$special": "surrogate"}
 NAN = {"$special": "nan"}
 INFINITY = {"$special": "inf"}
 NEGATIVE_INFINITY = {"$special": "-inf"}
 
 # Text that has to escape and encode identically in both languages.
-TRICKY_TEXT = 'quote " backslash \\ tab \t newline \n accented é kanji 漢'
+TRICKY_TEXT = (
+    'quote " backslash \\ tab \t newline \n accented é kanji 漢 clef 𝄞'
+)
 
 # One event per wire type, carrying the link fields that type actually uses, plus payload shapes
 # that could plausibly serialize differently: credential keys, nested arrays, a non-integral
@@ -924,6 +933,11 @@ REJECTED_EVENTS = {
     "category_contradicts_type": event("model.request", category="tool"),
     "unknown_capture_status": event("tool.start", capture_status="pretend_complete"),
     "null_capture_status": event("tool.start", capture_status=None),
+    # A lone surrogate is not a character: Python writes the raw code point, which no UTF-8
+    # sink can encode, and JavaScript writes an escaped one, so the same payload meant two
+    # things. Refused in both, wherever a caller string reaches the wire.
+    "unpaired_surrogate_in_metadata": event("tool.start", metadata={"text": SURROGATE}),
+    "unpaired_surrogate_in_a_link_id": event("tool.start", call_id=SURROGATE),
     "cyclic_metadata": event("tool.start", metadata={"loop": CYCLE}),
     "non_finite_number_in_metadata": event("tool.start", metadata={"ratio": NAN}),
     "negative_infinity_in_metadata": event("tool.start", metadata={"ratio": NEGATIVE_INFINITY}),
@@ -941,6 +955,7 @@ REJECTED_EVENTS = {
 # sees the payload the copy would refuse. Both languages must draw that line in the same place.
 CONTENT_ONLY_REJECTIONS = {
     "cyclic_content": event("tool.start", content={"loop": CYCLE}),
+    "unpaired_surrogate_in_content": event("tool.start", content={"text": SURROGATE}),
     "non_finite_number_in_content": event("tool.start", content={"score": INFINITY}),
     "content_nested_past_the_depth_limit": event(
         "tool.start", content=nested_object(MAX_PAYLOAD_DEPTH + 1)
@@ -2067,6 +2082,8 @@ def test_the_parity_matrix_covers_every_input_shape_the_contract_names():
         "duration_above_1e21_as_a_float",
         "duration_above_1e21_as_an_integer",
         "cyclic_metadata",
+        "unpaired_surrogate_in_metadata",
+        "unpaired_surrogate_in_a_link_id",
         "non_finite_number_in_metadata",
         "metadata_nested_past_the_depth_limit",
         "metadata_lists_nested_past_the_depth_limit",
@@ -2075,8 +2092,15 @@ def test_the_parity_matrix_covers_every_input_shape_the_contract_names():
     assert {
         "cyclic_content",
         "non_finite_number_in_content",
+        "unpaired_surrogate_in_content",
         "content_nested_past_the_depth_limit",
     } <= set(CONTENT_ONLY_REJECTIONS)
+    # The control for that rejection: a real astral character is written by both, so the rule
+    # refuses what no sink can encode rather than everything outside the basic plane.
+    assert "\U0001d11e" in TRICKY_TEXT
+    assert any(
+        "\U0001d11e" in json.dumps(fields, ensure_ascii=False) for fields in ACCEPTED_EVENTS
+    )
     # An integral duration is accepted, an integral float is stored as an integer, and the
     # safe-integer bound itself is accepted.
     assert any(fields.get("duration_ms") == 120 for fields in ACCEPTED_EVENTS)

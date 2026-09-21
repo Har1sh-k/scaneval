@@ -123,7 +123,11 @@
         "note": {"type": "string"},
         "labels_sha256": {
           "type": "string", "pattern": "^sha256:[0-9a-f]{64}$",
-          "description": "Digest of the label content this review covers: what the case claims to be, its target, and every control, projected by scaneval.contracts.label_digest. The latest review whose digest equals the case's current labels is the one review every gate asks, both for whether the approval stands and for whether the claimed level is earned. Absent on reviews recorded before approvals were bound to content; such a review is read as covering no current label, so planning leaves the case out until a review of the labels as they stand."
+          "description": "Digest of the label content this review covers: what the case claims to be, its target, every control, and the identity of every snapshot those name, projected by scaneval.contracts.label_digest. An approval covers the exact bytes reviewed, so a snapshot repinned to another commit or another exported tree changes this digest exactly as an edited label does. The latest review whose digest equals the case's current labels is the one review every gate asks, both for whether the approval stands and for what the validation level is. Absent on reviews recorded before approvals were bound to content; such a review is read as covering no current label, so planning leaves the case out until a review of the labels as they stand."
+        },
+        "chain_sha256": {
+          "type": "string", "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "This review's place in the chain: the digest of its own fields together with the chain value of the review recorded before it, computed by scaneval.contracts.review_chain_digest. Every recorded review carries one, and a pack whose chain does not verify is refused, so deleting the review that withdrew an approval cannot quietly restore it. Anyone who can edit the pack can recompute the chain, so this is not a signature and says nothing about who recorded a review; what it removes is the deletion that passes unnoticed."
         }
       }
     },
@@ -173,7 +177,7 @@
         "validation": {
           "type": "object", "additionalProperties": false, "required": ["level", "review_state", "checks", "reviews"],
           "properties": {
-            "level": {"enum": [null, "L1", "L2", "L3", "L4"], "description": "L1 is the mechanical state; L2 and above are recorded human reviews. A level on a human_approved case must be earned by the one review that covers the labels as they stand: that review must itself be recorded at that level or higher, and L3 and L4 need that same review to be by an independent_reviewer, so an independent approval of earlier content earns nothing here. L3 and L4 also require disposition validate, because a reviewed label rests on the screening decision behind it."},
+            "level": {"enum": [null, "L1", "L2", "L3", "L4"], "description": "A cached copy of the level the case's own records establish, never a fact in its own right and never read to decide anything. For a human_approved case that level is the level of the one review covering the labels as they stand, and this field must be exactly it: a value above or below that review is refused, so a case cannot be recorded at L2 under an L4 curator approval and then planned at L4. That covering review must also earn what it records, which for L3 and L4 means it was itself made by an independent_reviewer. For a mechanically_checked case the level is L1, and a draft carries none. L3 and L4 also require disposition validate, because a reviewed label rests on the screening decision behind it."},
             "review_state": {"enum": ["draft", "mechanically_checked", "human_approved"], "description": "mechanically_checked means level L1 and a recorded passing check set, carrying snapshot_id, for every snapshot the case references; it is never a claim that a person read anything."},
             "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
             "checked_trees": {
@@ -183,7 +187,11 @@
               "additionalProperties": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
             },
             "checks_failed": {"type": "boolean", "description": "Absent by default. Set when a mechanical check set failed for a snapshot this case references after the case was human approved: the recorded review and level stand, and planning leaves the case out until a correction decision resolves it."},
-            "reviews": {"type": "array", "items": {"$ref": "#/$defs/review"}}
+            "reviews": {"type": "array", "items": {"$ref": "#/$defs/review"}},
+            "reviews_sha256": {
+              "type": "string", "pattern": "^sha256:[0-9a-f]{64}$",
+              "description": "Where the recorded review history ends: the chain_sha256 of its last review, present exactly when the case records a review. The chain binds each review to the one before it, which catches an edit, a reordering, and a deletion from the middle; this catches the deletion off the end, which is the one that would otherwise restore an approval by dropping the review that withdrew it. Anyone who can edit the pack can rewrite this too, so it makes a deletion visible rather than impossible."
+            }
           }
         },
         "split": {"enum": ["development", "evaluation", "unassigned"]},

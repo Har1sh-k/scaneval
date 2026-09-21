@@ -7,6 +7,10 @@ material as well, and an adapter may hand its scanner paths to its own pinned ru
 that is configuration the adapter checked out, not the tree under evaluation. Exporting a tree
 records what was stripped or skipped, but it is not a sandbox: filesystem and network policy
 must be enforced outside this module.
+
+Every git invocation this package makes is built by :func:`git_command`, so a git call depends
+on nothing outside the directory it is given: see that function for what is neutralized and
+what is not.
 """
 
 from __future__ import annotations
@@ -56,11 +60,65 @@ class MaterializationError(RuntimeError):
     """A snapshot could not be fetched, verified, or exported as requested."""
 
 
+# Command-line settings every git invocation carries. Both are neutralizations rather than
+# preferences: ``core.hooksPath`` under a path that cannot hold a hook means no hook is ever
+# found, and an empty ``init.templateDir`` means ``git init`` copies nothing into the new
+# repository, hooks included.
+_GIT_HARDENING = ("-c", f"core.hooksPath={os.devnull}", "-c", "init.templateDir=")
+# The git variables the child is given. Everything else named ``GIT_*`` is removed, so no
+# variable in the operator environment can redirect a call, inject configuration, name an
+# identity, or point git at a program to run.
+_GIT_ENVIRONMENT = {
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_ASKPASS": "",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_SYSTEM": os.devnull,
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_ATTR_NOSYSTEM": "1",
+    "GIT_TEMPLATE_DIR": "",
+    "LC_ALL": "C",
+}
+
+
+def git_command(args: list[str]) -> tuple[list[str], dict[str, str]]:
+    """The argv and environment for one git invocation that depends on nothing outside its *cwd*.
+
+    Every git call this package makes is built here, so the rule holds on every path rather than
+    at each call site: a git invocation must depend on nothing but the directory it names.
+
+    What is neutralized. Every ``GIT_*`` variable in the operator environment is dropped, which
+    covers the ones that point git somewhere else (``GIT_DIR``, ``GIT_WORK_TREE``,
+    ``GIT_COMMON_DIR``, ``GIT_INDEX_FILE``, ``GIT_OBJECT_DIRECTORY``,
+    ``GIT_ALTERNATE_OBJECT_DIRECTORIES``, ``GIT_CEILING_DIRECTORIES``, ``GIT_NAMESPACE``), the
+    ones that inject configuration (``GIT_CONFIG``, ``GIT_CONFIG_COUNT`` and its key/value
+    pairs), the ones that name an author or committer, and the ones that name a program to run
+    (``GIT_SSH_COMMAND``, ``GIT_EXTERNAL_DIFF``, ``GIT_PROXY_COMMAND``, ``GIT_ASKPASS``,
+    ``GIT_TEMPLATE_DIR``). Global, XDG, and system configuration are switched off with
+    ``GIT_CONFIG_GLOBAL``, ``GIT_CONFIG_SYSTEM``, and ``GIT_CONFIG_NOSYSTEM``, so a global
+    ``init.templateDir``, ``core.hooksPath``, ``core.fsmonitor``, or ``core.autocrlf`` cannot
+    reach a trial workspace; system gitattributes are off for the same reason. Hooks and
+    templates are switched off again on the command line, so neither a leftover value nor a
+    future variable reintroduces them.
+
+    What is not. The ``git`` binary itself is whatever ``PATH`` resolves, and ``PATH``, ``HOME``,
+    and the rest of the non-git environment are passed through, so ssh still reads ``~/.ssh``.
+    Configuration *inside* the directory a call names is still honored, which is deliberate:
+    that is the repository the call is about. And because global configuration is off, a
+    credential helper or a ``url.insteadOf`` rewrite an operator relies on is off too, so a
+    fetch that needed one fails loudly rather than reaching a different remote than the one
+    recorded.
+    """
+    env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+    env.update(_GIT_ENVIRONMENT)
+    return ["git", *_GIT_HARDENING, *args], env
+
+
 def _git(args: list[str], cwd: Path, *, timeout: float = 600) -> str:
+    """Run one hermetic git command in *cwd* and return its stdout. See :func:`git_command`."""
+    argv, env = git_command(args)
     try:
         completed = subprocess.run(
-            ["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=timeout,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"},
+            argv, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise MaterializationError(f"git {' '.join(args)} failed: {exc}") from exc
@@ -327,7 +385,23 @@ def export_snapshot(
 
 
 def prepare_synthetic_history(source_dir: Path, *, message: str = "snapshot") -> dict:
-    """Create the minimum single-commit history a git-dependent scanner needs, with neutral identity."""
+    """Create the minimum single-commit history a git-dependent scanner needs, with neutral identity.
+
+    Every git call here is built by :func:`git_command`, so the repository this creates is the
+    one in *source_dir* and nothing else. That matters twice over. ``GIT_DIR`` and
+    ``GIT_WORK_TREE`` in the operator environment used to be inherited, so this could stage and
+    commit into an unrelated repository outside the trial workspace; they are dropped now. And
+    the operator's global configuration used to be read, so a global ``init.templateDir`` or
+    ``core.hooksPath`` put a hook in the new repository that then ran inside the workspace and
+    could write into the exported source this is supposed to leave untouched; global and system
+    configuration are off, hooks and templates are off, and ``--no-verify`` stays as the
+    commit-time belt to that suspenders. The recorded identity is the local configuration set
+    below rather than ``GIT_AUTHOR_NAME`` or ``GIT_COMMITTER_NAME`` from the environment, which
+    could otherwise make the identity this returns a false record of who committed.
+
+    What is still not guaranteed: the returned commit describes what git wrote, not that the
+    worked tree is unchanged. The caller compares the source before and after instead.
+    """
     if (source_dir / ".git").exists():
         raise MaterializationError(f"{source_dir} already has git history")
     _git(["init", "-q"], source_dir)

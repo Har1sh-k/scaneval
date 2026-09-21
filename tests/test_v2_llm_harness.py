@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -15,9 +16,14 @@ from scaneval.adapters.llm_harness import (
     HARNESS_PRESETS,
     TOOL_POLICY,
     FindingsBaseline,
+    HarnessImport,
+    LostRecord,
+    SelfReport,
     capture_status,
     import_harness_findings,
     parse_frontmatter,
+    read_self_report,
+    reconcile_import,
     snapshot_findings,
 )
 from scaneval.contracts import canonical_sha256, load_document
@@ -92,7 +98,11 @@ def test_import_keeps_findings_file_only_with_full_native_text(tmp_path):
     missing = import_harness_findings(tmp_path / "missing", harness="x", artifact_prefix="y",
                                       stage_dir=tmp_path / "unused",
                                       baseline=snapshot_findings(tmp_path / "missing"))
-    assert missing == ([], [], ["no findings directory was written by the harness"], 0)
+    # The fourth field is the losses themselves, not a separate count: ``lost`` is derived from
+    # it, so the number and the reasons cannot disagree, and each loss carries the finding id it
+    # knows so the self-report reconciliation can tell which reported finding it explains.
+    assert missing == ([], [], ["no findings directory was written by the harness"], ())
+    assert missing.lost == 0
     assert not (tmp_path / "unused").exists(), "nothing is staged when the harness wrote no findings"
 
 
@@ -171,6 +181,13 @@ def test_mock_runner_engine_run_produces_observed_bundle(tmp_path, harness, root
         assert claim["native_rule_id"].startswith(f"{harness}:")
         assert claim["raw_artifact_id"] in registered, "a claim must name an artifact the bundle holds"
         assert (bundle / registered[claim["raw_artifact_id"]]).is_file()
+
+    # The premise the self-report reconciliation rests on, checked against the real engine:
+    # every finding the harness names in its own summary is a record it wrote and the importer
+    # read, so a clean run reports no import loss.
+    reported = read_self_report(output.get("summary"))
+    assert set(reported.ids) <= {claim["claim_id"] for claim in result["claims"]}
+    assert not any("Import loss" in note for note in execution["notes"]), execution["notes"]
 
     events = [json.loads(line) for line in (bundle / "trace" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert execution["trace"]["events"] == len(events) == output["trace"]["events_written"]
@@ -332,7 +349,8 @@ def _fake_harness_root(tmp_path: Path) -> Path:
 
 
 def _stub_driver(monkeypatch, records: dict[str, str], *, state_dir: str = ".securevibes",
-                 plan_as_link: bool = False, output: dict | None = None) -> None:
+                 plan_as_link: bool = False, output: dict | None = None,
+                 block_plan_staging: bool = False) -> None:
     """Stand in for the tsx driver and leave exactly the records a harness run would leave.
 
     No process is spawned and no model is called: the stub reads the driver config the adapter
@@ -350,6 +368,9 @@ def _stub_driver(monkeypatch, records: dict[str, str], *, state_dir: str = ".sec
             (state / "bootstrap-plan.md").symlink_to(state / "elsewhere.md")
         else:
             (state / "bootstrap-plan.md").write_text("# plan\n", encoding="utf-8")
+        if block_plan_staging:
+            # A harness that wrote a regular file where the adapter stages its plan records.
+            (Path(config["output_path"]).parent / "harness-plan").write_text("not a directory\n", encoding="utf-8")
         if config.get("trace_path"):
             trace_path = Path(config["trace_path"])
             trace_path.parent.mkdir(parents=True, exist_ok=True)
@@ -365,7 +386,8 @@ def _stub_driver(monkeypatch, records: dict[str, str], *, state_dir: str = ".sec
 
 def _stubbed_bundle(tmp_path: Path, monkeypatch, records: dict[str, str], *, run_id: str = "run-stub",
                     root_config: str | None = None, plan_as_link: bool = False,
-                    trace_mode: str = "off", output: dict | None = None) -> Path:
+                    trace_mode: str = "off", output: dict | None = None,
+                    block_plan_staging: bool = False) -> Path:
     root = _fake_harness_root(tmp_path)
     sdk = tmp_path / "observer-sdk.js"
     sdk.write_text("// stub\n", encoding="utf-8")
@@ -374,7 +396,8 @@ def _stubbed_bundle(tmp_path: Path, monkeypatch, records: dict[str, str], *, run
         "harness": "securevibes-agent", "root": root_config or str(root), "model": "test/mock-llm",
         "runner": "mock", "observer_sdk": str(sdk)})
     preparation = adapter.prepare(spec, tmp_path / "cache")
-    _stub_driver(monkeypatch, records, plan_as_link=plan_as_link, output=output)
+    _stub_driver(monkeypatch, records, plan_as_link=plan_as_link, output=output,
+                 block_plan_staging=block_plan_staging)
     return run_invocation(prepared=_prepared(tmp_path), adapter=adapter, spec=spec, preparation=preparation,
                           out_dir=tmp_path / "out", run_id=run_id, timeout_seconds=60, trace_mode=trace_mode,
                           network_policy="none", clock=CLOCK)
@@ -676,3 +699,168 @@ def test_a_traced_run_reports_the_capture_gap_its_own_trace_record_carries(tmp_p
 
     assert control_execution["trace"]["capture_gap"] is False
     assert control_execution["capture"]["finding_submitted"] == "complete"
+
+
+# --- area B: what the harness says it wrote, against what the importer could read ---------
+
+
+REPORTED_TWO = {**DRIVER_OUTPUT,
+                "summary": {**DRIVER_OUTPUT["summary"],
+                            "newFindings": [{"id": "SV-AUTH-AUTHBYPASS-001"}],
+                            "updatedFindings": [{"id": "SV-INJ-CMDI-002"}]}}
+
+
+def test_a_scan_that_lost_every_finding_it_reported_does_not_reach_scoring_as_a_clean_success(tmp_path, monkeypatch):
+    """The importer counted only what it could see, so losing everything looked like finding nothing.
+
+    A harness run whose finding records never reached the findings directory left no record for
+    the importer to fail on: zero claims, zero losses, ``success`` with resolved bundles, and
+    full quiet credit for saying nothing. The harness's own summary names the findings it wrote,
+    and a name with no claim behind it is import loss like any other.
+    """
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {}, run_id="run-vanished", output=REPORTED_TWO)
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert result["claims"] == []
+    assert result["status"] == "partial" and result["bundles_resolved"] is False
+    assert result["error"]["code"] == "import_loss"
+    assert "2 harness finding record(s)" in result["error"]["message"]
+    assert "SV-AUTH-AUTHBYPASS-001" in result["error"]["message"]
+    assert "SV-INJ-CMDI-002" in result["error"]["message"]
+    assert execution["status"] == "partial" and execution["error"] == result["error"]
+    assert any("Import loss" in note for note in execution["notes"])
+
+    plan, decisions = _quiet_review(result)
+    report = score(plan, result, decisions)
+    controls = report["metrics"]["controls"]["capability_safe"]
+    assert controls["completed"] == 0 and controls["resolved"] == 0
+    assert controls["assessable_mass"] == 0.0 and report["metrics"]["completed"] is False
+    assert "Incomplete or failed execution cannot establish a successful negative control." in report["warnings"]
+
+
+def test_the_self_report_is_reconciled_against_the_claims_that_actually_arrived(tmp_path, monkeypatch):
+    """Half of what the harness says it wrote arrived; the other half is loss, named by id."""
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {"a.md": FINDING}, run_id="run-half", output=REPORTED_TWO)
+    result = load_document(bundle / "result.json", "scan-result")
+
+    assert [claim["claim_id"] for claim in result["claims"]] == ["SV-AUTH-AUTHBYPASS-001"]
+    assert result["status"] == "partial" and result["bundles_resolved"] is False
+    assert result["error"]["code"] == "import_loss"
+    assert "1 harness finding record(s)" in result["error"]["message"]
+    assert "SV-INJ-CMDI-002" in result["error"]["message"]
+    assert "SV-AUTH-AUTHBYPASS-001" not in result["error"]["message"], "the finding that arrived is not lost"
+
+
+def test_a_scan_that_delivered_every_finding_it_reported_is_still_a_clean_success(tmp_path, monkeypatch):
+    """The control: a self-report the claims account for changes nothing about the outcome."""
+    matched = {**DRIVER_OUTPUT, "summary": {**DRIVER_OUTPUT["summary"],
+                                            "newFindings": [{"id": "SV-AUTH-AUTHBYPASS-001"}]}}
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {"a.md": FINDING}, run_id="run-matched", output=matched)
+    result = load_document(bundle / "result.json", "scan-result")
+
+    assert [claim["claim_id"] for claim in result["claims"]] == ["SV-AUTH-AUTHBYPASS-001"]
+    assert result["status"] == "success" and result["bundles_resolved"] is True
+    assert "error" not in result
+
+
+def test_the_self_report_is_read_from_the_findings_the_harness_names():
+    """Ids where the summary carries records, a number where it carries a count, a note otherwise."""
+    report = read_self_report({"newFindings": [{"id": "A"}, {"id": "A"}, {"severity": "high"}],
+                               "updatedFindings": [{"id": "B"}]})
+    assert report.ids == ("A", "B") and report.unnamed == 1 and report.total == 3
+
+    assert read_self_report({"newFindings": 3}).unnamed == 3
+    unreadable = read_self_report({"updatedFindings": "two"})
+    assert unreadable.total == 0 and "not a list of findings" in (unreadable.note or "")
+    assert read_self_report(None) == SelfReport((), 0, None)
+    assert read_self_report({}) == SelfReport((), 0, None)
+
+
+def test_a_record_the_harness_reported_and_the_importer_rejected_is_counted_once():
+    """The reconciliation is over records, not a sum of two counts that overlap.
+
+    A record the importer read and refused is already loss with a reason of its own; the same
+    finding named in the summary must not be counted a second time. A finding named there that
+    no rejection explains is the shortfall.
+    """
+    rejected = HarnessImport([], [], [], (LostRecord("b.md", "SV-X-002", "unusable file_path; not imported"),))
+
+    once = reconcile_import(rejected, read_self_report({"newFindings": [{"id": "SV-X-002"}]}))
+    assert once.lost == 1
+    assert "did not arrive as claims" not in (once.message or "")
+
+    both = reconcile_import(rejected, read_self_report({"newFindings": [{"id": "SV-X-002"}, {"id": "SV-Y-003"}]}))
+    assert both.lost == 2
+    assert both.message.count("SV-X-002") == 1 and "SV-Y-003" in both.message
+
+    # A report that names no ids is compared by number, and delivered claims account for it.
+    delivered = HarnessImport([{"claim_id": "A"}, {"claim_id": "B"}], [], [], ())
+    assert reconcile_import(delivered, read_self_report({"newFindings": 2})).lost == 0
+    assert reconcile_import(delivered, read_self_report({"newFindings": 3})).lost == 1
+    # And a summary that names nothing asserts nothing: the importer's own count stands alone.
+    assert reconcile_import(rejected, read_self_report({})).lost == 1
+    assert reconcile_import(delivered, read_self_report({})) == (0, None, ())
+
+
+def test_a_plan_record_that_cannot_be_staged_is_noted_and_keeps_the_claims(tmp_path, monkeypatch):
+    """The staging loop raised, so one unstageable plan record discarded the whole import.
+
+    The plan records are copied after the findings have already been imported. A harness that
+    wrote a regular file where the staging directory goes made ``mkdir`` raise, the exception
+    left ``scan`` entirely, and the invocation was recorded as an adapter failure with no claims
+    at all, even though every finding had been read and staged. It is contained and noted now.
+    """
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {"a.md": FINDING}, run_id="run-plan-block",
+                             block_plan_staging=True)
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert result["status"] == "success", "a plan record is evidence, not a claim"
+    assert [claim["claim_id"] for claim in result["claims"]] == ["SV-AUTH-AUTHBYPASS-001"]
+    assert any("bootstrap-plan.md" in note and "could not be staged" in note for note in execution["notes"])
+    assert "harness-bootstrap-plan.md" not in {artifact["id"] for artifact in execution["raw_artifacts"]}
+    # The claim's own record is still staged and registered, which is what was being discarded.
+    registered = {artifact["id"] for artifact in execution["raw_artifacts"]}
+    assert result["claims"][0]["raw_artifact_id"] in registered
+
+
+def test_the_harness_provenance_is_read_from_the_harness_root_not_an_inherited_git_dir(tmp_path, monkeypatch):
+    """``prepare`` ran git with the operator environment, so GIT_DIR named the recorded HEAD.
+
+    The preparation record reports the harness commit the scan ran against. With ``GIT_DIR`` set
+    it reported an unrelated repository's HEAD instead, and every bundle from that run carried a
+    version string for a checkout that was never involved.
+    """
+    root = _fake_harness_root(tmp_path)
+    sdk = tmp_path / "observer-sdk.js"
+    sdk.write_text("// stub\n", encoding="utf-8")
+    import subprocess
+
+    def git(*args: str, cwd: Path) -> str:
+        environment = {**os.environ, "GIT_AUTHOR_NAME": "u", "GIT_AUTHOR_EMAIL": "u@x",
+                       "GIT_COMMITTER_NAME": "u", "GIT_COMMITTER_EMAIL": "u@x",
+                       "GIT_CONFIG_GLOBAL": os.devnull}
+        for name in ("GIT_DIR", "GIT_WORK_TREE"):
+            environment.pop(name, None)
+        return subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True,
+                              text=True, env=environment).stdout.strip()
+
+    elsewhere = tmp_path / "elsewhere"
+    for repository in (root, elsewhere):
+        repository.mkdir(exist_ok=True)
+        git("init", "-q", "-b", "main", cwd=repository)
+        (repository / "marker.txt").write_text(f"{repository.name}\n", encoding="utf-8")
+        git("add", "-A", cwd=repository)
+        git("commit", "-q", "-m", repository.name, cwd=repository)
+    monkeypatch.setenv("GIT_DIR", str(elsewhere / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(elsewhere))
+
+    adapter = get_adapter("llm-harness")
+    preparation = adapter.prepare(SystemSpec("sv-stub", "llm-harness", {
+        "harness": "securevibes-agent", "root": str(root), "model": "test/mock-llm",
+        "runner": "mock", "observer_sdk": str(sdk)}), tmp_path / "cache")
+    monkeypatch.undo()
+
+    assert preparation["harness"]["git_head"] == git("rev-parse", "HEAD", cwd=root)
+    assert preparation["harness"]["git_head"] != git("rev-parse", "HEAD", cwd=elsewhere)
