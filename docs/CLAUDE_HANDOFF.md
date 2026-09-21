@@ -166,8 +166,8 @@ scaneval replay results/claude-pilot-demo --output results/claude-pilot-replay.j
 cmp results/claude-pilot-demo/evaluation.json results/claude-pilot-replay.json
 
 # Offline, no network and no model: replay a preserved pilot bundle.
-scaneval replay corpus/pilot/runs/2026-09-20-semgrep/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
-scaneval review status corpus/pilot/runs/2026-09-20-semgrep/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
+scaneval replay corpus/pilot/runs/semgrep-oss-1.177.0/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
+scaneval review status corpus/pilot/runs/semgrep-oss-1.177.0/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
 ```
 
 The replay prints `review state draft` on stderr and `review status` prints `draft`. Both are correct and must stay correct until a human approval is actually recorded. Reproducing the runs themselves needs the network, and the harness run needs live model calls; the commands are in `docs/PILOT.md`.

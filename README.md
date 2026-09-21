@@ -24,7 +24,7 @@ This uses fabricated evaluator fixtures, not a live scanner or admitted CVEs. It
 Replay one of the preserved pilot bundles offline, with no network and no model call:
 
 ```bash
-scaneval replay corpus/pilot/runs/2026-09-20-semgrep/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
+scaneval replay corpus/pilot/runs/semgrep-oss-1.177.0/invocations/oauth2-proxy-f4b33b64__semgrep-oss-1.177.0-rules-40b8c63f__r1
 # scaneval: review state draft: these numbers come from decisions with no recorded human approval
 ```
 

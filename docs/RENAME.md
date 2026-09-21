@@ -59,6 +59,20 @@ an installed user: there are no installed users, since neither package has been 
 
 ## What deliberately did not change
 
+### Harness runs are never committed, and history was rewritten to enforce that
+
+A harness run's content-mode trace carries the source that was sent to a model, so harness
+runs stay on the machine that produced them under `results/`, which is gitignored. One was
+committed during development and then deleted, which does not remove it: the blobs stayed
+reachable in history and a push would have carried them. The branch was unpushed, so
+history was rewritten with `git-filter-repo` to drop those paths before any push. A backup
+of the pre-rewrite `.git` was taken first.
+
+The Semgrep run under `corpus/pilot/runs/` is committed deliberately. It is rule-engine
+output over public repositories with no model content, it is small, and it is the only
+reproducible evidence of what the pipeline produces. `tests/test_v2_preserved_runs.py`
+holds it to the same standard as any other committed bundle.
+
 ### Run bundles were regenerated, never relabeled
 
 Committed run bundles are evidence of what executed. Their documents bind to each other by
