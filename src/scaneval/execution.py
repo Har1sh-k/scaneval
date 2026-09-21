@@ -18,9 +18,18 @@ made and the moment they are read. Read that document before treating any of thi
 
 ``raw/`` and ``trace/`` are staged inside the private workspace while the scanner runs and
 are moved into the bundle once it returns or raises, so no path handed to an adapter resolves
-inside the run directory and declared artifact paths are re-rooted before they are hashed. A
-file the move would carry in under more than one name is de-aliased first: see
-:func:`_move_into_bundle`, so no file in the bundle is a second name for a live host file.
+inside the run directory and declared artifact paths are re-rooted before they are hashed. One
+rule decides what a staged tree may contain, and :func:`_move_into_bundle` is the one place it
+is enforced: no path in a bundle may name a file outside it. A hard link is copied, a symbolic
+link is cut, and every directory that remains is a real one, so nothing in the bundle is a
+second name for a live host file and nothing in it leads out.
+
+Two rules hold for every path this module touches, and each of them lives in one function.
+:func:`list_directory` is the one listing: an enumeration that cannot complete is a failed
+observation, never an empty one, so every walk here raises rather than reporting a directory it
+could not read as empty. :func:`read_regular_file` is the one read of a path a scanner could
+have written: it proves the file is a regular file in the same open that reads it, so a named
+pipe left where output belongs is refused instead of blocking the invocation forever.
 
 An outcome that breaks the adapter contract, an execution record the contract refuses, a trace
 file that is not UTF-8 text, and anything raised while capturing harness state, moving the
@@ -35,12 +44,15 @@ so it cannot stand as a clean observation of the frozen input it binds to. :func
 is the single definition of what that source is, used both for the hash the result binds to and
 for the before/after comparison, so neither can cover a path the other ignores. A source tree
 that cannot be walked is a failed observation rather than an empty one, so a scanner cannot hide
-what it wrote by making the directory it wrote in unreadable.
+what it wrote by making the directory it wrote in unreadable. A top-level ``.git`` is left out
+of that tree only when this run created it, so a scanner that makes one has it watched like any
+other directory it writes.
 
 No tree this module copies is ever copied through a symbolic link: :func:`_copy_tree_unresolved`
 is the one copy, for the exported input on the way in and for the scanner's state directory on
 the way out, and it preserves a link as a link or refuses one, so a link the scanner planted
-cannot pull a host file into the bundle.
+cannot pull a host file into the bundle. A link it preserved is cut when the staged tree enters
+the bundle, by the one rule stated above; what the scanner left is named in the record instead.
 
 Every path this module reads or writes after the scanner returns is a path the scanner could
 have replaced, and any component of it can be a link, not only the last one. So each of them,
@@ -83,7 +95,7 @@ import shutil
 import stat
 import tempfile
 import time
-from typing import Callable
+from typing import Callable, Iterator
 import uuid
 
 from . import __version__
@@ -240,6 +252,78 @@ def _enclose(base: Path) -> Containment:
         raise ExecutionError(str(exc)) from exc
 
 
+def list_directory(directory: Path) -> list[os.DirEntry]:
+    """Every entry in *directory*, sorted by name, raising when the listing cannot complete.
+
+    The one listing this module and the harness adapter make, and the one rule behind it: an
+    enumeration that cannot complete is a failed observation, never an empty one.
+    :func:`os.scandir` raises when the directory cannot be opened, and iterating it raises when
+    the listing breaks part way through; both happen inside this ``with``, so a caller receives
+    the error rather than a short list it cannot tell from a complete one.
+
+    Why this exists rather than ``os.walk``, ``Path.glob``, or ``Path.rglob``. Each of those
+    swallows exactly that error: ``os.walk`` reports a directory it could not list as holding
+    nothing, and the glob methods drop it without a word. This package built four separate
+    checks on one of them and every one read an unreadable directory as an empty one, which is
+    four ways a scanner could hide what it wrote by closing a directory behind itself. The
+    package's other enumeration, :func:`~scaneval.materialize.walk_regular_files`, keeps the
+    same rule for the input tree.
+    """
+    with os.scandir(directory) as entries:
+        return sorted(entries, key=lambda entry: entry.name)
+
+
+def walk_entries(root: Path) -> Iterator[tuple[Path, os.DirEntry]]:
+    """Every entry under *root* and its path, never descending through a symbolic link.
+
+    Built on :func:`list_directory`, so a directory that cannot be listed raises out of the walk
+    instead of contributing nothing to it: every walk in this module is this one, for that
+    reason. A symbolic link is yielded and never followed, so nothing behind one is enumerated
+    as part of *root*; what to do with the link itself is the caller's rule, not this one's.
+    """
+    pending = [Path(root)]
+    while pending:
+        directory = pending.pop()
+        for entry in list_directory(directory):
+            path = Path(entry.path)
+            yield path, entry
+            if entry.is_dir(follow_symlinks=False):
+                pending.append(path)
+
+
+def read_regular_file(path: Path) -> bytes:
+    """The bytes at *path*, which must be a regular file, read without following a link.
+
+    The one read this module and the harness adapter make of a path a scanner wrote or could
+    have replaced, and the one rule behind it: such a read must prove the file is a regular file
+    before it can block on it. The proof and the read are the same open, so nothing can be
+    swapped in between: ``O_NOFOLLOW`` refuses a symbolic link as the last component,
+    ``O_NONBLOCK`` makes opening a named pipe return at once rather than wait for a writer that
+    never comes, and the descriptor is checked with :func:`os.fstat` before a byte is read.
+
+    Everything that is not a readable regular file raises :class:`OSError`, so a caller that
+    must not fail records the message instead of the bytes. A named pipe left where a scanner's
+    own output belongs used to block an invocation forever, leaving no bundle and no record that
+    the run had happened at all.
+
+    The one read that does not come through here, named so it is not mistaken for an oversight:
+    an artifact's content hash, taken by :func:`~scaneval.materialize.sha256_file`, which streams
+    the file rather than holding it in memory. :func:`run_invocation` states the same requirement
+    before it calls that, with :meth:`Path.is_symlink` and :meth:`Path.is_file`, over a tree
+    :func:`_privatize` has already cleared of links; that is two operations rather than one, and
+    the window between them is the one ``docs/THREAT_MODEL.md`` describes.
+    """
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with os.fdopen(descriptor, "rb") as stream:
+        return stream.read()
+
+
 def _copy_tree_unresolved(source: Path, destination: Path) -> list[str]:
     """Copy one directory tree without following a symbolic link, and name the links it kept.
 
@@ -256,76 +340,95 @@ def _copy_tree_unresolved(source: Path, destination: Path) -> list[str]:
 
     The limits. A hard link is not a symbolic link: this copy reads its bytes, which gives the
     destination an inode of its own, and a staged tree that is moved rather than copied is
-    de-aliased instead by :func:`_dealias`. A link preserved in the bundle may still resolve to a
-    host path when someone later follows it by hand; nothing here resolves one.
+    de-aliased instead by :func:`_privatize`. A link preserved here is preserved in a staging
+    directory, not in a bundle: :func:`_move_into_bundle` cuts it on the way in and names it in
+    the record, so nothing that reaches a bundle resolves to a host path when someone follows it
+    by hand later.
+
+    The walk that names the links is :func:`walk_entries`, so a copied directory that cannot be
+    listed raises rather than reporting that the copy holds no link. Under ``os.walk`` it did
+    the second thing, and the record then said a tree holding links held none.
     """
     if source.is_symlink():
         raise ExecutionError(f"{source} is a symbolic link, not a directory; it was not copied")
     shutil.copytree(source, destination, symlinks=True)
-    links: list[str] = []
-    for parent, directories, files in os.walk(destination):
-        for name in directories + files:
-            path = Path(parent) / name
-            if path.is_symlink():
-                links.append(path.relative_to(destination).as_posix())
+    links = [path.relative_to(destination).as_posix()
+             for path, entry in walk_entries(destination) if entry.is_symlink()]
     return sorted(links)
 
 
-def _dealias(root: Path) -> list[str]:
-    """Give every multiply linked regular file under *root* an inode of its own; name the ones found.
+def _privatize(root: Path) -> tuple[list[str], list[str]]:
+    """Make every path under *root* name a file inside it; name the files copied and the links cut.
 
-    The rule: a file in the bundle must not be a second name for a file outside it. ``raw/`` and
-    ``trace/`` are moved rather than copied, which is what keeps the scanner's own bytes exactly
-    as it wrote them, but a move preserves inodes: a hard link the scanner planted made the
-    bundle's copy and a live host file one and the same file, so what ScanEval then hashed and
-    line-counted was whatever that host file held at that moment, it went on changing under the
-    recorded hash afterwards, and anything later written through the bundle's name would have
-    written into the host file.
+    This is what a staged tree must satisfy to be part of a bundle, and the whole of it: **no
+    path in a bundle may name a file outside the bundle.** Three things break that rule and each
+    is handled here, in one walk, before anything reads, hashes, or counts a line of the tree.
 
-    A symbolic link is not this, and is left exactly as it is: it is visibly a link, nothing here
-    follows one, and the record says the bundle holds a link rather than the bytes behind it. A
-    hard link is invisible in the same way an ordinary file is, which is why it is broken here
-    instead.
+    A hard link. ``raw/`` and ``trace/`` are moved rather than copied, which is what keeps the
+    scanner's own bytes exactly as it wrote them, but a move preserves inodes: a hard link the
+    scanner planted made the bundle's copy and a live host file one and the same file, so what
+    ScanEval hashed and line-counted was whatever that host file held at that moment, it went on
+    changing under the recorded hash afterwards, and anything later written through the bundle's
+    name would have written into the host file. It is copied rather than refused, because
+    refusing would destroy the scanner's raw output to prevent something the scanner could do
+    anyway: it could have copied any file it can read into ``raw/`` itself, and this module never
+    claimed the raw tree holds only bytes the scan invented. What a hard link adds is the live
+    alias, and copying removes exactly that: the bundle keeps a private snapshot of the bytes,
+    the host file keeps its own inode and is never written to. The copy is read and replaced
+    through the bundle's own name, so the host path is neither opened for writing nor unlinked.
 
-    Copied rather than refused, because refusing would destroy the scanner's raw output to
-    prevent something the scanner could do anyway: it could have copied any file it can read into
-    ``raw/`` itself, and this module never claimed the raw tree holds only bytes the scan
-    invented. What a hard link adds is the live alias, and copying removes exactly that: the
-    bundle keeps a private snapshot of the bytes, the host file keeps its own inode and is never
-    written to. The copy is read and replaced through the bundle's own name, so the host path is
-    neither opened for writing nor unlinked.
+    A symbolic link. It used to be kept, on the argument that it is visibly a link and nothing
+    here follows one. That argument was wrong twice. ``bundle/raw/x`` naming a host file is the
+    same alias a hard link is, and it stays live: it is what anyone reading the bundle by hand
+    afterwards actually opens. And a link to a directory hid a whole subtree from this walk, so
+    a hard link behind one was never de-aliased at all, which made the hard-link rule above
+    defeatable by planting one link above it. Every link is cut instead, and its name and its
+    target go into the record: what the scanner did is preserved as a fact about the run rather
+    than as a live pointer out of the bundle. Nothing behind it was ever the bundle's to keep.
 
-    A copy that fails raises to the caller, which records the staged output as unusable rather
-    than leaving a bundle that still aliases a host file behind a clean result.
+    Anything else the scanner left, a named pipe or a socket among them, stays exactly as it
+    wrote it. Those name no file, so they alias nothing, and nothing in this package opens one.
+
+    A copy or an unlink that fails raises to the caller, which records the staged output as
+    unusable rather than leaving a bundle that still aliases a host file behind a clean result.
+    So does a directory that cannot be listed, since a tree half walked is a tree not cleared.
 
     The limit. The bytes copied are the bytes at this moment, which is after the scanner's
     process has exited but is still a read the scanner could have raced had it left something
     running. See ``docs/THREAT_MODEL.md``.
     """
     dealiased: list[str] = []
-    for parent, _directories, files in os.walk(root):
-        for name in sorted(files):
-            path = Path(parent) / name
+    cut: list[str] = []
+    for path, _entry in walk_entries(root):
+        relative = path.relative_to(root).as_posix()
+        try:
+            entry = os.lstat(path)
+        except OSError:
+            continue
+        if stat.S_ISLNK(entry.st_mode):
             try:
-                entry = os.lstat(path)
+                target = os.readlink(path)
             except OSError:
-                continue
-            if not stat.S_ISREG(entry.st_mode) or entry.st_nlink <= 1:
-                continue
-            private = path.with_name(f".{path.name}.{uuid.uuid4().hex}.dealias")
-            try:
-                shutil.copyfile(path, private)
-                os.chmod(private, stat.S_IMODE(entry.st_mode))
-                os.replace(private, path)
-            except OSError:
-                Path(private).unlink(missing_ok=True)
-                raise
-            dealiased.append(path.relative_to(root).as_posix())
-    return sorted(dealiased)
+                target = "an unreadable target"
+            os.unlink(path)
+            cut.append(f"{relative} -> {target}")
+            continue
+        if not stat.S_ISREG(entry.st_mode) or entry.st_nlink <= 1:
+            continue
+        private = path.with_name(f".{path.name}.{uuid.uuid4().hex}.dealias")
+        try:
+            shutil.copyfile(path, private)
+            os.chmod(private, stat.S_IMODE(entry.st_mode))
+            os.replace(private, path)
+        except OSError:
+            Path(private).unlink(missing_ok=True)
+            raise
+        dealiased.append(relative)
+    return sorted(dealiased), sorted(cut)
 
 
-def _move_into_bundle(staging: Path, destination: Path) -> list[str]:
-    """Move one staged directory into the bundle, de-aliasing it, and name the files that needed it.
+def _move_into_bundle(staging: Path, destination: Path) -> tuple[list[str], list[str]]:
+    """Move one staged directory into the bundle under the rule for what a bundle may hold.
 
     A staging directory the adapter removed is recreated empty at the destination, so the
     bundle always holds the directory the execution record describes. A staging directory the
@@ -333,10 +436,11 @@ def _move_into_bundle(staging: Path, destination: Path) -> list[str]:
     bundle's own ``raw/`` or ``trace/`` a link to somewhere outside the bundle while the run
     recorded a success. The caller records that refusal as an outcome contract violation.
 
-    This is the one place a staged tree enters the bundle, so it is where the rule that no file
-    in the bundle aliases a file outside it is enforced: see :func:`_dealias`, which runs on the
-    moved tree before anything reads, hashes, or counts a line of it. The returned relative paths
-    are the files that were aliased, for the caller to record.
+    This is the one place a staged tree enters a bundle, so it is the one place the rule is
+    enforced: no path in a bundle may name a file outside it. :func:`_privatize` runs on the
+    moved tree before anything reads, hashes, or counts a line of it, copying every hard link
+    and cutting every symbolic link. The two returned lists are the files that had to be copied
+    and the links that were cut, each as ``name -> target``, for the caller to record.
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
     if staging.is_symlink():
@@ -347,7 +451,7 @@ def _move_into_bundle(staging: Path, destination: Path) -> list[str]:
         shutil.move(str(staging), str(destination))
     else:
         destination.mkdir(parents=True, exist_ok=True)
-    return _dealias(destination)
+    return _privatize(destination)
 
 
 def _rebase(path: Path, areas: list[tuple[Path, Path, Path]]) -> Path:
@@ -366,7 +470,29 @@ def _rebase(path: Path, areas: list[tuple[Path, Path, Path]]) -> Path:
     return path
 
 
-def _input_tree(source_dir: Path, state_dirs: frozenset[str]) -> dict[str, str]:
+def _git_tree(source_dir: Path) -> dict[str, str]:
+    """``{relative path: content hash}`` for a top-level ``.git`` this run did not create.
+
+    :func:`~scaneval.materialize.walk_regular_files` always leaves the top-level ``.git`` out,
+    because the runner writes one itself for a git-dependent adapter. When it did not write one,
+    that directory is ordinary content of the tree under evaluation and belongs in the map, so
+    it is walked here and put back. A ``.git`` that is a symbolic link is left out, like every
+    other link: it has no content of its own to hash.
+
+    The walk is :func:`walk_entries`, so a ``.git`` the scanner filled and then closed raises
+    instead of reading as empty. That is the whole point of counting it: the exclusion was one
+    directory name a scanner could write under freely, whether or not the adapter asked for git
+    and whether or not this run had created one.
+    """
+    root = source_dir / ".git"
+    if root.is_symlink() or not root.is_dir():
+        return {}
+    return {f".git/{path.relative_to(root).as_posix()}": sha256_file(path)[0]
+            for path, entry in walk_entries(root)
+            if not entry.is_symlink() and entry.is_file(follow_symlinks=False)}
+
+
+def _input_tree(source_dir: Path, state_dirs: frozenset[str], *, created_git: bool) -> dict[str, str]:
     """The one definition of the input tree: ``{relative path: content hash}``.
 
     Two things need this map and must not disagree about it: the hash compared against
@@ -375,24 +501,28 @@ def _input_tree(source_dir: Path, state_dirs: frozenset[str]) -> dict[str, str]:
     cannot be a path the other ignores.
 
     Excluded, and why. Symbolic links and anything that is not a regular file, because they
-    have no content of their own to hash. A top-level ``.git`` component, because this module
-    writes one itself when an adapter requires git
-    (:func:`~scaneval.materialize.prepare_synthetic_history`), so counting it would report the
-    runner's own bookkeeping as a scanner modification. Each of the adapter's declared
-    *state_dirs*, because they are the scanner's private scratch space, are preserved separately
-    under ``raw/harness-state/``, and exist only because the scanner created them.
+    have no content of their own to hash. Each of the adapter's declared *state_dirs*, because
+    they are the scanner's private scratch space, are preserved separately under
+    ``raw/harness-state/``, and exist only because the scanner created them. A top-level
+    ``.git`` component only when *created_git* says this run wrote one
+    (:func:`~scaneval.materialize.prepare_synthetic_history`), since counting the runner's own
+    bookkeeping would report it as a scanner modification.
 
-    Only the top-level ``.git`` is excluded. Excluding every path with a ``.git`` component
-    anywhere gave a scanner one directory name it could write under at any depth and stay out of
-    this map entirely, which is the same escape as the state directories without even needing an
-    adapter to declare one.
+    That ``.git`` exclusion used to be unconditional, which handed every scanner one directory
+    name it could write under and stay out of this map, including on a run whose adapter never
+    asked for git and where no ``.git`` existed until the scanner made one. It is excluded only
+    when this run created it now: see :func:`_git_tree`, which puts the directory back otherwise.
 
-    That last exclusion is sound only while the exported input contains no such directory
-    itself. :func:`run_invocation` establishes that by comparing this map's hash against
+    Only the top-level ``.git`` is ever excluded. Excluding every path with a ``.git`` component
+    anywhere gave a scanner the same hiding place at any depth, which is the same escape as the
+    state directories without even needing an adapter to declare one.
+
+    The exclusions are sound only while the exported input contains no such directory itself.
+    :func:`run_invocation` establishes that by comparing this map's hash against
     ``prepared.tree_hash``, which :func:`~scaneval.materialize.hash_exported_tree` computed over
-    the whole export: an input that ships one of the adapter's state directories cannot produce
-    a matching hash here, so it is refused rather than scanned with bytes the input hash covers
-    left outside the modification check.
+    the whole export: an input that ships one of the adapter's state directories, or a ``.git``
+    that the export strips and this map counts, cannot produce a matching hash here, so it is
+    refused rather than scanned with bytes the two sides disagree about.
 
     The walk is :func:`~scaneval.materialize.walk_regular_files`, which enumerates explicitly
     and raises when a directory cannot be listed. It used to be :meth:`Path.rglob`, which
@@ -401,8 +531,11 @@ def _input_tree(source_dir: Path, state_dirs: frozenset[str]) -> dict[str, str]:
     read as a clean observation of a tree it had changed. A tree that cannot be walked is now a
     failed observation, never an empty one.
     """
-    return {relative: sha256_file(path)[0]
-            for relative, path in sorted(walk_regular_files(source_dir, skip_top_level=state_dirs).items())}
+    hashes = {relative: sha256_file(path)[0]
+              for relative, path in sorted(walk_regular_files(source_dir, skip_top_level=state_dirs).items())}
+    if not created_git:
+        hashes.update(_git_tree(source_dir))
+    return hashes
 
 
 def _recordable_text(value: str) -> str:
@@ -497,11 +630,16 @@ def _capture_record(capture: dict, capture_state: dict | None, trace_record: dic
     know whether the file landed in the bundle. This module does know, so this is where the two
     are reconciled.
 
-    The rule: a category may claim ``complete`` only in a bundle that holds a counted trace.
-    Where there is no count, every ``complete`` becomes ``partial``, because what was recorded is
-    then a claim of complete observation with no record of the observation behind it. Nothing
-    else is touched: a category the adapter called ``partial``, ``unavailable``, or
-    ``not_applicable`` already claims less than the trace could back.
+    The rule: a category may claim ``complete`` only in a bundle that holds a trace with at
+    least one event in it. Anywhere else, every ``complete`` becomes ``partial``, because what
+    was recorded is then a claim of complete observation with no record of the observation
+    behind it. Nothing else is touched: a category the adapter called ``partial``,
+    ``unavailable``, or ``not_applicable`` already claims less than the trace could back.
+
+    A trace of zero events is one of those places, and it used to count as a trace. An empty
+    file backs no claim about what was observed: it is the same record a run that wrote nothing
+    at all leaves, so a bundle could say ``trace.events`` zero beside ``complete`` capture of
+    ``finding_submitted`` and still read as a clean success.
 
     The second value is how the observation broke, and it is ``None`` when it did not: the
     observer's own report of a capture gap or a dropped event, read off the same
@@ -517,13 +655,13 @@ def _capture_record(capture: dict, capture_state: dict | None, trace_record: dic
         if isinstance(dropped, int) and not isinstance(dropped, bool) and dropped > 0:
             reasons.append(f"{dropped} dropped event(s)")
     events = trace_record.get("events") if isinstance(trace_record, dict) else None
-    counted = isinstance(events, int) and not isinstance(events, bool)
+    counted = isinstance(events, int) and not isinstance(events, bool) and events > 0
     recorded = dict(capture)
     unbacked = sorted(name for name, value in recorded.items() if value == "complete") if not counted else []
     for name in unbacked:
         recorded[name] = "partial"
     if unbacked:
-        reasons.append(f"complete capture of {', '.join(unbacked)} claimed with no counted trace "
+        reasons.append(f"complete capture of {', '.join(unbacked)} claimed with no trace event "
                        "in this bundle")
     return recorded, " and ".join(reasons) or None
 
@@ -539,6 +677,9 @@ def _read_trace(outcome: NativeOutcome, staged_areas: list[tuple[Path, Path, Pat
     it, which nothing here ever does. A missing trace file is an unavailable count, not a
     failure. A file that is not UTF-8 text raises, because a count taken from bytes this cannot
     decode would be an invented number.
+
+    The read itself is :func:`read_regular_file`, so the regular-file requirement is proved by
+    the same open that reads the bytes rather than by a check the scanner could have raced.
     """
     events_path = (_rebase(Path(outcome.trace_path), staged_areas) if outcome.trace_path
                    else trace_dir / "events.jsonl")
@@ -557,7 +698,8 @@ def _read_trace(outcome: NativeOutcome, staged_areas: list[tuple[Path, Path, Pat
         except ValueError:
             outcome.notes.append("trace file left outside the bundle; its path is not recorded")
         else:
-            count = sum(1 for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip())
+            text = read_regular_file(events_path).decode("utf-8")
+            count = sum(1 for line in text.splitlines() if line.strip())
     return {"path": recorded_trace_path, "events": count, "mode": trace_mode,
             "capture_gap": (outcome.capture_state or {}).get("capture_gap"),
             "dropped_events": (outcome.capture_state or {}).get("dropped_events")}
@@ -713,9 +855,11 @@ def run_invocation(
     result's claim to be a clean observation of the frozen input. What counts as the source for
     that comparison is :func:`_input_tree`, which is also what the pre-scan hash check covers, so
     the watched tree and the hashed tree are the same tree; an input that already holds one of
-    the adapter's state directories fails that check and is refused before the scanner runs, as
-    is an input tree that cannot be walked at all, since there is no honest map of it to bind a
-    result to.
+    the adapter's state directories, or a top-level ``.git`` the export strips and the watched
+    tree counts, fails that check and is refused before the scanner runs, as is an input tree
+    that cannot be walked at all, since there is no honest map of it to bind a result to. A
+    ``.git`` is left out of the watched tree only when this run created it for a git-dependent
+    adapter, so one a scanner makes is watched like any other directory it writes.
 
     Two things are narrower than they look. When the post-scan re-hash of the source fails, the
     comparison never completed, so the provenance reports no observed modification and the
@@ -732,15 +876,22 @@ def run_invocation(
     execution record carries a note naming the directory still on disk, which is a leak an
     operator can find rather than one that was swallowed.
 
-    A staged file that turns out to be a second name for a file outside the bundle is copied as
-    it lands, so the bundle holds its own inode and the hash it records is of bytes nothing else
-    can change afterwards. The note says which files needed it. See :func:`_dealias`.
+    One rule decides what a staged tree may carry into the bundle, and it is enforced where the
+    tree lands: no path in a bundle may name a file outside it. A staged file that turns out to
+    be a second name for a file outside the bundle is copied as it lands, so the bundle holds
+    its own inode and the hash it records is of bytes nothing else can change afterwards, and a
+    symbolic link is cut, because it is a live name for a file the bundle does not hold and,
+    when it points at a directory, it hides a subtree from the copy that breaks those aliases.
+    Both are named in notes, links with their targets, so the record says what the scanner left
+    where the bundle no longer holds it. See :func:`_privatize`.
 
     Harness state is captured without following a link, at both ends of the copy. A state
     directory that is a symbolic link, or that is not a directory at all, is left out of
     ``captured_state_dirs`` and named in a note instead of copied through, because what lies
-    behind it is not the scratch space this run created; a link inside one is preserved as a
-    link and counted in a note. The destination is checked the same way, because the scanner
+    behind it is not the scratch space this run created; a link inside one is copied as a link
+    and counted in a note, then cut when the staged tree enters the bundle, so what it pointed
+    at is named in the record and reachable from nothing. The destination is checked the same
+    way, because the scanner
     writes into the staging directory too: a ``raw/harness-state`` it replaced with a link no
     longer resolves inside the staged raw output, so nothing is copied and the note says so
     rather than the copy landing wherever the link pointed. None of that is a violation of the
@@ -751,9 +902,10 @@ def run_invocation(
     observed is derived once, by :func:`_capture_record`, for both the status and the ``capture``
     mapping the execution record carries. It breaks two ways: ``capture_state`` reporting a
     capture gap or a dropped event, and a ``capture`` category claiming ``complete`` in a bundle
-    that holds no counted trace, which is what a declared trace file that was a link, resolved
-    out, was not a regular file, or was never written used to leave beside a clean success. The
-    category is downgraded to ``partial`` in the record, and an outcome that still carries claims
+    that holds no trace event, which is what a declared trace file that was a link, resolved
+    out, was not a regular file, was never written, or was written empty used to leave beside a
+    clean success. The category is downgraded to ``partial`` in the record, and an outcome that
+    still carries claims
     is recorded as ``partial`` with error code ``trace_capture_gap``, unless the adapter already
     named a failure of its own. ``bundles_resolved`` is untouched: a dropped trace event is not a
     lost claim, and saying otherwise would withdraw the claim budget over a hole in the trace.
@@ -819,7 +971,9 @@ def run_invocation(
         # which keeps it outside the hashed tree exactly as :func:`_input_tree` leaves it.
         _copy_tree_unresolved(prepared.source_dir, source)
         try:
-            before = _input_tree(source, state_dirs)
+            # Nothing has created a ``.git`` yet, so any that is here came with the input and is
+            # counted; the hash check below is what refuses an input that ships one.
+            before = _input_tree(source, state_dirs, created_git=False)
         except OSError as exc:
             # The tree handed to this invocation cannot be enumerated, so there is nothing to
             # compare the scan against and no honest hash to bind a result to. Refused the same
@@ -836,6 +990,13 @@ def run_invocation(
             detail = (f"; the exported input already contains adapter state directories "
                       f"({', '.join(collision)}), which are excluded from the input tree and so "
                       f"cannot be part of a matching hash") if collision else ""
+            git = source / ".git"
+            if not git.is_symlink() and git.is_dir():
+                # The other direction of the same disagreement: the export hash leaves a
+                # top-level .git out and the watched tree counts one this run did not create,
+                # so an input that ships one can never match and is refused rather than scanned.
+                detail += ("; the exported input already contains a top-level .git, which the "
+                           "watched input tree counts and the exported hash does not")
             raise ExecutionError(f"workspace tree hash {actual} does not match prepared input "
                                  f"{prepared.tree_hash}{detail}")
         if adapter.requires_git and not (source / ".git").exists():
@@ -902,15 +1063,19 @@ def run_invocation(
                 captured_state.append(name)
                 if links:
                     capture_notes.append(
-                        f"harness state {name} holds {len(links)} symbolic link(s), preserved "
-                        f"unresolved rather than copied through: {', '.join(links[:5])}")
+                        f"harness state {name} holds {len(links)} symbolic link(s), copied as "
+                        f"links rather than copied through and cut when the staged output "
+                        f"entered the bundle: {', '.join(links[:5])}")
         except Exception as exc:
             # The scanner owns both ends of this copy: the state directory it wrote and the
             # staging path it may have created there first. A failure is a recorded violation,
             # never a crash of the run, and the directories copied before it stay recorded.
             violation = violation or f"harness state could not be captured: {_failure_message(exc)}"
         try:
-            after = _input_tree(source, state_dirs) if source_inside else dict(before)
+            # A ``.git`` is the runner's own bookkeeping only when the runner wrote it; when it
+            # did not, one the scanner made is watched like everything else it wrote.
+            after = (_input_tree(source, state_dirs, created_git=synthetic is not None)
+                     if source_inside else dict(before))
         except Exception as exc:
             # The comparison never completed, so nothing is claimed about the source: `before`
             # stands in for `after`, the provenance reports no observed modification, and the
@@ -922,7 +1087,7 @@ def run_invocation(
         try:
             for staged, _resolved, final in staged_areas:
                 try:
-                    dealiased = _move_into_bundle(staged, final)
+                    dealiased, cut = _move_into_bundle(staged, final)
                 except Exception as exc:
                     # A staged directory that cannot be moved is recorded below rather than
                     # raised here, where it would replace whatever failure is already in flight.
@@ -935,6 +1100,14 @@ def run_invocation(
                             f"{len(dealiased)} file(s) staged into {final.name}/ were hard links "
                             f"to a file outside the bundle and were copied so the bundle holds "
                             f"its own: {', '.join(dealiased[:5])}")
+                    if cut:
+                        # The link is gone from the bundle and its target is recorded here, so
+                        # what the scanner left is a fact in the record rather than a live path
+                        # out of the bundle for whoever opens it next.
+                        alias_notes.append(
+                            f"{len(cut)} symbolic link(s) staged into {final.name}/ were cut so "
+                            f"no path in this bundle names a file outside it; the bytes behind "
+                            f"them were never part of the scan: {'; '.join(cut[:5])}")
         finally:
             try:
                 shutil.rmtree(workspace)

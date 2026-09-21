@@ -31,24 +31,34 @@ directory this run created. Both of those directories have their real path captu
 harness process starts, so a harness that replaces one cannot move the boundary it is checked
 against. A path that resolves out is refused and counted, never followed.
 
+Two rules about touching such a path at all, each stated in exactly one place, and both of
+those places in :mod:`scaneval.execution`, so the adapter and the bundle writer cannot drift
+apart about them. :func:`~scaneval.execution.list_directory` is the one listing, so a directory
+this cannot read is a counted failure and never an empty directory. :func:`read_record`, which
+wraps :func:`~scaneval.execution.read_regular_file`, is the one read, so every read proves the
+file is a regular file in the same open that reads it: a named pipe the harness left where its
+own output belongs used to block the invocation forever, leaving no bundle and no record that
+the run had happened.
+
 That boundary is a check, not isolation: ``docs/THREAT_MODEL.md`` says what it does and does not
 defend against, and a harness process still running in the workspace can defeat any of it.
 """
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 from typing import Any, NamedTuple
 
+from ..execution import list_directory, read_regular_file
 from ..kinds import kind_for_harness_class
 from ..materialize import HARNESS_STATE_DIRS, Containment, MaterializationError, git_command
-from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command, tail_text
+from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command
 
 
 DRIVER = Path(__file__).with_name("llm_harness_driver.mts")
@@ -246,14 +256,42 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def read_record(path: Path, contained: Path | None) -> tuple[bytes | None, str | None]:
+    """The bytes at one path the harness could have written, or a message naming why not.
+
+    Every read this adapter makes of such a path goes through here, so both rules hold on every
+    one of them rather than at whichever call site remembered to state them.
+
+    The path must resolve inside the directory it belongs to, which is what *contained* carries:
+    the caller passes :meth:`Enclosure.read` for a path in the workspace the scanner was handed
+    and :meth:`Enclosure.write` for one in this run's staging directory, and ``None`` there is a
+    refusal rather than a missing file.
+
+    And it must be a regular file, proved by :func:`~scaneval.execution.read_regular_file`, whose
+    open is the same open that reads the bytes. A named pipe left where the harness's own output
+    belongs used to block :func:`~scaneval.execution.run_invocation` forever, with no bundle and
+    no record that the run had happened; a symbolic link would have put a host file the scan
+    never wrote into the bundle as evidence. Neither is followed now, and both read as a failure
+    naming what was there, which every caller counts as loss or as a note.
+    """
+    if contained is None:
+        return None, "it does not resolve inside the directory this run gave it"
+    try:
+        return read_regular_file(path), None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None, "it is a symbolic link, not a regular file"
+        return None, exc.strerror or str(exc)
+
+
 def _list_markdown(directory: Path, enclosure: Enclosure) -> tuple[list[str], str | None, bool]:
     """Sorted ``*.md`` names in *directory*, a note naming any failure, and whether it exists.
 
-    Enumeration is explicit rather than delegated to :meth:`Path.glob`, which swallows the
-    ``OSError`` the directory walk raises and would make an unreadable directory
-    indistinguishable from an empty one. The third value is false only when the directory is
-    absent; a directory that exists and cannot be listed returns true with a note, so the
-    caller counts the records it could not see instead of reporting none.
+    Enumeration is :func:`~scaneval.execution.list_directory`, the package's one listing, rather
+    than :meth:`Path.glob`, which swallows the ``OSError`` the directory walk raises and would
+    make an unreadable directory indistinguishable from an empty one. The third value is false
+    only when the directory is absent; a directory that exists and cannot be listed returns true
+    with a note, so the caller counts the records it could not see instead of reporting none.
 
     A findings path that does not resolve inside the workspace is one of those failures, not a
     directory to read: what lies behind it is not the workspace this scan was given, so records
@@ -265,8 +303,7 @@ def _list_markdown(directory: Path, enclosure: Enclosure) -> tuple[list[str], st
         return [], ("the findings path does not resolve inside the workspace the scan was "
                     "given; it was not followed"), True
     try:
-        with os.scandir(directory) as entries:
-            names = sorted(entry.name for entry in entries)
+        names = [entry.name for entry in list_directory(directory)]
     except FileNotFoundError:
         return [], None, False
     except NotADirectoryError:
@@ -279,11 +316,16 @@ def _list_markdown(directory: Path, enclosure: Enclosure) -> tuple[list[str], st
 def snapshot_findings(findings_dir: Path, enclosure: Enclosure) -> FindingsBaseline:
     """Record the finding records present before the scan, so the import can exclude them.
 
-    Call this before the harness process starts. Each ``*.md`` file is hashed; one that cannot
-    be read is recorded with a ``None`` digest, which no content hash equals, so the importer
-    treats it as pre-existing rather than as something the scan produced. A directory that
-    cannot be listed, or that does not resolve inside the workspace, yields ``established``
+    Call this before the harness process starts. Each ``*.md`` file is hashed through
+    :func:`read_record`; one that cannot be read, that resolves out of the workspace, or that is
+    not a regular file is recorded with a ``None`` digest, which no content hash equals, so the
+    importer treats it as pre-existing rather than as something the scan produced. A directory
+    that cannot be listed, or that does not resolve inside the workspace, yields ``established``
     false, and the importer then attributes nothing to the scan instead of guessing.
+
+    The regular-file rule matters here as much as at the import: this runs on the exported input,
+    and a named pipe shipped where a finding record belongs would otherwise block the baseline
+    before the scanner had even started.
     """
     names, note, exists = _list_markdown(findings_dir, enclosure)
     if not exists:
@@ -292,16 +334,8 @@ def snapshot_findings(findings_dir: Path, enclosure: Enclosure) -> FindingsBasel
         return FindingsBaseline({}, False, note)
     digests: dict[str, str | None] = {}
     for name in names:
-        if enclosure.read(findings_dir / name) is None:
-            # A name that resolves out of the workspace is recorded with no digest, which no
-            # content hash equals, so the importer treats it as pre-existing and credits the
-            # scan with nothing found behind it.
-            digests[name] = None
-            continue
-        try:
-            digests[name] = _digest((findings_dir / name).read_bytes())
-        except OSError:
-            digests[name] = None
+        data, _failure = read_record(findings_dir / name, enclosure.read(findings_dir / name))
+        digests[name] = _digest(data) if data is not None else None
     return FindingsBaseline(digests, True, None)
 
 
@@ -318,21 +352,24 @@ def stage_record(source: Path, destination: Path, enclosure: Enclosure) -> str |
     The harness writes into the staging directory while it runs, so a link it left where these
     records go redirected the copy to any absolute path it chose and this wrote outside the
     bundle: ``mkdir(exist_ok=True)`` succeeds on a link to a directory and
-    :func:`shutil.copyfile` follows one. Neither is reached now unless the destination resolves
-    back inside the staging directory.
+    :func:`shutil.copyfile` followed one. Neither is reached now unless the destination resolves
+    back inside the staging directory, and the write itself refuses a link as well.
 
-    Only a regular file is copied. Both callers classify the record before they get here, but
-    the guard belongs to the copy as well: :func:`shutil.copyfile` follows a symbolic link and
-    would preserve a host file the scan never wrote, and opening a named pipe for reading would
-    block until something wrote to it, which nothing here ever does.
+    Only a regular file is copied, and the source goes through :func:`read_record` like every
+    other read this adapter makes: :func:`shutil.copyfile` followed a symbolic link and would
+    preserve a host file the scan never wrote, and opening a named pipe for reading would block
+    until something wrote to it, which nothing here ever does.
     """
-    if enclosure.read(source) is None or source.is_symlink() or not source.is_file():
-        return "the record is not a regular file inside the workspace; it was not followed or copied"
+    data, failure = read_record(source, enclosure.read(source))
+    if data is None:
+        return f"the record is not a regular file inside the workspace ({failure}); it was not copied"
     if enclosure.write(destination) is None:
         return "the staging destination does not resolve inside this run's raw output"
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
+        descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o666)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
     except OSError as exc:
         return exc.strerror or str(exc)
     return None
@@ -400,16 +437,16 @@ def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix
         return HarnessImport(claims, artifacts, notes, tuple(losses))
     for name in names:
         path = findings_dir / name
-        if enclosure.read(path) is None:
+        contained = enclosure.read(path)
+        if contained is None:
             lose(path.name, None, "finding record does not resolve inside the workspace; not imported")
             continue
-        if path.is_symlink() or not path.is_file():
-            lose(path.name, None, "finding record is not a regular file; not imported")
-            continue
-        try:
-            data = path.read_bytes()
-        except OSError as exc:
-            lose(path.name, None, f"finding record could not be read ({exc.strerror}); not imported")
+        data, failure = read_record(path, contained)
+        if data is None:
+            # One message for every way the read did not happen, including a record that is not
+            # a regular file: a link the importer must not follow and a named pipe it must not
+            # open are refusals of the same read, not two different kinds of event.
+            lose(path.name, None, f"finding record could not be read ({failure}); not imported")
             continue
         if name in baseline.digests and baseline.digests[name] in (None, _digest(data)):
             # These bytes were in the exported input before the harness ran, so the scan did
@@ -790,16 +827,20 @@ class LlmHarnessAdapter(Adapter):
                     artifacts.append({"id": f"harness-{name}", "path": copied})
         output: dict[str, Any] = {}
         driver_output = raw_dir / "driver-output.json"
-        if enclosure.write(driver_output) is None:
-            # The harness writes this file, so it can also leave a link there. Nothing outside
-            # the staging directory is parsed as this run's own output.
-            notes_prefix = ["the driver output path does not resolve inside this run's raw "
-                            "output; it was not read"]
+        # The harness writes this file, so it can leave a link, a directory, or a named pipe
+        # there instead. It is read like every other path it owns, through one function that
+        # proves the file is a regular file inside this run's raw output before it reads a byte.
+        # Reading it with read_text() blocked the whole invocation on a named pipe: no bundle,
+        # no execution record, and no way to tell the run from one that never finished.
+        raw_output, output_failure = read_record(driver_output, enclosure.write(driver_output))
+        if raw_output is None:
+            notes_prefix = [f"the driver output was not read ({output_failure}); this run is "
+                            "recorded as one that produced no summary"]
         else:
             notes_prefix = []
             try:
-                output = json.loads(driver_output.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+                output = json.loads(raw_output.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
                 output = {}
         # Only a mapping is a summary this can read. A truthy value of any other shape is not
         # one, and treating it as one crashed the scan on the first ``.get`` below; it is a
@@ -841,15 +882,18 @@ class LlmHarnessAdapter(Adapter):
                                    "harness_package": str(preparation["harness"].get("package_version")),
                                    "driver": str(output.get("driver_version", "unknown"))})
 
-        def stderr_tail() -> str:
-            """The tail of this run's own driver stderr, empty when that path left the staging area.
+        def stderr_tail(limit: int = 2000) -> str:
+            """The tail of this run's own driver stderr, empty when it could not be read.
 
             The file is created here before the driver starts, but the driver can replace it with
-            a link, and this text goes into the recorded error message: without the check a
-            scanner could choose which host file the bundle quotes.
+            a link, a directory, or a named pipe, and this text goes into the recorded error
+            message: without the check a scanner could choose which host file the bundle quotes,
+            and a pipe would hold the read open forever. Read through :func:`read_record`, like
+            every other path the harness owns.
             """
             stderr_path = raw_dir / "driver-stderr.txt"
-            return tail_text(stderr_path) if enclosure.write(stderr_path) is not None else ""
+            data, _failure = read_record(stderr_path, enclosure.write(stderr_path))
+            return "" if data is None else data[-limit:].decode("utf-8", errors="replace")
 
         def with_loss(message: str) -> str:
             """The branch's own message, with the import loss named beside it.

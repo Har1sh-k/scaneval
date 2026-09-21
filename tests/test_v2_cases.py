@@ -35,6 +35,7 @@ from scaneval.cases import (
     pack_sha256,
     pack_summary,
     record_review,
+    require_anchored,
     save_pack,
     set_disposition,
 )
@@ -247,6 +248,7 @@ def test_mechanical_checks_reach_l1_only_and_record_failures(tmp_path):
     assert validation()["review_state"] == "mechanically_checked"
 
     case_by_id(pack, "widget-shell")["target"]["accepted_locations"][0]["end_line"] = 99
+    reanchor(pack)
     outcomes = mechanical_checks(pack, "widget-abc", source, HASH, clock=CLOCK)
     assert outcomes[0]["passed"] is False
     assert validation()["review_state"] == "draft" and validation()["level"] is None
@@ -350,7 +352,9 @@ def two_snapshot_pack() -> dict:
     pack = make_pack()
     add_snapshot(pack, FIXED_SNAPSHOT)
     case_by_id(pack, "widget-shell")["controls"].append(fixed_control())
-    return pack
+    # No review holds this case's labels, so the anchor does: adding a control by hand costs the
+    # same rebuild adding one to any other anchored record does (see reanchor).
+    return reanchor(pack)
 
 
 def test_a_two_snapshot_case_reaches_l1_only_after_both_snapshots_pass_in_either_order(tmp_path):
@@ -392,6 +396,8 @@ def test_a_failing_check_after_approval_keeps_the_review_and_leaves_the_case_out
                  note="label established", clock=CLOCK)
     assert "checks_failed" not in case_by_id(pack, "widget-shell")["validation"]
 
+    # No reanchor: the approving review holds these labels by digest, so editing one costs the
+    # approval rather than the anchor (see contracts.case_anchor_projection).
     case_by_id(pack, "widget-shell")["target"]["accepted_locations"][0]["path"] = "src/moved.py"
     outcomes = mechanical_checks(pack, "widget-abc", source, HASH, clock=CLOCK)
     validation = case_by_id(pack, "widget-shell")["validation"]
@@ -518,6 +524,7 @@ def test_a_mechanically_checked_case_returns_to_draft_when_a_new_snapshot_is_unc
 
     add_snapshot(pack, FIXED_SNAPSHOT)
     case_by_id(pack, "widget-shell")["controls"].append(fixed_control())
+    reanchor(pack)
     mechanical_checks(pack, "widget-abc", source, HASH, clock=CLOCK)
 
     validation = case_by_id(pack, "widget-shell")["validation"]
@@ -532,6 +539,7 @@ def test_a_declared_path_whose_case_differs_from_the_export_is_missing(tmp_path)
     pack = make_pack()
     source = export(tmp_path)
     case_by_id(pack, "widget-shell")["target"]["accepted_locations"][0]["path"] = "src/App.py"
+    reanchor(pack)
 
     outcomes = mechanical_checks(pack, "widget-abc", source, HASH, clock=CLOCK)
 
@@ -643,6 +651,32 @@ def test_a_refused_change_leaves_the_pack_exactly_as_it_was(tmp_path):
     with pytest.raises(ContractError, match="explicit name"):
         admit_case(pack, "widget-shell", decision="admitted", by="\u200b", reason="pilot", clock=CLOCK)
     assert dump_json(pack) == before
+
+
+@pytest.mark.parametrize(
+    ("pack", "gap"),
+    [
+        ({}, "records nothing as its snapshots"),
+        ({"snapshots": [], "cases": []}, "records nothing as its admissions"),
+        ({"snapshots": [], "cases": [None], "admissions": []},
+         "every entry of cases must be a JSON object"),
+        ("a pack, honest", "a case pack is a JSON object, not str"),
+    ],
+    ids=["nothing-at-all", "no-admissions", "entry-is-not-an-object", "not-an-object"],
+)
+def test_a_write_refuses_a_pack_shape_it_cannot_read_rather_than_crashing(pack, gap):
+    """The first thing a write asks is the anchor question, and it is asked of what it was handed.
+
+    Changed deliberately this round: require_anchored reached straight into pack["admissions"], so
+    a hand-built, truncated, or half-written pack came back from the first gate as
+    KeyError: 'admissions'. A crash is not a refusal, and a caller reporting it cannot say which
+    pack was wrong or what was wrong with it. The gate establishes the shape it reads first now
+    (see contracts.pack_shape_gap), and the whole contract is still validate_document.
+    """
+    with pytest.raises(ContractError, match=gap):
+        require_anchored(pack, "nothing may be written to it")
+    with pytest.raises(ContractError, match=gap):
+        add_snapshot(pack, SNAPSHOT)
 
 
 LEGACY = {
@@ -856,6 +890,7 @@ def test_a_private_pack_may_name_its_cases_by_internal_identifier(tmp_path, alia
     """A CVE is neither required nor sufficient, so an internal id must not block L1."""
     pack = make_pack()
     case_by_id(pack, "widget-shell")["canonical_target"]["aliases"] = [alias]
+    reanchor(pack)
 
     outcome = mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)[0]
 
@@ -872,6 +907,7 @@ def test_a_private_pack_may_name_its_cases_by_internal_identifier(tmp_path, alia
 def test_a_malformed_public_identifier_still_fails_the_check(tmp_path, alias, problem):
     pack = make_pack()
     case_by_id(pack, "widget-shell")["canonical_target"]["aliases"] = [alias]
+    reanchor(pack)
 
     outcome = mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)[0]
 
@@ -1815,6 +1851,7 @@ def test_deleting_a_failing_check_cannot_turn_a_failed_set_into_a_passing_one(tm
     """
     pack = make_pack()
     case_by_id(pack, "widget-shell")["target"]["accepted_locations"][0]["path"] = "src/moved.py"
+    reanchor(pack)
     outcomes = mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)
     validation = case_by_id(pack, "widget-shell")["validation"]
     assert outcomes[0]["passed"] is False
@@ -2043,6 +2080,7 @@ def test_swapping_the_evidence_under_an_approved_control_leaves_the_approval_beh
     case["evidence"].append(evidence("inspection", origin="research_note", kind="source_inspection",
                                      reference="src/app.py", note="a second read of the call site"))
     case["controls"].append(safe_control())
+    reanchor(pack)  # no review holds these labels yet, so the anchor does
     mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)
     set_disposition(pack, "widget-shell", "validate", "evidence reviewed")
     approve_case(pack, "widget-shell", reviewer="R. Eviewer", role="independent_reviewer", level="L3",

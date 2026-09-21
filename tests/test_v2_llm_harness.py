@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import stat
+import threading
 
 import pytest
 
@@ -59,6 +61,34 @@ fingerprint: abc
 ## Reasoning
 The admin route registers before the auth middleware, so requests reach it unauthenticated.
 '''
+
+
+mkfifo_required = pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no named pipes on this platform")
+
+
+def call_with_deadline(function, seconds: float = 30.0):
+    """Call *function* on a daemon thread and fail the test if it does not return in time.
+
+    Opening a named pipe for reading blocks until something writes to it, so a regression in the
+    guards below would wait forever rather than fail. The worker is a daemon thread, so a
+    blocked call cannot hold up the rest of the suite or the interpreter's exit either.
+    """
+    outcome: dict[str, object] = {}
+
+    def call() -> None:
+        try:
+            outcome["value"] = function()
+        except BaseException as exc:  # re-raised below, on the thread running the test
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        pytest.fail(f"the call was still running after {seconds} seconds; it is blocked on a read")
+    if "error" in outcome:
+        raise outcome["error"]  # type: ignore[misc]
+    return outcome["value"]
 
 
 def _enclosure(workspace: Path, staging: Path | None = None) -> Enclosure:
@@ -137,6 +167,36 @@ def test_a_finding_record_that_is_not_a_regular_file_is_counted_as_import_loss(t
     assert [claim["claim_id"] for claim in imported.claims] == ["SV-AUTH-AUTHBYPASS-001"]
     assert imported.lost == 2
     assert sum("not a regular file" in note for note in imported.notes) == 2
+
+
+@mkfifo_required
+def test_a_named_pipe_where_a_finding_record_belongs_is_counted_rather_than_opened(tmp_path):
+    """The same rule as the driver output, one directory down: the read must not be able to block.
+
+    A record was classified with ``is_file()`` and then read with ``read_bytes()``, two separate
+    operations on a path the harness owns. Every read goes through one function now, which
+    proves the file is a regular file in the open that reads it, so a named pipe is one more
+    record that could not be read rather than an import that never returns. The call runs behind
+    a deadline, so a regression fails here instead of stalling the suite.
+    """
+    findings = tmp_path / "findings"
+    findings.mkdir()
+    baseline = snapshot_findings(findings, _enclosure(tmp_path))
+    (findings / "a.md").write_text(FINDING, encoding="utf-8")
+    os.mkfifo(findings / "pipe.md")
+
+    imported = call_with_deadline(
+        lambda: import_harness_findings(findings, harness="securevibes-agent",
+                                        artifact_prefix="harness-findings",
+                                        stage_dir=tmp_path / "raw" / "harness-findings",
+                                        baseline=baseline, enclosure=_enclosure(tmp_path)))
+
+    assert [claim["claim_id"] for claim in imported.claims] == ["SV-AUTH-AUTHBYPASS-001"]
+    assert imported.lost == 1
+    assert any("pipe.md" in note and "not a regular file" in note for note in imported.notes)
+    # The baseline is taken before the harness runs and must not block on one either.
+    with_pipe = call_with_deadline(lambda: snapshot_findings(findings, _enclosure(tmp_path)))
+    assert with_pipe.established is True and with_pipe.digests["pipe.md"] is None
 
 
 def test_prepare_validates_configuration(tmp_path):
@@ -367,7 +427,8 @@ def _fake_harness_root(tmp_path: Path) -> Path:
 def _stub_driver(monkeypatch, records: dict[str, str], *, state_dir: str = ".securevibes",
                  plan_as_link: bool = False, output: dict | None = None,
                  block_plan_staging: bool = False, state_as_link: Path | None = None,
-                 stage_as_link: Path | None = None, observed: dict | None = None) -> None:
+                 stage_as_link: Path | None = None, observed: dict | None = None,
+                 output_as_pipe: bool = False) -> None:
     """Stand in for the tsx driver and leave exactly the records a harness run would leave.
 
     No process is spawned and no model is called: the stub reads the driver config the adapter
@@ -376,8 +437,9 @@ def _stub_driver(monkeypatch, records: dict[str, str], *, state_dir: str = ".sec
     *state_as_link* makes the harness state directory a symbolic link to that path before it
     writes anything, so the records it writes land outside the workspace and are reached only
     through an ancestor. *stage_as_link* does the same to the directory the adapter stages
-    imported records into. *observed* collects the argv and environment the driver was started
-    with, for a test about what the process inherits.
+    imported records into. *output_as_pipe* leaves a named pipe where the driver output belongs,
+    which nothing ever writes to. *observed* collects the argv and environment the driver was
+    started with, for a test about what the process inherits.
     """
 
     def fake_run_command(argv, *, cwd, timeout_seconds, env, stdout_path, stderr_path, stdin_text=None):
@@ -408,9 +470,12 @@ def _stub_driver(monkeypatch, records: dict[str, str], *, state_dir: str = ".sec
             trace_path.parent.mkdir(parents=True, exist_ok=True)
             trace_path.write_text(
                 '{"type":"model.request"}\n{"type":"model.response"}\n', encoding="utf-8")
-        Path(config["output_path"]).write_text(json.dumps(output or DRIVER_OUTPUT), encoding="utf-8")
+        if output_as_pipe:
+            os.mkfifo(Path(config["output_path"]))
+        else:
+            Path(config["output_path"]).write_text(json.dumps(output or DRIVER_OUTPUT), encoding="utf-8")
         stdout_path.write_text("", encoding="utf-8")
-        stderr_path.write_text("", encoding="utf-8")
+        stderr_path.write_text("the driver left no output\n" if output_as_pipe else "", encoding="utf-8")
         return CommandResult(list(argv), 0, False, 0.0, stdout_path, stderr_path)
 
     monkeypatch.setattr(llm_harness, "run_command", fake_run_command)
@@ -420,7 +485,8 @@ def _stubbed_bundle(tmp_path: Path, monkeypatch, records: dict[str, str], *, run
                     root_config: str | None = None, plan_as_link: bool = False,
                     trace_mode: str = "off", output: dict | None = None,
                     block_plan_staging: bool = False, state_as_link: Path | None = None,
-                    stage_as_link: Path | None = None, observed: dict | None = None) -> Path:
+                    stage_as_link: Path | None = None, observed: dict | None = None,
+                    output_as_pipe: bool = False) -> Path:
     root = _fake_harness_root(tmp_path)
     sdk = tmp_path / "observer-sdk.js"
     sdk.write_text("// stub\n", encoding="utf-8")
@@ -431,7 +497,7 @@ def _stubbed_bundle(tmp_path: Path, monkeypatch, records: dict[str, str], *, run
     preparation = adapter.prepare(spec, tmp_path / "cache")
     _stub_driver(monkeypatch, records, plan_as_link=plan_as_link, output=output,
                  block_plan_staging=block_plan_staging, state_as_link=state_as_link,
-                 stage_as_link=stage_as_link, observed=observed)
+                 stage_as_link=stage_as_link, observed=observed, output_as_pipe=output_as_pipe)
     return run_invocation(prepared=_prepared(tmp_path), adapter=adapter, spec=spec, preparation=preparation,
                           out_dir=tmp_path / "out", run_id=run_id, timeout_seconds=60, trace_mode=trace_mode,
                           network_policy="none", clock=CLOCK)
@@ -1000,6 +1066,33 @@ def test_a_link_where_the_adapter_stages_records_writes_nothing_outside_the_bund
     assert any("could not be staged" in note and "does not resolve inside" in note
                for note in execution["notes"])
     assert list(outside.iterdir()) == [], "a record was copied outside the bundle"
+
+
+@mkfifo_required
+def test_a_named_pipe_where_the_driver_output_belongs_does_not_block_the_invocation(tmp_path, monkeypatch):
+    """The harness owns this path, and reading it had no regular-file guard at all.
+
+    ``driver-output.json`` was checked for resolving inside the staging directory and then read
+    with ``read_text()``. A named pipe passes that check and holds the read open until something
+    writes to it, which nothing ever does: ``run_invocation`` never returned, so the run produced
+    no bundle, no execution record, and nothing to tell it apart from a run still in progress. It
+    is read through the one function that proves the file is a regular file in the same open now,
+    so the run is recorded as one that produced no summary. The invocation runs behind a
+    deadline, so a regression fails here rather than stalling the suite.
+    """
+    bundle = call_with_deadline(
+        lambda: _stubbed_bundle(tmp_path, monkeypatch, {}, run_id="run-pipe", output_as_pipe=True))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["error"]["code"] == "driver_exit_0"
+    assert "the driver left no output" in result["error"]["message"]
+    assert any("the driver output was not read" in note and "not a regular file" in note
+               for note in execution["notes"])
+    # The pipe is still in the bundle exactly as the harness left it: staged, never opened.
+    assert stat.S_ISFIFO((bundle / "raw" / "driver-output.json").stat().st_mode)
+    assert ("declared artifact is not a regular file and was not hashed: driver-output"
+            in execution["notes"])
 
 
 def test_a_self_report_the_reader_cannot_parse_does_not_reach_scoring_as_a_clean_success(tmp_path, monkeypatch):

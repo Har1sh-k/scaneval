@@ -270,8 +270,12 @@ const inputFields = new Set<string>([
 /* One opaque message for every instrumentation failure, spelled as Python spells it. */
 const gapMessage = "observer instrumentation failure";
 /* Set in an event's metadata when instrumentation failed while that event was being built, or
-   when its duration could not be measured. The emitter owns this key and overwrites a caller
-   value of the same name, which is the Python behavior too. */
+   when its duration could not be measured. The name is reserved, and the emitter's claim on it
+   runs one way: `true` is written here whenever a gap degraded the event, overwriting a caller
+   value of the same name, and nothing at all is written when no gap occurred, so a caller that
+   put this key in its own metadata keeps what it put there on an undegraded event. The emitter
+   can only ever strengthen the claim the key makes, never weaken one: no event says "no gap"
+   over a gap. Python behaves the same way, in `_GAP_KEY`. */
 const gapKey = "observer_capture_gap";
 /* The timestamp an event carries when the clock could not be read, spelled as Python spells it. */
 const epochTimestamp = "1970-01-01T00:00:00.000Z";

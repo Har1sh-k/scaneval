@@ -15,6 +15,7 @@ import gc
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import types
@@ -345,10 +346,10 @@ def test_every_string_the_emitter_puts_on_the_wire_passes_the_one_validator():
 
     An ID factory is caller code, so the ID it hands back is held to exactly what a caller
     supplied ID is held to, in :func:`~scaneval.observer.emitter._is_id`. A clock is caller code
-    too, and a ``datetime`` subclass owns its own ``strftime``, so the timestamp it spells is
-    held to the same rule rather than trusted for having come from a clock. Both failures cost
-    the field and a capture gap, never the event: the sink still took it, so nothing is counted
-    as lost. The TypeScript emitter spelled a weaker version of this check inside its own
+    too, and a ``datetime`` subclass owns the fields its timestamp is spelled from, so that
+    timestamp is held to the same rule rather than trusted for having come from a clock. Both
+    failures cost the field and a capture gap, never the event: the sink still took it, so
+    nothing is counted as lost. The TypeScript emitter spelled a weaker version of this check inside its own
     ``nextId`` and wrote an event ID no UTF-8 sink could encode; one validator in each language
     is what keeps the two rejection sets identical.
     """
@@ -379,11 +380,25 @@ def test_every_string_the_emitter_puts_on_the_wire_passes_the_one_validator():
     assert (ignored.run_id, ignored.producer_id) == ("run-1", "producer-2")
     assert ignored.get_state() == CaptureState()
 
-    class Hostile(datetime):
-        """A clock reading that spells itself with a code point no UTF-8 sink can write."""
+    class SurrogateYear(int):
+        """A year that formats itself as a code point no UTF-8 sink can write."""
 
-        def strftime(self, _format: str) -> str:
+        def __format__(self, _spec: str) -> str:
             return lone
+
+    class Hostile(datetime):
+        """A clock reading whose year spells itself with a lone surrogate.
+
+        This overrode ``strftime`` until the emitter stopped calling it: every field of a
+        timestamp is formatted at a fixed width now, so the platform C library cannot decide
+        how wide a year is. A field that is not a plain ``int`` is how a caller's own datetime
+        can still put a string of its choosing on the wire, and it is still held to the one
+        validator rather than trusted for having come from a clock.
+        """
+
+        @property
+        def year(self) -> int:
+            return SurrogateYear(datetime.year.__get__(self))
 
     stamped, stamping_sink = recorder()
     fake = Observer(
@@ -399,6 +414,63 @@ def test_every_string_the_emitter_puts_on_the_wire_passes_the_one_validator():
     assert degraded["capture_status"] == "partial"
     assert stamped[0]["metadata"]["observer_capture_gap"] is True
     assert fake.get_state() == CaptureState(
+        dropped_events=0, capture_gap=True, last_sink_error=GAP
+    )
+
+
+@pytest.mark.parametrize("year,digits", [(1, "0001"), (99, "0099"), (999, "0999"), (2026, "2026")])
+def test_a_timestamp_spells_every_field_itself_at_a_fixed_width(year, digits):
+    """A wire value is this contract's to spell, never the platform C library's.
+
+    The emitter formatted the date and time through ``strftime``, which hands ``%Y`` to the C
+    library: a year below 1000 comes back as ``0999`` from one libc and ``999`` from another.
+    The bare spelling is not an RFC 3339 timestamp, fails the schema's ``date-time`` format, and
+    is not the four digits JavaScript's ``toISOString`` writes for the same instant, so two
+    machines running the same harness would have written timestamps that do not join. Every
+    field is spelled here now, at a fixed width, which is why the year the C library treats
+    differently is the interesting case and why the others are checked beside it.
+    """
+    seen, sink = recorder()
+    moment = datetime(year, 1, 2, 3, 4, 5, 600000, tzinfo=timezone.utc)
+    observer = Observer(
+        mode="metadata", sink=sink, run_id="r", producer_id="p",
+        id_factory=ids(), clock=lambda: moment,
+    )
+    assert observer.emit(**event_fields()) is not None
+    assert seen[0]["timestamp"] == f"{digits}-01-02T03:04:05.600Z"
+    # The schema's own format checker is the reader this protects: a bare year is not a date-time.
+    assert not list(Draft202012Validator(SCHEMA, format_checker=FormatChecker()).iter_errors(seen[0]))
+    assert observer.get_state() == CaptureState()
+
+
+def test_the_capture_gap_key_is_written_over_a_gap_and_never_written_without_one():
+    """The emitter can only strengthen the claim that key makes, which is the documented rule.
+
+    ``observer_capture_gap`` was documented as a key the emitter owns and overwrites, full stop,
+    which overstated it in the direction that matters least but overstated it all the same:
+    nothing is written when no gap occurred, so a caller's own value of that name survives on an
+    undegraded event. What a reader actually relies on is the other half, and that half does
+    hold: an event degraded by instrumentation carries ``True`` whatever the caller passed, so no
+    event ever says "no gap" over a gap. Both halves are pinned here because the document now
+    states both.
+    """
+    seen, sink = recorder()
+    clean = Observer(mode="metadata", sink=sink, run_id="r", producer_id="p",
+                     clock=clock(), id_factory=ids())
+    assert clean.emit(**event_fields(metadata={"observer_capture_gap": False, "model": "x"})) is not None
+    # Nothing failed, so nothing is written there and the harness's own value is what is recorded.
+    assert seen[0]["metadata"] == {"observer_capture_gap": False, "model": "x"}
+    assert seen[0]["capture_status"] == "partial"  # metadata mode, not a gap
+    assert clean.get_state() == CaptureState()
+
+    degraded = Observer(mode="metadata", sink=sink, run_id="r", producer_id="p",
+                        clock=raising("clock"), id_factory=ids())
+    assert degraded.emit(**event_fields(metadata={"observer_capture_gap": False, "model": "x"})) is not None
+    # The clock failed, so the caller's False is overwritten rather than left to describe an
+    # event built with a fabricated timestamp.
+    assert seen[1]["metadata"] == {"observer_capture_gap": True, "model": "x"}
+    assert seen[1]["timestamp"] == "1970-01-01T00:00:00.000Z"
+    assert degraded.get_state() == CaptureState(
         dropped_events=0, capture_gap=True, last_sink_error=GAP
     )
 
@@ -1587,16 +1659,24 @@ def never_settling_sink():
     return write
 
 
-def quiet_loop():
-    """A caller-owned loop that does not log about the tasks its teardown strands."""
+def caller_loop():
+    """A caller-owned loop that keeps what asyncio reports, instead of discarding it.
+
+    This installed a handler that threw every report away, and that is what let the emitter
+    strand a task on a torn down loop and log ``Task was destroyed but it is pending!`` into a
+    harness's output with no test noticing: the only witness there was is the one the fixture
+    silenced. It records now, and every test here that tears a loop down with the emitter's
+    writes still on it asserts the emitter left asyncio nothing to say about them.
+    """
     loop = asyncio.new_event_loop()
-    loop.set_exception_handler(lambda loop, context: None)
-    return loop
+    reports: list[str] = []
+    loop.set_exception_handler(lambda _loop, context: reports.append(str(context.get("message"))))
+    return loop, reports
 
 
 def test_writes_stranded_by_a_torn_down_loop_are_counted_not_reported_clean():
     observer = Observer(mode="content", sink=never_settling_sink())
-    loop = quiet_loop()
+    loop, reports = caller_loop()
 
     async def queue_three():
         for _ in range(3):
@@ -1617,11 +1697,57 @@ def test_writes_stranded_by_a_torn_down_loop_are_counted_not_reported_clean():
     )
     # Counted once: reaping the same stranded writes again adds nothing.
     assert observer.get_state().dropped_events == 3
+    gc.collect()
+    # And counted is all: the capture state is the only place instrumentation reports from.
+    assert reports == []
+
+
+@pytest.mark.parametrize("started", [True, False], ids=["suspended", "never-started"])
+def test_a_write_the_emitter_abandons_reports_itself_to_nobody_but_the_capture_state(started):
+    """Instrumentation never alters the caller, and a line in the caller's log is an alteration.
+
+    A caller's loop can be closed with the emitter's writes still queued on it. Every such task
+    was destroyed while pending, and asyncio's exception handler then printed ``Task was
+    destroyed but it is pending!`` into the harness's own output, once per stranded event,
+    naming the emitter's internals in a log the harness did not write. The loss was never in
+    question: it is counted in ``dropped_events`` either way. Only the reporting channel was,
+    and there is one channel, the capture state.
+
+    The two parameters are the two shapes a stranded write has, a task that ran and suspended
+    inside the sink and one whose first step never ran, because the fix has to cover a write the
+    emitter can inspect and a write that never began the same way. The other two noises asyncio
+    can make about an abandoned write, an unretrieved exception and a coroutine nobody awaited,
+    are pinned by their own tests; this is the third.
+    """
+    observer = Observer(mode="content", sink=never_settling_sink(), clock=clock(), id_factory=ids())
+    loop, reports = caller_loop()
+
+    async def queue_two():
+        for _ in range(2):
+            assert observer.emit(**event_fields()) is not None
+        if started:
+            # One turn, so the writes are suspended inside the sink rather than merely queued.
+            await asyncio.sleep(0)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        loop.run_until_complete(queue_two())
+        loop.close()
+        # Reaping drops the emitter's last reference to those tasks, which is when a destroyed
+        # pending task would have spoken up.
+        assert observer.get_state() == CaptureState(
+            dropped_events=2, capture_gap=True, last_sink_error=GAP
+        )
+        gc.collect()
+        messages = [str(entry.message) for entry in caught]
+
+    assert reports == []
+    assert [message for message in messages if "never awaited" in message] == []
 
 
 def test_aflush_from_another_loop_contains_the_failure_and_keeps_the_evidence():
     observer = Observer(mode="content", sink=never_settling_sink())
-    owner = quiet_loop()
+    owner, reports = caller_loop()
 
     async def queue_one():
         assert observer.emit(**event_fields()) is not None
@@ -1644,6 +1770,8 @@ def test_aflush_from_another_loop_contains_the_failure_and_keeps_the_evidence():
     assert observer.get_state() == CaptureState(
         dropped_events=1, capture_gap=True, last_sink_error=GAP
     )
+    gc.collect()
+    assert reports == []
 
 
 def test_elapsed_time_comes_from_a_real_monotonic_source_not_an_injected_clock():
@@ -1826,7 +1954,7 @@ def test_flush_releases_the_private_loop_and_close_releases_the_next_one():
 
 def test_close_forgets_writes_whose_loop_is_already_gone():
     observer = Observer(mode="content", sink=never_settling_sink())
-    loop = quiet_loop()
+    loop, reports = caller_loop()
 
     async def queue_one():
         assert observer.emit(**event_fields()) is not None
@@ -1841,6 +1969,8 @@ def test_close_forgets_writes_whose_loop_is_already_gone():
     )
     assert observer.emit(**event_fields()) is None
     assert observer.get_state().dropped_events == 2
+    gc.collect()
+    assert reports == []
 
 
 def cancel_queued_writes(before):
@@ -2694,3 +2824,198 @@ def test_an_interrupt_that_stops_an_event_counts_the_event_it_lost():
         dropped_events=0, capture_gap=True, last_sink_error=GAP
     )
     assert clean == CaptureState(dropped_events=0, capture_gap=False, last_sink_error=None)
+
+
+# --- the SDK guide against the code it describes -----------------------------------------
+# A document is not checked by being written carefully. Every table below is parsed out of
+# ``docs/OBSERVER_SDK.md`` and compared with what the code returns for the same inputs, in both
+# directions, because six rounds of review found the document making a claim the code had
+# stopped delivering and nothing failed when it did.
+OBSERVER_DOC = ROOT / "docs/OBSERVER_SDK.md"
+CAPTURE_SECTION = "What the securevibes-agent and Fieldglass integration actually captures"
+GAPLESS_STATE = {"capture_gap": False, "dropped_events": 0}
+REAL_ROUTE = ["claude"]
+# ``metadata`` and ``content`` are one column of the capture matrix, so both are driven through
+# every traced column rather than one standing in for the other.
+TRACED_MODES = ("metadata", "content")
+
+
+def doc_section(title: str) -> list[str]:
+    """The lines under one ``##`` heading of the SDK guide, up to the next one."""
+    lines = OBSERVER_DOC.read_text(encoding="utf-8").splitlines()
+    headings = [index for index, line in enumerate(lines) if line.startswith("## ")]
+    for position, start in enumerate(headings):
+        if lines[start][3:].strip() == title:
+            end = headings[position + 1] if position + 1 < len(headings) else len(lines)
+            return lines[start:end]
+    raise AssertionError(f"{OBSERVER_DOC} has no section titled {title!r}")
+
+
+def doc_table(lines: list[str]) -> tuple[list[str], list[list[str]]]:
+    """The first markdown table in ``lines``, as a header row and its body rows."""
+    rows = [line for line in lines if line.startswith("|")]
+    assert rows, "the section states its claim in prose a test cannot read"
+    # Split on the pipes that separate cells, never on an escaped one inside a cell: a member
+    # whose behavior column spells ``dict \| None`` is one cell, not two.
+    cells = [
+        [cell.strip().replace("\\|", "|") for cell in re.split(r"(?<!\\)\|", row.strip().strip("|"))]
+        for row in rows
+    ]
+    header, divider, *body = cells
+    assert set("".join(divider)) <= set("- :"), divider
+    assert all(len(row) == len(header) for row in body), body
+    return header, body
+
+
+def doc_names(cell: str) -> list[str]:
+    """The names a table cell spells in backticks, one cell often naming more than one.
+
+    A name is what its backticked span starts with, so a member written as a signature,
+    ``observe(start, success, failure, operation) -> Any``, is read as ``observe`` rather than
+    split at the commas inside its own parentheses.
+    """
+    names = re.findall(r"`([^`]+)`", cell)
+    assert names, f"a table cell names nothing this test can read: {cell!r}"
+    return [name.split("(")[0].strip() for name in names]
+
+
+def capture_calls(*, modes: tuple[str, ...] = TRACED_MODES, **overrides) -> list[dict]:
+    """The ``capture_status`` calls one column of the documented matrix stands for.
+
+    A traced column is driven in every recording mode rather than one mode standing in for the
+    others, because "metadata and content are the same column" is itself a claim the document
+    makes about the adapter.
+    """
+    calls = []
+    for mode in modes:
+        call = dict(trace_mode=mode, routes=REAL_ROUTE, has_summary=True,
+                    capture_state=GAPLESS_STATE)
+        call.update(overrides)
+        calls.append(call)
+    return calls
+
+
+# The document's own column headings, and the exact runs each one covers. Keeping them here as a
+# mapping is what makes the comparison run both ways: a column renamed or dropped from the table
+# no longer matches a key, so it fails rather than quietly going unchecked.
+CAPTURE_COLUMNS = {
+    "trace off": capture_calls(modes=("off",)),
+    "traced": capture_calls(),
+    # Every state that does not explicitly rule a gap out, including none at all.
+    "traced, gap": [
+        call
+        for state in ({"capture_gap": True, "dropped_events": 0},
+                      {"capture_gap": False, "dropped_events": 3}, {}, None)
+        for call in capture_calls(capture_state=state)
+    ],
+    "no summary": capture_calls(has_summary=False),
+    "mock route": capture_calls(routes=["mock"]),
+}
+
+
+def test_the_documented_capture_matrix_is_the_one_capture_status_returns():
+    """The adapter's capture table is read out of the guide and compared cell by cell.
+
+    The document claimed ``finding.submitted`` was **complete** for any traced run that returned
+    a summary. The code stopped saying that when ``capture_status`` began reading the observer's
+    own capture state: a run that reported a gap or a dropped event is ``partial``, and so is one
+    that reported no state at all. The document was more generous than the code in the one place
+    a reader is most likely to quote, and nothing failed, because the table was prose. It is a
+    grid now, with each column's inputs written down, so the next edit to either side has to
+    move both.
+
+    The adapter is imported inside the test rather than at module scope: this file also pins that
+    importing the observer does not import the evaluator, and that boundary is checked in a
+    subprocess so nothing here can quietly depend on the order the tests run in.
+    """
+    from scaneval.adapters.llm_harness import capture_status
+
+    header, rows = doc_table(doc_section(CAPTURE_SECTION))
+    assert header[:2] == ["Event type", "`capture_status` key"]
+    columns = header[2:]
+    assert set(columns) == set(CAPTURE_COLUMNS), columns
+    documented_types: set[str] = set()
+    documented_keys: set[str] = set()
+    for row in rows:
+        types, keys = doc_names(row[0]), doc_names(row[1])
+        documented_types |= set(types)
+        documented_keys |= set(keys)
+        for column, cell in zip(columns, row[2:], strict=True):
+            documented = doc_names(cell)
+            assert len(documented) == 1, (row[0], column, cell)
+            for arguments in CAPTURE_COLUMNS[column]:
+                returned = capture_status(
+                    arguments["trace_mode"], arguments["routes"],
+                    has_summary=arguments["has_summary"], capture_state=arguments["capture_state"],
+                )
+                for key in keys:
+                    assert returned[key] == documented[0], (key, column, arguments)
+
+    # Both directions. A key the adapter returns and the table does not carry would be an
+    # undocumented capture claim, and an event type the contract declares and the table does not
+    # mention would be a category nobody said anything about.
+    returned = capture_status("content", REAL_ROUTE, has_summary=True,
+                              capture_state=GAPLESS_STATE)
+    assert documented_keys == set(returned)
+    assert documented_types | {"observer.error"} == set(EVENT_TYPES)
+    # "fewer than half of them", in the sentence above the table, counted rather than asserted.
+    captured = [key for key, value in returned.items() if value not in ("unavailable", "not_applicable")]
+    assert len(captured) * 2 < len(EVENT_TYPES)
+
+
+def test_the_documented_python_api_is_the_package_export_list():
+    """The guide's "everything below is exported" line is checked rather than asserted.
+
+    ``TraceSink`` was listed in that section and was not exported, so a harness following the
+    guide got an :class:`ImportError` from a line the guide told it to write. Fixing the export
+    alone would have left the next name free to drift, so the list is read out of the document
+    and compared with ``__all__`` in both directions, and the member table is read against a
+    real observer the same way.
+    """
+    import scaneval.observer as package
+
+    section = doc_section("Python API")
+    documented: set[str] = set()
+    inside = False
+    for line in section:
+        if line.startswith("```"):
+            inside = line.strip() == "```python"
+            continue
+        if not inside or not line or line[0] in " \t)@#":
+            continue
+        if line.startswith("class "):
+            documented.add(line[len("class "):].split("(")[0].split(":")[0].strip())
+        elif line.startswith("def "):
+            documented.add(line[len("def "):].split("(")[0].strip())
+        else:
+            documented.add(line.split()[0])
+    assert documented == set(package.__all__)
+    assert all(hasattr(package, name) for name in package.__all__)
+
+    # The member table is the same claim about one class, so it is read the same way.
+    header, rows = doc_table(section)
+    assert header[0] == "Member"
+    members = {name.split("(")[0] for row in rows for name in doc_names(row[0])}
+    observer = Observer()
+    assert members == {name for name in dir(observer) if not name.startswith("_")}
+
+
+def test_every_test_the_guide_names_still_exists():
+    """The guide pins its claims to tests by name, so the names have to be real.
+
+    Most of what this document promises is followed by the test that holds it, cited in
+    backticks. A renamed or deleted test leaves the promise standing with nothing behind it,
+    and reads exactly like a checked one. The names are collected out of the document and
+    looked up in the suite here, which is the cheapest possible version of the same rule the
+    capture matrix and the API list follow: a claim about the code is compared with the code.
+    """
+    cited = set(re.findall(r"\btest_[a-z0-9_]+", OBSERVER_DOC.read_text(encoding="utf-8")))
+    # ``test_v2_...`` in a path is a module, not a test function, and is checked as a file.
+    modules = {name for name in cited if name.startswith("test_v2_")}
+    for module in modules:
+        assert (ROOT / "tests" / f"{module}.py").is_file(), module
+    defined = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted((ROOT / "tests").glob("test_*.py"))
+    )
+    missing = sorted(name for name in cited - modules if f"def {name}(" not in defined)
+    assert missing == [], missing

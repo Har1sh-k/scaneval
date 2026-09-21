@@ -23,12 +23,18 @@ run exactly as the caller's own ``await`` would run it, in every mode, because a
 instrumentation quietly left unexecuted would be a behavior change rather than an observation.
 A write that reached no sink is counted whether it failed, was cancelled before it ever
 started, or was stranded by a loop closed before it could run: an event nobody received must
-never read as a complete trace.
+never read as a complete trace. That count, and the capture gap beside it, are the only way
+the emitter ever reports a failure of its own. A write it abandons is quieted first, so nothing
+of the emitter's reaches the harness's output as an unretrieved exception, an un-awaited
+coroutine, or asyncio's report of a task destroyed while still pending on a loop the caller
+closed.
 
 Wiring mistakes are refused once, at wiring time, rather than degraded through a whole run:
 :func:`create_jsonl_sink` refuses a generator-function line writer exactly as the
 :class:`Observer` constructor refuses a generator-function sink, because calling one returns an
-iterator and writes nothing.
+iterator and writes nothing. :class:`TraceSink` is exported beside them as the structural type
+a sink satisfies, so a harness can annotate the object it owns against the same shape the
+constructor accepts; it is a typing protocol and nothing at runtime depends on inheriting it.
 
 :data:`MAX_PAYLOAD_DEPTH` is exported because it is part of the shared contract rather than an
 implementation detail: both emitters refuse a metadata or content payload nested deeper than
@@ -54,6 +60,7 @@ from .emitter import (
     CaptureState,
     JsonlSink,
     Observer,
+    TraceSink,
     create_jsonl_sink,
     default_redactor,
 )
@@ -68,6 +75,7 @@ __all__ = [
     "CaptureState",
     "JsonlSink",
     "Observer",
+    "TraceSink",
     "create_jsonl_sink",
     "default_redactor",
 ]

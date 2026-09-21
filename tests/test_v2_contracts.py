@@ -9,10 +9,8 @@ from jsonschema import Draft202012Validator
 import pytest
 
 from scaneval.contracts import (
-    CASE_LABEL_FIELDS,
     CASE_UNREAD_FIELDS,
     ContractError,
-    PACK_UNANCHORED_FIELDS,
     SNAPSHOT_IDENTITY_FIELDS,
     SNAPSHOT_UNREAD_FIELDS,
     admission_chain_digest,
@@ -26,14 +24,17 @@ from scaneval.contracts import (
     claimed_level_gap,
     covering_review,
     effective_level,
+    every_case_binds_its_labels,
     is_stated,
     label_digest,
+    labels_are_bound,
     level_gap,
     load_document,
     operative_review_gap,
     pack_anchor_digest,
     pack_anchor_gap,
     pack_anchor_projection,
+    pack_shape_gap,
     recorded_check_state,
     review_chain_digest,
     review_chain_gap,
@@ -856,6 +857,42 @@ def anchored(pack: dict) -> dict:
     return pack
 
 
+@pytest.mark.parametrize(
+    ("pack", "gap"),
+    [
+        ("not a pack", "a case pack is a JSON object, not str"),
+        ({}, "this pack records nothing as its snapshots"),
+        ({"snapshots": []}, "this pack records nothing as its cases"),
+        ({"snapshots": [], "cases": []}, "this pack records nothing as its admissions"),
+        ({"snapshots": {}, "cases": [], "admissions": []},
+         "this pack records a dict as its snapshots"),
+        ({"snapshots": [], "cases": ["widget-shell"], "admissions": []},
+         "every entry of cases must be a JSON object"),
+    ],
+    ids=["not-an-object", "nothing-at-all", "no-cases", "no-admissions", "wrong-type",
+         "entry-is-not-an-object"],
+)
+def test_the_anchor_gate_refuses_a_shape_it_cannot_read_instead_of_raising(pack, gap):
+    """The first gate a write asks is asked of whatever it was handed, so it establishes the shape.
+
+    Changed deliberately this round: pack_anchor_gap read pack["admissions"] before anything had
+    said there was one, so a hand-built, truncated, or half-written pack came back as
+    KeyError: 'admissions' from inside a gate whose whole job is to say what is wrong with a pack.
+    A crash is not a refusal, and the caller that has to report it cannot tell the two apart.
+    """
+    assert gap in pack_shape_gap(pack)
+    assert gap in pack_anchor_gap(pack)
+
+
+def test_the_shape_gate_passes_a_pack_the_contract_would_still_refuse():
+    """It says there is something to read, and nothing more; the contract is validate_document."""
+    readable = {"snapshots": [], "cases": [], "admissions": []}
+    assert pack_shape_gap(readable) is None
+    assert "anchor_sha256 is missing" in pack_anchor_gap(readable)
+    with pytest.raises(ContractError):
+        validate_document("case-pack", readable)
+
+
 def test_an_admission_history_verifies_as_a_chain_the_pack_anchor_ends():
     """Admissions are a history, so lifting a decision out of it is visible.
 
@@ -897,9 +934,9 @@ def test_the_pack_anchor_records_the_case_roster_and_where_each_history_ends():
     Deleting a case takes its chained history with it, and wiping a history takes the head that
     would have said where it ended, so both are anchored one level up. Changed deliberately: the
     projection used to be a roster of three fields per case, which is a list someone has to
-    remember to extend. It is the whole case minus its labels and minus a stated allowlist now, so
-    the review head is in it because the validation block is, and so is every other field nothing
-    else covers.
+    remember to extend. It is the whole case minus a stated allowlist now, and minus the labels only
+    for a case whose review holds them by digest, so the review head is in it because the validation
+    block is, and so is every other field nothing else covers.
     """
     pack, case = case_pack_fragment()
     second = copy.deepcopy(case)
@@ -916,8 +953,16 @@ def test_the_pack_anchor_records_the_case_roster_and_where_each_history_ends():
     assert projected[0]["validation"]["reviews_sha256"] == case["validation"]["reviews_sha256"]
     assert "reviews_sha256" not in projected[1]["validation"], \
         "a case that never had a history anchors one that is not there"
-    assert all("target" not in entry and "controls" not in entry for entry in projected), \
-        "the labels are bound to the review that covered them, not to the anchor"
+    # Changed deliberately this round. This used to assert that no case anchors its labels, which
+    # was the escape the anchor claim was refuted by: the second case records no review, so no
+    # digest held its target, its controls, or what it says it represents, and editing any of them
+    # was invisible to every record. The rule is per case now, and it is the recorded digest that
+    # decides, so the reviewed case still keeps its labels out and the unreviewed one does not.
+    assert "target" not in projected[0] and "controls" not in projected[0], \
+        "a review holds these labels by digest, so anchoring them too would cost a rebuild"
+    assert projected[1]["target"] == second["target"], \
+        "no review holds this case's labels, so nothing but the anchor can hold them"
+    assert {"controls", "represents", "canonical_target"} <= set(projected[1])
 
     deleted = copy.deepcopy(pack)
     del deleted["cases"][1]
@@ -1009,31 +1054,96 @@ def case_pack_schema() -> dict:
                       .read_text(encoding="utf-8"))
 
 
+# Every JSON Schema keyword this file knows how to read, in two tables. The first holds the
+# constructs that can declare a field, each of them walked below; the second holds the ones that
+# constrain a value without declaring one. A keyword in neither is refused rather than walked past,
+# because a field declared under a construct declared_paths does not walk is a field the
+# completeness tests below never ask about, which is the failure they exist to prevent. That is a
+# live risk and not a hypothetical one: allOf, prefixItems, patternProperties, if/then/else and
+# dependentSchemas all declare fields and none of them is walked here, so adding one to the schema
+# now fails this file instead of quietly shrinking what the tests cover.
+FIELD_DECLARING_KEYWORDS = frozenset({
+    "$ref", "properties", "items", "oneOf", "anyOf", "additionalProperties",
+})
+# $defs holds subschemas reached only through $ref, so walking it would invent paths for a
+# definition nothing references; each one is walked where it is used. propertyNames constrains the
+# keys of a free-keyed map rather than declaring a field under it.
+VALUE_ONLY_KEYWORDS = frozenset({
+    "$schema", "$id", "$defs", "$comment", "title", "description", "default", "examples",
+    "type", "required", "enum", "const", "format", "pattern", "propertyNames",
+    "minLength", "maxLength", "minItems", "maxItems", "uniqueItems", "minimum", "maximum",
+})
+
+
+def refuse_unknown_keywords(node: dict, prefix: str) -> None:
+    """Fail unless every keyword *node* carries is one :func:`declared_paths` accounts for."""
+    unknown = sorted(set(node) - FIELD_DECLARING_KEYWORDS - VALUE_ONLY_KEYWORDS)
+    assert not unknown, (
+        f"{prefix or '<root>'}: declared_paths does not read {unknown}, so a field declared under "
+        "it would be invisible to the completeness tests; walk it or state why it declares no field")
+
+
 def declared_paths(schema: dict, node: dict, prefix: str = "") -> set[str]:
     """Every field path the schema declares under *node*, in the shape :func:`field_paths` writes.
 
     References are resolved, ``oneOf`` and ``anyOf`` branches contribute all of their fields, array
     items contribute under ``[]``, and an object whose values are a schema, which is how a
     free-keyed map is declared, contributes under ``{}``.
+
+    Every keyword of every node is accounted for on the way: a construct that can declare a field
+    is walked, one that only constrains a value is listed, and anything else fails here rather than
+    being skipped. Changed deliberately this round, because skipping was the quiet failure: a field
+    declared under a construct this does not walk never reaches the completeness tests, so they
+    would keep passing while covering less.
     """
+    refuse_unknown_keywords(node, prefix)
     while "$ref" in node:
+        siblings = sorted((set(node) & FIELD_DECLARING_KEYWORDS) - {"$ref"})
+        assert not siblings, f"{prefix or '<root>'}: a $ref beside {siblings} is not read here"
         target = schema
         for part in node["$ref"].removeprefix("#/").split("/"):
             target = target[part]
         node = target
+        refuse_unknown_keywords(node, prefix)
     paths: set[str] = set()
     for key, child in node.get("properties", {}).items():
         here = f"{prefix}.{key}" if prefix else key
         paths.add(here)
         paths |= declared_paths(schema, child, here)
-    if isinstance(node.get("items"), dict):
-        paths |= declared_paths(schema, node["items"], f"{prefix}[]")
+    items = node.get("items")
+    if items is not None:
+        assert isinstance(items, dict), f"{prefix}[]: items must be a schema object to be walked"
+        paths |= declared_paths(schema, items, f"{prefix}[]")
     for branch in list(node.get("oneOf", [])) + list(node.get("anyOf", [])):
         paths |= declared_paths(schema, branch, prefix)
     extra = node.get("additionalProperties")
     if isinstance(extra, dict):
         paths |= declared_paths(schema, extra, f"{prefix}.{{}}" if prefix else "{}")
+    else:
+        assert extra is None or isinstance(extra, bool), (
+            f"{prefix}: additionalProperties must be a schema object or a boolean")
     return paths
+
+
+def test_declared_paths_refuses_a_schema_construct_it_does_not_walk():
+    """A construct this cannot read fails loudly, because skipping one hollows out the tests below.
+
+    Each of these declares a field somewhere the walk never reaches, so under the previous version
+    the completeness tests kept passing while asking about less than the whole contract.
+    """
+    schema = case_pack_schema()
+    assert declared_paths(schema, schema), "the contract as it stands is fully walked"
+
+    for construct in ("allOf", "prefixItems", "patternProperties", "dependentSchemas", "not"):
+        node = {"type": "object", construct: [{"properties": {"escaped": {"type": "string"}}}]}
+        with pytest.raises(AssertionError, match=f"does not read \\['{construct}'\\]"):
+            declared_paths(schema, node, "case")
+
+    with pytest.raises(AssertionError, match=r"a \$ref beside \['properties'\]"):
+        declared_paths(schema, {"$ref": "#/$defs/case", "properties": {"escaped": {}}}, "case")
+
+    with pytest.raises(AssertionError, match="items must be a schema object"):
+        declared_paths(schema, {"type": "array", "items": True}, "case.controls")
 
 
 def maximal_pack() -> dict:
@@ -1129,74 +1239,273 @@ def test_the_maximal_pack_carries_every_field_the_contract_declares():
     assert missing == set(), f"the fixture omits declared fields: {sorted(missing)}"
 
 
-def test_every_case_field_is_projected_or_allowlisted():
-    """Every field of a case is in the label digest, in the anchor, or in the stated allowlist.
+# Why each field of a case sits outside the anchor, written here rather than read out of the
+# constants the code projects by. These two tables are what let the completeness tests below fail.
+# The previous version of those tests derived the split from CASE_LABEL_FIELDS and then asserted
+# that the split was CASE_LABEL_FIELDS, so a field added to that constant escaped the anchor and
+# nothing failed: the test compared the split against itself and was cited as evidence that it
+# could not. Everything here is written down by hand, and a field that leaves the anchor without
+# being named here with a reason is reported as having escaped both records.
+CASE_FIELDS_A_DIGEST_HOLDS = {
+    "represents": "what the case claims to test: the approving review read this sentence",
+    "workload": "the deployment the allegation is made under, which a reviewer judged",
+    "component_role": "what the component is, which a reviewer judged",
+    "model_involvement": "whether a model is in the path, which a reviewer judged",
+    "coverage_signature": "how the case is classified for coverage, which a reviewer judged",
+    "canonical_target": "the kind, the variant family, and the public aliases of the allegation",
+    "target": "the allegation itself, down to its accepted locations and matching rules",
+    "controls": "what the case says is not an allegation, which an approval covers too",
+    "evidence": "the records the allegation rests on: an approval covers these with it",
+}
+CASE_FIELDS_NOTHING_READS = {
+    "notes": "free text no planning decision reads, so no record needs to hold it",
+}
+SNAPSHOT_FIELDS_A_DIGEST_HOLDS = {
+    "commit": "the bytes a label points at, which an approval covers",
+    "tree_hash": "the exported tree those bytes were read as, which an approval covers",
+    "languages": "which adapters ever see those bytes, which an approval covers",
+}
+SNAPSHOT_FIELDS_NOTHING_READS: dict[str, str] = {}
+PACK_FIELDS_OUTSIDE_THE_ANCHOR = {
+    "anchor_sha256": "the anchor itself, which cannot cover its own value",
+    "description": "free text no planning decision reads",
+    "notes": "free text no planning decision reads",
+    "schema_version": "pack identity, which every plan binds by hashing the whole file",
+    "namespace": "pack identity, which every plan binds by hashing the whole file",
+    "pack_id": "pack identity, which every plan binds by hashing the whole file",
+    "version": "pack identity, which every plan binds by hashing the whole file",
+    "status": "the release workflow rewrites it; every plan binds the file it was built from",
+}
 
-    This is the rule, rather than a list of fields anyone has to remember to extend: a field that
-    affects a planning decision must be inside something a decision is bound to. The two
-    projections are defined by subtraction, so a field added to the contract lands in the anchor by
-    default, and this holds that true from the other side: the union of the two projections and the
-    allowlist is the whole case record, down to the leaves, and nothing is in two of them.
 
-    A field added later and quietly left out of both would fail here, which is the point: the last
-    two rounds each closed one escaped field, the mechanical check record and the screening
-    disposition, by naming it.
+def paths_under(names: dict[str, str], paths: set[str]) -> set[str]:
+    """Every path in *paths* whose first segment is one of the fields *names* allowlists."""
+    return {path for path in paths if path.split(".")[0].split("[")[0] in names}
+
+
+def check_allowlist(names: dict[str, str], declared: set[str], outside: set[str], label: str) -> None:
+    """Hold an allowlist to its job: it explains fields that are really outside, and no others.
+
+    Three things, and each of them is a way the table could stop meaning anything. Every entry
+    states a reason, so an entry is a decision rather than a name. Every entry names a field the
+    contract actually declares, so a field deleted from the schema does not leave a standing excuse
+    behind for the next field to be given that name. And every entry names a field that is really
+    outside the anchor, so an excuse cannot be written for a field the anchor covers and then be
+    read later as if it had always been the reason that field was exempt.
+    """
+    top = {path.split(".")[0].split("[")[0] for path in declared}
+    for name, reason in names.items():
+        assert is_stated(reason), f"{label}: the allowlist entry {name!r} states no reason"
+        assert name in top, f"{label}: the allowlist names {name!r}, which the contract does not declare"
+        assert name in {path.split(".")[0].split("[")[0] for path in outside}, \
+            f"{label}: the allowlist excuses {name!r}, which the anchor covers anyway"
+
+
+def test_every_declared_case_field_is_anchored_or_allowlisted_with_a_reason():
+    """Every field the contract declares for a case is anchored, or allowlisted here with a reason.
+
+    The set of fields comes from the schema, not from the constants the code projects by, and the
+    reasons are written by hand in this file. That is the whole point of the rewrite: a field added
+    to CASE_LABEL_FIELDS used to leave the anchor and satisfy the assertion that the split was
+    CASE_LABEL_FIELDS, so the test could not fail on the thing it was cited for. Now a field can
+    leave the anchor only by being named in one of the two tables above, and a table entry has to
+    name a field the schema declares and say why.
+
+    Two cases are measured, because whether a field is anchored depends on whether a digest already
+    holds it. A case no review has bound is anchored whole, ``notes`` aside. A case whose review
+    carries a labels_sha256 is anchored except the label fields that review reads.
     """
     schema = case_pack_schema()
-    case = maximal_pack()["cases"][0]
+    approved = maximal_pack()["cases"][0]
+    assert labels_are_bound(approved), "the maximal case records a review carrying a digest"
+    # The same case with a history whose latest review carries no digest, which is how a pack
+    # written before approvals were bound to content reads. Every declared field is still present,
+    # so what is measured is the projection rather than a fixture with fields missing; a case with
+    # no review at all is the other unbound shape, and
+    # test_the_anchor_holds_the_labels_no_recorded_digest_holds measures that one.
+    unreviewed = copy.deepcopy(approved)
+    unreviewed["validation"]["reviews"].append(
+        {key: value for key, value in approved["validation"]["reviews"][0].items()
+         if key != "labels_sha256"})
+    assert not labels_are_bound(unreviewed)
+
     declared = declared_paths(schema, schema["$defs"]["case"])
-    assert declared - field_paths(case) == set()
+    assert declared - field_paths(approved) == set(), "the fixture must carry every declared field"
 
-    labelled = field_paths(case_label_projection(case))
-    anchored_paths = field_paths(case_anchor_projection(case))
-    allowlisted = {path for path in field_paths(case)
-                   if path.split(".")[0].split("[")[0] in CASE_UNREAD_FIELDS}
+    # A case no digest speaks for: the anchor is the only record there is, so it holds everything
+    # but the fields nothing reads. This is the claim that was false before this round.
+    outside_unreviewed = declared - field_paths(case_anchor_projection(unreviewed))
+    escaped = outside_unreviewed - paths_under(CASE_FIELDS_NOTHING_READS, declared)
+    assert escaped == set(), (
+        f"no review binds this case, so nothing but the anchor can hold {sorted(escaped)}")
+    check_allowlist(CASE_FIELDS_NOTHING_READS, declared, outside_unreviewed, "case, unreviewed")
 
-    assert field_paths(case) == labelled | anchored_paths | allowlisted
-    assert labelled & anchored_paths == set(), "a field in both records is two records of one fact"
-    assert allowlisted & (labelled | anchored_paths) == set()
-    # The allowlist is small enough to state, and stating it is what makes adding to it a decision.
-    assert CASE_UNREAD_FIELDS == {"notes"}
-    assert allowlisted == {"notes"}
-    # The split itself, so a projection that covered everything by covering the whole record would
-    # not pass: the labels are bound to the review that read them, the rest to the anchor. Moving a
-    # field from one to the other changes what an approval covers, so it is stated here too.
-    assert {path for path in labelled if "." not in path and "[" not in path} == CASE_LABEL_FIELDS
-    assert {"target", "controls", "evidence", "represents"} <= CASE_LABEL_FIELDS
-    assert {"disposition", "validation", "disclosure", "split", "case_id"} <= anchored_paths
-    assert "validation.check_sets.{}.result" in anchored_paths
-    assert "validation.checks_failed" in anchored_paths
-    assert "validation.reviews_sha256" in anchored_paths
+    # A case whose review holds its labels by digest: those labels, and only those, may be outside.
+    outside_approved = declared - field_paths(case_anchor_projection(approved))
+    escaped = (outside_approved - paths_under(CASE_FIELDS_NOTHING_READS, declared)
+               - paths_under(CASE_FIELDS_A_DIGEST_HOLDS, declared))
+    assert escaped == set(), f"{sorted(escaped)} is in neither record and in no allowlist"
+    check_allowlist(CASE_FIELDS_A_DIGEST_HOLDS, declared, outside_approved, "case, approved")
+    check_allowlist(CASE_FIELDS_NOTHING_READS, declared, outside_approved, "case, approved")
+
+    # The allowlisted labels are the ones the digest really reads, so a reason cannot be given here
+    # for a field no review ever covers. This is what ties the hand-written table to the code: a
+    # field added to CASE_LABEL_FIELDS and not to the table fails both this and the assertion above.
+    digested = {path.split(".")[0].split("[")[0]
+                for path in field_paths(case_label_projection(approved))}
+    assert digested == set(CASE_FIELDS_A_DIGEST_HOLDS)
+    assert set(CASE_FIELDS_NOTHING_READS) == set(CASE_UNREAD_FIELDS) == {"notes"}
+    # And nothing the digest holds is anchored under it as well, for an approved case: two records
+    # of one fact would mean an edited label could not be re-approved without an anchor rebuilt.
+    assert paths_under(CASE_FIELDS_A_DIGEST_HOLDS, field_paths(case_anchor_projection(approved))) == set()
 
 
-def test_every_snapshot_and_pack_field_is_projected_or_allowlisted():
-    """The same rule one level up, for a snapshot and for the pack's own fields.
+def test_the_anchor_holds_the_labels_no_recorded_digest_holds():
+    """A case nobody has reviewed keeps its labels in the anchor, so editing one is still visible.
 
-    A snapshot is split the same way: the identity a label points at travels in the label digest,
-    and everything else is anchored. The pack's own fields are anchored except the ones every plan
-    already binds by hashing the whole file it was built from.
+    Closed deliberately this round, and it refuted the claim the projections were built on. The
+    label fields were subtracted from the anchor unconditionally on the grounds that the covering
+    review holds them, which is no ground at all for a draft or mechanically checked case: there is
+    no review, so no digest holds the target, the controls, the evidence, or what the case says it
+    represents, and editing any of them was visible to nothing. A mechanically checked case is
+    planned at L1, so this was an edit to a planned allegation that no record disagreed with.
+    """
+    pack = maximal_pack()
+    pack["cases"][0]["validation"]["reviews"] = []
+    pack["cases"][0]["validation"].pop("reviews_sha256")
+    anchored(pack)
+    assert not labels_are_bound(pack["cases"][0]) and pack_anchor_gap(pack) is None
+
+    def retarget(case: dict) -> None:
+        case["target"]["description"] = "something else entirely"
+
+    def drop_a_control(case: dict) -> None:
+        case["controls"].clear()
+
+    def add_evidence(case: dict) -> None:
+        case["evidence"].append(dict(case["evidence"][0], evidence_id="extra"))
+
+    def restate(case: dict) -> None:
+        case["represents"] = "This case tests something else under x, and adds y."
+
+    for edit in (retarget, drop_a_control, add_evidence, restate):
+        candidate = copy.deepcopy(pack)
+        edit(candidate["cases"][0])
+        assert "a record a planning decision reads was deleted" in pack_anchor_gap(candidate), \
+            f"{edit.__name__} on an unreviewed case is visible to no other record"
+
+    # Recording a review is what moves the labels out, because it is what records them elsewhere.
+    case = pack["cases"][0]
+    record_history(case, [{**review(), "labels_sha256": label_digest(pack, case)}])
+    anchored(pack)
+    assert labels_are_bound(case) and pack_anchor_gap(pack) is None
+    retarget(case)
+    assert pack_anchor_gap(pack) is None, \
+        "the review holds these labels, so an edit costs the approval, not a rebuilt anchor"
+    assert covering_review(pack, case) is None, "and it does cost the approval"
+
+
+def test_every_declared_snapshot_field_is_anchored_or_allowlisted_with_a_reason():
+    """The same rule for a snapshot, and the same two measurements.
+
+    A snapshot's identity is what a label points at, so a review that carries a digest holds it.
+    That is true only where such a review was recorded, so the identity leaves the anchor only once
+    every case in the pack binds its own labels; until then a draft case reads those bytes with no
+    digest speaking for them, and repinning the snapshot under it was visible to nothing.
+    """
+    schema = case_pack_schema()
+    snapshot = maximal_pack()["snapshots"][0]
+    declared = declared_paths(schema, schema["$defs"]["snapshot"])
+    assert declared - field_paths(snapshot) == set(), "the fixture must carry every declared field"
+
+    outside_unbound = declared - field_paths(snapshot_anchor_projection(snapshot))
+    escaped = outside_unbound - paths_under(SNAPSHOT_FIELDS_NOTHING_READS, declared)
+    assert escaped == set(), (
+        f"no digest holds this snapshot's {sorted(escaped)}, so the anchor has to")
+    assert SNAPSHOT_FIELDS_NOTHING_READS == {} and SNAPSHOT_UNREAD_FIELDS == frozenset(), \
+        "nothing about a snapshot goes unread"
+
+    outside_bound = declared - field_paths(snapshot_anchor_projection(snapshot, identity_bound=True))
+    escaped = outside_bound - paths_under(SNAPSHOT_FIELDS_A_DIGEST_HOLDS, declared)
+    assert escaped == set(), f"{sorted(escaped)} is in neither record and in no allowlist"
+    check_allowlist(SNAPSHOT_FIELDS_A_DIGEST_HOLDS, declared, outside_bound, "snapshot, bound")
+
+    identity = {path.split(".")[0].split("[")[0]
+                for path in field_paths(snapshot_identity_projection(snapshot))}
+    assert identity == set(SNAPSHOT_FIELDS_A_DIGEST_HOLDS) == set(SNAPSHOT_IDENTITY_FIELDS)
+
+
+def test_the_anchor_holds_a_snapshot_identity_no_recorded_digest_holds():
+    """One unreviewed case in the pack is enough to keep every snapshot identity anchored.
+
+    The question is asked of the pack rather than of each snapshot, and deliberately: which
+    snapshots a case names is label content, so a per-snapshot answer would move a snapshot in and
+    out of the anchor when a control was pointed elsewhere, and a label edit on an approved case
+    would then cost an anchor rebuild. Coarse here anchors an identity some digest does hold; it
+    never leaves out one no digest holds.
+    """
+    pack = maximal_pack()
+    assert every_case_binds_its_labels(pack)
+    anchored(pack)
+    pack["snapshots"][0]["commit"] = "b" * 40
+    assert pack_anchor_gap(pack) is None, \
+        "every case here holds its labels by digest, so a repin costs the approvals, not the anchor"
+
+    draft = copy.deepcopy(pack["cases"][0])
+    draft["case_id"] = "widget-path"
+    draft["target"] = {**draft["target"], "target_id": "T-widget-path"}
+    draft["validation"] = {"level": None, "review_state": "draft", "checks": [], "reviews": []}
+    pack["cases"].append(draft)
+    assert not every_case_binds_its_labels(pack)
+    anchored(pack)
+
+    # The second case reads snap-a with no digest behind it, so nothing else records those bytes.
+    for field, value in (("commit", "c" * 40), ("tree_hash", "sha256:" + "9" * 64),
+                         ("languages", ["go"])):
+        candidate = copy.deepcopy(pack)
+        candidate["snapshots"][0][field] = value
+        assert "a record a planning decision reads was deleted" in pack_anchor_gap(candidate), \
+            f"an unreviewed case reads these bytes, so {field} has to be anchored"
+
+    # An empty pack is not a pack where every case is bound; it is a pack with nothing to bind.
+    assert every_case_binds_its_labels({"cases": []}) is False
+
+
+def test_every_declared_pack_field_is_anchored_or_allowlisted_with_a_reason():
+    """The pack's own fields, by the same rule and against the same kind of hand-written table.
+
+    The three record arrays are projected in their own way and measured by their own tests; every
+    other field the contract declares for a pack is anchored whole, down to its leaves, or named in
+    the table with a reason.
     """
     schema = case_pack_schema()
     pack = maximal_pack()
-    snapshot = pack["snapshots"][0]
+    projected = field_paths(pack_anchor_projection(pack))
+    record_arrays = {"snapshots", "cases", "admissions"}
 
-    declared = declared_paths(schema, schema["$defs"]["snapshot"])
-    assert declared - field_paths(snapshot) == set()
-    identity = field_paths(snapshot_identity_projection(snapshot))
-    anchored_paths = field_paths(snapshot_anchor_projection(snapshot))
-    assert field_paths(snapshot) == identity | anchored_paths
-    assert identity & anchored_paths == set()
-    assert SNAPSHOT_UNREAD_FIELDS == frozenset(), "nothing about a snapshot goes unread"
-    assert identity == set(SNAPSHOT_IDENTITY_FIELDS) == {"commit", "tree_hash", "languages"}
+    for name, child in schema["properties"].items():
+        if name in record_arrays:
+            continue
+        subtree = {name} | declared_paths(schema, child, name)
+        if name in PACK_FIELDS_OUTSIDE_THE_ANCHOR:
+            assert is_stated(PACK_FIELDS_OUTSIDE_THE_ANCHOR[name])
+            assert subtree & projected == set(), f"{name} is allowlisted and anchored both"
+        else:
+            assert subtree <= projected, (
+                f"pack field {name} is in neither the anchor nor the stated allowlist")
+    assert set(PACK_FIELDS_OUTSIDE_THE_ANCHOR) <= set(schema["properties"]), \
+        "an allowlist entry for a field the contract no longer declares is a standing excuse"
+    assert "review_budgets" in projected, "recall at k is computed at these cut-offs"
 
-    projection = pack_anchor_projection(pack)
-    for name in schema["properties"]:
-        covered = (name in PACK_UNANCHORED_FIELDS or name in projection
-                   or (name == "admissions" and "admissions_sha256" in projection))
-        assert covered, f"pack field {name} is in neither the anchor nor the stated allowlist"
-    assert "review_budgets" in projection, "recall at k is computed at these cut-offs"
-    assert PACK_UNANCHORED_FIELDS == {"anchor_sha256", "description", "notes", "schema_version",
-                                      "namespace", "pack_id", "version", "status"}
+    # The record arrays, each by the projection whose own test measures it.
+    assert projected >= {"snapshots", "cases"}
+    assert (pack_anchor_projection(pack)["cases"]
+            == [case_anchor_projection(case) for case in pack["cases"]])
+    assert (pack_anchor_projection(pack)["snapshots"]
+            == [snapshot_anchor_projection(snapshot, identity_bound=True)
+                for snapshot in pack["snapshots"]])
+    assert "admissions" not in projected and "admissions_sha256" in projected, \
+        "the admissions are anchored as the chain value their history ends at"
 
 
 def test_the_snapshot_identity_covers_the_languages_that_decide_which_adapters_run():

@@ -639,10 +639,18 @@ test("an event built while instrumentation failed is downgraded to partial and m
   assert.equal(marked.capture_status, "unavailable");
   assert.equal(marked.metadata.observer_capture_gap, true);
   assert.equal(marked.event_id, "event-fallback-1");
-  // The emitter owns the key and overwrites a caller value of the same name.
+  // The key is reserved, and the emitter's claim on it runs one way: `true` is written over a
+  // caller value whenever a gap degraded the event, so no event says "no gap" over a gap.
   const claimed = new Observer({ mode: "content", sink: { write: () => {} }, clock: { now: () => { throw new Error("clock"); } } });
   const overwritten = await claimed.emit(event({ metadata: { observer_capture_gap: "not mine to set" } }));
   assert.equal(overwritten.metadata.observer_capture_gap, true);
+  // Nothing at all is written when no gap occurred, so a caller's own value of that name
+  // survives on an undegraded event. The guide said the key was owned outright, which claimed
+  // more than either emitter does; both halves are pinned here and in the Python suite.
+  const undegraded = new Observer({ mode: "content", sink: { write: () => {} }, idFactory: ids(), clock: clock() });
+  const kept = await undegraded.emit(event({ metadata: { observer_capture_gap: false, model: "x" } }));
+  assert.equal(kept.metadata.observer_capture_gap, false);
+  assert.deepEqual(undegraded.getState(), { dropped_events: 0, capture_gap: false, last_sink_error: null });
 });
 
 test("the Clock interface cannot carry sub-millisecond precision", async () => {

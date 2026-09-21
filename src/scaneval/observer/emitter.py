@@ -188,8 +188,12 @@ _REDACTED = "[REDACTED]"
 _GAP_MESSAGE = "observer instrumentation failure"
 
 # Set in an event's metadata when instrumentation failed while that event was being built, so a
-# reader cannot mistake a fabricated ID or an epoch timestamp for a measured one. The emitter
-# owns this key and overwrites a caller value of the same name.
+# reader cannot mistake a fabricated ID or an epoch timestamp for a measured one. The name is
+# reserved, and the emitter's claim on it runs one way: it writes ``True`` here whenever a gap
+# degraded the event, overwriting a caller value of the same name, and it writes nothing at all
+# when no gap occurred, so a caller that put this key in its own metadata keeps what it put
+# there on an undegraded event. The emitter can only ever strengthen the claim the key makes,
+# never weaken one, which is the half that matters: no event says "no gap" over a gap.
 _GAP_KEY = "observer_capture_gap"
 
 # The timestamp an event carries when the clock could not be read. Spelled as a literal so the
@@ -221,7 +225,14 @@ Redactor = Callable[[str, Any, "tuple[str, ...]"], Any]
 
 
 class TraceSink(Protocol):
-    """An object a harness owns that accepts one finished event. It may be sync or async."""
+    """An object a harness owns that accepts one finished event. It may be sync or async.
+
+    Exported for annotation, and structural: a harness's own sink satisfies it by having the
+    method, never by inheriting from it, and nothing at runtime checks against this class. It
+    describes the object shape :class:`Observer` accepts, which is not the only one it accepts:
+    a bare callable taking the event works too, and :meth:`Observer._normalize_sink` is where
+    that choice is made.
+    """
 
     def write(self, event: JsonObject) -> Any:
         ...
@@ -534,15 +545,29 @@ def _iso_timestamp(moment: Any) -> str:
     A naive datetime is refused rather than assumed to be UTC or local: guessing a zone would
     put an invented offset into a record other tools join on.
 
+    Every field is spelled here, at a fixed width, rather than through ``strftime``. A timestamp
+    is a wire value, so its bytes must be a property of this contract and of nothing else, and
+    ``strftime`` delegates ``%Y`` to the platform C library: a year below 1000 is padded to four
+    digits by one libc and written bare by another, so the same clock reading would leave two
+    machines as ``0999-...`` and ``999-...``. The second spells no RFC 3339 timestamp at all,
+    fails the schema's ``date-time`` format, and no longer matches the four digits JavaScript's
+    ``toISOString`` writes for the same instant, which is the byte equality the two emitters
+    claim. The year is the only field ``strftime`` treats that way, and formatting all of them
+    alike is what keeps a second, platform-shaped spelling from reappearing beside this one.
+
     The formatted string passes :func:`_is_id` before it is returned, because a ``datetime``
-    subclass owns its own ``strftime`` and this is a caller string reaching the wire like any
-    other: it is held to the one rule all of them are held to rather than trusted for having
-    come from a clock. A reading this refuses costs the timestamp and a capture gap, never the
-    event, exactly as a naive one does.
+    subclass owns its own ``year`` and ``microsecond`` and this is a caller string reaching the
+    wire like any other: it is held to the one rule all of them are held to rather than trusted
+    for having come from a clock. A reading this refuses costs the timestamp and a capture gap,
+    never the event, exactly as a naive one does.
     """
     _require_aware(moment)
     utc = moment.astimezone(timezone.utc)
-    text = f"{utc.strftime('%Y-%m-%dT%H:%M:%S')}.{utc.microsecond // 1000:03d}Z"
+    text = (
+        f"{utc.year:04d}-{utc.month:02d}-{utc.day:02d}"
+        f"T{utc.hour:02d}:{utc.minute:02d}:{utc.second:02d}"
+        f".{utc.microsecond // 1000:03d}Z"
+    )
     if not _is_id(text):
         raise TypeError("clock produced a timestamp no UTF-8 sink could write")
     return text
@@ -1186,6 +1211,36 @@ class Observer:
         delivery.settle()
 
     @staticmethod
+    def _silence(task: Any) -> None:
+        """Stop asyncio reporting one of the emitter's own writes into the harness's output.
+
+        The general rule is the one the whole emitter is built on: instrumentation never alters
+        the caller, and a line printed into a harness's log is an alteration like any other.
+        :meth:`_retrieve` and :meth:`_discard` keep two of the three ways asyncio speaks up
+        about an abandoned write, an unretrieved exception and an un-awaited coroutine, out of
+        that output. This keeps the third. A caller's loop can be closed with a write still
+        queued on it; the task is then destroyed while pending, and asyncio's exception handler
+        logs ``Task was destroyed but it is pending!``, naming the emitter's internals in a
+        harness's output for an event the harness never asked about. The flag cleared here is
+        the one asyncio's own ``gather`` clears on the tasks it takes responsibility for, which
+        is exactly the relationship this emitter has to its writes.
+
+        Nothing is hidden by it. That write reached no sink, and the loss is reported where
+        every other loss is reported, as a ``dropped_events`` count and a capture gap in
+        :class:`CaptureState`, which is the one channel instrumentation may use. The silencing
+        is done here, at the single statement that ever creates a task, rather than where a
+        stranded write is later noticed, because a write the emitter never gets to reap, one
+        outstanding when a harness simply drops the observer, is destroyed pending just the
+        same. A task object with no such flag, which is not asyncio's, is left alone.
+        """
+        try:
+            task._log_destroy_pending = False
+        except _INTERRUPTS:
+            raise
+        except BaseException:
+            pass
+
+    @staticmethod
     def _retrieve(task: Any) -> None:
         """Read a finished write's exception, so asyncio logs no unretrieved one at collection."""
         try:
@@ -1474,6 +1529,9 @@ class Observer:
         private loop refused to start at all: the close raises ``GeneratorExit`` inside a
         suspended wrapper, which settles the record on its way out, and a wrapper that never
         started closes without running, leaving the record for :meth:`_write` to settle.
+
+        The task the caller's loop takes is silenced as it is created, for the same rule one
+        step further on: see :meth:`_silence`.
         """
         loop = _running_loop()
         writer = self._await_write(awaitable, delivery)
@@ -1486,6 +1544,7 @@ class Observer:
                 if isinstance(error, _INTERRUPTS):
                     raise
                 return False
+            self._silence(task)
             self._pending[task] = delivery
 
             def settled(

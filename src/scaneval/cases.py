@@ -42,13 +42,23 @@ Every field a planning decision reads is inside one of two records, and which on
 subtraction rather than by a list someone has to remember to extend. The labels are inside
 :func:`label_digest`, which the covering review carries. Everything else a case, a snapshot, or the
 pack itself records is inside ``anchor_sha256``, because
-:func:`scaneval.contracts.pack_anchor_projection` is the whole record minus the labels and minus a
-stated allowlist. A case's ``notes`` are the only field of a case in that allowlist; the pack's own
-identity and status are in it because every plan binds them by hashing the whole file it was built
-from. So the screening disposition a plan reads, the whole validation block with its check sets and
-its ``checks_failed`` flag, and the ``review_budgets`` every recall-at-k number is computed at are
-anchored, and a field added to the contract later is anchored the day it is added rather than the
-day someone notices. A test holds every field of a case, a snapshot, and the pack to that split.
+:func:`scaneval.contracts.pack_anchor_projection` is the whole record minus a stated allowlist and
+minus the labels a recorded review already holds by digest. A case's ``notes`` are the only field of
+a case in that allowlist; the pack's own identity and status are in it because every plan binds them
+by hashing the whole file it was built from. So the screening disposition a plan reads, the whole
+validation block with its check sets and its ``checks_failed`` flag, and the ``review_budgets``
+every recall-at-k number is computed at are anchored, and a field added to the contract later is
+anchored the day it is added rather than the day someone notices. A test holds every field of a
+case, a snapshot, and the pack to that split.
+
+Each subtraction is made for a record that exists rather than for one that might be recorded later.
+A draft or mechanically checked case has no review, so no digest holds what it alleges, and its
+target, controls, evidence, and represents statement are anchored along with everything else; they
+leave the anchor when an approval records :func:`label_digest` over them, which is what lets an
+edited label be re-approved without an anchor rebuilt by hand first, and that is the only reason
+they ever leave it. Every snapshot's identity is anchored in the same way until every case in the
+pack binds its own labels, because until then some case reads those bytes with no digest speaking
+for them.
 
 Inside those two records the chains do the rest, so that deleting one entry is visible rather than
 quiet. The recorded reviews are a chain rather than an array: each carries ``chain_sha256`` over
@@ -223,6 +233,13 @@ def require_anchored(pack: dict, purpose: str) -> None:
     whose anchor does not verify has had a record removed, and writing to it would replace the
     evidence of that with a fresh anchor over what remains. It is the narrower half of
     :func:`require_loadable`, which asks it too.
+
+    A pack too malformed to hold records at all is refused here as well, in the same shape of
+    message, because :func:`scaneval.contracts.pack_anchor_gap` establishes the shape before it
+    reads one (see :func:`scaneval.contracts.pack_shape_gap`). Before touching anything is meant
+    literally: every write path in this module reads the pack inside its own ``mutate``, so a
+    caller handing in something that is not a pack is told so rather than being given a
+    ``KeyError`` or a ``TypeError`` from whichever line happened to look first.
     """
     gap = pack_anchor_gap(pack)
     if gap:
@@ -250,6 +267,13 @@ def _apply_validated(pack: dict, mutate: Callable[[dict], Any]) -> Any:
     an inconsistent pack behind; what it can do is repair one, by re-running the checks a
     hand-added control left uncovered or by recording the decision that resolves a withdrawal, and
     a write path that refused an inconsistent pack would leave no way to do either.
+
+    This is also the one place a write establishes that it was handed a pack at all, which is why
+    every write in this module does its looking up, its duplicate checking, and its state checking
+    inside *mutate*, against the candidate. A lookup done before the call would reach into the
+    caller's object before this gate had said there was anything there, and the caller would get a
+    ``KeyError`` naming a field rather than a refusal naming the pack. The checks themselves are
+    unchanged and so are their messages; only where they run moved.
     """
     require_anchored(pack, "nothing may be written to it")
     candidate = copy.deepcopy(pack)
@@ -308,12 +332,17 @@ def cases_for_snapshot(pack: dict, snapshot_id: str) -> list[dict]:
 
 
 def add_snapshot(pack: dict, snapshot: dict) -> dict:
-    """Record one pinned snapshot. A snapshot the contract refuses leaves the pack unchanged."""
-    if any(existing["snapshot_id"] == snapshot["snapshot_id"] for existing in pack["snapshots"]):
-        raise ContractError(f"snapshot {snapshot['snapshot_id']} already exists")
+    """Record one pinned snapshot. A snapshot the contract refuses leaves the pack unchanged.
+
+    The duplicate check reads the candidate rather than *pack*, so nothing reads a record out of
+    the pack before :func:`_apply_validated` has established that there is a pack to read.
+    """
     record = copy.deepcopy({"tree_hash": None, "git_tree": None, "role": "vulnerable", **snapshot})
 
     def mutate(candidate: dict) -> dict:
+        if any(existing["snapshot_id"] == record["snapshot_id"]
+               for existing in candidate["snapshots"]):
+            raise ContractError(f"snapshot {record['snapshot_id']} already exists")
         candidate["snapshots"].append(record)
         return record
 
@@ -352,12 +381,15 @@ def draft_case(case_id: str, *, snapshot_id: str, kind: str, description: str, r
 
 
 def add_case(pack: dict, case: dict) -> dict:
-    """Record one case. A case the contract refuses leaves the pack unchanged."""
-    if any(existing["case_id"] == case["case_id"] for existing in pack["cases"]):
-        raise ContractError(f"case {case['case_id']} already exists")
+    """Record one case. A case the contract refuses leaves the pack unchanged.
+
+    The duplicate check reads the candidate, for the reason :func:`add_snapshot` gives.
+    """
     record = copy.deepcopy(case)
 
     def mutate(candidate: dict) -> dict:
+        if any(existing["case_id"] == record["case_id"] for existing in candidate["cases"]):
+            raise ContractError(f"case {record['case_id']} already exists")
         candidate["cases"].append(record)
         return record
 
@@ -695,7 +727,6 @@ def mechanical_checks(pack: dict, snapshot_id: str, source_dir: Path, tree_hash:
     """
     if not isinstance(tree_hash, str) or not _TREE_HASH.match(tree_hash):
         raise ContractError(f"tree_hash must be a sha256:<64 hex digits> digest, not {tree_hash!r}")
-    snapshot_by_id(pack, snapshot_id)
     now = _now(clock)
     present = exported_file_paths(source_dir)
 
@@ -809,40 +840,45 @@ def record_review(pack: dict, case_id: str, *, reviewer: str, role: str, decisio
     is not a decision. This does not authenticate the reviewer, check their independence, or verify
     that anything was read, and it records a claim of review rather than establishing the label. A
     refused decision leaves the pack unchanged.
+
+    The decision and the reviewer name are checked here, because they are arguments; everything
+    that reads the case is checked inside the write, against the candidate, so that a pack whose
+    anchored records do not verify is refused before a state rule reads a record out of it (see
+    :func:`_apply_validated`).
     """
     if decision not in REVIEW_DECISIONS:
         raise ContractError(f"decision must be one of {REVIEW_DECISIONS}")
     approving = decision == "approve"
     _require_stated(reviewer, f"{'approval' if approving else 'a recorded withdrawal'} requires an "
                               "explicit reviewer name; the tool never supplies one")
-    case = case_by_id(pack, case_id)
-    if approving:
-        if level not in LEVELS:
-            raise ContractError(f"level must be one of {LEVELS}")
-        if case["validation"]["review_state"] == "draft":
-            raise ContractError(f"case {case_id} has not passed mechanical checks; run corpus validate first")
-        if level in REVIEWED_LEVELS and role != "independent_reviewer":
-            raise ContractError("L3/L4 labels require an independent_reviewer decision")
-        if level in REVIEWED_LEVELS and case["disposition"]["value"] != "validate":
-            raise ContractError("L3/L4 require disposition validate")
-    else:
-        level = level or case["validation"]["level"] or "L1"
-        if level not in LEVELS:
-            raise ContractError(f"level must be one of {LEVELS}")
-    review = {"reviewer": reviewer, "role": role, "decision": decision, "level": level,
-              "at": _now(clock), "note": note, "labels_sha256": label_digest(pack, case)}
 
     def mutate(candidate: dict) -> dict:
         recorded_case = case_by_id(candidate, case_id)
         validation = recorded_case["validation"]
-        recorded = dict(review)
+        claimed = level
+        if approving:
+            if claimed not in LEVELS:
+                raise ContractError(f"level must be one of {LEVELS}")
+            if validation["review_state"] == "draft":
+                raise ContractError(f"case {case_id} has not passed mechanical checks; run corpus validate first")
+            if claimed in REVIEWED_LEVELS and role != "independent_reviewer":
+                raise ContractError("L3/L4 labels require an independent_reviewer decision")
+            if claimed in REVIEWED_LEVELS and recorded_case["disposition"]["value"] != "validate":
+                raise ContractError("L3/L4 require disposition validate")
+        else:
+            claimed = claimed or validation["level"] or "L1"
+            if claimed not in LEVELS:
+                raise ContractError(f"level must be one of {LEVELS}")
+        recorded = {"reviewer": reviewer, "role": role, "decision": decision, "level": claimed,
+                    "at": _now(clock), "note": note,
+                    "labels_sha256": label_digest(candidate, recorded_case)}
         previous = validation["reviews"][-1]["chain_sha256"] if validation["reviews"] else None
         recorded["chain_sha256"] = review_chain_digest(previous, recorded)
         validation["reviews"].append(recorded)
         validation["reviews_sha256"] = recorded["chain_sha256"]
         if approving:
             validation["review_state"] = "human_approved"
-            validation["level"] = level
+            validation["level"] = claimed
         elif validation["review_state"] == "human_approved":
             # A withdrawal is a withdrawal: under the operative-review rule the contract reads
             # (:func:`scaneval.contracts.operative_review_gap`), a case whose latest review
@@ -884,10 +920,10 @@ def set_disposition(pack: dict, case_id: str, value: str, reason: str) -> dict:
     if value not in DISPOSITIONS:
         raise ContractError(f"disposition must be one of {DISPOSITIONS}")
     _require_stated(reason, "a disposition change requires a non-blank reason")
-    previous = case_by_id(pack, case_id)["disposition"]["value"]
 
     def mutate(candidate: dict) -> dict:
         case = case_by_id(candidate, case_id)
+        previous = case["disposition"]["value"]
         case["disposition"] = {"value": value, "reason": reason}
         case["notes"].append(f"disposition changed from {previous} to {value}: {reason}")
         return case["disposition"]
@@ -936,14 +972,13 @@ def admit_case(pack: dict, case_id: str, *, decision: str, by: str, reason: str,
     who decided, not that the decision is correct, and it does not change a case's review state
     or level. A refused decision leaves the pack unchanged.
     """
-    case = case_by_id(pack, case_id)
     _require_stated(by, "an admission decision requires an explicit name; the tool never supplies one")
     _require_stated(reason, "an admission decision requires a non-blank reason")
-    admission = {"case_id": case_id, "target_id": case["target"]["target_id"], "decision": decision,
-                 "by": by, "at": _now(clock), "reason": reason}
 
     def mutate(candidate: dict) -> dict:
-        recorded = dict(admission)
+        case = case_by_id(candidate, case_id)
+        recorded = {"case_id": case_id, "target_id": case["target"]["target_id"],
+                    "decision": decision, "by": by, "at": _now(clock), "reason": reason}
         previous = candidate["admissions"][-1]["chain_sha256"] if candidate["admissions"] else None
         recorded["chain_sha256"] = admission_chain_digest(previous, recorded)
         candidate["admissions"].append(recorded)

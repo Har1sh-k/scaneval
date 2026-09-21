@@ -301,14 +301,19 @@ def review_chain_gap(reviews: list[dict[str, Any]], head: str | None) -> str | N
     return None
 
 
-# Where every field of a case lives. A field is in exactly one of three places, and nothing may
-# be in none of them: the label projection, which the covering review binds itself to; the anchor
-# projection, which is every remaining field of the case; and this allowlist, of fields no planning
-# decision reads. The two projections are defined as the whole record minus a list rather than as a
-# list of fields to cover, so a field added to the schema is anchored by default instead of
-# escaping quietly, and
-# ``tests/test_v2_contracts.py::test_every_case_field_is_projected_or_allowlisted`` fails when a new
-# field is in neither projection nor named here.
+# Where every field of a case lives. Every field is inside a digest, and the anchor is the default:
+# the label projection holds the fields a recorded review binds by :func:`label_digest`, the anchor
+# projection holds every field of the case that projection does not currently hold, and this
+# allowlist holds the fields no planning decision reads at all. The projections are defined as the
+# whole record minus a list rather than as a list of fields to cover, so a field added to the schema
+# is anchored by default instead of escaping quietly, and
+# ``tests/test_v2_contracts.py::test_every_declared_case_field_is_anchored_or_allowlisted_with_a_reason``
+# fails when a new field is in neither record nor named in the allowlist that test states.
+#
+# "Currently" is the part that used to be missing. A label field leaves the anchor only while a
+# recorded digest holds it (:func:`labels_are_bound`); a case nobody has reviewed, and one whose
+# latest review predates approvals carrying a digest, has no digest holding anything, so the anchor
+# holds its labels too. See :func:`case_anchor_projection`.
 CASE_LABEL_FIELDS = frozenset({
     "represents", "workload", "component_role", "model_involvement", "coverage_signature",
     "canonical_target", "target", "controls", "evidence",
@@ -316,18 +321,27 @@ CASE_LABEL_FIELDS = frozenset({
 CASE_UNREAD_FIELDS = frozenset({"notes"})
 
 # The same split for a snapshot, held by
-# ``tests/test_v2_contracts.py::test_every_snapshot_and_pack_field_is_projected_or_allowlisted``.
+# ``tests/test_v2_contracts.py::test_every_declared_snapshot_field_is_anchored_or_allowlisted_with_a_reason``.
 # Its identity is the part a label points at, so it travels inside :func:`label_digest`; everything
-# else about it is anchored. Nothing about a snapshot is unread.
+# else about it is anchored, and so is the identity itself until every case in the pack binds its
+# labels to a digest (:func:`every_case_binds_its_labels`), because a snapshot a draft case reads is
+# a snapshot no digest speaks for. Nothing about a snapshot is unread.
 SNAPSHOT_IDENTITY_FIELDS = frozenset({"commit", "tree_hash", "languages"})
 SNAPSHOT_UNREAD_FIELDS: frozenset[str] = frozenset()
 
 # And for the pack itself. ``anchor_sha256`` cannot cover itself, ``description`` and ``notes`` are
-# free text, and the pack's identity and status are bound where they are used rather than here:
-# every plan records ``pack_sha256`` over the whole file it was built from, so a pack renamed,
+# free text, and the pack's identity and status are bound after the fact rather than here: every
+# plan records ``pack_sha256`` over the whole file it was built from, so a pack renamed,
 # renumbered, or released is a different pack to every plan, manifest, and report that cites one.
-# Anchoring them would also put the tool's own version workflow, which reopens a released pack by
-# rewriting ``version`` and ``status`` (see :func:`scaneval.cli._pack_for_change`), behind a digest
+# What that after-the-fact binding does not cover is the edit made before anything cites the pack.
+# Nothing inside the file records what its version or status was, so renumbering a version, or
+# flipping ``status`` from ``draft`` to ``released`` on a pack no plan has yet been built from,
+# leaves no trace and no second record to disagree with. That is affordable only because no
+# decision in this build reads either field: :mod:`scaneval.cases` gates on neither,
+# :func:`scaneval.cases.build_plan` copies the version into a plan's provenance beside the digest of
+# the whole file, and the release rule in :func:`scaneval.cli._pack_for_change` is a workflow gate
+# on the file in hand rather than a claim about a label. Anchoring them would also put that
+# workflow, which reopens a released pack by rewriting ``version`` and ``status``, behind a digest
 # a person would have to recompute by hand.
 PACK_UNANCHORED_FIELDS = frozenset({
     "anchor_sha256", "description", "notes",
@@ -357,6 +371,11 @@ def case_label_projection(case: dict[str, Any]) -> dict[str, Any]:
     label came from, the disposition and the split say what is being done with it, and the
     validation block is the record of the reviews and checks themselves. Only ``notes`` is read by
     nothing at all.
+
+    This says what a review covers when one is recorded. It does not say that these fields are
+    outside the anchor: they leave the anchor only while a recorded review holds them by digest
+    (:func:`labels_are_bound`), so the labels of a case nobody has reviewed are anchored like
+    everything else.
     """
     projected = {key: value for key, value in case.items() if key in CASE_LABEL_FIELDS}
     if "canonical_target" in projected:
@@ -372,12 +391,38 @@ def case_label_projection(case: dict[str, Any]) -> dict[str, Any]:
     return projected
 
 
-def case_anchor_projection(case: dict[str, Any]) -> dict[str, Any]:
-    """Every field of *case* the anchor covers: the whole record minus the labels and the allowlist.
+def labels_are_bound(case: dict[str, Any]) -> bool:
+    """True when a recorded review already binds what *case* alleges to a digest.
 
-    The labels are left out because the covering review already binds itself to them by digest, and
-    binding them here too would mean an edited label could not be re-approved without an anchor
-    being rebuilt first. Everything else is here, whether or not anyone has thought about it yet:
+    The operative review is the latest recorded one (:func:`operative_review_gap`), and it carries
+    ``labels_sha256`` over the label content it read (:func:`label_digest`). While one is there the
+    labels are held by a digest, so :func:`case_anchor_projection` leaves them out and an edited
+    label can be re-approved without an anchor being rebuilt by hand first.
+
+    False when the case records no review at all, and false when its latest review carries no
+    digest, which is how a pack written before approvals were bound to content reads. Both mean no
+    record anywhere holds these labels, so the anchor holds them instead. Whether the digest that is
+    there covers the labels *as they now stand* is a different question, asked by
+    :func:`covering_review`: an approval that lapsed because a label was edited is still a recorded
+    digest of that label content, and the edit is exactly what it makes visible.
+
+    Read tolerantly, because a write path anchors its candidate before validating it: a case this
+    cannot read records no digest, so its labels are anchored, and the contract refuses the case a
+    moment later.
+    """
+    if not isinstance(case, dict):
+        return False
+    validation = case.get("validation")
+    reviews = validation.get("reviews") if isinstance(validation, dict) else None
+    latest = reviews[-1] if isinstance(reviews, list) and reviews else None
+    return isinstance(latest, dict) and bool(latest.get("labels_sha256"))
+
+
+def case_anchor_projection(case: dict[str, Any]) -> dict[str, Any]:
+    """Every field of *case* no other record holds: the whole record minus the allowlist, and minus
+    the labels only while a recorded digest holds them.
+
+    Everything that is not a label is always here, whether or not anyone has thought about it yet:
     the case identifier and the target id an admission is routed by, the disclosure dates, the
     screening disposition a plan reads, the split, and the whole validation block, which is the
     review history, its recorded end, every mechanical check, every check set record, and the
@@ -388,9 +433,25 @@ def case_anchor_projection(case: dict[str, Any]) -> dict[str, Any]:
     record, and a disposition could be edited to drop an approved, admitted case out of a plan.
     Both are in here now because everything is, and a field added later is in here the day it is
     added.
+
+    The labels are the one conditional subtraction, and the condition is :func:`labels_are_bound`:
+    a review carrying ``labels_sha256`` is a record of them, so binding them here as well would
+    mean an edited label could not be re-approved without an anchor being rebuilt by hand. Changed
+    deliberately this round: they used to be subtracted unconditionally, which left every case no
+    review has bound, a draft or a mechanically checked one, with its target, its controls, its
+    evidence, and what it claims to represent inside no record at all. Editing the target of a
+    draft case was invisible to the anchor and to every digest, and the claim that every field is
+    inside one of two records was false for exactly those cases.
+
+    The labels are projected verbatim when they are here, not through
+    :func:`case_label_projection`, because the anchor records what the file holds rather than what
+    a reviewer read: reordering a list is a change to the recorded pack even where it is not a
+    change to the allegation, and every other array the anchor covers is already read in the order
+    it was recorded.
     """
+    skipped = CASE_LABEL_FIELDS if labels_are_bound(case) else frozenset()
     return {key: value for key, value in case.items()
-            if key not in CASE_LABEL_FIELDS and key not in CASE_UNREAD_FIELDS}
+            if key not in skipped and key not in CASE_UNREAD_FIELDS}
 
 
 def snapshot_identity_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -415,16 +476,53 @@ def snapshot_identity_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
     return projected
 
 
-def snapshot_anchor_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
-    """Every field of *snapshot* the anchor covers: the whole record minus its identity.
+def snapshot_anchor_projection(snapshot: dict[str, Any], *,
+                               identity_bound: bool = False) -> dict[str, Any]:
+    """Every field of *snapshot* no other record holds: the whole record, minus its identity only
+    when *identity_bound* says a recorded digest already holds that identity.
 
-    The identity travels in :func:`label_digest` instead, for the same reason a case's labels do:
-    repinning a snapshot must cost the approvals recorded against it rather than stop the pack
-    loading. Everything else, the repository, the reference, the workload, the component role, the
-    licence, and the role the snapshot plays, is anchored here.
+    The repository, the reference, the workload, the component role, the licence, and the role the
+    snapshot plays are always anchored here. The identity is subtracted when it is held elsewhere,
+    for the same reason a case's labels are: it travels inside :func:`label_digest`, so repinning a
+    snapshot must cost the approvals recorded against those bytes rather than stop the pack loading
+    and leave nothing able to re-approve it.
+
+    Changed deliberately this round: the subtraction used to be unconditional, and the ground it
+    rests on holds only where a digest was actually recorded.
+    :func:`every_case_binds_its_labels` is what decides that for a pack, and the default here is
+    false, so a caller that does not know anchors the identity too. A snapshot a draft or
+    mechanically checked case reads is named by no digest at all, and repinning it to another
+    commit, or re-declaring the languages it is scanned as, changed which bytes that case is
+    planned against with no record anywhere disagreeing. Covering a field in two records costs a
+    rebuilt anchor; leaving it out of both is the hole this parameter exists to close.
     """
+    skipped = SNAPSHOT_IDENTITY_FIELDS if identity_bound else frozenset()
     return {key: value for key, value in snapshot.items()
-            if key not in SNAPSHOT_IDENTITY_FIELDS and key not in SNAPSHOT_UNREAD_FIELDS}
+            if key not in skipped and key not in SNAPSHOT_UNREAD_FIELDS}
+
+
+def every_case_binds_its_labels(pack: dict[str, Any]) -> bool:
+    """True when every case in *pack* holds its own labels by digest, and there is a case.
+
+    This is what lets a snapshot's identity leave the anchor: it is held by :func:`label_digest`
+    only for the cases that carry one, so a pack holding a single unreviewed case is a pack where
+    some reader of some snapshot's bytes speaks through no digest at all. The answer is asked of
+    the pack rather than of each snapshot on purpose, and the per-snapshot version was written and
+    then withdrawn: which snapshots a case names is itself label content, so deciding it snapshot by
+    snapshot let pointing a control at another snapshot move a third record in and out of the
+    anchor, and a label edit on an approved case would then have cost the anchor rebuild that the
+    subtraction exists to avoid. Coarse here means anchoring an identity some digest does hold,
+    which costs a rebuild after a hand repin; it never means leaving one out that no digest holds.
+
+    Every flip of this answer happens inside a write, which re-anchors: recording the first review
+    on the last unreviewed case, or adding a case to a pack of reviewed ones. A hand edit that
+    would flip it, deleting a review or adding a case, already leaves the review chain or the case
+    roster anchoring to something that is no longer there.
+    """
+    cases = pack.get("cases")
+    if not isinstance(cases, list) or not cases:
+        return False
+    return all(labels_are_bound(case) for case in cases)
 
 
 def pack_anchor_projection(pack: dict[str, Any]) -> dict[str, Any]:
@@ -439,7 +537,11 @@ def pack_anchor_projection(pack: dict[str, Any]) -> dict[str, Any]:
 
     The snapshots are projected by :func:`snapshot_anchor_projection` and the cases by
     :func:`case_anchor_projection`, so the roster of each is anchored together with every field of
-    them that is not a label. Deleting a case whole, its chained review history included, leaves
+    them that no digest holds. Both subtractions are now made for a digest that exists rather than
+    for one that might be recorded later: a case no review has bound is anchored with its labels,
+    and a snapshot's identity stays anchored until every case in the pack binds its own labels
+    (:func:`every_case_binds_its_labels`), because until then something reads those bytes with no
+    digest speaking for them. Deleting a case whole, its chained review history included, leaves
     every case that remains consistent, and :func:`scaneval.cases.plan_scope` reads the cases that
     are there: dropping the one draft case out of a pack of approved ones would otherwise turn a
     draft plan into a reviewed one. A review history wiped whole is an anchored ``null`` where a
@@ -452,9 +554,10 @@ def pack_anchor_projection(pack: dict[str, Any]) -> dict[str, Any]:
     history, the one that would restore a case to a reviewed-scope plan by dropping the rejection
     that kept it out.
     """
+    bound = every_case_binds_its_labels(pack)
     projected = {key: value for key, value in pack.items()
                  if key not in PACK_UNANCHORED_FIELDS and key not in _PACK_RECORD_FIELDS}
-    projected["snapshots"] = [snapshot_anchor_projection(snapshot)
+    projected["snapshots"] = [snapshot_anchor_projection(snapshot, identity_bound=bound)
                               for snapshot in pack["snapshots"]]
     projected["cases"] = [case_anchor_projection(case) for case in pack["cases"]]
     projected["admissions_sha256"] = (pack["admissions"][-1].get("chain_sha256")
@@ -467,19 +570,50 @@ def pack_anchor_digest(pack: dict[str, Any]) -> str:
     return canonical_sha256(pack_anchor_projection(pack))
 
 
+def pack_shape_gap(pack: Any) -> str | None:
+    """Why *pack* is not shaped like a case pack at all, or ``None`` when it is readable.
+
+    It asks for the three arrays every projection walks, and that each entry of them is a JSON
+    object. That is all: the field-by-field contract is :func:`validate_document`, and this says
+    only that there is something here to read.
+
+    It exists because :func:`pack_anchor_gap` is asked before anything has established the shape.
+    A write asks it of whatever the caller handed in (:func:`scaneval.cases.require_anchored` is the
+    first thing every write path does), so without this the first gate on a hand-built or truncated
+    pack raised ``KeyError: 'admissions'``, which is a crash rather than a refusal naming what is
+    wrong. Every deeper read in the projections is tolerant for the same reason, and tolerant is
+    safe there because an unreadable record anchors more rather than less.
+    """
+    if not isinstance(pack, dict):
+        return f"a case pack is a JSON object, not {type(pack).__name__}"
+    for name in ("snapshots", "cases", "admissions"):
+        value = pack.get(name)
+        if not isinstance(value, list):
+            held = "nothing" if name not in pack else f"a {type(value).__name__}"
+            return (f"this pack records {held} as its {name}, so nothing says which records it "
+                    "anchors")
+        if any(not isinstance(entry, dict) for entry in value):
+            return f"every entry of {name} must be a JSON object"
+    return None
+
+
 def pack_anchor_gap(pack: dict[str, Any]) -> str | None:
     """Why a pack's anchored records do not verify, or ``None`` when they do.
 
-    The admission history is checked as a chain, and everything
-    :func:`pack_anchor_projection` covers is checked against ``anchor_sha256``. A pack recording no
-    anchor at all is refused rather than read leniently, because an optional anchor is no anchor:
-    dropping the field is the same deletion it exists to make visible.
+    The shape is established first (:func:`pack_shape_gap`), then the admission history is checked
+    as a chain, then everything :func:`pack_anchor_projection` covers is checked against
+    ``anchor_sha256``. A pack recording no anchor at all is refused rather than read leniently,
+    because an optional anchor is no anchor: dropping the field is the same deletion it exists to
+    make visible.
 
     Every path that reads a planning decision out of a pack passes through here: the pack load in
     :func:`_validate_case_pack`, every library write, and :func:`scaneval.cases.build_plan`, both of
     which reach it through that same load. As with the review chain, anyone who can edit the pack
     can recompute this; what it removes is the deletion that passes unnoticed.
     """
+    shape = pack_shape_gap(pack)
+    if shape:
+        return shape
     gap, _ = chain_link_gap(pack["admissions"], kind="admission", label="admissions")
     if gap:
         return gap
@@ -864,7 +998,11 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
     snapshot, a case, or the pack itself is bound to ``anchor_sha256`` by
     :func:`pack_anchor_projection`: the disposition a plan reads, the whole validation block with
     its check sets and its ``checks_failed`` flag, the disclosure dates, the split, and the
-    ``review_budgets`` every recall-at-k number is computed at. What sits outside both is stated in
+    ``review_budgets`` every recall-at-k number is computed at. The labels of a case no review has
+    bound to a digest are in the anchor too (:func:`labels_are_bound`), and so is every snapshot's
+    identity until every case in the pack binds its own (:func:`every_case_binds_its_labels`),
+    because the first record is a record only where one was recorded: an unreviewed case has no
+    digest covering anything. What sits outside both is stated in
     three allowlists a test pins: a case's ``notes``, which nothing reads, and the pack's own
     identity and status, which every plan binds by hashing the whole file it was built from.
 

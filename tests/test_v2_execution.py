@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import errno
 import json
 import os
 from pathlib import Path
@@ -784,7 +785,15 @@ def test_a_trace_path_outside_the_staging_area_is_not_counted(tmp_path):
 
 
 def test_an_artifact_symlink_out_of_the_bundle_is_refused_rather_than_hashed(tmp_path):
-    """Following the link would record a hash of a file this bundle does not contain."""
+    """Following the link would record a hash of a file this bundle does not contain.
+
+    Changed deliberately: this used to assert the link was still in the bundle, which is the
+    behavior the staged-tree rule now refuses. A link is a live name for a file the bundle does
+    not hold, and whoever opens ``raw/link.json`` afterwards by hand gets the host file, so it
+    is cut as the staged tree lands and named with its target in the record instead. The
+    artifact is therefore missing rather than a link by the time it is collected, and the two
+    notes together say what the scanner left and why it is not here.
+    """
     secret = tmp_path / "secret.txt"
     secret.write_text("not part of the scan output\n", encoding="utf-8")
 
@@ -804,8 +813,12 @@ def test_an_artifact_symlink_out_of_the_bundle_is_refused_rather_than_hashed(tmp
     assert result["status"] == "success"
     assert [artifact["id"] for artifact in result["raw_artifacts"]] == ["native"]
     assert sha256_file(secret)[0] not in [artifact["sha256"] for artifact in result["raw_artifacts"]]
-    assert "declared artifact is a symbolic link and was not followed: link" in execution["notes"]
-    assert (bundle / "raw" / "link.json").is_symlink()
+    assert "declared artifact missing: link" in execution["notes"]
+    assert any("symbolic link(s) staged into raw/ were cut" in note and f"link.json -> {secret}" in note
+               for note in execution["notes"])
+    # Nothing in the bundle leads to the host file, and the host file is untouched.
+    assert not (bundle / "raw" / "link.json").exists() and not (bundle / "raw" / "link.json").is_symlink()
+    assert secret.read_text(encoding="utf-8") == "not part of the scan output\n"
 
 
 def test_an_adapter_version_the_record_cannot_carry_writes_no_bundle_documents(tmp_path):
@@ -1195,6 +1208,11 @@ def test_the_input_tree_is_the_same_tree_the_exported_hash_covers(tmp_path):
     The two used to disagree: the modification check excluded the adapter's state directories
     and the hash did not, so a scanner writing into one changed the hashed tree without being
     reported as having modified the source. They are pinned to each other here.
+
+    Changed deliberately: the pinning holds for the run that created its own ``.git``, which is
+    the only run that may leave one out. ``created_git`` false is the other half of the same
+    rule and is asserted below: the directory is counted, the two hashes then differ by design,
+    and ``run_invocation`` refuses an input that reaches it in that state.
     """
     tree = tmp_path / "tree"
     (tree / "src").mkdir(parents=True)
@@ -1205,14 +1223,18 @@ def test_the_input_tree_is_the_same_tree_the_exported_hash_covers(tmp_path):
     (tree / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
     (tree / "link.py").symlink_to(tree / "src" / "app.py")
 
-    full = execution_module._input_tree(tree, frozenset())
+    full = execution_module._input_tree(tree, frozenset(), created_git=True)
     assert sorted(full) == [".fakestate/notes.md", "src/app.py"], "no .git, no symlink"
     assert execution_module.tree_hash(full) == hash_exported_tree(tree)["tree_hash"]
     assert hash_exported_tree(tree)["file_count"] == len(full)
 
-    carved = execution_module._input_tree(tree, frozenset({".fakestate"}))
+    carved = execution_module._input_tree(tree, frozenset({".fakestate"}), created_git=True)
     assert sorted(carved) == ["src/app.py"]
     assert execution_module.tree_hash(carved) != hash_exported_tree(tree)["tree_hash"]
+
+    watched = execution_module._input_tree(tree, frozenset(), created_git=False)
+    assert sorted(watched) == [".fakestate/notes.md", ".git/HEAD", "src/app.py"]
+    assert execution_module.tree_hash(watched) != hash_exported_tree(tree)["tree_hash"]
 
 
 def test_an_input_that_already_holds_an_adapter_state_directory_is_refused(tmp_path):
@@ -1255,6 +1277,8 @@ def test_the_input_tree_docstring_names_what_it_excludes_and_why():
     assert "one definition of the input tree" in doc
     assert "``.git`` component" in doc and "state_dirs*" in doc
     assert "scanner's private scratch space" in doc
+    # The exclusion is conditional, and the docstring has to say on what.
+    assert "only when *created_git* says this run wrote one" in doc
 
 
 # --- neither failure mode can buy silence credit -----------------------------------------
@@ -1361,9 +1385,11 @@ def test_a_source_the_scan_made_unwalkable_is_a_failed_observation_not_a_clean_o
 def test_the_input_tree_raises_rather_than_dropping_a_directory_it_cannot_list(tmp_path):
     """The unit behind the test above, and the limit of it: an excluded directory is not walked.
 
-    A directory the map already leaves out is never descended into, so a ``.git`` or a state
-    directory that cannot be listed still cannot fail the walk; only a directory whose files the
-    map is supposed to cover can.
+    A directory the map already leaves out is never descended into, so a ``.git`` this run
+    created or a state directory that cannot be listed still cannot fail the walk; only a
+    directory whose files the map is supposed to cover can. A ``.git`` this run did not create
+    is one of those, which is the point of counting it: an unreadable one raises rather than
+    passing for empty.
     """
     tree = tmp_path / "tree"
     (tree / "src").mkdir(parents=True)
@@ -1374,15 +1400,19 @@ def test_the_input_tree_raises_rather_than_dropping_a_directory_it_cannot_list(t
     closed.chmod(0o000)
     try:
         with pytest.raises(PermissionError):
-            execution_module._input_tree(tree, frozenset())
+            execution_module._input_tree(tree, frozenset(), created_git=True)
         # The same tree with that directory excluded walks cleanly and hashes what is left.
-        assert sorted(execution_module._input_tree(tree, frozenset({"closed"}))) == ["src/app.py"]
+        assert sorted(execution_module._input_tree(tree, frozenset({"closed"}), created_git=True)) == ["src/app.py"]
 
         for excluded in (tree / ".git", tree / ".fakestate"):
             excluded.mkdir()
             (excluded / "notes.md").write_text("scratch\n", encoding="utf-8")
             excluded.chmod(0o000)
-        assert sorted(execution_module._input_tree(tree, frozenset({"closed", ".fakestate"}))) == ["src/app.py"]
+        assert sorted(execution_module._input_tree(tree, frozenset({"closed", ".fakestate"}),
+                                                   created_git=True)) == ["src/app.py"]
+        # The one this run did not create is inside the map, so closing it fails the walk.
+        with pytest.raises(PermissionError):
+            execution_module._input_tree(tree, frozenset({"closed", ".fakestate"}), created_git=False)
     finally:
         restore_directory_modes(tree)
 
@@ -1398,11 +1428,11 @@ def test_an_exported_input_that_cannot_be_walked_is_refused_before_the_scanner_r
     real_input_tree = execution_module._input_tree
     calls: list[int] = []
 
-    def failing(source_dir, state_dirs):
+    def failing(source_dir, state_dirs, *, created_git):
         calls.append(1)
         if len(calls) == 1:
             raise PermissionError(13, "Permission denied", str(source_dir / "closed"))
-        return real_input_tree(source_dir, state_dirs)
+        return real_input_tree(source_dir, state_dirs, created_git=created_git)
 
     execution_module._input_tree = failing
     try:
@@ -1634,6 +1664,88 @@ def test_a_nested_git_directory_is_not_a_place_a_scanner_can_hide_what_it_wrote(
     assert not any(path.startswith(".git/") for path in execution["provenance"]["modified_paths"])
 
 
+class GitPlantingAdapter(FakeAdapter):
+    """Creates a top-level ``.git`` this run never asked for and writes inside it."""
+
+    def __init__(self, *, close_it: bool = False):
+        super().__init__()
+        self.close_it = close_it
+
+    def scan(self, **kwargs):
+        outcome = super().scan(**kwargs)
+        planted = Path(kwargs["source_dir"]) / ".git"
+        planted.mkdir()
+        (planted / "planted.py").write_text("written by the scanner\n", encoding="utf-8")
+        if self.close_it:
+            planted.chmod(0o000)
+        return outcome
+
+
+def test_a_git_directory_this_run_did_not_create_is_watched_like_the_rest_of_the_source(tmp_path):
+    """The exclusion was unconditional, so ``.git`` was a hiding place on every run.
+
+    This adapter does not require git and the runner created no repository, so nothing here is
+    the runner's own bookkeeping: a scanner that makes a top-level ``.git`` and writes in it is
+    writing into the tree it was given. It used to fall out of the map on both sides of the
+    comparison, and the bundle recorded a clean observation of a tree the scan had changed. The
+    name is excluded only on a run that created one for a git-dependent adapter now.
+    """
+    adapter = GitPlantingAdapter()
+    assert adapter.requires_git is False
+    bundle = run(tmp_path, adapter)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["provenance"]["synthetic_history"] is None, "this run created no repository"
+    assert execution["provenance"]["source_modified"] is True
+    assert execution["provenance"]["modified_paths"] == [".git/planted.py"]
+    assert result["status"] == "partial" and result["error"]["code"] == "source_modified"
+
+
+def test_a_git_directory_the_scan_made_unreadable_is_a_failed_observation(tmp_path):
+    """The same directory, now inside the map, so closing it is a walk that cannot complete.
+
+    This is the enumeration rule reaching the one directory the map used to skip: a ``.git`` the
+    scanner filled and then closed raises out of the re-hash instead of reading as empty.
+    """
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+    try:
+        bundle = run(tmp_path, GitPlantingAdapter(close_it=True), workspace_root=workspace_root)
+
+        result = load_document(bundle / "result.json", "scan-result")
+        execution = load_document(bundle / "execution.json", "execution-record")
+        assert result["status"] == "error" and result["claims"] == []
+        assert result["error"]["code"] == "outcome_contract_violation"
+        assert "the source tree could not be re-hashed" in result["error"]["message"]
+        assert "PermissionError" in result["error"]["message"]
+        assert execution["provenance"]["source_modified"] is False, "the comparison never completed"
+    finally:
+        restore_directory_modes(workspace_root)
+
+
+def test_an_input_that_already_ships_a_git_directory_is_refused_before_the_scanner_runs(tmp_path):
+    """Counting ``.git`` is sound only while the exported hash and the watched tree agree.
+
+    ``hash_exported_tree`` leaves a top-level ``.git`` out and this map now counts one the run
+    did not create, so an input that ships one can never match. It is refused the way an input
+    shipping an adapter state directory is, rather than scanned with bytes the two sides
+    disagree about; a real export strips ``.git`` and never reaches this.
+    """
+    prepared = prepared_input(tmp_path)
+    (prepared.source_dir / ".git").mkdir()
+    (prepared.source_dir / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    prepared = PreparedInput(prepared.input_id, prepared.source_dir,
+                             hash_exported_tree(prepared.source_dir)["tree_hash"],
+                             prepared.languages, prepared.provenance)
+    adapter = FakeAdapter()
+
+    with pytest.raises(ExecutionError, match="already contains a top-level .git"):
+        run(tmp_path, adapter, prepared)
+
+    assert adapter.calls == 0, "nothing is scanned when the input and the hash disagree"
+
+
 def test_a_run_whose_observer_reported_a_capture_gap_is_not_recorded_as_a_clean_success(tmp_path):
     """The gap lived only in the execution record while the result said success.
 
@@ -1706,11 +1818,14 @@ def test_a_capture_gap_does_not_overwrite_the_failure_the_adapter_already_named(
     assert any("2 dropped event(s)" in note for note in execution["notes"])
 
 
-def test_a_link_inside_the_captured_state_is_preserved_rather_than_resolved(tmp_path):
+def test_a_link_inside_the_captured_state_is_never_resolved_and_does_not_reach_the_bundle(tmp_path):
     """The same copy, one level down: a link inside the state directory was followed too.
 
-    It is recreated as a link now, so the bundle records what the scanner left instead of the
-    bytes it pointed at, and the record counts the links it kept.
+    Changed deliberately: this used to assert the copied link was still a link in the bundle.
+    Copying it as a link is still the rule for the copy, which is what keeps the bytes behind it
+    out, but a bundle may hold no name for a file it does not contain, so the link is cut when
+    the staged output lands and its target is recorded. Both halves are asserted here: nothing
+    behind the link was ever read, and nothing in the bundle points at it now.
     """
     secret = tmp_path / "secret.txt"
     secret.write_text("not part of the scan output\n", encoding="utf-8")
@@ -1727,9 +1842,13 @@ def test_a_link_inside_the_captured_state_is_preserved_rather_than_resolved(tmp_
     captured = bundle / "raw" / "harness-state" / "fakestate"
     assert execution["provenance"]["captured_state_dirs"] == [".fakestate"]
     assert (captured / "notes.md").read_text(encoding="utf-8") == "harness state\n"
-    assert (captured / "escape.txt").is_symlink()
-    assert os.readlink(captured / "escape.txt") == str(secret)
-    assert any("preserved unresolved" in note and "escape.txt" in note for note in execution["notes"])
+    assert not (captured / "escape.txt").is_symlink() and not (captured / "escape.txt").exists()
+    assert any("copied as links rather than copied through" in note and "escape.txt" in note
+               for note in execution["notes"])
+    assert any("were cut" in note and f"escape.txt -> {secret}" in note for note in execution["notes"])
+    # The bytes behind the link were never copied, and the host file is untouched.
+    assert "not part of the scan output" not in json.dumps(execution)
+    assert secret.read_text(encoding="utf-8") == "not part of the scan output\n"
 
 
 def test_the_exported_input_is_copied_into_the_workspace_without_following_a_link(tmp_path):
@@ -1919,7 +2038,209 @@ def test_a_staged_file_with_one_name_is_left_exactly_as_the_scanner_wrote_it(tmp
     assert native.read_text(encoding="utf-8").startswith('{"findings"')
     assert native.stat().st_nlink == 1
     assert not any("hard link" in note for note in execution["notes"])
+    assert not any("were cut" in note for note in execution["notes"])
     assert not list(bundle.rglob("*.dealias"))
+
+
+# --- one enumeration, one read, and one rule for what a bundle may hold --------------------
+
+
+def test_one_listing_raises_where_os_walk_reports_a_directory_it_could_not_read_as_empty(tmp_path):
+    """The general rule, as a unit: an enumeration that cannot complete is a failed observation.
+
+    ``os.walk`` is what three of the walks in this module used, and its default is to ignore the
+    ``OSError`` the listing raises and yield the directory as holding nothing, which is the
+    contrast asserted first here. Everything in this module now enumerates through
+    ``list_directory`` and ``walk_entries``, which raise instead, so no caller can mistake a
+    directory it could not read for one that was empty.
+    """
+    tree = tmp_path / "tree"
+    (tree / "closed").mkdir(parents=True)
+    (tree / "closed" / "hidden.txt").write_text("planted\n", encoding="utf-8")
+    (tree / "open.txt").write_text("visible\n", encoding="utf-8")
+    (tree / "closed").chmod(0o000)
+    try:
+        # What the swallowing walk reports: the closed directory simply holds nothing.
+        assert [name for _parent, _dirs, files in os.walk(tree) for name in files] == ["open.txt"]
+        with pytest.raises(PermissionError):
+            execution_module.list_directory(tree / "closed")
+        with pytest.raises(PermissionError):
+            list(execution_module.walk_entries(tree))
+    finally:
+        restore_directory_modes(tree)
+
+    readable = tmp_path / "readable"
+    (readable / "sub").mkdir(parents=True)
+    (readable / "sub" / "a.txt").write_text("a\n", encoding="utf-8")
+    (readable / "link").symlink_to(readable / "sub", target_is_directory=True)
+    seen = {path.relative_to(readable).as_posix() for path, _entry in execution_module.walk_entries(readable)}
+    assert seen == {"sub", "sub/a.txt", "link"}, "the link is yielded and never descended into"
+
+
+@mkfifo_required
+def test_the_one_read_of_a_scanner_written_path_refuses_anything_but_a_regular_file(tmp_path):
+    """The other general rule, as a unit: the proof and the read are the same open.
+
+    The refusals run behind a deadline because the regression they guard is a read that never
+    returns: opening a named pipe for reading waits for a writer that never comes.
+    """
+    (tmp_path / "real.json").write_text("host bytes\n", encoding="utf-8")
+    pipe = tmp_path / "pipe.json"
+    os.mkfifo(pipe)
+    link = tmp_path / "link.json"
+    link.symlink_to(tmp_path / "real.json")
+
+    def refusals() -> dict[str, int | None]:
+        errnos: dict[str, int | None] = {}
+        for name, path in (("pipe", pipe), ("link", link), ("directory", tmp_path)):
+            with pytest.raises(OSError) as refused:
+                execution_module.read_regular_file(path)
+            errnos[name] = refused.value.errno
+        return errnos
+
+    errnos = call_with_deadline(refusals)
+    assert set(errnos) == {"pipe", "link", "directory"}
+    assert errnos["link"] == errno.ELOOP, "a link is refused by the open, not by a check before it"
+    assert errnos["pipe"] == errnos["directory"] == errno.EINVAL
+    assert execution_module.read_regular_file(tmp_path / "real.json") == b"host bytes\n"
+
+
+def test_a_hard_link_in_a_staged_directory_the_walk_cannot_read_is_a_recorded_failure(tmp_path):
+    """The blocker: ``os.walk`` skipped the unreadable directory and the alias survived it.
+
+    A scanner could plant a hard link to a host file, close the directory holding it, and the
+    de-alias walk reported that directory as empty: the bundle went on aliasing a live host file
+    behind a result that read as a clean success. The walk raises now, the staged move fails with
+    it, and the invocation is recorded as a failure rather than as a scan that found nothing to
+    de-alias.
+    """
+    host = tmp_path / "host.json"
+    host.write_text('{"host": "bytes"}\n', encoding="utf-8")
+
+    class ClosedStagingAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            hidden = Path(kwargs["raw_dir"]) / "hidden"
+            hidden.mkdir()
+            os.link(host, hidden / "aliased.json")
+            hidden.chmod(0o000)
+            return outcome
+
+    try:
+        bundle = run(tmp_path, ClosedStagingAdapter(), workspace_root=tmp_path)
+
+        result = load_document(bundle / "result.json", "scan-result")
+        execution = load_document(bundle / "execution.json", "execution-record")
+        assert result["status"] == "error" and result["claims"] == []
+        assert result["error"]["code"] == "outcome_contract_violation"
+        assert "staged output could not be moved into the bundle" in result["error"]["message"]
+        assert "PermissionError" in result["error"]["message"]
+        assert execution["status"] == "error" and execution["raw_artifacts"] == []
+        # The alias is still on disk, which is exactly why the run must not read as a clean one.
+        assert host.stat().st_nlink == 2
+    finally:
+        restore_directory_modes(tmp_path)
+
+
+def test_a_copied_state_directory_that_cannot_be_listed_is_a_recorded_failure(tmp_path, monkeypatch):
+    """The same rule at the other walk: naming the links in a tree this module just copied.
+
+    Under ``os.walk`` a copied directory that could not be listed contributed no links, so the
+    record said a captured state directory held none while it held some. The listing is driven
+    to fail here because copying the tree reads the source first, so nothing a test can put on
+    disk lets the copy succeed and the walk after it fail.
+    """
+    real_list = execution_module.list_directory
+    failed: list[int] = []
+
+    def failing(directory):
+        if Path(directory).name == "fakestate" and not failed:
+            failed.append(1)
+            raise PermissionError(13, "Permission denied", str(directory))
+        return real_list(directory)
+
+    monkeypatch.setattr(execution_module, "list_directory", failing)
+    bundle = run(tmp_path, FakeAdapter(), workspace_root=tmp_path)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert failed == [1], "the copy's own walk is the one that failed"
+    assert result["status"] == "error" and result["error"]["code"] == "outcome_contract_violation"
+    assert "harness state could not be captured" in result["error"]["message"]
+    assert "PermissionError" in result["error"]["message"]
+    assert execution["provenance"]["captured_state_dirs"] == []
+
+
+def test_a_symbolic_link_staged_into_the_bundle_is_cut_and_named_with_its_target(tmp_path):
+    """The one rule for what a staged tree may carry in: no path may name a file outside.
+
+    A link was kept, on the argument that it is visibly a link and nothing here follows one.
+    But ``bundle/raw/escape.json`` is what whoever opens the bundle by hand actually reads, and
+    what it reads is a host file the scan never produced. The link is cut as the tree lands and
+    its target goes into the record, so what the scanner did is a fact about the run rather than
+    a live path out of the bundle.
+    """
+    secret = tmp_path / "secret.txt"
+    secret.write_text("a host file the scan never produced\n", encoding="utf-8")
+
+    class LinkStagingAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            (Path(kwargs["raw_dir"]) / "escape.json").symlink_to(secret)
+            (Path(kwargs["trace_dir"]) / "events.jsonl").symlink_to(secret)
+            return outcome
+
+    bundle = run(tmp_path, LinkStagingAdapter(), trace_mode="metadata", workspace_root=tmp_path)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "success", "a cut link is not a failure of the scan itself"
+    for cut in (bundle / "raw" / "escape.json", bundle / "trace" / "events.jsonl"):
+        assert not cut.exists() and not cut.is_symlink()
+    assert any("staged into raw/ were cut" in note and f"escape.json -> {secret}" in note
+               for note in execution["notes"])
+    assert any("staged into trace/ were cut" in note and f"events.jsonl -> {secret}" in note
+               for note in execution["notes"])
+    assert execution["trace"]["events"] is None and execution["trace"]["path"] is None
+    # Nothing was written through either link and nothing behind them reached the record.
+    assert secret.read_text(encoding="utf-8") == "a host file the scan never produced\n"
+    assert "a host file the scan never produced" not in json.dumps(execution)
+
+
+def test_a_hard_link_behind_a_symlinked_directory_never_reaches_the_bundle(tmp_path):
+    """The two defects together: the walk cannot enter a link, so a link above one hid the alias.
+
+    De-aliasing never descends through a symbolic link, which is right, and keeping the link was
+    therefore a way to carry a whole aliased subtree into the bundle untouched: every file
+    behind ``raw/sub`` was reachable through the bundle and was the same inode as a host file.
+    Cutting the link removes the subtree from the bundle with it, so the de-alias rule covers
+    every directory a bundle actually has.
+    """
+    host = tmp_path / "host.json"
+    host.write_text('{"host": "bytes"}\n', encoding="utf-8")
+    behind = tmp_path / "behind"
+    behind.mkdir()
+    os.link(host, behind / "aliased.json")
+    assert host.stat().st_nlink == 2
+
+    class HidingLinkAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            (Path(kwargs["raw_dir"]) / "sub").symlink_to(behind, target_is_directory=True)
+            return outcome
+
+    bundle = run(tmp_path, HidingLinkAdapter(), workspace_root=tmp_path)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "success"
+    assert not (bundle / "raw" / "sub").exists() and not (bundle / "raw" / "sub").is_symlink()
+    assert not list(bundle.rglob("aliased.json")), "no path in the bundle reaches the aliased file"
+    assert any("were cut" in note and f"sub -> {behind}" in note for note in execution["notes"])
+    # The host alias is left exactly as the scanner made it: this cuts the name, not the file.
+    assert host.stat().st_nlink == 2
+    host.write_text("changed after the scan\n", encoding="utf-8")
+    assert (behind / "aliased.json").read_text(encoding="utf-8") == "changed after the scan\n"
 
 
 # --- nothing a scanner names can make the bundle unrecordable ------------------------------
@@ -2029,6 +2350,9 @@ class CompleteCaptureAdapter(FakeAdapter):
         elif self.trace == "symlink":
             events.symlink_to(Path(kwargs["raw_dir"]) / "native.json")
             outcome.trace_path = events
+        elif self.trace == "empty":
+            events.write_text("", encoding="utf-8")
+            outcome.trace_path = events
         elif self.trace == "outside":
             outcome.trace_path = self.elsewhere
         return outcome
@@ -2063,6 +2387,28 @@ def test_a_capture_category_cannot_claim_complete_in_a_bundle_with_no_counted_tr
     assert result["bundles_resolved"] is True, "a missing trace is not a lost claim"
     assert [claim["claim_id"] for claim in result["claims"]] == ["c1"]
     assert execution["status"] == result["status"] and execution["error"] == result["error"]
+
+
+def test_a_complete_capture_claim_is_not_backed_by_a_trace_with_no_events_in_it(tmp_path):
+    """A trace file that exists and holds nothing is the fifth way, and it counted as a trace.
+
+    The count was a trace as long as it was an integer, so zero read as a bundle that held an
+    observation. It holds the same record a run that observed nothing at all leaves, and no
+    category can claim complete observation on the strength of it, so the bundle could say
+    ``trace.events`` zero beside ``capture.finding_submitted`` complete and still be a clean
+    success. A count backs a claim only when there is at least one event behind it.
+    """
+    bundle = run(tmp_path, CompleteCaptureAdapter("empty"), trace_mode="content")
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["trace"]["events"] == 0 and execution["trace"]["path"] == "trace/events.jsonl"
+    assert execution["capture"]["finding_submitted"] == "partial"
+    assert execution["capture"]["model_requests"] == "partial", "only a complete claim is touched"
+    assert result["status"] == "partial" and result["error"]["code"] == "trace_capture_gap"
+    assert "complete capture of finding_submitted claimed with no trace event" in result["error"]["message"]
+    assert result["bundles_resolved"] is True, "an empty trace is not a lost claim"
+    assert [claim["claim_id"] for claim in result["claims"]] == ["c1"]
 
 
 def test_a_complete_capture_claim_a_counted_trace_backs_is_left_alone(tmp_path):
