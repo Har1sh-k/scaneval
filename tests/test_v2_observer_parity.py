@@ -76,13 +76,17 @@ more scenario rather than one more node process.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 from datetime import datetime, timedelta, timezone
+import inspect
 import json
 import math
 from pathlib import Path
+import re
 import shutil
 import subprocess
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -104,6 +108,8 @@ FIXTURE_PATH = ROOT / "schema/v2/fixtures/trace-event-v2.json"
 FIXTURE = json.loads(FIXTURE_PATH.read_text())
 SDK_BUILD = ROOT / "sdk/typescript/dist/index.js"
 NODE = shutil.which("node")
+OBSERVER_GUIDE = ROOT / "docs" / "OBSERVER_SDK.md"
+TS_SOURCE = ROOT / "sdk/typescript/src/index.ts"
 
 EPOCH = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
 EPOCH_MS = int(EPOCH.timestamp() * 1000)
@@ -1992,6 +1998,75 @@ def test_python_never_measures_elapsed_time_with_the_injected_wall_clock():
     assert observer.get_state() == CaptureState()
 
 
+def test_two_threads_sharing_one_python_observer_lose_the_ordering_the_contract_promises():
+    """The Python class is not thread safe, and this is what that costs. See the guide.
+
+    ``Observer.emit`` reads ``self._sequence`` into the event it is building, calls the clock and
+    the ID factory, and increments afterwards. The read and the increment are separate bytecode
+    with caller code between them, so two threads inside that window both take the same number.
+    Nothing here is a race the test hopes to win: the injected clock waits on a barrier, so every
+    thread is provably inside the window before any of them leaves it.
+
+    The damage is the quiet kind. Four events are written, four lines land in the sink, and the
+    capture state reports no gap and no dropped event, because nothing was lost; what is gone is
+    ``sequence``, which the contract makes the only ordering a reader may rely on. The
+    TypeScript emitter cannot reach this state: its build runs to completion inside one
+    synchronous stretch before the first ``await``, and JavaScript gives it no second caller to
+    interleave with.
+
+    A harness that emits from more than one thread needs one observer per thread, each with its
+    own ``producer_id``, or its own lock around ``emit``. Neither emitter provides one.
+    """
+    threads = 4
+    at_the_window = threading.Barrier(threads)
+
+    def barrier_clock():
+        # Called after the sequence number has been read and before it has been incremented.
+        at_the_window.wait(timeout=30)
+        return EPOCH
+
+    written: list[dict] = []
+    guard = threading.Lock()
+
+    def sink(event: dict) -> None:
+        with guard:
+            written.append(event)
+
+    observer = Observer(
+        mode="metadata",
+        sink=sink,
+        run_id="run-1",
+        producer_id="producer-1",
+        clock=barrier_clock,
+        id_factory=id_factory(None),
+    )
+
+    def emit_one(index: int) -> None:
+        observer.emit(
+            type="tool.start", capture_status="complete", metadata={"thread": index}
+        )
+
+    workers = [threading.Thread(target=emit_one, args=(index,)) for index in range(threads)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=30)
+    assert not any(worker.is_alive() for worker in workers), "an emit never returned"
+
+    assert len(written) == threads, "every event was built and delivered"
+    assert [event["sequence"] for event in written] == [0] * threads, (
+        "one sequence number for four events: the counter is read and incremented without a lock"
+    )
+    assert sorted(event["metadata"]["thread"] for event in written) == list(range(threads))
+    # The ID factory's own counter is read and written the same unlocked way, so whether the
+    # four IDs come out distinct is not something this can assert either way. That is the same
+    # defect one field along, and it is why the guide says one observer per thread rather than
+    # naming the fields that survive.
+    # And nothing in the record says the ordering is gone, which is the point.
+    assert observer.get_state() == CaptureState()
+    observer.close()
+
+
 @needs_node
 def test_the_default_redactor_hides_the_same_keys_in_both_languages(matrix_pairs):
     """ASCII case folding only, so a Unicode key JavaScript keeps is not hidden by Python."""
@@ -2651,14 +2726,33 @@ def test_the_parity_matrix_covers_every_input_shape_the_contract_names():
 
 
 @needs_node
-def test_dropped_events_still_diverges_for_failures_that_lose_no_event(
+def test_no_scenario_is_excluded_from_the_dropped_events_comparison(
     matrix_pairs, operation_pairs
 ):
-    """The counter the two emitters once disagreed on, now compared in every scenario."""
-    for name in sorted(DIVERGENT_DROPPED_EVENTS):
-        pair = matrix_pairs.get(name) or operation_pairs.get(name)
-        assert pair is not None, name
-        python_case, node_case = pair
+    """The counter the two emitters once disagreed on, compared in every scenario there is.
+
+    This test was ``test_dropped_events_still_diverges_for_failures_that_lose_no_event``, and it
+    looped over ``DIVERGENT_DROPPED_EVENTS`` asserting that the excluded scenarios agreed. The
+    set went empty when that divergence was closed, so the loop body stopped running: the test
+    could not fail, and it went on reading as coverage of the very counter it no longer touched.
+    A review found it, and this is the replacement rather than a deletion, because the claim
+    behind the empty set is worth asserting and nothing else asserted it directly.
+
+    What the empty set means is that the two comparisons that consult it,
+    :func:`test_both_emitters_report_the_same_capture_state_for_every_matrix_case` and
+    :func:`test_the_operation_boundary_helpers_agree_across_languages`,
+    suppress nothing. That is a claim about coverage, so it is asserted over the scenarios
+    themselves: every case in both plans, with a guard so an empty plan fails here rather than
+    passing on no evidence. Writing a name back into the exclusion set now fails this test, which
+    is what the set was always supposed to cost.
+    """
+    assert DIVERGENT_DROPPED_EVENTS == frozenset(), sorted(DIVERGENT_DROPPED_EVENTS)
+    assert DIVERGENT_CAPTURE_STATE == frozenset(), sorted(DIVERGENT_CAPTURE_STATE)
+
+    pairs = {**matrix_pairs, **operation_pairs}
+    assert len(pairs) == len(matrix_pairs) + len(operation_pairs), "a scenario name is in both plans"
+    assert len(pairs) > 30, f"only {len(pairs)} scenarios: the plans did not run"
+    for name, (python_case, node_case) in sorted(pairs.items()):
         assert python_case["state"]["dropped_events"] == node_case["state"]["dropped_events"], name
 
 
@@ -2753,3 +2847,125 @@ def test_both_constructors_refuse_the_same_wiring_mistakes(tmp_path):
         "sink_without_write": "refused",
         "generator_function_sink": "refused",
     }
+
+
+def guide_code_block(section_title: str, language: str, containing: str) -> str:
+    """One fenced ``language`` block under one ``##`` heading of the SDK guide.
+
+    The block is chosen by a string it contains rather than by position, so inserting another
+    block into that section ahead of it fails nothing and renaming the thing it documents fails
+    here instead of silently checking a different block.
+    """
+    lines = OBSERVER_GUIDE.read_text(encoding="utf-8").splitlines()
+    headings = [index for index, line in enumerate(lines) if line.startswith("## ")]
+    span: list[str] | None = None
+    for position, start in enumerate(headings):
+        if lines[start][3:].strip() == section_title:
+            end = headings[position + 1] if position + 1 < len(headings) else len(lines)
+            span = lines[start:end]
+            break
+    assert span is not None, f"{OBSERVER_GUIDE} has no section titled {section_title!r}"
+    blocks: list[list[str]] = []
+    inside = False
+    for line in span:
+        if line.startswith("```"):
+            inside = line.strip() == f"```{language}"
+            if inside:
+                blocks.append([])
+            continue
+        if inside:
+            blocks[-1].append(line)
+    matching = ["\n".join(block) for block in blocks if containing in "\n".join(block)]
+    assert len(matching) == 1, (
+        f"{len(matching)} {language} blocks under {section_title!r} contain {containing!r}"
+    )
+    return matching[0]
+
+
+def documented_keyword_options(block: str) -> dict[str, object]:
+    """``{name: default}`` for the keyword-only parameters of ``__init__`` in a guide block.
+
+    Parsed with :mod:`ast` rather than by regular expression, because what this compares against
+    is a real signature and the two have to be read the same way. The guide writes the body as
+    ``...``, which is valid Python, so the block parses as it stands.
+    """
+    tree = ast.parse(block)
+    initializers = [
+        node
+        for classdef in tree.body
+        if isinstance(classdef, ast.ClassDef)
+        for node in classdef.body
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+    ]
+    assert len(initializers) == 1, "the guide block no longer documents one __init__"
+    signature = initializers[0].args
+    assert [argument.arg for argument in signature.args] == ["self"], (
+        "the guide documents a positional parameter besides the receiver"
+    )
+    assert not signature.posonlyargs and signature.vararg is None and signature.kwarg is None
+    assert len(signature.kwonlyargs) == len(signature.kw_defaults)
+    options: dict[str, object] = {}
+    for argument, default in zip(signature.kwonlyargs, signature.kw_defaults):
+        assert default is not None, f"{argument.arg} is documented without a default"
+        options[argument.arg] = ast.literal_eval(default)
+    return options
+
+
+def ts_interface_body(text: str, name: str) -> list[str]:
+    """The declaration lines of ``export interface <name> { ... }``, comments and blanks dropped."""
+    match = re.search(rf"^export interface {name} \{{(.*?)^\}}", text, re.M | re.S)
+    assert match, f"no exported interface named {name}"
+    body = []
+    for line in match.group(1).splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("//", "/*", "*")):
+            continue
+        # Drop a trailing line comment so a note beside a field is not a difference.
+        body.append(" ".join(stripped.split("//")[0].split()))
+    return body
+
+
+def test_the_constructor_options_the_guide_documents_are_the_ones_the_code_takes():
+    """Both option lists, read out of this guide and compared with the code that takes them.
+
+    The guide's "what this document checks about itself" section separates what a test reads out
+    of the file from what is prose, and both API sections carry an "everything below is exported"
+    promise that is checked. A review pointed out that the constructor option lists sat inside
+    those checked-looking blocks while nothing read them: the Python export check skips every
+    indented line, so the ``__init__`` parameters are not in it, and the TypeScript export check
+    compares interface *names* and only ``CaptureState``'s fields, so ``ObserverOptions`` was a
+    name with an unchecked body under it. An option renamed, removed, or given a different
+    default in either language would have left the guide telling a harness author to pass
+    something the constructor does not take.
+
+    Both halves are read out of the document rather than stated here, so this cannot drift into
+    a third copy of the same list: the Python parameters and their defaults are parsed from the
+    guide's own code block and compared with :func:`inspect.signature`, and the TypeScript
+    ``ObserverOptions`` body is compared line for line with the one in the SDK source. Neither
+    half needs node or a build.
+    """
+    documented = documented_keyword_options(
+        guide_code_block("Python API", "python", "class Observer:")
+    )
+    signature = inspect.signature(Observer.__init__)
+    parameters = list(signature.parameters.values())
+    assert parameters[0].name == "self"
+    actual = {
+        parameter.name: parameter.default
+        for parameter in parameters[1:]
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    }
+    assert len(actual) == len(parameters) - 1, "the constructor takes something that is not keyword only"
+    assert documented == actual, "the guide's Python constructor block is not the signature"
+    assert documented, "the guide documents no constructor option at all"
+
+    # The TypeScript half: one options interface, compared with the SDK source line for line.
+    guide_interface = ts_interface_body(
+        guide_code_block("TypeScript API", "ts", "export interface ObserverOptions"),
+        "ObserverOptions",
+    )
+    source_interface = ts_interface_body(TS_SOURCE.read_text(encoding="utf-8"), "ObserverOptions")
+    assert guide_interface == source_interface
+    assert len(guide_interface) == len(documented), (
+        "the two languages document a different number of constructor options"
+    )

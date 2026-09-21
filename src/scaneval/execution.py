@@ -75,12 +75,12 @@ to being written, and it renders such text rather than failing on it.
 How completely this run was observed is one fact, derived in one place. :func:`_capture_record`
 reads the observer's reported state and the bundle's own trace record together and returns both
 the ``capture`` mapping the record carries and how the observation broke, so the two cannot
-disagree: a category cannot claim ``complete`` capture in a bundle that holds no counted trace,
-and a reported gap cannot sit beside a clean success. A run whose observation broke is recorded
-as ``partial`` with error code ``trace_capture_gap`` when nothing else already failed, and keeps
-the adapter's own ``bundles_resolved``. Losing trace events is not losing a claim, so nothing
-about the claim set is withdrawn; what is withdrawn is the result's standing as a clean complete
-observation.
+disagree: no category can claim it was observed at all, to any extent, in a bundle that holds no
+counted trace, and a reported gap cannot sit beside a clean success. A run whose observation
+broke is recorded as ``partial`` with error code ``trace_capture_gap`` when nothing else already
+failed, and keeps the adapter's own ``bundles_resolved``. Losing trace events is not losing a
+claim, so nothing about the claim set is withdrawn; what is withdrawn is the result's standing
+as a clean complete observation.
 
 Directory separation documents the boundary; it does not enforce it. Network and
 filesystem policy are declared here and must be enforced outside this process.
@@ -379,6 +379,14 @@ def _privatize(root: Path) -> tuple[list[str], list[str], list[str]]:
     the host file keeps its own inode and is never written to. The copy is read and replaced
     through the bundle's own name, so the host path is neither opened for writing nor unlinked.
 
+    What the check behind that actually establishes, because the note this writes must not say
+    more: a link count above one, and nothing else. It says the inode has at least one other
+    name; it does not say where that name is. Two staged files the scanner linked to each other
+    inside ``raw/`` have the same link count as one linked to the operator's private key, and
+    this sweep cannot tell them apart without searching every filesystem the bundle can reach,
+    which it does not do. So both are copied, which is right either way, and the record says a
+    link count was observed rather than claiming an alias out of the bundle was proved.
+
     A symbolic link. It used to be kept, on the argument that it is visibly a link and nothing
     here follows one. That argument was wrong twice. ``bundle/raw/x`` naming a host file is the
     same alias a hard link is, and it stays live: it is what anyone reading the bundle by hand
@@ -463,8 +471,8 @@ def _privatize(root: Path) -> tuple[list[str], list[str], list[str]]:
                 os.replace(private, path)
             except OSError as exc:
                 Path(private).unlink(missing_ok=True)
-                failures.append(f"{relative}: the hard link could not be copied, so this path is "
-                                f"still a second name for a file outside the bundle: "
+                failures.append(f"{relative}: the hard link could not be copied, so this path may "
+                                f"still be a second name for a file outside the bundle: "
                                 f"{_failure_message(exc)}")
                 continue
             dealiased.append(relative)
@@ -662,6 +670,16 @@ def _recordable_document(document: dict) -> tuple[dict, int]:
     return dict(rendered), count  # type: ignore[call-overload]
 
 
+# Every ``capture`` value that claims the category was observed at all, and so needs a trace in
+# this bundle behind it. ``unavailable`` and ``not_applicable`` are the rest of the schema's
+# enumeration and claim no observation, so nothing backs them and nothing has to.
+#
+# A tuple rather than a set, because the membership test runs over values an adapter supplied and
+# those are not yet known to be strings: a ``capture`` holding a dict is a contract violation the
+# record is built to report, and ``in`` over a set would hash it and raise before it could be.
+_OBSERVED_CAPTURE = ("complete", "partial", "redacted")
+
+
 def _capture_record(capture: dict, capture_state: dict | None, trace_record: dict | None,
                     ) -> tuple[dict, str | None]:
     """The capture mapping this bundle can support, and how the observation of this run broke.
@@ -677,11 +695,20 @@ def _capture_record(capture: dict, capture_state: dict | None, trace_record: dic
     know whether the file landed in the bundle. This module does know, so this is where the two
     are reconciled.
 
-    The rule: a category may claim ``complete`` only in a bundle that holds a trace with at
-    least one event in it. Anywhere else, every ``complete`` becomes ``partial``, because what
-    was recorded is then a claim of complete observation with no record of the observation
-    behind it. Nothing else is touched: a category the adapter called ``partial``,
-    ``unavailable``, or ``not_applicable`` already claims less than the trace could back.
+    The rule: a category may claim that it was observed at all only in a bundle that holds a
+    trace with at least one event in it. Anywhere else, every value in :data:`_OBSERVED_CAPTURE`
+    becomes ``unavailable``, because what was recorded is then a claim of observation with no
+    record of any observation behind it. Two values are left alone, and only two: ``unavailable``
+    claims nothing, and ``not_applicable`` says the category does not apply to this scan at all,
+    which is a fact about the scanner rather than about what this run observed.
+
+    The rule used to reconcile ``complete`` alone, and rewrite it to ``partial``. That closed the
+    loudest half and left the quiet half open: a bundle holding no trace at all went on recording
+    ``partial`` observation of categories nothing had observed, and the downgrade wrote a second
+    one of those into the record itself. ``partial`` is a claim that something was seen and some
+    of it was missed, and ``redacted`` is a claim that something was seen and stored with values
+    hidden; neither is a claim a bundle with no trace in it can back any better than ``complete``
+    is. The downgrade target is therefore the one value that claims nothing.
 
     A trace of zero events is one of those places, and it used to count as a trace. An empty
     file backs no claim about what was observed: it is the same record a run that wrote nothing
@@ -704,11 +731,12 @@ def _capture_record(capture: dict, capture_state: dict | None, trace_record: dic
     events = trace_record.get("events") if isinstance(trace_record, dict) else None
     counted = isinstance(events, int) and not isinstance(events, bool) and events > 0
     recorded = dict(capture)
-    unbacked = sorted(name for name, value in recorded.items() if value == "complete") if not counted else []
+    unbacked = sorted(name for name, value in recorded.items()
+                      if value in _OBSERVED_CAPTURE) if not counted else []
     for name in unbacked:
-        recorded[name] = "partial"
+        recorded[name] = "unavailable"
     if unbacked:
-        reasons.append(f"complete capture of {', '.join(unbacked)} claimed with no trace event "
+        reasons.append(f"observed capture of {', '.join(unbacked)} claimed with no trace event "
                        "in this bundle")
     return recorded, " and ".join(reasons) or None
 
@@ -1163,8 +1191,11 @@ def run_invocation(
                         # it outlives a discarded outcome like the capture and cleanup notes.
                         alias_notes.append(
                             f"{len(dealiased)} file(s) staged into {final.name}/ were hard links "
-                            f"to a file outside the bundle and were copied so the bundle holds "
-                            f"its own: {', '.join(dealiased[:5])}")
+                            f"and were copied so the bundle holds an inode of its own. What was "
+                            f"observed of each is a link count above one, so the inode had at "
+                            f"least one other name; where that name is, inside this bundle or "
+                            f"outside it, is not something this sweep looked for: "
+                            f"{', '.join(dealiased[:5])}")
                     if cut:
                         # The link is gone from the bundle and its target is recorded here, so
                         # what the scanner left is a fact in the record rather than a live path

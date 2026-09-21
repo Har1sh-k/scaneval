@@ -15,13 +15,32 @@ writes files, it may run a subprocess, and in the interesting configurations it 
 calls to a model provider. ScanEval never assumes any of that is well behaved. It assumes the
 opposite and tries to record the truth about it.
 
-Recording the truth is the property this package actually provides. An invocation ends with a
-bundle whose `result.json` and `execution.json` are written together or not at all; a scan that
-broke a contract is an explicit error record rather than an empty success; a path that left the
-directory it belonged to is a refusal with a note rather than a file that was followed; a source
-the scan changed is a `partial` result that cannot stand as a clean observation of the frozen
-input. Those are claims about the record, and they hold against a buggy scanner and a confused
-one.
+Recording the truth is the property this package actually provides. No failure this process can
+observe leaves `result.json` in a bundle without `execution.json` beside it; a scan that broke a
+contract is an explicit error record rather than an empty success; a path that left the directory
+it belonged to is a refusal with a note rather than a file that was followed; a source the scan
+changed is a `partial` result that cannot stand as a clean observation of the frozen input. Those
+are claims about the record, and they hold against a buggy scanner and a confused one.
+
+**The exception to the first of those, stated rather than glossed.** "Written together or not at
+all" is what `_write_new_documents` aims at and not what it can guarantee. Both documents are
+serialized, encoded, and staged as temporary files before either is renamed into place, and a
+rename that fails removes the one that already landed, so every failure the process sees is
+contained. Two failures are outside that. The two renames are separate system calls, so a process
+killed between them, by a `SIGKILL`, an out-of-memory kill, or a power loss, leaves `result.json`
+alone in the bundle. And the removal that undoes the first rename can itself fail, on a read-only
+filesystem or a directory whose permissions changed under the run; the invocation then raises
+that failure and `result.json` stays. Both leave a successful-looking result with no record of
+the run that produced it.
+`tests/test_v2_execution.py::test_a_rollback_removal_that_fails_leaves_the_result_without_its_execution_record`
+drives the second and asserts the split bundle. The first cannot be driven from inside the
+process doing the renaming. Reading a bundle means checking that both documents are there, not
+assuming it.
+
+A third shape is not an exception to it, because it leaves neither document: several failures end
+an invocation with a bundle directory holding `request.json`, `raw/`, and `trace/` and nothing
+else. An adapter whose `name` or `adapter_version` is not a non-empty string is one, and the
+unbounded read named under the limits below is another.
 
 ## What the checks are for
 
@@ -35,11 +54,36 @@ resolved again afterwards. What it catches is a link that is there when the chec
 
 **The input hash.** The exported tree is hashed before the scan and the result binds to that
 hash, so a result cannot be attributed to an input nobody can reconstruct. It says what was on
-disk when the hash was taken.
+disk when the hash was taken, and it says it about the content of regular files, which is the
+same enumeration and the same structural limit as the check below.
 
 **Source-modification detection.** The same tree is walked again after the scanner returns, and
 a difference is recorded as a changed execution condition. It compares two moments. It says
-nothing about the moments in between.
+nothing about the moments in between, and it says nothing at all about most of what a directory
+can hold.
+
+The second gap there is structural rather than temporal, and it is easy to miss because the
+first one is the one everybody names. Both walks are `walk_regular_files`, which enumerates
+regular files and hashes their contents: a symbolic link, a named pipe, a socket, a device node,
+and a directory with nothing in it are not in the map, on either side, and neither are a file's
+mode, owner, timestamps, or extended attributes. So a scanner can plant a symbolic link in the
+exported source pointing at the operator's private key, plant a named pipe where the next tool
+to read the tree will block on it, create an empty directory, or make a file executable, and the
+comparison is between two identical maps. `source_modified` reads `false`, `modified_paths` is
+empty, and the run is a clean `success`. No race is involved and no timing helps: the check
+cannot see these things at any moment, so waiting for a quieter one changes nothing.
+
+What it does catch is content. A regular file whose bytes changed, a regular file that appeared,
+a regular file that went away, and a regular file replaced by something that is not one all move
+the map and are recorded. An extra hard link the scanner makes to a file already in the tree is
+caught too, because the new name is a regular file the walk enumerates. Read `source_modified:
+false` as "no regular file's content or name in this tree changed between the two walks", which
+is what it is, and never as "the input the scanner was handed is the input that is there now".
+
+`tests/test_v2_execution.py::test_a_scanner_that_changes_the_input_in_ways_the_walk_cannot_see_is_recorded_as_a_clean_run`
+plants all four, asserts the clean bundle the code really produces, and carries the hard link
+beside them as the control. It documents the gap rather than pretending to close it, for the same
+reason the restore-before-return test does.
 
 **State capture.** The scanner's scratch directories are copied into the bundle without
 following a symbolic link, and a file the staged tree would have carried in under a second name
@@ -151,6 +195,49 @@ kind of thing and the only kind that closes this:
   into making lands somewhere that does not matter. The hard-link example above is dangerous only
   because ScanEval runs with reach the scanner should never have.
 
+## The second limit, named: nothing here bounds what a scanner can make ScanEval read, copy, or spend
+
+The first limit is about *when* a check runs. This one is about *how much* the checks themselves
+cost, and it is separate because no amount of ordering fixes it:
+
+**Every size in this package is the scanner's to choose. ScanEval sets no ceiling on the bytes it
+reads into memory, the bytes it copies into the bundle, or the seconds it spends doing either.**
+
+The invocation timeout bounds the scanner's own process, and only to the extent the adapter
+enforces it; it bounds nothing the runner does after the scanner returns, and that is where the
+reading and copying happen. Four places, all reached with input the scanner wrote:
+
+- **The trace count.** `_read_trace` calls `read_regular_file` on the declared trace file, which
+  reads the whole file into memory in one call, and then decodes it as UTF-8. There is no size
+  check anywhere on that path. A scanner that writes a trace larger than the memory the process
+  can get raises `MemoryError`, which is neither the `OSError` nor the `UnicodeDecodeError` that
+  call site contains, so it travels out of `run_invocation` uncaught. The invocation then ends
+  with a bundle directory holding `request.json`, `raw/`, and `trace/`, and neither `result.json`
+  nor `execution.json`: one file the scanner chose the size of, and no record of the run at all.
+  The harness adapter's `read_record` reads every harness record the same unbounded way, and
+  contains `OSError` alone for the same reason.
+  `tests/test_v2_execution.py::test_a_failure_the_trace_read_does_not_contain_ends_the_invocation_with_no_documents`
+  injects the failure rather than provoking it, and asserts the bundle that is left.
+- **The state capture.** Each directory the adapter declares as scanner scratch space is copied
+  whole into `raw/harness-state/`. The scanner writes that directory and decides how large it is.
+- **The de-alias sweep.** Every staged file with a link count above one is copied to give the
+  bundle its own inode. The scanner decides how many such files there are and how large each is.
+- **The artifact hashes.** `sha256_file` streams, so memory is bounded there, but the time and
+  the disk reads are not.
+
+Two smaller shapes belong with them. A note that names every staged entry the sweep could not
+clear joins all of them into one string, so an execution record can be made large by making many
+unclearable entries. And the exported source is walked and hashed twice, before and after, over
+whatever the scanner left in it.
+
+None of this is a deception of the record; it is a denial of service against the run, and in the
+trace-read case a denial of the record itself. It is not patchable into safety from in here
+either: a cap on the trace read turns a crash into a refusal, which is better, but the copies and
+the walks would each need their own cap, each cap is a number somebody has to pick, and a scanner
+that wants to exhaust the host has the whole filesystem to do it with. What actually bounds it is
+the environment: a memory limit, a disk quota, and a wall-clock kill on the sandbox, which is the
+same answer as the section above and for the same reason.
+
 ## What closes it, and what an operator should do
 
 Closing this requires taking control of the filesystem and the process away from the scanner,
@@ -167,6 +254,9 @@ which is an operating-system job:
   the execution record is a declaration; the environment has to enforce it.
 - Run as an unprivileged user with no access to the operator's home directory, credentials, or
   the ScanEval run directory. Nothing in the bundle path should be reachable from inside.
+- Give the sandbox a **memory limit, a disk quota, and a wall-clock kill**, and size them for the
+  runner's own post-scan reading and copying rather than for the scanner alone. Nothing in this
+  package bounds any of the three; the section above says where each is spent.
 - Take the bundle out of the sandbox after the process has exited and the filesystem is no
   longer writable by anything the scan started, then hash it outside.
 
@@ -176,11 +266,19 @@ it does not enforce it.
 
 ## How to read a bundle
 
+- Check that both `result.json` and `execution.json` are there before reading either. A bundle
+  holding one without the other is a killed or failed write, not a result: the exception named at
+  the top of this document.
 - A clean bundle says the record is internally consistent and that no refused path, capture gap,
   source modification, or import loss was observed. It is not a certificate that the scanner
   behaved.
+- `source_modified: false` covers the content and the names of regular files, and nothing else. A
+  link, a pipe, a device node, an empty directory, or a mode change the scanner left in the input
+  is not in that comparison at all.
 - A bundle from a run that was not OS-isolated carries the whole of this document as its caveat.
   Say so when you publish numbers from one.
 - Treat the trace and the raw output as what the run reported about itself. `capture` says how
-  completely each category was observed, and a category cannot claim complete observation in a
-  bundle that holds no counted trace.
+  completely each category was observed, and no category can claim it was observed at all, to any
+  extent, in a bundle that holds no counted trace: `complete`, `partial` and `redacted` are each
+  rewritten to `unavailable` there. `not_applicable` is untouched, because it says the category
+  does not apply to this scan rather than that this run saw something.

@@ -1924,6 +1924,139 @@ def test_a_scanner_that_restores_the_source_before_returning_is_recorded_as_a_cl
     assert result["input_hash"] == execution["provenance"]["tree_hash"]
 
 
+@mkfifo_required
+def test_a_scanner_that_changes_the_input_in_ways_the_walk_cannot_see_is_recorded_as_a_clean_run(tmp_path):
+    """The structural half of the same limit, which has nothing to do with timing.
+
+    The before-and-after comparison is over ``walk_regular_files``, which enumerates regular
+    files and hashes their contents. Everything else a directory can hold is outside it in both
+    directions, and so is every attribute of a file that is not its bytes. This adapter waits
+    until the scan is over and then plants a symbolic link to a host file, a named pipe, and an
+    empty directory in the exported source, and makes a file executable. Nothing races anything:
+    the walk could run a week later and still see two identical maps.
+
+    The document says so under source-modification detection rather than claiming the check is
+    narrower than it is, and this asserts the clean-looking bundle the code really produces. The
+    control is in the same run: a hard link to a file already in the tree is a new regular file
+    name, so that one is caught, which is what makes the rest a gap in the map and not in the walk.
+    """
+    host = tmp_path / "host-secret"
+    host.write_text("a host file the scan never produced\n", encoding="utf-8")
+    planted: dict[str, bool] = {}
+
+    class StructuralAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            source = Path(kwargs["source_dir"])
+            (source / "planted.link").symlink_to(host)
+            os.mkfifo(source / "planted.fifo")
+            (source / "planted-empty").mkdir()
+            (source / "README.md").chmod(0o777)
+            # Asserted from inside the scan, because the private workspace holding them is
+            # removed once the bundle is taken out of it.
+            planted["link"] = (source / "planted.link").is_symlink()
+            planted["fifo"] = stat.S_ISFIFO(os.lstat(source / "planted.fifo").st_mode)
+            planted["directory"] = (source / "planted-empty").is_dir()
+            planted["mode"] = bool(os.lstat(source / "README.md").st_mode & stat.S_IXUSR)
+            return outcome
+
+    bundle = run(tmp_path, StructuralAdapter())
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert planted == {"link": True, "fifo": True, "directory": True, "mode": True}
+    assert result["status"] == "success" and "error" not in result
+    assert execution["provenance"]["source_modified"] is False
+    assert execution["provenance"]["modified_paths"] == []
+    assert "planted" not in json.dumps(execution), "nothing about them reached the record"
+
+    # The control: a regular file the scanner adds does move the map, so the gap is what the
+    # walk cannot enumerate rather than the comparison failing to compare.
+    class LinkingAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            os.link(Path(kwargs["source_dir"]) / "app.py", Path(kwargs["source_dir"]) / "app.py.alias")
+            return outcome
+
+    other = run(tmp_path / "second", LinkingAdapter())
+    caught = load_document(other / "execution.json", "execution-record")
+    assert caught["provenance"]["source_modified"] is True
+    assert caught["provenance"]["modified_paths"] == ["app.py.alias"]
+
+
+def test_a_rollback_removal_that_fails_leaves_the_result_without_its_execution_record(tmp_path, monkeypatch):
+    """The stated exception to "written together or not at all", driven rather than asserted.
+
+    A rename that fails removes the document that already landed, which is what keeps the pair
+    together for every failure this module can observe. That removal is itself a filesystem
+    operation and can fail: a read-only filesystem, a directory whose permissions changed under
+    the run. The rollback is then incomplete, its own error is what travels out, and the bundle
+    holds ``result.json`` with no ``execution.json`` beside it.
+
+    The other way there is a process killed between the two renames, which no test can drive from
+    inside the process doing the renaming. Both are named in ``docs/THREAT_MODEL.md``, which is
+    why this asserts the split bundle rather than a promise the code does not keep.
+    """
+    real_replace = os.replace
+    real_unlink = Path.unlink
+
+    def failing_replace(source, destination):
+        if str(destination).endswith("execution.json"):
+            raise OSError("No space left on device")
+        return real_replace(source, destination)
+
+    def failing_unlink(self, missing_ok=False):
+        if self.name == "result.json":
+            raise PermissionError("the rollback removal was refused too")
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+    with pytest.raises(PermissionError, match="the rollback removal was refused too"):
+        run(tmp_path, FakeAdapter())
+    monkeypatch.undo()
+
+    bundle = tmp_path / "out" / invocation_id("input-a", "fake-sys", 1)
+    assert (bundle / "result.json").is_file(), "the document the rollback could not remove"
+    assert not (bundle / "execution.json").exists()
+    assert sorted(entry.name for entry in bundle.iterdir()) == ["raw", "request.json", "result.json"]
+
+
+def test_a_failure_the_trace_read_does_not_contain_ends_the_invocation_with_no_documents(tmp_path, monkeypatch):
+    """The unbounded read, and what it costs when the bytes do not fit.
+
+    ``_read_trace`` reads the declared trace file whole, with no size check anywhere on the path,
+    and the call site contains ``OSError`` and ``UnicodeDecodeError``. A file too large to hold
+    raises neither: ``MemoryError`` travels out of ``run_invocation``, and the invocation ends
+    with a bundle directory holding the request and the scanner's own output and neither bundle
+    document. The scanner picks the size, so it picks whether the run is recorded at all.
+
+    The failure is injected rather than provoked, because provoking it means exhausting the
+    machine running the suite. What is under test is the containment, not the allocator: this
+    fails if that call site ever grows a guard wide enough to record the failure instead.
+    """
+
+    class TracingAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            events = Path(kwargs["trace_dir"]) / "events.jsonl"
+            events.write_text('{"type":"finding.submitted"}\n', encoding="utf-8")
+            outcome.trace_path = events
+            return outcome
+
+    def too_large(path):
+        raise MemoryError("the trace did not fit in memory")
+
+    monkeypatch.setattr(execution_module, "read_regular_file", too_large)
+    with pytest.raises(MemoryError, match="the trace did not fit in memory"):
+        run(tmp_path, TracingAdapter(), trace_mode="metadata")
+    monkeypatch.undo()
+
+    bundle = tmp_path / "out" / invocation_id("input-a", "fake-sys", 1)
+    assert sorted(entry.name for entry in bundle.iterdir()) == ["raw", "request.json", "trace"]
+    assert not (bundle / "result.json").exists() and not (bundle / "execution.json").exists()
+
+
 def test_the_threat_model_document_states_the_limit_this_package_does_not_defend():
     """The module docstrings point at it, so it has to say the things they rely on it saying."""
     threat_model = Path(__file__).resolve().parents[1] / "docs" / "THREAT_MODEL.md"
@@ -1935,6 +2068,33 @@ def test_the_threat_model_document_states_the_limit_this_package_does_not_defend
         assert expected in text, f"the document must name {expected} as what an operator needs"
     assert "docs/THREAT_MODEL.md" in execution_module.__doc__
     assert "docs/THREAT_MODEL.md" in materialize_module.__doc__
+
+
+def test_the_threat_model_document_states_the_three_claims_a_review_found_overstated():
+    """Three sentences a reviewer reproduced as false or narrower than they read.
+
+    Each is a claim the document made about the code, so each is checked against the document
+    rather than left to the next reader to re-derive. The exception to the bundle-write pairing,
+    the structural half of the source-modification gap, and the absence of any bound on what a
+    scanner can make this package read, copy, or spend, which is the one that can end an
+    invocation with no record of it at all.
+    """
+    text = (Path(__file__).resolve().parents[1] / "docs" / "THREAT_MODEL.md").read_text(encoding="utf-8")
+    # One line, so a claim this looks for is found wherever the paragraph happens to wrap.
+    lowered = " ".join(text.lower().split())
+
+    # The pairing, with its exception rather than as an unconditional guarantee.
+    assert "no failure this process can observe leaves" in lowered
+    assert "the exception to the first of those" in lowered
+    assert "killed" in lowered and "removal that undoes the first rename" in lowered
+    # The structural half of the modification gap, named as structural rather than temporal.
+    assert "structural rather than temporal" in lowered
+    for shape in ("symbolic link", "named pipe", "device node", "empty"):
+        assert shape in lowered, f"the document must name {shape} as outside the comparison"
+    # The bound that does not exist, named as a limit of its own.
+    assert "read, copy, or spend" in lowered
+    assert "sets no ceiling" in lowered
+    assert "memoryerror" in lowered and "no record of the run at all" in lowered
 
 
 def test_the_threat_model_document_names_the_class_two_reported_findings_belong_to():
@@ -2456,7 +2616,14 @@ def test_an_artifact_named_in_bytes_the_record_cannot_carry_is_dropped_with_a_no
 
 
 class CompleteCaptureAdapter(FakeAdapter):
-    """Reports complete capture of a category; *trace* decides what trace the bundle ends up with."""
+    """Reports capture of four categories; *trace* decides what trace the bundle ends up with.
+
+    One category per value the schema's enumeration carries, so every one of them meets the
+    reconciliation: ``complete`` and ``partial`` and ``redacted`` each claim the category was
+    observed, to a different extent, and ``not_applicable`` claims the category does not apply
+    to this scan at all. The first three need a trace behind them and the fourth needs none,
+    which is what the downgrade tests below and their control are about.
+    """
 
     def __init__(self, trace: str, elsewhere: Path | None = None):
         super().__init__()
@@ -2465,7 +2632,8 @@ class CompleteCaptureAdapter(FakeAdapter):
 
     def scan(self, **kwargs):
         outcome = super().scan(**kwargs)
-        outcome.capture = {"model_requests": "partial", "finding_submitted": "complete"}
+        outcome.capture = {"model_requests": "partial", "finding_submitted": "complete",
+                           "context_selection": "redacted", "tool_calls": "not_applicable"}
         trace_dir = kwargs["trace_dir"]
         if trace_dir is None:
             return outcome
@@ -2489,15 +2657,23 @@ class CompleteCaptureAdapter(FakeAdapter):
     [("missing", "content"), ("symlink", "content"), ("outside", "content"), ("written", "off")],
     ids=["no-trace-file", "trace-is-a-link", "trace-outside-the-bundle", "tracing-off"],
 )
-def test_a_capture_category_cannot_claim_complete_in_a_bundle_with_no_counted_trace(tmp_path, trace, trace_mode):
-    """``trace.events`` null beside ``capture.finding_submitted`` complete, in four ways.
+def test_no_capture_category_may_claim_observation_in_a_bundle_with_no_counted_trace(tmp_path, trace, trace_mode):
+    """``trace.events`` null beside a ``capture`` that says the run was observed, in four ways.
 
     The two used to be written independently into one document: the count came from the file
     this module could find in the bundle, and the category came from the adapter, which reports
     what its observer saw and cannot know whether the file landed. Every way the count goes
-    missing left the record claiming a complete observation with no observation behind it, and
-    the run still read as a clean success. Both now come from one derivation, so the category is
+    missing left the record claiming an observation with no observation behind it, and the run
+    still read as a clean success. Both now come from one derivation, so the categories are
     downgraded and the run is partial with the reason named.
+
+    The reconciliation used to cover ``complete`` alone, and rewrite it to ``partial``. A review
+    pointed out that it was then writing the very thing it refuses: ``partial`` claims the
+    category was observed and some of it was missed, ``redacted`` claims it was observed and
+    stored with values hidden, and a bundle holding no trace backs neither any better than it
+    backs ``complete``. Every value that claims an observation is downgraded now, to the one
+    value that claims none, and the two here that claim none are left exactly as the adapter
+    wrote them.
     """
     elsewhere = tmp_path / "elsewhere.jsonl"
     elsewhere.write_text('{"type":"finding_submitted"}\n', encoding="utf-8")
@@ -2505,22 +2681,27 @@ def test_a_capture_category_cannot_claim_complete_in_a_bundle_with_no_counted_tr
 
     result = load_document(bundle / "result.json", "scan-result")
     execution = load_document(bundle / "execution.json", "execution-record")
-    assert execution["capture"]["finding_submitted"] == "partial"
-    assert execution["capture"]["model_requests"] == "partial", "only a complete claim is touched"
+    assert execution["capture"] == {"finding_submitted": "unavailable",
+                                    "model_requests": "unavailable",
+                                    "context_selection": "unavailable",
+                                    "tool_calls": "not_applicable"}, (
+        "every claim of observation is downgraded; a category that does not apply is untouched")
     assert execution["trace"] is None or execution["trace"]["events"] is None
     assert result["status"] == "partial" and result["error"]["code"] == "trace_capture_gap"
-    assert "complete capture of finding_submitted" in result["error"]["message"]
+    assert ("observed capture of context_selection, finding_submitted, model_requests claimed "
+            "with no trace event in this bundle") in result["error"]["message"]
+    assert "tool_calls" not in result["error"]["message"], "nothing was withdrawn from it"
     assert result["bundles_resolved"] is True, "a missing trace is not a lost claim"
     assert [claim["claim_id"] for claim in result["claims"]] == ["c1"]
     assert execution["status"] == result["status"] and execution["error"] == result["error"]
 
 
-def test_a_complete_capture_claim_is_not_backed_by_a_trace_with_no_events_in_it(tmp_path):
+def test_a_capture_claim_is_not_backed_by_a_trace_with_no_events_in_it(tmp_path):
     """A trace file that exists and holds nothing is the fifth way, and it counted as a trace.
 
     The count was a trace as long as it was an integer, so zero read as a bundle that held an
     observation. It holds the same record a run that observed nothing at all leaves, and no
-    category can claim complete observation on the strength of it, so the bundle could say
+    category can claim observation on the strength of it, so the bundle could say
     ``trace.events`` zero beside ``capture.finding_submitted`` complete and still be a clean
     success. A count backs a claim only when there is at least one event behind it.
     """
@@ -2529,26 +2710,34 @@ def test_a_complete_capture_claim_is_not_backed_by_a_trace_with_no_events_in_it(
     result = load_document(bundle / "result.json", "scan-result")
     execution = load_document(bundle / "execution.json", "execution-record")
     assert execution["trace"]["events"] == 0 and execution["trace"]["path"] == "trace/events.jsonl"
-    assert execution["capture"]["finding_submitted"] == "partial"
-    assert execution["capture"]["model_requests"] == "partial", "only a complete claim is touched"
+    assert execution["capture"] == {"finding_submitted": "unavailable",
+                                    "model_requests": "unavailable",
+                                    "context_selection": "unavailable",
+                                    "tool_calls": "not_applicable"}
     assert result["status"] == "partial" and result["error"]["code"] == "trace_capture_gap"
-    assert "complete capture of finding_submitted claimed with no trace event" in result["error"]["message"]
+    assert "observed capture of context_selection, finding_submitted, model_requests claimed with no trace event" in result["error"]["message"]
     assert result["bundles_resolved"] is True, "an empty trace is not a lost claim"
     assert [claim["claim_id"] for claim in result["claims"]] == ["c1"]
 
 
-def test_a_complete_capture_claim_a_counted_trace_backs_is_left_alone(tmp_path):
-    """The control: the rule downgrades an unbacked claim, not tracing itself."""
+def test_every_capture_claim_a_counted_trace_backs_is_left_alone(tmp_path):
+    """The control: the rule downgrades an unbacked claim, not tracing itself.
+
+    One counted event backs every category the adapter reported, whatever each one claims, so
+    the mapping reaches the record exactly as it was written and the run stays a clean success.
+    """
     bundle = run(tmp_path, CompleteCaptureAdapter("written"), trace_mode="content")
 
     result = load_document(bundle / "result.json", "scan-result")
     execution = load_document(bundle / "execution.json", "execution-record")
     assert execution["trace"]["events"] == 1 and execution["trace"]["path"] == "trace/events.jsonl"
-    assert execution["capture"]["finding_submitted"] == "complete"
+    assert execution["capture"] == {"finding_submitted": "complete", "model_requests": "partial",
+                                    "context_selection": "redacted",
+                                    "tool_calls": "not_applicable"}
     assert result["status"] == "success" and "error" not in result
 
 
-def test_a_capture_gap_and_an_unbacked_complete_claim_are_reported_together(tmp_path):
+def test_a_capture_gap_and_an_unbacked_capture_claim_are_reported_together(tmp_path):
     """One derivation, so a record that breaks both ways says both rather than the first one."""
 
     class GappyUnbackedAdapter(CompleteCaptureAdapter):
@@ -2564,6 +2753,6 @@ def test_a_capture_gap_and_an_unbacked_complete_claim_are_reported_together(tmp_
     message = result["error"]["message"]
     assert result["status"] == "partial" and result["error"]["code"] == "trace_capture_gap"
     assert "a capture gap" in message and "3 dropped event(s)" in message
-    assert "complete capture of finding_submitted" in message
-    assert execution["capture"]["finding_submitted"] == "partial"
+    assert "observed capture of context_selection, finding_submitted, model_requests" in message
+    assert execution["capture"]["finding_submitted"] == "unavailable"
     assert execution["trace"]["capture_gap"] is True and execution["trace"]["events"] is None
