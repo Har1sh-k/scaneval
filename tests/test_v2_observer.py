@@ -1608,6 +1608,62 @@ def test_a_write_cancelled_after_it_started_is_counted_exactly_once():
     assert len(started) == 1
 
 
+def cancelled_during_flush(settle):
+    """Cancel the awaiting task while a queued write is still waiting for its first step.
+
+    The cancel callback is scheduled before ``emit`` creates the write task, so the loop
+    delivers it while the flush is already suspended on its gather and the write has not run
+    yet. ``gather`` then cancels that write, it settles as cancelled with no guard of its own
+    having run, and the cancellation travels on out of the await. Nothing sleeps and no real
+    clock is read: the ordering is the ready queue's, not a timer's.
+    """
+    written: list[dict] = []
+
+    async def sink(event):
+        written.append(event)
+
+    async def scenario():
+        observer = Observer(mode="metadata", sink=sink, clock=clock(), id_factory=ids())
+        before = asyncio.all_tasks()
+        asyncio.get_running_loop().call_soon(asyncio.current_task().cancel)
+        assert observer.emit(**event_fields()) is not None
+        queued = asyncio.all_tasks() - before
+        try:
+            await settle(observer)
+        except asyncio.CancelledError:
+            pass
+        return observer.get_state(), [task.cancelled() for task in queued]
+
+    state, cancelled = asyncio.run(scenario())
+    return state, cancelled, written
+
+
+def test_aflush_counts_a_write_its_own_cancellation_settled_as_cancelled():
+    """The batch is out of the pending set, so the cancellation is the last record of it.
+
+    ``aflush`` removes the batch it is about to gather from the pending set, and a cancellation
+    of the awaiting task makes ``gather`` raise instead of returning results. The write it
+    cancelled before that write's first step therefore ran no guard inside itself, is invisible
+    to the reaper and to the done callback, and never appeared in any result list: it used to
+    leave an event that reached no sink behind a capture state reading zero dropped events and
+    no gap at all. It is accounted in the batch now, before the cancellation is re-raised.
+    """
+    state, cancelled, written = cancelled_during_flush(lambda observer: observer.aflush())
+    # The premise: the write really did settle as cancelled without ever reaching the sink.
+    assert cancelled == [True]
+    assert written == []
+    # The conclusion: that event is a counted loss, not a clean state.
+    assert state == CaptureState(dropped_events=1, capture_gap=True, last_sink_error=GAP)
+
+
+def test_aclose_counts_the_writes_a_cancellation_settled_before_it_closes():
+    """The same loss through the close, which is the path a caller's timeout actually takes."""
+    state, cancelled, written = cancelled_during_flush(lambda observer: observer.aclose())
+    assert cancelled == [True]
+    assert written == []
+    assert state == CaptureState(dropped_events=1, capture_gap=True, last_sink_error=GAP)
+
+
 def test_last_sink_error_is_one_opaque_constant_for_every_failure():
     seen, sink = recorder()
     failing_sink = Observer(mode="content", sink=raising("disk full: /tmp/trace.jsonl"))
@@ -1997,41 +2053,179 @@ def test_a_sink_returning_an_awaitable_is_still_driven_not_counted_as_a_generato
     assert driven.get_state() == CaptureState()
 
 
-def test_a_timing_hook_that_raises_an_interrupt_stops_the_operation_as_documented():
-    """The one exception to "a timing hook costs at most the duration", stated rather than hidden.
+def interrupting(*_args, **_kwargs):
+    """A caller hook that raises the caller's own interrupt rather than an instrumentation one."""
+    raise KeyboardInterrupt("operator")
 
-    ``_read_monotonic`` re-raises the caller's own ``KeyboardInterrupt`` and ``SystemExit``, and
-    the first read is taken before the operation runs, so a hook that raises one of those does
-    stop the work it was wired in to measure. The class docstring used to claim that a timing
-    hook never stops that operation, which is false for exactly this hook.
+
+class InterruptingMapping(Mapping):
+    """A start Mapping that interrupts the moment the emitter reads it.
+
+    Reading a caller's Mapping is running the caller's code, so this is one more hook, not a
+    payload: ``dict(fields)`` in :meth:`Observer._snapshot` is what runs ``__iter__`` here.
     """
-    seen, sink = recorder()
-    ran: list[str] = []
 
-    def interrupting():
+    def __iter__(self):
         raise KeyboardInterrupt("operator")
 
-    observer = Observer(mode="metadata", sink=sink, clock=clock(), monotonic=interrupting)
+    def __len__(self):
+        return 0
+
+    def __getitem__(self, key):
+        raise KeyError(key)
+
+
+def test_every_caller_hook_that_raises_an_interrupt_stops_the_operation_as_documented():
+    """The exception to "instrumentation never alters the caller", named rather than hidden.
+
+    ``KeyboardInterrupt`` and ``SystemExit`` are the caller's own and are re-raised where the
+    hook raised them. ``observe`` emits the start event and takes the first elapsed-time reading
+    before the operation runs, so every caller hook either step touches can stop the work: the
+    start Mapping, the redactor, the clock, the ID factory, the sink, and the elapsed-time
+    source. The class docstring named only the timing hook, which is one of six, and this pins
+    the list rather than the one member of it that was easiest to reach.
+    """
+    ran: list[str] = []
+
+    def observer_with(**hooks):
+        seen, sink = recorder()
+        settings = {"clock": clock(), "id_factory": ids(), "sink": sink}
+        settings.update(hooks)
+        return seen, Observer(mode="metadata", run_id="r", producer_id="p", **settings)
+
+    wired = {
+        "start_mapping": observer_with(),
+        "redactor": observer_with(redactor=interrupting),
+        "clock": observer_with(clock=interrupting),
+        "id_factory": observer_with(id_factory=interrupting),
+        "sink": observer_with(sink=interrupting),
+        "monotonic": observer_with(monotonic=interrupting),
+    }
+    # A metadata key of its own, because the redactor is called per key and an empty payload
+    # would never reach it: the hook that cannot run cannot stop anything.
+    start_event = dict(TOOL_START, metadata={"tool": "grep"})
+    for name, (seen, observer) in wired.items():
+        start = InterruptingMapping() if name == "start_mapping" else start_event
+        with pytest.raises(KeyboardInterrupt):
+            observer.observe(
+                start, completion, lambda error, duration: completion(duration),
+                lambda: ran.append(name),
+            )
+        # The operation never ran, so there is no completion event to write either.
+        assert ran == [], name
+        # Only the timing hook lets the start event through: it is read after that event is
+        # written, which is exactly why it costs no event of its own.
+        assert [event["type"] for event in seen] == (["tool.start"] if name == "monotonic" else [])
+
+    # Every other failure from the same hooks is contained and the operation still runs.
+    seen, contained = observer_with(
+        redactor=raising("redactor"), monotonic=raising("monotonic"), sink=recorder()[1]
+    )
+    assert contained.observe(
+        TOOL_START, completion, lambda error, duration: completion(duration),
+        lambda: ran.append("contained") or "value",
+    ) == "value"
+    assert ran == ["contained"]
+
+    # The docstring names every hook that can do this instead of claiming it away or naming one.
+    claim = " ".join(Observer.__doc__.split())
+    assert "KeyboardInterrupt` and :class:`SystemExit` are the single exception" in claim
+    assert (
+        "the start Mapping, the redactor, the clock, the ID factory, the sink, and the "
+        "elapsed-time source can each stop it" in claim
+    )
+    assert "it never stops the operation it was wired in to measure from running" not in claim
+    assert "with one exception" not in claim
+
+
+def test_an_interrupt_that_stops_an_event_counts_the_event_it_lost():
+    """An interrupt travels on, but the event it stopped reached no sink and is counted.
+
+    A redactor, a caller's Mapping, the clock and the ID factory used to lose their event with a
+    capture state reading zero dropped events, no gap, and no sink error: a run cut short by an
+    operator reported that it had recorded everything it was handed. The interrupt is still the
+    caller's and is still re-raised unchanged; only the accounting changed. ``dropped_events``
+    counts events that reached no sink, and these reached no sink.
+    """
+    clean = CaptureState()
+    lost = CaptureState(dropped_events=1, capture_gap=True, last_sink_error=GAP)
+
+    def lose_one(**hooks):
+        seen, sink = recorder()
+        settings = {"clock": clock(), "id_factory": ids(), "sink": sink}
+        settings.update(hooks)
+        observer = Observer(mode="metadata", run_id="r", producer_id="p", **settings)
+        fields = hooks.pop("fields", None) or event_fields()
+        with pytest.raises(KeyboardInterrupt):
+            observer.emit(**fields)
+        assert seen == []
+        return observer.get_state()
+
+    assert lose_one(redactor=interrupting) == lost
+    assert lose_one(clock=interrupting) == lost
+    assert lose_one(id_factory=interrupting) == lost
+    assert lose_one(sink=interrupting) == lost
+
+    # The start Mapping is read through observe, which is the only entry that takes one.
+    seen, sink = recorder()
+    mapping_observer = Observer(
+        mode="metadata", sink=sink, clock=clock(), id_factory=ids(), run_id="r", producer_id="p"
+    )
+    ran: list[str] = []
     with pytest.raises(KeyboardInterrupt):
-        observer.observe(
-            TOOL_START, completion, lambda error, duration: completion(duration),
+        mapping_observer.observe(
+            InterruptingMapping(), completion, lambda error, duration: completion(duration),
             lambda: ran.append("ran"),
         )
-    # The start event was written before the read that interrupted, and the operation never ran,
-    # so there is no completion event either.
-    assert ran == []
+    assert (seen, ran) == ([], [])
+    assert mapping_observer.get_state() == lost
+
+    # The elapsed-time hook on the completion read is the same loss one step later: the start
+    # event was delivered, and the completion event the interrupt stopped was not.
+    reads = 0
+
+    def interrupting_at_the_end():
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            raise KeyboardInterrupt("operator")
+        return 100.0
+
+    seen, sink = recorder()
+    timed = Observer(
+        mode="metadata",
+        sink=sink,
+        clock=clock(),
+        id_factory=ids(),
+        run_id="r",
+        producer_id="p",
+        monotonic=interrupting_at_the_end,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        timed.observe(
+            TOOL_START, completion, lambda error, duration: completion(duration), lambda: "value"
+        )
     assert [event["type"] for event in seen] == ["tool.start"]
+    assert timed.get_state() == lost
 
-    # Every other failure from the same hook is contained, which is the rest of the claim.
-    ordinary = Observer(mode="metadata", sink=sink, clock=clock(), monotonic=raising("monotonic"))
-    assert ordinary.observe(
-        TOOL_START, completion, lambda error, duration: completion(duration),
-        lambda: ran.append("ran"),
-    ) is None
-    assert ran == ["ran"]
-
-    # The docstring names the exception instead of claiming it away.
-    claim = " ".join(Observer.__doc__.split())
-    assert "A timing hook costs at most that duration and a capture gap, with one exception" in claim
-    assert "KeyboardInterrupt" in claim and "SystemExit" in claim
-    assert "it never stops the operation it was wired in to measure from running" not in claim
+    # The read taken before the operation is the one case that loses no event at all: nothing
+    # was being built, so it is a gap and not a loss, and the counter must not claim otherwise.
+    seen, sink = recorder()
+    at_the_start = Observer(
+        mode="metadata",
+        sink=sink,
+        clock=clock(),
+        id_factory=ids(),
+        run_id="r",
+        producer_id="p",
+        monotonic=interrupting,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        at_the_start.observe(
+            TOOL_START, completion, lambda error, duration: completion(duration), lambda: "value"
+        )
+    assert [event["type"] for event in seen] == ["tool.start"]
+    assert at_the_start.get_state() == CaptureState(
+        dropped_events=0, capture_gap=True, last_sink_error=GAP
+    )
+    assert clean == CaptureState(dropped_events=0, capture_gap=False, last_sink_error=None)

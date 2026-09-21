@@ -24,7 +24,9 @@ A source the scanner modified is a changed execution condition rather than a sca
 and it is recorded as one: the result keeps the claims but goes partial with unresolved bundles,
 so it cannot stand as a clean observation of the frozen input it binds to. :func:`_input_tree`
 is the single definition of what that source is, used both for the hash the result binds to and
-for the before/after comparison, so neither can cover a path the other ignores.
+for the before/after comparison, so neither can cover a path the other ignores. A source tree
+that cannot be walked is a failed observation rather than an empty one, so a scanner cannot hide
+what it wrote by making the directory it wrote in unreadable.
 
 Directory separation documents the boundary; it does not enforce it. Network and
 filesystem policy are declared here and must be enforced outside this process.
@@ -47,7 +49,7 @@ from . import __version__
 from .adapters.base import Adapter, NativeOutcome, SystemSpec
 from .contracts import ContractError, canonical_json, canonical_sha256, validate_document
 from .kinds import mapping_version
-from .materialize import prepare_synthetic_history, sha256_file, tree_hash
+from .materialize import prepare_synthetic_history, sha256_file, tree_hash, walk_regular_files
 
 
 NETWORK_POLICIES = ("none", "model_provider_only", "unrestricted")
@@ -101,28 +103,50 @@ def _canonical_bytes(value: dict) -> bytes:
         raise ContractError(f"value is not canonical UTF-8 JSON: {exc}") from exc
 
 
-def _write_new_bytes(path: Path, payload: bytes) -> None:
-    """Write *payload* at *path* in one step, refusing to overwrite an existing path.
+def _write_new_documents(documents: list[tuple[Path, bytes]]) -> None:
+    """Write several documents so a reader sees either all of them or none.
 
-    The bytes go to a temporary file in the same directory and are renamed into place, so a
-    reader never sees a partially written document: a bundle document is either absent or
-    complete, and a truncated ``execution.json`` never appears beside a valid ``result.json``.
-    The existence check and the rename are two operations rather than one, so this refuses a
-    record that is already there; it does not arbitrate between concurrent writers for one path.
+    Every payload goes to a temporary file in its destination directory first, and nothing is
+    renamed into place until all of them are written, so a reader never sees a partially written
+    document and a failure part way leaves no document at all. A rename that fails after an
+    earlier one succeeded is undone by removing what was already renamed, so an I/O failure
+    between ``result.json`` and ``execution.json`` cannot leave a successful result beside a
+    missing execution record.
+
+    Two limits. The renames are separate operations, so a process killed between them can still
+    leave the first document behind; what this removes is every failure this module can observe.
+    And the existence check and the rename are two operations as well, so this refuses a record
+    that is already there; it does not arbitrate between concurrent writers for one path.
     """
-    if os.path.lexists(path):
-        raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(path))
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.part")
-    # Created the way a plain create would be, so the umask still decides the mode, and with
-    # O_EXCL so this never writes through a name something else put there first.
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    for path, _payload in documents:
+        if os.path.lexists(path):
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(path))
+    staged: list[tuple[Path, Path]] = []
+    renamed: list[Path] = []
     try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
-        os.replace(temporary, path)
+        for path, payload in documents:
+            temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.part")
+            # Created the way a plain create would be, so the umask still decides the mode, and
+            # with O_EXCL so this never writes through a name something else put there first.
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+            staged.append((temporary, path))
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload)
+        for temporary, path in staged:
+            os.replace(temporary, path)
+            renamed.append(path)
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        for path in renamed:
+            path.unlink(missing_ok=True)
         raise
+    finally:
+        for temporary, _path in staged:
+            temporary.unlink(missing_ok=True)
+
+
+def _write_new_bytes(path: Path, payload: bytes) -> None:
+    """Write one document, refusing to overwrite an existing path. See :func:`_write_new_documents`."""
+    _write_new_documents([(path, payload)])
 
 
 def _write_new(path: Path, value: dict) -> None:
@@ -229,17 +253,16 @@ def _input_tree(source_dir: Path, state_dirs: frozenset[str]) -> dict[str, str]:
     the whole export: an input that ships one of the adapter's state directories cannot produce
     a matching hash here, so it is refused rather than scanned with bytes the input hash covers
     left outside the modification check.
+
+    The walk is :func:`~scaneval.materialize.walk_regular_files`, which enumerates explicitly
+    and raises when a directory cannot be listed. It used to be :meth:`Path.rglob`, which
+    swallows that error: a scanner could write into the source, make the directory it wrote in
+    unreadable, and the files it left behind would simply not appear in the map, so the scan
+    read as a clean observation of a tree it had changed. A tree that cannot be walked is now a
+    failed observation, never an empty one.
     """
-    hashes: dict[str, str] = {}
-    for path in sorted(source_dir.rglob("*")):
-        if path.is_symlink() or not path.is_file():
-            continue
-        rel = path.relative_to(source_dir).as_posix()
-        parts = rel.split("/")
-        if parts[0] in state_dirs or ".git" in parts:
-            continue
-        hashes[rel] = sha256_file(path)[0]
-    return hashes
+    return {relative: sha256_file(path)[0]
+            for relative, path in sorted(walk_regular_files(source_dir, skip_top_level=state_dirs).items())}
 
 
 def _empty_trace(trace_mode: str) -> dict:
@@ -297,12 +320,20 @@ def _outcome_violation(outcome: object) -> str | None:
         return f"adapter returned {type(outcome).__name__}, not a NativeOutcome"
     if not isinstance(outcome.artifacts, list):
         return f"artifacts must be a list, not {type(outcome.artifacts).__name__}"
+    declared: set[str] = set()
     for index, artifact in enumerate(outcome.artifacts):
         if not isinstance(artifact, dict):
             return f"artifacts[{index}] must be a mapping, not {type(artifact).__name__}"
         identifier = artifact.get("id")
         if not isinstance(identifier, str) or not identifier:
             return f"artifacts[{index}].id must be a non-empty string, not {identifier!r}"
+        if identifier in declared:
+            # A claim cites one id, so an id naming two files makes the citation ambiguous: the
+            # reader cannot tell which bytes the claim rests on, and the second file would be
+            # registered under a name already taken.
+            return (f"artifacts[{index}].id {identifier!r} is declared twice; one artifact id "
+                    "must name one file")
+        declared.add(identifier)
         path = artifact.get("path")
         if not isinstance(path, (str, PurePath)):
             return f"artifacts[{index}].path must be a string or a path, not {type(path).__name__}"
@@ -345,9 +376,13 @@ def _violation_outcome(message: str) -> NativeOutcome:
     Nothing the adapter reported is carried over: an outcome this module could not read is not
     a source of claims, artifact paths, versions, or usage. The raw output the scanner already
     wrote is still staged into the bundle, so what the scan produced on disk is preserved.
+
+    ``bundles_resolved`` is false for the same reason it is false on :func:`_error_result`:
+    every claim the scan may have made was discarded, so this record must not carry the numeric
+    shape of a scan whose claims all arrived.
     """
     return NativeOutcome(
-        status="error", exit_code=None, command=[],
+        status="error", exit_code=None, command=[], bundles_resolved=False,
         error={"code": "outcome_contract_violation", "message": message[:2000]},
         notes=[f"The adapter outcome was discarded: {message}"[:2000]])
 
@@ -359,10 +394,14 @@ def _error_result(run_id: str, system_id: str, input_hash: str, wall: float, err
     the adapter reported cannot carry its own contract violation into the record that reports
     the refusal. The raw artifacts stay in the execution record, which is where a failed import
     leaves the evidence of what the scan wrote.
+
+    ``bundles_resolved`` is false. This record reports that every claim the scan made was lost,
+    which is maximal import loss; reporting resolved bundles would give it the numeric shape of
+    a fully imported scan and let the scoring contract read a claim budget off it.
     """
     return {"schema_version": "2.0", "run_id": run_id, "system_id": system_id,
             "input_hash": input_hash, "status": "error", "claims": [], "ranking": "unranked",
-            "bundles_resolved": True, "usage": {"wall_seconds": round(wall, 3), "cost_usd": None},
+            "bundles_resolved": False, "usage": {"wall_seconds": round(wall, 3), "cost_usd": None},
             "error": error}
 
 
@@ -384,7 +423,8 @@ def run_invocation(
     """Execute one invocation and return its bundle directory. Never overwrites.
 
     ``result.json`` and ``execution.json`` are written only once both documents validate and
-    encode, so a bundle never holds a successful result beside a missing execution record. An
+    encode, and they are renamed into place together, so a bundle never holds a successful
+    result beside a missing execution record: a write that fails part way leaves neither. An
     outcome this module cannot read, an execution record the contract refuses, a trace file that
     is not UTF-8 text, and any failure while capturing harness state, moving the staged
     directories into the bundle, collecting or hashing declared artifacts, or serializing what
@@ -407,7 +447,9 @@ def run_invocation(
     result's claim to be a clean observation of the frozen input. What counts as the source for
     that comparison is :func:`_input_tree`, which is also what the pre-scan hash check covers, so
     the watched tree and the hashed tree are the same tree; an input that already holds one of
-    the adapter's state directories fails that check and is refused before the scanner runs.
+    the adapter's state directories fails that check and is refused before the scanner runs, as
+    is an input tree that cannot be walked at all, since there is no honest map of it to bind a
+    result to.
 
     Two things are narrower than they look. When the post-scan re-hash of the source fails, the
     comparison never completed, so the provenance reports no observed modification and the
@@ -418,6 +460,11 @@ def run_invocation(
     request and the scanner's own output with neither ``result.json`` nor ``execution.json``.
     That is why :mod:`scaneval.runner` vets the attributes every record copies when it prepares
     a system rather than when it invokes one.
+
+    The scanner's private workspace is removed once both staged directories are in the bundle. A
+    removal that fails does not change what the scan observed, so it is not a violation: the
+    execution record carries a note naming the directory still on disk, which is a leak an
+    operator can find rather than one that was swallowed.
     """
     if network_policy not in NETWORK_POLICIES:
         raise ExecutionError(f"unknown network policy {network_policy!r}")
@@ -451,13 +498,21 @@ def run_invocation(
     after: dict[str, str] = {}
     captured_state: list[str] = []
     move_failures: list[str] = []
+    cleanup_notes: list[str] = []
     try:
         staging_raw.mkdir()
         if staging_trace is not None:
             staging_trace.mkdir()
         source = workspace / "source"
         shutil.copytree(prepared.source_dir, source, symlinks=False)
-        before = _input_tree(source, state_dirs)
+        try:
+            before = _input_tree(source, state_dirs)
+        except OSError as exc:
+            # The tree handed to this invocation cannot be enumerated, so there is nothing to
+            # compare the scan against and no honest hash to bind a result to. Refused the same
+            # way a hash mismatch is, before the scanner runs.
+            raise ExecutionError(f"the exported input could not be walked, so no observation of "
+                                 f"it can be recorded: {_failure_message(exc)}") from exc
         actual = tree_hash(before)
         if actual != prepared.tree_hash:
             # The hash is taken over the same map the modification check uses, so a mismatch
@@ -509,7 +564,8 @@ def run_invocation(
         except Exception as exc:
             # The comparison never completed, so nothing is claimed about the source: `before`
             # stands in for `after`, the provenance reports no observed modification, and the
-            # violation says the re-hash failed.
+            # violation says the re-hash failed. A directory the scan made unreadable arrives
+            # here, because the walk raises rather than reporting the files behind it as gone.
             after = dict(before)
             violation = violation or f"the source tree could not be re-hashed: {_failure_message(exc)}"
     finally:
@@ -522,7 +578,16 @@ def run_invocation(
                     # raised here, where it would replace whatever failure is already in flight.
                     move_failures.append(f"{final.name}: {_failure_message(exc)}")
         finally:
-            shutil.rmtree(workspace, ignore_errors=True)
+            try:
+                shutil.rmtree(workspace)
+            except Exception as exc:
+                # The bundle documents are still exactly as good as they were, so this is not a
+                # violation of the outcome: it is a directory left behind, and it is named in
+                # the execution record with its path rather than ignored. Contained here so a
+                # failed cleanup cannot replace whatever failure is already in flight.
+                cleanup_notes.append(
+                    f"the scanner's private workspace could not be removed and is still on disk "
+                    f"at {workspace}: {_failure_message(exc)}")
     if move_failures:
         violation = violation or ("staged output could not be moved into the bundle: "
                                   + "; ".join(move_failures))
@@ -611,7 +676,7 @@ def run_invocation(
                            "captured_state_dirs": captured_state},
             "preparation": preparation, "unsupported_languages": unsupported,
             "error": result.get("error"), "import_error": import_error,
-            "notes": list(outcome.notes), "raw_artifacts": raw_artifacts,
+            "notes": list(outcome.notes) + cleanup_notes, "raw_artifacts": raw_artifacts,
         }
         return result, execution
 
@@ -688,6 +753,6 @@ def run_invocation(
             # Nothing the adapter supplied is left in these documents, so the refusal is about
             # the invocation itself; writing half a bundle would be worse than writing none.
             raise ExecutionError(f"the invocation could not be recorded: {again}") from again
-    _write_new_bytes(bundle / "result.json", result_bytes)
-    _write_new_bytes(bundle / "execution.json", execution_bytes)
+    _write_new_documents([(bundle / "result.json", result_bytes),
+                          (bundle / "execution.json", execution_bytes)])
     return bundle

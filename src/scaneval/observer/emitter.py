@@ -16,8 +16,10 @@ the failure becomes a visible capture gap and only :class:`KeyboardInterrupt` an
 instrumentation defect. An :class:`asyncio.CancelledError` raised by a sink is a recorded gap,
 not an escape. One lost event counts once: the guard that owns a caller call records the loss,
 and the containment guards outside it re-raise an interrupt without counting it again. An
-interrupt raised inside a redactor or a caller's own Mapping propagates unrecorded, because the
-run a capture state would describe is the one that is ending. A payload that is not JSON, is
+interrupt raised inside a redactor, a caller's own Mapping, the clock, the ID factory, or the
+elapsed-time source travels on to the caller unchanged, but the event it stopped is counted as
+lost before it does: that event reached no sink, and a state reading clean would say the run
+ended having recorded everything it was handed. A payload that is not JSON, is
 cyclic, or is nested deeper than :data:`MAX_PAYLOAD_DEPTH`, a :class:`RecursionError` raised
 near the stack limit, and an event the wire contract rejects are all dropped and counted. An
 event built while instrumentation failed carries a fabricated ID or timestamp, so it is
@@ -518,12 +520,19 @@ class Observer:
     ``monotonic`` explicitly. A duration that cannot be measured, because a read failed, a
     reading could not even be checked, the source went backwards, or the span exceeds the
     shared safe-integer bound, is omitted from the event and recorded as a capture gap rather
-    than invented. A timing hook costs at most that duration and a capture gap, with one
-    exception: :class:`KeyboardInterrupt` and :class:`SystemExit` are the caller's own
-    interrupt and are re-raised where the hook raised them, so a hook that raises one of those
-    on the read taken before the operation starts does stop that operation from running. Every
-    other failure a timing hook can produce, including a reading the emitter cannot even check,
-    is contained and costs the duration alone.
+    than invented. A timing hook costs at most that duration and a capture gap, and every other
+    failure a caller hook can produce, including a reading the emitter cannot even check, costs
+    at most a capture gap and the event it was building.
+
+    :class:`KeyboardInterrupt` and :class:`SystemExit` are the single exception, and they are
+    not the timing hook's alone. :meth:`observe` and :meth:`observe_async` emit the start event
+    and take the first elapsed-time reading before the operation runs, so an interrupt raised by
+    any caller code either one touches first travels out where it was raised and the operation
+    never runs: the start Mapping, the redactor, the clock, the ID factory, the sink, and the
+    elapsed-time source can each stop it. That is deliberate, because an interrupt is the
+    caller's own and instrumentation may not swallow one, and it is the only way any of those
+    hooks can reach the operation at all. The event such an interrupt stopped is counted as a
+    lost event on the way out, so a run cut short still says what it failed to record.
 
     Synchronous harnesses need no event loop: :meth:`emit`, :meth:`observe`, :meth:`flush`, and
     :meth:`close` are ordinary methods, and a sink that returns an awaitable is driven to
@@ -759,7 +768,11 @@ class Observer:
         guard inside :meth:`_await_write` that would have recorded it, and it is out of the
         pending set that :meth:`_reap_lost_writes` reads, so nothing else would ever count an
         event that reached no sink. A write cancelled after it started counted itself, and a
-        write that failed counted itself, so neither is counted twice.
+        write that failed counted itself, so neither is counted twice. That holds however the
+        gather ends. When it returns, the cancelled write is one of its results. When the
+        cancellation that settled the write also travels on out of this await, the gather
+        returns nothing at all, and the batch in hand is the last record of those writes, so
+        :meth:`_reap_batch` accounts for them before the cancellation is re-raised.
 
         A sink that never returns makes this wait forever. That is deliberate: the emitter
         imposes no timeout, because cancelling a harness's write is a policy decision only the
@@ -770,7 +783,8 @@ class Observer:
         prescribes. ``gather`` here collects a cancelled write into its results rather than
         raising it, so a cancellation that does come out of that await is the caller's, never a
         write's. Whatever the cancellation settles, the writes it left unsettled go back into
-        the pending set first, so the record of them survives it.
+        the pending set and the writes it settled as cancelled are counted, before it is
+        re-raised, so neither the record of them nor their loss dies with it.
         """
         import asyncio
 
@@ -784,9 +798,12 @@ class Observer:
             try:
                 results = await asyncio.gather(*batch, return_exceptions=True)
             except BaseException as error:
-                # Evidence first: an unsettled write goes back into the pending set so the
-                # failure cannot erase the record of what it failed to settle.
-                self._pending.update(write for write in batch if not write.done())
+                # Evidence first, before anything is re-raised: an unsettled write goes back
+                # into the pending set so the failure cannot erase the record of what it failed
+                # to settle, and a write this failure already settled as cancelled is counted,
+                # because this batch is out of the pending set and nothing else will ever see
+                # it again.
+                self._reap_batch(batch)
                 if isinstance(error, (*_INTERRUPTS, asyncio.CancelledError)):
                     # The caller's own cancellation, not a write's: ``return_exceptions=True``
                     # hands a cancelled write back as a result, so nothing but a cancellation
@@ -828,7 +845,9 @@ class Observer:
         it does out of :meth:`aflush`, so a timeout wrapped around this call reports as a
         timeout. The observer is still closed and the private loop still released on the way
         out, because a caller who cancelled a close asked for the close: leaving it open would
-        let a late event postdate the run in silence.
+        let a late event postdate the run in silence. The flush accounts for the writes that
+        cancellation settled before letting it through, so a close a timeout cut short still
+        reports the events it cost rather than a clean state.
         """
         try:
             await self.aflush()
@@ -867,6 +886,34 @@ class Observer:
                     self._lost_event()
             elif unusable:
                 self._pending.discard(write)
+                self._lost_event()
+
+    def _reap_batch(self, batch: tuple[Any, ...]) -> None:
+        """Account for a gathered batch a failure cut short: keep the unsettled, count the lost.
+
+        A write that is still unsettled goes back into the pending set, because it is not lost
+        and only its loop can settle it. A write the failure settled as cancelled is a lost
+        event and is counted here, because :meth:`aflush` took this batch out of the pending
+        set before awaiting it: :meth:`_reap_lost_writes` can no longer see it,
+        :meth:`_write_settled` already declined to count it for the same reason, and a
+        cancellation delivered before the write's first step ran no guard inside it either.
+        Counting it anywhere else would count it twice; counting it nowhere left an event that
+        reached no sink behind a capture state reading zero dropped events and no gap. A write
+        that settled any other way counted itself and is neither kept nor counted again.
+        """
+        for write in batch:
+            try:
+                settled = write.done()
+                cancelled = settled and write.cancelled()
+            except _INTERRUPTS:
+                raise
+            except BaseException:
+                # A write the emitter cannot even inspect is not one it can claim was delivered.
+                self._lost_event()
+                continue
+            if not settled:
+                self._pending.add(write)
+            elif cancelled:
                 self._lost_event()
 
     def _write_settled(self, task: Any, awaitable: Any) -> None:
@@ -949,10 +996,24 @@ class Observer:
         """Emit the event that closes an observed operation, with its measured duration or none.
 
         Guarded like :meth:`_emit_fields`, so an instrumentation failure here cannot travel out
-        of :meth:`observe` into the operation's own result or exception.
+        of :meth:`observe` into the operation's own result or exception. The elapsed-time read
+        is guarded separately because it is the one step whose failure stops the completion
+        event from being built at all: an interrupt from that hook is the caller's and travels
+        on, but the event it stopped reached no sink, so the loss is counted before it does.
+        Past that read, :meth:`_emit_built` owns the builder call and counts its own losses, so
+        this guard re-raises an interrupt without counting it a second time.
         """
         try:
             elapsed = self._elapsed_ms(began)
+        except BaseException as failure:
+            self._gaps += 1
+            self._dropped_events += 1
+            self._capture_gap = True
+            self._last_sink_error = _GAP_MESSAGE
+            if isinstance(failure, _INTERRUPTS):
+                raise
+            return None
+        try:
             arguments = (elapsed,) if error is _MISSING else (error, elapsed)
             return self._emit_built(build, arguments, drop_duration=elapsed is None)
         except BaseException as failure:
@@ -1025,14 +1086,20 @@ class Observer:
                     event["capture_status"] = "partial"
                 metadata[_GAP_KEY] = True
         except BaseException as error:
-            if isinstance(error, _INTERRUPTS):
-                raise
             # Marked inline: a RecursionError leaves no room to call another method, and this
-            # handler must record the loss even when the interpreter is out of stack.
+            # handler must record the loss even when the interpreter is out of stack. An
+            # interrupt is recorded here too and then travels on. It is the caller's own and is
+            # never contained, but the event it stopped, from a redactor, a caller's Mapping,
+            # the clock or the ID factory, reached no sink all the same, and leaving it uncounted
+            # said the run ended having recorded everything it was handed. This is the guard that
+            # owns those calls, so it is the one that counts them, once: the guards outside it
+            # re-raise an interrupt without counting it again.
             self._gaps += 1
             self._dropped_events += 1
             self._capture_gap = True
             self._last_sink_error = _GAP_MESSAGE
+            if isinstance(error, _INTERRUPTS):
+                raise
             return None
         return event
 

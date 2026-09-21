@@ -28,6 +28,7 @@ import subprocess
 from typing import Any, NamedTuple
 
 from ..kinds import kind_for_harness_class
+from ..materialize import HARNESS_STATE_DIRS
 from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command, tail_text
 
 
@@ -159,7 +160,15 @@ def _list_markdown(directory: Path) -> tuple[list[str], str | None, bool]:
     indistinguishable from an empty one. The third value is false only when the directory is
     absent; a directory that exists and cannot be listed returns true with a note, so the
     caller counts the records it could not see instead of reporting none.
+
+    A findings path that is itself a symbolic link is one of those failures, not a directory to
+    read: what lies behind it is not the workspace this scan was given, so records found there
+    were not shown to be anything this scan wrote. The link is refused whole, which is stricter
+    than the per-record symlink check below and has to be, since that check never sees a record
+    reached only through the directory link.
     """
+    if directory.is_symlink():
+        return [], "the findings path is a symbolic link and was not followed", True
     try:
         with os.scandir(directory) as entries:
             names = sorted(entry.name for entry in entries)
@@ -206,8 +215,10 @@ def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix
     nothing registers. A record that is not a regular file, cannot be read, carries no id,
     carries an unusable ``file_path``, or cannot be staged yields no claim and is counted in
     ``lost`` as well as noted. The directory is listed explicitly, so a listing that fails is
-    counted and noted rather than read as an empty directory. The full native allegation text
-    is preserved; line ranges are never invented.
+    counted and noted rather than read as an empty directory, and a findings path that is itself
+    a symbolic link is one of those failures: nothing behind it is read, because it is not the
+    workspace this scan was handed. The full native allegation text is preserved; line ranges
+    are never invented.
 
     Provenance. *baseline* is :func:`snapshot_findings` taken before the harness process
     started, and a record whose name and bytes are both in it is not imported: it was already
@@ -305,7 +316,8 @@ def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix
     return HarnessImport(claims, artifacts, notes, lost)
 
 
-def capture_status(trace_mode: str, routes: list[str], *, has_summary: bool) -> dict[str, str]:
+def capture_status(trace_mode: str, routes: list[str], *, has_summary: bool,
+                   capture_state: dict | None = None) -> dict[str, str]:
     """Per-category capture availability for one harness run.
 
     Tool dispatch is ``unavailable`` on every real route: it happens inside the model CLI
@@ -313,15 +325,25 @@ def capture_status(trace_mode: str, routes: list[str], *, has_summary: bool) -> 
     nothing about whether a tool ran. Only the mock runner, which spawns no process at
     all, makes the concept inapplicable. Model events are ``partial`` at best because the
     harness retries inside its own runner, below the observed boundary.
+
+    ``finding_submitted`` is read off *capture_state*, the observer state the driver reported,
+    rather than off the bare fact that a trace was written. It used to be ``complete`` whenever
+    the run was traced and produced a summary, which contradicted the ``capture_gap`` and
+    ``dropped_events`` the same execution record carries. ``complete`` now requires a state that
+    explicitly reports no gap and no dropped event; a state reporting either, and a run that
+    reported no state at all, are ``partial``, because nothing there rules a gap out.
     """
     request_capture = {"off": "unavailable", "metadata": "partial", "content": "partial"}[trace_mode]
     traced = trace_mode != "off"
+    gapless = (isinstance(capture_state, dict) and capture_state.get("capture_gap") is False
+               and capture_state.get("dropped_events") == 0)
+    submitted = ("complete" if gapless else "partial") if (traced and has_summary) else "unavailable"
     return {
         "model_requests": request_capture,
         "model_responses": request_capture,
         "tool_calls": "not_applicable" if routes == ["mock"] else "unavailable",
         "context_selection": "partial" if traced else "unavailable",
-        "finding_submitted": "complete" if (traced and has_summary) else "unavailable",
+        "finding_submitted": submitted,
         "finding_candidate": "unavailable",
         "finding_validation": "unavailable",
         "finding_filtered": "unavailable",
@@ -334,7 +356,10 @@ class LlmHarnessAdapter(Adapter):
     requires_git = True
     supported_languages = frozenset({"python", "javascript", "typescript", "go", "rust"})
     env_passthrough = ("NODE_OPTIONS", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "XDG_CONFIG_HOME")
-    state_dirs = (".securevibes", ".fieldglass")
+    # Derived from the one list the export strips, so a repository shipping a top-level
+    # harness state directory cannot be stripped by one of them and treated as ordinary
+    # content by the other.
+    state_dirs = tuple(sorted(HARNESS_STATE_DIRS))
 
     def _preset(self, spec: SystemSpec) -> tuple[str, dict[str, Any], Path]:
         """The harness preset and its root, resolved to an absolute path.
@@ -461,7 +486,7 @@ class LlmHarnessAdapter(Adapter):
         capture_state = (trace or {}).get("state") if isinstance(trace, dict) else None
         routes = sorted({str(route) for route in (output.get("observed_routes") or [])}) if isinstance(output, dict) else []
         mock_only = routes == ["mock"]
-        capture = capture_status(trace_mode, routes, has_summary=bool(summary))
+        capture = capture_status(trace_mode, routes, has_summary=bool(summary), capture_state=capture_state)
         notes = list(imported.notes) + plan_notes
         loss_message = None
         if imported.lost:

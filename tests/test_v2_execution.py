@@ -116,6 +116,34 @@ class FakeAdapter(Adapter):
                              capture={"model_requests": "unavailable"}, notes=["fake run"])
 
 
+class HidingAdapter(FakeAdapter):
+    """Writes a file into the source it was handed, then closes the directory holding it."""
+
+    def scan(self, **kwargs):
+        outcome = super().scan(**kwargs)
+        hidden = kwargs["source_dir"] / "hidden"
+        hidden.mkdir()
+        (hidden / "dropped.py").write_text("planted by the scanner\n", encoding="utf-8")
+        hidden.chmod(0o000)
+        return outcome
+
+
+def restore_directory_modes(root: Path) -> None:
+    """Make every directory under *root* readable again so the temporary tree can be removed.
+
+    A test that takes a directory away from the walker leaves it unreadable on disk, and the
+    private workspace holding it is then deliberately left behind by the runner, so pytest's own
+    cleanup of ``tmp_path`` would trip over it. The walk is top down, so a directory reopened
+    here is descended into afterwards.
+    """
+    for parent, directories, _files in os.walk(root):
+        for name in directories:
+            try:
+                os.chmod(os.path.join(parent, name), 0o700)
+            except OSError:
+                pass
+
+
 def run(tmp_path: Path, adapter: FakeAdapter, prepared: PreparedInput | None = None, **kwargs) -> Path:
     prepared = prepared or prepared_input(tmp_path)
     return run_invocation(prepared=prepared, adapter=adapter, spec=SystemSpec("fake-sys", "fake", {"knob": 1}),
@@ -470,6 +498,10 @@ class HostileAdapter(FakeAdapter):
             # Declared beside the real artifact the claim cites, not instead of it: a claim
             # left citing a dropped artifact is a contract violation of its own, tested below.
             outcome.artifacts.append({"id": "dump", "path": raw_dir / "dump"})
+        if self.hostility == "duplicate-artifact-id":
+            second = raw_dir / "second.json"
+            second.write_text('{"findings": [{"file": "other.py"}]}\n', encoding="utf-8")
+            outcome.artifacts.append({"id": "native", "path": second})
         if self.hostility == "state-squat":
             (raw_dir / "harness-state" / "fakestate").mkdir(parents=True)
         if self.hostility == "cyclic-claim":
@@ -1258,3 +1290,182 @@ def _semgrep_bundle(tmp_path: Path, payload: dict, exit_code: int = 0) -> Path:
                    "ruleset_root": str(tmp_path / "rules")}
     return run_invocation(prepared=prepared, adapter=SemgrepAdapter(), spec=spec, preparation=preparation,
                           out_dir=tmp_path / "out", run_id="run-semgrep", clock=CLOCK)
+
+
+# --- area B: an input tree that cannot be walked, and two documents that land together ----
+
+
+def test_a_source_the_scan_made_unwalkable_is_a_failed_observation_not_a_clean_one(tmp_path):
+    """A scanner cannot hide what it wrote by closing the directory it wrote it in.
+
+    ``_input_tree`` enumerated with :meth:`Path.rglob`, which swallows the ``OSError`` the walk
+    raises, so a directory the scanner created, filled, and then made unreadable simply did not
+    appear in the after map. The comparison found nothing changed and the bundle recorded a
+    clean success over a source the scan had edited. The walk now raises, the re-hash guard
+    catches it, and the invocation is recorded as a failed observation instead.
+    """
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+    try:
+        bundle = run(tmp_path, HidingAdapter(), workspace_root=workspace_root)
+
+        result = load_document(bundle / "result.json", "scan-result")
+        execution = load_document(bundle / "execution.json", "execution-record")
+        assert result["status"] == "error" and result["claims"] == []
+        assert result["error"]["code"] == "outcome_contract_violation"
+        assert "the source tree could not be re-hashed" in result["error"]["message"]
+        assert "PermissionError" in result["error"]["message"]
+        # Nothing is claimed about the source either way: the comparison never completed.
+        assert execution["provenance"]["source_modified"] is False
+        assert execution["provenance"]["modified_paths"] == []
+        # What the scan wrote into the bundle is still preserved.
+        assert (bundle / "raw" / "native.json").is_file()
+    finally:
+        restore_directory_modes(workspace_root)
+
+
+def test_the_input_tree_raises_rather_than_dropping_a_directory_it_cannot_list(tmp_path):
+    """The unit behind the test above, and the limit of it: an excluded directory is not walked.
+
+    A directory the map already leaves out is never descended into, so a ``.git`` or a state
+    directory that cannot be listed still cannot fail the walk; only a directory whose files the
+    map is supposed to cover can.
+    """
+    tree = tmp_path / "tree"
+    (tree / "src").mkdir(parents=True)
+    (tree / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    closed = tree / "closed"
+    closed.mkdir()
+    (closed / "hidden.py").write_text("y = 2\n", encoding="utf-8")
+    closed.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError):
+            execution_module._input_tree(tree, frozenset())
+        # The same tree with that directory excluded walks cleanly and hashes what is left.
+        assert sorted(execution_module._input_tree(tree, frozenset({"closed"}))) == ["src/app.py"]
+
+        for excluded in (tree / ".git", tree / ".fakestate"):
+            excluded.mkdir()
+            (excluded / "notes.md").write_text("scratch\n", encoding="utf-8")
+            excluded.chmod(0o000)
+        assert sorted(execution_module._input_tree(tree, frozenset({"closed", ".fakestate"}))) == ["src/app.py"]
+    finally:
+        restore_directory_modes(tree)
+
+
+def test_an_exported_input_that_cannot_be_walked_is_refused_before_the_scanner_runs(tmp_path):
+    """An input tree with no honest map is refused, the way a hash mismatch is.
+
+    The copy into the private workspace normally fails first on a tree that cannot be read, so
+    this guards the narrow case where the copy succeeded and the walk still cannot finish. It is
+    driven here by making the walk fail, because nothing a test can put on disk reaches it.
+    """
+    adapter = FakeAdapter()
+    real_input_tree = execution_module._input_tree
+    calls: list[int] = []
+
+    def failing(source_dir, state_dirs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise PermissionError(13, "Permission denied", str(source_dir / "closed"))
+        return real_input_tree(source_dir, state_dirs)
+
+    execution_module._input_tree = failing
+    try:
+        with pytest.raises(ExecutionError, match="the exported input could not be walked"):
+            run(tmp_path, adapter)
+    finally:
+        execution_module._input_tree = real_input_tree
+
+    assert adapter.calls == 0, "nothing is scanned when the input cannot be enumerated"
+    bundle = tmp_path / "out" / invocation_id("input-a", "fake-sys", 1)
+    assert not (bundle / "result.json").exists() and not (bundle / "execution.json").exists()
+
+
+def test_a_private_workspace_that_could_not_be_removed_is_named_in_the_record(tmp_path, monkeypatch):
+    """A leftover workspace used to be swallowed by ``ignore_errors``: no note, no path, nothing.
+
+    The bundle is still exactly as good as it was, so this is not a violation of the outcome.
+    What changes is that the execution record names the directory that is still on disk, so an
+    operator can find it instead of discovering it as unexplained growth under the temporary
+    root.
+    """
+    workspace_root = tmp_path / "ws"
+    workspace_root.mkdir()
+    real_rmtree = shutil.rmtree
+
+    def failing(target, *args, **kwargs):
+        if Path(target).name.startswith("scaneval-trial-"):
+            raise PermissionError(13, "Permission denied", str(target))
+        return real_rmtree(target, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", failing)
+    bundle = run(tmp_path, FakeAdapter(), workspace_root=workspace_root)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "success", "a cleanup failure does not change what the scan observed"
+    leftover = [entry for entry in workspace_root.iterdir() if entry.name.startswith("scaneval-trial-")]
+    assert len(leftover) == 1
+    note = [line for line in execution["notes"] if "private workspace could not be removed" in line]
+    assert len(note) == 1 and str(leftover[0]) in note[0] and "PermissionError" in note[0]
+
+
+def test_a_total_import_failure_does_not_report_resolved_bundles(tmp_path):
+    """Maximal import loss must not carry the numeric shape of a fully imported scan.
+
+    ``_error_result`` hardcoded ``bundles_resolved`` true on the record that reports that every
+    claim was refused, and the outcome that replaces one this module could not read carried the
+    dataclass default, which is also true. Both are false now: no claim survived either.
+    """
+    dangling = load_document(run(tmp_path / "a", CitingAdapter("nothing-here")) / "result.json", "scan-result")
+    assert dangling["status"] == "error" and dangling["error"]["code"] == "import_contract_violation"
+    assert dangling["bundles_resolved"] is False and dangling["claims"] == []
+
+    discarded = load_document(run(tmp_path / "b", HostileAdapter("state-squat")) / "result.json", "scan-result")
+    assert discarded["status"] == "error" and discarded["error"]["code"] == "outcome_contract_violation"
+    assert discarded["bundles_resolved"] is False and discarded["claims"] == []
+
+
+def test_one_artifact_id_may_not_name_two_files(tmp_path):
+    """A claim cites one id, so an id naming two files makes the evidence it rests on ambiguous.
+
+    The adapter contract now refuses the duplicate. The scan-result contract still accepts two
+    ``raw_artifacts`` entries sharing an id, which is a change to ``contracts.py`` and belongs to
+    whoever owns that file; this closes the path an adapter reaches it through.
+    """
+    bundle = run(tmp_path, HostileAdapter("duplicate-artifact-id"))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["error"]["code"] == "outcome_contract_violation"
+    assert "'native' is declared twice" in result["error"]["message"]
+    assert result.get("raw_artifacts", []) == [] and execution["raw_artifacts"] == []
+    # Both files the scan wrote are still in the bundle; only the outcome naming them was refused.
+    assert (bundle / "raw" / "native.json").is_file() and (bundle / "raw" / "second.json").is_file()
+
+
+def test_a_result_is_never_written_without_the_execution_record_beside_it(tmp_path, monkeypatch):
+    """The two documents were two separate writes, so a failure between them split the bundle.
+
+    ``result.json`` landed and ``execution.json`` did not, leaving a successful result with no
+    record of the run that produced it, which is exactly what the module promises never happens.
+    Both are staged first and renamed together now, and a rename that fails removes the one that
+    already landed.
+    """
+    real_replace = os.replace
+
+    def failing(source, destination):
+        if str(destination).endswith("execution.json"):
+            raise OSError("No space left on device")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", failing)
+    with pytest.raises(OSError, match="No space left on device"):
+        run(tmp_path, FakeAdapter())
+
+    bundle = tmp_path / "out" / invocation_id("input-a", "fake-sys", 1)
+    assert not (bundle / "result.json").exists(), "the result must not outlive its execution record"
+    assert not (bundle / "execution.json").exists()
+    # The request and the scanner's own output stay; no temporary file is left behind either.
+    assert sorted(entry.name for entry in bundle.iterdir()) == ["raw", "request.json"]

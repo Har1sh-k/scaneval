@@ -32,7 +32,12 @@ an observer with no sink at all.
 The operation-boundary helpers are compared too, not only ``emit``: Python's ``observe_async``
 and TypeScript's ``observeAsync`` are driven over the same success, failure and unmeasurable
 duration scenarios, with a monotonic source scripted read for read, and their completion events
-are compared byte for byte.
+are compared byte for byte. One operation scenario deliberately injects no monotonic source at
+all, only a clock, because that is the case in which the two emitters once disagreed: TypeScript
+derived elapsed time from an injected ``Clock`` and Python never did. Both now measure with a
+real monotonic source, so that scenario's duration is the one value in the whole matrix that is
+a property of how fast the test ran, and it is compared as a shape rather than as a value, by
+name, in ``REAL_TIME_OPERATIONS``.
 
 What these tests do not prove: that the two emitters share code, that either is correct about a
 harness that never emits, or that a trace says anything about a scanner's findings. Three known
@@ -41,11 +46,17 @@ float in a payload writes as ``1.0`` from Python and ``1`` from JavaScript, a pa
 looks like an array index sorts ahead of its siblings in JavaScript only, and a timestamp cannot
 carry sub-millisecond precision in either language because the TypeScript ``Clock`` hands back a
 ``Date``. Those three are representational limits of the two languages, not defects, and they
-are excluded from the byte comparison by name rather than by loosening it. Every behavioral
-divergence found by review has been closed, so both exclusion sets below are empty. All of this
-is recorded in ``docs/OBSERVER_SDK.md``.
+are excluded from the byte comparison by name rather than by loosening it. The fourth exclusion
+is not a limit but a measurement: the one operation scenario that injects no monotonic source
+has each language time the same trivial operation with its own real one, so that duration is
+compared as a shape and blanked before the bytes are. Every behavioral divergence found by
+review has been closed, so both divergence sets below are empty. All of this is recorded in
+``docs/OBSERVER_SDK.md``.
 
-Nothing here calls a model, reaches the network, sleeps, or reads a real clock. The TypeScript
+Nothing here calls a model, reaches the network, or sleeps, and no timestamp comes from
+anywhere but an injected clock. The one real reading in the file is the monotonic source of the
+clock-only operation scenario, which is there to prove that neither emitter reaches for a wall
+clock when no monotonic source is injected. The TypeScript
 side is a throwaway driver written into a temporary directory and run under node against the
 SDK's build output, which is gitignored and therefore local. The tests skip with a reason when
 node or that build is absent rather than pretend parity was checked. Each plan is run through
@@ -708,6 +719,31 @@ def parsed(lines: list[str]) -> list[dict]:
     return [json.loads(line) for line in lines]
 
 
+def measurement_free(case: dict) -> dict:
+    """One scenario's record with every real measured duration replaced by a marker.
+
+    Only a scenario named in :data:`REAL_TIME_OPERATIONS` needs this, and only for the one field
+    nothing scripts: two languages measuring the same trivial operation with their own monotonic
+    sources write their own numbers of milliseconds. Everything else, the JSONL bytes included,
+    still compares exactly, so blanking the measurement keeps the rest of the comparison instead
+    of dropping the scenario out of it. The marker is a string, so a duration that went missing
+    in one language is still a failure rather than a match.
+    """
+    lines = []
+    for emitted in parsed(case["lines"]):
+        if "duration_ms" in emitted:
+            emitted["duration_ms"] = "<measured>"
+        lines.append(json.dumps(emitted, ensure_ascii=False, separators=(",", ":")))
+    operations = [
+        {
+            **step,
+            "duration_seen": None if step["duration_seen"] is None else "<measured>",
+        }
+        for step in case["operations"]
+    ]
+    return {**case, "lines": lines, "operations": operations}
+
+
 def iso_timestamp(read_index: int) -> str:
     """The timestamp the injected clock produces on its nth read, spelled as the wire spells it."""
     moment = EPOCH + timedelta(milliseconds=STEP_MS * read_index)
@@ -1013,6 +1049,14 @@ DIVERGENT_DROPPED_EVENTS: frozenset[str] = frozenset()
 
 DIVERGENT_CAPTURE_STATE: frozenset[str] = frozenset()
 
+# The one scenario whose duration nothing scripts. It injects a clock and no monotonic source,
+# which is exactly the case the two emitters once disagreed about, so both now read their own
+# real monotonic source and measure their own elapsed milliseconds for the same work. Every
+# other thing about it is compared exactly, bytes included; only the measured number is compared
+# as a shape, by :func:`measurement_free` and
+# :func:`test_neither_emitter_measures_elapsed_time_with_an_injected_wall_clock`.
+REAL_TIME_OPERATIONS: frozenset[str] = frozenset({"operation-clock-only-no-monotonic"})
+
 
 def interleaved(rejections: dict) -> list[dict]:
     """Alternate refused and accepted events so a divergent rejection desynchronizes the streams.
@@ -1144,11 +1188,17 @@ def operation_scenario(name: str, monotonic_values: list, steps: list[dict], **e
 def operations_plan() -> dict:
     """The operation-boundary matrix: Python ``observe_async`` against TypeScript ``observeAsync``.
 
-    Every scenario scripts the monotonic source read for read, in seconds, so the duration is a
-    property of the plan and not of how fast the test ran. The differences between 100.0 and
-    100.25 seconds, and between 0.0 and 0.0005, are exact in binary floating point, so both
-    languages compute the same product before rounding and the half-way case really does test
-    half-to-even rounding rather than a representation accident.
+    Every scenario but one scripts the monotonic source read for read, in seconds, so the
+    duration is a property of the plan and not of how fast the test ran. The differences between
+    100.0 and 100.25 seconds, and between 0.0 and 0.0005, are exact in binary floating point, so
+    both languages compute the same product before rounding and the half-way case really does
+    test half-to-even rounding rather than a representation accident.
+
+    The exception is ``operation-clock-only-no-monotonic``, which injects no monotonic source on
+    purpose: a fixture that injects only a clock is the case in which TypeScript used to measure
+    the span with that wall clock while Python measured it with a real monotonic source. Neither
+    derives elapsed time from a clock now, so the scenario is here to keep that closed, and its
+    duration is the one measured value in the matrix.
     """
     return {
         "epoch_ms": EPOCH_MS,
@@ -1209,6 +1259,18 @@ def operations_plan() -> dict:
                 [operation_step("call-clock", "success")],
                 clock_throws_on=[1],
             ),
+            # A clock and no monotonic source: the case that used to diverge. Neither emitter
+            # may time the operation with that wall clock, so the clock is read exactly once
+            # per event in both, the two timestamps are the injected ones, and the duration is
+            # each language's own real measurement rather than the injected 10 ms step.
+            {
+                "name": "operation-clock-only-no-monotonic",
+                "mode": "content",
+                "run_id": "run-operation-clock-only-no-monotonic",
+                "producer_id": "producer-operation-clock-only-no-monotonic",
+                "events": [],
+                "operations": [operation_step("call-clock-only", "success")],
+            },
             # Off mode runs the operation and instruments nothing, in both languages.
             {
                 "name": "operation-off-mode",
@@ -1516,18 +1578,61 @@ def test_python_compares_redactor_scalars_by_value_and_not_by_identity():
     assert seen == [emitted]
 
 
+@needs_node
+def test_neither_emitter_measures_elapsed_time_with_an_injected_wall_clock(operation_pairs):
+    """The closed divergence, pinned across the two languages on the case that used to show it.
+
+    A fixture that injects a clock and no monotonic source used to get a clock-derived duration
+    from TypeScript and a real elapsed time from Python: the TypeScript emitter read its default
+    elapsed-time source off the injected ``Clock``, which is a wall clock and can be adjusted
+    forwards or backwards between two reads. Both now default to a real monotonic source, so the
+    clock is read exactly once per event in each language, the two timestamps are the injected
+    ones rather than the third and fourth ticks of a clock that also timed the operation, and
+    the duration is a measurement in both.
+
+    The measured milliseconds are the one value here that is not a property of the plan, so they
+    are asserted as a shape, a whole nonnegative count, and blanked before the bytes are
+    compared. Nothing sleeps: the operation is an immediate return.
+    """
+    python_case, node_case = operation_pairs["operation-clock-only-no-monotonic"]
+    # Byte for byte apart from the two measurements, which no plan pins.
+    assert measurement_free(python_case)["lines"] == measurement_free(node_case)["lines"]
+    assert python_case["state"] == node_case["state"] == {
+        "dropped_events": 0,
+        "capture_gap": False,
+        "last_sink_error": None,
+    }
+    for case, language in ((python_case, "python"), (node_case, "node")):
+        start, completion = parsed(case["lines"])
+        # One clock read per event. Two more would be the wall clock timing the operation, and
+        # they would move the completion timestamp two ticks further on.
+        assert [start["timestamp"], completion["timestamp"]] == [
+            iso_timestamp(0),
+            iso_timestamp(1),
+        ], language
+        assert "duration_ms" not in start, language
+        # A real measurement, so it is an integer and nonnegative, and it is not asserted to be
+        # the 10 ms step the injected clock would have implied.
+        measured = completion["duration_ms"]
+        assert isinstance(measured, int) and not isinstance(measured, bool), language
+        assert measured >= 0, language
+        # Nothing was degraded: a measured span leaves the completion event complete.
+        assert completion["capture_status"] == "complete", language
+        assert "observer_capture_gap" not in completion["metadata"], language
+        assert case["operations"][0]["duration_seen"] == measured, language
+
+
 def test_python_never_measures_elapsed_time_with_the_injected_wall_clock():
-    """Deliberately not a parity case: the two default monotonic sources differ, so it is pinned
-    on the Python side alone.
+    """The Python half of the same rule, pinned without node so it holds in a skipped run.
 
     Python's ``monotonic`` argument defaults to :func:`time.monotonic` and never falls back to
     the injected ``clock``, because a wall clock can be adjusted between two reads and a span
-    measured with one would record time that never elapsed. The TypeScript ``Observer`` still
-    derives its default monotonic source from an injected ``Clock``, so a fixture that injects
-    only a clock gets a duration there and a real elapsed time here. That is why every operation
-    scenario in the parity matrix injects a monotonic source explicitly, and why this rule is
-    checked here instead: what it asserts is that the wall clock is read exactly twice, once per
-    event, and never a third and fourth time to time the operation.
+    measured with one would record time that never elapsed. The TypeScript emitter now makes the
+    same choice, and the two are compared on it by
+    :func:`test_neither_emitter_measures_elapsed_time_with_an_injected_wall_clock`, which needs
+    node and the built SDK. This one needs neither: what it asserts is that the wall clock is
+    read exactly twice, once per event, and never a third and fourth time to time the operation.
+    It also covers the synchronous ``observe``, which has no TypeScript counterpart at all.
     """
     reads = {"count": 0}
 
@@ -1812,8 +1917,14 @@ def test_the_operation_boundary_helpers_agree_across_languages(operation_pairs):
     * Sub-millisecond spans are compared only after rounding, because ``duration_ms`` is a whole
       number of milliseconds in both and the TypeScript ``Clock`` cannot carry finer than a
       millisecond anyway.
+    * The duration of a scenario named in :data:`REAL_TIME_OPERATIONS` is a real measurement in
+      each language, so it is blanked by :func:`measurement_free` and compared as a shape by
+      :func:`test_neither_emitter_measures_elapsed_time_with_an_injected_wall_clock`. Everything
+      else about that scenario, the bytes included, is compared here like any other.
     """
     for name, (python_case, node_case) in operation_pairs.items():
+        if name in REAL_TIME_OPERATIONS:
+            python_case, node_case = measurement_free(python_case), measurement_free(node_case)
         assert python_case["operations"] == node_case["operations"], name
         assert python_case["lines"] == node_case["lines"], name
         assert python_case["event_ids"] == node_case["event_ids"], name
@@ -1990,6 +2101,15 @@ def test_the_parity_matrix_covers_every_input_shape_the_contract_names():
     operation_names = {case["name"] for case in operations_plan()["scenarios"]}
     assert DIVERGENT_DROPPED_EVENTS <= (names | operation_names)
     assert DIVERGENT_CAPTURE_STATE <= names
+    assert REAL_TIME_OPERATIONS <= operation_names
+    # The closed divergence keeps its scenario: exactly one operation case injects a clock and
+    # no monotonic source, which is the shape that used to be measured with the wall clock.
+    clock_only = {
+        case["name"]
+        for case in operations_plan()["scenarios"]
+        if case["mode"] != "off" and "monotonic_values" not in case
+    }
+    assert clock_only == REAL_TIME_OPERATIONS
     # Every operation-boundary outcome the helpers can reach has a scenario.
     outcomes = {
         step["outcome"]

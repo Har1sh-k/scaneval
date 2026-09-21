@@ -26,8 +26,14 @@ from .contracts import ContractError, canonical_json, canonical_sha256
 
 SCHEMA_VERSION = "2.0"
 PROFILES = ("standard", "metadata_blinded")
+# The scratch directories a scanning harness writes inside the tree it was handed. This is the
+# source of truth for that set: the export strips them, and adapters derive their ``state_dirs``
+# from it, so a directory one of them treats as harness scratch is never ordinary content to the
+# other. A repository that ships one at the top level is therefore stripped on export and
+# excluded from the modification check by the same list.
+HARNESS_STATE_DIRS = frozenset({".securevibes", ".fieldglass"})
 # Harness or evaluator state that must never travel with an exported snapshot.
-STRIPPED_TOP_LEVEL = frozenset({".securevibes", ".scaneval", ".repos"})
+STRIPPED_TOP_LEVEL = frozenset({".scaneval", ".repos"}) | HARNESS_STATE_DIRS
 # Files whose presence a scanner may treat as project instructions. They stay in the export
 # under the standard profile, but their presence is recorded as a retained identity cue. Only
 # paths an agent actually reads as instructions count: ``.github`` as a whole does not, because
@@ -181,6 +187,43 @@ def tree_hash(file_hashes: dict[str, str]) -> str:
     return canonical_sha256(dict(sorted(file_hashes.items())))
 
 
+def walk_regular_files(root: Path, *, skip_top_level: frozenset[str] = frozenset()) -> dict[str, Path]:
+    """Every regular file under *root*, as ``{relative posix path: path}``.
+
+    This is the one enumeration both the exported-tree hash and the modification check in
+    :mod:`scaneval.execution` are built from, so neither can cover a path the other ignores.
+
+    The walk is explicit rather than :meth:`Path.rglob`, which swallows the ``OSError`` a
+    directory listing raises: under it a directory that cannot be listed is indistinguishable
+    from an empty one, so a scanner could write files into the source, make the directory
+    holding them unreadable, and watch them drop out of the map without a word. Here a listing
+    that fails raises, and the caller decides whether that is a refused input or a failed
+    observation.
+
+    Left out and never descended into: any path with a ``.git`` component, and each name in
+    *skip_top_level* at the top level. Left out as files: symbolic links and anything that is
+    not a regular file, because they have no content of their own to hash. Because an excluded
+    directory is never descended into, one of them being unreadable cannot fail the walk.
+    """
+    found: dict[str, Path] = {}
+    pending: list[tuple[Path, str]] = [(root, "")]
+    while pending:
+        directory, prefix = pending.pop()
+        with os.scandir(directory) as entries:
+            listed = sorted(entries, key=lambda entry: entry.name)
+        for entry in listed:
+            if entry.name == ".git" or (not prefix and entry.name in skip_top_level):
+                continue
+            if entry.is_symlink():
+                continue
+            relative = f"{prefix}{entry.name}"
+            if entry.is_dir(follow_symlinks=False):
+                pending.append((Path(entry.path), f"{relative}/"))
+            elif entry.is_file(follow_symlinks=False):
+                found[relative] = Path(entry.path)
+    return found
+
+
 def _first_component(path: str) -> str:
     return path.split("/", 1)[0]
 
@@ -320,13 +363,12 @@ def write_provenance(trial_dir: Path, record: dict) -> Path:
 
 
 def hash_exported_tree(source_dir: Path) -> dict:
-    """Recompute the export's file map from disk, for verification against provenance."""
-    hashes: dict[str, str] = {}
-    for path in sorted(source_dir.rglob("*")):
-        if path.is_symlink() or not path.is_file():
-            continue
-        rel = path.relative_to(source_dir).as_posix()
-        if any(part == ".git" for part in rel.split("/")):
-            continue
-        hashes[rel] = sha256_file(path)[0]
+    """Recompute the export's file map from disk, for verification against provenance.
+
+    Enumeration is :func:`walk_regular_files`, the same one the modification check uses, so a
+    directory that cannot be walked raises here instead of quietly shrinking the map that is
+    compared against the recorded hash.
+    """
+    hashes = {relative: sha256_file(path)[0]
+              for relative, path in sorted(walk_regular_files(source_dir).items())}
     return {"tree_hash": tree_hash(hashes), "file_count": len(hashes)}

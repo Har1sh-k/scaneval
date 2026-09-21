@@ -236,12 +236,43 @@ def test_only_the_mock_runner_makes_tool_dispatch_inapplicable():
 
 @pytest.mark.parametrize("mode,expected", [("off", "unavailable"), ("metadata", "partial"), ("content", "partial")])
 def test_model_events_are_never_complete_because_retries_are_below_the_boundary(mode, expected):
-    capture = capture_status(mode, ["claude"], has_summary=True)
+    """The capture state is supplied here because ``complete`` now requires a gap-free one.
+
+    This test asserted ``finding_submitted`` complete for any traced run with a summary, which
+    is the claim the next test shows was wrong; the gap-free state keeps it as the control for
+    what the model categories say.
+    """
+    gapless = {"capture_gap": False, "dropped_events": 0}
+    capture = capture_status(mode, ["claude"], has_summary=True, capture_state=gapless)
 
     assert capture["model_requests"] == capture["model_responses"] == expected
     assert capture["context_selection"] == ("unavailable" if mode == "off" else "partial")
     assert capture["finding_submitted"] == ("unavailable" if mode == "off" else "complete")
-    assert capture_status(mode, ["claude"], has_summary=False)["finding_submitted"] == "unavailable"
+    assert capture_status(mode, ["claude"], has_summary=False,
+                          capture_state=gapless)["finding_submitted"] == "unavailable"
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [({"capture_gap": False, "dropped_events": 0}, "complete"),
+     ({"capture_gap": True, "dropped_events": 0}, "partial"),
+     ({"capture_gap": False, "dropped_events": 3}, "partial"),
+     ({}, "partial"),
+     (None, "partial")],
+    ids=["gapless", "gap", "dropped", "empty-state", "no-state"],
+)
+def test_finding_submitted_follows_the_capture_state_the_same_record_carries(state, expected):
+    """``complete`` used to follow from tracing at all, contradicting the record it sits in.
+
+    The execution record carries ``capture_gap`` and ``dropped_events`` from the same observer
+    state, so a run that reported a gap or a dropped event was calling its finding capture
+    complete on one line and admitting a hole in it on the next. A state that reports neither is
+    still complete; a state that reports either, and a run that reported no state at all, are
+    partial, because nothing there rules a gap out.
+    """
+    capture = capture_status("content", ["claude"], has_summary=True, capture_state=state)
+
+    assert capture["finding_submitted"] == expected
 
 
 def test_every_declared_tool_policy_says_who_declared_it():
@@ -301,7 +332,7 @@ def _fake_harness_root(tmp_path: Path) -> Path:
 
 
 def _stub_driver(monkeypatch, records: dict[str, str], *, state_dir: str = ".securevibes",
-                 plan_as_link: bool = False) -> None:
+                 plan_as_link: bool = False, output: dict | None = None) -> None:
     """Stand in for the tsx driver and leave exactly the records a harness run would leave.
 
     No process is spawned and no model is called: the stub reads the driver config the adapter
@@ -319,7 +350,12 @@ def _stub_driver(monkeypatch, records: dict[str, str], *, state_dir: str = ".sec
             (state / "bootstrap-plan.md").symlink_to(state / "elsewhere.md")
         else:
             (state / "bootstrap-plan.md").write_text("# plan\n", encoding="utf-8")
-        Path(config["output_path"]).write_text(json.dumps(DRIVER_OUTPUT), encoding="utf-8")
+        if config.get("trace_path"):
+            trace_path = Path(config["trace_path"])
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
+            trace_path.write_text(
+                '{"type":"model.request"}\n{"type":"model.response"}\n', encoding="utf-8")
+        Path(config["output_path"]).write_text(json.dumps(output or DRIVER_OUTPUT), encoding="utf-8")
         stdout_path.write_text("", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
         return CommandResult(list(argv), 0, False, 0.0, stdout_path, stderr_path)
@@ -328,7 +364,8 @@ def _stub_driver(monkeypatch, records: dict[str, str], *, state_dir: str = ".sec
 
 
 def _stubbed_bundle(tmp_path: Path, monkeypatch, records: dict[str, str], *, run_id: str = "run-stub",
-                    root_config: str | None = None, plan_as_link: bool = False) -> Path:
+                    root_config: str | None = None, plan_as_link: bool = False,
+                    trace_mode: str = "off", output: dict | None = None) -> Path:
     root = _fake_harness_root(tmp_path)
     sdk = tmp_path / "observer-sdk.js"
     sdk.write_text("// stub\n", encoding="utf-8")
@@ -337,9 +374,9 @@ def _stubbed_bundle(tmp_path: Path, monkeypatch, records: dict[str, str], *, run
         "harness": "securevibes-agent", "root": root_config or str(root), "model": "test/mock-llm",
         "runner": "mock", "observer_sdk": str(sdk)})
     preparation = adapter.prepare(spec, tmp_path / "cache")
-    _stub_driver(monkeypatch, records, plan_as_link=plan_as_link)
+    _stub_driver(monkeypatch, records, plan_as_link=plan_as_link, output=output)
     return run_invocation(prepared=_prepared(tmp_path), adapter=adapter, spec=spec, preparation=preparation,
-                          out_dir=tmp_path / "out", run_id=run_id, timeout_seconds=60, trace_mode="off",
+                          out_dir=tmp_path / "out", run_id=run_id, timeout_seconds=60, trace_mode=trace_mode,
                           network_policy="none", clock=CLOCK)
 
 
@@ -577,3 +614,65 @@ def test_an_input_that_ships_the_harness_state_directory_never_reaches_the_impor
         run_invocation(prepared=prepared, adapter=adapter, spec=spec, preparation=preparation,
                        out_dir=tmp_path / "out", run_id="run-planted", timeout_seconds=60,
                        trace_mode="off", network_policy="none", clock=CLOCK)
+
+
+# --- area B: the findings directory itself, and capture that matches the record -----------
+
+
+def test_a_findings_directory_that_is_a_symbolic_link_is_refused_rather_than_followed(tmp_path):
+    """Each record was checked for symlink-ness; the directory holding them never was.
+
+    A link where the findings directory belongs points at bytes outside the workspace this scan
+    was handed, and every record behind it was imported as a finding of this scan, staged as an
+    artifact, and credited. The per-record check cannot see them, because they are reached only
+    through the directory link. The link is refused whole now, and the records nobody could read
+    are counted as loss, so the scan can earn neither completeness nor quiet credit.
+    """
+    state = tmp_path / "state"
+    state.mkdir()
+    findings = state / "findings"
+    # Before the harness runs there is no findings directory at all.
+    baseline = snapshot_findings(findings)
+    assert baseline.established and baseline.digests == {}
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "planted.md").write_text(FINDING, encoding="utf-8")
+    findings.symlink_to(outside, target_is_directory=True)
+
+    imported = import_harness_findings(findings, harness="securevibes-agent",
+                                       artifact_prefix="harness-findings",
+                                       stage_dir=tmp_path / "raw" / "harness-findings",
+                                       baseline=baseline)
+
+    assert imported.claims == [] and imported.artifacts == []
+    assert imported.lost == 1
+    assert any("symbolic link" in note for note in imported.notes)
+    assert not (tmp_path / "raw" / "harness-findings").exists(), "nothing behind the link is staged"
+    # A baseline taken over the link is not established either, so nothing is attributed to the
+    # scan even if the link was already there when the snapshot was taken.
+    assert snapshot_findings(findings).established is False
+
+
+def test_a_traced_run_reports_the_capture_gap_its_own_trace_record_carries(tmp_path, monkeypatch):
+    """The execution record used to say finding capture was complete beside its own gap.
+
+    ``capture.finding_submitted`` and ``trace.capture_gap`` come from the same observer state
+    and are written into the same document, so the record contradicted itself whenever the
+    observer reported a gap or a dropped event.
+    """
+    gap = {**DRIVER_OUTPUT, "trace": {"mode": "content", "state": {"capture_gap": True, "dropped_events": 2}}}
+    bundle = _stubbed_bundle(tmp_path / "gap", monkeypatch, {"a.md": FINDING}, run_id="run-gap",
+                             trace_mode="content", output=gap)
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert execution["trace"]["capture_gap"] is True and execution["trace"]["dropped_events"] == 2
+    assert execution["trace"]["events"] == 2 and execution["trace"]["path"] == "trace/events.jsonl"
+    assert execution["capture"]["finding_submitted"] == "partial"
+
+    clean = {**DRIVER_OUTPUT, "trace": {"mode": "content", "state": {"capture_gap": False, "dropped_events": 0}}}
+    control = _stubbed_bundle(tmp_path / "clean", monkeypatch, {"a.md": FINDING}, run_id="run-clean-trace",
+                              trace_mode="content", output=clean)
+    control_execution = load_document(control / "execution.json", "execution-record")
+
+    assert control_execution["trace"]["capture_gap"] is False
+    assert control_execution["capture"]["finding_submitted"] == "complete"

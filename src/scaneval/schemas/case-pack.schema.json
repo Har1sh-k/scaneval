@@ -123,7 +123,7 @@
         "note": {"type": "string"},
         "labels_sha256": {
           "type": "string", "pattern": "^sha256:[0-9a-f]{64}$",
-          "description": "Digest of the label content this review covers: what the case claims to be, its target, and every control, projected by scaneval.cases.label_digest. Absent on reviews recorded before approvals were bound to content; such a review is read as covering no current label, so planning leaves the case out until a review of the labels as they stand."
+          "description": "Digest of the label content this review covers: what the case claims to be, its target, and every control, projected by scaneval.contracts.label_digest. The latest review whose digest equals the case's current labels is the one review every gate asks, both for whether the approval stands and for whether the claimed level is earned. Absent on reviews recorded before approvals were bound to content; such a review is read as covering no current label, so planning leaves the case out until a review of the labels as they stand."
         }
       }
     },
@@ -173,12 +173,12 @@
         "validation": {
           "type": "object", "additionalProperties": false, "required": ["level", "review_state", "checks", "reviews"],
           "properties": {
-            "level": {"enum": [null, "L1", "L2", "L3", "L4"], "description": "L1 is the mechanical state; L2 and above are recorded human reviews. A level on a human_approved case must be carried by an approving review recorded at that level or higher, and L3 and L4 need that review to be by an independent_reviewer. L3 and L4 also require disposition validate, because a reviewed label rests on the screening decision behind it."},
+            "level": {"enum": [null, "L1", "L2", "L3", "L4"], "description": "L1 is the mechanical state; L2 and above are recorded human reviews. A level on a human_approved case must be earned by the one review that covers the labels as they stand: that review must itself be recorded at that level or higher, and L3 and L4 need that same review to be by an independent_reviewer, so an independent approval of earlier content earns nothing here. L3 and L4 also require disposition validate, because a reviewed label rests on the screening decision behind it."},
             "review_state": {"enum": ["draft", "mechanically_checked", "human_approved"], "description": "mechanically_checked means level L1 and a recorded passing check set, carrying snapshot_id, for every snapshot the case references; it is never a claim that a person read anything."},
             "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
             "checked_trees": {
               "type": "object",
-              "description": "The digest of the exported tree each recorded check set ran against, keyed by snapshot_id. One check set reads one export, so the digest is recorded once for the set. Planning compares it with the snapshot's declared tree_hash, so editing that field cannot retarget a standing check set, or an approval resting on one, at a different export. Absent for sets recorded before this field existed, where a passing snapshot_hash_recorded check holds the same digest in its detail.",
+              "description": "The digest of the exported tree each recorded check set ran against, keyed by snapshot_id. One check set reads one export, so the digest is recorded once for the set. It is the third of three records of that one fact, beside the detail of the set's passing snapshot_hash_recorded check and the snapshot's declared tree_hash, and loading a pack requires all three to agree: editing any two contradicts the third instead of retargeting a standing check set, or an approval resting on one, at a different export. A failing set records the export it read and rejected, which the declared hash is not expected to match. Absent for sets recorded before this field existed, where the passing snapshot_hash_recorded check holds the same digest in its detail.",
               "propertyNames": {"$ref": "#/$defs/id"},
               "additionalProperties": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
             },
@@ -191,8 +191,10 @@
       }
     },
     "admission": {
-      "type": "object", "additionalProperties": false, "required": ["case_id", "decision", "by", "at", "reason"],
-      "properties": {"case_id": {"$ref": "#/$defs/id"}, "decision": {"enum": ["admitted", "rejected", "deferred"]},
+      "type": "object", "additionalProperties": false, "required": ["case_id", "target_id", "decision", "by", "at", "reason"],
+      "description": "One admission decision made by a named person. It names both the case it was recorded on and the target_id that case carried at the time; the target_id is inside the label digest, so the decision is bound to content a review covers rather than to a name. A pack whose admission no longer resolves to the target of the case it names is refused, and planning routes each decision by target_id, so renaming two cases cannot move a rejection onto different content.",
+      "properties": {"case_id": {"$ref": "#/$defs/id"}, "target_id": {"$ref": "#/$defs/id"},
+                     "decision": {"enum": ["admitted", "rejected", "deferred"]},
                      "by": {"type": "string", "minLength": 1}, "at": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}
     }
   }

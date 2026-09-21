@@ -147,6 +147,129 @@ def recorded_check_state(checks: list[dict[str, Any]], snapshot_id: str) -> str 
     return "pass" if all(check["result"] == "pass" for check in recorded) else "fail"
 
 
+def _label_projection(case: dict[str, Any]) -> dict[str, Any]:
+    """The label content of *case*: what a reviewer of it passed judgment on.
+
+    Only the fields that say what is being alleged are projected, and a reviewer approving a case
+    approves what the case claims to be as well as where it claims it: the canonical target, the
+    coverage signature, the represents statement, the workload, the component role, and whether a
+    model was involved are projected alongside the target and the controls.
+
+    The case identifier, its evidence records, its disclosure dates, its disposition, its split,
+    its notes, and the recorded reviews and checks are left out: those say where a label came from
+    or what is being done with it, not what it alleges, and changing one of them does not change
+    what a reviewer read. The target's own identifier is projected, so an admission recorded
+    against that identifier is bound to content this digest covers.
+
+    Two orderings are normalized because neither carries content: controls are projected in
+    ``control_id`` order, which the contract keeps unique pack-wide, and aliases are sorted, which
+    the contract keeps unique within the case. Reordering either list alone is therefore not a
+    content change, while adding, removing, renaming, or editing an entry is.
+    """
+    target = case["target"]
+    canonical = case["canonical_target"]
+    return {
+        "represents": case["represents"],
+        "workload": case["workload"],
+        "component_role": case["component_role"],
+        "model_involvement": case["model_involvement"],
+        "coverage_signature": case["coverage_signature"],
+        "canonical_target": {
+            "kind": canonical["kind"],
+            "variant_family": canonical["variant_family"],
+            "aliases": sorted(canonical["aliases"]),
+        },
+        "target": {
+            "target_id": target["target_id"],
+            "snapshot_id": target["snapshot_id"],
+            "kind": target["kind"],
+            "description": target["description"],
+            "affected_input_or_authority": target.get("affected_input_or_authority"),
+            "accepted_locations": target["accepted_locations"],
+            "assumptions": target["assumptions"],
+            "matching_rules": target["matching_rules"],
+        },
+        "controls": [
+            {
+                "control_id": control["control_id"],
+                "snapshot_id": control["snapshot_id"],
+                "type": control["type"],
+                "target_id": control.get("target_id"),
+                "description": control["description"],
+                "property": control["property"],
+                "allowed_actors_inputs": control["allowed_actors_inputs"],
+                "assumptions": control["assumptions"],
+                "ruled_out_allegation": control["ruled_out_allegation"],
+                "locations": control["locations"],
+            }
+            for control in sorted(case["controls"], key=lambda control: control["control_id"])
+        ],
+    }
+
+
+def label_digest(case: dict[str, Any]) -> str:
+    """The digest of one case's labels: what it claims to be, its target, and every control.
+
+    A recorded approval carries this digest, so an approval is bound to the content it covered
+    rather than to the case it sits on. Adding, removing, or editing a control changes it, as
+    does editing the target's mechanism, description, affected input, accepted locations,
+    assumptions, or matching rules, and so does editing what the case says it represents: its
+    canonical kind, variant family, aliases, coverage signature, represents statement, workload,
+    component role, or model involvement. None of those can ride on an earlier review.
+
+    The snapshot each label names is projected too: moving a target or a control onto a
+    different snapshot changes what was reviewed exactly as editing its text does.
+
+    This lives here rather than in :mod:`scaneval.cases` because both the planning gate and the
+    pack-load gate must ask the same question of the same content, and :mod:`scaneval.cases`
+    imports this module and not the other way round. :mod:`scaneval.cases` re-exports it.
+    """
+    return canonical_sha256(_label_projection(case))
+
+
+def covering_review(case: dict[str, Any]) -> dict[str, Any] | None:
+    """The one recorded review that approves *case* as its labels now stand, or ``None``.
+
+    The latest recorded review is the operative one, so this is that review when it approved the
+    case and carries :func:`label_digest` of these labels. ``None`` when a later review rejected
+    the case or reopened the question, when the labels changed after the approval, when no review
+    is recorded, and when the latest review records no digest at all: a review that never named
+    the content it read cannot be shown to cover this content.
+
+    Every gate that asks whether an approval is in force asks this one review, so a plan and a
+    pack load cannot end up resting on two different reviews. Nothing is rewritten or withdrawn
+    here; this reads what the pack records.
+    """
+    reviews = case["validation"]["reviews"]
+    if not reviews:
+        return None
+    review = reviews[-1]
+    if review["decision"] != "approve" or not review.get("labels_sha256"):
+        return None
+    return review if review["labels_sha256"] == label_digest(case) else None
+
+
+def level_gap(review: dict[str, Any], claimed: str | None) -> str | None:
+    """Why *review* does not itself earn *claimed*, or ``None`` when it does.
+
+    Levels are ordered, so an approval recorded at a higher level earns a lower claimed one. L3
+    and L4 rest on an independent review, so the one review being asked must itself carry that
+    role: an independent approval elsewhere in the history was an approval of other content and
+    earns nothing here. ``None`` for a case claiming no level, which has nothing to earn.
+    """
+    if claimed is None:
+        return None
+    if review["decision"] != "approve":
+        return f"the review covering these labels decided {review['decision']}, not approve"
+    if _LEVEL_RANK[review["level"]] < _LEVEL_RANK[claimed]:
+        return (f"the review covering these labels is recorded at {review['level']}; {claimed} "
+                f"requires an approving review recorded at {claimed} or higher")
+    if claimed in ("L3", "L4") and review["role"] != "independent_reviewer":
+        return (f"the review covering these labels carries the role {review['role']}; {claimed} "
+                f"requires an approving review at {claimed} or higher by an independent_reviewer")
+    return None
+
+
 def _validate_scan_request(document: dict[str, Any]) -> None:
     request_input = document["input"]
     _require_relative_path(request_input["root"], "input.root")
@@ -253,12 +376,36 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
     failed, and an L3/L4 label belongs only to a case screened as worth validating. A
     ``human_approved`` case makes the same claim about its check sets as a mechanically checked
     one unless it raises ``checks_failed``, and it cannot stand under a latest review that
-    rejected it. Its level must be one a recorded approving review carries: an approval at that
-    level or higher, and for L3 or L4 one of those approvals must be by an ``independent_reviewer``,
-    so a hand-edited level cannot claim a review nobody recorded. A snapshot whose recorded checks
-    say its hash was confirmed must carry that hash. Every recorded review names a reviewer and
-    every admission names who decided it, by the same :func:`is_stated` rule the write paths
-    apply, so a hand-edited pack cannot claim a review or an admission by an unnamed person.
+    rejected it.
+
+    Its level must be earned by the one review that covers the labels as they stand, which
+    :func:`covering_review` names and :func:`level_gap` measures: that review must itself be
+    recorded at the claimed level or higher, and for L3 or L4 must itself be by an
+    ``independent_reviewer``. An independent approval elsewhere in the history approved other
+    content and earns nothing here, so a case cannot be raised to a reviewed level by editing a
+    label, collecting a lesser approval of the edit, and resting the level on the older review.
+    :func:`scaneval.cases.approval_is_current` asks the same review the same question, so a plan
+    and a pack load cannot rest on two different ones. When no recorded review covers the current
+    labels the case plans nothing whatever it claims, and the weaker rule applies instead: the
+    level must be one some recorded approval carries, so the pack still cannot claim a review
+    nobody recorded.
+
+    Which export a check set read is recorded three times, and the three must agree: the
+    ``checked_trees`` entry for the snapshot, the ``detail`` of that set's passing
+    ``snapshot_hash_recorded`` check, and the ``tree_hash`` the snapshot declares. A passing set
+    that names its export must carry the check confirming it, and a ``checked_trees`` entry for a
+    snapshot no recorded check set ran against records a check that never happened. Editing any
+    two of the three therefore contradicts the third rather than pointing a standing approval at
+    an export the checks never ran against. A failing set is exempt from the comparison with the
+    declared hash, because recording the export that was read and rejected is exactly what it is
+    for; a failing set keeps the case out of a plan anyway.
+
+    Every recorded review names a reviewer and every admission names who decided it, by the same
+    :func:`is_stated` rule the write paths apply, so a hand-edited pack cannot claim a review or an
+    admission by an unnamed person. Every admission also names the ``target_id`` it decided, which
+    :func:`label_digest` covers, and that target must still be the one the named case carries:
+    renaming two cases around a standing decision no longer moves it onto different content.
+
     Whether a recorded approval still covers the labels as they stand is a planning question,
     answered by :func:`scaneval.cases.approval_is_current`, not a consistency one: a pack whose
     labels changed after a review is still a truthful record of that review and loads here.
@@ -307,14 +454,6 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
         referenced = [target["snapshot_id"]] + [control["snapshot_id"] for control in case["controls"]]
         unchecked = sorted({snapshot for snapshot in referenced
                             if recorded_check_state(validation["checks"], snapshot) != "pass"})
-        for snapshot_id in sorted(set(referenced)):
-            confirmed = [check for check in validation["checks"]
-                         if check.get("snapshot_id") == snapshot_id
-                         and check["check"] == "snapshot_hash_recorded" and check["result"] == "pass"]
-            if confirmed and not snapshot_hashes.get(snapshot_id):
-                raise ContractError(
-                    f"{label}: snapshot {snapshot_id} records a passing snapshot_hash_recorded check "
-                    "but the snapshot carries no tree_hash")
         if state == "human_approved" and not approvals:
             raise ContractError(f"{label}: human_approved requires at least one recorded approving review")
         if state == "human_approved" and validation["level"] is None:
@@ -330,16 +469,27 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
                 f"for: {', '.join(unchecked)}")
         if state == "human_approved" and validation["level"] is not None:
             claimed = validation["level"]
-            carried = [r for r in approvals if _LEVEL_RANK[r["level"]] >= _LEVEL_RANK[claimed]]
-            if not carried:
-                recorded = ", ".join(sorted({r["level"] for r in approvals})) or "none"
-                raise ContractError(
-                    f"{label}: level {claimed} requires an approving review recorded at {claimed} or "
-                    f"higher; the recorded approvals are at {recorded}")
-            if claimed in ("L3", "L4") and not any(r["role"] == "independent_reviewer" for r in carried):
-                raise ContractError(
-                    f"{label}: {claimed} requires an approving review at {claimed} or higher by an "
-                    "independent_reviewer; no recorded approval carries that role")
+            covering = covering_review(case)
+            if covering is not None:
+                # One review covers these labels, so that review alone earns the claimed level:
+                # an approval elsewhere in the history approved other content.
+                gap = level_gap(covering, claimed)
+                if gap:
+                    raise ContractError(f"{label}: {gap}")
+            else:
+                # No recorded review covers the labels as they stand, so planning leaves the case
+                # out whatever it claims. The level must still be one the history records, or the
+                # pack claims a review nobody recorded.
+                carried = [r for r in approvals if _LEVEL_RANK[r["level"]] >= _LEVEL_RANK[claimed]]
+                if not carried:
+                    recorded = ", ".join(sorted({r["level"] for r in approvals})) or "none"
+                    raise ContractError(
+                        f"{label}: level {claimed} requires an approving review recorded at {claimed} or "
+                        f"higher; the recorded approvals are at {recorded}")
+                if claimed in ("L3", "L4") and not any(r["role"] == "independent_reviewer" for r in carried):
+                    raise ContractError(
+                        f"{label}: {claimed} requires an approving review at {claimed} or higher by an "
+                        "independent_reviewer; no recorded approval carries that role")
         if validation["level"] in ("L3", "L4") and state != "human_approved":
             raise ContractError(f"{label}: {validation['level']} requires human_approved review state")
         if state == "draft" and validation["level"] is not None:
@@ -361,12 +511,53 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
             raise ContractError(
                 f"{label}: {validation['level']} requires disposition validate, not "
                 f"{case['disposition']['value']}")
+        # The three records of which export each check set read, compared with each other. These
+        # run after the state rules so that a pack missing a check set is told that first: a
+        # record of a set that is not there is a narrower complaint than the set being absent.
+        recorded_trees = validation.get("checked_trees", {})
+        for snapshot_id, entry in sorted(recorded_trees.items()):
+            if not any(check.get("snapshot_id") == snapshot_id for check in validation["checks"]):
+                raise ContractError(
+                    f"{label}: validation.checked_trees records {entry} for snapshot {snapshot_id}, "
+                    "but no recorded check set ran against that snapshot")
+        for snapshot_id in sorted(set(referenced)):
+            confirmed = {check["detail"] for check in validation["checks"]
+                         if check.get("snapshot_id") == snapshot_id
+                         and check["check"] == "snapshot_hash_recorded" and check["result"] == "pass"}
+            declared = snapshot_hashes.get(snapshot_id)
+            entry = recorded_trees.get(snapshot_id)
+            if confirmed and not declared:
+                raise ContractError(
+                    f"{label}: snapshot {snapshot_id} records a passing snapshot_hash_recorded check "
+                    "but the snapshot carries no tree_hash")
+            if confirmed and {declared} != confirmed:
+                raise ContractError(
+                    f"{label}: snapshot {snapshot_id} records a passing snapshot_hash_recorded check "
+                    f"for {', '.join(sorted(confirmed))}, but the snapshot declares {declared}; the "
+                    "checks ran against an export the snapshot no longer names")
+            if entry is not None and confirmed and {entry} != confirmed:
+                raise ContractError(
+                    f"{label}: validation.checked_trees records {entry} for snapshot {snapshot_id}, "
+                    f"but that check set's passing snapshot_hash_recorded check records "
+                    f"{', '.join(sorted(confirmed))}")
+            if (entry is not None and not confirmed
+                    and recorded_check_state(validation["checks"], snapshot_id) == "pass"):
+                raise ContractError(
+                    f"{label}: validation.checked_trees records {entry} for snapshot {snapshot_id}, "
+                    "but that passing check set carries no passing snapshot_hash_recorded check to "
+                    "confirm it")
     _unique(target_ids, "target_id")
     _unique(control_ids, "control_id")
-    case_ids = {case["case_id"] for case in document["cases"]}
+    targets_by_case = {case["case_id"]: case["target"]["target_id"] for case in document["cases"]}
     for index, admission in enumerate(document["admissions"]):
-        if admission["case_id"] not in case_ids:
+        if admission["case_id"] not in targets_by_case:
             raise ContractError(f"admission references unknown case {admission['case_id']}")
+        named = targets_by_case[admission["case_id"]]
+        if admission["target_id"] != named:
+            raise ContractError(
+                f"admissions[{index}] was recorded against target {admission['target_id']} of case "
+                f"{admission['case_id']}, which now carries target {named}; the decision no longer "
+                "resolves to the content it named")
         if not is_stated(admission["by"]):
             raise ContractError(
                 f"a recorded admission must name who decided it; admissions[{index}].by is blank")

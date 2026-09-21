@@ -12,6 +12,8 @@ import pytest
 
 from scaneval.contracts import ContractError, canonical_sha256
 from scaneval.materialize import (
+    HARNESS_STATE_DIRS,
+    STRIPPED_TOP_LEVEL,
     MaterializationError,
     cache_key,
     export_snapshot,
@@ -19,6 +21,7 @@ from scaneval.materialize import (
     hash_exported_tree,
     prepare_synthetic_history,
     tree_hash,
+    walk_regular_files,
     write_provenance,
 )
 
@@ -209,3 +212,77 @@ def test_instruction_cue_detection_covers_assistant_files_only():
     for path in (".github/workflows/ci.yml", ".github/CODEOWNERS", ".github/ISSUE_TEMPLATE/bug.md",
                  ".github/dependabot.yml", "README.md", "src/claude.py", "docs/github/instructions/x.md"):
         assert not _is_instruction_file(path), path
+
+
+# --- one enumeration, and one list of harness state directories ---------------------------
+
+
+def test_the_exported_hash_raises_rather_than_shrinking_when_a_directory_cannot_be_walked(tmp_path):
+    """An unreadable directory used to hash exactly like an absent one.
+
+    :meth:`Path.rglob` swallows the ``OSError`` the walk raises, so the files behind such a
+    directory silently left the map and the recomputed hash described a tree that was never
+    there. The walk raises now, and the caller decides what a tree it cannot enumerate means.
+    """
+    source = tmp_path / "source"
+    (source / "src").mkdir(parents=True)
+    (source / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    closed = source / "closed"
+    closed.mkdir()
+    (closed / "hidden.py").write_text("y = 2\n", encoding="utf-8")
+    closed.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError):
+            hash_exported_tree(source)
+        with pytest.raises(PermissionError):
+            walk_regular_files(source)
+        # The exclusions are never descended into, so an unreadable one cannot fail the walk.
+        closed.chmod(0o700)
+        git_dir = source / ".git"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        git_dir.chmod(0o000)
+        assert sorted(walk_regular_files(source)) == ["closed/hidden.py", "src/app.py"]
+        assert sorted(walk_regular_files(source, skip_top_level=frozenset({"closed"}))) == ["src/app.py"]
+    finally:
+        for directory in (closed, source / ".git"):
+            if directory.exists():
+                directory.chmod(0o700)
+
+
+def test_one_list_of_harness_state_directories_feeds_the_export_and_the_adapter():
+    """The export stripped ``.securevibes`` but not ``.fieldglass``; the adapter claimed both.
+
+    A repository shipping a top-level ``.fieldglass`` was therefore exported with it in place
+    and then had it excluded from the modification check as scanner scratch, so bytes inside the
+    input hash were rewritten unwatched. One list is the source of truth for both ends now.
+    """
+    from scaneval.adapters.llm_harness import HARNESS_PRESETS, LlmHarnessAdapter
+
+    assert set(LlmHarnessAdapter.state_dirs) == set(HARNESS_STATE_DIRS)
+    assert {preset["state_dir"] for preset in HARNESS_PRESETS.values()} == set(HARNESS_STATE_DIRS)
+    assert HARNESS_STATE_DIRS <= STRIPPED_TOP_LEVEL
+    assert ".fieldglass" in HARNESS_STATE_DIRS
+
+
+def test_an_export_strips_every_harness_state_directory(tmp_path):
+    """The end of the same finding: both state directories leave the snapshot on export."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git("init", "-q", "-b", "main", cwd=repo)
+    git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=repo)
+    (repo / "app.py").write_text("print('v1')\n", encoding="utf-8")
+    for name in sorted(HARNESS_STATE_DIRS):
+        (repo / name).mkdir()
+        (repo / name / "findings.md").write_text(f"{name} scratch\n", encoding="utf-8")
+    git("add", "-A", "-f", ".", cwd=repo)
+    git("commit", "-q", "-m", "first", cwd=repo)
+    commit = git("rev-parse", "HEAD", cwd=repo)
+
+    snapshot = fetch_snapshot(str(repo), commit, tmp_path / "cache")
+    record = export_snapshot(snapshot, tmp_path / "trial")
+
+    source = tmp_path / "trial" / "source"
+    assert record["stripped"] == [f"{name}/findings.md" for name in sorted(HARNESS_STATE_DIRS)]
+    assert [path.name for path in source.iterdir()] == ["app.py"]
+    assert record["trial"]["file_count"] == 1

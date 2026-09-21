@@ -285,7 +285,11 @@ test("a monotonic source that steps backwards costs the duration, not the comple
   assert.deepEqual(observer.getState(), { dropped_events: 0, capture_gap: true, last_sink_error: "observer instrumentation failure" });
 });
 
-test("a clock that throws during observeAsync omits the duration instead of writing a zero", async () => {
+test("a clock that throws during observeAsync costs the timestamp, not the duration", async () => {
+  // This test used to assert that a throwing clock also cost the duration, which was true only
+  // because the emitter derived its elapsed-time source from the injected clock. It no longer
+  // does, for the reason Python never did: a wall clock can be adjusted between two reads. The
+  // two failures are independent now, and each costs exactly its own field.
   const seen = [];
   const observer = new Observer({ mode: "metadata", sink: { write: e => seen.push(e) }, idFactory: ids(), clock: { now: () => { throw new Error("clock"); } } });
   const durations = [];
@@ -293,17 +297,89 @@ test("a clock that throws during observeAsync omits the duration instead of writ
   const done = duration_ms => { durations.push(duration_ms); return { type: "tool.end", capture_status: "complete", duration_ms, metadata: {} }; };
   assert.equal(await observer.observeAsync(start, done, done, async () => "value"), "value");
   await observer.flush();
-  assert.deepEqual(durations, [undefined]);
+  // The span was measured with a real monotonic source, so the builder was handed a whole
+  // number of milliseconds rather than the undefined a clock-derived source produced here.
+  assert.equal(durations.length, 1);
+  assert.ok(Number.isInteger(durations[0]) && durations[0] >= 0);
   const completion = seen.at(-1);
-  assert.notEqual(completion.duration_ms, 0);
-  assert.equal(Object.keys(plain(completion)).includes("duration_ms"), false);
+  assert.equal(completion.duration_ms, durations[0]);
+  assert.equal(completion.timestamp, "1970-01-01T00:00:00.000Z");
+  // The event is still marked, because the clock read that failed left a fabricated timestamp.
   assert.equal(completion.capture_status, "partial");
   assert.equal(completion.metadata.observer_capture_gap, true);
-  assert.equal(completion.timestamp, "1970-01-01T00:00:00.000Z");
-  // One gap for the start event's clock read, one for the failed elapsed read, one for the
-  // completion event's clock read. None of them is a fabricated measurement, and none lost an
-  // event: both events reached the sink, so the drop counter stays at zero.
+  // One gap per failed clock read, one event each. Neither event was lost: both reached the
+  // sink, so the drop counter stays at zero.
   assert.deepEqual(observer.getState(), { dropped_events: 0, capture_gap: true, last_sink_error: "observer instrumentation failure" });
+
+  // The unmeasurable span is now reachable only through the elapsed-time source itself, which
+  // is the whole point of it being a separate source.
+  const timed = [];
+  const unmeasurable = new Observer({
+    mode: "metadata", sink: { write: e => timed.push(e) }, idFactory: ids(), clock: clock(),
+    monotonic: { now: () => { throw new Error("monotonic"); } },
+  });
+  const spans = [];
+  const record = duration_ms => { spans.push(duration_ms); return { type: "tool.end", capture_status: "complete", duration_ms, metadata: {} }; };
+  assert.equal(await unmeasurable.observeAsync(start, record, record, async () => "value"), "value");
+  await unmeasurable.flush();
+  assert.deepEqual(spans, [undefined]);
+  assert.equal(Object.keys(plain(timed.at(-1))).includes("duration_ms"), false);
+  assert.equal(timed.at(-1).capture_status, "partial");
+  assert.equal(timed.at(-1).metadata.observer_capture_gap, true);
+  assert.equal(timed.at(-1).timestamp, "2023-11-14T22:13:20.010Z");
+  assert.deepEqual(unmeasurable.getState(), { dropped_events: 0, capture_gap: true, last_sink_error: "observer instrumentation failure" });
+});
+
+test("an injected clock never measures elapsed time, in either language", async () => {
+  // The divergence this closes: the emitter used to derive its default monotonic source from an
+  // injected Clock, so a fixture that injected a 10 ms-per-read clock got duration_ms 10 out of
+  // TypeScript and a real measurement out of Python for the same code. A wall clock can be
+  // adjusted between two reads, so a span measured with one is time that may never have
+  // elapsed. Python's `monotonic` defaults to time.monotonic and never falls back to its
+  // `clock`; this is the same rule, pinned on this side.
+  const seen = [];
+  let reads = 0;
+  const observer = new Observer({
+    mode: "metadata", sink: { write: e => seen.push(e) }, idFactory: ids(), runId: "r", producerId: "p",
+    clock: { now: () => new Date(1_700_000_000_000 + (reads++) * 10) },
+  });
+  const start = { type: "tool.start", capture_status: "complete", metadata: { tool: "grep" } };
+  const done = duration_ms => ({ type: "tool.end", capture_status: "complete", duration_ms, metadata: { tool: "grep" } });
+  assert.equal(await observer.observeAsync(start, done, done, async () => "value"), "value");
+  await observer.flush();
+  // One clock read per event and no more. Two extra reads would be the operation being timed
+  // with the wall clock, and they would shift every timestamp after them as well.
+  assert.equal(reads, 2);
+  assert.deepEqual(seen.map(e => e.timestamp), ["2023-11-14T22:13:20.000Z", "2023-11-14T22:13:20.010Z"]);
+  // The duration is a real measurement, not the 10 ms step this clock would have implied.
+  const measured = seen.at(-1).duration_ms;
+  assert.ok(Number.isInteger(measured) && measured >= 0);
+  assert.equal(seen.at(-1).capture_status, "partial");
+  assert.equal(seen.at(-1).metadata.observer_capture_gap, undefined);
+  assert.deepEqual(observer.getState(), { dropped_events: 0, capture_gap: false, last_sink_error: null });
+
+  // A host with no performance.now() offers no monotonic source at all. The span is reported
+  // unmeasurable rather than taken off Date.now(), which is a wall clock like any other: an
+  // omitted duration says the span is unknown, a wall-clock one would be read as a measurement.
+  const host = globalThis.performance;
+  const hostless = [];
+  try {
+    delete globalThis.performance;
+    const bare = new Observer({ mode: "metadata", sink: { write: e => hostless.push(e) }, idFactory: ids(), clock: clock() });
+    const spans = [];
+    const record = duration_ms => { spans.push(duration_ms); return { type: "tool.end", capture_status: "complete", duration_ms, metadata: {} }; };
+    assert.equal(await bare.observeAsync(start, record, record, async () => "value"), "value");
+    await bare.flush();
+    assert.deepEqual(spans, [undefined]);
+    assert.equal(Object.keys(plain(hostless.at(-1))).includes("duration_ms"), false);
+    assert.equal(hostless.at(-1).capture_status, "partial");
+    assert.equal(hostless.at(-1).metadata.observer_capture_gap, true);
+    // The completion event is still delivered, so this costs the duration and not the event.
+    assert.deepEqual(bare.getState(), { dropped_events: 0, capture_gap: true, last_sink_error: "observer instrumentation failure" });
+  } finally {
+    globalThis.performance = host;
+  }
+  assert.equal(hostless.length, 2);
 });
 
 test("close refuses later events as counted capture gaps", async () => {

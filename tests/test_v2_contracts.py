@@ -10,7 +10,10 @@ from scaneval.contracts import (
     ContractError,
     canonical_json,
     canonical_sha256,
+    covering_review,
     is_stated,
+    label_digest,
+    level_gap,
     load_document,
     validate_document,
 )
@@ -566,3 +569,78 @@ def test_a_claim_that_cites_no_raw_artifact_is_still_accepted():
     assert validate_document("scan-result", document) is document
     document["raw_artifacts"] = [{"id": "only", "path": "raw/only.json", "sha256": "sha256:" + "d" * 64}]
     assert validate_document("scan-result", document) is document
+
+
+def review(level: str = "L3", role: str = "independent_reviewer", decision: str = "approve") -> dict:
+    """One recorded review, with only the fields the level rule reads filled in."""
+    return {"reviewer": "R. Eviewer", "role": role, "decision": decision, "level": level,
+            "at": "2026-09-20T15:00:00+00:00", "note": ""}
+
+
+@pytest.mark.parametrize(
+    ("recorded", "claimed", "gap"),
+    [
+        (review("L3"), "L3", None),
+        (review("L4"), "L3", None),
+        (review("L3"), "L2", None),
+        (review("L2", role="curator"), "L2", None),
+        (review("L2", role="curator"), "L1", None),
+        (review("L3"), None, None),
+        (review("L2", role="curator"), "L3", "recorded at L2"),
+        (review("L1", role="curator"), "L2", "recorded at L1"),
+        (review("L3"), "L4", "recorded at L3"),
+        (review("L4", role="curator"), "L3", "carries the role curator"),
+        (review("L4", role="adjudicator"), "L4", "carries the role adjudicator"),
+        (review("L3", decision="unresolved"), "L3", "decided unresolved, not approve"),
+    ],
+    ids=["exact", "higher", "lower-claim", "curator-l2", "curator-carries-l1", "no-claim",
+         "curator-under-l3", "below-claim", "above-every-approval", "role-under-l3",
+         "role-under-l4", "not-an-approval"],
+)
+def test_one_review_earns_a_level_on_its_own_record(recorded, claimed, gap):
+    """level_gap reads the review it is given: no other review in a history can help it.
+
+    Levels are ordered, so an approval recorded higher earns a lower claim, and L3 and L4 need the
+    role on this same review rather than on an approval of content it never covered.
+    """
+    measured = level_gap(recorded, claimed)
+
+    if gap is None:
+        assert measured is None
+    else:
+        assert measured is not None and gap in measured
+
+
+def test_the_covering_review_is_the_latest_one_that_names_these_labels():
+    """Every gate asks one review, so which review that is cannot depend on who is asking."""
+    case = {
+        "case_id": "widget-shell", "represents": "r", "workload": "conventional_application",
+        "component_role": "application", "model_involvement": {"state": "not_reviewed"},
+        "coverage_signature": {"idiom": {"state": "not_reviewed"}},
+        "canonical_target": {"kind": "command_injection", "variant_family": "f", "aliases": ["b", "a"]},
+        "target": {"target_id": "T-widget-shell", "snapshot_id": "snap-a", "kind": "command_injection",
+                   "description": "d", "accepted_locations": [], "assumptions": [], "matching_rules": []},
+        "controls": [],
+        "validation": {"level": "L3", "review_state": "human_approved", "checks": [], "reviews": []},
+    }
+    digest = label_digest(case)
+    assert covering_review(case) is None, "no review is recorded"
+
+    case["validation"]["reviews"].append({**review(), "labels_sha256": digest})
+    assert covering_review(case) is case["validation"]["reviews"][-1]
+
+    # Sorting the aliases is not a content change, so the same review still covers the labels.
+    case["canonical_target"]["aliases"] = ["a", "b"]
+    assert label_digest(case) == digest and covering_review(case) is not None
+
+    # A later review of any other decision is the operative one, and it covers nothing.
+    for decision in ("unresolved", "reject"):
+        case["validation"]["reviews"].append({**review(decision=decision), "labels_sha256": digest})
+        assert covering_review(case) is None
+        case["validation"]["reviews"].pop()
+
+    # An approval that names other content, or names none at all, covers nothing either.
+    case["validation"]["reviews"].append({**review(), "labels_sha256": "sha256:" + "f" * 64})
+    assert covering_review(case) is None
+    case["validation"]["reviews"][-1].pop("labels_sha256")
+    assert covering_review(case) is None

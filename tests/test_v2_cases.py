@@ -134,8 +134,15 @@ def test_contract_rejects_inconsistent_review_states_and_dangling_references():
     with pytest.raises(ContractError, match="not declared"):
         validate_document("case-pack", broken)
     broken = json.loads(json.dumps(pack))
-    broken["admissions"].append({"case_id": "ghost", "decision": "admitted", "by": "x", "at": "t", "reason": "r"})
+    broken["admissions"].append({"case_id": "ghost", "target_id": "T-ghost", "decision": "admitted",
+                                 "by": "x", "at": "t", "reason": "r"})
     with pytest.raises(ContractError, match="unknown case"):
+        validate_document("case-pack", broken)
+    # An admission is bound to the target it decided, so it cannot be recorded without one.
+    broken = json.loads(json.dumps(pack))
+    broken["admissions"].append({"case_id": "widget-shell", "decision": "admitted", "by": "x",
+                                 "at": "t", "reason": "r"})
+    with pytest.raises(ContractError, match="'target_id' is a required property"):
         validate_document("case-pack", broken)
 
 
@@ -643,12 +650,20 @@ def test_the_contract_refuses_an_approval_whose_checks_are_missing_or_rejected(t
     assert validate_document("case-pack", pack) is pack
 
     broken = json.loads(json.dumps(pack))
+    # The record of which tree a check set read goes with the set, so both are dropped here.
     broken["cases"][0]["validation"]["checks"] = []
+    broken["cases"][0]["validation"]["checked_trees"] = {}
     with pytest.raises(ContractError, match="human_approved requires a recorded passing check set"):
         validate_document("case-pack", broken)
     # The flag is what an approved case records when a check set failed; it is then consistent.
     broken["cases"][0]["validation"]["checks_failed"] = True
     assert validate_document("case-pack", broken) is broken
+    # Keeping the record of the tree while dropping the set it belongs to claims a check that is
+    # not in the pack, so the entry is refused rather than read as evidence of an export.
+    orphaned = json.loads(json.dumps(broken))
+    orphaned["cases"][0]["validation"]["checked_trees"] = {"widget-abc": HASH}
+    with pytest.raises(ContractError, match="no recorded check set ran against that snapshot"):
+        validate_document("case-pack", orphaned)
 
     broken = json.loads(json.dumps(pack))
     for check in broken["cases"][0]["validation"]["checks"]:
@@ -1028,7 +1043,13 @@ def test_editing_a_snapshot_tree_hash_cannot_retarget_a_standing_approval(tmp_pa
     assert checked_tree_hash(case_by_id(pack, "widget-shell"), "widget-abc") == HASH
 
     pack["snapshots"][0]["tree_hash"] = other
-    assert validate_document("case-pack", pack) is pack, "the pack is still a consistent record"
+    # Changed deliberately: this assertion used to read that the edited pack was still a
+    # consistent record. It is not. The passing check says the export digest agreed with the
+    # declared hash, and the snapshot now declares another, so the pack contradicts itself and is
+    # refused at load. Planning below runs on the pack in memory, which never went through a load.
+    with pytest.raises(ContractError, match="the checks ran against an export the snapshot no "
+                                            "longer names"):
+        validate_document("case-pack", pack)
 
     plan, notes = build_plan(pack, "widget-abc", other)
     assert plan["scope"] == "draft" and plan["targets"] == [] and plan["controls"] == []
@@ -1121,3 +1142,164 @@ def test_a_trailing_rejecting_review_is_also_the_operative_one(tmp_path):
     assert plan["scope"] == "draft" and plan["targets"] == []
     assert any("the latest recorded review rejected this case" in note for note in notes)
     assert approval_is_current(case_by_id(pack, "widget-shell")) is False
+
+
+def test_a_lesser_approval_of_an_edit_cannot_launder_an_older_independent_level(tmp_path):
+    """Reproduces approval laundering: the review covering the edit is the one that must earn L3.
+
+    An independent reviewer approves the case at L3, a control is added afterwards, and a curator
+    approves the labels as they now stand at L2. The L3 approval covers what the case used to say,
+    so nothing that read the control was recorded at L3 and no L3 plan may carry it.
+    """
+    pack = approved_pack(tmp_path)
+    case_by_id(pack, "widget-shell")["controls"].append(safe_control())
+    approve_case(pack, "widget-shell", reviewer="C. Urator", role="curator", level="L2",
+                 note="structure re-read; the mechanism was not", clock=CLOCK)
+    validation = case_by_id(pack, "widget-shell")["validation"]
+    assert validation["level"] == "L2"
+    assert [(r["role"], r["level"]) for r in validation["reviews"]] == [
+        ("independent_reviewer", "L3"), ("curator", "L2")]
+
+    validation["level"] = "L3"
+
+    with pytest.raises(ContractError, match="the review covering these labels is recorded at L2; "
+                                            "L3 requires an approving review recorded at L3 or higher"):
+        validate_document("case-pack", pack)
+    assert approval_is_current(case_by_id(pack, "widget-shell")) is False
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "draft" and plan["targets"] == [] and plan["controls"] == []
+    assert any("L3 requires an approving review recorded at L3 or higher" in note for note in notes)
+
+    # The honest record of the same history loads and plans the edit at the level that read it.
+    case_by_id(pack, "widget-shell")["validation"]["level"] = "L2"
+    assert validate_document("case-pack", pack) is pack
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "draft" and notes == []
+    assert [target["validation_level"] for target in plan["targets"]] == ["L2"]
+    assert [control["validation_level"] for control in plan["controls"]] == ["L2"]
+
+    # An independent reviewer reading the labels as they stand is what reaches a reviewed plan.
+    approve_case(pack, "widget-shell", reviewer="S. Econd", role="independent_reviewer", level="L3",
+                 note="the control was read too", clock=CLOCK)
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "reviewed" and notes == []
+    assert [control["validation_level"] for control in plan["controls"]] == ["L3"]
+
+
+def test_a_plan_reads_its_level_from_the_review_that_covers_the_labels(tmp_path):
+    """The level a plan claims comes from the covering review, not from the stored field."""
+    pack = approved_pack(tmp_path)
+    case_by_id(pack, "widget-shell")["validation"]["reviews"][-1]["level"] = "L4"
+    case_by_id(pack, "widget-shell")["validation"]["reviews"][-1]["note"] = "build and tests read"
+
+    assert validate_document("case-pack", pack) is pack, "an L4 approval carries the claimed L3"
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+
+    assert notes == [] and plan["scope"] == "reviewed"
+    assert [target["validation_level"] for target in plan["targets"]] == ["L4"]
+
+
+def test_a_two_field_tree_edit_contradicts_the_third_record_of_the_export(tmp_path):
+    """Reproduces the retargeted export: three records name the tree the checks read, and they agree.
+
+    Editing the snapshot's declared hash and the ``checked_trees`` entry together used to point a
+    standing approval at an export the checks never ran against, because nothing compared either
+    with the digest the passing ``snapshot_hash_recorded`` check already carried.
+    """
+    pack = approved_pack(tmp_path)
+    other = "sha256:" + "c" * 64
+    case = case_by_id(pack, "widget-shell")
+    assert case["validation"]["checked_trees"] == {"widget-abc": HASH}
+    assert [check["detail"] for check in case["validation"]["checks"]
+            if check["check"] == "snapshot_hash_recorded"] == [HASH]
+
+    pack["snapshots"][0]["tree_hash"] = other
+    case["validation"]["checked_trees"]["widget-abc"] = other
+
+    with pytest.raises(ContractError, match="the checks ran against an export the snapshot no "
+                                            "longer names"):
+        validate_document("case-pack", pack)
+    assert checked_tree_hash(case_by_id(pack, "widget-shell"), "widget-abc") is None
+    plan, notes = build_plan(pack, "widget-abc", other)
+    assert plan["scope"] == "draft" and plan["targets"] == [] and plan["controls"] == []
+    assert any("the records of which tree the checks for snapshot(s) widget-abc ran against "
+               "disagree with each other" in note for note in notes)
+
+    # Editing the entry alone is the same contradiction seen from the other side.
+    pack["snapshots"][0]["tree_hash"] = HASH
+    with pytest.raises(ContractError, match="but that check set's passing snapshot_hash_recorded "
+                                            "check records"):
+        validate_document("case-pack", pack)
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["targets"] == []
+    assert any("disagree with each other" in note for note in notes)
+
+    # The records agreeing again is what plans the case, and they agree on one export only.
+    case_by_id(pack, "widget-shell")["validation"]["checked_trees"]["widget-abc"] = HASH
+    assert validate_document("case-pack", pack) is pack
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "reviewed" and notes == []
+
+
+def two_case_pack(tmp_path: Path) -> dict:
+    """Two mechanically checked cases on one snapshot, each with its own target."""
+    pack = make_pack()
+    add_case(pack, draft_case(
+        "widget-path", snapshot_id="widget-abc", kind="path_traversal", description="join of a user path",
+        represents=REPRESENTS, workload="conventional_application", component_role="application", aliases=[],
+        evidence=[evidence("note", origin="research_note", kind="source_inspection", reference="src/app.py")],
+        accepted_locations=[{"path": "src/app.py", "start_line": 1, "end_line": 1, "role": "sink"}],
+    ))
+    mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)
+    return pack
+
+
+def test_renaming_two_cases_cannot_swap_a_rejected_admission_onto_another(tmp_path):
+    """Reproduces the swapped admission: a decision is bound to the target it named, not to a name.
+
+    Case identity stays outside :func:`label_digest`, because an identifier says where a label came
+    from rather than what it alleges. The admission is bound to content instead: it records the
+    ``target_id`` it decided, which the digest covers, planning routes decisions by that binding,
+    and a pack whose admission no longer names the target of the case it names is refused. What
+    this protects is the named human decision: a rejection cannot be moved onto content nobody
+    rejected, and the content that was rejected cannot be admitted, by renaming two cases.
+    """
+    pack = two_case_pack(tmp_path)
+    admit_case(pack, "widget-shell", decision="rejected", by="J. Curator",
+               reason="the mechanism duplicates an admitted target", clock=CLOCK)
+    assert pack["admissions"][0]["target_id"] == "T-widget-shell"
+    plan, _ = build_plan(pack, "widget-abc", HASH)
+    assert [target["target_id"] for target in plan["targets"]] == ["T-widget-path"]
+
+    case_by_id(pack, "widget-shell")["case_id"] = "widget-held"
+    case_by_id(pack, "widget-path")["case_id"] = "widget-shell"
+    case_by_id(pack, "widget-held")["case_id"] = "widget-path"
+
+    with pytest.raises(ContractError, match="the decision no longer resolves to the content it named"):
+        validate_document("case-pack", pack)
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert [target["target_id"] for target in plan["targets"]] == ["T-widget-path"], \
+        "the rejection stays on the content it named, whatever that case is now called"
+    assert any("widget-path: excluded by the latest admission decision (rejected by J. Curator" in note
+               for note in notes)
+    assert latest_admission(pack, "widget-path")["decision"] == "rejected"
+    assert latest_admission(pack, "widget-shell") is None
+
+
+def test_renaming_one_case_keeps_its_decision_and_names_what_the_pack_must_say(tmp_path):
+    """A rename is not a swap: the decision follows the target, and the record has to be tidied."""
+    pack = two_case_pack(tmp_path)
+    admit_case(pack, "widget-shell", decision="rejected", by="J. Curator",
+               reason="the mechanism duplicates an admitted target", clock=CLOCK)
+
+    case_by_id(pack, "widget-shell")["case_id"] = "widget-shell-renamed"
+
+    with pytest.raises(ContractError, match="unknown case widget-shell"):
+        validate_document("case-pack", pack)
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert [target["target_id"] for target in plan["targets"]] == ["T-widget-path"]
+    assert any("widget-shell-renamed: excluded by the latest admission decision" in note
+               for note in notes)
+
+    pack["admissions"][0]["case_id"] = "widget-shell-renamed"
+    assert validate_document("case-pack", pack) is pack

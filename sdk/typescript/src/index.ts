@@ -146,10 +146,18 @@ export interface Clock {
  * still delivered. The emitter never writes an invented duration, because an omitted one says
  * the span is unknown while a fabricated one would be read as a measurement.
  *
- * When no source is injected, elapsed time is derived from the injected `Clock` if there is
- * one, so a test with a fixed clock measures against that clock, and otherwise from
- * `performance.now()`, falling back to `Date.now()` on a host without it. Deriving from a wall
- * clock inherits the wall clock's jumps; that is why an injectable monotonic source exists.
+ * When no source is injected, elapsed time comes from `performance.now()`. It never comes from
+ * the `Clock`, not even one a caller injected, because a wall clock can be adjusted forwards or
+ * backwards between two reads and a span measured with one would record time that never
+ * elapsed. The Python emitter draws that line in the same place, defaulting to `time.monotonic`
+ * and never falling back to its `clock`, so a fixture that injects only a clock gets a real
+ * measurement from both rather than a clock-derived number from one of them. A test that needs
+ * a pinned duration injects `monotonic` explicitly.
+ *
+ * On a host with no `performance.now()` at all there is no monotonic source to read: the
+ * default reports every reading as unusable rather than substituting `Date.now()`, so the span
+ * is omitted and marked as a capture gap the way any other unmeasurable span is. An omitted
+ * duration says the span is unknown; one taken off a wall clock would be read as a measurement.
  */
 export interface Monotonic {
   now(): number;
@@ -359,7 +367,16 @@ function redact(
   }
   return { value, redacted: false };
 }
-/** Elapsed time from `performance.now()` when the host has it, else from the wall clock. */
+/**
+ * Elapsed time from `performance.now()`, read in seconds, and from nothing else.
+ *
+ * A host without `performance.now()` offers this emitter no monotonic source, so every reading
+ * is reported as unusable: `NaN` is what `readMonotonic` already refuses, so the span is omitted
+ * and the event is marked, exactly as a source that throws or steps backwards is handled.
+ * `Date.now()` is deliberately not the fallback. It is a wall clock, it can be adjusted between
+ * two reads, and a duration taken off it would be read as a measurement of work that may never
+ * have taken that long.
+ */
 function defaultMonotonic(): Monotonic {
   const host = (globalThis as { performance?: { now?: () => number } })
     .performance;
@@ -367,7 +384,7 @@ function defaultMonotonic(): Monotonic {
   if (typeof highResolution === "function") {
     return { now: () => highResolution.call(host) / 1000 };
   }
-  return { now: () => Date.now() / 1000 };
+  return { now: () => Number.NaN };
 }
 /* The two prototypes every generator function and async generator function is built on, read
    once from generators this module owns. Classifying a caller's function by comparing its
@@ -539,12 +556,11 @@ export class Observer {
       ? undefined
       : vetSink(options.sink);
     this.clock = options.clock ?? { now: () => new Date() };
-    // The same choice the Python emitter makes: the injected monotonic source, else the
-    // injected clock read as seconds, else a real monotonic source.
-    this.monotonic = options.monotonic ??
-      (options.clock === undefined
-        ? defaultMonotonic()
-        : { now: () => this.clock.now().getTime() / 1000 });
+    // The same choice the Python emitter makes: the injected monotonic source, else a real
+    // monotonic source, and never the clock. A wall clock can be adjusted between two reads, so
+    // a span measured with one is time that may never have elapsed, and an injected clock is
+    // still a wall clock. A fixture that needs a pinned duration injects `monotonic`.
+    this.monotonic = options.monotonic ?? defaultMonotonic();
     let n = 0;
     this.ids = options.idFactory ??
       {
