@@ -10,12 +10,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import gc
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import warnings
 
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
@@ -24,6 +26,7 @@ from scaneval.observer import (
     CAPTURE_STATUSES,
     EVENT_CATEGORIES,
     EVENT_TYPES,
+    MAX_PAYLOAD_DEPTH,
     RECORDING_MODES,
     SCHEMA_VERSION,
     CaptureState,
@@ -238,14 +241,21 @@ def test_a_sink_object_with_a_write_method_is_accepted():
 
 
 def test_every_instrumentation_failure_becomes_a_capture_gap():
+    seen, sink = recorder()
     observer = Observer(
-        mode="content", id_factory=raising("ids"), clock=raising("clock"),
+        mode="content", sink=sink, id_factory=raising("ids"), clock=raising("clock"),
         redactor=raising("redactor"),
     )
     assert observer.run_id == "run-fallback-1"
     assert observer.producer_id == "producer-fallback-2"
+    # Two ID failures at construction, and neither lost an event: there was no event yet.
+    assert observer.get_state() == CaptureState(
+        dropped_events=0, capture_gap=True, last_sink_error=GAP
+    )
     assert observer.emit(**event_fields()) is None
-    assert observer.get_state().dropped_events == 3
+    assert seen == []
+    # The redactor is what stopped this event, so exactly one event was lost.
+    assert observer.get_state().dropped_events == 1
     assert observer.get_state().capture_gap is True
     assert observer.get_state().last_sink_error == GAP
 
@@ -344,14 +354,16 @@ def test_jsonl_sink_delegates_writing_to_the_caller():
 
 def test_observe_returns_the_value_and_records_a_duration():
     seen, sink = recorder()
-    observer = Observer(mode="metadata", sink=sink, clock=clock())
+    ticks = iter([100.0, 100.01])
+    observer = Observer(mode="metadata", sink=sink, clock=clock(), monotonic=lambda: next(ticks))
     start = {"type": "tool.start", "capture_status": "complete", "metadata": {}}
     done = lambda duration_ms: {
         "type": "tool.end", "capture_status": "complete", "duration_ms": duration_ms, "metadata": {}
     }
     assert observer.observe(start, done, lambda error, duration_ms: done(duration_ms), lambda: 42) == 42
     assert [event["type"] for event in seen] == ["tool.start", "tool.end"]
-    # Whole milliseconds, measured from the injected clock because no monotonic source was given.
+    # Whole milliseconds, measured from the injected monotonic source. The wall clock beside it
+    # is never the elapsed-time source, so pinning a duration means injecting ``monotonic``.
     assert seen[1]["duration_ms"] == 10
     assert isinstance(seen[1]["duration_ms"], int)
 
@@ -424,7 +436,8 @@ def test_off_mode_observe_bypasses_every_factory():
 
 def test_observe_async_awaits_the_operation_and_records_a_duration():
     seen, sink = recorder()
-    observer = Observer(mode="metadata", sink=sink, clock=clock())
+    ticks = iter([100.0, 100.01])
+    observer = Observer(mode="metadata", sink=sink, clock=clock(), monotonic=lambda: next(ticks))
     start = {"type": "tool.start", "capture_status": "complete", "metadata": {}}
     done = lambda duration_ms: {
         "type": "tool.end", "capture_status": "complete", "duration_ms": duration_ms, "metadata": {}
@@ -830,8 +843,10 @@ def test_a_backwards_monotonic_source_omits_the_duration_instead_of_dropping_the
     assert [event["type"] for event in seen] == ["tool.start", "tool.end"]
     assert "duration_ms" not in seen[1]
     assert seen[1]["metadata"]["observer_capture_gap"] is True
+    # Both events reached the sink, so nothing was lost: the unmeasurable span is a gap on a
+    # delivered event, and counting it as a dropped event would report a loss that never was.
     assert observer.get_state() == CaptureState(
-        dropped_events=1, capture_gap=True, last_sink_error=GAP
+        dropped_events=0, capture_gap=True, last_sink_error=GAP
     )
 
 
@@ -890,7 +905,10 @@ def test_an_event_built_during_an_instrumentation_failure_is_marked_partial():
     observer.emit(**event_fields(capture_status="unavailable"))
     assert seen[1]["capture_status"] == "unavailable"
     assert seen[1]["metadata"]["observer_capture_gap"] is True
-    assert observer.get_state().dropped_events == 2
+    # Two events, two failed clock reads, and both events delivered: a gap, no loss.
+    assert observer.get_state() == CaptureState(
+        dropped_events=0, capture_gap=True, last_sink_error=GAP
+    )
 
 
 def test_a_recursion_error_inside_emit_is_a_capture_gap():
@@ -1123,3 +1141,407 @@ def test_importing_the_observer_does_not_import_the_evaluator():
     loaded = json.loads(completed.stdout)
     assert not [name for name in loaded if name in EVALUATOR_MODULES]
     assert loaded == [name for name in loaded if name == "scaneval" or name.startswith("scaneval.observer")]
+
+
+def never_settling_sink():
+    """An async sink whose write is queued and never finishes. It sleeps on nothing."""
+
+    async def write(event):
+        await asyncio.Event().wait()
+
+    return write
+
+
+def quiet_loop():
+    """A caller-owned loop that does not log about the tasks its teardown strands."""
+    loop = asyncio.new_event_loop()
+    loop.set_exception_handler(lambda loop, context: None)
+    return loop
+
+
+def test_writes_stranded_by_a_torn_down_loop_are_counted_not_reported_clean():
+    observer = Observer(mode="content", sink=never_settling_sink())
+    loop = quiet_loop()
+
+    async def queue_three():
+        for _ in range(3):
+            assert observer.emit(**event_fields()) is not None
+        # Let the writes start, so they are genuinely in flight rather than merely scheduled.
+        await asyncio.sleep(0)
+
+    try:
+        loop.run_until_complete(queue_three())
+        # While the loop lives the writes are not lost: only that loop can settle them.
+        assert observer.get_state() == CaptureState()
+    finally:
+        loop.close()
+    # The loop is gone, so those three writes can never run and the sink saw none of them.
+    # A capture state that still read clean would claim a delivery that never happened.
+    assert observer.get_state() == CaptureState(
+        dropped_events=3, capture_gap=True, last_sink_error=GAP
+    )
+    # Counted once: reaping the same stranded writes again adds nothing.
+    assert observer.get_state().dropped_events == 3
+
+
+def test_aflush_from_another_loop_contains_the_failure_and_keeps_the_evidence():
+    observer = Observer(mode="content", sink=never_settling_sink())
+    owner = quiet_loop()
+
+    async def queue_one():
+        assert observer.emit(**event_fields()) is not None
+        await asyncio.sleep(0)
+
+    owner.run_until_complete(queue_one())
+
+    async def flush_from_elsewhere():
+        # A different loop. Gathering another loop's write raises, and an emitter that emptied
+        # the pending set before gathering would erase the record of what it failed to settle.
+        await observer.aflush()
+        await observer.aclose()
+
+    asyncio.run(flush_from_elsewhere())
+    # Nothing raised into the caller, and nothing was counted: the write is still the owning
+    # loop's to run, so it is not lost yet.
+    assert observer.get_state() == CaptureState()
+    owner.close()
+    # The evidence survived the failed flush, so the loss is visible once the loop is gone.
+    assert observer.get_state() == CaptureState(
+        dropped_events=1, capture_gap=True, last_sink_error=GAP
+    )
+
+
+def test_elapsed_time_comes_from_a_real_monotonic_source_not_an_injected_clock():
+    seen, sink = recorder()
+    reads = 0
+
+    def walking_backwards():
+        nonlocal reads
+        reads += 1
+        # A wall clock a caller may legitimately inject, adjusted backwards between reads.
+        return datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc) - timedelta(seconds=reads)
+
+    observer = Observer(mode="metadata", sink=sink, clock=walking_backwards)
+    assert observer.observe(TOOL_START, completion, lambda e, d: completion(d), lambda: 42) == 42
+    # Two events, two timestamps, and not one clock read spent on the duration: measuring a
+    # span with a wall clock would record an elapsed time that never elapsed.
+    assert reads == 2
+    assert seen[1]["metadata"]["measured"] is True
+    assert isinstance(seen[1]["duration_ms"], int)
+    # Nothing sleeps here, so the real monotonic span is small, and it is never negative.
+    assert 0 <= seen[1]["duration_ms"] < 1000
+    # No gap marker: the span was measured, not fabricated and not abandoned.
+    assert "observer_capture_gap" not in seen[1]["metadata"]
+    assert observer.get_state() == CaptureState()
+
+
+def test_dropped_events_counts_lost_events_not_degraded_ones():
+    seen, sink = recorder()
+    degraded = Observer(
+        mode="metadata", sink=sink, clock=raising("clock"), id_factory=raising("ids")
+    )
+    assert degraded.emit(**event_fields()) is not None
+    # The event carries a fabricated ID and an epoch timestamp and says so, and it reached the
+    # sink intact enough to read. Nothing was lost, so nothing is counted as dropped.
+    assert len(seen) == 1
+    assert seen[0]["capture_status"] == "partial"
+    assert seen[0]["metadata"]["observer_capture_gap"] is True
+    assert degraded.get_state() == CaptureState(
+        dropped_events=0, capture_gap=True, last_sink_error=GAP
+    )
+
+    # A sink that refuses the write is the case the counter exists for.
+    lost = Observer(mode="metadata", sink=raising("disk full"))
+    assert lost.emit(**event_fields()) is not None
+    assert lost.get_state() == CaptureState(
+        dropped_events=1, capture_gap=True, last_sink_error=GAP
+    )
+
+
+def test_a_callable_object_whose_call_is_a_generator_is_refused_at_construction():
+    class GeneratorCall:
+        def __call__(self, event):
+            yield event
+
+    class AsyncGeneratorCall:
+        async def __call__(self, event):
+            yield event
+
+    # Calling either returns an iterator and writes nothing, exactly as a bare generator
+    # function does, so the same wiring mistake is caught in the same place.
+    for unusable in (GeneratorCall(), AsyncGeneratorCall()):
+        with pytest.raises(ValueError):
+            Observer(mode="content", sink=unusable)
+
+    class GeneratorWriteMethod:
+        def write(self, event):
+            yield event
+
+    with pytest.raises(ValueError):
+        Observer(mode="metadata", sink=GeneratorWriteMethod())
+
+
+def test_a_recording_mode_without_a_sink_counts_every_event_as_lost():
+    observer = Observer(
+        mode="metadata", run_id="r", producer_id="p", clock=clock(), id_factory=ids()
+    )
+    event = observer.emit(**event_fields())
+    # The event is built and returned, so the observer still works as a builder. It reached
+    # nobody, and the capture state says that rather than reporting a clean run.
+    assert event["sequence"] == 0 and event["event_id"] == "event-1"
+    assert observer.get_state() == CaptureState(
+        dropped_events=1, capture_gap=True, last_sink_error=GAP
+    )
+    observer.emit(**event_fields())
+    assert observer.get_state().dropped_events == 2
+
+
+def test_a_write_that_cannot_be_scheduled_leaks_no_unawaited_coroutine():
+    handed: list = []
+
+    async def write(event):
+        return None
+
+    def sink(event):
+        awaitable = write(event)
+        handed.append(awaitable)
+        return awaitable
+
+    async def scenario():
+        observer = Observer(mode="content", sink=sink)
+        loop = asyncio.get_running_loop()
+
+        def refuse(*args, **kwargs):
+            raise RuntimeError("no more tasks")
+
+        loop.create_task = refuse
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                assert observer.emit(**event_fields()) is not None
+                gc.collect()
+        finally:
+            # The loop is the test runner's, and its own teardown schedules tasks too.
+            del loop.create_task
+        return observer.get_state(), [str(entry.message) for entry in caught]
+
+    state, messages = asyncio.run(scenario())
+    # Both the write and the coroutine that would have awaited it are closed. Discarding only
+    # one leaves the other un-awaited, and an un-awaited coroutine prints a RuntimeWarning
+    # into the caller's process at collection time.
+    assert [message for message in messages if "never awaited" in message] == []
+    assert handed[0].cr_frame is None
+    assert state == CaptureState(dropped_events=1, capture_gap=True, last_sink_error=GAP)
+
+
+class Probed:
+    """A value whose every attribute lookup is caller code that must not run."""
+
+    def __init__(self):
+        object.__setattr__(self, "reads", [])
+
+    def __getattr__(self, name):
+        self.reads.append(name)
+        raise RuntimeError("instrumentation read an attribute off a caller's value")
+
+
+def test_observe_async_reads_nothing_off_the_value_an_operation_returned():
+    probe = Probed()
+    off = Observer(mode="off", id_factory=raising("ids"), clock=raising("clock"))
+
+    async def scenario(observer):
+        return await observer.observe_async(
+            event_fields(), lambda d: event_fields(), lambda e, d: event_fields(), lambda: probe
+        )
+
+    # Off mode is a pass-through in both forms: the synchronous observe never looks at the
+    # value, so the coroutine form must not look either.
+    assert asyncio.run(scenario(off)) is probe
+    assert off.observe(event_fields(), raising("s"), raising("f"), lambda: probe) is probe
+    assert probe.reads == []
+    assert off.get_state() == CaptureState()
+
+    # Awaitability is a property of the type, so a recording mode does not probe it either.
+    seen, sink = recorder()
+    recording = Observer(mode="metadata", sink=sink, clock=clock())
+    assert asyncio.run(scenario(recording)) is probe
+    assert probe.reads == []
+    assert len(seen) == 2
+
+
+def test_flush_releases_the_private_loop_and_close_releases_the_next_one():
+    loops: list = []
+
+    async def sink(event):
+        loops.append(asyncio.get_running_loop())
+
+    observer = Observer(mode="metadata", sink=sink)
+    assert observer.emit(**event_fields()) is not None
+    assert loops[0].is_closed() is False
+    observer.flush()
+    # The loop is the emitter's own resource, so a flush releases it rather than holding a
+    # selector open until close.
+    assert loops[0].is_closed() is True
+    assert observer.emit(**event_fields()) is not None
+    assert len(loops) == 2 and loops[1] is not loops[0]
+    observer.close()
+    assert loops[1].is_closed() is True
+    assert observer.get_state() == CaptureState()
+
+
+def test_close_forgets_writes_whose_loop_is_already_gone():
+    observer = Observer(mode="content", sink=never_settling_sink())
+    loop = quiet_loop()
+
+    async def queue_one():
+        assert observer.emit(**event_fields()) is not None
+        await asyncio.sleep(0)
+
+    loop.run_until_complete(queue_one())
+    loop.close()
+    observer.close()
+    # close counts the stranded write once and stops holding a task that can never run.
+    assert observer.get_state() == CaptureState(
+        dropped_events=1, capture_gap=True, last_sink_error=GAP
+    )
+    assert observer.emit(**event_fields()) is None
+    assert observer.get_state().dropped_events == 2
+
+
+def test_last_sink_error_is_one_opaque_constant_for_every_failure():
+    seen, sink = recorder()
+    failing_sink = Observer(mode="content", sink=raising("disk full: /tmp/trace.jsonl"))
+    failing_clock = Observer(mode="content", sink=sink, clock=raising("clock says 2026"))
+    failing_redactor = Observer(mode="content", sink=sink, redactor=raising("policy exploded"))
+    failing_timer = Observer(mode="metadata", sink=sink, monotonic=raising("no timer"))
+    for observer in (failing_sink, failing_clock, failing_redactor):
+        observer.emit(**event_fields())
+    failing_timer.observe(TOOL_START, completion, lambda e, d: completion(d), lambda: 1)
+
+    reported = {
+        observer.get_state().last_sink_error
+        for observer in (failing_sink, failing_clock, failing_redactor, failing_timer)
+    }
+    # Four different failures, one message. The field says that capture broke, never which
+    # call broke or why: a sink's own text can quote the payload it refused to write.
+    assert reported == {GAP}
+    assert "disk full" not in GAP and "policy exploded" not in GAP
+    # The documented promise is that one constant, not a failure class it cannot produce.
+    assert GAP in CaptureState.__doc__
+    assert "names the failure class" not in CaptureState.__doc__
+
+
+def test_redaction_follows_javascript_strict_inequality():
+    seen, sink = recorder()
+    rebuilt: list[bool] = []
+
+    def rebuilding(key, value, path):
+        if isinstance(value, str):
+            copy = "".join(list(value))
+            rebuilt.append(copy is not value)
+            return copy
+        if isinstance(value, int) and not isinstance(value, bool):
+            copy = int(str(value))
+            rebuilt.append(copy is not value)
+            return copy
+        return value
+
+    scalars = Observer(mode="content", sink=sink, redactor=rebuilding)
+    scalars.emit(
+        type="tool.start", capture_status="complete",
+        metadata={"tool": "grep", "matched": 10**18}, content={},
+    )
+    # Every scalar came back as a different Python object holding the same value. JavaScript
+    # gives a scalar no separate identity, so an equal string or number is not a replacement
+    # and this event is not redacted. Asking ``is`` would have said it was.
+    assert rebuilt == [True, True]
+    assert seen[0]["capture_status"] == "complete"
+    assert seen[0]["metadata"] == {"tool": "grep", "matched": 10**18}
+
+    # A container is compared by identity, so an equal rebuild is a replacement.
+    containers, container_sink = recorder()
+    Observer(
+        mode="metadata", sink=container_sink,
+        redactor=lambda key, value, path: dict(value) if isinstance(value, dict) else value,
+    ).emit(type="tool.start", capture_status="complete", metadata={"flags": {"case": True}})
+    assert containers[0]["capture_status"] == "redacted"
+
+    # true !== 1 under strict equality, while Python's == calls them equal.
+    swapped, swap_sink = recorder()
+    Observer(
+        mode="metadata", sink=swap_sink,
+        redactor=lambda key, value, path: 1 if value is True else value,
+    ).emit(type="tool.start", capture_status="complete", metadata={"cached": True})
+    assert swapped[0]["capture_status"] == "redacted"
+    assert swapped[0]["metadata"] == {"cached": 1}
+
+
+def nested_payload(levels: int) -> dict:
+    """A payload of exactly ``levels`` nested containers, the outer object included."""
+    payload: dict = {"leaf": True}
+    for _ in range(levels - 1):
+        payload = {"next": payload}
+    return payload
+
+
+def test_a_payload_nested_deeper_than_the_shared_limit_is_a_capture_gap():
+    seen, sink = recorder()
+    observer = Observer(mode="content", sink=sink)
+    assert observer.emit(**event_fields(metadata=nested_payload(MAX_PAYLOAD_DEPTH))) is not None
+    assert observer.emit(**event_fields(metadata=nested_payload(MAX_PAYLOAD_DEPTH + 1))) is None
+    assert observer.emit(**event_fields(content=nested_payload(MAX_PAYLOAD_DEPTH + 1))) is None
+    # A list is a container too, so mixing shapes buys no extra depth.
+    assert observer.emit(**event_fields(metadata={"items": [nested_payload(MAX_PAYLOAD_DEPTH)]})) is None
+    assert len(seen) == 1
+    assert observer.get_state() == CaptureState(
+        dropped_events=3, capture_gap=True, last_sink_error=GAP
+    )
+
+    # A redactor is caller code, and its output is measured at the depth it would occupy, so
+    # it cannot hand back a value deeper than the shared limit.
+    smuggled, smuggling_sink = recorder()
+    smuggling = Observer(
+        mode="content", sink=smuggling_sink,
+        redactor=lambda key, value, path: (
+            nested_payload(MAX_PAYLOAD_DEPTH) if key == "body" else value
+        ),
+    )
+    assert smuggling.emit(
+        type="tool.start", capture_status="complete", metadata={}, content={"body": "x"}
+    ) is None
+    assert smuggled == []
+    assert smuggling.get_state().dropped_events == 1
+
+
+def test_a_duration_beyond_the_safe_integer_bound_is_refused():
+    seen, sink = recorder()
+    observer = Observer(mode="metadata", sink=sink)
+    end = {"type": "tool.end", "capture_status": "complete", "metadata": {}}
+    assert observer.emit(**end, duration_ms=9007199254740991) is not None
+    # Past 2 ** 53 - 1 a JSON number stops round-tripping, so a value Python can hold exactly
+    # would reach a JavaScript reader as a different one.
+    assert observer.emit(**end, duration_ms=9007199254740992) is None
+    assert observer.emit(**end, duration_ms=1e300) is None
+    assert [event["duration_ms"] for event in seen] == [9007199254740991]
+    assert observer.get_state() == CaptureState(
+        dropped_events=2, capture_gap=True, last_sink_error=GAP
+    )
+
+
+def test_an_elapsed_span_beyond_the_safe_integer_bound_is_omitted_not_written():
+    seen, sink = recorder()
+    ticks = iter([0.0, 1e300])
+    observer = Observer(
+        mode="metadata", sink=sink, clock=clock(), monotonic=lambda: next(ticks)
+    )
+    assert observer.observe(TOOL_START, completion, lambda e, d: completion(d), lambda: 42) == 42
+    # A span the wire cannot carry exactly is treated as unmeasurable: the completion event is
+    # still recorded, without a duration, and says its own capture was partial.
+    assert [event["type"] for event in seen] == ["tool.start", "tool.end"]
+    assert "duration_ms" not in seen[1]
+    assert seen[1]["metadata"]["measured"] is False
+    assert seen[1]["capture_status"] == "partial"
+    assert seen[1]["metadata"]["observer_capture_gap"] is True
+    assert observer.get_state() == CaptureState(
+        dropped_events=0, capture_gap=True, last_sink_error=GAP
+    )

@@ -12,7 +12,13 @@ closed by ``close()``.
 Never altering the caller is enforced, not hoped for: every caller-supplied hook and every sink
 write runs under a ``BaseException`` guard that records a capture gap and re-raises only
 :class:`KeyboardInterrupt` and :class:`SystemExit`, so a cancelled, failing, or recursion-bound
-sink costs a trace event and never the run being observed.
+sink costs a trace event and never the run being observed. ``dropped_events`` counts the events
+that reached no sink; a failure that only degraded an event sets ``capture_gap`` and marks that
+event instead, because the event was still delivered.
+
+:data:`MAX_PAYLOAD_DEPTH` is exported because it is part of the shared contract rather than an
+implementation detail: both emitters refuse a metadata or content payload nested deeper than
+that many containers, so a harness can check its own payloads against the same number.
 
 It is also independent of the evaluator. Importing :mod:`scaneval.observer` must not pull in
 the contracts, scoring, runner, execution, review, report, or adapter modules, so a harness can
@@ -28,6 +34,7 @@ from .emitter import (
     CAPTURE_STATUSES,
     EVENT_CATEGORIES,
     EVENT_TYPES,
+    MAX_PAYLOAD_DEPTH,
     RECORDING_MODES,
     SCHEMA_VERSION,
     CaptureState,
@@ -41,6 +48,7 @@ __all__ = [
     "CAPTURE_STATUSES",
     "EVENT_CATEGORIES",
     "EVENT_TYPES",
+    "MAX_PAYLOAD_DEPTH",
     "RECORDING_MODES",
     "SCHEMA_VERSION",
     "CaptureState",

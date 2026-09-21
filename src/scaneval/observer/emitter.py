@@ -14,31 +14,47 @@ ID factory, redactor, event builder) and every sink write runs under a ``BaseExc
 the failure becomes a visible capture gap and only :class:`KeyboardInterrupt` and
 :class:`SystemExit` are re-raised, because those are the caller's own interrupt rather than an
 instrumentation defect. An :class:`asyncio.CancelledError` raised by a sink is a recorded gap,
-not an escape. One lost event counts once: the guard that owns a caller call records the gap,
+not an escape. One lost event counts once: the guard that owns a caller call records the loss,
 and the containment guards outside it re-raise an interrupt without counting it again. An
 interrupt raised inside a redactor or a caller's own Mapping propagates unrecorded, because the
-run a capture state would describe is the one that is ending. A payload that is not JSON or is
-cyclic, a :class:`RecursionError` raised near the stack limit, and an event the wire contract
-rejects are all counted in :class:`CaptureState` and dropped. An event built while
-instrumentation failed carries a fabricated ID or timestamp, so it is downgraded to ``partial``
-and marked with ``observer_capture_gap`` in its metadata rather than left claiming to be a
-measurement. A gap says the trace is incomplete; an absent event is not evidence of absent
-activity.
+run a capture state would describe is the one that is ending. A payload that is not JSON, is
+cyclic, or is nested deeper than :data:`MAX_PAYLOAD_DEPTH`, a :class:`RecursionError` raised
+near the stack limit, and an event the wire contract rejects are all dropped and counted. An
+event built while instrumentation failed carries a fabricated ID or timestamp, so it is
+downgraded to ``partial`` and marked with ``observer_capture_gap`` in its metadata rather than
+left claiming to be a measurement. A gap says the trace is incomplete; an absent event is not
+evidence of absent activity.
+
+``dropped_events`` counts events that reached no sink, and nothing else. A clock read, an ID
+read, or an elapsed-time read that failed sets ``capture_gap`` and marks the event it degraded,
+but it does not increment the counter, because the event was still delivered: counting it there
+would report a loss that did not happen and hide the ones that did. A write queued on an event
+loop that is torn down before it runs is the opposite case, and is counted, because that event
+reached nobody.
 
 The wire contract is shared with ``sdk/typescript``, so the two emitters accept and reject the
 same inputs and, where they once differed, the stricter rule is the shared one:
 
 * A field present with the value ``None`` is refused rather than read as absent. ``None`` is not
   absence: the contract distinguishes a field a harness did not send from one it sent empty.
-* ``duration_ms`` is a whole number of milliseconds. A non-integral, negative, non-finite, or
-  ``None`` duration is refused, and an integral float is stored as an integer so both languages
-  write the same bytes.
+* ``duration_ms`` is a whole number of milliseconds and a safe integer. A non-integral,
+  negative, non-finite, ``None``, boolean, or larger than ``2 ** 53 - 1`` duration is refused,
+  and an integral float is stored as an integer so both languages write the same bytes. The
+  bound is JavaScript's: past it a JSON number stops round-tripping, so a value Python could
+  hold exactly would reach a reader as a different one.
 * A field name the contract does not list is refused, so a misspelling is loud rather than
   silently dropped.
 * The default redactor folds case over ASCII only (``re.IGNORECASE | re.ASCII``), so it hides
   the same key names the JavaScript regex hides and does not fold, say, a Kelvin sign into a
   ``k``.
-* Whether a redactor changed a value is decided by reference identity, never by value equality.
+* Whether a redactor changed a value follows JavaScript strict inequality: an immutable scalar
+  (string, number, boolean, ``None``) is compared by value, and a container by identity. Python
+  must mirror that rather than ask ``is``, because CPython gives two equal strings or two equal
+  large integers separate identities and the two emitters would then disagree about whether an
+  event was redacted.
+* A payload nested deeper than :data:`MAX_PAYLOAD_DEPTH` containers is refused as a capture
+  gap, so neither language accepts a payload the other refuses and neither recurses without a
+  documented bound.
 * Keys are emitted in the order the wire schema declares them.
 
 A rejected event consumes no sequence number, no event ID, and no clock read in either language.
@@ -87,6 +103,17 @@ EVENT_TYPES = (
 )
 EVENT_CATEGORIES = ("model", "tool", "context", "finding", "observer")
 CAPTURE_STATUSES = ("complete", "partial", "redacted", "unavailable")
+
+# The shared nesting bound for a metadata or content payload, counted in containers: the
+# payload object itself is the first, a dict or list inside it is the second, and a payload
+# that would need a thirty-third is refused as a capture gap. Both emitters enforce this exact
+# number, so neither accepts a payload the other refuses, and neither recurses over caller data
+# without a documented limit. Raising it is a contract change in both languages at once.
+MAX_PAYLOAD_DEPTH = 32
+
+# JavaScript's Number.MAX_SAFE_INTEGER. Past it a JSON number no longer round-trips through a
+# double, so a duration above this would reach a reader as a different value than it left as.
+_MAX_SAFE_INTEGER = 2**53 - 1
 
 # The category of an event is a property of its type, never an independent claim by the caller.
 _CATEGORY_FOR = {event_type: event_type.split(".", 1)[0] for event_type in EVENT_TYPES}
@@ -140,14 +167,25 @@ class TraceSink(Protocol):
 class CaptureState:
     """What the emitter failed to record. It is a snapshot, so it never changes underfoot.
 
-    ``dropped_events`` counts instrumentation failures, not scanner findings, and
-    ``last_sink_error`` names the failure class rather than quoting an exception, so a state
-    snapshot cannot leak a payload a sink refused. A write started inside a caller's event loop
-    and not yet finished is neither counted nor reported here: it is not lost, and awaiting
-    :meth:`Observer.aflush` is what settles it into either a delivered event or a counted gap.
-    The three fields are the ones the TypeScript emitter's capture state carries, so a reader
-    joins the two by name. Zero dropped events is not a claim that the harness emitted
-    everything it should have: it only says nothing the harness did emit was lost here.
+    ``dropped_events`` counts events that reached no sink, not scanner findings and not
+    instrumentation failures in general: a clock, ID, or elapsed-time read that failed sets
+    ``capture_gap`` and marks the event it degraded, but the event was delivered, so it is not
+    counted here. ``capture_gap`` is therefore the broader flag, and it can be true while the
+    counter is zero.
+
+    ``last_sink_error`` is one opaque constant, ``"observer instrumentation failure"``, for
+    every failure the emitter contains. It reports that capture broke, never which call broke
+    or why: a sink's exception text can quote the payload it failed to write, and an emitter
+    that repeated it would put that payload into the state a harness prints. Read the marked
+    events, not this field, to see where capture degraded.
+
+    A write started inside a caller's event loop and not yet finished is neither counted nor
+    reported here: it is not lost, and awaiting :meth:`Observer.aflush` is what settles it into
+    either a delivered event or a counted loss. A write whose loop is torn down before it runs
+    is counted, because that event reached nobody. The three fields are the ones the TypeScript
+    emitter's capture state carries, so a reader joins the two by name. Zero dropped events is
+    not a claim that the harness emitted everything it should have: it only says nothing the
+    harness did emit was lost here.
     """
 
     dropped_events: int = 0
@@ -176,8 +214,16 @@ def create_jsonl_sink(write_line: Callable[[str], Any]) -> JsonlSink:
 
 
 def _is_awaitable(value: Any) -> bool:
-    """True for coroutines, futures, and tasks. Deliberately false for async generators."""
-    return hasattr(value, "__await__")
+    """True for coroutines, futures, and tasks, decided the way ``await`` itself decides.
+
+    The test is for ``__await__`` on the type, never on the instance. ``await`` resolves that
+    name as a type slot, so an instance attribute named ``__await__`` is not awaitable however
+    it looks, and reading the name off the instance would both answer differently than the
+    language does and run caller code: a property or a ``__getattr__`` on an operation's return
+    value is the caller's code, and instrumentation must not run it merely to classify the
+    value. Deliberately false for async generators, which define ``__aiter__`` instead.
+    """
+    return any("__await__" in base.__dict__ for base in type(value).__mro__)
 
 
 def _running_loop() -> Any:
@@ -190,13 +236,15 @@ def _running_loop() -> Any:
         return None
 
 
-def _copy_json(value: Any, seen: set[int] | None = None) -> Any:
+def _copy_json(value: Any, seen: set[int] | None = None, depth: int = 1) -> Any:
     """Deep copy into plain JSON types, refusing anything that would not survive the wire.
 
-    Non-finite floats, cyclic structures, non-string object keys, and objects that are not
-    dicts, lists, tuples, or JSON scalars raise :class:`TypeError`. This is a copy, not a
-    coercion: nothing is stringified to make it fit, because a silently reshaped payload would
-    misdescribe the run it claims to observe.
+    Non-finite floats, cyclic structures, non-string object keys, objects that are not dicts,
+    lists, tuples, or JSON scalars, and containers nested deeper than :data:`MAX_PAYLOAD_DEPTH`
+    raise :class:`TypeError`. ``depth`` counts containers, and the payload object a caller
+    passed is the first, so the limit is a property of the payload rather than of this call.
+    This is a copy, not a coercion: nothing is stringified or truncated to make it fit, because
+    a silently reshaped payload would misdescribe the run it claims to observe.
     """
     if value is None or isinstance(value, (str, bool)):
         return value
@@ -210,47 +258,83 @@ def _copy_json(value: Any, seen: set[int] | None = None) -> Any:
     marker = id(value)
     if marker in seen:
         raise TypeError("cyclic JSON value")
+    if depth > MAX_PAYLOAD_DEPTH:
+        # Refused, not truncated: both emitters draw the line here, so a payload one accepts
+        # is one the other accepts, and neither walks a caller's structure without a bound.
+        raise TypeError("JSON value nested deeper than the shared payload limit")
     if isinstance(value, dict):
         seen.add(marker)
         copied: JsonObject = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TypeError("non-string JSON object key")
-            copied[key] = _copy_json(item, seen)
+            copied[key] = _copy_json(item, seen, depth + 1)
         seen.discard(marker)
         return copied
     if isinstance(value, (list, tuple)):
         seen.add(marker)
-        items = [_copy_json(item, seen) for item in value]
+        items = [_copy_json(item, seen, depth + 1) for item in value]
         seen.discard(marker)
         return items
     raise TypeError("non-JSON value")
 
 
-def _redact(value: Any, redactor: Redactor, path: tuple[str, ...] = ()) -> tuple[Any, bool]:
+def _strictly_equal(replacement: Any, original: Any) -> bool:
+    """JavaScript ``===`` over JSON values, so both emitters answer "was this replaced" alike.
+
+    An immutable scalar (string, number, boolean, ``None``) is compared by value, because
+    JavaScript gives it no separate identity: two equal strings are the same value there, and a
+    redactor that rebuilt one changed nothing. A container is compared by identity, so a
+    structurally equal rebuild is a replacement. Python must mirror this instead of asking
+    ``is``: CPython gives two equal strings or two equal large integers separate identities,
+    and an emitter that read that as a change would mark an event ``redacted`` where the
+    TypeScript emitter marked it ``complete``. ``True`` and ``1`` stay different values here,
+    as they do under ``===`` and unlike under Python's ``==``.
+    """
+    if replacement is original:
+        # NaN is the one value that is not equal to itself in either language. It cannot reach
+        # this function through a copied payload, which refuses non-finite numbers, so this is
+        # the rule stated rather than a case that fires.
+        return not (isinstance(replacement, float) and math.isnan(replacement))
+    if replacement is None or original is None:
+        return False
+    if isinstance(replacement, bool) or isinstance(original, bool):
+        return replacement is original
+    if isinstance(replacement, (int, float)) and isinstance(original, (int, float)):
+        return replacement == original
+    if isinstance(replacement, str) and isinstance(original, str):
+        return replacement == original
+    return False
+
+
+def _redact(
+    value: Any, redactor: Redactor, path: tuple[str, ...] = (), depth: int = 1
+) -> tuple[Any, bool]:
     """Apply the redactor at every object key and report whether anything was replaced.
 
     The redactor sees keys, never bare list elements, and its replacement is copied and walked
-    again: a redactor is caller code, so its output is no more trusted than the payload it
-    replaced. A replacement counts as a redaction when it is not the object it replaced, by
-    reference and never by value, so a redactor that hands back an equal copy is still reported
-    as having changed the value. Raising from a redactor aborts the event; it never partially
-    stores one.
+    again at the depth it would occupy: a redactor is caller code, so its output is no more
+    trusted than the payload it replaced and cannot smuggle a value past the shared nesting
+    limit. A replacement counts as a redaction when :func:`_strictly_equal` says it is not the
+    value it replaced, which is JavaScript's rule: an equal rebuilt container is a replacement,
+    an equal scalar is not. Raising from a redactor aborts the event; it never partially stores
+    one.
     """
     if isinstance(value, dict):
         output: JsonObject = {}
         changed = False
         for key, original in value.items():
             replacement = redactor(key, original, path)
-            nested, nested_changed = _redact(_copy_json(replacement), redactor, (*path, key))
-            changed = changed or nested_changed or replacement is not original
+            copied = _copy_json(replacement, None, depth + 1)
+            nested, nested_changed = _redact(copied, redactor, (*path, key), depth + 1)
+            changed = changed or nested_changed or not _strictly_equal(replacement, original)
             output[key] = nested
         return output, changed
     if isinstance(value, list):
         items = []
         changed = False
         for index, item in enumerate(value):
-            nested, nested_changed = _redact(item, redactor, (*path, str(index)))
+            nested, nested_changed = _redact(item, redactor, (*path, str(index)), depth + 1)
             changed = changed or nested_changed
             items.append(nested)
         return items, changed
@@ -305,6 +389,25 @@ def _is_id(value: Any) -> bool:
     return isinstance(value, str) and value != ""
 
 
+def _is_generator_callable(target: Any) -> bool:
+    """True when calling ``target`` would return a generator instead of writing anything.
+
+    A plain generator function is the obvious shape. A callable object whose ``__call__`` is a
+    generator function is the same wiring mistake wearing a different hat: calling it builds an
+    iterator nobody drives, so the sink writes nothing and reports no loss. ``__call__`` is read
+    off the type rather than the instance, so vetting a sink runs no caller code.
+    """
+    # Imported here so importing the emitter stays cheap; this runs once, at wiring time.
+    import inspect
+
+    if inspect.isgeneratorfunction(target) or inspect.isasyncgenfunction(target):
+        return True
+    call = getattr(type(target), "__call__", None)
+    if call is None:
+        return False
+    return inspect.isgeneratorfunction(call) or inspect.isasyncgenfunction(call)
+
+
 def _sink_target(sink: Any) -> Callable[[JsonObject], Any]:
     """Resolve the one callable a sink object exposes, running as little caller code as possible.
 
@@ -333,16 +436,25 @@ class Observer:
     event mapping or an object with such a ``write`` method, sync or async in both shapes. An
     unknown ``mode`` or an unusable ``sink`` raises at construction, because a harness author
     fixes that once at wiring time; nothing during a scan raises. A generator function or async
-    generator function is an unusable sink: calling one returns an iterator and writes nothing,
-    which is a wiring mistake rather than a runtime failure. In ``off`` mode the sink is not
-    inspected at all, because it is never used.
+    generator function is an unusable sink, including as the ``__call__`` of a callable object:
+    calling one returns an iterator and writes nothing, which is a wiring mistake rather than a
+    runtime failure. In ``off`` mode the sink is not inspected at all, because it is never used.
+
+    A recording mode with no sink at all is allowed and is not silent: :meth:`emit` still builds
+    the event and returns it, so the observer can be used as a builder, but every event it
+    builds reached nobody and is counted as a lost event in :class:`CaptureState`. Recording it
+    honestly is the deliberate half of that choice, rather than refusing the observer at
+    construction: the returned event is a real use, and a state that reported zero for events
+    nobody received would be a black hole.
 
     ``clock`` names the wall clock that timestamps events. ``monotonic`` is the separate source
     :meth:`observe` measures elapsed time with; it returns a float number of seconds and
-    defaults to :func:`time.monotonic`, or to the supplied ``clock`` when a caller injects one
-    and no monotonic source, so a fixture that pins time stays reproducible without wiring two
-    factories. A duration that cannot be measured, because a read failed or the source went
-    backwards, is omitted from the event and recorded as a capture gap rather than invented.
+    defaults to :func:`time.monotonic`. It never falls back to ``clock``: a wall clock can be
+    adjusted backwards or forwards between two reads, so measuring a span with one would record
+    an elapsed time that never elapsed. A fixture that needs a pinned duration injects
+    ``monotonic`` explicitly. A duration that cannot be measured, because a read failed, the
+    source went backwards, or the span exceeds the shared safe-integer bound, is omitted from
+    the event and recorded as a capture gap rather than invented.
 
     Synchronous harnesses need no event loop: :meth:`emit`, :meth:`observe`, :meth:`flush`, and
     :meth:`close` are ordinary methods, and a sink that returns an awaitable is driven to
@@ -375,7 +487,9 @@ class Observer:
         # there is caller code, and an observer that records nothing must run none of it.
         self._sink = None if mode == "off" else self._normalize_sink(sink)
         self._clock = clock if clock is not None else _default_clock
-        self._monotonic = self._choose_monotonic(monotonic, clock)
+        # Never the injected clock: a wall clock is not a monotonic source, and a fabricated
+        # duration is worse than an omitted one.
+        self._monotonic = monotonic if monotonic is not None else time.monotonic
         self._ids = id_factory if id_factory is not None else _default_id_factory()
         self._redactor = redactor if redactor is not None else default_redactor
         self._sequence = 0
@@ -384,6 +498,9 @@ class Observer:
         self._runner_loop: Any = None
         self._closed = False
         self._dropped_events = 0
+        # Every gap, counted or not, so :meth:`_build` can tell that instrumentation failed
+        # while an event was being built even when that failure lost no event.
+        self._gaps = 0
         self._capture_gap = False
         self._last_sink_error: str | None = None
         # Off mode must not invoke a caller's ID factory merely by existing.
@@ -409,33 +526,21 @@ class Observer:
         if sink is None:
             return None
         target = _sink_target(sink)
-        # Imported here so importing the emitter stays cheap; this runs once, at wiring time.
-        import inspect
-
-        if inspect.isgeneratorfunction(target) or inspect.isasyncgenfunction(target):
+        if _is_generator_callable(target):
             raise ValueError(
                 "sink must not be a generator function: calling one returns an iterator and "
                 "writes nothing"
             )
         return target
 
-    @staticmethod
-    def _choose_monotonic(
-        monotonic: Callable[[], float] | None, clock: Callable[[], datetime] | None
-    ) -> Callable[[], float]:
-        """Pick the elapsed-time source: the injected one, else the injected clock, else time."""
-        if monotonic is not None:
-            return monotonic
-        if clock is None:
-            return time.monotonic
-
-        def from_clock() -> float:
-            return _require_aware(clock()).timestamp()
-
-        return from_clock
-
     def get_state(self) -> CaptureState:
-        """Return a snapshot of what capture lost. Later failures do not alter the snapshot."""
+        """Return a snapshot of what capture lost. Later failures do not alter the snapshot.
+
+        Writes whose event loop was torn down before they ran are counted first: a write that
+        can never run is a lost event, and reporting a clean state for it would say the trace
+        is complete when the sink never saw those events.
+        """
+        self._reap_lost_writes()
         return CaptureState(
             dropped_events=self._dropped_events,
             capture_gap=self._capture_gap,
@@ -447,8 +552,10 @@ class Observer:
 
         Not a coroutine: a synchronous harness calls this directly. The event is validated
         against the wire contract before it is built, and an input the contract rejects, an
-        instrumentation failure, or a closed observer is counted as a capture gap instead of
-        raising. A field passed explicitly as None is refused rather than read as absent. In
+        instrumentation failure that stopped the event, or a closed observer is counted as a
+        lost event instead of raising. A failure that only degraded an event, such as a clock
+        read that raised, is a capture gap on a delivered event and is not counted as a loss.
+        A field passed explicitly as None is refused rather than read as absent. In
         ``off`` mode this returns None without touching the clock, the ID factory, the redactor,
         or the sink, including when the observer has been closed.
 
@@ -470,7 +577,9 @@ class Observer:
         except BaseException as error:
             if isinstance(error, _INTERRUPTS):
                 raise
-            # Recorded inline: a RecursionError leaves no stack to call a helper with.
+            # Recorded inline: a RecursionError leaves no stack to call a helper with. The
+            # event never reached a sink, so it counts as a lost one.
+            self._gaps += 1
             self._dropped_events += 1
             self._capture_gap = True
             self._last_sink_error = _GAP_MESSAGE
@@ -486,14 +595,14 @@ class Observer:
         """Run a synchronous operation between a start event and a success or failure event.
 
         Not a coroutine. ``success`` and ``failure`` build their event from the elapsed whole
-        milliseconds, measured with the monotonic source rather than the wall clock; ``failure``
-        also receives the exception, which is then re-raised unchanged, as the original object
-        with its original traceback. The operation's return value is passed back untouched. Both
-        builders receive None when the duration could not be measured, and any ``duration_ms``
-        they return is then dropped from the event, which is still emitted, downgraded to
-        ``partial``, and marked with ``observer_capture_gap`` in its metadata. A builder that
-        raises is a capture gap too, and only its own KeyboardInterrupt or SystemExit reaches
-        the caller.
+        milliseconds, measured with the monotonic source and never with the wall clock, not even
+        one a caller injected; ``failure`` also receives the exception, which is then re-raised
+        unchanged, as the original object with its original traceback. The operation's return
+        value is passed back untouched. Both builders receive None when the duration could not
+        be measured, and any ``duration_ms`` they return is then dropped from the event, which
+        is still emitted, downgraded to ``partial``, and marked with ``observer_capture_gap`` in
+        its metadata. A builder that raises loses its event, and only its own KeyboardInterrupt
+        or SystemExit reaches the caller.
 
         Untouched is literal: if the operation returns a generator, an iterator, a file, or an
         awaitable, that object is returned as it is and the duration covers only the call that
@@ -524,11 +633,14 @@ class Observer:
         """Coroutine form of :meth:`observe` for an operation that returns an awaitable.
 
         The operation is called, and its result is awaited only when it is awaitable, so a
-        plain value works too. An async generator is not awaitable: it is returned untouched
-        and the duration covers only the call that created it, never the stream a caller later
-        consumes. The awaited value is returned unchanged and an exception is re-raised as the
-        original object. An unmeasurable duration is omitted and recorded as a gap, exactly as
-        in :meth:`observe`.
+        plain value works too. Awaitable is decided on the result's type, the way ``await``
+        decides it, so classifying the result runs none of the caller's own code: in ``off``
+        mode this is as much a pass-through as the synchronous :meth:`observe`, which reads
+        nothing off the value at all. An async generator is not awaitable: it is returned
+        untouched and the duration covers only the call that created it, never the stream a
+        caller later consumes. The awaited value is returned unchanged and an exception is
+        re-raised as the original object. An unmeasurable duration is omitted and recorded as a
+        gap, exactly as in :meth:`observe`.
 
         Writes this starts are not awaited here. Call :meth:`aflush` when the harness operation
         is finished if you need them on disk before reading :meth:`get_state`.
@@ -546,19 +658,30 @@ class Observer:
         return value
 
     def flush(self) -> None:
-        """Wait for writes :meth:`emit` started and did not finish. Not a coroutine.
+        """Settle what can be settled here and release the private loop. Not a coroutine.
 
         In a synchronous harness each write has already been driven to completion by ``emit``,
-        so this returns at once. Writes started while an event loop was running belong to that
-        loop and only it can run them: waiting for them from synchronous code would deadlock
-        the loop, so this returns instead and records nothing. A write in flight is not a lost
-        event, and counting one as dropped would report a loss that never happened; a write
-        that does fail counts itself. An asynchronous harness must await :meth:`aflush`.
+        so there is nothing to wait for and the private event loop those writes ran on is
+        closed here rather than held until :meth:`close`; the next async write creates another.
+        Writes started while an event loop was running belong to that loop and only it can run
+        them: waiting for them from synchronous code would deadlock the loop, so this leaves
+        them pending. A write in flight is not a lost event, and counting one as dropped would
+        report a loss that never happened; a write that fails counts itself, and a write whose
+        loop was torn down before it ran is counted here. An asynchronous harness must await
+        :meth:`aflush`.
         """
-        return None
+        self._reap_lost_writes()
+        self._close_runner()
 
     async def aflush(self) -> None:
         """Coroutine that waits for writes :meth:`emit` started and did not await.
+
+        Only writes belonging to the loop this runs on are awaited. A write queued on a
+        different loop is left pending rather than gathered: awaiting a future from another
+        loop raises, and an emitter that let that raise would turn a harness's flush into an
+        instrumentation error and, by clearing the pending set first, destroy the record of the
+        very writes it failed to settle. Those writes are still the other loop's to run, and
+        they are counted as lost only once that loop is gone.
 
         A sink that never returns makes this wait forever. That is deliberate: the emitter
         imposes no timeout, because cancelling a harness's write is a policy decision only the
@@ -567,29 +690,90 @@ class Observer:
         """
         import asyncio
 
-        while self._pending:
-            batch = tuple(self._pending)
+        loop = _running_loop()
+        while True:
+            self._reap_lost_writes()
+            batch = tuple(write for write in self._pending if self._settles_on(write, loop))
+            if not batch:
+                return
             self._pending.difference_update(batch)
-            await asyncio.gather(*batch, return_exceptions=True)
+            try:
+                await asyncio.gather(*batch, return_exceptions=True)
+            except BaseException as error:
+                # Evidence first: an unsettled write goes back into the pending set so the
+                # failure cannot erase the record of what it failed to settle.
+                self._pending.update(write for write in batch if not write.done())
+                if isinstance(error, _INTERRUPTS):
+                    raise
+                self._mark_gap()
+                return
 
     def close(self) -> None:
         """Flush, then refuse later events. Not a coroutine, and it closes no caller resource.
 
-        After this, :meth:`emit` records a capture gap and returns None instead of writing, so a
+        After this, :meth:`emit` records a lost event and returns None instead of writing, so a
         late event is visible as loss rather than silently appearing after the run it postdates.
-        The private event loop an async sink made this observer create is closed here, because
-        that loop is the emitter's own and nobody else can close it. A sink the caller opened
-        stays the caller's to close.
+        The private event loop an async sink made this observer create is released by the flush,
+        because that loop is the emitter's own and nobody else can close it, and pending writes
+        whose loop is already gone are counted rather than kept as references to tasks that can
+        never run. A write still live on a caller's loop is left alone: it is not lost, and only
+        that loop can settle it. A sink the caller opened stays the caller's to close.
         """
         self.flush()
         self._closed = True
-        self._close_runner()
 
     async def aclose(self) -> None:
-        """Coroutine form of :meth:`close`: await :meth:`aflush`, then refuse later events."""
+        """Coroutine form of :meth:`close`: await :meth:`aflush`, then refuse later events.
+
+        The private loop is released here too, so neither closing path leaves the emitter's own
+        resource open.
+        """
         await self.aflush()
         self._closed = True
         self._close_runner()
+
+    def _reap_lost_writes(self) -> None:
+        """Count writes that can never run, and forget writes that already settled.
+
+        A queued write is not lost while its loop can still run it, so a live one is left
+        pending and uncounted. Once that loop is closed the write can never run: the event
+        reached no sink, nobody else will ever count it, and a capture state that still read
+        clean would be claiming a delivery that never happened. A write cancelled before it
+        started is the same loss: :meth:`_await_write` never ran, so it never recorded itself.
+        """
+        for write in tuple(self._pending):
+            try:
+                settled = write.done()
+                cancelled = settled and write.cancelled()
+                loop = write.get_loop()
+                unusable = loop is None or loop.is_closed()
+            except _INTERRUPTS:
+                raise
+            except BaseException:
+                # A pending entry the emitter cannot even inspect is not a write it can claim
+                # was delivered.
+                self._pending.discard(write)
+                self._lost_event()
+                continue
+            if settled:
+                self._pending.discard(write)
+                if cancelled:
+                    self._lost_event()
+            elif unusable:
+                self._pending.discard(write)
+                self._lost_event()
+
+    @staticmethod
+    def _settles_on(write: Any, loop: Any) -> bool:
+        """True when ``loop`` is the one that can run this write, so awaiting it is safe."""
+        if loop is None:
+            return False
+        try:
+            return write.get_loop() is loop
+        except _INTERRUPTS:
+            raise
+        except BaseException:
+            return False
 
     def _emit_fields(self, fields: Any, drop_duration: bool = False) -> JsonObject | None:
         """Build and write one event. Nothing but a caller's own interrupt leaves this method."""
@@ -597,7 +781,7 @@ class Observer:
             return None
         try:
             if self._closed:
-                self._mark_gap()
+                self._lost_event()
                 return None
             event = self._build(fields, drop_duration)
         except BaseException as error:
@@ -606,6 +790,7 @@ class Observer:
             # Reached only when a guard further in could not run, which is what a
             # RecursionError does to a handler that has to call something. Recorded inline
             # for the same reason.
+            self._gaps += 1
             self._dropped_events += 1
             self._capture_gap = True
             self._last_sink_error = _GAP_MESSAGE
@@ -617,6 +802,7 @@ class Observer:
         except BaseException as error:
             if isinstance(error, _INTERRUPTS):
                 raise
+            self._gaps += 1
             self._dropped_events += 1
             self._capture_gap = True
             self._last_sink_error = _GAP_MESSAGE
@@ -637,6 +823,7 @@ class Observer:
         except BaseException as failure:
             if isinstance(failure, _INTERRUPTS):
                 raise
+            self._gaps += 1
             self._dropped_events += 1
             self._capture_gap = True
             self._last_sink_error = _GAP_MESSAGE
@@ -648,16 +835,16 @@ class Observer:
         arguments: tuple[Any, ...],
         drop_duration: bool = False,
     ) -> JsonObject | None:
-        """Build an event from a caller's callback. A callback that raises is a capture gap."""
+        """Build an event from a caller's callback. A callback that raises loses that event."""
         try:
             fields = build(*arguments)
         except BaseException as error:
-            self._fail(error)
+            self._fail_lost(error)
             return None
         return self._emit_fields(fields, drop_duration)
 
     def _build(self, fields: Any, drop_duration: bool = False) -> JsonObject | None:
-        gaps_before = self._dropped_events
+        gaps_before = self._gaps
         try:
             snapshot = self._snapshot(fields)
             if drop_duration:
@@ -694,7 +881,7 @@ class Observer:
             event["metadata"] = metadata
             if content is not None:
                 event["content"] = content
-            if drop_duration or self._dropped_events > gaps_before:
+            if drop_duration or self._gaps > gaps_before:
                 # Instrumentation failed while this event was built, or the duration it should
                 # carry could not be measured. Either way part of it is missing or fabricated:
                 # say so rather than let a reader take an epoch timestamp for a measurement or
@@ -707,6 +894,7 @@ class Observer:
                 raise
             # Marked inline: a RecursionError leaves no room to call another method, and this
             # handler must record the loss even when the interpreter is out of stack.
+            self._gaps += 1
             self._dropped_events += 1
             self._capture_gap = True
             self._last_sink_error = _GAP_MESSAGE
@@ -736,7 +924,8 @@ class Observer:
         otherwise be dropped in silence and the event would understate what the harness saw. A
         field present with the value None is refused for the same reason: the contract has no
         null, and reading None as absence would silently record a different event than the one
-        the harness described.
+        the harness described. ``duration_ms`` must also be a safe integer, so neither emitter
+        accepts a count of milliseconds the other could not write back unchanged.
         """
         if not set(fields).issubset(_INPUT_FIELDS):
             return False
@@ -769,36 +958,52 @@ class Observer:
 
     def _write(self, event: JsonObject) -> None:
         if self._sink is None:
+            # A recording mode with no sink. The event was built, spent a sequence number and
+            # an ID, and reached nobody, so it is a lost event rather than a clean state.
+            self._lost_event()
             return
         try:
             result = self._sink(event)
         except BaseException as error:
-            self._fail(error)
+            self._fail_lost(error)
             return
         if _is_awaitable(result):
             self._drive(result)
 
     def _drive(self, awaitable: Any) -> None:
-        """Finish an async write on this observer's own loop, or hand it to the caller's loop."""
+        """Finish an async write on this observer's own loop, or hand it to the caller's loop.
+
+        Both failure paths close the wrapper coroutine as well as the write it wraps. Closing a
+        coroutine never touches what it would have awaited, so discarding only one of the two
+        leaves the other un-awaited, and an un-awaited coroutine becomes a ``RuntimeWarning``
+        in the caller's process at collection time. Instrumentation that failed must not also
+        print into a harness's output.
+        """
         loop = _running_loop()
+        writer = self._await_write(awaitable)
         if loop is not None:
             try:
-                task = loop.create_task(self._await_write(awaitable))
+                task = loop.create_task(writer)
             except BaseException as error:
+                self._discard(writer)
                 self._discard(awaitable)
-                self._fail(error)
+                self._fail_lost(error)
                 return
             self._pending.add(task)
             task.add_done_callback(self._pending.discard)
             return
         runner = self._runner()
         if runner is None:
+            self._discard(writer)
             self._discard(awaitable)
+            self._lost_event()
             return
         try:
-            runner.run_until_complete(self._await_write(awaitable))
+            runner.run_until_complete(writer)
         except BaseException as error:
-            self._fail(error)
+            self._discard(writer)
+            self._discard(awaitable)
+            self._fail_lost(error)
 
     def _runner(self) -> Any:
         """This observer's private event loop, created on first need and never installed.
@@ -846,18 +1051,35 @@ class Observer:
         except BaseException:
             # A cancelled write is a lost event, not an escape: cancellation from a caller's
             # sink must not travel out of instrumentation into the harness.
-            self._mark_gap()
+            self._lost_event()
 
     def _fail(self, error: BaseException) -> None:
-        """Record an instrumentation failure and let only a caller's own interrupt through."""
+        """Record a failure that degraded an event without losing it, and re-raise interrupts.
+
+        The clock, the ID factory, and the elapsed-time source reach here: their failure leaves
+        a delivered event carrying a fabricated field, which :meth:`_build` marks in the event
+        itself. Counting it as a dropped event would claim a loss that did not happen.
+        """
         self._mark_gap()
         if isinstance(error, _INTERRUPTS):
             raise error
 
+    def _fail_lost(self, error: BaseException) -> None:
+        """Record a failure that lost one event, and let only a caller's own interrupt through."""
+        self._lost_event()
+        if isinstance(error, _INTERRUPTS):
+            raise error
+
     def _mark_gap(self) -> None:
-        self._dropped_events += 1
+        """Capture broke here, but no event was lost by it."""
+        self._gaps += 1
         self._capture_gap = True
         self._last_sink_error = _GAP_MESSAGE
+
+    def _lost_event(self) -> None:
+        """One event reached no sink. Counted once, by whichever guard owns that loss."""
+        self._mark_gap()
+        self._dropped_events += 1
 
     def _next_id(self, prefix: str) -> str:
         try:
@@ -895,9 +1117,11 @@ class Observer:
     def _elapsed_ms(self, began: float | None) -> int | None:
         """Whole milliseconds between two reads, or None when the span cannot be measured.
 
-        A failed read, a non-finite span, or a source that went backwards yields None and a
-        capture gap. The emitter never invents a duration: an omitted one says the span is
-        unknown, while a fabricated one would be read as a measurement.
+        A failed read, a non-finite span, a source that went backwards, or a span past the
+        shared safe-integer bound yields None and a capture gap. The last is a measurement the
+        wire cannot carry exactly, so it is refused here rather than allowed to reject the whole
+        completion event at validation. The emitter never invents a duration: an omitted one
+        says the span is unknown, while a fabricated one would be read as a measurement.
         """
         if began is None:
             return None
@@ -908,20 +1132,35 @@ class Observer:
         if not math.isfinite(elapsed) or elapsed < 0:
             self._mark_gap()
             return None
-        return round(elapsed)
+        whole = round(elapsed)
+        if whole > _MAX_SAFE_INTEGER:
+            self._mark_gap()
+            return None
+        return whole
 
 
 def _is_duration(value: Any) -> bool:
-    """A duration is a whole, finite, nonnegative number of milliseconds, and never a bool."""
+    """A duration is a whole, finite, nonnegative, safe-integer count of milliseconds.
+
+    Never a bool, and never larger than ``2 ** 53 - 1``: past that bound a JSON number stops
+    round-tripping through a double, so Python could hold a value the TypeScript emitter and a
+    JavaScript reader could not, and the two would write different bytes for the same input.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
     if not math.isfinite(value) or value < 0:
+        return False
+    if value > _MAX_SAFE_INTEGER:
         return False
     return not isinstance(value, float) or value.is_integer()
 
 
 async def _resolve(value: Any) -> Any:
-    """Await an awaitable, pass anything else back untouched. Never iterates a generator."""
+    """Await an awaitable, pass anything else back untouched. Never iterates a generator.
+
+    What counts as awaitable is decided on the type, so a value that merely looks awaitable
+    from the outside is handed back rather than probed; nothing of the caller's runs here.
+    """
     if _is_awaitable(value):
         return await value
     return value

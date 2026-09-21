@@ -121,12 +121,30 @@ def tool_failed(error: BaseException, duration_ms) -> dict:
     }
 
 
+def stopwatch(step: float = 0.010):
+    """A monotonic source advancing a fixed step per read, in seconds.
+
+    Elapsed time comes from this rather than from the injected wall clock: the emitter
+    deliberately refuses to measure a duration with a clock that can move backwards, so a
+    test that wants a predictable duration_ms has to supply the monotonic source itself.
+    """
+    reading = 0.0
+
+    def read() -> float:
+        nonlocal reading
+        value = reading
+        reading += step
+        return value
+
+    return read
+
+
 def traced(mode: str = "content") -> tuple[list[dict], Observer]:
     """An observer wired to a list sink with every source of nondeterminism injected."""
     seen, sink = recorder()
     observer = Observer(
         mode=mode, sink=sink, run_id="run-1", producer_id="producer-1",
-        clock=clock(), id_factory=ids(),
+        clock=clock(), id_factory=ids(), monotonic=stopwatch(),
     )
     return seen, observer
 
