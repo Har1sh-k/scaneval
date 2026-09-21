@@ -50,7 +50,7 @@ tsx examples/observer/typescript_harness.mts
 This repository vendors no `tsx`. The output below came from the one in a sibling checkout:
 
 ```sh
-/Users/hk/Documents/GitHub/securevibes-agent/node_modules/.bin/tsx \
+../securevibes-agent/node_modules/.bin/tsx \
   examples/observer/typescript_harness.mts
 ```
 

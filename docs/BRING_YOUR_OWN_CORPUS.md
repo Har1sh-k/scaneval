@@ -13,8 +13,8 @@ to. Section 9 collects the gaps.
 Two conventions used throughout:
 
 ```sh
-SB=/Users/hk/Documents/GitHub/scaneval/.venv/bin/scaneval   # or `scaneval` on PATH
-BYOC=/private/tmp/byoc                                          # the organization's working directory
+SB=scaneval              # or the path to it inside your virtual environment
+BYOC=/private/tmp/byoc   # the organization's working directory
 ```
 
 JSON output in this guide is wrapped across lines for readability. The commands themselves print
