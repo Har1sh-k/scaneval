@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 
 import pytest
@@ -20,6 +21,7 @@ from scaneval.adapters.base import Adapter, AdapterError, NativeOutcome, SystemS
 from scaneval.adapters.semgrep import SemgrepAdapter, import_semgrep_results
 from scaneval.contracts import ContractError, canonical_sha256, load_document, validate_document
 from scaneval.execution import ExecutionError, PreparedInput, _write_new, invocation_id, run_invocation
+from scaneval import materialize as materialize_module
 from scaneval.materialize import hash_exported_tree, sha256_file
 from scaneval.scoring import score
 
@@ -29,6 +31,28 @@ CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
 # cannot encode it, so it only fails at the moment the bytes are produced.
 LONE_SURROGATE = chr(0xD800)
 mkfifo_required = pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no named pipes on this platform")
+
+
+def _filesystem_accepts_undecodable_names(directory: Path) -> bool:
+    """Whether a file name that is not valid UTF-8 can exist here at all.
+
+    ext4 and most Linux filesystems store file names as bytes and accept these; APFS and HFS+
+    refuse them at ``open`` with ``EILSEQ``. The behavior under test is what this package does
+    once such a name reaches it, so the test that needs a real one skips where none can be made.
+    """
+    probe = os.path.join(os.fsencode(str(directory)), b"scaneval-probe\xff")
+    try:
+        with open(probe, "wb") as handle:
+            handle.write(b"probe")
+    except (OSError, ValueError):
+        return False
+    os.unlink(probe)
+    return True
+
+
+undecodable_names_required = pytest.mark.skipif(
+    not _filesystem_accepts_undecodable_names(Path(tempfile.gettempdir())),
+    reason="this filesystem refuses file names that are not valid UTF-8")
 
 
 def call_with_deadline(function, seconds: float = 30.0):
@@ -421,17 +445,24 @@ def test_a_document_utf8_cannot_encode_creates_no_file(tmp_path):
     assert not path.exists()
 
 
-def test_a_claim_utf8_cannot_encode_is_a_recorded_violation_not_a_half_written_bundle(tmp_path):
-    """The claim passes every contract check, so the encoding refusal is what gets recorded."""
+def test_a_claim_utf8_cannot_encode_is_rendered_into_the_record_rather_than_costing_the_scan(tmp_path):
+    """Deliberately changed: this used to discard every claim the scan made over one character.
+
+    The allegation holds a lone surrogate, which passes every contract check and fails only when
+    the documents become bytes. That refusal was recorded as an outcome violation, so a scanner
+    reached it by naming one thing badly and lost the whole claim set with it. Both documents go
+    through the one rendering step now, so the text is recorded with backslash escapes, the scan
+    stands, and the execution record says how many strings had to be rendered. The bundle is
+    still written whole, which is what the old assertion was really protecting.
+    """
     bundle = run(tmp_path, OutcomeAdapter(lambda outcome: _with(
         outcome, claims=[{**outcome.claims[0], "allegation": f"lone surrogate {LONE_SURROGATE}"}])))
 
     result = load_document(bundle / "result.json", "scan-result")
     execution = load_document(bundle / "execution.json", "execution-record")
-    assert result["status"] == "error" and result["claims"] == []
-    assert result["error"]["code"] == "outcome_contract_violation"
-    assert "could not be encoded" in result["error"]["message"]
-    assert execution["error"] == result["error"]
+    assert result["status"] == "success" and "error" not in result
+    assert result["claims"][0]["allegation"] == "lone surrogate \\ud800"
+    assert any("bytes UTF-8 cannot encode" in note for note in execution["notes"])
     assert (bundle / "result.json").stat().st_size > 0
     assert (bundle / "execution.json").stat().st_size > 0
     assert (bundle / "raw" / "native.json").is_file()
@@ -595,9 +626,12 @@ def test_a_named_pipe_in_a_staging_directory_is_skipped_rather_than_opened(tmp_p
 
 @pytest.mark.parametrize("field", ["capture", "model_identity"], ids=["capture", "model-identity"])
 def test_a_cyclic_mapping_the_adapter_supplied_is_a_recorded_violation(tmp_path, field):
-    """Validating the execution record walks what the adapter supplied, so a cycle raises there.
+    """Building the execution record walks what the adapter supplied, so a cycle raises there.
 
     Only the build step was contained, so the cycle escaped run_invocation as a RecursionError.
+    It is caught one step earlier than it used to be, in the rendering pass both documents go
+    through before they are validated, and it is contained exactly the same way: the outcome is
+    discarded, the refusal names the RecursionError, and the bundle is written.
     """
 
     def mutate(outcome: NativeOutcome) -> NativeOutcome:
@@ -611,7 +645,7 @@ def test_a_cyclic_mapping_the_adapter_supplied_is_a_recorded_violation(tmp_path,
     execution = load_document(bundle / "execution.json", "execution-record")
     assert result["status"] == "error" and result["claims"] == []
     assert result["error"]["code"] == "outcome_contract_violation"
-    assert "the execution record could not be validated" in result["error"]["message"]
+    assert "the bundle documents could not be built" in result["error"]["message"]
     assert "RecursionError" in result["error"]["message"]
     assert execution["capture"] == {} and execution["model_identity"] is None
     assert (bundle / "raw" / "native.json").is_file()
@@ -1728,3 +1762,336 @@ def test_the_exported_input_is_copied_into_the_workspace_without_following_a_lin
     assert seen["target"] == str(secret)
     execution = load_document(bundle / "execution.json", "execution-record")
     assert execution["provenance"]["source_modified"] is False
+
+
+# --- what the isolation in this package does and does not reach: docs/THREAT_MODEL.md -----
+
+
+def test_a_scanner_that_restores_the_source_before_returning_is_recorded_as_a_clean_run(tmp_path):
+    """The honest limit, documented rather than claimed closed. See ``docs/THREAT_MODEL.md``.
+
+    This adapter modifies the exported source, scans the mutation, and puts the original bytes
+    back before it returns. Every check this module makes runs before the scanner starts or
+    after it returns, so both see the frozen input and the bundle records a clean success with
+    ``source_modified`` false: the result binds to a tree hash the scanner did not scan, and
+    nothing in the record says so.
+
+    No in-process check can close this. It is a time-of-check to time-of-use race against a
+    process running concurrently in a directory it controls, and the only fix is to take the
+    control away: an operator who needs that must run the scanner under OS-level isolation with
+    the input read-only, which this package does not provide. This test asserts the outcome the
+    code actually produces, so nobody mistakes the gap for a defended edge.
+    """
+    scanned: dict[str, str] = {}
+
+    class RestoringAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            source = Path(kwargs["source_dir"]) / "app.py"
+            original = source.read_text(encoding="utf-8")
+            source.write_text("# what the scanner actually scanned\n", encoding="utf-8")
+            scanned["during"] = source.read_text(encoding="utf-8")
+            outcome = super().scan(**kwargs)
+            source.write_text(original, encoding="utf-8")  # restored before this returns
+            return outcome
+
+    bundle = run(tmp_path, RestoringAdapter())
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert scanned["during"] == "# what the scanner actually scanned\n"
+    assert result["status"] == "success" and "error" not in result
+    assert execution["provenance"]["source_modified"] is False
+    assert execution["provenance"]["modified_paths"] == []
+    assert result["input_hash"] == execution["provenance"]["tree_hash"]
+
+
+def test_the_threat_model_document_states_the_limit_this_package_does_not_defend():
+    """The module docstrings point at it, so it has to say the things they rely on it saying."""
+    threat_model = Path(__file__).resolve().parents[1] / "docs" / "THREAT_MODEL.md"
+    text = threat_model.read_text(encoding="utf-8")
+
+    assert "untrusted" in text
+    assert "restore" in text and "time-of-check" in text
+    for expected in ("read-only", "container", "virtual machine"):
+        assert expected in text, f"the document must name {expected} as what an operator needs"
+    assert "docs/THREAT_MODEL.md" in execution_module.__doc__
+    assert "docs/THREAT_MODEL.md" in materialize_module.__doc__
+
+
+# --- a base captured before the scanner ran, not resolved after it -------------------------
+
+
+def test_a_workspace_swapped_after_the_capture_cannot_move_the_boundary_it_is_checked_against(tmp_path):
+    """The containment check resolved its own base, which made it vacuous against a swap.
+
+    The scanner is handed a directory inside the private workspace, so it can reach the
+    workspace itself. Moving the real one aside and leaving a symbolic link to a directory it
+    controls used to satisfy every post-scan check: the base resolved into the scanner's
+    directory, the source resolved under it, and the runner walked, hashed, and captured the
+    tree the scanner had substituted. The workspace's real path is read once, before the scan,
+    and the substituted source does not resolve inside it.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "source").mkdir(parents=True)
+    (elsewhere / "source" / "planted.py").write_text("planted by the scanner\n", encoding="utf-8")
+
+    class WorkspaceSwappingAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            workspace = Path(kwargs["source_dir"]).parent
+            workspace.rename(workspace.with_name(workspace.name + "-real"))
+            workspace.symlink_to(elsewhere, target_is_directory=True)
+            # What the old check compared: both sides now resolve inside the scanner's own tree.
+            assert (workspace / "source").resolve() == (elsewhere / "source").resolve()
+            return outcome
+
+    bundle = run(tmp_path, WorkspaceSwappingAdapter(), workspace_root=tmp_path)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "outcome_contract_violation"
+    assert "the exported source no longer resolves inside the private workspace" in result["error"]["message"]
+    assert execution["provenance"]["source_modified"] is False, "the comparison never completed"
+    assert execution["provenance"]["captured_state_dirs"] == []
+    # Nothing from the substituted tree was walked, hashed, or copied into the bundle.
+    assert "planted.py" not in json.dumps(execution)
+    assert not list(bundle.rglob("planted.py"))
+    assert (elsewhere / "source" / "planted.py").read_text(encoding="utf-8") == "planted by the scanner\n"
+
+
+# --- no file in the bundle is a second name for a file outside it --------------------------
+
+
+def test_a_hard_link_staged_into_the_bundle_is_copied_rather_than_left_aliasing_a_host_file(tmp_path):
+    """``raw/`` and ``trace/`` are moved, and a move keeps inodes, so a planted link aliased a host file.
+
+    The bundle's file and the host's file were one file. ScanEval hashed it and counted its
+    lines, the host file went on changing under the recorded hash afterwards, and a later write
+    through the bundle's name would have landed in the host file. Each staged tree is
+    de-aliased as it enters the bundle now, so the bundle holds its own inode either way.
+    """
+    host = tmp_path / "host.json"
+    host.write_text('{"host": "bytes"}\n', encoding="utf-8")
+    host_events = tmp_path / "host-events.jsonl"
+    host_events.write_text('{"type":"one"}\n{"type":"two"}\n', encoding="utf-8")
+
+    class LinkPlantingAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            aliased = Path(kwargs["raw_dir"]) / "aliased.json"
+            events = Path(kwargs["trace_dir"]) / "events.jsonl"
+            os.link(host, aliased)
+            os.link(host_events, events)
+            assert aliased.stat().st_nlink == 2 and events.stat().st_nlink == 2
+            outcome.artifacts.append({"id": "aliased", "path": aliased})
+            outcome.trace_path = events
+            return outcome
+
+    bundle = run(tmp_path, LinkPlantingAdapter(), trace_mode="metadata", workspace_root=tmp_path)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    staged = bundle / "raw" / "aliased.json"
+    staged_events = bundle / "trace" / "events.jsonl"
+    assert result["status"] == "success"
+    assert staged.stat().st_nlink == 1 and host.stat().st_nlink == 1
+    assert staged_events.stat().st_nlink == 1 and host_events.stat().st_nlink == 1
+    assert execution["trace"]["events"] == 2
+    recorded = {artifact["id"]: artifact["sha256"] for artifact in result["raw_artifacts"]}
+    assert recorded["aliased"] == sha256_file(staged)[0]
+    # The host files are untouched, and what the bundle holds no longer follows them.
+    host.write_text("changed after the scan\n", encoding="utf-8")
+    host_events.write_text("", encoding="utf-8")
+    assert staged.read_text(encoding="utf-8") == '{"host": "bytes"}\n'
+    assert staged_events.read_text(encoding="utf-8").splitlines() == ['{"type":"one"}', '{"type":"two"}']
+    assert recorded["aliased"] == sha256_file(staged)[0], "the recorded hash still describes the bundle"
+    assert any("hard links" in note and "aliased.json" in note for note in execution["notes"])
+    assert any("hard links" in note and "events.jsonl" in note for note in execution["notes"])
+
+
+def test_a_staged_file_with_one_name_is_left_exactly_as_the_scanner_wrote_it(tmp_path):
+    """The control: de-aliasing touches a multiply linked file and nothing else."""
+    bundle = run(tmp_path, FakeAdapter(), workspace_root=tmp_path)
+
+    execution = load_document(bundle / "execution.json", "execution-record")
+    native = bundle / "raw" / "native.json"
+    assert native.read_text(encoding="utf-8").startswith('{"findings"')
+    assert native.stat().st_nlink == 1
+    assert not any("hard link" in note for note in execution["notes"])
+    assert not list(bundle.rglob("*.dealias"))
+
+
+# --- nothing a scanner names can make the bundle unrecordable ------------------------------
+
+
+def test_a_file_name_utf8_cannot_encode_is_recorded_rather_than_costing_the_whole_bundle(tmp_path, monkeypatch):
+    """One file name used to leave an invocation with no ``result.json`` and no ``execution.json``.
+
+    A file name is bytes. A filesystem that accepts bytes UTF-8 cannot decode hands Python a
+    name holding escaped surrogates, which canonical JSON keeps and every contract check passes
+    but the encoding refuses. The refusal arrived where the documents became bytes, the rebuilt
+    refusal record carried the same modified path and was refused again, and the invocation
+    raised with ``request.json`` and ``raw/`` written and neither document beside them. The name
+    is injected into the walk here rather than created, because the filesystem this test runs on
+    may be one that refuses such a name at ``open``.
+    """
+    real_walk = execution_module.walk_regular_files
+    walks: list[int] = []
+
+    def walk_with_an_undecodable_name(root: Path, *, skip_top_level=frozenset()):
+        found = real_walk(root, skip_top_level=skip_top_level)
+        walks.append(1)
+        if len(walks) > 1 and "app.py" in found:
+            # What os.scandir returns for such a name: a string only os.fsencode turns back into
+            # the bytes on disk. Mapped to a real file, because the walk's values get hashed.
+            found[f"planted{LONE_SURROGATE}.py"] = found["app.py"]
+        return found
+
+    monkeypatch.setattr(execution_module, "walk_regular_files", walk_with_an_undecodable_name)
+    bundle = run(tmp_path, FakeAdapter())
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "partial" and result["error"]["code"] == "source_modified"
+    assert [claim["claim_id"] for claim in result["claims"]] == ["c1"], "the claims are not the casualty"
+    assert execution["provenance"]["source_modified"] is True
+    assert execution["provenance"]["modified_paths"] == ["planted\\ud800.py"]
+    assert any("bytes UTF-8 cannot encode" in note for note in execution["notes"])
+    assert (bundle / "result.json").is_file() and (bundle / "execution.json").is_file()
+
+
+def test_the_rendering_touches_only_what_utf8_cannot_encode_and_counts_what_it_touched():
+    """The one pass both documents go through, on keys and values alike."""
+    document = {"notes": [f"name {LONE_SURROGATE}"], f"key{LONE_SURROGATE}": "value",
+                "count": 3, "ok": "plain text", "nothing": None}
+
+    rendered, count = execution_module._recordable(document)
+
+    assert rendered == {"notes": ["name \\ud800"], "key\\ud800": "value",
+                        "count": 3, "ok": "plain text", "nothing": None}
+    assert count == 2
+    assert json.dumps(rendered, ensure_ascii=False).encode("utf-8"), "the rendering is writable"
+    assert execution_module._recordable({"ok": "plain text"}) == ({"ok": "plain text"}, 0)
+
+
+@undecodable_names_required
+def test_an_artifact_named_in_bytes_the_record_cannot_carry_is_dropped_with_a_note(tmp_path):
+    """A rendered path does not open, and an artifact is evidence a claim has to be able to cite.
+
+    So this one artifact is dropped where the links, the missing files, and the directories are
+    dropped, rather than registered under a name that names nothing. The file itself stays in
+    the bundle exactly as the scanner wrote it.
+    """
+
+    class OddNameAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            raw = os.fsencode(str(kwargs["raw_dir"]))
+            odd = os.path.join(raw, b"native\xff.json")
+            with open(odd, "wb") as handle:
+                handle.write(b'{"findings": []}\n')
+            outcome.artifacts.append({"id": "odd-name", "path": Path(os.fsdecode(odd))})
+            return outcome
+
+    bundle = run(tmp_path, OddNameAdapter(), workspace_root=tmp_path)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "success"
+    assert [artifact["id"] for artifact in result["raw_artifacts"]] == ["native"]
+    assert ("declared artifact has a name this record cannot carry and was not registered: odd-name"
+            in execution["notes"])
+    assert b"native\xff.json" in os.listdir(os.fsencode(str(bundle / "raw")))
+
+
+# --- one derivation of how completely the run was observed ---------------------------------
+
+
+class CompleteCaptureAdapter(FakeAdapter):
+    """Reports complete capture of a category; *trace* decides what trace the bundle ends up with."""
+
+    def __init__(self, trace: str, elsewhere: Path | None = None):
+        super().__init__()
+        self.trace = trace
+        self.elsewhere = elsewhere
+
+    def scan(self, **kwargs):
+        outcome = super().scan(**kwargs)
+        outcome.capture = {"model_requests": "partial", "finding_submitted": "complete"}
+        trace_dir = kwargs["trace_dir"]
+        if trace_dir is None:
+            return outcome
+        events = Path(trace_dir) / "events.jsonl"
+        if self.trace == "written":
+            events.write_text('{"type":"finding_submitted"}\n', encoding="utf-8")
+            outcome.trace_path = events
+        elif self.trace == "symlink":
+            events.symlink_to(Path(kwargs["raw_dir"]) / "native.json")
+            outcome.trace_path = events
+        elif self.trace == "outside":
+            outcome.trace_path = self.elsewhere
+        return outcome
+
+
+@pytest.mark.parametrize(
+    ("trace", "trace_mode"),
+    [("missing", "content"), ("symlink", "content"), ("outside", "content"), ("written", "off")],
+    ids=["no-trace-file", "trace-is-a-link", "trace-outside-the-bundle", "tracing-off"],
+)
+def test_a_capture_category_cannot_claim_complete_in_a_bundle_with_no_counted_trace(tmp_path, trace, trace_mode):
+    """``trace.events`` null beside ``capture.finding_submitted`` complete, in four ways.
+
+    The two used to be written independently into one document: the count came from the file
+    this module could find in the bundle, and the category came from the adapter, which reports
+    what its observer saw and cannot know whether the file landed. Every way the count goes
+    missing left the record claiming a complete observation with no observation behind it, and
+    the run still read as a clean success. Both now come from one derivation, so the category is
+    downgraded and the run is partial with the reason named.
+    """
+    elsewhere = tmp_path / "elsewhere.jsonl"
+    elsewhere.write_text('{"type":"finding_submitted"}\n', encoding="utf-8")
+    bundle = run(tmp_path, CompleteCaptureAdapter(trace, elsewhere), trace_mode=trace_mode)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["capture"]["finding_submitted"] == "partial"
+    assert execution["capture"]["model_requests"] == "partial", "only a complete claim is touched"
+    assert execution["trace"] is None or execution["trace"]["events"] is None
+    assert result["status"] == "partial" and result["error"]["code"] == "trace_capture_gap"
+    assert "complete capture of finding_submitted" in result["error"]["message"]
+    assert result["bundles_resolved"] is True, "a missing trace is not a lost claim"
+    assert [claim["claim_id"] for claim in result["claims"]] == ["c1"]
+    assert execution["status"] == result["status"] and execution["error"] == result["error"]
+
+
+def test_a_complete_capture_claim_a_counted_trace_backs_is_left_alone(tmp_path):
+    """The control: the rule downgrades an unbacked claim, not tracing itself."""
+    bundle = run(tmp_path, CompleteCaptureAdapter("written"), trace_mode="content")
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["trace"]["events"] == 1 and execution["trace"]["path"] == "trace/events.jsonl"
+    assert execution["capture"]["finding_submitted"] == "complete"
+    assert result["status"] == "success" and "error" not in result
+
+
+def test_a_capture_gap_and_an_unbacked_complete_claim_are_reported_together(tmp_path):
+    """One derivation, so a record that breaks both ways says both rather than the first one."""
+
+    class GappyUnbackedAdapter(CompleteCaptureAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            outcome.capture_state = {"capture_gap": True, "dropped_events": 3}
+            return outcome
+
+    bundle = run(tmp_path, GappyUnbackedAdapter("missing"), trace_mode="content")
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    message = result["error"]["message"]
+    assert result["status"] == "partial" and result["error"]["code"] == "trace_capture_gap"
+    assert "a capture gap" in message and "3 dropped event(s)" in message
+    assert "complete capture of finding_submitted" in message
+    assert execution["capture"]["finding_submitted"] == "partial"
+    assert execution["trace"]["capture_gap"] is True and execution["trace"]["events"] is None

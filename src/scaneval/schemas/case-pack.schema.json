@@ -13,6 +13,7 @@
     "status": {"enum": ["draft", "reviewed", "released"]},
     "description": {"type": "string"},
     "review_budgets": {
+      "description": "The cut-offs every recall-at-k number is computed at, copied into each plan by scaneval.cases.build_plan. Inside anchor_sha256, because editing a budget changes what a run reports about a scanner without changing a single label.",
       "type": "object", "additionalProperties": false, "required": ["full", "pr"],
       "properties": {
         "full": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},
@@ -24,7 +25,7 @@
     "admissions": {"type": "array", "items": {"$ref": "#/$defs/admission"}},
     "anchor_sha256": {
       "type": "string", "pattern": "^sha256:[0-9a-f]{64}$",
-      "description": "The digest of the records a planning decision reads whose deletion nothing else would see: the case roster in recorded order, each case's id and target_id, where each case's review history ends, and where the admission history ends. Computed by scaneval.contracts.pack_anchor_digest. Every pack carries one: the field is optional here only so that a pack without it is refused by the rule that says why rather than by a shape error, and a pack that omits it is refused all the same, because an optional anchor is no anchor. Deleting a whole case with its chained review history, wiping a case's review history so an empty one is indistinguishable from a deleted one, or deleting the admission that kept a case out of a plan each leave the pack anchoring to something else. Anyone who can edit the pack can recompute this, so it makes such a deletion visible rather than impossible."
+      "description": "The digest of every record a planning decision reads that the label digest does not already cover: the pack fields themselves, review_budgets included, each snapshot minus the identity a label points at, each case minus its label fields and its notes, and the chain value the admission history ends at. Computed by scaneval.contracts.pack_anchor_digest, which projects the whole record minus a stated allowlist rather than a list of fields to cover, so a field added to this schema is anchored the day it is added. Every pack carries one: the field is optional here only so that a pack without it is refused by the rule that says why rather than by a shape error, and a pack that omits it is refused all the same, because an optional anchor is no anchor. Editing the disposition that keeps a case in a plan, deleting a case's mechanical check set, rewriting the review budgets a recall-at-k number is computed at, deleting a whole case with its chained review history, wiping a case's review history so an empty one is indistinguishable from a deleted one, and deleting the admission that kept a case out of a plan each leave the pack anchoring to something else. Anyone who can edit the pack can recompute this, so it makes such a deletion visible rather than impossible."
     },
     "notes": {"type": "array", "items": {"type": "string"}}
   },
@@ -57,6 +58,7 @@
         "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
         "reference": {"type": "string", "description": "How the commit was chosen: tag, parent of fix, or explicit advisory commit."},
         "languages": {"type": "array", "minItems": 1, "uniqueItems": true,
+                      "description": "Which adapters are run against this export, and therefore part of the snapshot identity scaneval.contracts.label_digest covers: a snapshot re-declared as holding no Python is a different scan of the same bytes, and an approval that covered the one did not cover the other. Read as a set, so the order carries no content.",
                       "items": {"enum": ["python", "typescript", "javascript", "go", "rust"]}},
         "workload": {"enum": ["conventional_application", "conventional_automation", "ai_assisted_application", "agentic_application"]},
         "component_role": {"enum": ["application", "library_sdk", "infrastructure"]},
@@ -120,7 +122,7 @@
         "role": {"enum": ["curator", "independent_reviewer", "adjudicator"]},
         "decision": {
           "enum": ["approve", "reject", "unresolved"],
-          "description": "unresolved records the reviewer reopening the question rather than settling it. The latest recorded review is the operative one: a case whose latest review rejected it or left it unresolved is not currently approved, so planning leaves it out while the whole recorded history stays in place."
+          "description": "unresolved records the reviewer reopening the question rather than settling it. The latest recorded review is the operative one: a case whose latest review rejected it or left it unresolved is not currently approved, so it cannot be recorded as human_approved, planning leaves it out, and the whole recorded history stays in place. Rejection and reopening are one rule, scaneval.contracts.operative_review_gap, which the load, the planning gate, and record_review all read."
         },
         "level": {"enum": ["L1", "L2", "L3", "L4"]},
         "at": {"type": "string", "minLength": 1},
@@ -168,7 +170,8 @@
         },
         "target": {"$ref": "#/$defs/target"},
         "controls": {"type": "array", "items": {"$ref": "#/$defs/control"}},
-        "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"},
+                     "description": "The records a label rests on. Inside scaneval.contracts.label_digest: an allegation at a reviewed level is the allegation together with its evidence, so deleting an advisory or rewriting what one says costs the approval exactly as an edited target does. Read in evidence_id order, which the contract keeps unique, so the order of the list carries no content."},
         "disclosure": {
           "type": "object", "additionalProperties": false,
           "required": ["earliest_public_artifact", "cve_published", "ghsa_published", "fix_commit_date", "note"],
@@ -176,13 +179,14 @@
                          "ghsa_published": {"$ref": "#/$defs/date"}, "fix_commit_date": {"$ref": "#/$defs/date"}, "note": {"type": "string"}}
         },
         "disposition": {"type": "object", "additionalProperties": false, "required": ["value", "reason"],
+                        "description": "The screening decision build_plan reads: an excluded case is not planned. Inside anchor_sha256, so dropping an approved and admitted case out of a plan by editing two scalars is a pack that no longer anchors to its own records.",
                         "properties": {"value": {"enum": ["validate", "needs_evidence", "extended_regression", "exclude"]},
                                        "reason": {"type": "string", "minLength": 1}}},
         "validation": {
           "type": "object", "additionalProperties": false, "required": ["level", "review_state", "checks", "reviews"],
           "properties": {
             "level": {"enum": [null, "L1", "L2", "L3", "L4"], "description": "A cached copy of the level the case's own records establish, never a fact in its own right and never read to decide anything. For a human_approved case that level is the level of the one review covering the labels as they stand, and this field must be exactly it: a value above or below that review is refused, so a case cannot be recorded at L2 under an L4 curator approval and then planned at L4. That covering review must also earn what it records, which for L3 and L4 means it was itself made by an independent_reviewer. For a mechanically_checked case the level is L1, and a draft carries none. L3 and L4 also require disposition validate, because a reviewed label rests on the screening decision behind it."},
-            "review_state": {"enum": ["draft", "mechanically_checked", "human_approved"], "description": "mechanically_checked means level L1 and a recorded passing check set, carrying snapshot_id, for every snapshot the case references; it is never a claim that a person read anything."},
+            "review_state": {"enum": ["draft", "mechanically_checked", "human_approved"], "description": "mechanically_checked means level L1 and a recorded passing check set, carrying snapshot_id, for every snapshot the case references; it is never a claim that a person read anything. human_approved requires the latest recorded review to be an approving one: a rejection and an unresolved reopening are both withdrawals, and both leave the case at the state its mechanical checks earn."},
             "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
             "check_sets": {
               "type": "object",

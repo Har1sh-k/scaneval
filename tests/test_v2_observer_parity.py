@@ -24,18 +24,24 @@ beyond-safe-integer durations, the same shapes again as payload numbers, where t
 disagree about a trailing ``.0``, about a negative zero, about an integer past the safe-integer
 bound, and about where plain decimal notation ends, a payload nested one container past the shared
 depth limit and one exactly at it, an unknown field name, a missing metadata, a metadata that is a
-list and one that is a string, an empty and a non-string link ID, a cyclic payload, a non-finite
+list and one that is a string, a metadata and a content that are objects no payload copy can
+read, an empty and a non-string value for every link ID the contract names, a cyclic payload, a
+non-finite
 number inside a payload, an unpaired surrogate in a payload and in a link ID against an astral
 character that is written, credential-like and Unicode payload keys, a redactor that returns a
 structurally equal copy of a container, a redactor that returns an equal copy of a scalar, a
-redactor that throws, a sink that throws an ordinary error, a sink that throws a value that is not
-an error, an ID factory that throws, a clock that throws, a clock that steps backwards, and an
+redactor that throws, a redactor whose replacement is not JSON, a redactor whose replacement is
+one container too deep, a sink that throws an ordinary error, a sink that throws a value that is not
+an error, a sink that hands back an iterator nobody drives, an ID factory that throws, an ID
+factory that returns a string the wire refuses, a run and producer ID the wire refuses, a clock
+that throws, a clock that steps backwards, an emit after close, and an
 observer with no sink at all.
 
 The operation-boundary helpers are compared too, not only ``emit``: Python's ``observe_async``
 and TypeScript's ``observeAsync`` are driven over the same success, failure and unmeasurable
-duration scenarios, with a monotonic source scripted read for read, and their completion events
-are compared byte for byte. One operation scenario deliberately injects no monotonic source at
+duration scenarios, with a monotonic source scripted read for read, including every unusable
+reading it can produce, one that raises, a NaN, an infinity and a value that is not a number at
+all, and their completion events are compared byte for byte. One operation scenario deliberately injects no monotonic source at
 all, only a clock, because that is the case in which the two emitters once disagreed: TypeScript
 derived elapsed time from an injected ``Clock`` and Python never did. Both now measure with a
 real monotonic source, so that scenario's duration is the one value in the whole matrix that is
@@ -77,6 +83,7 @@ import math
 from pathlib import Path
 import shutil
 import subprocess
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -103,6 +110,9 @@ EPOCH_MS = int(EPOCH.timestamp() * 1000)
 STEP_MS = 10
 GAP_MESSAGE = "observer instrumentation failure"
 MAX_SAFE_INTEGER = 2**53 - 1
+# The lifecycle links the wire contract names, in the order the schema lists them. Checked
+# against the schema below, so this cannot drift into a private copy of a shorter list.
+LINK_FIELDS = ("parent_event_id", "call_id", "attempt_id", "candidate_id", "claim_id")
 
 needs_node = pytest.mark.skipif(
     NODE is None or not SDK_BUILD.exists(),
@@ -157,6 +167,17 @@ function materialize(value) {
       /* A lone high surrogate. JSON cannot carry one, so the plan spells it as a marker and
          each language builds its own: one UTF-16 code unit here, one code point in Python. */
       if (value.$special === "surrogate") return "\\uD800";
+      /* An object that is not a plain object: a class instance carrying the same field. The
+         Python side builds a SimpleNamespace, which is not a Mapping, for the same reason.
+         Neither emitter may store either one, in either recording mode. */
+      if (value.$special === "exotic_object") {
+        class Exotic {
+          constructor() {
+            this.tool = "grep";
+          }
+        }
+        return new Exotic();
+      }
       if (value.$special === "nan") return NaN;
       if (value.$special === "inf") return Infinity;
       if (value.$special === "-inf") return -Infinity;
@@ -179,6 +200,20 @@ function materialize(value) {
   return value;
 }
 
+/* The Python ``nested_object``, spelled here: a payload of exactly ``containers`` nested
+   objects, the payload object itself included. */
+function nestedObject(containers) {
+  const root = {};
+  let inner = root;
+  for (let i = 1; i < containers; i += 1) {
+    const child = {};
+    inner.child = child;
+    inner = child;
+  }
+  inner.leaf = "bottom";
+  return root;
+}
+
 const redactors = {
   default: undefined,
   // Hands back a structurally equal copy of every container and leaves scalars alone. Under
@@ -198,6 +233,12 @@ const redactors = {
   throws: () => {
     throw new Error("redactor unavailable");
   },
+  // A replacement that is not JSON in either language. A redactor is caller code, so its output
+  // is copied and revalidated like any payload, and the event is refused in both.
+  non_json: () => () => {},
+  // A replacement sitting exactly on the shared nesting limit, which is one container too many
+  // where it lands. The budget is per position, so a redactor cannot smuggle depth past it.
+  deepens: (key, value) => (key === "smuggled" ? nestedObject(MAX_PAYLOAD_DEPTH) : value),
 };
 
 function scriptedMonotonic(values) {
@@ -210,6 +251,9 @@ function scriptedMonotonic(values) {
       if (value === "throw") throw new Error("monotonic unavailable");
       if (value === "nan") return NaN;
       if (value === "inf") return Infinity;
+      // A reading that is not a number at all. Both emitters refuse it without calling it, so
+      // the span is unmeasurable rather than a duration built from a string.
+      if (value === "text") return "100.0";
       return value;
     },
   };
@@ -234,21 +278,29 @@ for (const scenario of plan.scenarios) {
           ? "sink unavailable"
           : new Error("sink unavailable");
       }
+      // A write that hands back an iterator nobody drives writes nothing and reports nothing.
+      if (scenario.sink_returns_generator) {
+        return (function* () {
+          yield event;
+        })();
+      }
       return jsonl.write(event);
     },
   };
   const clockThrows = new Set(scenario.clock_throws_on ?? []);
   const clockOffsets = scenario.clock_offsets_ms ?? null;
   let reads = 0;
-  const supplied = (scenario.id_values ?? []).slice();
+  // Materialized, so a scripted ID can be a string the wire refuses: the marker the plan
+  // carries cannot survive a JSON file as a raw code point.
+  const supplied = (scenario.id_values ?? []).map(materialize);
   const idThrows = new Set(scenario.id_throws_on ?? []);
   let issued = 0;
   let idCalls = 0;
   const observer = new Observer({
     mode: scenario.mode,
     ...(scenario.no_sink ? {} : { sink }),
-    runId: scenario.run_id ?? undefined,
-    producerId: scenario.producer_id ?? undefined,
+    runId: materialize(scenario.run_id ?? undefined),
+    producerId: materialize(scenario.producer_id ?? undefined),
     idFactory: {
       next: (prefix) => {
         const index = idCalls++;
@@ -274,7 +326,10 @@ for (const scenario of plan.scenarios) {
   const recorded = [];
   const eventIds = [];
   const sequences = [];
-  for (const input of scenario.events ?? []) {
+  for (const [index, input] of (scenario.events ?? []).entries()) {
+    // A scenario that closes mid stream: every event after this point is refused and counted
+    // as a lost one, because it postdates the run it belongs to.
+    if (index === scenario.close_after) await observer.close();
     const emitted = await observer.emit(materialize(input));
     recorded.push(emitted !== undefined);
     eventIds.push(emitted === undefined ? null : emitted.event_id);
@@ -387,6 +442,10 @@ def materialize(value):
                 return loop
             if name == "surrogate":
                 return "\ud800"
+            if name == "exotic_object":
+                # Not a Mapping, and the node driver's analogue is a class instance: an object
+                # carrying the same field that neither emitter may read as a payload.
+                return SimpleNamespace(tool="grep")
             if name == "nan":
                 return float("nan")
             if name == "inf":
@@ -431,6 +490,16 @@ def throwing_redactor(key, value, path):
     raise RuntimeError("redactor unavailable")
 
 
+def non_json_redactor(key, value, path):
+    """Replace every value with something that is not JSON. The event is refused in both."""
+    return lambda: None
+
+
+def deepening_redactor(key, value, path):
+    """Replace one named key with a payload that is one container too deep where it lands."""
+    return nested_object(MAX_PAYLOAD_DEPTH) if key == "smuggled" else value
+
+
 # ``default`` is None so each emitter uses its own built-in redactor: that is the thing under
 # comparison, and substituting one shared implementation would hide a divergence between them.
 REDACTORS = {
@@ -438,6 +507,8 @@ REDACTORS = {
     "equal_copy": equal_copy_redactor,
     "equal_copy_scalar": equal_copy_scalar_redactor,
     "throws": throwing_redactor,
+    "non_json": non_json_redactor,
+    "deepens": deepening_redactor,
 }
 
 
@@ -496,13 +567,17 @@ def scripted_monotonic(values):
     """Read the elapsed-time source from a script, in seconds, exactly as the node driver does.
 
     A ``"throw"`` entry raises, ``"nan"`` and ``"inf"`` return the non-finite readings the
-    emitter has to refuse. Nothing here reads a real clock, so a duration is a property of the
-    plan rather than of how fast the test ran.
+    emitter has to refuse, and ``"text"`` returns a reading that is not a number at all, which
+    both emitters must refuse without calling it. Nothing here reads a real clock, so a duration
+    is a property of the plan rather than of how fast the test ran.
+
+    The return annotation is deliberately wide: a monotonic source is caller code, and the
+    unusable readings are exactly what the emitter has to classify rather than trust.
     """
     scripted = list(values)
     reads = 0
 
-    def now() -> float:
+    def now() -> Any:
         nonlocal reads
         index = reads
         reads += 1
@@ -515,13 +590,20 @@ def scripted_monotonic(values):
             return float("nan")
         if value == "inf":
             return float("inf")
+        if value == "text":
+            return "100.0"
         return float(value)
 
     return now
 
 
-def counting_sink(lines: list[str], throws_on=(), kind="error"):
-    """The JSONL sink, wrapped so named write attempts fail. Serialization stays the SDK's."""
+def counting_sink(lines: list[str], throws_on=(), kind="error", returns_generator=False):
+    """The JSONL sink, wrapped so named write attempts fail. Serialization stays the SDK's.
+
+    ``returns_generator`` makes every write hand back an iterator nobody drives instead of
+    writing, which is the wiring mistake no constructor check can see: the line is never
+    written, the sink reports no failure, and both emitters must count the event as lost.
+    """
     throwing = set(throws_on)
     jsonl = create_jsonl_sink(lines.append)
     writes = 0
@@ -534,6 +616,8 @@ def counting_sink(lines: list[str], throws_on=(), kind="error"):
             if kind == "non_error":
                 raise SinkFailureValue("sink unavailable")
             raise RuntimeError("sink unavailable")
+        if returns_generator:
+            return (item for item in (event,))
         return jsonl.write(event)
 
     return write
@@ -608,6 +692,7 @@ def python_results(plan: dict) -> list[dict]:
                 lines,
                 scenario.get("sink_throws_on", ()),
                 scenario.get("sink_throw_kind", "error"),
+                scenario.get("sink_returns_generator", False),
             )
         )
         monotonic = (
@@ -618,10 +703,11 @@ def python_results(plan: dict) -> list[dict]:
         observer = Observer(
             mode=scenario["mode"],
             sink=sink,
-            run_id=scenario.get("run_id"),
-            producer_id=scenario.get("producer_id"),
+            run_id=materialize(scenario.get("run_id")),
+            producer_id=materialize(scenario.get("producer_id")),
             id_factory=id_factory(
-                scenario.get("id_values"), scenario.get("id_throws_on", ())
+                [materialize(value) for value in scenario.get("id_values") or ()],
+                scenario.get("id_throws_on", ()),
             ),
             clock=fixed_clock(
                 plan["epoch_ms"],
@@ -635,7 +721,11 @@ def python_results(plan: dict) -> list[dict]:
         recorded: list[bool] = []
         event_ids: list[str | None] = []
         sequences: list[int | None] = []
-        for fields in scenario.get("events", []):
+        for index, fields in enumerate(scenario.get("events", [])):
+            # A scenario that closes mid stream: every event after this point is refused and
+            # counted as a lost one, because it postdates the run it belongs to.
+            if index == scenario.get("close_after"):
+                observer.close()
             emitted = observer.emit(**materialize(fields))
             recorded.append(emitted is not None)
             event_ids.append(None if emitted is None else emitted["event_id"])
@@ -788,6 +878,10 @@ def nested_lists(containers: int) -> dict:
 
 CYCLE = {"$special": "cycle"}
 SURROGATE = {"$special": "surrogate"}
+# An object neither emitter may read as a payload: a class instance in JavaScript, a
+# SimpleNamespace in Python. Both languages have the same rule, spelled in their own terms, and
+# both apply it to metadata and to content in every recording mode.
+EXOTIC_OBJECT = {"$special": "exotic_object"}
 NAN = {"$special": "nan"}
 INFINITY = {"$special": "inf"}
 NEGATIVE_INFINITY = {"$special": "-inf"}
@@ -895,6 +989,10 @@ ACCEPTED_EVENTS = [
     event("tool.start", metadata=nested_object(MAX_PAYLOAD_DEPTH)),
     event("tool.start", metadata=nested_lists(MAX_PAYLOAD_DEPTH)),
     event("tool.start", metadata={"tool": "grep"}, content=nested_object(MAX_PAYLOAD_DEPTH)),
+    # The category a caller may state, agreeing with the type. The contract allows it, derives
+    # the stored value from the type anyway, and refuses one that contradicts it; only the
+    # contradiction was exercised before.
+    event("tool.start", category="tool", call_id="call-6", metadata={"tool": "grep"}),
     # Edge shapes that carry no optional field at all.
     event("tool.start", metadata={}),
     event("model.request", metadata={"empty_list": [], "empty_object": {}}, content={}),
@@ -960,9 +1058,24 @@ REJECTED_EVENTS = {
     "metadata_is_a_string": event("tool.start", metadata="tool=grep"),
     "content_is_a_list": event("tool.start", content=["grep"]),
     "content_is_null": event("tool.start", content=None),
+    # A payload object neither language can store: what counts as one is a property of the
+    # contract, not of the recording mode, so this is refused in metadata mode too. The
+    # TypeScript gate once asked only whether the value was a non-array object while its copy
+    # applied the real rule, so this shape was accepted in metadata mode and refused in content
+    # mode by the same emitter.
+    "metadata_is_not_a_payload_object": event("tool.start", metadata=EXOTIC_OBJECT),
+    "content_is_not_a_payload_object": event(
+        "tool.start", metadata={"tool": "grep"}, content=EXOTIC_OBJECT
+    ),
+    # Every link field the contract names is validated, not only the two a rejection happened
+    # to cover: a field missing from either emitter's list would be a divergent rejection.
     "empty_call_id": event("tool.start", call_id=""),
     "non_string_call_id": event("tool.start", call_id=7),
     "empty_claim_id": event("finding.submitted", claim_id=""),
+    "empty_parent_event_id": event("tool.end", parent_event_id=""),
+    "empty_attempt_id": event("model.response", attempt_id=""),
+    "empty_candidate_id": event("finding.candidate", candidate_id=""),
+    "non_string_candidate_id": event("finding.candidate", candidate_id=7),
     "null_duration": event("tool.end", duration_ms=None),
     "non_integral_duration": event("tool.end", duration_ms=12.5),
     "negative_duration": event("tool.end", duration_ms=-1),
@@ -1066,6 +1179,14 @@ REDACTION_EVENTS = [
         metadata={"nested": {"token": "hide me", "safe": "kept"}, "list": [{"cookie": "hide me"}]},
         content={"headers": {"Authorization": "hide me", "accept": "kept"}},
     ),
+]
+
+# One event whose payload the deepening redactor replaces, and one it leaves alone. The
+# replacement lands one container past the shared limit, so the first is refused by both
+# emitters and the second is recorded by both.
+SMUGGLED_PAYLOAD_EVENTS = [
+    event("tool.start", metadata={"smuggled": 1}),
+    event("tool.start", metadata={"tool": "grep"}),
 ]
 
 REDACTOR_PROBE_EVENTS = [
@@ -1211,6 +1332,18 @@ def matrix_plan() -> dict:
             redactor="equal_copy_scalar",
         ),
         scenario("throwing-redactor", "content", REDACTOR_PROBE_EVENTS, redactor="throws"),
+        # A redactor whose replacement is not JSON. Its output is caller data, copied and
+        # revalidated like any payload, so the event is refused in both languages.
+        scenario("non-json-redactor", "content", REDACTOR_PROBE_EVENTS, redactor="non_json"),
+        # A redactor whose replacement is one container too deep where it lands. The depth
+        # budget is per position in both languages, so the replaced event is refused and the
+        # untouched one is recorded.
+        scenario(
+            "depth-smuggling-redactor",
+            "content",
+            SMUGGLED_PAYLOAD_EVENTS,
+            redactor="deepens",
+        ),
         scenario("sink-throws", "content", ACCEPTED_EVENTS, sink_throws_on=[0, 3, 4]),
         # A JavaScript throw of a string, and the closest Python analogue: a BaseException that
         # is not an Exception. Both must be contained and counted as one lost event each.
@@ -1244,6 +1377,37 @@ def matrix_plan() -> dict:
         # A recording observer with no sink at all: both build and return the event and neither
         # writes a line. What they report about it is the open divergence below.
         scenario("no-sink-builder-mode", "content", DEGRADED_EVENTS, no_sink=True),
+        # A sink whose write hands back an iterator nobody drives. No constructor check can see
+        # that shape, the line is never written, and the sink reports no failure, so both
+        # emitters must count every event it swallowed rather than report clean capture.
+        scenario(
+            "sink-returns-an-undriven-generator",
+            "content",
+            DEGRADED_EVENTS,
+            sink_returns_generator=True,
+        ),
+        # An ID factory that hands back strings the wire refuses: a lone surrogate, then an
+        # empty one. Both must fall back to the same spelling and mark the events they degraded,
+        # rather than one language writing an event ID no UTF-8 sink can encode. The supplied
+        # run and producer IDs keep the factory for the event IDs alone.
+        scenario(
+            "id-factory-returns-unusable-ids",
+            "content",
+            DEGRADED_EVENTS,
+            id_values=[SURROGATE, "", "event-3"],
+        ),
+        # Run and producer IDs a caller supplied that the wire refuses. Both must ignore them
+        # and draw from the factory instead, in the same order, so the event IDs line up.
+        {
+            "name": "unusable-run-and-producer-ids",
+            "mode": "content",
+            "run_id": "",
+            "producer_id": SURROGATE,
+            "events": DEGRADED_EVENTS,
+        },
+        # A close in the middle of a stream. Every event after it postdates the run it belongs
+        # to, so both emitters refuse it and count it as lost.
+        scenario("emit-after-close", "content", DEGRADED_EVENTS, close_after=2),
         # No run_id or producer_id: both must draw them from the injected factory in the same
         # order, so the event IDs that follow are offset identically.
         {
@@ -1355,6 +1519,19 @@ def operations_plan() -> dict:
                 "operation-monotonic-returns-nan",
                 [100.0, "nan"],
                 [operation_step("call-nan", "success")],
+            ),
+            operation_scenario(
+                "operation-monotonic-returns-infinity",
+                [100.0, "inf"],
+                [operation_step("call-infinite", "success")],
+            ),
+            # A reading that is not a number at all. Checking a reading is as much caller code
+            # as taking one, so both emitters classify it rather than convert it, and the span
+            # is unmeasurable instead of a duration built from a string.
+            operation_scenario(
+                "operation-monotonic-returns-a-non-number",
+                ["text", 100.25],
+                [operation_step("call-not-a-number", "success")],
             ),
             # The builder insists on a duration the emitter could not measure. Both must drop it
             # rather than write a number nothing measured.
@@ -1477,7 +1654,7 @@ def test_both_emitters_write_byte_identical_jsonl_for_the_whole_parity_matrix(ma
         written += len(python_case["lines"])
     # Guard against a matrix that agreed because it recorded nothing. The count only grows as
     # cases are added, so a shrinking matrix fails here rather than passing on less evidence.
-    assert written >= 221
+    assert written >= 248
     # Key order is the schema's declaration order in both, on every line either wrote.
     declared = list(
         json.loads((ROOT / "schema/v2/trace-event.schema.json").read_text())["properties"]
@@ -1517,6 +1694,14 @@ def test_both_emitters_agree_on_which_matrix_events_were_recorded(matrix_pairs):
     assert not any(by_name["off-mode-defaults"])
     # A recording observer with no sink still builds and returns every event in both languages.
     assert all(by_name["no-sink-builder-mode"])
+    # A sink that hands back an iterator writes nothing, and the event is still built in both.
+    assert all(by_name["sink-returns-an-undriven-generator"])
+    # A redactor whose replacement is not JSON refuses the event in both; one that replaces a
+    # named key with a too-deep payload refuses that event and records the one it left alone.
+    assert not any(by_name["non-json-redactor"])
+    assert by_name["depth-smuggling-redactor"] == [False, True]
+    # A close in the middle of the stream: the events after it are refused by both.
+    assert by_name["emit-after-close"] == [True, True, False, False]
 
 
 @needs_node
@@ -1598,6 +1783,26 @@ def test_both_emitters_report_the_same_capture_state_for_every_matrix_case(matri
         "capture_gap": True,
         "last_sink_error": GAP_MESSAGE,
     }
+    assert by_name["non-json-redactor"] == {
+        "dropped_events": len(REDACTOR_PROBE_EVENTS),
+        "capture_gap": True,
+        "last_sink_error": GAP_MESSAGE,
+    }
+    # Every event the undriven-generator sink swallowed is a lost event, not clean capture.
+    assert by_name["sink-returns-an-undriven-generator"] == {
+        "dropped_events": len(DEGRADED_EVENTS),
+        "capture_gap": True,
+        "last_sink_error": GAP_MESSAGE,
+    }
+    # Two events arrived after the close, and each is one lost event in both languages.
+    assert by_name["emit-after-close"] == {
+        "dropped_events": 2,
+        "capture_gap": True,
+        "last_sink_error": GAP_MESSAGE,
+    }
+    # A run or producer ID the wire refuses costs nothing at all: it is not used, and the
+    # factory supplies the IDs instead, so there is no event to lose and nothing to degrade.
+    assert by_name["unusable-run-and-producer-ids"] == clean
 
 
 @needs_node
@@ -2265,6 +2470,14 @@ def test_the_parity_matrix_covers_every_input_shape_the_contract_names():
     plan = matrix_plan()
     modes = {case["mode"] for case in plan["scenarios"]}
     assert modes == set(RECORDING_MODES)
+    # The link list this file checks against is the schema's own: every declared property that
+    # is optional and is not a payload or a duration. A link added to the contract and not to
+    # LINK_FIELDS fails here rather than going untested.
+    schema = json.loads((ROOT / "schema/v2/trace-event.schema.json").read_text())
+    optional = [name for name in schema["properties"] if name not in schema["required"]]
+    assert [name for name in optional if name not in ("duration_ms", "content")] == list(
+        LINK_FIELDS
+    )
     emitted_types = {
         fields.get("type") for case in plan["scenarios"] for fields in case["events"]
     }
@@ -2294,8 +2507,35 @@ def test_the_parity_matrix_covers_every_input_shape_the_contract_names():
         "metadata_nested_past_the_depth_limit",
         "metadata_lists_nested_past_the_depth_limit",
         "field_named_self",
+        # A payload object neither language can store, refused in every mode by both: what a
+        # payload object is belongs to the contract, not to the recording mode.
+        "metadata_is_not_a_payload_object",
+        "content_is_not_a_payload_object",
     }
     assert required_rejections <= set(REJECTED_EVENTS)
+    # Every field a caller may supply is exercised, and every one of them is accepted somewhere
+    # as well as refused somewhere, so a field the matrix only ever refuses cannot hide a
+    # divergence in how the two emitters store it.
+    supplied = {
+        name for case in plan["scenarios"] for fields in case["events"] for name in fields
+    }
+    declared_input_fields = {
+        "type",
+        "category",
+        "capture_status",
+        "metadata",
+        "content",
+        "duration_ms",
+        *LINK_FIELDS,
+    }
+    assert declared_input_fields <= supplied
+    assert declared_input_fields <= {name for fields in ACCEPTED_EVENTS for name in fields}
+    # Each link field is refused somewhere too: they share one rule, and a field left out of
+    # one emitter's list would be a divergent rejection nothing else in the matrix would see.
+    refused_links = {
+        name for fields in REJECTED_EVENTS.values() for name in fields if name in LINK_FIELDS
+    }
+    assert refused_links == set(LINK_FIELDS)
     # Every payload-number shape the rule names, on both sides of both bounds.
     assert set(PAYLOAD_NUMBER_REJECTIONS) <= set(REJECTED_EVENTS)
     assert {
@@ -2341,17 +2581,55 @@ def test_the_parity_matrix_covers_every_input_shape_the_contract_names():
     assert {
         "sink-throws",
         "sink-throws-a-non-error-value",
+        "sink-returns-an-undriven-generator",
         "throwing-redactor",
+        "non-json-redactor",
+        "depth-smuggling-redactor",
         "equal-copy-redactor",
         "equal-copy-scalar-redactor",
         "clock-throws",
         "clock-steps-backwards",
         "id-factory-throws",
+        "id-factory-returns-unusable-ids",
+        "unusable-run-and-producer-ids",
         "no-sink-builder-mode",
+        "emit-after-close",
     } <= names
+    # Every public constructor option is driven by some scenario, and a plan key is what drives
+    # it. An option with no key here is one the matrix never varies, which is the gap this
+    # assertion exists to make loud.
+    plan_keys = {key for case in plan["scenarios"] for key in case}
+    assert {
+        "mode",
+        "run_id",
+        "producer_id",
+        "redactor",
+        "no_sink",
+        "sink_throws_on",
+        "sink_throw_kind",
+        "sink_returns_generator",
+        "clock_throws_on",
+        "clock_offsets_ms",
+        "id_values",
+        "id_throws_on",
+        "close_after",
+    } <= plan_keys
+    # Every redactor the file defines is used by a scenario, so adding one without driving it
+    # fails here rather than sitting unused.
+    assert {case.get("redactor", "default") for case in plan["scenarios"]} == set(REDACTORS)
+    # The elapsed-time source is the one option only the operation plan can drive, and every
+    # unusable reading it can produce is scripted by some scenario.
+    operation_plan = operations_plan()
+    readings = {
+        value
+        for case in operation_plan["scenarios"]
+        for value in case.get("monotonic_values", ())
+        if isinstance(value, str)
+    }
+    assert readings == {"throw", "nan", "inf", "text"}
     # Every excluded scenario is a scenario that actually exists, in one plan or the other, so a
     # renamed case cannot leave a stale exclusion silently suppressing a comparison.
-    operation_names = {case["name"] for case in operations_plan()["scenarios"]}
+    operation_names = {case["name"] for case in operation_plan["scenarios"]}
     assert DIVERGENT_DROPPED_EVENTS <= (names | operation_names)
     assert DIVERGENT_CAPTURE_STATE <= names
     assert REAL_TIME_OPERATIONS <= operation_names
@@ -2359,14 +2637,14 @@ def test_the_parity_matrix_covers_every_input_shape_the_contract_names():
     # no monotonic source, which is the shape that used to be measured with the wall clock.
     clock_only = {
         case["name"]
-        for case in operations_plan()["scenarios"]
+        for case in operation_plan["scenarios"]
         if case["mode"] != "off" and "monotonic_values" not in case
     }
     assert clock_only == REAL_TIME_OPERATIONS
     # Every operation-boundary outcome the helpers can reach has a scenario.
     outcomes = {
         step["outcome"]
-        for case in operations_plan()["scenarios"]
+        for case in operation_plan["scenarios"]
         for step in case["operations"]
     }
     assert outcomes == {"success", "failure"}
@@ -2382,6 +2660,73 @@ def test_dropped_events_still_diverges_for_failures_that_lose_no_event(
         assert pair is not None, name
         python_case, node_case = pair
         assert python_case["state"]["dropped_events"] == node_case["state"]["dropped_events"], name
+
+
+@needs_node
+def test_an_unusable_id_from_a_factory_is_refused_by_both_and_never_written(matrix_pairs):
+    """Every caller string on the wire passes one validator, wherever the string came from.
+
+    The TypeScript ``nextId`` checked a factory-produced ID with a local type-and-length test
+    instead of the shared ``validId``, so an ID carrying an unpaired surrogate went straight
+    onto the wire while Python's ``_next_id`` refused the same value through ``_is_id`` and fell
+    back. One event, two event IDs, and a line no UTF-8 sink could have written in one of the
+    two languages. Both refuse it now, and the fallback spelling is the same, so the streams
+    stay aligned: a degraded ID is a capture gap on a delivered event, never a lost one, and the
+    events after it keep the factory's own numbering.
+
+    The same rule covers the run and producer IDs a caller supplies, which the second scenario
+    here hands over as an empty string and as a lone surrogate: both are ignored in both
+    languages and the factory is asked instead, in the same order.
+    """
+    python_case, node_case = matrix_pairs["id-factory-returns-unusable-ids"]
+    assert python_case["lines"] == node_case["lines"]
+    assert python_case["event_ids"] == node_case["event_ids"]
+    assert python_case["event_ids"] == [
+        "event-fallback-1",
+        "event-fallback-2",
+        "event-3",
+        "event-1",
+    ]
+    for line in parsed(python_case["lines"]):
+        assert line["event_id"].encode("utf-8").decode("utf-8") == line["event_id"]
+    # The two refused IDs degraded their events without losing them: marked, downgraded, kept.
+    marked = parsed(python_case["lines"])[:2]
+    assert [line["capture_status"] for line in marked] == ["partial", "partial"]
+    assert all(line["metadata"]["observer_capture_gap"] is True for line in marked)
+    assert python_case["state"] == node_case["state"]
+    assert python_case["state"]["dropped_events"] == 0
+    assert python_case["state"]["capture_gap"] is True
+
+    supplied = matrix_pairs["unusable-run-and-producer-ids"]
+    assert supplied[0]["run_id"] == supplied[1]["run_id"] == "run-1"
+    assert supplied[0]["producer_id"] == supplied[1]["producer_id"] == "producer-2"
+
+
+@needs_node
+def test_a_payload_that_is_not_a_storable_object_is_refused_in_every_mode(matrix_pairs):
+    """What a payload object is belongs to the contract, not to the recording mode.
+
+    The TypeScript gate asked only whether ``content`` was a non-array object while the copy
+    applied the plain-object rule, so an object built on some other prototype was accepted in
+    ``metadata`` mode, where content is never copied, and refused in ``content`` mode by the
+    same emitter. Python refused it in both, because one predicate answered for both paths
+    there. Both emitters now ask one predicate as well, so the mode decides whether content is
+    stored and never what a caller may hand over.
+
+    What is inside a stored payload is the separate rule, and it still belongs to the copy:
+    the ``CONTENT_ONLY_REJECTIONS`` are accepted in ``metadata`` mode by both emitters.
+    """
+    refusals = list({**REJECTED_EVENTS, **CONTENT_ONLY_REJECTIONS})
+    shapes = ["metadata_is_not_a_payload_object", "content_is_not_a_payload_object"]
+    for mode in ("metadata", "content"):
+        python_case, node_case = matrix_pairs[f"rejections-interleaved-{mode}"]
+        assert python_case["recorded"] == node_case["recorded"]
+        for name in shapes:
+            # The interleaved stream is a refusal followed by an accepted event, so the input
+            # at twice the index is the refusal itself.
+            index = refusals.index(name) * 2
+            assert python_case["recorded"][index] is False, (mode, name)
+            assert node_case["recorded"][index] is False, (mode, name)
 
 
 @needs_node

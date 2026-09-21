@@ -475,6 +475,67 @@ test("a string no UTF-8 sink could encode is refused as a capture gap", async ()
   assert.deepEqual(astral.getState(), { dropped_events: 0, capture_gap: false, last_sink_error: null });
 });
 
+test("every string this emitter puts on the wire passes the one validator", async () => {
+  // The rule is not "a payload string is checked": it is that every caller-derived string on
+  // the wire passes validId, whichever hook produced it. nextId used to spell its own weaker
+  // version of the check, a typeof and a length test, so an id carrying an unpaired surrogate
+  // went straight onto the wire while Python refused the same value in _is_id and fell back.
+  const lone = "\uD800";
+  const seen = [];
+  const supplied = [lone, "", "event-3"];
+  const observer = new Observer({
+    mode: "metadata", sink: { write: e => seen.push(e) }, runId: "r", producerId: "p",
+    idFactory: { next: prefix => (supplied.length > 0 ? supplied.shift() : `${prefix}-x`) },
+    clock: clock(),
+  });
+  await observer.emit(event()); await observer.emit(event()); await observer.emit(event());
+  assert.deepEqual(seen.map(e => e.event_id), ["event-fallback-1", "event-fallback-2", "event-3"]);
+  // A refused id degrades the event it was for and loses nothing: the sink still took it.
+  assert.deepEqual(seen.slice(0, 2).map(e => e.capture_status), ["partial", "partial"]);
+  assert.ok(seen.slice(0, 2).every(e => e.metadata.observer_capture_gap === true));
+  assert.deepEqual(observer.getState(), { dropped_events: 0, capture_gap: true, last_sink_error: "observer instrumentation failure" });
+  // A run or producer id the wire refuses is not used at all: the factory supplies one instead.
+  const ignored = new Observer({ mode: "metadata", sink: { write: () => {} }, runId: lone, producerId: "", idFactory: ids() });
+  assert.deepEqual([ignored.runId, ignored.producerId], ["run-1", "producer-2"]);
+  assert.deepEqual(ignored.getState(), { dropped_events: 0, capture_gap: false, last_sink_error: null });
+  // A Clock is typed to hand back a Date, and nothing at a JavaScript call site makes it one.
+  // A stand-in that spells a timestamp no sink could write costs the timestamp, not the event.
+  const timestamps = [];
+  const fake = new Observer({ mode: "metadata", sink: { write: e => timestamps.push(e) }, runId: "r", producerId: "p", idFactory: ids(), clock: { now: () => ({ toISOString: () => lone }) } });
+  const degraded = await fake.emit(event());
+  assert.equal(degraded.timestamp, "1970-01-01T00:00:00.000Z");
+  assert.equal(degraded.capture_status, "partial");
+  assert.deepEqual(fake.getState(), { dropped_events: 0, capture_gap: true, last_sink_error: "observer instrumentation failure" });
+});
+
+test("a payload that is not a plain object is refused in every recording mode", async () => {
+  // One predicate answers for the gate and for the copy. It used to be two: validInput asked
+  // only whether a value was a non-array object while copyJson applied the plain-object rule,
+  // so a content built on another prototype was accepted in metadata mode, where the copy never
+  // runs, and refused in content mode by the same emitter. The mode decides whether content is
+  // stored, never what a caller may hand over.
+  class Exotic { constructor() { this.tool = "grep"; } }
+  const exotic = () => new Exotic();
+  for (const mode of ["metadata", "content"]) {
+    const seen = []; const observer = new Observer({ mode, sink: { write: e => seen.push(e) }, idFactory: ids(), clock: clock() });
+    assert.equal(await observer.emit(event({ metadata: exotic() })), undefined, mode);
+    assert.equal(await observer.emit(event({ content: exotic() })), undefined, mode);
+    assert.equal(await observer.emit(event({ content: new Map([["tool", "grep"]]) })), undefined, mode);
+    assert.equal(await observer.emit(event({ content: new Date(0) })), undefined, mode);
+    assert.deepEqual(seen, [], mode);
+    assert.equal(observer.getState().dropped_events, 4, mode);
+    // The controls: an object literal and a null-prototype object are both storable, and what
+    // is INSIDE a content payload is still the copy's business, so metadata mode accepts a
+    // content the copy would refuse.
+    const bare = Object.create(null); bare.tool = "grep";
+    assert.ok(await observer.emit(event({ metadata: bare, content: { tool: "grep" } })), mode);
+  }
+  const metadataMode = new Observer({ mode: "metadata", sink: { write: () => {} }, idFactory: ids(), clock: clock() });
+  assert.ok(await metadataMode.emit(event({ content: { ratio: 1e-5 } })));
+  const contentMode = new Observer({ mode: "content", sink: { write: () => {} }, idFactory: ids(), clock: clock() });
+  assert.equal(await contentMode.emit(event({ content: { ratio: 1e-5 } })), undefined);
+});
+
 test("payload nesting deeper than MAX_PAYLOAD_DEPTH is refused as a capture gap", async () => {
   const seen = []; const observer = new Observer({ mode: "metadata", sink: { write: e => seen.push(e) }, idFactory: ids(), clock: clock() });
   assert.equal(MAX_PAYLOAD_DEPTH, 32);

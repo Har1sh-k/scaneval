@@ -67,8 +67,12 @@ def _enclosure(workspace: Path, staging: Path | None = None) -> Enclosure:
     Every path the adapter touches after the harness starts is proved to resolve inside one of
     these, which is what catches a symbolic link above a record rather than only one at it. A
     unit test that is not about escaping hands both roots the temporary directory it built in.
+
+    Captured, as the adapter captures them: the real path of each root is read here, before the
+    call under test, and the checks inside it compare against that rather than resolving the root
+    again afterwards.
     """
-    return Enclosure(workspace, staging if staging is not None else workspace)
+    return Enclosure.capture(workspace, staging if staging is not None else workspace)
 
 
 def test_frontmatter_parser_handles_arrays_quoted_strings_and_numbers():
@@ -1085,3 +1089,42 @@ def test_the_harness_provenance_is_read_from_the_harness_root_not_an_inherited_g
 
     assert preparation["harness"]["git_head"] == git("rev-parse", "HEAD", cwd=root)
     assert preparation["harness"]["git_head"] != git("rev-parse", "HEAD", cwd=elsewhere)
+
+
+def test_a_workspace_swapped_after_the_enclosure_was_captured_cannot_move_the_boundary(tmp_path):
+    """The enclosure resolved its own roots on every check, after the harness had run.
+
+    A harness that replaces the workspace it was handed with a symbolic link to a tree it
+    controls moved the base along with the path: the records behind the link resolved inside the
+    base that now pointed at them, every check passed, and they were read, staged, and imported
+    as findings of this scan. Both roots have their real path read once, when the enclosure is
+    captured before the harness process starts, so the substituted tree does not resolve inside
+    the workspace this run created.
+    """
+    workspace = tmp_path / "source"
+    (workspace / "findings").mkdir(parents=True)
+    (workspace / "findings" / "real.md").write_text(FINDING, encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "findings").mkdir(parents=True)
+    (elsewhere / "findings" / "planted.md").write_text(PLANTED, encoding="utf-8")
+    raw = tmp_path / "raw"
+    raw.mkdir()
+
+    enclosure = Enclosure.capture(workspace, raw)
+    baseline = snapshot_findings(workspace / "findings", enclosure)
+    assert baseline.established is True
+
+    workspace.rename(tmp_path / "source-real")
+    workspace.symlink_to(elsewhere, target_is_directory=True)
+    assert (workspace / "findings" / "planted.md").is_file(), "the substituted tree is reachable"
+
+    imported = import_harness_findings(workspace / "findings", harness="securevibes-agent",
+                                       artifact_prefix="harness-findings",
+                                       stage_dir=raw / "harness-findings",
+                                       baseline=baseline, enclosure=enclosure)
+
+    assert imported.claims == [] and imported.artifacts == []
+    assert imported.lost == 1
+    assert any("does not resolve inside the workspace" in note for note in imported.notes)
+    assert not (raw / "harness-findings").exists(), "nothing from the substituted tree was staged"
+    assert [path.name for path in (elsewhere / "findings").iterdir()] == ["planted.md"]

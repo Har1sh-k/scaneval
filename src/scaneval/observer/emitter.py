@@ -72,10 +72,19 @@ same inputs and, where they once differed, the stricter rule is the shared one:
   gap, so neither language accepts a payload the other refuses and neither recurses without a
   documented bound.
 * A string no UTF-8 sink could write is refused as a capture gap, in a payload value, a payload
-  key, and a link, run or producer ID alike. Python held an unpaired surrogate and copied it into
+  key, a link, run or producer ID, an ID a factory produced, and the timestamp a caller's clock
+  spelled alike. Python held an unpaired surrogate and copied it into
   the line, where a real JSONL file failed to encode it and lost the event at the sink, while
   JavaScript escaped it and wrote a line that parses. A surrogate pair spelling a real astral
-  character is text and both write it.
+  character is text and both write it. Each language decides "may this string go on the wire" in
+  one place, :func:`_is_id` here and ``validId`` there, so no path can carry a weaker copy of
+  the rule.
+* A ``metadata`` or ``content`` that is not a payload object the emitter can store is refused,
+  in every recording mode. A payload object is a Mapping here and a plain object in JavaScript,
+  decided by :func:`_is_payload_object` and by ``isJsonObject``, each asked by the input gate
+  and by the payload copy, so a mode cannot change what a caller may hand over. What is inside a
+  stored payload is the separate rule the copy owns, which is why a ``content`` whose contents
+  the copy would refuse is accepted in ``metadata`` mode, where content is never copied.
 * Keys are emitted in the order the wire schema declares them.
 
 A rejected event consumes no sequence number, no event ID, and no clock read in either language.
@@ -524,10 +533,19 @@ def _iso_timestamp(moment: Any) -> str:
 
     A naive datetime is refused rather than assumed to be UTC or local: guessing a zone would
     put an invented offset into a record other tools join on.
+
+    The formatted string passes :func:`_is_id` before it is returned, because a ``datetime``
+    subclass owns its own ``strftime`` and this is a caller string reaching the wire like any
+    other: it is held to the one rule all of them are held to rather than trusted for having
+    come from a clock. A reading this refuses costs the timestamp and a capture gap, never the
+    event, exactly as a naive one does.
     """
     _require_aware(moment)
     utc = moment.astimezone(timezone.utc)
-    return f"{utc.strftime('%Y-%m-%dT%H:%M:%S')}.{utc.microsecond // 1000:03d}Z"
+    text = f"{utc.strftime('%Y-%m-%dT%H:%M:%S')}.{utc.microsecond // 1000:03d}Z"
+    if not _is_id(text):
+        raise TypeError("clock produced a timestamp no UTF-8 sink could write")
+    return text
 
 
 def _require_aware(moment: Any) -> datetime:
@@ -557,13 +575,34 @@ def _is_encodable(text: str) -> bool:
     return _SURROGATE.search(text) is None
 
 
+def _is_payload_object(value: Any) -> bool:
+    """The one test for a payload the emitter can store, asked by every path that decides.
+
+    A ``metadata`` or ``content`` a caller hands over is any :class:`~collections.abc.Mapping`,
+    because :meth:`Observer._snapshot` reads it once into a ``dict`` before anything is copied.
+    Everything below that top level must be a ``dict``, a list or a tuple, which
+    :func:`_copy_json` decides.
+
+    It is one function because the gate and the copy must not be able to disagree about what a
+    payload is: the TypeScript emitter gated ``content`` on "any non-array object" while its copy
+    applied a stricter rule, so a payload was acceptable in ``metadata`` mode and refused in
+    ``content`` mode. The recording mode decides whether content is stored, never what a caller
+    may hand over. :meth:`Observer._valid_input` and :meth:`Observer._snapshot` both ask here,
+    and the TypeScript ``isJsonObject`` is the same question in the other language.
+    """
+    return isinstance(value, Mapping)
+
+
 def _is_id(value: Any) -> bool:
-    """A usable id: a nonempty string of characters a UTF-8 sink can write.
+    """A usable wire string: a nonempty string of characters a UTF-8 sink can write.
 
     The surrogate rule a payload string is held to is the rule every caller string on the wire
-    is held to, because a lone surrogate in a link ID, a run ID, or a producer ID costs the
-    same line the same way. Checking it here covers all three: the constructor, the ID factory,
-    and the link fields the wire contract validates all decide "is this a usable id" here.
+    is held to, because a lone surrogate in a link ID, a run ID, a producer ID, an ID a factory
+    produced, or a timestamp a caller's clock spelled costs the same line the same way.
+    Checking it here covers all of them: the constructor, the ID factory, the link fields the
+    wire contract validates, and :func:`_iso_timestamp` all decide "may this string go on the
+    wire" here, so no path can carry a second, weaker spelling of the rule. The TypeScript
+    ``validId`` decides the same set.
     """
     return isinstance(value, str) and value != "" and _is_encodable(value)
 
@@ -1320,13 +1359,17 @@ class Observer:
         A caller's Mapping is caller code: reading it twice lets it answer differently the
         second time and put a value in the event that no check ever saw. Metadata, and content
         when it will be stored, are deep copied here for the same reason.
+
+        What counts as a payload worth copying is :func:`_is_payload_object`, the same test
+        :meth:`_valid_input` applies, so a payload this declines to copy is one the gate refuses
+        rather than one that slips through unstored.
         """
         if not isinstance(fields, Mapping):
             raise TypeError("trace event input must be a mapping")
         snapshot = dict(fields)
-        if isinstance(snapshot.get("metadata"), Mapping):
+        if _is_payload_object(snapshot.get("metadata")):
             snapshot["metadata"] = _copy_json(dict(snapshot["metadata"]))
-        if self._mode == "content" and isinstance(snapshot.get("content"), Mapping):
+        if self._mode == "content" and _is_payload_object(snapshot.get("content")):
             snapshot["content"] = _copy_json(dict(snapshot["content"]))
         return snapshot
 
@@ -1339,6 +1382,11 @@ class Observer:
         null, and reading None as absence would silently record a different event than the one
         the harness described. ``duration_ms`` must also be a safe integer, so neither emitter
         accepts a count of milliseconds the other could not write back unchanged.
+
+        ``metadata`` and ``content`` are held to :func:`_is_payload_object`, the one test the
+        copy asks as well, and ``content`` is held to it in every recording mode: the mode
+        decides whether content is stored, never what shape a caller may hand over. A link ID is
+        held to :func:`_is_id`, the one test every caller string on the wire passes.
         """
         if not set(fields).issubset(_INPUT_FIELDS):
             return False
@@ -1351,9 +1399,9 @@ class Observer:
             return False
         if fields.get("capture_status") not in CAPTURE_STATUSES:
             return False
-        if not isinstance(fields.get("metadata"), Mapping):
+        if not _is_payload_object(fields.get("metadata")):
             return False
-        if "content" in fields and not isinstance(fields["content"], Mapping):
+        if "content" in fields and not _is_payload_object(fields["content"]):
             return False
         if "duration_ms" in fields and not _is_duration(fields["duration_ms"]):
             return False

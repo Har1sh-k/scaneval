@@ -340,6 +340,101 @@ def test_a_string_no_utf8_sink_could_encode_is_refused_as_a_capture_gap():
     assert astral.get_state() == CaptureState()
 
 
+def test_every_string_the_emitter_puts_on_the_wire_passes_the_one_validator():
+    """The rule is not "payload strings are checked": it is every caller string on the wire.
+
+    An ID factory is caller code, so the ID it hands back is held to exactly what a caller
+    supplied ID is held to, in :func:`~scaneval.observer.emitter._is_id`. A clock is caller code
+    too, and a ``datetime`` subclass owns its own ``strftime``, so the timestamp it spells is
+    held to the same rule rather than trusted for having come from a clock. Both failures cost
+    the field and a capture gap, never the event: the sink still took it, so nothing is counted
+    as lost. The TypeScript emitter spelled a weaker version of this check inside its own
+    ``nextId`` and wrote an event ID no UTF-8 sink could encode; one validator in each language
+    is what keeps the two rejection sets identical.
+    """
+    lone = "\ud800"
+    supplied = [lone, "", "event-3"]
+
+    def factory(prefix: str) -> str:
+        return supplied.pop(0) if supplied else f"{prefix}-x"
+
+    seen, sink = recorder()
+    observer = Observer(
+        mode="metadata", sink=sink, run_id="r", producer_id="p", id_factory=factory, clock=clock()
+    )
+    for _ in range(3):
+        observer.emit(**event_fields())
+    assert [line["event_id"] for line in seen] == [
+        "event-fallback-1",
+        "event-fallback-2",
+        "event-3",
+    ]
+    assert [line["capture_status"] for line in seen[:2]] == ["partial", "partial"]
+    assert all(line["metadata"]["observer_capture_gap"] is True for line in seen[:2])
+    assert observer.get_state() == CaptureState(
+        dropped_events=0, capture_gap=True, last_sink_error=GAP
+    )
+    # A run or producer ID the wire refuses is not used at all: the factory supplies one.
+    ignored = Observer(mode="metadata", sink=sink, run_id=lone, producer_id="", id_factory=ids())
+    assert (ignored.run_id, ignored.producer_id) == ("run-1", "producer-2")
+    assert ignored.get_state() == CaptureState()
+
+    class Hostile(datetime):
+        """A clock reading that spells itself with a code point no UTF-8 sink can write."""
+
+        def strftime(self, _format: str) -> str:
+            return lone
+
+    stamped, stamping_sink = recorder()
+    fake = Observer(
+        mode="metadata",
+        sink=stamping_sink,
+        run_id="r",
+        producer_id="p",
+        id_factory=ids(),
+        clock=lambda: Hostile(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc),
+    )
+    degraded = fake.emit(**event_fields())
+    assert degraded["timestamp"] == "1970-01-01T00:00:00.000Z"
+    assert degraded["capture_status"] == "partial"
+    assert stamped[0]["metadata"]["observer_capture_gap"] is True
+    assert fake.get_state() == CaptureState(
+        dropped_events=0, capture_gap=True, last_sink_error=GAP
+    )
+
+
+def test_a_payload_that_is_not_a_mapping_is_refused_in_every_recording_mode():
+    """What a payload object is belongs to the contract, never to the recording mode.
+
+    ``metadata`` and ``content`` are held to
+    :func:`~scaneval.observer.emitter._is_payload_object`, the one test the copy asks as well,
+    and ``content`` is held to it in both recording modes even though only ``content`` mode
+    stores it. The mode decides whether content is stored, not what a caller may hand over. The
+    TypeScript emitter gated content on a looser test than its copy applied and therefore
+    accepted in ``metadata`` mode what it refused in ``content`` mode.
+
+    What is INSIDE a stored payload is the separate rule and still belongs to the copy, which
+    is why the last two lines accept in ``metadata`` mode a content that ``content`` mode
+    refuses.
+    """
+    carrier = types.SimpleNamespace(tool="grep")
+    for mode in ("metadata", "content"):
+        seen, sink = recorder()
+        observer = Observer(mode=mode, sink=sink, clock=clock(), id_factory=ids())
+        assert observer.emit(**event_fields(metadata=carrier)) is None, mode
+        assert observer.emit(**event_fields(content=carrier)) is None, mode
+        assert observer.emit(**event_fields(content=["grep"])) is None, mode
+        assert seen == [], mode
+        assert observer.get_state().dropped_events == 3, mode
+        # The control: any Mapping is storable, because the snapshot reads it into a dict.
+        assert observer.emit(**event_fields(metadata=types.MappingProxyType({"tool": "grep"})))
+
+    metadata_mode = Observer(mode="metadata", sink=recorder()[1], clock=clock())
+    assert metadata_mode.emit(**event_fields(content={"ratio": 1e-5})) is not None
+    content_mode = Observer(mode="content", sink=recorder()[1], clock=clock())
+    assert content_mode.emit(**event_fields(content={"ratio": 1e-5})) is None
+
+
 def test_a_payload_number_is_stored_only_when_both_languages_write_it_alike():
     """A number either emitter accepts is one both write as the same bytes, or it is refused.
 

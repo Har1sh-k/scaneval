@@ -9,9 +9,18 @@ Bundle layout (all evaluator-side; the scanner only ever sees a private workspac
       raw/              stdout, stderr, native artifacts, captured harness state
       trace/            observer events when the adapter captured any
 
+What this module defends against, and what it does not, is stated in ``docs/THREAT_MODEL.md``.
+In short: the scanner is untrusted by design, and the checks here, path containment, the input
+hash, source-modification detection and state capture, defend against a careless or buggy
+scanner and against accidental escape. They do not survive a hostile scanner running
+concurrently in a directory it controls, which can undo any of them between the moment they are
+made and the moment they are read. Read that document before treating any of this as isolation.
+
 ``raw/`` and ``trace/`` are staged inside the private workspace while the scanner runs and
 are moved into the bundle once it returns or raises, so no path handed to an adapter resolves
-inside the run directory and declared artifact paths are re-rooted before they are hashed.
+inside the run directory and declared artifact paths are re-rooted before they are hashed. A
+file the move would carry in under more than one name is de-aliased first: see
+:func:`_move_into_bundle`, so no file in the bundle is a second name for a live host file.
 
 An outcome that breaks the adapter contract, an execution record the contract refuses, a trace
 file that is not UTF-8 text, and anything raised while capturing harness state, moving the
@@ -36,15 +45,28 @@ cannot pull a host file into the bundle.
 Every path this module reads or writes after the scanner returns is a path the scanner could
 have replaced, and any component of it can be a link, not only the last one. So each of them,
 the exported source, the destination of the harness-state capture, a declared artifact, and a
-declared trace file, is resolved whole against the directory it is supposed to be inside by
-:func:`~scaneval.materialize.resolve_within` before it is touched. A path that resolves out is
-refused with a note or a recorded violation, never followed.
+declared trace file, is resolved whole against a :class:`~scaneval.materialize.Containment`
+before it is touched. A path that resolves out is refused with a note or a recorded violation,
+never followed. Every one of those directories has its real path captured before the scanner
+starts, because a base resolved afterwards is a base the scanner may have moved, and a check
+against a moved base passes whatever the scanner points it at.
 
-A run whose observer reported a capture gap or a dropped event is recorded as ``partial`` with
-error code ``trace_capture_gap`` when nothing else already failed, and keeps the adapter's own
-``bundles_resolved``. Losing trace events is not losing a claim, so nothing about the claim set
-is withdrawn; what is withdrawn is the result's standing as a clean complete observation, which
-the execution record was already contradicting by carrying the gap beside a success.
+Nothing the scanner names can make this bundle unrecordable. A string that UTF-8 cannot encode,
+which is what a file name the filesystem accepted and the decoder had to escape becomes, used to
+raise while the documents were serialized, and it raised again on the rebuilt record, so the
+invocation ended with ``raw/`` and ``request.json`` on disk and neither ``result.json`` nor
+``execution.json``. :func:`_recordable` is the one place both documents pass through on their way
+to being written, and it renders such text rather than failing on it.
+
+How completely this run was observed is one fact, derived in one place. :func:`_capture_record`
+reads the observer's reported state and the bundle's own trace record together and returns both
+the ``capture`` mapping the record carries and how the observation broke, so the two cannot
+disagree: a category cannot claim ``complete`` capture in a bundle that holds no counted trace,
+and a reported gap cannot sit beside a clean success. A run whose observation broke is recorded
+as ``partial`` with error code ``trace_capture_gap`` when nothing else already failed, and keeps
+the adapter's own ``bundles_resolved``. Losing trace events is not losing a claim, so nothing
+about the claim set is withdrawn; what is withdrawn is the result's standing as a clean complete
+observation.
 
 Directory separation documents the boundary; it does not enforce it. Network and
 filesystem policy are declared here and must be enforced outside this process.
@@ -58,6 +80,7 @@ import errno
 import os
 from pathlib import Path, PurePath
 import shutil
+import stat
 import tempfile
 import time
 from typing import Callable
@@ -68,8 +91,9 @@ from .adapters.base import Adapter, NativeOutcome, SystemSpec
 from .contracts import ContractError, canonical_json, canonical_sha256, validate_document
 from .kinds import mapping_version
 from .materialize import (
+    Containment,
+    MaterializationError,
     prepare_synthetic_history,
-    resolve_within,
     sha256_file,
     tree_hash,
     walk_regular_files,
@@ -202,6 +226,20 @@ def _failure_message(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {str(exc) or repr(exc)}"[:2000]
 
 
+def _enclose(base: Path) -> Containment:
+    """Capture *base*'s real path before the scanner runs, or refuse the invocation.
+
+    Every containment check in this module is against a path captured this way, and every
+    capture happens before the adapter is called. A base that cannot be resolved has no real
+    path to contain against, so it is a setup failure rather than a check that quietly returns
+    ``None`` after the scan.
+    """
+    try:
+        return Containment.capture(base)
+    except MaterializationError as exc:
+        raise ExecutionError(str(exc)) from exc
+
+
 def _copy_tree_unresolved(source: Path, destination: Path) -> list[str]:
     """Copy one directory tree without following a symbolic link, and name the links it kept.
 
@@ -216,9 +254,10 @@ def _copy_tree_unresolved(source: Path, destination: Path) -> list[str]:
     recreated as a link, so the bundle records what the scanner left rather than the bytes it
     pointed at, and the returned relative paths let the caller say so in the record.
 
-    The limits. A hard link is not a symbolic link and is copied as the file it is, and a link
-    preserved in the bundle may still resolve to a host path when someone later follows it by
-    hand; nothing here resolves one.
+    The limits. A hard link is not a symbolic link: this copy reads its bytes, which gives the
+    destination an inode of its own, and a staged tree that is moved rather than copied is
+    de-aliased instead by :func:`_dealias`. A link preserved in the bundle may still resolve to a
+    host path when someone later follows it by hand; nothing here resolves one.
     """
     if source.is_symlink():
         raise ExecutionError(f"{source} is a symbolic link, not a directory; it was not copied")
@@ -232,14 +271,72 @@ def _copy_tree_unresolved(source: Path, destination: Path) -> list[str]:
     return sorted(links)
 
 
-def _move_into_bundle(staging: Path, destination: Path) -> None:
-    """Move one staged directory out of the private workspace and into the bundle.
+def _dealias(root: Path) -> list[str]:
+    """Give every multiply linked regular file under *root* an inode of its own; name the ones found.
+
+    The rule: a file in the bundle must not be a second name for a file outside it. ``raw/`` and
+    ``trace/`` are moved rather than copied, which is what keeps the scanner's own bytes exactly
+    as it wrote them, but a move preserves inodes: a hard link the scanner planted made the
+    bundle's copy and a live host file one and the same file, so what ScanEval then hashed and
+    line-counted was whatever that host file held at that moment, it went on changing under the
+    recorded hash afterwards, and anything later written through the bundle's name would have
+    written into the host file.
+
+    A symbolic link is not this, and is left exactly as it is: it is visibly a link, nothing here
+    follows one, and the record says the bundle holds a link rather than the bytes behind it. A
+    hard link is invisible in the same way an ordinary file is, which is why it is broken here
+    instead.
+
+    Copied rather than refused, because refusing would destroy the scanner's raw output to
+    prevent something the scanner could do anyway: it could have copied any file it can read into
+    ``raw/`` itself, and this module never claimed the raw tree holds only bytes the scan
+    invented. What a hard link adds is the live alias, and copying removes exactly that: the
+    bundle keeps a private snapshot of the bytes, the host file keeps its own inode and is never
+    written to. The copy is read and replaced through the bundle's own name, so the host path is
+    neither opened for writing nor unlinked.
+
+    A copy that fails raises to the caller, which records the staged output as unusable rather
+    than leaving a bundle that still aliases a host file behind a clean result.
+
+    The limit. The bytes copied are the bytes at this moment, which is after the scanner's
+    process has exited but is still a read the scanner could have raced had it left something
+    running. See ``docs/THREAT_MODEL.md``.
+    """
+    dealiased: list[str] = []
+    for parent, _directories, files in os.walk(root):
+        for name in sorted(files):
+            path = Path(parent) / name
+            try:
+                entry = os.lstat(path)
+            except OSError:
+                continue
+            if not stat.S_ISREG(entry.st_mode) or entry.st_nlink <= 1:
+                continue
+            private = path.with_name(f".{path.name}.{uuid.uuid4().hex}.dealias")
+            try:
+                shutil.copyfile(path, private)
+                os.chmod(private, stat.S_IMODE(entry.st_mode))
+                os.replace(private, path)
+            except OSError:
+                Path(private).unlink(missing_ok=True)
+                raise
+            dealiased.append(path.relative_to(root).as_posix())
+    return sorted(dealiased)
+
+
+def _move_into_bundle(staging: Path, destination: Path) -> list[str]:
+    """Move one staged directory into the bundle, de-aliasing it, and name the files that needed it.
 
     A staging directory the adapter removed is recreated empty at the destination, so the
     bundle always holds the directory the execution record describes. A staging directory the
     adapter replaced with a symbolic link is refused instead of moved: moving it would make the
     bundle's own ``raw/`` or ``trace/`` a link to somewhere outside the bundle while the run
     recorded a success. The caller records that refusal as an outcome contract violation.
+
+    This is the one place a staged tree enters the bundle, so it is where the rule that no file
+    in the bundle aliases a file outside it is enforced: see :func:`_dealias`, which runs on the
+    moved tree before anything reads, hashes, or counts a line of it. The returned relative paths
+    are the files that were aliased, for the caller to record.
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
     if staging.is_symlink():
@@ -250,6 +347,7 @@ def _move_into_bundle(staging: Path, destination: Path) -> None:
         shutil.move(str(staging), str(destination))
     else:
         destination.mkdir(parents=True, exist_ok=True)
+    return _dealias(destination)
 
 
 def _rebase(path: Path, areas: list[tuple[Path, Path, Path]]) -> Path:
@@ -307,23 +405,66 @@ def _input_tree(source_dir: Path, state_dirs: frozenset[str]) -> dict[str, str]:
             for relative, path in sorted(walk_regular_files(source_dir, skip_top_level=state_dirs).items())}
 
 
-def _capture_break(capture_state: dict | None) -> str | None:
-    """How the observer said capture broke during this run, or ``None`` when it said it did not.
+def _recordable_text(value: str) -> str:
+    """*value* when UTF-8 can encode it, else the same text with what it cannot escaped.
 
-    Read off the same ``capture_state`` the trace record carries, so the sentence in the notes
-    and the numbers in ``trace`` cannot describe different runs. A state that reports neither a
-    gap nor a dropped event, and a run that reported no state at all, both yield ``None``: this
-    reports what the observer said broke, and asserts nothing about a run that said nothing.
+    The escape is ``backslashreplace``, so a surrogate stands as ``\\udcff`` and a reader can
+    recover the byte the filesystem held. The rendering is lossless and it is not the name: a
+    path recorded this way no longer opens by the string the record carries, which is why an
+    artifact whose bundle path needs it is dropped with a note instead (see
+    :func:`run_invocation`), and why what remains recorded this way is text nothing dereferences.
     """
-    if not isinstance(capture_state, dict):
-        return None
-    reasons = []
-    if capture_state.get("capture_gap") is True:
-        reasons.append("a capture gap")
-    dropped = capture_state.get("dropped_events")
-    if isinstance(dropped, int) and not isinstance(dropped, bool) and dropped > 0:
-        reasons.append(f"{dropped} dropped event(s)")
-    return " and ".join(reasons) or None
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return value.encode("utf-8", "backslashreplace").decode("ascii")
+    return value
+
+
+def _recordable(value: object) -> tuple[object, int]:
+    """*value* with every string in it recordable, and how many had to be rendered.
+
+    The one place both bundle documents pass through before they are validated and written, so
+    the rule holds for every string either of them can carry, wherever it came from: a path the
+    scanner chose, a note, an adapter's own version string, a key in a mapping it supplied.
+
+    Why it is here rather than at each of those places. A file name is bytes, and a filesystem
+    that accepts bytes UTF-8 cannot decode hands Python a string holding escaped surrogates,
+    which canonical JSON keeps and every contract check passes but :meth:`str.encode` refuses. So
+    the failure surfaced at the moment the documents became bytes, where the only thing left to
+    do was refuse the bundle, and the refusal record was built from the same values and refused
+    again: the invocation raised with ``raw/`` and ``request.json`` written and neither
+    ``result.json`` nor ``execution.json`` beside them. A scanner could reach that by naming one
+    file it wrote. Rendering the text costs a name that no longer opens; raising costs the whole
+    record of the run.
+
+    A cyclic container raises :class:`RecursionError` here, as it does in validation, and the
+    caller records that refusal.
+    """
+    if isinstance(value, str):
+        rendered = _recordable_text(value)
+        return rendered, int(rendered != value)
+    if isinstance(value, dict):
+        rendered_map: dict = {}
+        count = 0
+        for key, item in value.items():
+            if isinstance(key, str):
+                key_text = _recordable_text(key)
+                count += int(key_text != key)
+                key = key_text
+            rendered_item, item_count = _recordable(item)
+            rendered_map[key] = rendered_item
+            count += item_count
+        return rendered_map, count
+    if isinstance(value, list):
+        rendered_list = []
+        count = 0
+        for item in value:
+            rendered_item, item_count = _recordable(item)
+            rendered_list.append(rendered_item)
+            count += item_count
+        return rendered_list, count
+    return value, 0
 
 
 def _empty_trace(trace_mode: str) -> dict:
@@ -331,8 +472,64 @@ def _empty_trace(trace_mode: str) -> dict:
     return {"path": None, "events": None, "mode": trace_mode, "capture_gap": None, "dropped_events": None}
 
 
+def _recordable_document(document: dict) -> tuple[dict, int]:
+    """One bundle document with every string in it recordable, and how many were rendered.
+
+    A mapping in is a mapping out; the copy is what makes that true for the type as well as at
+    runtime, and a bundle document is small enough for it to cost nothing.
+    """
+    rendered, count = _recordable(document)
+    return dict(rendered), count  # type: ignore[call-overload]
+
+
+def _capture_record(capture: dict, capture_state: dict | None, trace_record: dict | None,
+                    ) -> tuple[dict, str | None]:
+    """The capture mapping this bundle can support, and how the observation of this run broke.
+
+    One function for two facts that used to be written independently into the same document, and
+    could therefore contradict each other. ``trace.events`` counts the events the bundle holds;
+    each ``capture`` category says how completely that category was observed. A run could reach a
+    clean success with ``trace.events`` null and ``capture.finding_submitted`` reading
+    ``complete``, in four ways, one for each way :func:`_read_trace` declines to count: a trace
+    path that is a symbolic link, one that resolves outside the bundle, one that is not a regular
+    file, and one that is simply not there. A trace mode of ``off`` and a discarded outcome make
+    six. The adapter is not lying in any of them; it reports what its observer saw, and it cannot
+    know whether the file landed in the bundle. This module does know, so this is where the two
+    are reconciled.
+
+    The rule: a category may claim ``complete`` only in a bundle that holds a counted trace.
+    Where there is no count, every ``complete`` becomes ``partial``, because what was recorded is
+    then a claim of complete observation with no record of the observation behind it. Nothing
+    else is touched: a category the adapter called ``partial``, ``unavailable``, or
+    ``not_applicable`` already claims less than the trace could back.
+
+    The second value is how the observation broke, and it is ``None`` when it did not: the
+    observer's own report of a capture gap or a dropped event, read off the same
+    ``capture_state`` the trace record carries, and a downgraded category, named. The caller
+    records ``partial`` on an outcome that still carries claims, so a run cannot be a clean
+    success while its own records say it was not completely observed.
+    """
+    reasons = []
+    if isinstance(capture_state, dict):
+        if capture_state.get("capture_gap") is True:
+            reasons.append("a capture gap")
+        dropped = capture_state.get("dropped_events")
+        if isinstance(dropped, int) and not isinstance(dropped, bool) and dropped > 0:
+            reasons.append(f"{dropped} dropped event(s)")
+    events = trace_record.get("events") if isinstance(trace_record, dict) else None
+    counted = isinstance(events, int) and not isinstance(events, bool)
+    recorded = dict(capture)
+    unbacked = sorted(name for name, value in recorded.items() if value == "complete") if not counted else []
+    for name in unbacked:
+        recorded[name] = "partial"
+    if unbacked:
+        reasons.append(f"complete capture of {', '.join(unbacked)} claimed with no counted trace "
+                       "in this bundle")
+    return recorded, " and ".join(reasons) or None
+
+
 def _read_trace(outcome: NativeOutcome, staged_areas: list[tuple[Path, Path, Path]], trace_dir: Path,
-                trace_mode: str, bundle: Path) -> dict:
+                trace_mode: str, bundle: Containment) -> dict:
     """Count the events in the staged trace file and record where it landed.
 
     Only a regular file this bundle actually holds is read: a trace path that is a symbolic link,
@@ -349,14 +546,14 @@ def _read_trace(outcome: NativeOutcome, staged_areas: list[tuple[Path, Path, Pat
     recorded_trace_path = None
     if events_path.is_symlink():
         outcome.notes.append("declared trace file is a symbolic link; it was not read or counted")
-    elif resolve_within(events_path, bundle) is None:
+    elif bundle.contains(events_path) is None:
         outcome.notes.append("declared trace file is outside the bundle; it was not read or counted")
     elif events_path.exists() and not events_path.is_file():
         outcome.notes.append("declared trace file is not a regular file; it was not read or "
                              f"counted: {events_path.name}")
     elif events_path.is_file():
         try:
-            recorded_trace_path = events_path.relative_to(bundle).as_posix()
+            recorded_trace_path = events_path.relative_to(bundle.base).as_posix()
         except ValueError:
             outcome.notes.append("trace file left outside the bundle; its path is not recorded")
         else:
@@ -496,9 +693,17 @@ def run_invocation(
 
     A claim citing a ``raw_artifact_id`` this bundle does not register is one of those refused
     documents: the scan-result contract enforces the reference, so an id the adapter invented,
-    and an id whose artifact was dropped here for being a link, missing, or outside the bundle,
-    both end as an error result carrying code ``import_contract_violation`` rather than as a
-    success pointing at evidence nobody can open.
+    and an id whose artifact was dropped here for being a link, missing, outside the bundle, or
+    named in bytes this record cannot carry, both end as an error result carrying code
+    ``import_contract_violation`` rather than as a success pointing at evidence nobody can open.
+
+    Nothing else a scanner or an adapter named can make this bundle unrecordable. Both documents
+    go through :func:`_recordable` before they are validated and written, so a string UTF-8
+    cannot encode is rendered with backslash escapes and named in a note rather than raising
+    where the only thing left to do is refuse. The two failures that still end the invocation
+    with no record are named below, and both are the caller's own values rather than the
+    scanner's: an adapter attribute the record copies that is not a string, and a prepared
+    provenance that cannot be hashed, which is why that hash is taken before anything is created.
 
     A source the scan itself changed is a condition change, not a scanner failure: when the
     workspace source differs after the scan, an outcome that still carries claims is recorded as
@@ -515,7 +720,7 @@ def run_invocation(
     Two things are narrower than they look. When the post-scan re-hash of the source fails, the
     comparison never completed, so the provenance reports no observed modification and the
     violation names the failed re-hash. And an adapter whose own ``name`` or ``adapter_version``
-    is not a non-empty string makes the execution record unwritable: that raises
+    is not a non-empty string still makes the execution record unwritable: that raises
     :class:`ExecutionError` once the bundle directory, its ``request.json``, and the staged
     ``raw/`` and ``trace/`` trees are already there, so what remains is a bundle holding the
     request and the scanner's own output with neither ``result.json`` nor ``execution.json``.
@@ -526,6 +731,10 @@ def run_invocation(
     removal that fails does not change what the scan observed, so it is not a violation: the
     execution record carries a note naming the directory still on disk, which is a leak an
     operator can find rather than one that was swallowed.
+
+    A staged file that turns out to be a second name for a file outside the bundle is copied as
+    it lands, so the bundle holds its own inode and the hash it records is of bytes nothing else
+    can change afterwards. The note says which files needed it. See :func:`_dealias`.
 
     Harness state is captured without following a link, at both ends of the copy. A state
     directory that is a symbolic link, or that is not a directory at all, is left out of
@@ -538,23 +747,38 @@ def run_invocation(
     outcome: nothing failed and no claim is affected, but the bundle says plainly that it does
     not hold what the link pointed at.
 
-    A run the observer could not record completely is not a clean one. When ``capture_state``
-    reports a capture gap or a dropped event, an outcome that still carries claims is recorded
-    as ``partial``, with error code ``trace_capture_gap`` unless the adapter already named a
-    failure of its own, and a note saying what the observer reported. ``bundles_resolved`` is
-    untouched: a dropped trace event is not a lost claim, and saying otherwise would withdraw
-    the claim budget over a hole in the trace. The status is what changes, because that is what
-    a reader and the scoring contract take as the run's claim to be complete.
+    A run the observer could not record completely is not a clean one, and how completely it was
+    observed is derived once, by :func:`_capture_record`, for both the status and the ``capture``
+    mapping the execution record carries. It breaks two ways: ``capture_state`` reporting a
+    capture gap or a dropped event, and a ``capture`` category claiming ``complete`` in a bundle
+    that holds no counted trace, which is what a declared trace file that was a link, resolved
+    out, was not a regular file, or was never written used to leave beside a clean success. The
+    category is downgraded to ``partial`` in the record, and an outcome that still carries claims
+    is recorded as ``partial`` with error code ``trace_capture_gap``, unless the adapter already
+    named a failure of its own. ``bundles_resolved`` is untouched: a dropped trace event is not a
+    lost claim, and saying otherwise would withdraw the claim budget over a hole in the trace.
+    The status is what changes, because that is what a reader and the scoring contract take as
+    the run's claim to be complete.
     """
     if network_policy not in NETWORK_POLICIES:
         raise ExecutionError(f"unknown network policy {network_policy!r}")
     if trace_mode not in ("off", "metadata", "content"):
         raise ExecutionError(f"unknown trace mode {trace_mode!r}")
     unsupported = [lang for lang in prepared.languages if lang not in adapter.supported_languages]
+    # Hashed before anything is created: the provenance is the caller's, it is fixed before the
+    # scan, and a value it cannot be hashed from would otherwise surface while the execution
+    # record was being built, where every rebuilt record would carry it too and the invocation
+    # would end with no record at all.
+    try:
+        provenance_digest = canonical_sha256(prepared.provenance)
+    except ContractError as exc:
+        raise ExecutionError(f"the prepared input's provenance cannot be hashed, so no execution "
+                             f"record can bind to it: {exc}") from exc
     bundle = out_dir / invocation_id(prepared.input_id, spec.system_id, repetition)
     bundle.mkdir(parents=True, exist_ok=False)
     raw_dir = bundle / "raw"
     trace_dir = bundle / "trace" if trace_mode != "off" else None
+    bundle_area = _enclose(bundle)
     request = build_request(run_id, prepared, spec, timeout_seconds=timeout_seconds, trace_mode=trace_mode)
     _write_new(bundle / "request.json", request)
 
@@ -562,13 +786,18 @@ def run_invocation(
     workspace = Path(tempfile.mkdtemp(prefix="scaneval-trial-", dir=str(workspace_root) if workspace_root else None))
     # The scanner writes into the workspace, never into the run directory; both staged
     # directories are moved into the bundle below, whether the scan returns or raises.
-    resolved_workspace = workspace.resolve()
+    #
+    # Every directory a path is later checked against has its real path read here, before the
+    # scanner exists, and each check below is against that captured path. Resolving a base after
+    # the scanner ran was the same as asking the scanner where its own containment was.
+    workspace_area = _enclose(workspace)
     staging_raw = workspace / "raw"
     staging_trace = None
-    staged_areas = [(staging_raw, resolved_workspace / "raw", raw_dir)]
+    staged_areas = [(staging_raw, workspace_area.root / "raw", raw_dir)]
     if trace_dir is not None:
         staging_trace = workspace / "trace"
-        staged_areas.append((staging_trace, resolved_workspace / "trace", trace_dir))
+        staged_areas.append((staging_trace, workspace_area.root / "trace", trace_dir))
+    staging_raw_area = _enclose(staging_raw)
     started_at = _now(clock)
     started = time.monotonic()
     synthetic = None
@@ -578,6 +807,7 @@ def run_invocation(
     after: dict[str, str] = {}
     captured_state: list[str] = []
     move_failures: list[str] = []
+    alias_notes: list[str] = []
     capture_notes: list[str] = []
     cleanup_notes: list[str] = []
     try:
@@ -634,7 +864,7 @@ def run_invocation(
         # before it is touched. This is the first of them: the exported source itself is one
         # component inside the private workspace, and a scanner that replaced it with a link
         # would otherwise have the capture and the re-hash walk whatever it pointed at.
-        source_inside = resolve_within(source, resolved_workspace) is not None
+        source_inside = workspace_area.contains(source) is not None
         if not source_inside:
             violation = violation or (
                 "the exported source no longer resolves inside the private workspace, so "
@@ -658,7 +888,7 @@ def run_invocation(
                         f"the harness state path {name} is not a directory; it was not captured")
                     continue
                 destination = staging_raw / "harness-state" / name.lstrip(".")
-                if resolve_within(destination, staging_raw) is None:
+                if staging_raw_area.contains(destination) is None:
                     # The scanner owns the destination as well as the source: it writes into the
                     # staging directory while it runs, so a link at ``harness-state`` sends this
                     # copy to any absolute path it chooses. Nothing is created along a path that
@@ -692,11 +922,19 @@ def run_invocation(
         try:
             for staged, _resolved, final in staged_areas:
                 try:
-                    _move_into_bundle(staged, final)
+                    dealiased = _move_into_bundle(staged, final)
                 except Exception as exc:
                     # A staged directory that cannot be moved is recorded below rather than
                     # raised here, where it would replace whatever failure is already in flight.
                     move_failures.append(f"{final.name}: {_failure_message(exc)}")
+                else:
+                    if dealiased:
+                        # A fact about this invocation, not something the adapter reported, so
+                        # it outlives a discarded outcome like the capture and cleanup notes.
+                        alias_notes.append(
+                            f"{len(dealiased)} file(s) staged into {final.name}/ were hard links "
+                            f"to a file outside the bundle and were copied so the bundle holds "
+                            f"its own: {', '.join(dealiased[:5])}")
         finally:
             try:
                 shutil.rmtree(workspace)
@@ -717,7 +955,12 @@ def run_invocation(
     trace_record: dict | None = None
 
     def build_documents() -> tuple[dict, dict]:
-        """The result and execution documents for the outcome as it currently stands."""
+        """The result and execution documents for the outcome as it currently stands.
+
+        Both documents leave here recordable: every string in them has been through
+        :func:`_recordable`, so nothing a scanner or an adapter named can make them unwritable,
+        and the execution record says so in a note when anything had to be rendered.
+        """
         raw_artifacts: list[dict] = []
         for artifact in outcome.artifacts:
             path = _rebase(Path(artifact["path"]), staged_areas)
@@ -726,7 +969,7 @@ def run_invocation(
                 # this bundle preserved, and need not be inside the bundle at all.
                 outcome.notes.append(f"declared artifact is a symbolic link and was not followed: {artifact['id']}")
                 continue
-            if path.exists() and resolve_within(path, bundle) is None:
+            if path.exists() and bundle_area.contains(path) is None:
                 outcome.notes.append(f"declared artifact resolves outside the bundle: {artifact['id']}")
                 continue
             if not path.exists():
@@ -745,6 +988,16 @@ def run_invocation(
                 # this records what the scan produced, and never moves files it was not handed.
                 outcome.notes.append(f"declared artifact outside the bundle: {artifact['id']}")
                 continue
+            if _recordable_text(relative) != relative:
+                # The name is bytes UTF-8 cannot encode, so the only path this record could
+                # carry is an escaped rendering of it, and a reader following that string would
+                # find nothing. An artifact is evidence a claim cites, so it is dropped here with
+                # the other artifacts nobody can open rather than registered under a name that
+                # does not name it. The file itself stays in the bundle exactly as it is.
+                outcome.notes.append(
+                    f"declared artifact has a name this record cannot carry and was not "
+                    f"registered: {artifact['id']}")
+                continue
             raw_artifacts.append({"id": artifact["id"], "path": relative, "sha256": sha256_file(path)[0]})
         usage = {key: value for key, value in outcome.usage.items() if key in _USAGE_KEYS and value is not None}
         usage["wall_seconds"] = round(wall, 3)
@@ -757,15 +1010,18 @@ def run_invocation(
             **({"error": outcome.error} if outcome.error else {}),
             **({"raw_artifacts": raw_artifacts} if raw_artifacts else {}),
         }
+        result, rendered_in_result = _recordable_document(result)
         import_error = None
         try:
+            # The document validated is the document written: the rendering above happens first,
+            # so nothing the contract approved is reshaped after it approved it.
             validate_document("scan-result", result)
         except ContractError as exc:
             # A normalization that violates the contract is a failed import, not a quiet empty
             # success. The replacement is built from known-good fields only: spreading the
             # refused document would carry its usage or artifacts, and their violation with
             # them, straight into the record that reports the refusal.
-            import_error = str(exc)
+            import_error = _recordable_text(str(exc))
             result = _error_result(run_id, spec.system_id, prepared.tree_hash, wall,
                                    {"code": "import_contract_violation", "message": import_error[:2000]})
             try:
@@ -789,8 +1045,11 @@ def run_invocation(
                                "note": "Policy is recorded, not enforced by this runner; enforce it in the execution environment."},
             "environment": {"passthrough": sorted(set(("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "USER", "SHELL")
                                                       + tuple(adapter.env_passthrough)))},
-            "capture": dict(outcome.capture), "trace": trace_record,
-            "provenance": {"tree_hash": prepared.tree_hash, "provenance_sha256": canonical_sha256(prepared.provenance),
+            # One derivation for both: the capture mapping and the trace record cannot claim
+            # different things about how completely this run was observed.
+            "capture": _capture_record(dict(outcome.capture), outcome.capture_state, trace_record)[0],
+            "trace": trace_record,
+            "provenance": {"tree_hash": prepared.tree_hash, "provenance_sha256": provenance_digest,
                            "profile": prepared.profile, "synthetic_history": synthetic,
                            "source_modified": bool(modified), "modified_paths": modified[:200],
                            "captured_state_dirs": captured_state},
@@ -799,9 +1058,17 @@ def run_invocation(
             # The runner's own notes outlive a discarded outcome: a link refused where harness
             # state belongs, and a workspace left on disk, are facts about this invocation
             # rather than anything the adapter reported.
-            "notes": list(outcome.notes) + capture_notes + cleanup_notes,
+            "notes": list(outcome.notes) + alias_notes + capture_notes + cleanup_notes,
             "raw_artifacts": raw_artifacts,
         }
+        execution, rendered_in_execution = _recordable_document(execution)
+        if rendered_in_result + rendered_in_execution:
+            # Appended after the rendering, so this sentence is itself plain ASCII and needs no
+            # second pass. It is the record saying that a name in it is not the name on disk.
+            execution["notes"].append(
+                f"{rendered_in_result + rendered_in_execution} string(s) in this bundle hold "
+                "bytes UTF-8 cannot encode and are recorded with backslash escapes; a path among "
+                "them does not open under the name written here.")
         return result, execution
 
     def finished_documents() -> tuple[bytes, bytes]:
@@ -837,7 +1104,7 @@ def run_invocation(
 
     if violation is None and trace_dir is not None:
         try:
-            trace_record = _read_trace(outcome, staged_areas, trace_dir, trace_mode, bundle)
+            trace_record = _read_trace(outcome, staged_areas, trace_dir, trace_mode, bundle_area)
         except (UnicodeDecodeError, OSError) as exc:
             # A trace this module cannot read as UTF-8 text is a recorded failure, not a
             # silently missing count beside an otherwise successful result.
@@ -861,18 +1128,21 @@ def run_invocation(
                         f"during the scan ({', '.join(modified[:3])}); the result is not a clean "
                         f"observation of the frozen input")[:2000]}
 
-    capture_break = _capture_break(outcome.capture_state) if violation is None else None
+    # The same derivation the execution record's ``capture`` mapping comes from, so the status
+    # and that mapping cannot say different things about how completely this run was observed.
+    capture_break = (_capture_record(dict(outcome.capture), outcome.capture_state, trace_record)[1]
+                     if violation is None else None)
     if capture_break and outcome.status in ("success", "partial"):
         # The run itself recorded that the observation of it broke, so the result must not read
         # as a clean complete one. Only the status changes: ``bundles_resolved`` is left as the
         # adapter reported it, because a dropped trace event is not a lost claim.
         outcome.status = "partial"
         outcome.notes.append(
-            f"The observer reported {capture_break} during this run, so the trace is not a "
-            "complete record of what the scanner did. The claims themselves are unaffected.")
+            f"This run reports {capture_break}, so the trace is not a complete record of what "
+            "the scanner did. The claims themselves are unaffected.")
         outcome.error = outcome.error or {
             "code": "trace_capture_gap",
-            "message": (f"the observer reported {capture_break}; this result is a complete claim "
+            "message": (f"this run reports {capture_break}; this result is a complete claim "
                         f"set over an incomplete observation of the run")[:2000]}
 
     if violation is not None:

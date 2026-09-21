@@ -5,8 +5,15 @@
  * and reject the same inputs, write the same keys in the wire schema's declaration order,
  * redact by the same ASCII key-name rule, decide "was this value replaced" by the same
  * strict-inequality rule, refuse the same payload nesting depth, refuse the same strings no
- * UTF-8 sink could write, refuse the same payload numbers, and report the same capture state
- * fields. A payload number is the one value either language would otherwise spell its own way:
+ * UTF-8 sink could write, refuse the same payload objects, refuse the same payload numbers,
+ * and report the same capture state fields.
+ *
+ * Two of those rules are one function each, because a rule with a second, weaker copy of itself
+ * somewhere is a divergence waiting to be found. `validId` decides every caller-derived string
+ * that reaches the wire: a link ID, a run or producer ID, an ID a factory produced, and the
+ * timestamp a caller's clock spelled. `isJsonObject` decides every payload object, asked by the
+ * input gate and by the copy alike, so a recording mode cannot change what a caller may hand
+ * over. A payload number is the one value either language would otherwise spell its own way:
  * `wireNumber` keeps only the numbers both write identically, an integer inside the safe-integer
  * range or a non-integral value at least `MIN_PLAIN_DECIMAL` in magnitude, and refuses the rest
  * as a capture gap. A rejected event consumes
@@ -352,6 +359,26 @@ function roundHalfToEven(value: number): number {
   return floor % 2 === 0 ? floor : floor + 1;
 }
 /**
+ * The one test for an object the emitter can store, asked by every path that has to decide.
+ *
+ * A stored payload object is a plain object: an object literal, or one built on a null
+ * prototype. An array, a `Map`, a `Date`, a boxed primitive and a class instance all fail it,
+ * because copying one would either invent keys it does not carry or drop the state it does.
+ *
+ * It is one function because this used to be two tests that disagreed. `validInput` asked only
+ * whether a value was a non-array object, while `copyJson` applied the plain-prototype rule, so
+ * a `content` built on some other prototype was refused in `content` mode, where the copy runs,
+ * and accepted in `metadata` mode, where it does not. The recording mode decided what shape of
+ * payload was acceptable, which is not something a mode may decide. One predicate answers for
+ * the gate and for the copy now, so there is no mode in which the two can differ. Python asks
+ * the same question in the same two places, in `_is_payload_object`.
+ */
+function isJsonObject(value: unknown): value is JsonObject {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+/**
  * Deep copy into plain JSON types, refusing anything that would not survive the wire.
  *
  * `depth` counts the containers already entered, so the payload object itself is checked at
@@ -388,10 +415,8 @@ function copyJson(
     seen.delete(value);
     return result;
   }
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw new TypeError("non-plain JSON object");
-  }
+  // The same predicate the input gate asks, so the copy cannot refuse a shape the gate allowed.
+  if (!isJsonObject(value)) throw new TypeError("non-plain JSON object");
   const result = Object.create(null) as JsonObject;
   for (const key of Object.keys(value)) {
     if (!isEncodable(key)) {
@@ -747,9 +772,11 @@ export class Observer {
   private nextId(prefix: string): string {
     try {
       const id = this.ids.next(prefix);
-      if (typeof id !== "string" || id.length === 0) {
-        throw new TypeError("invalid id");
-      }
+      // The shared validator, not a local spelling of part of it: a factory is caller code, so
+      // the id it hands back is held to exactly what a caller-supplied ID is held to. Checking
+      // only the type and the length here let an id carrying an unpaired surrogate reach the
+      // wire, where Python's `_next_id` refused the same value through `_is_id`.
+      if (!this.validId(id)) throw new TypeError("invalid id");
       return id;
     } catch {
       this.markGap();
@@ -757,20 +784,30 @@ export class Observer {
     }
   }
   /**
-   * A usable id: a nonempty string of characters a UTF-8 sink can write.
+   * A usable wire string: a nonempty string of characters a UTF-8 sink can write.
    *
    * The surrogate rule a payload string is held to is the rule every caller string on the wire
-   * is held to, because a lone surrogate in a link ID, a run ID, or a producer ID costs the same
-   * line the same way. This is where all three are decided, as Python decides all three in
-   * `_is_id`.
+   * is held to, because a lone surrogate in a link ID, a run ID, a producer ID, an ID a factory
+   * produced, or a timestamp a caller's clock spelled costs the same line the same way. This is
+   * where every one of them is decided, so there is no second, weaker spelling of the rule for
+   * one of the paths to use. Python decides the same set in `_is_id`.
    */
   private validId(value: unknown): value is string {
     return typeof value === "string" && value.length > 0 && isEncodable(value);
   }
+  /**
+   * The wall-clock reading, as the wire spells it, or the epoch with one gap.
+   *
+   * The string is held to `validId` like any other caller string on the wire: a `Clock` is
+   * typed to hand back a `Date`, but nothing at a JavaScript call site makes it, and a stand-in
+   * whose `toISOString` returns something no UTF-8 sink can write would otherwise put it in
+   * every event. Python reaches the same place from the other side, refusing a clock reading
+   * that is not an aware `datetime` and spelling the timestamp itself.
+   */
   private now(): string {
     try {
       const timestamp = this.clock.now().toISOString();
-      if (!timestamp) throw new TypeError("invalid clock");
+      if (!this.validId(timestamp)) throw new TypeError("invalid clock");
       return timestamp;
     } catch {
       this.markGap();
@@ -869,9 +906,6 @@ export class Observer {
     );
     return write;
   }
-  private isObject(value: unknown): value is JsonObject {
-    return value !== null && typeof value === "object" && !Array.isArray(value);
-  }
   /**
    * Read the caller's input once, so validation and building see the same event.
    *
@@ -881,6 +915,10 @@ export class Observer {
    * it. Every field is read exactly once here, and metadata, plus content when it will be
    * stored, are deep copied at the same moment for the same reason. This mirrors the Python
    * `_snapshot`.
+   *
+   * What counts as a payload object worth copying is `isJsonObject`, the same test `validInput`
+   * applies, so a payload this declines to copy is one the gate refuses rather than one that
+   * slips through unstored.
    */
   private snapshot(input: EventInput): Record<string, unknown> {
     const raw = input as unknown;
@@ -892,10 +930,10 @@ export class Observer {
     for (const name of Object.keys(supplied)) {
       snapshot[name] = supplied[name];
     }
-    if (this.isObject(snapshot["metadata"])) {
+    if (isJsonObject(snapshot["metadata"])) {
       snapshot["metadata"] = copyJson(snapshot["metadata"]);
     }
-    if (this.mode === "content" && this.isObject(snapshot["content"])) {
+    if (this.mode === "content" && isJsonObject(snapshot["content"])) {
       snapshot["content"] = copyJson(snapshot["content"]);
     }
     return snapshot;
@@ -907,11 +945,18 @@ export class Observer {
    * sequence number, no event ID, and no clock read in either language: that is only safe
    * while both refuse exactly the same inputs. Refused here: an unknown field name, an
    * unknown type, a category that contradicts the type, an unknown capture status, a missing
-   * or non-object metadata, a non-object content, a `duration_ms` that is null, not a number,
+   * metadata or one that is not a storable object, a content that is present and is not one, a
+   * `duration_ms` that is null, not a number,
    * boolean, non-finite, non-integral, negative, or beyond the safe integer range, and a link
-   * ID that is present but is not a nonempty string. Absent is spelled `undefined`; an
+   * ID that is present but is not a usable one. Absent is spelled `undefined`; an
    * explicit null is a rejection, never a shorthand for absent. It reads the snapshot, never
    * the caller's object, so what is validated is exactly what is built.
+   *
+   * "Storable object" is `isJsonObject`, the one test the copy applies too, and it is applied
+   * to `content` in every recording mode. The mode decides whether content is stored, never
+   * what a caller may hand over: gating it on the looser "any non-array object" test here left
+   * `metadata` mode accepting a payload `content` mode refused. Whether a link ID is usable is
+   * `validId`, the one test every caller string on the wire passes.
    */
   private validInput(snapshot: Record<string, unknown>): boolean {
     for (const name of Object.keys(snapshot)) {
@@ -929,9 +974,9 @@ export class Observer {
     if (!captureStatuses.has(snapshot["capture_status"] as CaptureStatus)) {
       return false;
     }
-    if (!this.isObject(snapshot["metadata"])) return false;
+    if (!isJsonObject(snapshot["metadata"])) return false;
     if (
-      snapshot["content"] !== undefined && !this.isObject(snapshot["content"])
+      snapshot["content"] !== undefined && !isJsonObject(snapshot["content"])
     ) return false;
     if (!this.validDuration(snapshot["duration_ms"])) return false;
     return idFields.every((name) =>

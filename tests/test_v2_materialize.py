@@ -14,6 +14,7 @@ from scaneval.contracts import ContractError, canonical_sha256
 from scaneval.materialize import (
     HARNESS_STATE_DIRS,
     STRIPPED_TOP_LEVEL,
+    Containment,
     MaterializationError,
     cache_key,
     export_snapshot,
@@ -459,3 +460,50 @@ def test_a_global_hook_or_template_cannot_run_inside_the_trial_workspace(tmp_pat
     assert not (source / ".git" / "hooks" / "post-commit").exists(), "the template was copied in"
     assert hash_exported_tree(source) == before, "the exported source is not what it was"
     assert git("log", "--format=%an <%ae>", cwd=source).splitlines() == ["ScanEval <scaneval@localhost>"]
+
+
+def test_containment_compares_against_the_base_it_captured_not_one_resolved_afterwards(tmp_path):
+    """The check used to resolve its own base on every call, which made it vacuous against a swap.
+
+    A process with write access to the directory it was handed can reach the directory above it.
+    Moving the real base aside and leaving a symbolic link to a tree it controls moved the base
+    along with the path: both resolved under the root it chose, the comparison succeeded, and
+    the check said nothing at all. The real path is read once, before that process runs, and
+    every comparison afterwards is against that captured path.
+    """
+    workspace = tmp_path / "workspace"
+    (workspace / "source").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "source").mkdir(parents=True)
+    (elsewhere / "source" / "planted.py").write_text("planted\n", encoding="utf-8")
+
+    captured = Containment.capture(workspace)
+    real = workspace.resolve()
+    assert captured.contains(workspace / "source") == (workspace / "source").resolve()
+    assert captured.contains(workspace) == workspace.resolve(), "the base is inside itself"
+    assert captured.contains(elsewhere / "source") is None
+
+    workspace.rename(tmp_path / "moved")
+    workspace.symlink_to(elsewhere, target_is_directory=True)
+
+    # What resolving the base afterwards would compare: both sides land in the substituted tree.
+    assert (workspace / "source").resolve() == (elsewhere / "source").resolve()
+    assert captured.contains(workspace / "source") is None
+    assert captured.contains(workspace / "source" / "planted.py") is None
+    # The captured root is where the directory really was, which the swap cannot change; the
+    # base stays the name this run was handed, for making a contained path relative in a record.
+    assert captured.base == workspace and captured.root == real
+
+
+def test_containment_reports_a_path_it_cannot_resolve_the_same_way_as_one_that_escaped(tmp_path):
+    """Three outcomes a caller must treat alike, and one that is a setup failure instead."""
+    captured = Containment.capture(tmp_path)
+
+    assert captured.contains(tmp_path / "does-not-exist-yet") is not None, "a capture destination"
+    assert captured.contains(Path(f"{tmp_path}/holds\x00a-nul")) is None
+    assert captured.contains(tmp_path.parent) is None
+
+    with pytest.raises(MaterializationError, match="could not be resolved"):
+        # No captured path means nothing can be proved inside it, so this is refused where it
+        # happens rather than returning None from a check made after a scanner has run.
+        Containment.capture(Path("base\x00with-a-nul"))

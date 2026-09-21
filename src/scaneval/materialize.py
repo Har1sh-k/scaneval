@@ -12,10 +12,15 @@ Every git invocation this package makes is built by :func:`git_command`, so a gi
 on nothing outside the directory it is given: see that function for what is neutralized and
 what is not.
 
-:func:`resolve_within` is the one containment check this package has. Every path read or written
+:class:`Containment` is the one containment check this package has. Every path read or written
 after a scanner ran is a path the scanner could have replaced, and the final component is not the
 only one that can be a link, so the rule is stated once here and every such path is resolved
-whole against the directory it is supposed to be inside.
+whole against a directory whose own real path was captured before the scanner started.
+
+What that check is for, and what it is not, is stated in ``docs/THREAT_MODEL.md``: it defends
+against a careless or buggy scanner and against accidental escape, and it does not survive a
+hostile one running concurrently in a directory it controls. Read that document before treating
+anything here as isolation.
 """
 
 from __future__ import annotations
@@ -254,33 +259,71 @@ def inspect_commit(url: str, commit: str, *, timeout: float = 600) -> dict:
         shutil.rmtree(staging, ignore_errors=True)
 
 
-def resolve_within(path: Path, base: Path) -> Path | None:
-    """*path* resolved whole, when it is still inside *base*; ``None`` when it is not.
+@dataclass(frozen=True)
+class Containment:
+    """One directory, its real path captured before an untrusted process ran, and the rule for it.
 
     The one containment check in this package, and the one rule for every path that is read or
-    written after a scanner has run. Both paths are resolved first, every symbolic link on the
-    way followed, so this catches a link anywhere in the path and not only in its last component:
-    checking the final component is what let a link one level up redirect a read to anywhere on
-    the host while each file behind it looked like an ordinary regular file. *base* itself is
-    inside *base*, and a path that does not exist yet resolves to where it would be created,
-    which is what a capture destination needs.
+    written after a scanner has run: :meth:`contains` resolves the path whole, every symbolic
+    link on the way followed, so it catches a link anywhere in the path and not only in its last
+    component. Checking the final component is what let a link one level up redirect a read to
+    anywhere on the host while each file behind it looked like an ordinary regular file.
 
-    ``None`` means one of three things, all of which a caller must treat the same way: the path
-    left *base*, the filesystem refused to resolve it (``OSError``), or it is not a path the
-    filesystem accepts at all, such as one holding an embedded NUL byte (``ValueError``).
+    Why this is a captured object rather than a function of two paths. The check used to resolve
+    its own base on every call, after the scanner had run, so a scanner that replaced the
+    directory it was handed with a link to somewhere else moved the base as well as the path:
+    both resolved under the root the scanner had chosen, the comparison succeeded, and the check
+    said nothing at all. :meth:`capture` reads the base's real path once, before the scanner
+    starts, and every later comparison is against that captured path, which nothing the scanner
+    does can move. A base is therefore never resolved after the process it contains has run.
+
+    *base* is kept beside *root* because a caller that has proved a path is inside still needs
+    the name it was handed to make the path relative for a record: ``root`` is where the
+    directory really is, ``base`` is what this run called it.
 
     The limits. This compares resolved paths: it does not follow bind mounts or hard links, so it
     is a check against the obvious escape rather than an isolation boundary. And resolving is not
     opening, so a process still running in that directory can replace a component between the
     check and the read; the callers here run after the scanner process has exited, which narrows
-    that window rather than closing it.
+    that window rather than closing it. ``docs/THREAT_MODEL.md`` states plainly what that leaves
+    undefended, with the restore-before-return race as the worked example.
     """
-    try:
-        resolved = path.resolve()
-        root = base.resolve()
-    except (OSError, ValueError):
-        return None
-    return resolved if resolved == root or resolved.is_relative_to(root) else None
+
+    base: Path
+    root: Path
+
+    @classmethod
+    def capture(cls, base: Path) -> "Containment":
+        """Read *base*'s real path now, to compare against for the rest of the run.
+
+        Call this before handing the directory to anything untrusted. A base the filesystem
+        refuses to resolve, or that is not a path it accepts at all, is a setup failure rather
+        than a check that returns ``None`` later: there is no captured path to contain against,
+        so nothing can be proved inside it. A base that does not exist yet resolves to where it
+        would be created, which is what a capture destination needs.
+        """
+        base = Path(base)
+        try:
+            return cls(base, base.resolve())
+        except (OSError, ValueError) as exc:
+            raise MaterializationError(
+                f"the directory {base} could not be resolved, so nothing can be proved to be "
+                f"inside it: {exc}") from exc
+
+    def contains(self, path: Path) -> Path | None:
+        """*path* resolved whole, when it is still inside this directory; ``None`` when it is not.
+
+        The captured root itself is inside it, and a path that does not exist yet resolves to
+        where it would be created. ``None`` means one of three things, all of which a caller must
+        treat the same way: the path left the directory, the filesystem refused to resolve it
+        (``OSError``), or it is not a path the filesystem accepts at all, such as one holding an
+        embedded NUL byte (``ValueError``).
+        """
+        try:
+            resolved = Path(path).resolve()
+        except (OSError, ValueError):
+            return None
+        return resolved if resolved == self.root or resolved.is_relative_to(self.root) else None
 
 
 def sha256_file(path: Path) -> tuple[str, int]:

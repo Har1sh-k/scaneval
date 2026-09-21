@@ -27,7 +27,12 @@ Every path this adapter touches after the harness process starts is a path the h
 have replaced, and any component of it can be a symbolic link, not only the last one. So each
 read and each copy destination goes through one :class:`Enclosure`, which resolves the whole
 path and proves it is still inside the workspace the scanner was handed or the staging
-directory this run created. A path that resolves out is refused and counted, never followed.
+directory this run created. Both of those directories have their real path captured before the
+harness process starts, so a harness that replaces one cannot move the boundary it is checked
+against. A path that resolves out is refused and counted, never followed.
+
+That boundary is a check, not isolation: ``docs/THREAT_MODEL.md`` says what it does and does not
+defend against, and a harness process still running in the workspace can defeat any of it.
 """
 
 from __future__ import annotations
@@ -42,7 +47,7 @@ import subprocess
 from typing import Any, NamedTuple
 
 from ..kinds import kind_for_harness_class
-from ..materialize import HARNESS_STATE_DIRS, git_command, resolve_within
+from ..materialize import HARNESS_STATE_DIRS, Containment, MaterializationError, git_command
 from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command, tail_text
 
 
@@ -136,28 +141,47 @@ class Enclosure(NamedTuple):
 
     ``workspace`` is the exported source the scanner was handed: every read after the harness
     process starts must resolve inside it. ``staging`` is this run's raw output directory: every
-    copy destination must resolve inside that. Both checks are
-    :func:`~scaneval.materialize.resolve_within`, which resolves the path whole, so a link
-    anywhere along it is caught and not only one in the last component.
+    copy destination must resolve inside that. Both are
+    :class:`~scaneval.materialize.Containment`, which resolves the path whole, so a link anywhere
+    along it is caught and not only one in the last component.
 
-    That is the difference this class exists for. The importer used to check each record for
-    being a link and never its ancestors, so a link one level up, at the harness state directory
-    or at any parent of it, left every record behind it looking like an ordinary regular file in
-    an ordinary directory. Records from anywhere on the host were read, staged into the bundle,
-    and imported as claims of this scan. Checking the last component is not a containment check;
-    resolving the whole path is.
+    That is the first difference this class exists for. The importer used to check each record
+    for being a link and never its ancestors, so a link one level up, at the harness state
+    directory or at any parent of it, left every record behind it looking like an ordinary
+    regular file in an ordinary directory. Records from anywhere on the host were read, staged
+    into the bundle, and imported as claims of this scan. Checking the last component is not a
+    containment check; resolving the whole path is.
+
+    The second is :meth:`capture`. Both directories have their real path read once, before the
+    harness process starts, and every check afterwards is against those captured paths. The
+    check used to resolve its own base on each call, after the harness had run, so a harness that
+    replaced the workspace or the staging directory with a link moved the base along with the
+    path and every comparison succeeded against a root it had chosen.
     """
 
-    workspace: Path
-    staging: Path
+    workspace: Containment
+    staging: Containment
+
+    @classmethod
+    def capture(cls, workspace: Path, staging: Path) -> "Enclosure":
+        """Read both directories' real paths now, before the harness process starts.
+
+        A directory that cannot be resolved is an :class:`AdapterError` rather than a check that
+        fails quietly later: without a captured path there is nothing to contain against, and the
+        run must not start believing it has a boundary it does not have.
+        """
+        try:
+            return cls(Containment.capture(workspace), Containment.capture(staging))
+        except MaterializationError as exc:
+            raise AdapterError(f"the scan boundary could not be established: {exc}") from exc
 
     def read(self, path: Path) -> Path | None:
         """*path* when it still resolves inside the workspace the scanner was handed, else ``None``."""
-        return resolve_within(path, self.workspace)
+        return self.workspace.contains(path)
 
     def write(self, path: Path) -> Path | None:
         """*path* when it still resolves inside this run's staging directory, else ``None``."""
-        return resolve_within(path, self.staging)
+        return self.staging.contains(path)
 
 
 class LostRecord(NamedTuple):
@@ -587,6 +611,11 @@ def capture_status(trace_mode: str, routes: list[str], *, has_summary: bool,
     ``dropped_events`` the same execution record carries. ``complete`` now requires a state that
     explicitly reports no gap and no dropped event; a state reporting either, and a run that
     reported no state at all, are ``partial``, because nothing there rules a gap out.
+
+    This reports what the observer saw. Whether the trace file reached the bundle is something
+    only the runner knows, so that half of the same question is settled there: a ``complete``
+    here is downgraded by :func:`~scaneval.execution._capture_record` when the bundle it lands in
+    holds no counted trace, and the run is recorded as partial. Do not answer it twice.
     """
     request_capture = {"off": "unavailable", "metadata": "partial", "content": "partial"}[trace_mode]
     traced = trace_mode != "off"
@@ -707,7 +736,7 @@ class LlmHarnessAdapter(Adapter):
         # The one enclosure every read and every copy destination below goes through: the
         # harness may read from and write to both of these directories while it runs, so each
         # path is resolved whole and proved to be inside the one it belongs to.
-        enclosure = Enclosure(Path(source_dir), Path(raw_dir))
+        enclosure = Enclosure.capture(Path(source_dir), Path(raw_dir))
         # Taken before the harness process starts: whatever is in the findings directory now
         # came with the exported input, not from this scan.
         findings_baseline = snapshot_findings(state_dir / "findings", enclosure)

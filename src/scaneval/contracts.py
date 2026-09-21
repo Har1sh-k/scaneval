@@ -153,7 +153,10 @@ def check_set_gap(validation: dict[str, Any], snapshot_id: str) -> str | None:
     """Why the recorded check set for *snapshot_id* does not verify, or ``None``.
 
     ``None``, too, when no set is recorded for it: a set that is not there is absent, not broken,
-    and the case is unchecked for that snapshot.
+    and the case is unchecked for that snapshot. Nothing inside a case can tell an absent set from
+    a deleted one, because the deletion takes the record that would have complained, which is why
+    the whole validation block is inside the pack anchor (see :func:`case_anchor_projection`): a
+    set deleted after the pack was anchored is a pack that no longer anchors to its own records.
 
     A check set is one record in ``validation.check_sets``, not the checks that happen to carry a
     snapshot id. The record states the result and the export the set ran against, and its
@@ -298,37 +301,165 @@ def review_chain_gap(reviews: list[dict[str, Any]], head: str | None) -> str | N
     return None
 
 
-def pack_anchor_projection(pack: dict[str, Any]) -> dict[str, Any]:
-    """The pack-level records whose deletion a planning decision would not otherwise see.
+# Where every field of a case lives. A field is in exactly one of three places, and nothing may
+# be in none of them: the label projection, which the covering review binds itself to; the anchor
+# projection, which is every remaining field of the case; and this allowlist, of fields no planning
+# decision reads. The two projections are defined as the whole record minus a list rather than as a
+# list of fields to cover, so a field added to the schema is anchored by default instead of
+# escaping quietly, and
+# ``tests/test_v2_contracts.py::test_every_case_field_is_projected_or_allowlisted`` fails when a new
+# field is in neither projection nor named here.
+CASE_LABEL_FIELDS = frozenset({
+    "represents", "workload", "component_role", "model_involvement", "coverage_signature",
+    "canonical_target", "target", "controls", "evidence",
+})
+CASE_UNREAD_FIELDS = frozenset({"notes"})
 
-    Three things are anchored here, and each of them is something a case or an admission cannot
-    anchor for itself, because deleting it takes the record that would have complained with it.
+# The same split for a snapshot, held by
+# ``tests/test_v2_contracts.py::test_every_snapshot_and_pack_field_is_projected_or_allowlisted``.
+# Its identity is the part a label points at, so it travels inside :func:`label_digest`; everything
+# else about it is anchored. Nothing about a snapshot is unread.
+SNAPSHOT_IDENTITY_FIELDS = frozenset({"commit", "tree_hash", "languages"})
+SNAPSHOT_UNREAD_FIELDS: frozenset[str] = frozenset()
 
-    The case roster: each case's identifier and the target it carries, in recorded order. Deleting
-    a case whole, its chained review history included, leaves every case that remains consistent,
-    and :func:`scaneval.cases.plan_scope` reads the cases that are there: dropping the one draft
-    case out of a pack of approved ones would otherwise turn a draft plan into a reviewed one. The
-    target identifier is in the roster because it is what an admission decision is routed by, so
-    the roster says which decisions the pack's cases still resolve to and not only how many cases
-    there are.
+# And for the pack itself. ``anchor_sha256`` cannot cover itself, ``description`` and ``notes`` are
+# free text, and the pack's identity and status are bound where they are used rather than here:
+# every plan records ``pack_sha256`` over the whole file it was built from, so a pack renamed,
+# renumbered, or released is a different pack to every plan, manifest, and report that cites one.
+# Anchoring them would also put the tool's own version workflow, which reopens a released pack by
+# rewriting ``version`` and ``status`` (see :func:`scaneval.cli._pack_for_change`), behind a digest
+# a person would have to recompute by hand.
+PACK_UNANCHORED_FIELDS = frozenset({
+    "anchor_sha256", "description", "notes",
+    "schema_version", "namespace", "pack_id", "version", "status",
+})
+# The three pack-level arrays the anchor projects in their own way rather than verbatim.
+_PACK_RECORD_FIELDS = frozenset({"snapshots", "cases", "admissions"})
 
-    Where each case's review history ends: the ``reviews_sha256`` it records, or ``null`` when it
-    records none. A history wiped whole is an anchored ``null`` against a recorded digest, which is
-    how an empty history stays distinguishable from a deleted one.
 
-    Where the admission history ends: the chain value of the last recorded admission, or ``null``
-    when the pack records none. The admission chain binds each decision to the one before it, and
-    this is what catches the deletion off the end of it, the one that would restore a case to a
-    reviewed-scope plan by dropping the rejection that kept it out.
+def case_label_projection(case: dict[str, Any]) -> dict[str, Any]:
+    """The fields of *case* that say what is alleged: what a reviewer of it passed judgment on.
+
+    Every field named in :data:`CASE_LABEL_FIELDS` is projected whole, subfields included, so a
+    field added inside a target, a control, or an evidence record is covered the day it is added
+    rather than the day someone remembers to list it here. Three orderings are normalized because
+    none of them carries content: controls are read in ``control_id`` order, each control's evidence
+    ids are sorted, evidence records are read in ``evidence_id`` order, and aliases are sorted. The
+    contract keeps all four unique, so reordering one of those lists alone is not a content change
+    while adding, removing, renaming, or editing an entry is.
+
+    The evidence records are in here, not beside it: an L3 label is an allegation plus the evidence
+    it rests on, so deleting the advisory a case cites, or rewriting what it says, is a change to
+    what was reviewed and costs the approval exactly as an edited target does.
+
+    What is left out is left out deliberately, and every one of those fields is anchored instead
+    (see :func:`case_anchor_projection`): the case identifier and its disclosure dates say where a
+    label came from, the disposition and the split say what is being done with it, and the
+    validation block is the record of the reviews and checks themselves. Only ``notes`` is read by
+    nothing at all.
     """
-    return {
-        "cases": [{"case_id": case["case_id"],
-                   "target_id": case["target"]["target_id"],
-                   "reviews_sha256": case["validation"].get("reviews_sha256")}
-                  for case in pack["cases"]],
-        "admissions_sha256": (pack["admissions"][-1].get("chain_sha256")
-                              if pack["admissions"] else None),
-    }
+    projected = {key: value for key, value in case.items() if key in CASE_LABEL_FIELDS}
+    if "canonical_target" in projected:
+        canonical = projected["canonical_target"]
+        projected["canonical_target"] = {**canonical, "aliases": sorted(canonical["aliases"])}
+    if "controls" in projected:
+        projected["controls"] = [
+            {**control, "evidence_ids": sorted(control["evidence_ids"])}
+            for control in sorted(projected["controls"], key=lambda item: item["control_id"])]
+    if "evidence" in projected:
+        projected["evidence"] = sorted(projected["evidence"],
+                                       key=lambda item: item["evidence_id"])
+    return projected
+
+
+def case_anchor_projection(case: dict[str, Any]) -> dict[str, Any]:
+    """Every field of *case* the anchor covers: the whole record minus the labels and the allowlist.
+
+    The labels are left out because the covering review already binds itself to them by digest, and
+    binding them here too would mean an edited label could not be re-approved without an anchor
+    being rebuilt first. Everything else is here, whether or not anyone has thought about it yet:
+    the case identifier and the target id an admission is routed by, the disclosure dates, the
+    screening disposition a plan reads, the split, and the whole validation block, which is the
+    review history, its recorded end, every mechanical check, every check set record, and the
+    ``checks_failed`` flag.
+
+    That is the point of defining it by subtraction. A case's mechanical check record used to be
+    deletable because an absent check set reads as an unchecked snapshot rather than as a deleted
+    record, and a disposition could be edited to drop an approved, admitted case out of a plan.
+    Both are in here now because everything is, and a field added later is in here the day it is
+    added.
+    """
+    return {key: value for key, value in case.items()
+            if key not in CASE_LABEL_FIELDS and key not in CASE_UNREAD_FIELDS}
+
+
+def snapshot_identity_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """The fields of *snapshot* that say which bytes a label points at and how they are read.
+
+    The commit and the exported tree hash each name bytes. The declared languages are here because
+    they decide which adapters are run against those bytes (see
+    :func:`scaneval.runner.run_invocation`), so a snapshot re-declared as holding no Python is a
+    different scan of the same export, and an approval that covered the one did not cover the
+    other. Languages are sorted because the adapters read the list as a set, so its order carries
+    no content.
+
+    The repository is deliberately not here. A commit hash and a tree hash each name bytes, so a
+    snapshot moved to a mirror or a fork that holds the same commit and exports the same tree is
+    the content the reviewer read; where those bytes were fetched from is provenance, which the
+    snapshot record keeps, which the anchor covers, and which no approval rests on.
+    """
+    projected = {key: value for key, value in snapshot.items()
+                 if key in SNAPSHOT_IDENTITY_FIELDS}
+    if "languages" in projected:
+        projected["languages"] = sorted(projected["languages"])
+    return projected
+
+
+def snapshot_anchor_projection(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Every field of *snapshot* the anchor covers: the whole record minus its identity.
+
+    The identity travels in :func:`label_digest` instead, for the same reason a case's labels do:
+    repinning a snapshot must cost the approvals recorded against it rather than stop the pack
+    loading. Everything else, the repository, the reference, the workload, the component role, the
+    licence, and the role the snapshot plays, is anchored here.
+    """
+    return {key: value for key, value in snapshot.items()
+            if key not in SNAPSHOT_IDENTITY_FIELDS and key not in SNAPSHOT_UNREAD_FIELDS}
+
+
+def pack_anchor_projection(pack: dict[str, Any]) -> dict[str, Any]:
+    """Every record in *pack* that a planning decision reads and that nothing else would anchor.
+
+    This is the whole pack minus three subtractions, each of them named and each of them because
+    the field is covered somewhere else or covered by nothing because it is read by nothing.
+
+    Pack-level fields are projected verbatim, :data:`PACK_UNANCHORED_FIELDS` aside, so
+    ``review_budgets`` is in here: it is the list of cut-offs every recall-at-k number is computed
+    at, it is copied into each plan, and it was previously in neither the digest nor the anchor.
+
+    The snapshots are projected by :func:`snapshot_anchor_projection` and the cases by
+    :func:`case_anchor_projection`, so the roster of each is anchored together with every field of
+    them that is not a label. Deleting a case whole, its chained review history included, leaves
+    every case that remains consistent, and :func:`scaneval.cases.plan_scope` reads the cases that
+    are there: dropping the one draft case out of a pack of approved ones would otherwise turn a
+    draft plan into a reviewed one. A review history wiped whole is an anchored ``null`` where a
+    ``reviews_sha256`` belongs, which is how an empty history stays distinguishable from a deleted
+    one, and a deleted check set is an anchored ``check_sets`` record that is no longer there.
+
+    The admissions are projected as the chain value of the last recorded decision, or ``null`` when
+    the pack records none. Each decision's own fields are covered by the chain, which binds it to
+    the decision before it, so what is left for the anchor is the deletion off the end of the
+    history, the one that would restore a case to a reviewed-scope plan by dropping the rejection
+    that kept it out.
+    """
+    projected = {key: value for key, value in pack.items()
+                 if key not in PACK_UNANCHORED_FIELDS and key not in _PACK_RECORD_FIELDS}
+    projected["snapshots"] = [snapshot_anchor_projection(snapshot)
+                              for snapshot in pack["snapshots"]]
+    projected["cases"] = [case_anchor_projection(case) for case in pack["cases"]]
+    projected["admissions_sha256"] = (pack["admissions"][-1].get("chain_sha256")
+                                      if pack["admissions"] else None)
+    return projected
 
 
 def pack_anchor_digest(pack: dict[str, Any]) -> str:
@@ -339,129 +470,65 @@ def pack_anchor_digest(pack: dict[str, Any]) -> str:
 def pack_anchor_gap(pack: dict[str, Any]) -> str | None:
     """Why a pack's anchored records do not verify, or ``None`` when they do.
 
-    The admission history is checked as a chain, and the case roster, each case's review head, and
-    the end of the admission history are checked against ``anchor_sha256`` (see
-    :func:`pack_anchor_projection`). A pack recording no anchor at all is refused rather than read
-    leniently, because an optional anchor is no anchor: dropping the field is the same deletion it
-    exists to make visible.
+    The admission history is checked as a chain, and everything
+    :func:`pack_anchor_projection` covers is checked against ``anchor_sha256``. A pack recording no
+    anchor at all is refused rather than read leniently, because an optional anchor is no anchor:
+    dropping the field is the same deletion it exists to make visible.
 
     Every path that reads a planning decision out of a pack passes through here: the pack load in
-    :func:`_validate_case_pack`, every library write, and :func:`scaneval.cases.build_plan`, which
-    can be handed a pack that never went through a load. As with the review chain, anyone who can
-    edit the pack can recompute this; what it removes is the deletion that passes unnoticed.
+    :func:`_validate_case_pack`, every library write, and :func:`scaneval.cases.build_plan`, both of
+    which reach it through that same load. As with the review chain, anyone who can edit the pack
+    can recompute this; what it removes is the deletion that passes unnoticed.
     """
     gap, _ = chain_link_gap(pack["admissions"], kind="admission", label="admissions")
     if gap:
         return gap
     recorded = pack.get("anchor_sha256")
     if not recorded:
-        return ("anchor_sha256 is missing, so nothing says which cases, review histories, and "
-                "admissions this pack recorded, and deleting one of them would leave no trace")
+        return ("anchor_sha256 is missing, so nothing says which snapshots, cases, review "
+                "histories, check sets, and admissions this pack recorded, and deleting one of "
+                "them would leave no trace")
     expected = pack_anchor_digest(pack)
     if recorded != expected:
-        return (f"anchor_sha256 records {recorded}, and the cases, review histories, and "
-                f"admissions as they now stand anchor to {expected}; a case, a review history, or "
-                "an admission was deleted, reordered, or renamed")
+        return (f"anchor_sha256 records {recorded}, and the records this pack anchors now anchor "
+                f"to {expected}; a record a planning decision reads was deleted, reordered, or "
+                "edited")
     return None
 
 
 def _snapshot_identity(pack: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
-    """The identity of every snapshot *case* names: its commit and the export recorded for it.
+    """The identity of every snapshot *case* names, keyed by snapshot id.
 
     A label points at bytes, so what a reviewer read is the label text together with the tree it
-    describes. Each referenced snapshot is projected by the two fields that say which bytes those
-    are, keyed by snapshot id, and a snapshot the pack does not declare is projected as ``None``:
-    a label naming a snapshot that is not there names no bytes at all, which is itself a change
-    from one that named a declared snapshot.
-
-    The repository is deliberately left out. A commit hash and an exported tree hash each name
-    bytes, so a snapshot moved to a mirror or a fork that holds the same commit and exports the
-    same tree is the content the reviewer read; where those bytes were fetched from is provenance,
-    which the snapshot record keeps and which no approval rests on.
+    describes and the languages that decide how that tree is read (see
+    :func:`snapshot_identity_projection`). A snapshot the pack does not declare is projected as
+    ``None``: a label naming a snapshot that is not there names no bytes at all, which is itself a
+    change from one that named a declared snapshot.
     """
     declared = {snapshot["snapshot_id"]: snapshot for snapshot in pack["snapshots"]}
     named = [case["target"]["snapshot_id"]] + [control["snapshot_id"] for control in case["controls"]]
     identity: dict[str, Any] = {}
     for snapshot_id in named:
         snapshot = declared.get(snapshot_id)
-        identity[snapshot_id] = None if snapshot is None else {
-            "commit": snapshot["commit"], "tree_hash": snapshot.get("tree_hash")}
+        identity[snapshot_id] = None if snapshot is None else snapshot_identity_projection(snapshot)
     return identity
 
 
 def _label_projection(pack: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
-    """The label content of *case*: what a reviewer of it passed judgment on.
+    """The label content of *case* together with the identity of the snapshots it names.
 
-    Only the fields that say what is being alleged are projected, and a reviewer approving a case
-    approves what the case claims to be as well as where it claims it: the canonical target, the
-    coverage signature, the represents statement, the workload, the component role, and whether a
-    model was involved are projected alongside the target and the controls.
-
-    The snapshots those labels name are projected by identity rather than by name alone, because an
-    approval covers the exact bytes that were reviewed: each referenced snapshot contributes its
-    commit and the export hash the pack records for it (see :func:`_snapshot_identity`). Repinning a
-    snapshot to another commit, or recording a different export for it, therefore costs the approval
+    The case's own half is :func:`case_label_projection`, which is every field of the case that
+    says what is alleged, projected whole. The other half is the bytes those labels point at: each
+    referenced snapshot contributes its commit, its recorded export, and its declared languages
+    (see :func:`_snapshot_identity`). Repinning a snapshot to another commit, recording a different
+    export for it, or re-declaring the languages it is scanned as therefore costs the approval
     exactly as editing the target's text does.
 
-    The case identifier, its evidence records, its disclosure dates, its disposition, its split,
-    its notes, and the recorded reviews and checks are left out: those say where a label came from
-    or what is being done with it, not what it alleges, and changing one of them does not change
-    what a reviewer read. The target's own identifier is projected, so an admission recorded
-    against that identifier is bound to content this digest covers.
-
-    A control's ``evidence_ids`` are projected too, because they are the evidence that control
-    rests on: swapping a control onto other evidence changes what the control is asserted from,
-    which is part of what a reviewer read. The evidence records themselves stay outside, as every
-    other record of where a label came from does; what is projected is which of them each control
-    names.
-
-    Three orderings are normalized because none carries content: controls are projected in
-    ``control_id`` order, which the contract keeps unique pack-wide, aliases are sorted, which the
-    contract keeps unique within the case, and each control's evidence ids are sorted. Reordering
-    one of those lists alone is therefore not a content change, while adding, removing, renaming,
-    or editing an entry is.
+    Everything left out of the case half is anchored instead, so nothing escapes both records; the
+    split between them is stated once, in :data:`CASE_LABEL_FIELDS` and :data:`CASE_UNREAD_FIELDS`,
+    and a test holds every field of a case to it.
     """
-    target = case["target"]
-    canonical = case["canonical_target"]
-    return {
-        "represents": case["represents"],
-        "workload": case["workload"],
-        "component_role": case["component_role"],
-        "model_involvement": case["model_involvement"],
-        "coverage_signature": case["coverage_signature"],
-        "canonical_target": {
-            "kind": canonical["kind"],
-            "variant_family": canonical["variant_family"],
-            "aliases": sorted(canonical["aliases"]),
-        },
-        "snapshots": _snapshot_identity(pack, case),
-        "target": {
-            "target_id": target["target_id"],
-            "snapshot_id": target["snapshot_id"],
-            "kind": target["kind"],
-            "description": target["description"],
-            "affected_input_or_authority": target.get("affected_input_or_authority"),
-            "accepted_locations": target["accepted_locations"],
-            "assumptions": target["assumptions"],
-            "matching_rules": target["matching_rules"],
-        },
-        "controls": [
-            {
-                "control_id": control["control_id"],
-                "snapshot_id": control["snapshot_id"],
-                "type": control["type"],
-                "target_id": control.get("target_id"),
-                "description": control["description"],
-                "property": control["property"],
-                "allowed_actors_inputs": control["allowed_actors_inputs"],
-                "assumptions": control["assumptions"],
-                "ruled_out_allegation": control["ruled_out_allegation"],
-                "locations": control["locations"],
-                "evidence_ids": sorted(control["evidence_ids"]),
-            }
-            for control in sorted(case["controls"], key=lambda control: control["control_id"])
-        ],
-    }
+    return {**case_label_projection(case), "snapshots": _snapshot_identity(pack, case)}
 
 
 def label_digest(pack: dict[str, Any], case: dict[str, Any]) -> str:
@@ -473,12 +540,15 @@ def label_digest(pack: dict[str, Any], case: dict[str, Any]) -> str:
     description, affected input, accepted locations, assumptions, or matching rules, and so does
     editing what the case says it represents: its canonical kind, variant family, aliases,
     coverage signature, represents statement, workload, component role, or model involvement.
-    None of those can ride on an earlier review.
+    Deleting or rewriting an evidence record does too, because an allegation at a reviewed level is
+    the allegation together with the evidence it rests on. None of those can ride on an earlier
+    review.
 
-    The snapshots each label names are projected too, by commit and recorded tree hash as well as
-    by name: moving a target or a control onto a different snapshot changes what was reviewed, and
-    so does repinning a snapshot the label already named, because the review covered the bytes that
-    snapshot stood for and not the identifier.
+    The snapshots each label names are projected too, by commit, recorded tree hash, and declared
+    languages as well as by name: moving a target or a control onto a different snapshot changes
+    what was reviewed, so does repinning a snapshot the label already named, because the review
+    covered the bytes that snapshot stood for and not the identifier, and so does re-declaring the
+    languages those bytes are scanned as, because that decides which adapters ever see them.
 
     This takes the pack because a snapshot's identity lives there rather than on the case. It lives
     here rather than in :mod:`scaneval.cases` because both the planning gate and the pack-load gate
@@ -488,15 +558,55 @@ def label_digest(pack: dict[str, Any], case: dict[str, Any]) -> str:
     return canonical_sha256(_label_projection(pack, case))
 
 
+def latest_review(case: dict[str, Any]) -> dict[str, Any] | None:
+    """The last recorded review of *case* by list order, whatever it decided, or ``None``.
+
+    List order is the only ordering used; recorded timestamps are text and are not parsed here.
+    :mod:`scaneval.cases` re-exports this, because the write paths there and the load gate here
+    must read the same review.
+    """
+    reviews = case["validation"]["reviews"]
+    return reviews[-1] if reviews else None
+
+
+def operative_review_gap(case: dict[str, Any]) -> str | None:
+    """Why the latest recorded review of *case* is not an approval, or ``None`` when it is one.
+
+    The latest recorded review is the operative one, and this is the one place that rule is
+    written down. A rejection says the label is wrong and an ``unresolved`` entry says the reviewer
+    reopened the question without settling it; both are withdrawals, and neither leaves a case
+    approved. A case with no review at all has no approval in force either.
+
+    Three paths read this and now cannot disagree: :func:`_validate_case_pack` refuses a
+    ``human_approved`` case whose latest review is any of the three, :func:`covering_review` names
+    no covering review under one, and :func:`scaneval.cases.record_review` moves the recorded state
+    back to what the mechanical checks earn when it records one. It used to be three rules, and the
+    seam between them was ``unresolved``: the load refused a rejection but accepted a reopening,
+    and the write path demoted on a rejection but not on a reopening, so a reopened case stayed
+    recorded as ``human_approved`` at the level of an approval nothing stood behind.
+
+    This reads the decision only. Whether an approval that is in force covers the labels as they
+    stand is :func:`covering_review`, and what level it earns is :func:`claimed_level_gap`.
+    """
+    review = latest_review(case)
+    if review is None:
+        return "no review is recorded for this case"
+    if review["decision"] == "unresolved":
+        return "the latest recorded review reopened the question and left it unresolved"
+    if review["decision"] == "reject":
+        return "the latest recorded review rejected this case"
+    return None
+
+
 def covering_review(pack: dict[str, Any], case: dict[str, Any]) -> dict[str, Any] | None:
     """The one recorded review that approves *case* as its labels now stand, or ``None``.
 
-    The latest recorded review is the operative one, so this is that review when it approved the
-    case and carries :func:`label_digest` of these labels. ``None`` when a later review rejected
-    the case or reopened the question, when the labels changed after the approval, when the
-    snapshots they name were repinned, when no review is recorded, and when the latest review
-    records no digest at all: a review that never named the content it read cannot be shown to
-    cover this content.
+    The latest recorded review is the operative one (:func:`operative_review_gap`), so this is that
+    review when it approved the case and carries :func:`label_digest` of these labels. ``None``
+    when a later review rejected the case or reopened the question, when the labels changed after
+    the approval, when the snapshots they name were repinned or re-declared, when no review is
+    recorded, and when the latest review records no digest at all: a review that never named the
+    content it read cannot be shown to cover this content.
 
     ``None``, too, when the recorded history does not verify as a chain (see
     :func:`review_chain_gap`). A review is read as the last entry of a history, so a history whose
@@ -511,13 +621,12 @@ def covering_review(pack: dict[str, Any], case: dict[str, Any]) -> dict[str, Any
     reads what the pack records.
     """
     validation = case["validation"]
-    reviews = validation["reviews"]
-    if review_chain_gap(reviews, validation.get("reviews_sha256")):
+    if review_chain_gap(validation["reviews"], validation.get("reviews_sha256")):
         return None
-    if not reviews:
+    if operative_review_gap(case) is not None:
         return None
-    review = reviews[-1]
-    if review["decision"] != "approve" or not review.get("labels_sha256"):
+    review = latest_review(case)
+    if not review.get("labels_sha256"):
         return None
     return review if review["labels_sha256"] == label_digest(pack, case) else None
 
@@ -730,7 +839,9 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
     failed, and an L3/L4 label belongs only to a case screened as worth validating. A
     ``human_approved`` case makes the same claim about its check sets as a mechanically checked
     one unless it raises ``checks_failed``, and it cannot stand under a latest review that
-    rejected it.
+    withdrew the approval, whether that review rejected the case or reopened the question
+    (:func:`operative_review_gap`, which :func:`scaneval.cases.record_review` reads too, so the
+    state this refuses is the state no write path can leave behind).
 
     ``validation.level`` is a cached claim and decides nothing. The level of an approved case is
     the level of the one review covering its labels, which :func:`covering_review` names and
@@ -747,17 +858,26 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
     level must be one some recorded approval carries, so the pack still cannot claim a review
     nobody recorded.
 
-    Every record a planning decision reads is anchored, so deleting one is visible rather than
-    quiet, and the three anchors are checked here as they are everywhere else. The recorded reviews
-    are a chain ending at ``validation.reviews_sha256`` (:func:`review_chain_gap`). Each mechanical
-    check set is one record in ``validation.check_sets`` whose digest covers its result, its
-    export, and its own checks (:func:`check_set_gap`), so deleting or unattributing a failing
-    check cannot turn a failed set into a passing one. The admissions are a chain, and the case
-    roster, each case's review head, and the end of the admission history are anchored by
-    ``anchor_sha256`` (:func:`pack_anchor_gap`), so deleting an admission, wiping a case's review
-    history, or deleting a whole case is not a consistent pack. Those docstrings say what that does
-    and does not prove; in short, anyone who can edit the pack can recompute an anchor, so they
-    catch the quiet deletion rather than a determined forger.
+    Every field a planning decision reads is inside one of two records, and which one is decided by
+    subtraction rather than by a list of fields anyone has to remember to extend. The labels are
+    bound to the approval that covered them by :func:`label_digest`. Everything else about a
+    snapshot, a case, or the pack itself is bound to ``anchor_sha256`` by
+    :func:`pack_anchor_projection`: the disposition a plan reads, the whole validation block with
+    its check sets and its ``checks_failed`` flag, the disclosure dates, the split, and the
+    ``review_budgets`` every recall-at-k number is computed at. What sits outside both is stated in
+    three allowlists a test pins: a case's ``notes``, which nothing reads, and the pack's own
+    identity and status, which every plan binds by hashing the whole file it was built from.
+
+    Inside those records the chains do the rest, and they are checked here as they are everywhere
+    else. The recorded reviews are a chain ending at ``validation.reviews_sha256``
+    (:func:`review_chain_gap`). Each mechanical check set is one record in ``validation.check_sets``
+    whose digest covers its result, its export, and its own checks (:func:`check_set_gap`), so
+    deleting or unattributing a failing check cannot turn a failed set into a passing one, and
+    deleting the record itself no longer reads as a snapshot nobody checked, because the anchor
+    holds it. The admissions are a chain whose end the anchor records, so deleting an admission,
+    wiping a case's review history, or deleting a whole case is not a consistent pack. Those
+    docstrings say what that does and does not prove; in short, anyone who can edit the pack can
+    recompute an anchor, so they catch the quiet deletion rather than a determined forger.
 
     Which export a check set read is recorded three times, and the three must agree: the
     ``check_sets`` record for the snapshot, the ``detail`` of that set's passing
@@ -834,14 +954,17 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
         referenced = [target["snapshot_id"]] + [control["snapshot_id"] for control in case["controls"]]
         unchecked = sorted({snapshot for snapshot in referenced
                             if recorded_check_state(validation, snapshot) != "pass"})
-        if state == "human_approved" and not approvals:
-            raise ContractError(f"{label}: human_approved requires at least one recorded approving review")
+        if state == "human_approved":
+            # One rule, and the same one the write path and the planning gate read: the latest
+            # recorded review is the operative one, so a case is human_approved only under an
+            # approving latest review. A rejection and a reopening are both withdrawals.
+            withdrawn = operative_review_gap(case)
+            if withdrawn:
+                raise ContractError(
+                    f"{label}: human_approved requires the latest recorded review to be an "
+                    f"approving review, and {withdrawn}; record the decision that reinstated it")
         if state == "human_approved" and validation["level"] is None:
             raise ContractError(f"{label}: human_approved requires a validation level")
-        if state == "human_approved" and reviews and reviews[-1]["decision"] == "reject":
-            raise ContractError(
-                f"{label}: the latest recorded review rejected this case, so it cannot also be "
-                "human_approved; record the decision that reinstated it")
         if state == "human_approved" and unchecked and not validation.get("checks_failed"):
             raise ContractError(
                 f"{label}: human_approved requires a recorded passing check set for every referenced "
