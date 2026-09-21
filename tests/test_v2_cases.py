@@ -499,6 +499,13 @@ def test_a_case_is_not_planned_while_any_referenced_snapshot_is_unchecked(tmp_pa
     # nothing about that snapshot, so the case is unplanned until it is checked.
     add_snapshot(pack, LATER_SNAPSHOT)
     case_by_id(pack, "widget-shell")["controls"].append(later_control())
+    # Changed deliberately this round: this hand edit now costs the anchor rebuild that every hand
+    # edit of an anchored record costs, and the write below refuses the pack without it. While no
+    # case named widget-later, no label digest held its commit, its tree hash, or its languages, so
+    # the anchor had to; naming it in a control is what moves that identity into the record a
+    # review of these labels carries, and out of the anchor. Declaring the snapshot after the
+    # control that names it is the order that avoids the rebuild, because add_snapshot is a write.
+    reanchor(pack)
 
     # Changed deliberately: this asserted a plan with a note. An approved case referencing a
     # snapshot with no check set is a pack the load refuses, so planning refuses it too now, in the
@@ -1397,6 +1404,49 @@ def test_a_trailing_withdrawal_is_the_operative_review_whichever_one_it_is(tmp_p
     assert plan["scope"] == "reviewed" and notes == []
 
 
+@pytest.mark.parametrize(
+    ("state", "level"),
+    [("mechanically_checked", "L1"), ("draft", None)],
+    ids=["mechanically-checked", "draft"],
+)
+def test_an_approving_latest_review_is_refused_beside_a_state_that_denies_it(tmp_path, state, level):
+    """The mirror of the trailing withdrawal: one rule, read the other way round.
+
+    Closed deliberately this round. The load refused human_approved under a latest review that
+    withdrew the approval, and accepted the mirror of it: a case recorded draft or
+    mechanically_checked under a latest review that approved it. The recorded state and the latest
+    recorded review are two records of one fact, and they disagreed. No write path can produce it,
+    because record_review sets human_approved on every approval it records, so what loaded was
+    always a hand edit.
+
+    What the mirror bought was not a higher plan, because plan_scope reads the recorded state and a
+    mechanical state never reaches a reviewed one. It bought the disagreement itself: a standing,
+    unwithdrawn L3 approval in the history beside a state, a summary, and a CLI listing that all
+    say the case was never reviewed, and beside it the rules human_approved carries, the covering
+    review and the disposition among them, going unasked.
+    """
+    pack = approved_pack(tmp_path)
+    honest = copy.deepcopy(pack)
+    validation = case_by_id(pack, "widget-shell")["validation"]
+    validation.update({"review_state": state, "level": level})
+    reanchor(pack)
+
+    with pytest.raises(ContractError, match="the latest recorded review approved this case, so "
+                                            "the recorded review state must be human_approved, "
+                                            f"not {state}"):
+        validate_document("case-pack", pack)
+    with pytest.raises(ContractError, match="this pack does not load as a case pack"):
+        build_plan(pack, "widget-abc", HASH)
+
+    # A withdrawal is a decision a named reviewer records, and recording one leaves a pack that
+    # loads: the state record_review writes is the state the contract then requires.
+    record_review(honest, "widget-shell", reviewer="A. Djudicator", role="adjudicator",
+                  decision="reject", note="the mechanism is not what the label says", clock=CLOCK)
+    assert case_by_id(honest, "widget-shell")["validation"]["review_state"] == "mechanically_checked"
+    assert validate_document("case-pack", honest) is honest
+    assert build_plan(honest, "widget-abc", HASH)[0]["scope"] == "draft"
+
+
 def test_a_lesser_approval_of_an_edit_cannot_launder_an_older_independent_level(tmp_path):
     """Reproduces approval laundering: the review covering the edit is the one that must earn L3.
 
@@ -1755,19 +1805,29 @@ def test_deleting_the_review_that_withdrew_an_approval_cannot_pass_unnoticed(tmp
         validate_document("case-pack", unchained)
 
     # Rebuilding the chain and the head is what a deletion costs, and it is a deliberate act: the
-    # pack loads again, and the history it now states is one the person who edited it wrote. The
-    # withdrawal left a second record behind, the state it moved the case to, so restoring the
-    # approval means writing that back as well and anchoring the result.
+    # history the pack then states is one the person who edited it wrote. The withdrawal left a
+    # second record behind, the state it moved the case to, so restoring the approval means writing
+    # that back as well and anchoring the result.
     rebuilt = copy.deepcopy(withdrawn)
     rechain(rebuilt, case_by_id(rebuilt, "widget-shell")["validation"])
-    assert validate_document("case-pack", rebuilt) is rebuilt
-    assert build_plan(rebuilt, "widget-abc", HASH)[0]["scope"] == "draft", \
-        "deleting the entry does not restore the state the withdrawal moved the case out of"
+    # Changed deliberately this round: the rebuilt pack used to load, and to plan as a draft on the
+    # strength of the mechanically_checked state the withdrawal left behind. That is the mirror of
+    # the state this contract already refused: the latest recorded review now approves the case, so
+    # a state saying it is unreviewed is the same disagreement between two records of one fact,
+    # read the other way round. The operative-review rule is symmetrical, so the load names it.
+    with pytest.raises(ContractError, match="the latest recorded review approved this case, so the "
+                                            "recorded review state must be human_approved, not "
+                                            "mechanically_checked"):
+        validate_document("case-pack", rebuilt)
+    with pytest.raises(ContractError, match="this pack does not load as a case pack"):
+        build_plan(rebuilt, "widget-abc", HASH)
+
     case_by_id(rebuilt, "widget-shell")["validation"].update(
         {"review_state": "human_approved", "level": "L3"})
     reanchor(rebuilt)
     assert validate_document("case-pack", rebuilt) is rebuilt
-    assert build_plan(rebuilt, "widget-abc", HASH)[0]["scope"] == "reviewed"
+    assert build_plan(rebuilt, "widget-abc", HASH)[0]["scope"] == "reviewed", \
+        "restoring the approval takes the state, the level, the chain, the head, and the anchor"
 
 
 def test_the_three_reproductions_are_refused_end_to_end(tmp_path):

@@ -804,3 +804,75 @@ test("a write that returns an undriven generator is a lost event, not clean capt
   assert.deepEqual(plain.getState(), { dropped_events: 0, capture_gap: false, last_sink_error: null });
   assert.deepEqual(awaited.getState(), { dropped_events: 0, capture_gap: false, last_sink_error: null });
 });
+
+test("a payload property Object.keys cannot see is refused, never dropped", async () => {
+  // The copy walked with Object.keys, which reports own enumerable string keys and nothing
+  // else, so a symbol-keyed property and a non-enumerable one were silently left out of the
+  // stored payload: the event was recorded, the capture state read clean, and the record was
+  // short of what the caller handed over. A symbol key is JavaScript's spelling of the
+  // non-string object key Python's _copy_json refuses, and a non-enumerable own property is
+  // still a property of the payload, so both are refused and both cost a capture gap.
+  const seen = []; const observer = new Observer({ mode: "content", sink: { write: e => seen.push(e) }, idFactory: ids(), clock: clock() });
+  const symbolKeyed = () => ({ kept: 1, [Symbol("hidden")]: "value" });
+  const nonEnumerable = () => {
+    const payload = { kept: 1 };
+    Object.defineProperty(payload, "hidden", { value: "value", enumerable: false });
+    return payload;
+  };
+  for (const build of [symbolKeyed, nonEnumerable]) {
+    assert.equal(await observer.emit(event({ metadata: build() })), undefined);
+    assert.equal(await observer.emit(event({ content: build() })), undefined);
+    // Nested as deep as one level, where the copy is what walks it rather than the input gate.
+    assert.equal(await observer.emit(event({ metadata: { inner: build() } })), undefined);
+  }
+  assert.deepEqual(seen, []);
+  assert.equal(observer.getState().dropped_events, 6);
+  assert.equal(observer.getState().capture_gap, true);
+  // The control: the same payload without the invisible property is stored whole, and a
+  // redactor's replacement is held to the rule too, because its output is copied the same way.
+  assert.ok(await observer.emit(event({ metadata: { kept: 1 }, content: { kept: 1 } })));
+  const replacing = new Observer({
+    mode: "metadata", sink: { write: () => {} }, idFactory: ids(), clock: clock(),
+    redactor: (key, value) => key === "kept" ? symbolKeyed() : value,
+  });
+  assert.equal(await replacing.emit(event({ metadata: { kept: 1 } })), undefined);
+});
+
+test("a payload key that looks like an array index reorders the redactor too", async () => {
+  // The documented limit used to say only that the bytes differ. JavaScript orders an
+  // integer-like own property name ahead of its siblings everywhere it enumerates an object,
+  // and the redactor walk is one of those places, so the redactor is CALLED in a different
+  // order than Python calls it. A pure redactor stores the same values either way; an
+  // order-dependent one does not, which is why the guide now says so.
+  const order = [];
+  const observer = new Observer({
+    mode: "metadata", sink: { write: () => {} }, idFactory: ids(), clock: clock(),
+    redactor: (key, value) => { order.push(key); return value; },
+  });
+  assert.ok(await observer.emit(event({ metadata: { alpha: 1, "2": 2, beta: 3 } })));
+  assert.deepEqual(order, ["2", "alpha", "beta"]);
+  // Python's _redact walks the same payload in insertion order, alpha, 2, beta. The two orders
+  // are compared across the languages nowhere, because the parity matrix excludes such keys.
+});
+
+test("a caller's run and producer ID are kept in off mode", async () => {
+  // "In off mode both are the string off" was true only of an observer given neither. Off mode
+  // consumes no ID from the factory; it does not discard the IDs the caller supplied, and a
+  // harness that names its run once and constructs observers in every mode gets that name back.
+  const named = new Observer({ mode: "off", runId: "run-7", producerId: "producer-7",
+    idFactory: { next: () => { throw new Error("off mode must not call this"); } } });
+  assert.equal(named.runId, "run-7");
+  assert.equal(named.producerId, "producer-7");
+  // Absent, and unusable, are the two cases that fall back to the literal.
+  const bare = new Observer({ mode: "off", idFactory: { next: () => { throw new Error("off mode must not call this"); } } });
+  assert.equal(bare.runId, "off");
+  assert.equal(bare.producerId, "off");
+  const unusable = new Observer({ mode: "off", runId: "", producerId: 7 });
+  assert.equal(unusable.runId, "off");
+  assert.equal(unusable.producerId, "off");
+  // A recording mode keeps a supplied ID the same way and asks the factory only for what is
+  // missing, so off mode is not a special case about the caller's IDs, only about the factory.
+  const recording = new Observer({ mode: "metadata", sink: { write: () => {} }, runId: "run-7", idFactory: ids() });
+  assert.equal(recording.runId, "run-7");
+  assert.equal(recording.producerId, "producer-1");
+});

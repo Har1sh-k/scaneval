@@ -22,7 +22,9 @@ inside the run directory and declared artifact paths are re-rooted before they a
 rule decides what a staged tree may contain, and :func:`_move_into_bundle` is the one place it
 is enforced: no path in a bundle may name a file outside it. A hard link is copied, a symbolic
 link is cut, and every directory that remains is a real one, so nothing in the bundle is a
-second name for a live host file and nothing in it leads out.
+second name for a live host file and nothing in it leads out. An entry the sweep cannot
+inspect or clear is a recorded failure of the invocation rather than a skipped entry, and the
+sweep completes before it reports, so the record names every one of them.
 
 Two rules hold for every path this module touches, and each of them lives in one function.
 :func:`list_directory` is the one listing: an enumeration that cannot complete is a failed
@@ -357,8 +359,8 @@ def _copy_tree_unresolved(source: Path, destination: Path) -> list[str]:
     return sorted(links)
 
 
-def _privatize(root: Path) -> tuple[list[str], list[str]]:
-    """Make every path under *root* name a file inside it; name the files copied and the links cut.
+def _privatize(root: Path) -> tuple[list[str], list[str], list[str]]:
+    """Make every path under *root* name a file inside it; name what was copied, cut, and failed.
 
     This is what a staged tree must satisfy to be part of a bundle, and the whole of it: **no
     path in a bundle may name a file outside the bundle.** Three things break that rule and each
@@ -389,9 +391,27 @@ def _privatize(root: Path) -> tuple[list[str], list[str]]:
     Anything else the scanner left, a named pipe or a socket among them, stays exactly as it
     wrote it. Those name no file, so they alias nothing, and nothing in this package opens one.
 
-    A copy or an unlink that fails raises to the caller, which records the staged output as
-    unusable rather than leaving a bundle that still aliases a host file behind a clean result.
-    So does a directory that cannot be listed, since a tree half walked is a tree not cleared.
+    Nothing here is skipped and nothing here stops the sweep. Every way an entry can resist the
+    rule, a directory that cannot be listed, an entry that cannot be inspected, a link that
+    cannot be cut, and a hard link that cannot be copied, is collected into the third returned
+    list and the walk carries on, so the caller learns about all of them; it records them and
+    refuses the invocation, because a tree only half cleared may still hold a second name for a
+    file outside the bundle and must not stand behind a clean result.
+
+    Both halves of that were defects. An entry :func:`os.lstat` refused used to be skipped in
+    silence, which is exactly what a hard link inside a directory the scanner left readable but
+    not searchable is: the listing succeeds, the stat does not, the alias stayed live in the
+    bundle, and no note, no error, and no count said so. And the first copy or unlink that failed
+    raised out of here, so every entry the walk had not yet reached stayed aliased while the
+    record named only the problem that stopped it. A failure to observe an entry is a recorded
+    failed observation, never a skip, which is the rule :func:`list_directory` states for a
+    listing and this one keeps for an entry.
+
+    The walk is this function's own rather than :func:`walk_entries` for the same reason: a
+    generator that raises cannot be resumed, so one unlistable directory ended the sweep for
+    every directory after it too. An entry's kind is read with :func:`os.lstat` rather than from
+    the directory entry, because an entry that cannot be stat'ed has no knowable kind and a link
+    must never be followed to learn one.
 
     The limit. The bytes copied are the bytes at this moment, which is after the scanner's
     process has exited but is still a read the scanner could have raced had it left something
@@ -399,35 +419,59 @@ def _privatize(root: Path) -> tuple[list[str], list[str]]:
     """
     dealiased: list[str] = []
     cut: list[str] = []
-    for path, _entry in walk_entries(root):
-        relative = path.relative_to(root).as_posix()
+    failures: list[str] = []
+    pending = [Path(root)]
+    while pending:
+        directory = pending.pop()
         try:
-            entry = os.lstat(path)
-        except OSError:
+            entries = list_directory(directory)
+        except OSError as exc:
+            failures.append(f"{directory.relative_to(root).as_posix()}: the directory could not "
+                            f"be listed, so nothing in it was de-aliased: {_failure_message(exc)}")
             continue
-        if stat.S_ISLNK(entry.st_mode):
+        for entry in entries:
+            path = Path(entry.path)
+            relative = path.relative_to(root).as_posix()
             try:
-                target = os.readlink(path)
-            except OSError:
-                target = "an unreadable target"
-            os.unlink(path)
-            cut.append(f"{relative} -> {target}")
-            continue
-        if not stat.S_ISREG(entry.st_mode) or entry.st_nlink <= 1:
-            continue
-        private = path.with_name(f".{path.name}.{uuid.uuid4().hex}.dealias")
-        try:
-            shutil.copyfile(path, private)
-            os.chmod(private, stat.S_IMODE(entry.st_mode))
-            os.replace(private, path)
-        except OSError:
-            Path(private).unlink(missing_ok=True)
-            raise
-        dealiased.append(relative)
-    return sorted(dealiased), sorted(cut)
+                status = os.lstat(path)
+            except OSError as exc:
+                failures.append(f"{relative}: the entry could not be inspected, so whether it "
+                                f"names a file outside the bundle is unknown: {_failure_message(exc)}")
+                continue
+            if stat.S_ISLNK(status.st_mode):
+                try:
+                    target = os.readlink(path)
+                except OSError:
+                    target = "an unreadable target"
+                try:
+                    os.unlink(path)
+                except OSError as exc:
+                    failures.append(f"{relative}: the symbolic link to {target} could not be cut: "
+                                    f"{_failure_message(exc)}")
+                    continue
+                cut.append(f"{relative} -> {target}")
+                continue
+            if stat.S_ISDIR(status.st_mode):
+                pending.append(path)
+                continue
+            if not stat.S_ISREG(status.st_mode) or status.st_nlink <= 1:
+                continue
+            private = path.with_name(f".{path.name}.{uuid.uuid4().hex}.dealias")
+            try:
+                shutil.copyfile(path, private)
+                os.chmod(private, stat.S_IMODE(status.st_mode))
+                os.replace(private, path)
+            except OSError as exc:
+                Path(private).unlink(missing_ok=True)
+                failures.append(f"{relative}: the hard link could not be copied, so this path is "
+                                f"still a second name for a file outside the bundle: "
+                                f"{_failure_message(exc)}")
+                continue
+            dealiased.append(relative)
+    return sorted(dealiased), sorted(cut), sorted(failures)
 
 
-def _move_into_bundle(staging: Path, destination: Path) -> tuple[list[str], list[str]]:
+def _move_into_bundle(staging: Path, destination: Path) -> tuple[list[str], list[str], list[str]]:
     """Move one staged directory into the bundle under the rule for what a bundle may hold.
 
     A staging directory the adapter removed is recreated empty at the destination, so the
@@ -439,8 +483,11 @@ def _move_into_bundle(staging: Path, destination: Path) -> tuple[list[str], list
     This is the one place a staged tree enters a bundle, so it is the one place the rule is
     enforced: no path in a bundle may name a file outside it. :func:`_privatize` runs on the
     moved tree before anything reads, hashes, or counts a line of it, copying every hard link
-    and cutting every symbolic link. The two returned lists are the files that had to be copied
-    and the links that were cut, each as ``name -> target``, for the caller to record.
+    and cutting every symbolic link. The three returned lists are the files that had to be
+    copied, the links that were cut, each as ``name -> target``, and every entry the sweep could
+    not clear, for the caller to record. The sweep finishes whatever it finds, so the third list
+    names every such entry rather than the first one; a non-empty third list means this tree may
+    still hold a second name for a file outside the bundle, which the caller refuses.
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
     if staging.is_symlink():
@@ -883,7 +930,12 @@ def run_invocation(
     symbolic link is cut, because it is a live name for a file the bundle does not hold and,
     when it points at a directory, it hides a subtree from the copy that breaks those aliases.
     Both are named in notes, links with their targets, so the record says what the scanner left
-    where the bundle no longer holds it. See :func:`_privatize`.
+    where the bundle no longer holds it. A staged path the sweep could not inspect or clear,
+    which is what a hard link inside a directory left readable but not searchable used to be
+    until it was skipped in silence, is named in a note too and makes the invocation a recorded
+    failure: a bundle that may still hold a second name for a host file must not read as a clean
+    success. The sweep finishes before it reports, so that note names every such path rather than
+    the one that stopped it. See :func:`_privatize`.
 
     Harness state is captured without following a link, at both ends of the copy. A state
     directory that is a symbolic link, or that is not a directory at all, is left out of
@@ -1087,12 +1139,25 @@ def run_invocation(
         try:
             for staged, _resolved, final in staged_areas:
                 try:
-                    dealiased, cut = _move_into_bundle(staged, final)
+                    dealiased, cut, unswept = _move_into_bundle(staged, final)
                 except Exception as exc:
                     # A staged directory that cannot be moved is recorded below rather than
                     # raised here, where it would replace whatever failure is already in flight.
                     move_failures.append(f"{final.name}: {_failure_message(exc)}")
                 else:
+                    if unswept:
+                        # Every entry the sweep could not clear, not the first of them: this
+                        # tree may still hold a second name for a file outside the bundle, so
+                        # the note says which paths and the violation below refuses the run.
+                        # The note carries all of them because a record naming only some is the
+                        # defect this replaced.
+                        alias_notes.append(
+                            f"{len(unswept)} staged path(s) under {final.name}/ could not be "
+                            f"inspected or de-aliased, so this bundle may still hold a second "
+                            f"name for a file outside it: {'; '.join(unswept)}")
+                        move_failures.append(
+                            f"{final.name}: {len(unswept)} staged path(s) could not be inspected "
+                            f"or de-aliased: {'; '.join(unswept)}")
                     if dealiased:
                         # A fact about this invocation, not something the adapter reported, so
                         # it outlives a discarded outcome like the capture and cleanup notes.

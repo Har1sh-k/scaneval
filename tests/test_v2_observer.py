@@ -7,12 +7,16 @@ or calls a model: every clock and ID factory is injected and deterministic.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 from collections.abc import Mapping
 from copy import deepcopy
+import dataclasses
 from datetime import datetime, timedelta, timezone
 import gc
+import itertools
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -121,8 +125,25 @@ def test_off_mode_records_nothing_and_never_calls_instrumentation():
 
 
 def test_off_mode_keeps_explicit_run_and_producer_ids():
+    """``off`` mode consumes no ID from the factory; it does not discard the caller's own.
+
+    The guide said "in ``off`` mode both are the string ``off``" until a review read it against
+    this. What ``off`` mode owes the caller is that no ID factory runs, and the literal is the
+    fallback for an ID that was not supplied or was not usable, not a replacement for one that
+    was. A harness naming its run once and building an observer per mode would otherwise find
+    the ``off`` one reporting a different run than the rest.
+    """
     observer = Observer(run_id="r", producer_id="p", id_factory=raising("ids"))
     assert (observer.run_id, observer.producer_id) == ("r", "p")
+    absent = Observer(id_factory=raising("ids"))
+    assert (absent.run_id, absent.producer_id) == ("off", "off")
+    # Unusable is the other fallback: an empty string and a non-string are not IDs.
+    unusable = Observer(run_id="", producer_id=7, id_factory=raising("ids"))
+    assert (unusable.run_id, unusable.producer_id) == ("off", "off")
+    # A recording mode keeps a supplied ID the same way and asks the factory only for the rest,
+    # so off mode is not a special case about the caller's IDs, only about the factory.
+    recording = Observer(mode="metadata", sink=lambda event: None, run_id="r", id_factory=ids())
+    assert (recording.run_id, recording.producer_id) == ("r", "producer-1")
 
 
 def test_metadata_mode_omits_content_and_downgrades_complete_to_partial():
@@ -473,6 +494,33 @@ def test_the_capture_gap_key_is_written_over_a_gap_and_never_written_without_one
     assert degraded.get_state() == CaptureState(
         dropped_events=0, capture_gap=True, last_sink_error=GAP
     )
+
+
+def test_a_payload_key_that_looks_like_an_array_index_reorders_the_redactor_too():
+    """Python's half of the one shape the two emitters accept and do not write alike.
+
+    The documented limit used to say only that the bytes differ. JavaScript orders an
+    integer-like own property name ahead of its siblings everywhere it enumerates an object,
+    and the redactor walk is one of those places, so the redactor is CALLED in a different
+    order in the two languages: ``"2"`` first there, insertion order here. A redactor that
+    answers from the key, value and path it is handed stores the same values either way, which
+    is why the stored payload below is the one the caller passed; a redactor carrying state
+    across calls can store different values in the two languages, and neither emitter can tell.
+
+    The two orders are compared against each other nowhere, because the parity matrix excludes
+    such keys by name. Each language pins its own, this one here and JavaScript's in its own
+    suite, so the guide's claim about the divergence has both halves behind it.
+    """
+    order = []
+    seen, sink = recorder()
+    observer = Observer(mode="metadata", sink=sink, clock=clock(), id_factory=ids(),
+                        redactor=lambda key, value, path: order.append(key) or value)
+    assert observer.emit(**event_fields(metadata={"alpha": 1, "2": 2, "beta": 3})) is not None
+    assert order == ["alpha", "2", "beta"]
+    # The stored object is the same one either language stores; only the order of these calls,
+    # and of the bytes a sink writes, is the language's own.
+    assert seen[0]["metadata"] == {"alpha": 1, "2": 2, "beta": 3}
+    assert list(seen[0]["metadata"]) == ["alpha", "2", "beta"]
 
 
 def test_a_payload_that_is_not_a_mapping_is_refused_in_every_recording_mode():
@@ -2827,22 +2875,34 @@ def test_an_interrupt_that_stops_an_event_counts_the_event_it_lost():
 
 
 # --- the SDK guide against the code it describes -----------------------------------------
-# A document is not checked by being written carefully. Every table below is parsed out of
-# ``docs/OBSERVER_SDK.md`` and compared with what the code returns for the same inputs, in both
-# directions, because six rounds of review found the document making a claim the code had
-# stopped delivering and nothing failed when it did.
+# A document is not checked by being written carefully, and a document that advertises a check
+# it does not perform is worse than one that claims nothing, because a reader takes a checked
+# claim on trust. Everything ``docs/OBSERVER_SDK.md`` says about itself is checked here, and it
+# is checked by reading the claim out of the document rather than by keeping a second copy of
+# it: both export lists, every test name it cites in either language, the capture matrix with
+# its column definitions and its coverage counts, and the constants it states. A review found
+# each of those four advertised and only the first performed, which is how the guide came to
+# describe a column set the test was free to disagree with.
 OBSERVER_DOC = ROOT / "docs/OBSERVER_SDK.md"
+TS_SOURCE = ROOT / "sdk/typescript/src/index.ts"
+TS_SUITE = ROOT / "sdk/typescript/test/observer.test.mjs"
 CAPTURE_SECTION = "What the securevibes-agent and Fieldglass integration actually captures"
-GAPLESS_STATE = {"capture_gap": False, "dropped_events": 0}
-REAL_ROUTE = ["claude"]
-# ``metadata`` and ``content`` are one column of the capture matrix, so both are driven through
-# every traced column rather than one standing in for the other.
-TRACED_MODES = ("metadata", "content")
+# The keyword arguments ``capture_status`` takes, in the order the guide's column table lists
+# them. The names are asserted against that header rather than assumed.
+CAPTURE_INPUTS = ("trace_mode", "routes", "has_summary", "capture_state")
+# The guide counts small things in words. Spelling them out here is what lets a sentence like
+# "the ten wire event types" be compared with ``len(EVENT_TYPES)``.
+COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "ten": 10,
+               "fourteen": 14, "tenth": 10, "fourth": 4}
+
+
+def doc_text() -> str:
+    return OBSERVER_DOC.read_text(encoding="utf-8")
 
 
 def doc_section(title: str) -> list[str]:
     """The lines under one ``##`` heading of the SDK guide, up to the next one."""
-    lines = OBSERVER_DOC.read_text(encoding="utf-8").splitlines()
+    lines = doc_text().splitlines()
     headings = [index for index, line in enumerate(lines) if line.startswith("## ")]
     for position, start in enumerate(headings):
         if lines[start][3:].strip() == title:
@@ -2851,20 +2911,43 @@ def doc_section(title: str) -> list[str]:
     raise AssertionError(f"{OBSERVER_DOC} has no section titled {title!r}")
 
 
-def doc_table(lines: list[str]) -> tuple[list[str], list[list[str]]]:
-    """The first markdown table in ``lines``, as a header row and its body rows."""
-    rows = [line for line in lines if line.startswith("|")]
-    assert rows, "the section states its claim in prose a test cannot read"
-    # Split on the pipes that separate cells, never on an escaped one inside a cell: a member
-    # whose behavior column spells ``dict \| None`` is one cell, not two.
-    cells = [
-        [cell.strip().replace("\\|", "|") for cell in re.split(r"(?<!\\)\|", row.strip().strip("|"))]
-        for row in rows
-    ]
-    header, divider, *body = cells
-    assert set("".join(divider)) <= set("- :"), divider
-    assert all(len(row) == len(header) for row in body), body
-    return header, body
+def doc_tables(lines: list[str]) -> list[tuple[list[str], list[list[str]]]]:
+    """Every markdown table in ``lines``, each as a header row and its body rows."""
+    blocks: list[list[str]] = []
+    for line in lines:
+        if line.startswith("|"):
+            if not blocks or not blocks[-1] or not blocks[-1][-1].startswith("|"):
+                blocks.append([])
+            blocks[-1].append(line)
+        elif blocks and blocks[-1]:
+            blocks.append([])
+    tables = []
+    for rows in (block for block in blocks if block):
+        # Split on the pipes that separate cells, never on an escaped one inside a cell: a
+        # member whose behavior column spells ``dict \| None`` is one cell, not two.
+        cells = [
+            [cell.strip().replace("\\|", "|")
+             for cell in re.split(r"(?<!\\)\|", row.strip().strip("|"))]
+            for row in rows
+        ]
+        header, divider, *body = cells
+        assert set("".join(divider)) <= set("- :"), divider
+        assert all(len(row) == len(header) for row in body), body
+        tables.append((header, body))
+    return tables
+
+
+def doc_table(lines: list[str], first_header: str) -> tuple[list[str], list[list[str]]]:
+    """The one table in ``lines`` whose first header cell is ``first_header``.
+
+    A section carries more than one table now, so a table is chosen by what it says it is
+    rather than by being the first one. A renamed header fails here instead of silently
+    checking a different table than the one the claim is about.
+    """
+    for header, body in doc_tables(lines):
+        if header[0] == first_header:
+            return header, body
+    raise AssertionError(f"no table headed {first_header!r} in that section")
 
 
 def doc_names(cell: str) -> list[str]:
@@ -2879,50 +2962,120 @@ def doc_names(cell: str) -> list[str]:
     return [name.split("(")[0].strip() for name in names]
 
 
-def capture_calls(*, modes: tuple[str, ...] = TRACED_MODES, **overrides) -> list[dict]:
-    """The ``capture_status`` calls one column of the documented matrix stands for.
+def doc_literals(cell: str) -> list[object]:
+    """Every JSON literal a table cell spells in backticks, in the order it spells them.
 
-    A traced column is driven in every recording mode rather than one mode standing in for the
-    others, because "metadata and content are the same column" is itself a claim the document
-    makes about the adapter.
+    This is how a column definition in the guide becomes a set of calls: the cell is the
+    document's own list of the values that column covers, so the test builds runs from what the
+    document says rather than from a copy of it kept here.
     """
-    calls = []
-    for mode in modes:
-        call = dict(trace_mode=mode, routes=REAL_ROUTE, has_summary=True,
-                    capture_state=GAPLESS_STATE)
-        call.update(overrides)
-        calls.append(call)
-    return calls
+    spans = re.findall(r"`([^`]+)`", cell)
+    assert spans, f"a table cell states no value this test can read: {cell!r}"
+    return [json.loads(span) for span in spans]
 
 
-# The document's own column headings, and the exact runs each one covers. Keeping them here as a
-# mapping is what makes the comparison run both ways: a column renamed or dropped from the table
-# no longer matches a key, so it fails rather than quietly going unchecked.
-CAPTURE_COLUMNS = {
-    "trace off": capture_calls(modes=("off",)),
-    "traced": capture_calls(),
-    # Every state that does not explicitly rule a gap out, including none at all.
-    "traced, gap": [
-        call
-        for state in ({"capture_gap": True, "dropped_events": 0},
-                      {"capture_gap": False, "dropped_events": 3}, {}, None)
-        for call in capture_calls(capture_state=state)
-    ],
-    "no summary": capture_calls(has_summary=False),
-    "mock route": capture_calls(routes=["mock"]),
-}
+def doc_code(lines: list[str], language: str) -> list[str]:
+    """Every line inside the fenced code blocks of one language in ``lines``."""
+    collected, inside = [], False
+    for line in lines:
+        if line.startswith("```"):
+            inside = line.strip() == f"```{language}"
+            continue
+        if inside:
+            collected.append(line)
+    assert collected, f"no {language} code block in that section"
+    return collected
+
+
+def ts_exports(text: str) -> set[str]:
+    """Top-level ``export`` names in a TypeScript file or in a documented code block.
+
+    Only column zero counts, so the members of an exported class, which are indented in both
+    the source and the guide, are not read as exports of their own.
+    """
+    return set(re.findall(
+        r"^export (?:declare )?(?:const|type|interface|function|class) (\w+)", text, re.M
+    ))
+
+
+def ts_union(text: str, name: str) -> tuple[str, ...]:
+    """The string members of ``export type <name> = "a" | "b";``, however it is line wrapped."""
+    match = re.search(rf"^export type {name} =(.*?);", text, re.M | re.S)
+    assert match, f"no exported union named {name}"
+    return tuple(re.findall(r'"([^"]*)"', match.group(1)))
+
+
+def ts_interface_fields(text: str, name: str) -> tuple[str, ...]:
+    """The field names of ``export interface <name> { ... }``, in declaration order."""
+    match = re.search(rf"^export interface {name} \{{(.*?)^\}}", text, re.M | re.S)
+    assert match, f"no exported interface named {name}"
+    return tuple(re.findall(r"^\s*(\w+)\??:", match.group(1), re.M))
+
+
+def ts_public_members(text: str, name: str) -> set[str]:
+    """The public members of ``export class <name>``: what a caller of the SDK can reach."""
+    match = re.search(rf"^export class {name} \{{(.*?)^\}}", text, re.M | re.S)
+    assert match, f"no exported class named {name}"
+    members = re.findall(
+        r"^  (?!private |#)(?:readonly |get |set |async )*([A-Za-z_$][\w$]*)\s*[(<:]",
+        match.group(1), re.M,
+    )
+    return set(members)
+
+
+def documented_capture_columns() -> dict[str, list[dict]]:
+    """Each capture-matrix column, as every ``capture_status`` call the guide says it covers.
+
+    The guide spells one row per column and one backticked value per value that column covers,
+    so the calls are the cartesian product of its cells. The definitions used to live here as a
+    dict of hand-written calls, which left the guide free to describe a different column set
+    than the one being checked.
+    """
+    header, rows = doc_table(doc_section(CAPTURE_SECTION), "Column")
+    assert [cell.strip("`") for cell in header[1:]] == list(CAPTURE_INPUTS), header
+    columns = {}
+    for row in rows:
+        values = [doc_literals(cell) for cell in row[1:]]
+        columns[row[0]] = [
+            dict(zip(CAPTURE_INPUTS, combination, strict=True))
+            for combination in itertools.product(*values)
+        ]
+    return columns
+
+
+def documented_capture_space() -> list[dict]:
+    """Every combination of inputs the guide's input-space table enumerates."""
+    header, rows = doc_table(doc_section(CAPTURE_SECTION), "Input")
+    values = {row[0].strip("`"): doc_literals(row[1]) for row in rows}
+    assert list(values) == list(CAPTURE_INPUTS), list(values)
+    return [
+        dict(zip(CAPTURE_INPUTS, combination, strict=True))
+        for combination in itertools.product(*values.values())
+    ]
+
+
+def call_key(call: dict) -> str:
+    """A hashable spelling of one call, so covered and uncovered can be counted as sets."""
+    return json.dumps(call, sort_keys=True)
 
 
 def test_the_documented_capture_matrix_is_the_one_capture_status_returns():
-    """The adapter's capture table is read out of the guide and compared cell by cell.
+    """The adapter's capture table, its column definitions and its coverage are all read here.
 
     The document claimed ``finding.submitted`` was **complete** for any traced run that returned
     a summary. The code stopped saying that when ``capture_status`` began reading the observer's
     own capture state: a run that reported a gap or a dropped event is ``partial``, and so is one
     that reported no state at all. The document was more generous than the code in the one place
-    a reader is most likely to quote, and nothing failed, because the table was prose. It is a
-    grid now, with each column's inputs written down, so the next edit to either side has to
-    move both.
+    a reader is most likely to quote, and nothing failed, because the table was prose.
+
+    The columns then moved into a grid but their *inputs* stayed here, hardcoded, which left the
+    same hole one level up: the guide could be edited to describe a column the test never built
+    and nothing would fail. The inputs are a table in the guide now and this reads them, so the
+    document is the only copy.
+
+    The columns are a sample of the input space and not a partition of it, which the guide now
+    says and this counts: the covered and uncovered totals are compared with the three numbers
+    the guide states. What holds across the whole space is driven across the whole space.
 
     The adapter is imported inside the test rather than at module scope: this file also pins that
     importing the observer does not import the evaluator, and that boundary is checked in a
@@ -2930,37 +3083,68 @@ def test_the_documented_capture_matrix_is_the_one_capture_status_returns():
     """
     from scaneval.adapters.llm_harness import capture_status
 
-    header, rows = doc_table(doc_section(CAPTURE_SECTION))
-    assert header[:2] == ["Event type", "`capture_status` key"]
-    columns = header[2:]
-    assert set(columns) == set(CAPTURE_COLUMNS), columns
+    section = doc_section(CAPTURE_SECTION)
+    columns = documented_capture_columns()
+    header, rows = doc_table(section, "Event type")
+    assert header[1] == "`capture_status` key"
+    assert header[2:] == list(columns), (header[2:], list(columns))
     documented_types: set[str] = set()
     documented_keys: set[str] = set()
     for row in rows:
         types, keys = doc_names(row[0]), doc_names(row[1])
         documented_types |= set(types)
         documented_keys |= set(keys)
-        for column, cell in zip(columns, row[2:], strict=True):
+        for column, cell in zip(header[2:], row[2:], strict=True):
             documented = doc_names(cell)
             assert len(documented) == 1, (row[0], column, cell)
-            for arguments in CAPTURE_COLUMNS[column]:
+            for call in columns[column]:
                 returned = capture_status(
-                    arguments["trace_mode"], arguments["routes"],
-                    has_summary=arguments["has_summary"], capture_state=arguments["capture_state"],
+                    call["trace_mode"], call["routes"],
+                    has_summary=call["has_summary"], capture_state=call["capture_state"],
                 )
                 for key in keys:
-                    assert returned[key] == documented[0], (key, column, arguments)
+                    assert returned[key] == documented[0], (key, column, call)
 
     # Both directions. A key the adapter returns and the table does not carry would be an
     # undocumented capture claim, and an event type the contract declares and the table does not
     # mention would be a category nobody said anything about.
-    returned = capture_status("content", REAL_ROUTE, has_summary=True,
-                              capture_state=GAPLESS_STATE)
+    gapless = {"capture_gap": False, "dropped_events": 0}
+    returned = capture_status("content", ["claude"], has_summary=True, capture_state=gapless)
     assert documented_keys == set(returned)
     assert documented_types | {"observer.error"} == set(EVENT_TYPES)
     # "fewer than half of them", in the sentence above the table, counted rather than asserted.
-    captured = [key for key, value in returned.items() if value not in ("unavailable", "not_applicable")]
+    captured = [key for key, value in returned.items()
+                if value not in ("unavailable", "not_applicable")]
     assert len(captured) * 2 < len(EVENT_TYPES)
+
+    # The columns are a sample of the space, and the guide states by how much. Every column's
+    # runs must be runs the space enumerates, or the sample would be of something else.
+    space = documented_capture_space()
+    covered = {call_key(call) for calls in columns.values() for call in calls}
+    every = {call_key(call) for call in space}
+    assert covered <= every, sorted(covered - every)
+    stated = re.search(
+        r"The (\w+) columns name (\d+) of the (\d+) combinations that enumerates, "
+        r"and the remaining (\d+) are outside the table",
+        "\n".join(section),
+    )
+    assert stated, "the guide no longer states its coverage in the sentence this reads"
+    assert COUNT_WORDS[stated.group(1)] == len(columns)
+    assert int(stated.group(2)) == len(covered)
+    assert int(stated.group(3)) == len(every) == len(space)
+    assert int(stated.group(4)) == len(every) - len(covered)
+
+    # What the guide claims across the whole space, driven across the whole space: the columns
+    # cover 28 runs, so a claim about all 120 needs the other 92 exercised too.
+    for call in space:
+        every_run = capture_status(
+            call["trace_mode"], call["routes"],
+            has_summary=call["has_summary"], capture_state=call["capture_state"],
+        )
+        assert set(every_run) == documented_keys, call
+        assert (every_run["tool_calls"] == "not_applicable") == (call["routes"] == ["mock"]), call
+        for key in ("finding_candidate", "finding_validation", "finding_filtered"):
+            assert every_run[key] == "unavailable", (key, call)
 
 
 def test_the_documented_python_api_is_the_package_export_list():
@@ -2976,12 +3160,8 @@ def test_the_documented_python_api_is_the_package_export_list():
 
     section = doc_section("Python API")
     documented: set[str] = set()
-    inside = False
-    for line in section:
-        if line.startswith("```"):
-            inside = line.strip() == "```python"
-            continue
-        if not inside or not line or line[0] in " \t)@#":
+    for line in doc_code(section, "python"):
+        if not line or line[0] in " \t)@#":
             continue
         if line.startswith("class "):
             documented.add(line[len("class "):].split("(")[0].split(":")[0].strip())
@@ -2993,23 +3173,270 @@ def test_the_documented_python_api_is_the_package_export_list():
     assert all(hasattr(package, name) for name in package.__all__)
 
     # The member table is the same claim about one class, so it is read the same way.
-    header, rows = doc_table(section)
-    assert header[0] == "Member"
+    header, rows = doc_table(section, "Member")
     members = {name.split("(")[0] for row in rows for name in doc_names(row[0])}
     observer = Observer()
     assert members == {name for name in dir(observer) if not name.startswith("_")}
 
+    # And the field list in that table's ``emit`` row, which is the other export-shaped claim
+    # the section makes: a caller writes these names and no others, and an unknown one is a
+    # refused event rather than a dropped field.
+    from scaneval.observer.emitter import _INPUT_FIELDS
+
+    accepts = re.search(r"Accepts ((?:`\w+`, )+)and optionally ((?:`\w+`, )+`\w+`)\.",
+                        doc_text())
+    assert accepts, "the emit row no longer lists the fields this reads"
+    listed = re.findall(r"`(\w+)`", accepts.group(1) + accepts.group(2))
+    assert set(listed) == set(_INPUT_FIELDS) and len(listed) == len(_INPUT_FIELDS)
+
+
+def test_the_documented_typescript_api_is_the_sdk_export_list():
+    """The other "everything below is exported" line, which nothing checked until now.
+
+    The guide said it of both packages and the test read only the Python one, so the TypeScript
+    section carried the same promise with nothing behind it: a name added to the SDK and left
+    undocumented, or documented and never exported, would have gone on reading as checked.
+
+    It reads ``sdk/typescript/src/index.ts`` rather than ``dist/``, so it needs neither node nor
+    a build and cannot be skipped into passing. The class members are compared too, because the
+    guide's ``Observer`` block is a claim about what a caller can reach: anything ``private``
+    there is not part of it.
+    """
+    source = TS_SOURCE.read_text(encoding="utf-8")
+    section = doc_section("TypeScript API")
+    block = "\n".join(doc_code(section, "ts"))
+    assert ts_exports(block) == ts_exports(source)
+    assert ts_public_members(block, "Observer") == ts_public_members(source, "Observer")
+    # The guide's own note that the mode is private in TypeScript, checked rather than trusted.
+    assert "mode" not in ts_public_members(source, "Observer")
+    assert {"runId", "producerId", "emit", "observeAsync", "flush", "close", "getState",
+            "closed"} <= ts_public_members(source, "Observer")
+    # And its claim that only two of these exports survive as runtime values, which is what a
+    # JavaScript caller can actually import: the rest are types and vanish at the build.
+    runtime = set(re.findall(r"^export const (\w+)", source, re.M))
+    stated = re.search(r"Only `(\w+)` and `(\w+)` exist as runtime constants in TypeScript",
+                       doc_text())
+    assert runtime == set(stated.groups()) == {"SCHEMA_VERSION", "MAX_PAYLOAD_DEPTH"}
+
+
+def test_the_constants_the_guide_states_are_the_constants_both_emitters_use():
+    """Every number and reserved name the guide states, against the code that enforces it.
+
+    These were prose. A guide is where a harness author goes to learn a limit, so a stated
+    number that no longer matches the code is a worse failure than an unstated one: the reader
+    has no reason to doubt it. The Python block's comments are the values themselves, the
+    TypeScript block's unions are the same vocabulary spelled as types, and the numbers in the
+    rules are read out of the sentences that state them.
+    """
+    import scaneval.observer as package
+    from scaneval.observer import emitter
+
+    text = doc_text()
+    source = TS_SOURCE.read_text(encoding="utf-8")
+
+    # 1. The Python constants block: ``NAME  # <value>`` is the value, not a gloss of it.
+    for line in doc_code(doc_section("Python API"), "python"):
+        comment = re.fullmatch(r"([A-Z_]+) +# (.+)", line)
+        if not comment:
+            continue
+        name, stated = comment.group(1), comment.group(2)
+        value = getattr(package, name)
+        if stated[0] in '("' or stated[0].isdigit():
+            assert ast.literal_eval(stated) == value, name
+        else:
+            # The one comment that states a count rather than a literal, because ten event
+            # types would not fit the line: "the ten wire event types, in schema order".
+            count = re.match(r"the (\w+) ", stated)
+            assert count and COUNT_WORDS[count.group(1)] == len(value), (name, stated)
+
+    # 2. The same vocabulary on the TypeScript side, in the guide and in the SDK source.
+    block = "\n".join(doc_code(doc_section("TypeScript API"), "ts"))
+    for union, constant in (("RecordingMode", RECORDING_MODES), ("EventType", EVENT_TYPES),
+                            ("EventCategory", EVENT_CATEGORIES),
+                            ("CaptureStatus", CAPTURE_STATUSES)):
+        assert ts_union(block, union) == ts_union(source, union) == constant, union
+    assert re.search(r'export const SCHEMA_VERSION: "([^"]+)"', block).group(1) == SCHEMA_VERSION
+    assert re.search(r'SCHEMA_VERSION = "([^"]+)"', source).group(1) == SCHEMA_VERSION
+    documented_depth = int(re.search(r"export const MAX_PAYLOAD_DEPTH = (\d+)", block).group(1))
+    assert documented_depth == MAX_PAYLOAD_DEPTH
+    assert int(re.search(r"^export const MAX_PAYLOAD_DEPTH = (\d+)", source, re.M).group(1)) \
+        == MAX_PAYLOAD_DEPTH
+
+    # 3. Rule 8's two numbers: the limit, and the further levels it leaves inside the payload.
+    assert int(re.search(r"`MAX_PAYLOAD_DEPTH`, which is (\d+)", text).group(1)) \
+        == MAX_PAYLOAD_DEPTH
+    further = int(re.search(r"that object plus (\d+) further levels", text).group(1))
+    assert further == MAX_PAYLOAD_DEPTH - 1
+
+    # 4. The safe-integer bound, everywhere the guide spells it, and the float-integer
+    # threshold rule 4 leans on for not needing an upper bound on the decimal window.
+    spelled = re.findall(r"`2 \*\* (\d+) - (\d+)`", text)
+    assert spelled, "the guide no longer spells the safe-integer bound"
+    for base, less in spelled:
+        assert 2 ** int(base) - int(less) == emitter._MAX_SAFE_INTEGER
+    integral_from = int(re.search(r"every double at or above `2 \*\* (\d+)` is an integer",
+                                  text).group(1))
+    assert math.nextafter(2.0 ** integral_from, math.inf) - 2.0 ** integral_from == 1.0
+
+    # 5. Rule 4's two floors, and the spellings Python's repr gives them.
+    floor = float(re.search(r"A non-integral number must be at least `([\d.e+-]+)` in magnitude",
+                            text).group(1))
+    assert floor == emitter._MIN_PLAIN_DECIMAL
+    assert float(re.search(r"const MIN_PLAIN_DECIMAL = ([\d.e+-]+);", source).group(1)) == floor
+    assert "e" not in repr(floor) and "e" in repr(floor / 10)
+    over_refused = float(re.search(r"Magnitudes below `([\d.e+-]+)` are the deliberate "
+                                   r"over-refusal", text).group(1))
+    assert 0 < over_refused < floor
+    padded = re.search(r"Python pads it to two digits \(`([\de.+-]+)`\) and JavaScript does not",
+                       text).group(1)
+    assert repr(float(padded)) == padded
+
+    # 6. The counts the guide states in words.
+    numbered = [int(number) for number in re.findall(r"^\*\*(\d+)\. ", text, re.M)]
+    assert numbered == list(range(1, len(numbered) + 1)), numbered
+    rules = re.search(r"the (\w+) numbered rules of the parity contract", text).group(1)
+    assert COUNT_WORDS[rules] == len(numbered)
+    types = re.search(r"the (\w+) wire event types", text).group(1)
+    assert COUNT_WORDS[types] == len(EVENT_TYPES)
+    ordinal = re.search(r"`observer\.error` is the (\w+) event type", text).group(1)
+    assert EVENT_TYPES[COUNT_WORDS[ordinal] - 1] == "observer.error"
+    state = re.search(r"Capture state carries the same (\w+) fields\.\*\* "
+                      r"`(\w+)`, `(\w+)`, and `(\w+)`", text)
+    fields = tuple(field.name for field in dataclasses.fields(CaptureState))
+    assert COUNT_WORDS[state.group(1)] == len(fields) == 3
+    assert state.groups()[1:] == fields == ts_interface_fields(source, "CaptureState")
+
+    # 7. The two reserved strings, read off the behavior rather than off a constant.
+    gap_key = re.search(r"and set `(\w+): true` in its metadata", text).group(1)
+    message = re.search(r'one opaque constant, `"([^"]+)"`', text).group(1)
+    seen, sink = recorder()
+    clean = Observer(mode="metadata", sink=sink, clock=clock(), id_factory=ids())
+    # "Neither emitter ever writes false": nothing at all is written without a gap.
+    assert gap_key not in clean.emit(**event_fields(metadata={}))["metadata"]
+    assert clean.get_state().last_sink_error is None
+    broken = Observer(mode="metadata", sink=raising("sink"), clock=raising("clock"),
+                      id_factory=ids())
+    assert broken.emit(**event_fields(metadata={}))["metadata"][gap_key] is True
+    assert broken.get_state().last_sink_error == message
+    assert len(seen) == 1
+    assert re.search(rf'const gapKey = "{gap_key}"', source)
+    assert re.search(rf'const gapMessage = "{message}"', source)
+
+
+def test_the_key_order_the_guide_spells_is_the_order_an_event_carries():
+    """Rule 10's list, read out of the guide and compared with a real event and the schema.
+
+    The rule names nine keys, defers the five link fields to the schema's own order, and names
+    three more. A reader joining traces on field position takes that list literally, so it is
+    built here exactly as the sentence describes it, including the deferral, and compared with
+    the keys an event actually carries when every optional field is supplied.
+    """
+    text = doc_text()
+    rule = re.search(r"\*\*10\. Emitted key order is the schema's declaration order\.\*\* "
+                     r"(.+?), then the link fields in the order the schema lists them, then (.+?)\.",
+                     text)
+    assert rule, "rule 10 no longer spells its order in the sentence this reads"
+    head = re.findall(r"`(\w+)`", rule.group(1))
+    tail = re.findall(r"`(\w+)`", rule.group(2))
+    # The schema's own link list: every declared property that is optional and is neither a
+    # payload nor the duration, in declaration order, which is what the sentence defers to.
+    optional = [name for name in SCHEMA["properties"] if name not in SCHEMA["required"]]
+    links = [name for name in optional if name not in ("duration_ms", "content")]
+    assert len(links) == 5, links
+    seen, sink = recorder()
+    observer = Observer(mode="content", sink=sink, run_id="r", producer_id="p",
+                        clock=clock(), id_factory=ids())
+    assert observer.emit(**event_fields(duration_ms=5, **dict.fromkeys(links, "link"))) is not None
+    assert list(seen[0]) == head + links + tail
+    # And the schema's own declaration order is that same list, which is what the rule claims
+    # the emitter follows rather than merely agreeing with by accident.
+    assert list(SCHEMA["properties"]) == head + links + tail
+
+
+def test_the_redactor_key_names_the_guide_lists_are_the_ones_it_hides():
+    """Rule 7's key list and its two Unicode counterexamples, read out of the guide.
+
+    The list is what a harness author reads to know whether their own key name will be hidden,
+    so it is the list most worth being wrong about, and it was prose. The counterexamples were
+    worse than prose: the sentence spelled the Kelvin-sign key as ``toKen`` with an ordinary
+    ASCII ``K``, which both languages hide and always did, so the example demonstrated the
+    opposite of the rule it was under. The code points are named in the guide now, and read
+    from it here.
+    """
+    from scaneval.observer import default_redactor
+
+    text = doc_text()
+    listed = re.search(r"Both hide the same whole key names \((.+?), any case\)", text).group(1)
+    names = re.findall(r"`([^`]+)`", listed)
+    assert len(names) >= 11, names
+    for name in names:
+        # ``credential(s)`` is two names in one span: the plural is optional in the pattern.
+        for spelled in ([name] if "(" not in name else
+                        [name.replace("(s)", ""), name.replace("(s)", "s")]):
+            for cased in (spelled, spelled.upper(), spelled.title()):
+                assert default_redactor(cased, "value", ()) == "[REDACTED]", cased
+    contains = re.search(r"neither hides a key that merely contains one, such as `(\w+)`", text)
+    assert default_redactor(contains.group(1), "value", ()) == "value"
+    # The two lookalikes, by code point rather than by glyph.
+    token = re.search(r"spelling `token` with (U\+[0-9A-F]{4}) in place of its `k`", text).group(1)
+    secret = re.search(r"one spelling `secret` with (U\+[0-9A-F]{4}) in place of its `s`",
+                       text).group(1)
+    folded = "to" + chr(int(token[2:], 16)) + "en"
+    long_s = chr(int(secret[2:], 16)) + "ecret"
+    assert default_redactor(folded, "value", ()) == "value", folded
+    assert default_redactor(long_s, "value", ()) == "value", long_s
+    # The control: the ASCII spellings of the same two keys are hidden, so the counterexamples
+    # are about the code points and not about the words.
+    assert default_redactor("token", "value", ()) == default_redactor("secret", "value", ()) \
+        == "[REDACTED]"
+
+
+def test_the_payload_number_window_the_guide_states_is_the_one_the_emitter_enforces():
+    """The guide's accepted range for a payload number, driven at the bounds it names.
+
+    The numbers in rule 4 are the reason a harness scales a small value before it emits it, so
+    they are the numbers most worth being wrong about. Each bound is read out of the sentence
+    that states it and then emitted, rather than restated here.
+    """
+    text = doc_text()
+    bound = 2 ** int(re.search(r"`2 \*\* (\d+) - 1`", text).group(1)) - 1
+    floor = float(re.search(r"A non-integral number must be at least `([\d.e+-]+)` in magnitude",
+                            text).group(1))
+    over_refused = float(re.search(r"Magnitudes below `([\d.e+-]+)` are the deliberate "
+                                   r"over-refusal", text).group(1))
+    seen, sink = recorder()
+    observer = Observer(mode="metadata", sink=sink, clock=clock(), id_factory=ids())
+    kept = observer.emit(**event_fields(metadata={
+        "bound": bound, "floor": floor, "negative_floor": -floor,
+        # "It is stored as an integer, because JavaScript has one number type", and -0.0 with it.
+        "integral_float": 5.0, "negative_zero": -0.0,
+    }))
+    assert kept["metadata"] == {"bound": bound, "floor": floor, "negative_floor": -floor,
+                                "integral_float": 5, "negative_zero": 0}
+    assert isinstance(kept["metadata"]["integral_float"], int)
+    for refused in (bound + 1, -(bound + 1), floor / 10, over_refused, over_refused / 10):
+        assert observer.emit(**event_fields(metadata={"value": refused})) is None, refused
+    assert len(seen) == 1
+    assert observer.get_state().dropped_events == 5
+
 
 def test_every_test_the_guide_names_still_exists():
-    """The guide pins its claims to tests by name, so the names have to be real.
+    """The guide pins its claims to tests by name, so the names have to be real, in both suites.
 
     Most of what this document promises is followed by the test that holds it, cited in
     backticks. A renamed or deleted test leaves the promise standing with nothing behind it,
-    and reads exactly like a checked one. The names are collected out of the document and
-    looked up in the suite here, which is the cheapest possible version of the same rule the
-    capture matrix and the API list follow: a claim about the code is compared with the code.
+    and reads exactly like a checked one.
+
+    It used to look up the Python names alone while the guide said "every test this guide cites
+    by name is looked up the same way", which was false of the four TypeScript tests it cited
+    as quoted prose, in the paragraphs about the divergences most likely to be quoted. A
+    TypeScript test is cited as ``observer.test.mjs::"its exact name"`` now, so it can be looked
+    up in the suite that defines it, and the guide is held to citing at least those four: a
+    citation rewritten back into bare prose would otherwise take its claim out of this check
+    without failing it.
     """
-    cited = set(re.findall(r"\btest_[a-z0-9_]+", OBSERVER_DOC.read_text(encoding="utf-8")))
+    text = doc_text()
+    cited = set(re.findall(r"\btest_[a-z0-9_]+", text))
     # ``test_v2_...`` in a path is a module, not a test function, and is checked as a file.
     modules = {name for name in cited if name.startswith("test_v2_")}
     for module in modules:
@@ -3019,3 +3446,9 @@ def test_every_test_the_guide_names_still_exists():
     )
     missing = sorted(name for name in cited - modules if f"def {name}(" not in defined)
     assert missing == [], missing
+
+    typescript = set(re.findall(r'`observer\.test\.mjs::"([^"]+)"`', text))
+    assert len(typescript) >= 4, sorted(typescript)
+    suite = TS_SUITE.read_text(encoding="utf-8")
+    absent = sorted(name for name in typescript if f'test("{name}"' not in suite)
+    assert absent == [], absent

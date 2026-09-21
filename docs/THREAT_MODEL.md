@@ -85,6 +85,72 @@ can be closed from inside this process:
 Patching individual instances of this class would misrepresent what the package defends. It
 would also be endless: each patch narrows a window that the attacker chooses the width of.
 
+## The class, named: deciding a path and using it are two operations
+
+Those instances are one defect wearing different clothes, and the shape is worth naming exactly,
+because it is what keeps coming back in review as if it were a new bug each time:
+
+**ScanEval decides what a path is at one moment and acts on that path at another, and the
+scanner owns the directory in between.** Resolving a path, listing a directory, stating an entry,
+creating a parent directory, and hashing a file are each a separate operation from the open that
+follows it. Whatever the scanner puts at that path in the gap is what gets opened. No check
+inside this process closes the gap, because the check is one of the two operations that make it.
+A check can refuse what was planted before it ran. It can say nothing about what is planted
+after.
+
+Two worked examples, both in `stage_record` in `src/scaneval/adapters/llm_harness.py`, which
+copies a harness record into this run's raw output at a path the harness itself can write to:
+
+- **A named pipe planted where a record is staged.** The staging path is checked against the
+  enclosure, then opened for writing. A harness that creates a FIFO at that path in between is
+  not trying to read or write anything through it; it is handing the invocation an open that
+  never returns. Without `O_NONBLOCK` that open blocks until a reader appears, and nothing ever
+  reads it, so the invocation hangs with no bundle, no execution record, and no evidence that the
+  run happened at all. It is the write-side twin of the pipe that used to block the record read.
+- **A destination hard-linked to a host file.** The same open carries `O_NOFOLLOW`, which refuses
+  a symbolic link as the last component. A hard link is not a symbolic link: it is a second
+  directory entry for the same inode, `O_NOFOLLOW` has nothing to refuse, and the open truncates
+  and overwrites the host file the harness linked there. The scanner does not read anything it
+  could not already read; it gets ScanEval to write, with the operator's privileges, into a file
+  of its choosing.
+
+They sit beside the restore-before-return race above. That one is a gap between two of ScanEval's
+own reads; these two are gaps between a decision about a path and the use of it. Same class,
+different window, and the scanner picks the width of each.
+
+`tests/test_v2_llm_harness.py::test_a_named_pipe_where_a_record_is_staged_does_not_block_the_invocation`
+and `::test_a_staging_destination_hard_linked_to_a_host_file_is_not_overwritten` drive both
+examples, and
+`tests/test_v2_execution.py::test_the_threat_model_document_names_the_class_two_reported_findings_belong_to`
+fails if this section stops naming the class, the examples, or the limit of the hardening.
+
+**What has been hardened here, and what that is worth.** `stage_record` now opens its destination
+with `O_NONBLOCK` and proves with `fstat`, on the descriptor it just opened, that the destination
+is a regular file carrying exactly one link, before it truncates anything or writes a byte. That
+refuses both instances above. It is cheap defence in depth and worth having, in the same way
+`read_regular_file` is worth having on the read side. It does not close the class and must never
+be read as closing it: the enclosure check and the open are still two operations, the `mkdir` and
+the open are still two operations, and a harness process still alive can plant a pipe, a link, or
+a whole substituted directory between any two of them. The same is true of the de-alias sweep in
+`execution.py`, which now records every staged entry it could not inspect instead of skipping it:
+that makes a failed observation visible, which is this package's actual job, and it still reads
+the tree at one moment rather than owning it.
+
+**What OS-level isolation gives that no check here can.** The hardenings narrow windows. An
+operating system removes the scanner's ability to act inside them at all, which is a different
+kind of thing and the only kind that closes this:
+
+- A read-only mount makes the bytes unable to change between the hash and the read. No in-process
+  check can establish that, because it can only look again and compare two moments.
+- A container or virtual machine created for one invocation and destroyed after it means no
+  process survives to act in any gap. In-process, a background process the scanner left behind is
+  invisible and unbounded.
+- A filesystem frozen before the bundle is taken out means every path ScanEval resolved is still
+  the path it opens. Inside the process, that is exactly what cannot be established.
+- An unprivileged user with no path to the operator's files means a write ScanEval is tricked
+  into making lands somewhere that does not matter. The hard-link example above is dangerous only
+  because ScanEval runs with reach the scanner should never have.
+
 ## What closes it, and what an operator should do
 
 Closing this requires taking control of the filesystem and the process away from the scanner,

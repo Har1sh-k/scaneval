@@ -38,10 +38,13 @@ this cannot read is a counted failure and never an empty directory. :func:`read_
 wraps :func:`~scaneval.execution.read_regular_file`, is the one read, so every read proves the
 file is a regular file in the same open that reads it: a named pipe the harness left where its
 own output belongs used to block the invocation forever, leaving no bundle and no record that
-the run had happened.
+the run had happened. :func:`stage_record` is the one write, and it proves the same thing about
+its destination in the open that creates it, for the same reasons in the other direction.
 
 That boundary is a check, not isolation: ``docs/THREAT_MODEL.md`` says what it does and does not
-defend against, and a harness process still running in the workspace can defeat any of it.
+defend against, and a harness process still running in the workspace can defeat any of it. The
+checks in :func:`stage_record` are the clearest case: each of them is a separate operation from
+the open that follows it, so they refuse what is planted before them and nothing planted after.
 """
 
 from __future__ import annotations
@@ -52,6 +55,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 from typing import Any, NamedTuple
 
@@ -359,6 +363,21 @@ def stage_record(source: Path, destination: Path, enclosure: Enclosure) -> str |
     other read this adapter makes: :func:`shutil.copyfile` followed a symbolic link and would
     preserve a host file the scan never wrote, and opening a named pipe for reading would block
     until something wrote to it, which nothing here ever does.
+
+    The destination is proved to be a regular file this run alone names, in the same open that
+    writes it, which is the rule :func:`~scaneval.execution.read_regular_file` keeps for a read.
+    ``O_NONBLOCK`` makes opening a named pipe planted here fail at once rather than wait forever
+    for a reader, and the descriptor is checked with :func:`os.fstat` before a byte is written:
+    anything that is not a regular file is refused, and so is one carrying a second link, because
+    ``O_NOFOLLOW`` refuses a symbolic link and a hard link is not one, so the write would have
+    truncated and overwritten whatever host file the harness had linked here. The truncation
+    happens after those checks rather than in the open, so a refused destination is left exactly
+    as it was found.
+
+    That hardening narrows two instances; it does not close the class they belong to. The
+    enclosure check and this open are still two operations, and so are the ``mkdir`` and the
+    open, so a harness process still running can plant a pipe, a link, or a whole directory in
+    between. ``docs/THREAT_MODEL.md`` states that class and what an operator has to do about it.
     """
     data, failure = read_record(source, enclosure.read(source))
     if data is None:
@@ -367,7 +386,23 @@ def stage_record(source: Path, destination: Path, enclosure: Enclosure) -> str |
         return "the staging destination does not resolve inside this run's raw output"
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o666)
+        descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
+                             | getattr(os, "O_NONBLOCK", 0), 0o666)
+    except OSError as exc:
+        return exc.strerror or str(exc)
+    try:
+        try:
+            staged = os.fstat(descriptor)
+            if not stat.S_ISREG(staged.st_mode):
+                raise OSError(errno.EINVAL, "the staging destination is not a regular file",
+                              str(destination))
+            if staged.st_nlink > 1:
+                raise OSError(errno.EMLINK, "the staging destination is a second name for another "
+                              "file, so writing the record would overwrite that file", str(destination))
+            os.ftruncate(descriptor, 0)
+        except BaseException:
+            os.close(descriptor)
+            raise
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(data)
     except OSError as exc:

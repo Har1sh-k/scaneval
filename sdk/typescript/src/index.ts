@@ -392,6 +392,14 @@ function isJsonObject(value: unknown): value is JsonObject {
  * copy, not a coercion: nothing is stringified or truncated to make it fit. The one thing it
  * normalizes is `-0`, in `wireNumber`, which chooses between two spellings of one value rather
  * than changing the value.
+ *
+ * It refuses rather than drops, which is why the own properties are read through
+ * `getOwnPropertyNames` and `getOwnPropertySymbols` instead of `Object.keys`. A symbol-keyed
+ * property is JavaScript's own spelling of the non-string object key Python's `_copy_json`
+ * refuses, and a non-enumerable own property is a value the caller put in the payload; walking
+ * with `Object.keys` silently left both out of the stored copy, so a payload could be stored
+ * short of what it carried with nothing marking the event. A dropped property misdescribes the
+ * run exactly as a truncated one would, so both are a refusal and therefore a capture gap.
  */
 function copyJson(
   value: JsonValue,
@@ -421,10 +429,19 @@ function copyJson(
   }
   // The same predicate the input gate asks, so the copy cannot refuse a shape the gate allowed.
   if (!isJsonObject(value)) throw new TypeError("non-plain JSON object");
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    // JavaScript's non-string object key. Python refuses one outright rather than dropping it.
+    throw new TypeError("non-string JSON object key");
+  }
   const result = Object.create(null) as JsonObject;
-  for (const key of Object.keys(value)) {
+  for (const key of Object.getOwnPropertyNames(value)) {
     if (!isEncodable(key)) {
       throw new TypeError("JSON object key carries an unpaired surrogate");
+    }
+    if (!Object.getOwnPropertyDescriptor(value, key)!.enumerable) {
+      // Storing the payload without it would record less than the caller handed over, and
+      // nothing on the event would say so.
+      throw new TypeError("non-enumerable JSON object property");
     }
     Object.defineProperty(result, key, {
       value: copyJson(value[key], seen, depth + 1),

@@ -51,14 +51,22 @@ every recall-at-k number is computed at are anchored, and a field added to the c
 anchored the day it is added rather than the day someone notices. A test holds every field of a
 case, a snapshot, and the pack to that split.
 
-Each subtraction is made for a record that exists rather than for one that might be recorded later.
-A draft or mechanically checked case has no review, so no digest holds what it alleges, and its
-target, controls, evidence, and represents statement are anchored along with everything else; they
-leave the anchor when an approval records :func:`label_digest` over them, which is what lets an
-edited label be re-approved without an anchor rebuilt by hand first, and that is the only reason
-they ever leave it. Every snapshot's identity is anchored in the same way until every case in the
+Each subtraction is made per record, for a digest that exists and that holds that record, rather
+than for one that might be recorded later. A draft or mechanically checked case has no review, so
+no digest holds what it alleges, and its target, controls, evidence, and represents statement are
+anchored along with everything else; they leave the anchor when an approval records
+:func:`label_digest` over them, which is what lets an edited label be re-approved without an anchor
+rebuilt by hand first, and that is the only reason they ever leave it. A snapshot's identity is
+anchored in the same way, and on two conditions rather than one
+(:func:`scaneval.contracts.snapshots_bound_by_labels`): it stays anchored until every case in the
 pack binds its own labels, because until then some case reads those bytes with no digest speaking
-for them.
+for them, and it stays anchored for as long as no case names the snapshot, because a label digest
+carries the identity of the snapshots that label names and of no others. A snapshot a pack declares
+and nothing points at is the ordinary state :func:`add_snapshot` leaves behind, and repinning it, or
+re-declaring the languages it is scanned as, lapses no approval because no approval covers it.
+Naming it in a target or a control therefore moves its identity out of the anchor: done by a write
+that is free, and done by hand it costs the anchor rebuild every hand edit of an anchored record
+costs.
 
 Inside those two records the chains do the rest, so that deleting one entry is visible rather than
 quiet. The recorded reviews are a chain rather than an array: each carries ``chain_sha256`` over
@@ -80,7 +88,9 @@ re-validates what it produces and repairing an inconsistent pack is what the wri
 A review is recorded through one write path, :func:`record_review`, whether it approves a label or
 withdraws that approval, so an approval and its withdrawal share every gate and every record. A
 rejection moves the case back to the state its mechanical checks earn, and the case is planned
-under neither: the latest recorded review is the operative one.
+under neither: the latest recorded review is the operative one. The recorded state and that review
+are two records of one fact, and the contract requires them to agree in both directions, so neither
+a withdrawal nor an approval can be written into a pack by editing the other one of the two.
 
 Admission is an explicit decision, never an absence. Only a recorded ``admitted`` decision admits a
 case to a reviewed-scope plan; a case nobody has decided on, or one recorded ``deferred``, is

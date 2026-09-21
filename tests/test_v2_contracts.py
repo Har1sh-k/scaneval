@@ -40,6 +40,7 @@ from scaneval.contracts import (
     review_chain_gap,
     snapshot_anchor_projection,
     snapshot_identity_projection,
+    snapshots_bound_by_labels,
     validate_document,
 )
 
@@ -1405,51 +1406,112 @@ def test_the_anchor_holds_the_labels_no_recorded_digest_holds():
     assert covering_review(pack, case) is None, "and it does cost the approval"
 
 
-def test_every_declared_snapshot_field_is_anchored_or_allowlisted_with_a_reason():
-    """The same rule for a snapshot, and the same two measurements.
+def orphan_snapshot_pack() -> dict:
+    """A pack of fully bound cases that also declares a snapshot no case names.
 
-    A snapshot's identity is what a label points at, so a review that carries a digest holds it.
-    That is true only where such a review was recorded, so the identity leaves the anchor only once
-    every case in the pack binds its own labels; until then a draft case reads those bytes with no
-    digest speaking for them, and repinning the snapshot under it was visible to nothing.
+    The ordinary shape of one: a snapshot is declared before the case that will point at it, which
+    is what ``add_snapshot`` does on its own.
+    """
+    pack = maximal_pack()
+    pack["snapshots"].append({**copy.deepcopy(pack["snapshots"][0]), "snapshot_id": "snap-b"})
+    return pack
+
+
+def test_every_declared_snapshot_field_is_anchored_or_allowlisted_with_a_reason():
+    """The same rule for a snapshot, and now measured through the pack that decides it.
+
+    A snapshot's identity is what a label points at, so a recorded review carrying a digest of
+    those labels holds it. That is true only of the snapshots such a review names, and only where
+    one was recorded, so both conditions are measured here against a real pack instead of being
+    passed in as an answer.
+
+    Changed deliberately this round: this test read ``snapshot_anchor_projection`` directly, with
+    ``identity_bound`` hardcoded true for one measurement and false for the other. That measured
+    the subtraction and never the rule that decides it, so no assertion in this file could fail
+    when a pack subtracted the identity of a snapshot no case names, which no label digest can hold
+    and the anchor had therefore stopped holding too.
     """
     schema = case_pack_schema()
-    snapshot = maximal_pack()["snapshots"][0]
     declared = declared_paths(schema, schema["$defs"]["snapshot"])
-    assert declared - field_paths(snapshot) == set(), "the fixture must carry every declared field"
+    assert declared - field_paths(maximal_pack()["snapshots"][0]) == set(), \
+        "the fixture must carry every declared field"
 
-    outside_unbound = declared - field_paths(snapshot_anchor_projection(snapshot))
-    escaped = outside_unbound - paths_under(SNAPSHOT_FIELDS_NOTHING_READS, declared)
-    assert escaped == set(), (
-        f"no digest holds this snapshot's {sorted(escaped)}, so the anchor has to")
-    assert SNAPSHOT_FIELDS_NOTHING_READS == {} and SNAPSHOT_UNREAD_FIELDS == frozenset(), \
-        "nothing about a snapshot goes unread"
+    def anchored_fields(pack: dict, index: int) -> set[str]:
+        """Which of that snapshot's fields the pack anchor holds, as the anchor itself projects."""
+        return field_paths(pack_anchor_projection(pack)["snapshots"][index])
 
-    outside_bound = declared - field_paths(snapshot_anchor_projection(snapshot, identity_bound=True))
+    # A snapshot a case names, in a pack where every case binds its labels: the identity, and only
+    # the identity, may be outside the anchor.
+    outside_bound = declared - anchored_fields(maximal_pack(), 0)
     escaped = outside_bound - paths_under(SNAPSHOT_FIELDS_A_DIGEST_HOLDS, declared)
     assert escaped == set(), f"{sorted(escaped)} is in neither record and in no allowlist"
     check_allowlist(SNAPSHOT_FIELDS_A_DIGEST_HOLDS, declared, outside_bound, "snapshot, bound")
 
+    # The two packs where no digest holds this snapshot's identity: one whose only case records no
+    # review at all, and one where the snapshot is declared and no case names it. The anchor is the
+    # only record either of them has, so it holds every field the contract declares.
+    unreviewed = maximal_pack()
+    unreviewed["cases"][0]["validation"]["reviews"] = []
+    unreviewed["cases"][0]["validation"].pop("reviews_sha256")
+
+    for reason, pack, index in (("no case binds its labels", unreviewed, 0),
+                                ("no case names this snapshot", orphan_snapshot_pack(), 1)):
+        outside = declared - anchored_fields(pack, index)
+        escaped = outside - paths_under(SNAPSHOT_FIELDS_NOTHING_READS, declared)
+        assert escaped == set(), (
+            f"{reason}, so no digest holds this snapshot's {sorted(escaped)} and the anchor has to")
+    assert SNAPSHOT_FIELDS_NOTHING_READS == {} and SNAPSHOT_UNREAD_FIELDS == frozenset(), \
+        "nothing about a snapshot goes unread"
+
     identity = {path.split(".")[0].split("[")[0]
-                for path in field_paths(snapshot_identity_projection(snapshot))}
+                for path in field_paths(snapshot_identity_projection(maximal_pack()["snapshots"][0]))}
     assert identity == set(SNAPSHOT_FIELDS_A_DIGEST_HOLDS) == set(SNAPSHOT_IDENTITY_FIELDS)
 
 
-def test_the_anchor_holds_a_snapshot_identity_no_recorded_digest_holds():
-    """One unreviewed case in the pack is enough to keep every snapshot identity anchored.
+def repins(pack: dict, index: int) -> list[tuple[str, dict]]:
+    """The pack repinned three ways at ``snapshots[index]``: another commit, export, and language."""
+    return [(field, {**copy.deepcopy(pack),
+                     "snapshots": [{**snapshot, field: value} if position == index else snapshot
+                                   for position, snapshot in enumerate(pack["snapshots"])]})
+            for field, value in (("commit", "c" * 40), ("tree_hash", "sha256:" + "9" * 64),
+                                 ("languages", ["go"]))]
 
-    The question is asked of the pack rather than of each snapshot, and deliberately: which
-    snapshots a case names is label content, so a per-snapshot answer would move a snapshot in and
-    out of the anchor when a control was pointed elsewhere, and a label edit on an approved case
-    would then cost an anchor rebuild. Coarse here anchors an identity some digest does hold; it
-    never leaves out one no digest holds.
+
+def test_the_anchor_holds_a_snapshot_identity_no_recorded_digest_holds():
+    """Two ways a snapshot identity is held by no digest, and the anchor has to hold both.
+
+    A label digest carries the identity of the snapshots that label names, so an identity may leave
+    the anchor only where such a digest was recorded and only for a snapshot it names. One
+    unreviewed case anywhere in the pack fails the first condition for every snapshot; a snapshot
+    the pack declares that no case points at fails the second on its own, however thoroughly the
+    rest of the pack is reviewed.
+
+    The first condition is asked of the pack rather than of each snapshot, and deliberately: which
+    snapshots a case names is label content, so asking it per snapshot would move a snapshot in and
+    out of the anchor whenever a control was pointed elsewhere, and a label edit on an approved
+    case would then cost an anchor rebuild. Coarse there anchors an identity some digest does hold.
+    Neither condition ever leaves out one no digest holds, which is what the second one fixes: the
+    orphan snapshot below had its commit, its export, and its languages inside no record at all.
     """
     pack = maximal_pack()
     assert every_case_binds_its_labels(pack)
+    assert snapshots_bound_by_labels(pack) == {"snap-a"}
     anchored(pack)
     pack["snapshots"][0]["commit"] = "b" * 40
     assert pack_anchor_gap(pack) is None, \
         "every case here holds its labels by digest, so a repin costs the approvals, not the anchor"
+
+    # A snapshot the pack declares and no case names, which is what add_snapshot leaves behind
+    # until a case is pointed at it. No label digest names it, so no approval lapses when it is
+    # repinned, and build_plan and the runner still read its export and its declared languages.
+    orphan = anchored(orphan_snapshot_pack())
+    assert every_case_binds_its_labels(orphan)
+    assert snapshots_bound_by_labels(orphan) == {"snap-a"}, "no case names snap-b"
+    for field, candidate in repins(orphan, 1):
+        assert "a record a planning decision reads was deleted" in pack_anchor_gap(candidate), \
+            f"no digest names snap-b, so its {field} has to be anchored"
+    # And snap-a, which a bound case does name, is still subtracted in that same pack.
+    assert all(pack_anchor_gap(candidate) is None for _, candidate in repins(orphan, 0))
 
     draft = copy.deepcopy(pack["cases"][0])
     draft["case_id"] = "widget-path"
@@ -1457,18 +1519,17 @@ def test_the_anchor_holds_a_snapshot_identity_no_recorded_digest_holds():
     draft["validation"] = {"level": None, "review_state": "draft", "checks": [], "reviews": []}
     pack["cases"].append(draft)
     assert not every_case_binds_its_labels(pack)
+    assert snapshots_bound_by_labels(pack) == frozenset()
     anchored(pack)
 
     # The second case reads snap-a with no digest behind it, so nothing else records those bytes.
-    for field, value in (("commit", "c" * 40), ("tree_hash", "sha256:" + "9" * 64),
-                         ("languages", ["go"])):
-        candidate = copy.deepcopy(pack)
-        candidate["snapshots"][0][field] = value
+    for field, candidate in repins(pack, 0):
         assert "a record a planning decision reads was deleted" in pack_anchor_gap(candidate), \
             f"an unreviewed case reads these bytes, so {field} has to be anchored"
 
     # An empty pack is not a pack where every case is bound; it is a pack with nothing to bind.
     assert every_case_binds_its_labels({"cases": []}) is False
+    assert snapshots_bound_by_labels({"cases": []}) == frozenset()
 
 
 def test_every_declared_pack_field_is_anchored_or_allowlisted_with_a_reason():
@@ -1503,7 +1564,11 @@ def test_every_declared_pack_field_is_anchored_or_allowlisted_with_a_reason():
             == [case_anchor_projection(case) for case in pack["cases"]])
     assert (pack_anchor_projection(pack)["snapshots"]
             == [snapshot_anchor_projection(snapshot, identity_bound=True)
-                for snapshot in pack["snapshots"]])
+                for snapshot in pack["snapshots"]]), \
+        "the one snapshot here is named by a case that binds its labels, so its identity is held"
+    assert (pack_anchor_projection(orphan_snapshot_pack())["snapshots"][1]
+            == snapshot_anchor_projection(orphan_snapshot_pack()["snapshots"][1])), \
+        "and a snapshot no case names is projected whole, because no digest holds its identity"
     assert "admissions" not in projected and "admissions_sha256" in projected, \
         "the admissions are anchored as the chain value their history ends at"
 

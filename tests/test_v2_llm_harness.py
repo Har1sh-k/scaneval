@@ -829,6 +829,79 @@ def test_a_link_where_the_staging_directory_goes_cannot_redirect_a_staged_record
     assert list(outside.iterdir()) == [], "the copy landed outside the bundle"
 
 
+@mkfifo_required
+def test_a_named_pipe_where_a_record_is_staged_does_not_block_the_invocation(tmp_path):
+    """Defence in depth against one instance of a class ``docs/THREAT_MODEL.md`` documents.
+
+    The staging path is decided and then opened, and the harness owns the directory in between,
+    so it can leave a named pipe there. Opening a pipe for writing waits for a reader, nothing in
+    ScanEval ever reads this one, and the invocation hung with no bundle and no execution record:
+    the write-side twin of the pipe that used to block the record read. ``O_NONBLOCK`` makes the
+    open fail at once instead, and the record is counted as import loss like any other record
+    that could not be staged.
+
+    This narrows one instance. It does not close the class, which is why the document carries it
+    as a worked example rather than as a fixed bug, and why
+    ``tests/test_v2_execution.py::test_the_threat_model_document_names_the_class_two_reported_findings_belong_to``
+    asserts the document still says so.
+    """
+    workspace = tmp_path / "source"
+    findings = workspace / "findings"
+    findings.mkdir(parents=True)
+    raw = tmp_path / "raw"
+    stage = raw / "harness-findings"
+    stage.mkdir(parents=True)
+    baseline = snapshot_findings(findings, _enclosure(workspace, raw))
+    (findings / "a.md").write_text(FINDING, encoding="utf-8")
+    os.mkfifo(stage / "a.md")
+
+    imported = call_with_deadline(
+        lambda: import_harness_findings(findings, harness="securevibes-agent",
+                                        artifact_prefix="harness-findings", stage_dir=stage,
+                                        baseline=baseline, enclosure=_enclosure(workspace, raw)))
+
+    assert imported.claims == [] and imported.artifacts == []
+    assert imported.lost == 1
+    assert any("could not be staged" in note for note in imported.notes)
+    assert stat.S_ISFIFO(os.lstat(stage / "a.md").st_mode), "the pipe is untouched and unread"
+
+
+def test_a_staging_destination_hard_linked_to_a_host_file_is_not_overwritten(tmp_path):
+    """The other worked example of the same class: ``O_NOFOLLOW`` stops a link it can see.
+
+    A hard link is a second directory entry for one inode, not a symbolic link, so ``O_NOFOLLOW``
+    has nothing to refuse: the open truncated the host file the harness had linked where the
+    record goes and wrote the record into it, with the operator's privileges. The destination is
+    proved to be a regular file carrying one link, on the descriptor the open returned and before
+    anything is truncated, so the host file keeps its bytes and the record is counted as loss.
+
+    Defence in depth against one instance, not a closed class: the harness can still link a file
+    there after this check and before another operation, which is what the threat model states.
+    """
+    workspace = tmp_path / "source"
+    findings = workspace / "findings"
+    findings.mkdir(parents=True)
+    raw = tmp_path / "raw"
+    stage = raw / "harness-findings"
+    stage.mkdir(parents=True)
+    baseline = snapshot_findings(findings, _enclosure(workspace, raw))
+    (findings / "a.md").write_text(FINDING, encoding="utf-8")
+    host = tmp_path / "host.md"
+    host.write_text("host bytes the scan never wrote\n", encoding="utf-8")
+    os.link(host, stage / "a.md")
+
+    imported = import_harness_findings(findings, harness="securevibes-agent",
+                                       artifact_prefix="harness-findings", stage_dir=stage,
+                                       baseline=baseline, enclosure=_enclosure(workspace, raw))
+
+    assert imported.claims == [] and imported.artifacts == []
+    assert imported.lost == 1
+    assert any("could not be staged" in note and "second name for another file" in note
+               for note in imported.notes)
+    assert host.read_text(encoding="utf-8") == "host bytes the scan never wrote\n"
+    assert host.stat().st_nlink == 2, "the link is the harness's own doing and is left alone"
+
+
 def test_a_traced_run_reports_the_capture_gap_its_own_trace_record_carries(tmp_path, monkeypatch):
     """The execution record used to say finding capture was complete beside its own gap.
 

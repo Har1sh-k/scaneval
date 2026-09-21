@@ -1937,6 +1937,34 @@ def test_the_threat_model_document_states_the_limit_this_package_does_not_defend
     assert "docs/THREAT_MODEL.md" in materialize_module.__doc__
 
 
+def test_the_threat_model_document_names_the_class_two_reported_findings_belong_to():
+    """Two findings are documented here rather than patched, so the document has to say so.
+
+    A named pipe planted where a record is staged, and a staging destination hard-linked to a
+    host file, both need the scanner to put something at a path between the moment ScanEval
+    decides that path and the moment it opens it. Neither can be closed from inside this process,
+    so the document names that class, carries both as worked examples beside the
+    restore-before-return race already there, and says what an operator gets from OS-level
+    isolation that no check in here provides. The cheap hardening that happens to cover these two
+    is stated as defence in depth and explicitly not as a closed class, which is asserted here
+    too: a package that patches instances of an unwinnable class and then reads as defending the
+    class is overstating itself, and this test is what stops the document drifting into that.
+    """
+    text = (Path(__file__).resolve().parents[1] / "docs" / "THREAT_MODEL.md").read_text(encoding="utf-8")
+    lowered = text.lower()
+
+    assert "deciding a path and using it are two operations" in lowered, "the class is named"
+    for example in ("named pipe planted where a record is staged",
+                    "destination hard-linked to a host file"):
+        assert example in lowered, f"the document must carry {example!r} as a worked example"
+    assert "stage_record" in text and "O_NONBLOCK" in text and "O_NOFOLLOW" in text
+    assert "restore-before-return" in text, "the two examples sit beside the race already there"
+    # The hardening is named as defence in depth, and the class is explicitly not closed by it.
+    assert "defence in depth" in lowered and "does not close the class" in lowered
+    # And what only the operating system provides, which is why these are documented, not patched.
+    assert "read-only mount" in lowered and "no in-process" in lowered
+
+
 # --- a base captured before the scanner ran, not resolved after it -------------------------
 
 
@@ -2110,9 +2138,13 @@ def test_a_hard_link_in_a_staged_directory_the_walk_cannot_read_is_a_recorded_fa
 
     A scanner could plant a hard link to a host file, close the directory holding it, and the
     de-alias walk reported that directory as empty: the bundle went on aliasing a live host file
-    behind a result that read as a clean success. The walk raises now, the staged move fails with
-    it, and the invocation is recorded as a failure rather than as a scan that found nothing to
-    de-alias.
+    behind a result that read as a clean success. The listing raises now, the sweep collects that
+    failure and carries on, and the invocation is recorded as a failure rather than as a scan
+    that found nothing to de-alias.
+
+    Changed deliberately in the last round: this used to assert the walk raised out of the sweep
+    and ended it. The sweep completes and collects every failure now, so the assertion is on the
+    recorded failure naming the directory rather than on the exception that once escaped.
     """
     host = tmp_path / "host.json"
     host.write_text('{"host": "bytes"}\n', encoding="utf-8")
@@ -2135,11 +2167,105 @@ def test_a_hard_link_in_a_staged_directory_the_walk_cannot_read_is_a_recorded_fa
         assert result["error"]["code"] == "outcome_contract_violation"
         assert "staged output could not be moved into the bundle" in result["error"]["message"]
         assert "PermissionError" in result["error"]["message"]
+        assert "hidden: the directory could not be listed" in result["error"]["message"]
         assert execution["status"] == "error" and execution["raw_artifacts"] == []
+        assert any("may still hold a second name for a file outside it" in note
+                   and "hidden" in note for note in execution["notes"])
         # The alias is still on disk, which is exactly why the run must not read as a clean one.
         assert host.stat().st_nlink == 2
     finally:
         restore_directory_modes(tmp_path)
+
+
+def test_a_hard_link_the_sweep_cannot_inspect_is_recorded_rather_than_skipped(tmp_path):
+    """The silent skip: an entry ``lstat`` refused left the alias in the bundle and said nothing.
+
+    A directory the scanner leaves readable but not searchable answers the listing and refuses
+    every stat of what is in it. The de-alias sweep therefore saw a hard link's name, could not
+    learn it was one, and skipped it: the bundle kept a live second name for a host file behind
+    a result that read as a clean success, with no note, no error, and no count anywhere in the
+    record. That is the same silent-swallow shape as a walk that reads an unreadable directory
+    as an empty one, one level down. A failure to inspect an entry is a recorded failed
+    observation now, and the invocation is refused because the alias may still be there.
+    """
+    host = tmp_path / "host.json"
+    host.write_text('{"host": "bytes"}\n', encoding="utf-8")
+
+    class UnsearchableStagingAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            closed = Path(kwargs["raw_dir"]) / "closed"
+            closed.mkdir()
+            os.link(host, closed / "aliased.json")
+            # Readable, so the listing succeeds; not searchable, so no stat of an entry does.
+            closed.chmod(0o400)
+            return outcome
+
+    try:
+        bundle = run(tmp_path, UnsearchableStagingAdapter(), workspace_root=tmp_path)
+
+        result = load_document(bundle / "result.json", "scan-result")
+        execution = load_document(bundle / "execution.json", "execution-record")
+        # The premise, asserted rather than assumed: the listing works and the stat does not.
+        assert [entry.name for entry in execution_module.list_directory(bundle / "raw" / "closed")] == ["aliased.json"]
+        with pytest.raises(PermissionError):
+            os.lstat(bundle / "raw" / "closed" / "aliased.json")
+        assert result["status"] == "error" and result["claims"] == []
+        assert result["error"]["code"] == "outcome_contract_violation"
+        assert "closed/aliased.json: the entry could not be inspected" in result["error"]["message"]
+        assert any("may still hold a second name for a file outside it" in note
+                   and "closed/aliased.json" in note for note in execution["notes"])
+        assert execution["raw_artifacts"] == []
+        # The alias really did survive, which is exactly why nothing may call this run clean.
+        assert host.stat().st_nlink == 2
+    finally:
+        restore_directory_modes(tmp_path)
+
+
+def test_the_sweep_finishes_and_records_every_entry_it_could_not_de_alias(tmp_path):
+    """The abort: the first failing entry ended the sweep, so everything after it stayed aliased.
+
+    ``_privatize`` raised on the first copy that failed, which left every entry the walk had not
+    reached still a second name for a host file while the record named only the problem that
+    stopped it. The sweep completes now: the two links it cannot copy are both named, and the
+    third, which it can copy, is de-aliased rather than left behind the first failure.
+    """
+    hosts = {name: tmp_path / f"{name}-host.json"
+             for name in ("a-unreadable", "b-unreadable", "z-readable")}
+    for name, host in hosts.items():
+        host.write_text(f'{{"host": "{name}"}}\n', encoding="utf-8")
+
+    class ManyLinksAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            raw = Path(kwargs["raw_dir"])
+            for name, host in hosts.items():
+                os.link(host, raw / f"{name}.json")
+            for name in ("a-unreadable", "b-unreadable"):
+                # The inode is shared, so this closes the host file too; the copy that would
+                # de-alias it has to read it and cannot.
+                (raw / f"{name}.json").chmod(0o000)
+            return outcome
+
+    bundle = run(tmp_path, ManyLinksAdapter(), workspace_root=tmp_path)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["error"]["code"] == "outcome_contract_violation"
+    message = result["error"]["message"]
+    for name in ("a-unreadable.json", "b-unreadable.json"):
+        assert f"{name}: the hard link could not be copied" in message, "every failure is named"
+        assert hosts[name.removesuffix(".json")].stat().st_nlink == 2, "still aliased, and said so"
+    assert "z-readable.json" not in message
+    # The entry after the failures was still swept, and it is recorded as the copy it was.
+    assert (bundle / "raw" / "z-readable.json").stat().st_nlink == 1
+    assert hosts["z-readable"].stat().st_nlink == 1
+    assert (bundle / "raw" / "z-readable.json").read_text(encoding="utf-8") == '{"host": "z-readable"}\n'
+    assert any("2 staged path(s) under raw/ could not be inspected or de-aliased" in note
+               and "a-unreadable.json" in note and "b-unreadable.json" in note
+               for note in execution["notes"])
+    assert any("hard links" in note and "z-readable.json" in note for note in execution["notes"])
+    assert not list(bundle.rglob("*.dealias"))
 
 
 def test_a_copied_state_directory_that_cannot_be_listed_is_a_recorded_failure(tmp_path, monkeypatch):
