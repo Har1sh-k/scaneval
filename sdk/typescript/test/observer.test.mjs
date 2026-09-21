@@ -231,6 +231,10 @@ test("the shared rejection set is refused and costs no sequence, id, or clock re
     event({ content: null }),
     event({ call_id: null }),
     event({ call_id: "" }),
+    // The name the Python receiver happens to use. It is an unknown field name here and was a
+    // TypeError out of the Python call itself until that receiver was made positional only, so
+    // the two rejection sets cover it the same way now.
+    event({ self: "shadowed" }),
   ];
   for (const input of refused) assert.equal(await observer.emit(input), undefined);
   assert.deepEqual(seen, []);
@@ -510,6 +514,48 @@ test("duration_ms must be a safe integer count of milliseconds", async () => {
   assert.deepEqual(measured.getState(), { dropped_events: 0, capture_gap: true, last_sink_error: "observer instrumentation failure" });
 });
 
+test("a payload number is stored only when both languages write it alike", async () => {
+  // Two bounds, both shared with the Python emitter and both applied in one place, on every
+  // number in every payload. An integral number stops at Number.MAX_SAFE_INTEGER, past which a
+  // JSON number no longer distinguishes neighbouring integers, so Python could write a count
+  // this language would read as a different one; that is the bound duration_ms already
+  // carries. A non-integral number stops at 1e-4, the smallest magnitude both languages spell
+  // in plain decimal notation: below it Python writes 1e-05 where JavaScript writes 0.00001,
+  // and where both use an exponent Python pads it to two digits and JavaScript does not.
+  const lines = [];
+  const observer = new Observer({ mode: "content", sink: createJsonlSink(line => lines.push(line)), idFactory: ids(), clock: clock() });
+  assert.ok(await observer.emit(event({
+    metadata: { ratio: 1.5, floor: 1e-4, negativeFloor: -1e-4, integral: 2, negativeZero: -0, maxSafe: Number.MAX_SAFE_INTEGER, minSafe: -Number.MAX_SAFE_INTEGER },
+    content: { scores: [1.5, 2, -0] },
+  })));
+  // -0 is stored as 0, which is what JSON.stringify writes for it and what Python's
+  // integral-float normalization produces, so the two hold the same value as well as writing
+  // the same bytes.
+  assert.ok(Object.is(JSON.parse(lines[0]).metadata.negativeZero, 0));
+  assert.ok(lines[0].includes('"integral":2,') && lines[0].includes('"negativeZero":0,'));
+  assert.ok(lines[0].includes('"scores":[1.5,2,0]') && lines[0].includes('"floor":0.0001'));
+  assert.equal(lines[0].includes("e-"), false);
+  const refused = [
+    { count: 2 ** 53 }, { count: -(2 ** 53) }, { count: 1e30 }, { count: 1e16 },
+    { counts: [1, 2 ** 53] }, { nested: { count: 2 ** 53 } },
+    { ratio: 1e-5 }, { ratio: 9.999999999999999e-5 },
+    // Below 1e-9 both languages write the same bytes, and both refuse these anyway: the
+    // accepted range is one window, not two with a hole between them.
+    { ratio: 1e-10 },
+  ];
+  for (const metadata of refused) assert.equal(await observer.emit(event({ metadata })), undefined);
+  // Content is copied, and therefore number checked, only in content mode.
+  assert.equal(await observer.emit(event({ content: { count: 2 ** 53 } })), undefined);
+  const metadataMode = new Observer({ mode: "metadata", sink: { write: () => {} } });
+  assert.ok(await metadataMode.emit(event({ content: { count: 2 ** 53 } })));
+  // A redactor's replacement is caller data and goes through the same one check.
+  const smuggling = new Observer({ mode: "metadata", sink: { write: () => {} }, redactor: (key, value) => key === "smuggled" ? 2 ** 53 : value });
+  assert.equal(await smuggling.emit(event({ metadata: { smuggled: 1 } })), undefined);
+  assert.equal(lines.length, 1);
+  assert.deepEqual(observer.getState(), { dropped_events: refused.length + 1, capture_gap: true, last_sink_error: "observer instrumentation failure" });
+  assert.equal(smuggling.getState().dropped_events, 1);
+});
+
 test("an event built while instrumentation failed is downgraded to partial and marked", async () => {
   const seen = []; let reads = 0;
   const observer = new Observer({
@@ -550,11 +596,12 @@ test("the Clock interface cannot carry sub-millisecond precision", async () => {
   assert.deepEqual(observer.getState(), { dropped_events: 0, capture_gap: false, last_sink_error: null });
 });
 
-test("dropped_events counts only events that reached no sink", async () => {
-  // A clock, an ID factory, or an elapsed-time source that fails leaves a delivered event
-  // carrying a fabricated or absent field. The event is marked, the gap is flagged, and the
-  // counter is left alone, because counting it would report a loss that did not happen and
-  // hide the ones that did. Python splits _mark_gap from _lost_event over exactly this.
+test("dropped_events counts only events no sink acknowledged taking", async () => {
+  // A clock, an ID factory, or an elapsed-time source that fails leaves an event the sink
+  // still took, carrying a fabricated or absent field. The event is marked, the gap is
+  // flagged, and the counter is left alone, because counting it would report a loss that did
+  // not happen and hide the ones that did. Python splits _mark_gap from _lost_event over
+  // exactly this.
   const seen = [];
   const degraded = new Observer({
     mode: "content", sink: { write: e => seen.push(e) }, runId: "r", producerId: "p",

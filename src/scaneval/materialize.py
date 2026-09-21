@@ -11,6 +11,11 @@ must be enforced outside this module.
 Every git invocation this package makes is built by :func:`git_command`, so a git call depends
 on nothing outside the directory it is given: see that function for what is neutralized and
 what is not.
+
+:func:`resolve_within` is the one containment check this package has. Every path read or written
+after a scanner ran is a path the scanner could have replaced, and the final component is not the
+only one that can be a link, so the rule is stated once here and every such path is resolved
+whole against the directory it is supposed to be inside.
 """
 
 from __future__ import annotations
@@ -60,11 +65,18 @@ class MaterializationError(RuntimeError):
     """A snapshot could not be fetched, verified, or exported as requested."""
 
 
-# Command-line settings every git invocation carries. Both are neutralizations rather than
+# Command-line settings every git invocation carries. All four are neutralizations rather than
 # preferences: ``core.hooksPath`` under a path that cannot hold a hook means no hook is ever
-# found, and an empty ``init.templateDir`` means ``git init`` copies nothing into the new
-# repository, hooks included.
-_GIT_HARDENING = ("-c", f"core.hooksPath={os.devnull}", "-c", "init.templateDir=")
+# found, an empty ``init.templateDir`` means ``git init`` copies nothing into the new repository,
+# hooks included, and the two file settings replace paths git would otherwise look for under the
+# operator's HOME. They are set on the command line rather than in the environment because that
+# is the only way to beat git's built-in fallback: ``core.attributesFile`` and
+# ``core.excludesFile`` default to ``$XDG_CONFIG_HOME/git/attributes`` and ``.../git/ignore``
+# when no configuration names them, and switching global configuration off does not switch that
+# default off. A file at either path changes the bytes git writes into a working tree, and so the
+# tree hash a whole run binds to.
+_GIT_HARDENING = ("-c", f"core.hooksPath={os.devnull}", "-c", "init.templateDir=",
+                  "-c", f"core.attributesFile={os.devnull}", "-c", f"core.excludesFile={os.devnull}")
 # The git variables the child is given. Everything else named ``GIT_*`` is removed, so no
 # variable in the operator environment can redirect a call, inject configuration, name an
 # identity, or point git at a program to run.
@@ -91,14 +103,26 @@ def git_command(args: list[str]) -> tuple[list[str], dict[str, str]]:
     ``GIT_COMMON_DIR``, ``GIT_INDEX_FILE``, ``GIT_OBJECT_DIRECTORY``,
     ``GIT_ALTERNATE_OBJECT_DIRECTORIES``, ``GIT_CEILING_DIRECTORIES``, ``GIT_NAMESPACE``), the
     ones that inject configuration (``GIT_CONFIG``, ``GIT_CONFIG_COUNT`` and its key/value
-    pairs), the ones that name an author or committer, and the ones that name a program to run
+    pairs), the ones that name an author or committer, the ones that name a program to run
     (``GIT_SSH_COMMAND``, ``GIT_EXTERNAL_DIFF``, ``GIT_PROXY_COMMAND``, ``GIT_ASKPASS``,
-    ``GIT_TEMPLATE_DIR``). Global, XDG, and system configuration are switched off with
+    ``GIT_TEMPLATE_DIR``), and the one that names a tree to read attributes from
+    (``GIT_ATTR_SOURCE``). Global, XDG, and system configuration are switched off with
     ``GIT_CONFIG_GLOBAL``, ``GIT_CONFIG_SYSTEM``, and ``GIT_CONFIG_NOSYSTEM``, so a global
     ``init.templateDir``, ``core.hooksPath``, ``core.fsmonitor``, or ``core.autocrlf`` cannot
     reach a trial workspace; system gitattributes are off for the same reason. Hooks and
     templates are switched off again on the command line, so neither a leftover value nor a
     future variable reintroduces them.
+
+    The operator's own attributes and ignore files are the same class of input and are covered
+    the same way. ``core.attributesFile`` and ``core.excludesFile`` are pointed at
+    :data:`os.devnull` on the command line, because git falls back to
+    ``$XDG_CONFIG_HOME/git/attributes`` and ``$XDG_CONFIG_HOME/git/ignore`` (``~/.config/git/``
+    when that variable is unset) when no configuration names them, and that fallback survives
+    ``GIT_CONFIG_GLOBAL``. Without this, one ``* text=auto`` or one ``*.md filter=...`` line in
+    the operator's home directory changed the bytes ``git checkout`` wrote into a cache entry,
+    and therefore the exported snapshot and the ``tree_hash`` every result in the run binds to;
+    one line in the global ignore file hid an untracked file from the ``--untracked-files=all``
+    check that is supposed to prove a cache entry is clean.
 
     What is not. The ``git`` binary itself is whatever ``PATH`` resolves, and ``PATH``, ``HOME``,
     and the rest of the non-git environment are passed through, so ssh still reads ``~/.ssh``.
@@ -230,6 +254,35 @@ def inspect_commit(url: str, commit: str, *, timeout: float = 600) -> dict:
         shutil.rmtree(staging, ignore_errors=True)
 
 
+def resolve_within(path: Path, base: Path) -> Path | None:
+    """*path* resolved whole, when it is still inside *base*; ``None`` when it is not.
+
+    The one containment check in this package, and the one rule for every path that is read or
+    written after a scanner has run. Both paths are resolved first, every symbolic link on the
+    way followed, so this catches a link anywhere in the path and not only in its last component:
+    checking the final component is what let a link one level up redirect a read to anywhere on
+    the host while each file behind it looked like an ordinary regular file. *base* itself is
+    inside *base*, and a path that does not exist yet resolves to where it would be created,
+    which is what a capture destination needs.
+
+    ``None`` means one of three things, all of which a caller must treat the same way: the path
+    left *base*, the filesystem refused to resolve it (``OSError``), or it is not a path the
+    filesystem accepts at all, such as one holding an embedded NUL byte (``ValueError``).
+
+    The limits. This compares resolved paths: it does not follow bind mounts or hard links, so it
+    is a check against the obvious escape rather than an isolation boundary. And resolving is not
+    opening, so a process still running in that directory can replace a component between the
+    check and the read; the callers here run after the scanner process has exited, which narrows
+    that window rather than closing it.
+    """
+    try:
+        resolved = path.resolve()
+        root = base.resolve()
+    except (OSError, ValueError):
+        return None
+    return resolved if resolved == root or resolved.is_relative_to(root) else None
+
+
 def sha256_file(path: Path) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
@@ -258,10 +311,18 @@ def walk_regular_files(root: Path, *, skip_top_level: frozenset[str] = frozenset
     that fails raises, and the caller decides whether that is a refused input or a failed
     observation.
 
-    Left out and never descended into: any path with a ``.git`` component, and each name in
-    *skip_top_level* at the top level. Left out as files: symbolic links and anything that is
-    not a regular file, because they have no content of their own to hash. Because an excluded
-    directory is never descended into, one of them being unreadable cannot fail the walk.
+    Left out and never descended into, at the top level only: ``.git``, and each name in
+    *skip_top_level*. Both exclusions are for directories this runner creates or hands over, and
+    the top-level restriction is the point of them. A ``.git`` at any depth used to be skipped,
+    so a scanner could put everything it wrote under a nested ``.git`` and the map, the exported
+    hash, and the modification check built from it would all report a tree nobody had touched.
+    Only the one the runner creates for a git-dependent adapter is excluded now, and an export
+    ships no other: :func:`export_snapshot` strips every ``.git`` path out of the snapshot.
+
+    Left out as files: symbolic links and anything that is not a regular file, because they have
+    no content of their own to hash. Because an excluded directory is never descended into, one
+    of them being unreadable cannot fail the walk; a nested ``.git`` that cannot be listed now
+    fails it, like any other directory whose files the map is supposed to cover.
     """
     found: dict[str, Path] = {}
     pending: list[tuple[Path, str]] = [(root, "")]
@@ -270,7 +331,7 @@ def walk_regular_files(root: Path, *, skip_top_level: frozenset[str] = frozenset
         with os.scandir(directory) as entries:
             listed = sorted(entries, key=lambda entry: entry.name)
         for entry in listed:
-            if entry.name == ".git" or (not prefix and entry.name in skip_top_level):
+            if not prefix and (entry.name == ".git" or entry.name in skip_top_level):
                 continue
             if entry.is_symlink():
                 continue

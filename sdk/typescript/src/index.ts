@@ -5,7 +5,11 @@
  * and reject the same inputs, write the same keys in the wire schema's declaration order,
  * redact by the same ASCII key-name rule, decide "was this value replaced" by the same
  * strict-inequality rule, refuse the same payload nesting depth, refuse the same strings no
- * UTF-8 sink could write, and report the same capture state fields. A rejected event consumes
+ * UTF-8 sink could write, refuse the same payload numbers, and report the same capture state
+ * fields. A payload number is the one value either language would otherwise spell its own way:
+ * `wireNumber` keeps only the numbers both write identically, an integer inside the safe-integer
+ * range or a non-integral value at least `MIN_PLAIN_DECIMAL` in magnitude, and refuses the rest
+ * as a capture gap. A rejected event consumes
  * no sequence number, no event ID, and no clock read; that is only safe because the rejection
  * sets are identical, so the rule in `validInput` is a contract rather than an implementation
  * detail. Where the two once differed, the stricter rule
@@ -26,12 +30,13 @@
  * visible capture gap. A gap says the trace is incomplete; an absent event is not evidence
  * of absent activity.
  *
- * `dropped_events` counts events that reached no sink, and nothing else. A clock read, an ID
- * read, or an elapsed-time read that failed sets `capture_gap` and marks the event it degraded,
- * but it does not increment the counter, because the event was still delivered: counting it
- * there would report a loss that did not happen and hide the ones that did. A recording
- * observer with no sink is the opposite case and is counted, because every event it builds
- * reaches nobody. Python draws the same line, between `_mark_gap` and `_lost_event`.
+ * `dropped_events` counts events no sink acknowledged taking, and nothing else; `CaptureState`
+ * states that promise and why acknowledgement rather than arrival is the word. A clock read, an
+ * ID read, or an elapsed-time read that failed sets `capture_gap` and marks the event it
+ * degraded, but it does not increment the counter, because the sink still took that event:
+ * counting it there would report a loss that did not happen and hide the ones that did. A
+ * recording observer with no sink is the opposite case and is counted, because every event it
+ * builds reaches nobody. Python draws the same line, between `_mark_gap` and `_lost_event`.
  *
  * A flush settles the writes that begin while it is already waiting, not a snapshot of the set
  * taken when it was called, and `close` drains and sets its closed flag in one loop: a close that
@@ -189,12 +194,19 @@ export interface TraceSink {
  * field. It names the failure class rather than quoting an exception, because a sink's
  * error text can carry the payload it failed to write.
  *
- * `dropped_events` counts events that reached no sink, not scanner findings and not
+ * `dropped_events` counts events no sink acknowledged taking, not scanner findings and not
  * instrumentation failures in general: a clock, ID, or elapsed-time read that failed sets
- * `capture_gap` and marks the event it degraded, but that event was delivered, so it is not
- * counted here. `capture_gap` is therefore the broader flag, and it can be true while the
+ * `capture_gap` and marks the event it degraded, but the sink still took that event, so it is
+ * not counted here. `capture_gap` is therefore the broader flag, and it can be true while the
  * counter is zero. Zero is not a claim that the harness emitted everything it should have; it
  * only says nothing the harness did emit was lost here.
+ *
+ * Acknowledgement is the exact word, and it is the only thing either emitter can observe: a
+ * sink is caller code neither looks inside, so an event counts as taken when the write returns
+ * or its promise resolves, and a write cut short teaches the emitter nothing. JavaScript has no
+ * cancellation, so here the only way a write is cut short is by throwing or rejecting, which is
+ * the sink refusing the event. Python's `CaptureState` carries the longer form of this, for the
+ * cancelled write it can have and this language cannot.
  */
 export interface CaptureState {
   dropped_events: number;
@@ -283,6 +295,54 @@ const unpairedSurrogate =
 function isEncodable(text: string): boolean {
   return !unpairedSurrogate.test(text);
 }
+/* The smallest magnitude both languages spell in plain decimal notation, and therefore the
+   smallest number the wire carries that is not an integer. JavaScript switches to exponent
+   notation below 1e-6 and Python's repr below 1e-4, and where both use an exponent they spell
+   it differently: Python pads it to two digits, writing 1e-07 where JavaScript writes 1e-7. A
+   smaller payload number would therefore leave the two emitters as different bytes, up to a
+   point: below 1e-9 every exponent has two digits in both languages and the two agree again.
+   Those are refused all the same, so the accepted range is one window rather than two with a
+   hole from 1e-9 to 1e-4 in the middle of it. A harness carrying numbers that small scales
+   them once, into a unit the wire carries, rather than discovering that 1e-10 is written and
+   1e-8 is not. Python spells the same constant `_MIN_PLAIN_DECIMAL`; changing it changes the
+   shared contract in both languages at once. */
+const MIN_PLAIN_DECIMAL = 1e-4;
+/**
+ * The one spelling of a payload number both emitters write, or a throw refusing it.
+ *
+ * A number is stored only when JavaScript and Python write it as the same bytes. This is the
+ * single place that decides that, for every number in every payload, because a trace one
+ * language can write and the other cannot read is worse than a missing event: it looks
+ * complete.
+ *
+ * An integral value must be a safe integer. Past `Number.MAX_SAFE_INTEGER` a JSON number stops
+ * distinguishing neighbouring integers, so Python could hold a value this language would read
+ * as a different one; that is the bound `duration_ms` already carries, applied to the numbers a
+ * caller puts in a payload. A non-integral value must be at least `MIN_PLAIN_DECIMAL` in
+ * magnitude, the plain decimal window the two share, including the magnitudes below 1e-9 where
+ * the two agree again and this refuses them anyway; the constant says why. The window's upper
+ * end needs no check: every double at or above 2 ** 52 is an integer, so a non-integral value
+ * never reaches it.
+ *
+ * `-0` is normalized to `0`, which is what `JSON.stringify` writes for it anyway and what
+ * Python's integral-float normalization produces, so the two hold the same value in memory as
+ * well as writing the same bytes. Nothing else is coerced: a number outside the shared range is
+ * a capture gap, never a rounded value, because a silently altered number would misdescribe the
+ * run it claims to observe. Python's `_wire_number` draws all of these lines in the same place.
+ */
+function wireNumber(value: number): number {
+  if (!Number.isFinite(value)) throw new TypeError("non-finite JSON number");
+  if (!Number.isInteger(value)) {
+    if (Math.abs(value) < MIN_PLAIN_DECIMAL) {
+      throw new TypeError("JSON number below the shared plain-decimal window");
+    }
+    return value;
+  }
+  if (!Number.isSafeInteger(value)) {
+    throw new TypeError("JSON number outside the shared safe-integer range");
+  }
+  return value === 0 ? 0 : value;
+}
 /** Python's `round`: a half goes to the even neighbour, so both languages write one integer. */
 function roundHalfToEven(value: number): number {
   const floor = Math.floor(value);
@@ -296,9 +356,11 @@ function roundHalfToEven(value: number): number {
  *
  * `depth` counts the containers already entered, so the payload object itself is checked at
  * depth 0 and nesting beyond `MAX_PAYLOAD_DEPTH` containers is refused. Non-finite numbers,
- * cycles, non-plain objects, values that are not JSON, and a string or key carrying an unpaired
- * surrogate are refused too. This is a copy, not a coercion: nothing is stringified or truncated
- * to make it fit.
+ * numbers outside the range both languages write alike, cycles, non-plain objects, values that
+ * are not JSON, and a string or key carrying an unpaired surrogate are refused too. This is a
+ * copy, not a coercion: nothing is stringified or truncated to make it fit. The one thing it
+ * normalizes is `-0`, in `wireNumber`, which chooses between two spellings of one value rather
+ * than changing the value.
  */
 function copyJson(
   value: JsonValue,
@@ -314,10 +376,7 @@ function copyJson(
     }
     return value;
   }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new TypeError("non-finite JSON number");
-    return value;
-  }
+  if (typeof value === "number") return wireNumber(value);
   if (typeof value !== "object") throw new TypeError("non-JSON value");
   if (depth >= MAX_PAYLOAD_DEPTH) {
     throw new TypeError("JSON value nested deeper than MAX_PAYLOAD_DEPTH");

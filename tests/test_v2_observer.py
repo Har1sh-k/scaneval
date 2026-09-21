@@ -41,6 +41,12 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = json.loads((ROOT / "schema/v2/trace-event.schema.json").read_text())
 FIXTURE = json.loads((ROOT / "schema/v2/fixtures/trace-event-v2.json").read_text())
 GAP = "observer instrumentation failure"
+# JavaScript's Number.MAX_SAFE_INTEGER, the largest integer the wire carries in either
+# language, spelled here rather than imported so the test states the bound it is checking.
+MAX_SAFE_INTEGER = 2**53 - 1
+# The smallest magnitude both languages spell in plain decimal notation, and so the smallest
+# non-integral number a payload can carry.
+MIN_PLAIN_DECIMAL = 1e-4
 EVALUATOR_MODULES = (
     "scaneval.contracts",
     "scaneval.scoring",
@@ -332,6 +338,115 @@ def test_a_string_no_utf8_sink_could_encode_is_refused_as_a_capture_gap():
     assert astral.emit(**event_fields(metadata={"clef \U0001d11e": "\U0001d11e"})) is not None
     assert lines[0].encode("utf-8").decode("utf-8") == lines[0]
     assert astral.get_state() == CaptureState()
+
+
+def test_a_payload_number_is_stored_only_when_both_languages_write_it_alike():
+    """A number either emitter accepts is one both write as the same bytes, or it is refused.
+
+    Two bounds, both shared with the TypeScript emitter and both applied in one place, on every
+    number in every payload. An integral number stops at the safe-integer bound ``duration_ms``
+    already carries: past ``2 ** 53 - 1`` a JSON number no longer distinguishes neighbouring
+    integers, so Python could write a count a JavaScript reader would read as a different one.
+    A non-integral number stops at 1e-4, the smallest magnitude both languages spell in plain
+    decimal notation: below it Python writes ``1e-05`` where JavaScript writes ``0.00001``, and
+    where both do use an exponent Python pads it to two digits and JavaScript does not. Below
+    1e-9 every exponent has two digits in both and the two agree again; those are refused all
+    the same, so the accepted range is one window rather than two with a hole between them.
+
+    An integral float is stored as the integer it equals, which is not a coercion but a choice
+    between two spellings of one value: JavaScript has one number type and writes ``5`` where
+    ``json.dumps`` writes ``5.0``. It is the normalization ``duration_ms`` already gets, for the
+    same reason, and it is why ``-0.0`` is stored as ``0``, which is what JavaScript writes.
+    """
+    lines: list[str] = []
+    observer = Observer(mode="content", sink=create_jsonl_sink(lines.append), clock=clock())
+    assert observer.emit(**event_fields(
+        metadata={
+            "ratio": 1.5,
+            "floor": MIN_PLAIN_DECIMAL,
+            "negative_floor": -MIN_PLAIN_DECIMAL,
+            "integral_float": 2.0,
+            "negative_zero": -0.0,
+            "max_safe": MAX_SAFE_INTEGER,
+            "min_safe": -MAX_SAFE_INTEGER,
+            "large_integral_float": 1.5e15,
+        },
+        content={"scores": [1.5, 2.0, -0.0]},
+    )) is not None
+    stored = json.loads(lines[0])
+    assert stored["metadata"]["integral_float"] == 2
+    assert stored["metadata"]["large_integral_float"] == 1500000000000000
+    # The bytes, not only the values: a trailing ".0" and a "-0" are exactly what the two
+    # languages would otherwise disagree about, and both survive a parsed comparison.
+    assert '"integral_float":2,' in lines[0]
+    assert '"negative_zero":0,' in lines[0]
+    assert '"scores":[1.5,2,0]' in lines[0]
+    assert '"ratio":1.5' in lines[0] and '"floor":0.0001' in lines[0]
+    assert "e-" not in lines[0]
+
+    refused = [
+        {"count": 2**53},
+        {"count": -(2**53)},
+        {"count": 10**30},
+        {"count": 1e16},
+        {"counts": [1, 2**53]},
+        {"nested": {"count": 2**53}},
+        {"ratio": 1e-5},
+        {"ratio": 9.999999999999999e-05},
+        # Below 1e-9 both languages write the same bytes, and both refuse these anyway: the
+        # accepted range is one window, not two with a hole between them.
+        {"ratio": 1e-10},
+    ]
+    for payload in refused:
+        assert observer.emit(**event_fields(metadata=payload)) is None, payload
+    # Content is copied, and therefore number checked, only in content mode, exactly as the
+    # depth and surrogate rules are.
+    assert observer.emit(**event_fields(content={"count": 2**53})) is None
+    metadata_mode = Observer(mode="metadata", sink=create_jsonl_sink(lines.append))
+    assert metadata_mode.emit(**event_fields(content={"count": 2**53})) is not None
+    # A redactor's replacement is caller data and goes through the same one check.
+    smuggling = Observer(
+        mode="metadata",
+        sink=create_jsonl_sink(lines.append),
+        redactor=lambda key, value, path: 2**53 if key == "smuggled" else value,
+    )
+    assert smuggling.emit(**event_fields(metadata={"smuggled": 1})) is None
+    assert len(lines) == 2
+    assert observer.get_state() == CaptureState(
+        dropped_events=len(refused) + 1, capture_gap=True, last_sink_error=GAP
+    )
+    assert smuggling.get_state().dropped_events == 1
+
+
+def test_how_an_emit_call_is_spelled_never_raises_into_the_harness():
+    """A field named ``self``, and a stray positional argument, are refused events.
+
+    Python binds arguments before the first statement of a method runs, so neither could be
+    contained by any guard inside ``emit``: a caller whose event carried a field named ``self``
+    got a :class:`TypeError` out of the call itself and a capture state that counted nothing,
+    while the same event named anything else was a counted refusal. The receiver is positional
+    only now, so ``self`` is an unknown field name like ``metdata``, and the tuple that
+    collects stray positional arguments is not a Mapping, so it reaches the same refusal by the
+    same path.
+    """
+    seen, sink = recorder()
+    observer = Observer(
+        mode="metadata", sink=sink, clock=clock(), id_factory=ids(),
+        run_id="run-spelling", producer_id="producer-spelling",
+    )
+    assert observer.emit(self="shadowed", **event_fields()) is None
+    assert observer.emit(event_fields()) is None
+    assert observer.emit(event_fields(), self="shadowed") is None
+    assert seen == []
+    assert observer.get_state() == CaptureState(
+        dropped_events=3, capture_gap=True, last_sink_error=GAP
+    )
+    # The control: the same event without that name is recorded, and the refusals above cost it
+    # no sequence number, no event ID and no clock read.
+    assert observer.emit(**event_fields()) is not None
+    assert seen[0]["sequence"] == 0
+    assert seen[0]["event_id"] == "event-1"
+    assert seen[0]["timestamp"] == "2023-11-14T22:13:20.000Z"
 
 
 @pytest.mark.parametrize("extra", [
@@ -1708,7 +1823,14 @@ def test_aflush_counts_a_write_cancelled_before_it_started():
 
 
 def test_a_write_cancelled_after_it_started_is_counted_exactly_once():
-    """The guard inside the write records that loss, and no second path counts it again."""
+    """The guard inside the write records that loss, and no second path counts it again.
+
+    The sink here stored the event before it suspended, and the count stands anyway. That is
+    the counter's promise, which is acknowledgement and not arrival: see
+    :func:`test_a_cancelled_write_is_counted_whether_or_not_the_sink_kept_the_event` for why
+    the emitter cannot tell this write from one that stored nothing, and why the direction it
+    guesses is this one.
+    """
     started = []
 
     async def sink(event):
@@ -1732,6 +1854,63 @@ def test_a_write_cancelled_after_it_started_is_counted_exactly_once():
         dropped_events=1, capture_gap=True, last_sink_error=GAP
     )
     assert len(started) == 1
+
+
+def test_a_cancelled_write_is_counted_whether_or_not_the_sink_kept_the_event():
+    """``dropped_events`` counts what no sink acknowledged taking, which is all there is to see.
+
+    Two writes cancelled at the same point, one of which had already stored its event and one
+    of which never would have. Nothing the emitter can read tells them apart: a sink is caller
+    code it never looks inside, a cancellation is delivered at whichever suspension point the
+    sink happens to be at, and a coroutine that raises ``CancelledError`` of its own marks its
+    task cancelled exactly as a real cancellation does. So both are counted, and the counter is
+    an upper bound on what the trace is missing rather than a claim about which lines are
+    absent from the file.
+
+    Counting neither would be the other reading of "events that reached no sink", and it is the
+    wrong one: it would report a clean capture state for the second write here, which reached
+    nobody, and a trace that looks complete is the failure this module exists to prevent.
+    Counting both costs one event of precision in a case the emitter cannot resolve, and
+    ``capture_gap`` says the trace is incomplete either way. The promise is stated where the
+    counter is defined rather than in each place that charges it.
+    """
+    kept: list[dict] = []
+
+    async def stored_it_first(event):
+        kept.append(event)
+        await asyncio.Event().wait()
+
+    async def stored_nothing(event):
+        await asyncio.Event().wait()
+        kept.append(event)
+
+    def run(sink):
+        async def scenario():
+            observer = Observer(mode="metadata", sink=sink, clock=clock(), id_factory=ids())
+            before = asyncio.all_tasks()
+            assert observer.emit(**event_fields()) is not None
+            # One turn lets the write start and reach the sink's own suspension point, so the
+            # cancellation lands inside the sink rather than before it. Nothing sleeps.
+            await asyncio.sleep(0)
+            queued = cancel_queued_writes(before)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            queued.clear()
+            return observer.get_state()
+
+        return asyncio.run(scenario())
+
+    lost = CaptureState(dropped_events=1, capture_gap=True, last_sink_error=GAP)
+    assert run(stored_it_first) == lost
+    assert len(kept) == 1
+    assert run(stored_nothing) == lost
+    # The premise: one sink really did take the event and the other really did not, and the two
+    # capture states are identical all the same.
+    assert len(kept) == 1
+    # The promise is written where the counter is defined, not restated loosely elsewhere.
+    promise = " ".join(CaptureState.__doc__.split())
+    assert "counts events no sink acknowledged taking" in promise
+    assert "upper bound" in promise
 
 
 def test_a_sink_that_cancels_its_own_write_task_is_counted_once_and_only_when_lost():
@@ -1890,16 +2069,20 @@ def test_redaction_follows_javascript_strict_inequality():
         return value
 
     scalars = Observer(mode="content", sink=sink, redactor=rebuilding)
+    # The integer is the largest the wire carries, which is far past CPython's small-integer
+    # cache, so rebuilding it really does produce a different object with the same value. It
+    # used to be 10 ** 18, which the payload-number bound now refuses: a value JavaScript
+    # cannot hold exactly never reaches a redactor in either language.
     scalars.emit(
         type="tool.start", capture_status="complete",
-        metadata={"tool": "grep", "matched": 10**18}, content={},
+        metadata={"tool": "grep", "matched": MAX_SAFE_INTEGER}, content={},
     )
     # Every scalar came back as a different Python object holding the same value. JavaScript
     # gives a scalar no separate identity, so an equal string or number is not a replacement
     # and this event is not redacted. Asking ``is`` would have said it was.
     assert rebuilt == [True, True]
     assert seen[0]["capture_status"] == "complete"
-    assert seen[0]["metadata"] == {"tool": "grep", "matched": 10**18}
+    assert seen[0]["metadata"] == {"tool": "grep", "matched": MAX_SAFE_INTEGER}
 
     # A container is compared by identity, so an equal rebuild is a replacement.
     containers, container_sink = recorder()

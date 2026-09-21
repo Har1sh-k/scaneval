@@ -22,6 +22,7 @@ from scaneval.materialize import (
     hash_exported_tree,
     prepare_synthetic_history,
     tree_hash,
+    verify_cached_snapshot,
     walk_regular_files,
     write_provenance,
 )
@@ -251,6 +252,29 @@ def test_the_exported_hash_raises_rather_than_shrinking_when_a_directory_cannot_
                 directory.chmod(0o700)
 
 
+def test_only_the_top_level_git_directory_is_left_out_of_the_walk(tmp_path):
+    """A ``.git`` at any depth was skipped, which handed a scanner one name to hide under.
+
+    The exclusion exists for the single repository this runner creates at the top of a trial
+    source, so that its own bookkeeping is not reported as a scanner modification. Applying it to
+    every ``.git`` component anywhere meant anything written under a nested one left the map, the
+    exported hash, and the modification check built from it, without a word.
+    """
+    source = tmp_path / "source"
+    (source / "vendor" / ".git").mkdir(parents=True)
+    (source / "vendor" / ".git" / "planted.py").write_text("written by the scanner\n", encoding="utf-8")
+    (source / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (source / ".git").mkdir()
+    (source / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    walked = walk_regular_files(source)
+
+    assert sorted(walked) == ["app.py", "vendor/.git/planted.py"]
+    assert hash_exported_tree(source)["file_count"] == 2
+    # An export never ships a nested one, which is why excluding only the top level is sound.
+    assert all(part != ".git" for part in "app.py".split("/"))
+
+
 def test_one_list_of_harness_state_directories_feeds_the_export_and_the_adapter():
     """The export stripped ``.securevibes`` but not ``.fieldglass``; the adapter claimed both.
 
@@ -309,6 +333,11 @@ def test_every_git_invocation_is_built_hermetically(monkeypatch):
 
     assert argv[0] == "git" and argv[-2:] == ["status", "--porcelain"]
     assert f"core.hooksPath={os.devnull}" in argv and "init.templateDir=" in argv
+    # The operator's own attributes and ignore files are the same class of input: git falls back
+    # to $XDG_CONFIG_HOME/git/ for both when no configuration names them, and that fallback
+    # survives GIT_CONFIG_GLOBAL, so it has to be beaten on the command line.
+    assert f"core.attributesFile={os.devnull}" in argv
+    assert f"core.excludesFile={os.devnull}" in argv
     assert {name for name in env if name.startswith("GIT_")} == {
         "GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_SYSTEM",
         "GIT_CONFIG_GLOBAL", "GIT_ATTR_NOSYSTEM", "GIT_TEMPLATE_DIR"}
@@ -316,6 +345,47 @@ def test_every_git_invocation_is_built_hermetically(monkeypatch):
     assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_TEMPLATE_DIR"] == ""
     # Everything that is not git's own knob is passed through: ssh still finds ~/.ssh.
     assert env["PATH"] == os.environ["PATH"] and env["HOME"] == os.environ["HOME"]
+
+
+def test_an_operator_file_in_home_cannot_change_the_bytes_a_snapshot_exports(tmp_path, monkeypatch):
+    """Global configuration was off, but git\'s own fallback paths under HOME were still read.
+
+    ``core.attributesFile`` and ``core.excludesFile`` default to ``$XDG_CONFIG_HOME/git/``
+    when no configuration names them, and that default survives ``GIT_CONFIG_GLOBAL``. So one
+    ``* text eol=crlf`` line in the operator\'s home directory changed the bytes ``git checkout``
+    wrote into the cache, and therefore the exported snapshot and the ``tree_hash`` every result
+    in the run binds to; one line in the global ignore file hid an untracked file from the check
+    that is supposed to prove a cache entry is clean. Both are pointed at os.devnull now.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git("init", "-q", "-b", "main", cwd=repo)
+    git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=repo)
+    (repo / "app.py").write_bytes(b"print('v1')\nprint('v2')\n")
+    git("add", "-A", "-f", ".", cwd=repo)
+    git("commit", "-q", "-m", "first", cwd=repo)
+    commit = git("rev-parse", "HEAD", cwd=repo)
+
+    home = tmp_path / "home"
+    (home / "git").mkdir(parents=True)
+    (home / "git" / "attributes").write_text("* text eol=crlf\n", encoding="utf-8")
+    (home / "git" / "ignore").write_text("planted.txt\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home))
+
+    snapshot = fetch_snapshot(str(repo), commit, tmp_path / "cache")
+    record = export_snapshot(snapshot, tmp_path / "trial")
+
+    exported = (tmp_path / "trial" / "source" / "app.py").read_bytes()
+    assert exported == b"print('v1')\nprint('v2')\n", "an operator attributes file rewrote the export"
+    assert b"\r\n" not in exported
+    assert record["trial"]["tree_hash"] == hash_exported_tree(tmp_path / "trial" / "source")["tree_hash"]
+
+    # The ignore half of the same finding: a file the operator ignores globally is still an
+    # untracked file in a cache entry that is supposed to be a clean checkout of the commit.
+    (snapshot.path / "planted.txt").write_text("left behind\n", encoding="utf-8")
+    with pytest.raises(MaterializationError, match="immutable"):
+        verify_cached_snapshot(snapshot.path, commit)
+    monkeypatch.undo()
 
 
 def test_a_git_call_cannot_be_redirected_by_the_environment(tmp_path, monkeypatch):

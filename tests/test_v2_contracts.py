@@ -8,8 +8,12 @@ import pytest
 
 from scaneval.contracts import (
     ContractError,
+    admission_chain_digest,
     canonical_json,
     canonical_sha256,
+    chain_digest,
+    check_set_digest,
+    check_set_gap,
     claimed_level_gap,
     covering_review,
     effective_level,
@@ -17,6 +21,10 @@ from scaneval.contracts import (
     label_digest,
     level_gap,
     load_document,
+    pack_anchor_digest,
+    pack_anchor_gap,
+    pack_anchor_projection,
+    recorded_check_state,
     review_chain_digest,
     review_chain_gap,
     validate_document,
@@ -759,3 +767,184 @@ def test_a_review_history_verifies_as_a_chain_with_a_recorded_end():
 
     assert "nothing says where the recorded review history ends" in review_chain_gap(reviews, None)
     assert "the history it names was deleted whole" in review_chain_gap([], head)
+
+def check_set(snapshot_id: str = "snap-a", results: tuple[str, ...] = ("pass", "pass"),
+              tree_hash: str = HASH) -> dict:
+    """One case validation block holding one anchored check set, as the write path records it."""
+    checks = [{"check": f"check-{index}", "result": result, "at": "2026-09-20T15:00:00+00:00",
+               "detail": "", "snapshot_id": snapshot_id} for index, result in enumerate(results)]
+    record = {"result": "pass" if all(r == "pass" for r in results) else "fail",
+              "tree_hash": tree_hash}
+    record["checks_sha256"] = check_set_digest(snapshot_id, record, checks)
+    return {"checks": checks, "check_sets": {snapshot_id: record}}
+
+
+def test_a_check_set_is_one_anchored_record_and_not_a_view_over_the_checks():
+    """The set states its own result and hashes its own checks, so membership cannot be edited.
+
+    Deleting the failing check, moving it to another set by rewriting its snapshot id, and editing
+    the record to say the set passed are all deletions of the same kind: each leaves the record
+    hashing to something that is no longer there. Restating the record is the deliberate act, and
+    then the pack says what the person who restated it wrote.
+    """
+    validation = check_set(results=("pass", "fail"))
+    assert recorded_check_state(validation, "snap-a") == "fail"
+    assert check_set_gap(validation, "snap-a") is None
+    assert recorded_check_state(validation, "snap-b") is None, "no set is recorded for it"
+
+    deleted = copy.deepcopy(validation)
+    deleted["checks"] = [check for check in deleted["checks"] if check["result"] == "pass"]
+    assert "a check was deleted, unattributed, reordered, or edited" in check_set_gap(deleted, "snap-a")
+    assert recorded_check_state(deleted, "snap-a") is None
+
+    moved = copy.deepcopy(validation)
+    moved["checks"][1]["snapshot_id"] = "snap-b"
+    assert "a check was deleted, unattributed, reordered, or edited" in check_set_gap(moved, "snap-a")
+    assert "records no check set for it" in check_set_gap(moved, "snap-b")
+
+    reordered = copy.deepcopy(validation)
+    reordered["checks"].reverse()
+    assert "a check was deleted, unattributed, reordered, or edited" in check_set_gap(reordered, "snap-a")
+
+    claimed = copy.deepcopy(validation)
+    claimed["check_sets"]["snap-a"]["result"] = "pass"
+    assert "a check was deleted, unattributed, reordered, or edited" in check_set_gap(claimed, "snap-a"), \
+        "the record hashes its own result too, so restating it is not a quiet edit"
+
+    # Restated over the checks it still holds, the record contradicts them instead.
+    restated = copy.deepcopy(claimed)
+    record = restated["check_sets"]["snap-a"]
+    record["checks_sha256"] = check_set_digest("snap-a", record, restated["checks"])
+    assert "records pass, but the checks it holds are fail" in check_set_gap(restated, "snap-a")
+
+    emptied = copy.deepcopy(validation)
+    emptied["checks"] = []
+    assert "no recorded check carries that snapshot" in check_set_gap(emptied, "snap-a")
+
+    unrecorded = copy.deepcopy(validation)
+    unrecorded.pop("check_sets")
+    assert "records no check set for it" in check_set_gap(unrecorded, "snap-a")
+    assert recorded_check_state(unrecorded, "snap-a") is None
+
+
+def admission(case_id: str = "widget-shell", decision: str = "admitted") -> dict:
+    """One admission decision, with only the fields the chain and the anchor read filled in."""
+    return {"case_id": case_id, "target_id": f"T-{case_id}", "decision": decision,
+            "by": "J. Curator", "at": "2026-09-20T15:00:00+00:00", "reason": "pilot slice"}
+
+
+def anchored(pack: dict) -> dict:
+    """Chain the pack's admissions and anchor the pack over them, as the write path does."""
+    previous = None
+    for entry in pack["admissions"]:
+        entry.pop("chain_sha256", None)
+        entry["chain_sha256"] = admission_chain_digest(previous, entry)
+        previous = entry["chain_sha256"]
+    pack["anchor_sha256"] = pack_anchor_digest(pack)
+    return pack
+
+
+def test_an_admission_history_verifies_as_a_chain_the_pack_anchor_ends():
+    """Admissions are a history, so lifting a decision out of it is visible.
+
+    The chain catches an edit, a reordering, and a deletion from the middle. The anchor catches the
+    deletion off the end, which the chain alone cannot see and which is the one that would restore
+    a case by dropping the rejection that kept it out.
+    """
+    pack, case = case_pack_fragment()
+    pack["admissions"] = [admission(), admission(decision="rejected")]
+    anchored(pack)
+    assert pack_anchor_gap(pack) is None
+
+    truncated = copy.deepcopy(pack)
+    del truncated["admissions"][-1]
+    assert "an admission was deleted" in pack_anchor_gap(truncated)
+
+    middle = copy.deepcopy(pack)
+    middle["admissions"] = [copy.deepcopy(pack["admissions"][1])]
+    assert "does not chain to the admission before it" in pack_anchor_gap(middle)
+
+    edited = copy.deepcopy(pack)
+    edited["admissions"][1]["decision"] = "admitted"
+    assert "does not chain to the admission before it" in pack_anchor_gap(edited)
+
+    unchained = copy.deepcopy(pack)
+    del unchained["admissions"][0]["chain_sha256"]
+    assert "records no chain_sha256" in pack_anchor_gap(unchained)
+
+    # A review cannot be replayed as an admission: the chain digest names which kind it covers.
+    assert admission_chain_digest(None, admission()) != chain_digest(None, admission(), "review")
+
+    # Rebuilding both is what the deletion costs, and it is a deliberate act.
+    assert pack_anchor_gap(anchored(truncated)) is None
+
+
+def test_the_pack_anchor_records_the_case_roster_and_where_each_history_ends():
+    """What a case cannot anchor for itself: that it is there, and that it had a history.
+
+    Deleting a case takes its chained history with it, and wiping a history takes the head that
+    would have said where it ended, so both are anchored one level up.
+    """
+    pack, case = case_pack_fragment()
+    second = copy.deepcopy(case)
+    second["case_id"] = "widget-path"
+    second["target"] = {**case["target"], "target_id": "T-widget-path"}
+    second["validation"] = {"level": None, "review_state": "draft", "checks": [], "reviews": []}
+    pack["cases"].append(second)
+    pack["admissions"] = []
+    record_history(case, [{**review(), "labels_sha256": label_digest(pack, case)}])
+    anchored(pack)
+    assert pack_anchor_gap(pack) is None
+    assert pack_anchor_projection(pack)["cases"] == [
+        {"case_id": "widget-shell", "target_id": "T-widget-shell",
+         "reviews_sha256": case["validation"]["reviews_sha256"]},
+        {"case_id": "widget-path", "target_id": "T-widget-path", "reviews_sha256": None}]
+
+    deleted = copy.deepcopy(pack)
+    del deleted["cases"][1]
+    assert "a case, a review history, or an admission was deleted" in pack_anchor_gap(deleted)
+
+    reordered = copy.deepcopy(pack)
+    reordered["cases"].reverse()
+    assert "a case, a review history, or an admission was deleted" in pack_anchor_gap(reordered)
+
+    renamed = copy.deepcopy(pack)
+    renamed["cases"][1]["case_id"] = "widget-other"
+    assert "a case, a review history, or an admission was deleted" in pack_anchor_gap(renamed)
+
+    wiped = copy.deepcopy(pack)
+    wiped["cases"][0]["validation"]["reviews"] = []
+    wiped["cases"][0]["validation"].pop("reviews_sha256")
+    assert review_chain_gap([], None) is None, \
+        "nothing inside a wiped history can complain; the anchor is what is left"
+    assert "a case, a review history, or an admission was deleted" in pack_anchor_gap(wiped)
+
+    missing = copy.deepcopy(pack)
+    missing.pop("anchor_sha256")
+    assert "anchor_sha256 is missing" in pack_anchor_gap(missing)
+
+
+def control(evidence_ids: list[str]) -> dict:
+    """One control, with only the fields the label projection reads filled in."""
+    return {"control_id": "C-widget-shell-safe", "snapshot_id": "snap-a", "type": "capability_safe",
+            "description": "d", "property": "p", "allowed_actors_inputs": "a", "assumptions": [],
+            "ruled_out_allegation": "r", "locations": [], "evidence_ids": evidence_ids}
+
+
+def test_the_label_digest_covers_the_evidence_a_control_rests_on():
+    """A control asserted from other evidence is a different control, so the approval lapses."""
+    pack, case = case_pack_fragment()
+    case["controls"] = [control(["fix"])]
+    digest = label_digest(pack, case)
+    record_history(case, [{**review(), "labels_sha256": digest}])
+    assert covering_review(pack, case) is not None
+
+    case["controls"] = [control(["inspection"])]
+    assert label_digest(pack, case) != digest
+    assert covering_review(pack, case) is None
+
+    case["controls"] = [control(["inspection", "fix"])]
+    swapped = label_digest(pack, case)
+    case["controls"] = [control(["fix", "inspection"])]
+    assert label_digest(pack, case) == swapped, "the order of the ids carries no content"
+

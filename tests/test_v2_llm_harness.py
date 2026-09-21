@@ -15,6 +15,7 @@ from scaneval.adapters.base import AdapterError, CommandResult, SystemSpec
 from scaneval.adapters.llm_harness import (
     HARNESS_PRESETS,
     TOOL_POLICY,
+    Enclosure,
     FindingsBaseline,
     HarnessImport,
     LostRecord,
@@ -60,6 +61,16 @@ The admin route registers before the auth middleware, so requests reach it unaut
 '''
 
 
+def _enclosure(workspace: Path, staging: Path | None = None) -> Enclosure:
+    """The two roots the importer is allowed to read from and write into, for a unit test.
+
+    Every path the adapter touches after the harness starts is proved to resolve inside one of
+    these, which is what catches a symbolic link above a record rather than only one at it. A
+    unit test that is not about escaping hands both roots the temporary directory it built in.
+    """
+    return Enclosure(workspace, staging if staging is not None else workspace)
+
+
 def test_frontmatter_parser_handles_arrays_quoted_strings_and_numbers():
     record, body = parse_frontmatter(FINDING)
     assert record["title"] == "Route handler skips auth: token check missing"
@@ -73,14 +84,14 @@ def test_frontmatter_parser_handles_arrays_quoted_strings_and_numbers():
 def test_import_keeps_findings_file_only_with_full_native_text(tmp_path):
     findings = tmp_path / "findings"
     findings.mkdir()
-    baseline = snapshot_findings(findings)
+    baseline = snapshot_findings(findings, _enclosure(tmp_path))
     (findings / "a.md").write_text(FINDING, encoding="utf-8")
     (findings / "b.md").write_text(FINDING.replace("SV-AUTH-AUTHBYPASS-001", "SV-X-002").replace("./src/routes/admin.ts", "/abs/path.ts"), encoding="utf-8")
     (findings / "c.md").write_text("---\ntitle: no id\n---\nbody\n", encoding="utf-8")
     stage = tmp_path / "raw" / "harness-findings"
     imported = import_harness_findings(findings, harness="securevibes-agent",
                                        artifact_prefix="harness-findings", stage_dir=stage,
-                                       baseline=baseline)
+                                       baseline=baseline, enclosure=_enclosure(tmp_path))
     assert imported.claims == [{
         "claim_id": "SV-AUTH-AUTHBYPASS-001", "allegation": "Route handler skips auth: token check missing",
         "kind": "auth_bypass", "primary_location": {"path": "src/routes/admin.ts"},
@@ -97,7 +108,8 @@ def test_import_keeps_findings_file_only_with_full_native_text(tmp_path):
     assert imported.lost == 2, "a record that yields no claim is import loss, not a note on a clean scan"
     missing = import_harness_findings(tmp_path / "missing", harness="x", artifact_prefix="y",
                                       stage_dir=tmp_path / "unused",
-                                      baseline=snapshot_findings(tmp_path / "missing"))
+                                      baseline=snapshot_findings(tmp_path / "missing", _enclosure(tmp_path)),
+                                      enclosure=_enclosure(tmp_path))
     # The fourth field is the losses themselves, not a separate count: ``lost`` is derived from
     # it, so the number and the reasons cannot disagree, and each loss carries the finding id it
     # knows so the self-report reconciliation can tell which reported finding it explains.
@@ -109,14 +121,14 @@ def test_import_keeps_findings_file_only_with_full_native_text(tmp_path):
 def test_a_finding_record_that_is_not_a_regular_file_is_counted_as_import_loss(tmp_path):
     findings = tmp_path / "findings"
     findings.mkdir()
-    baseline = snapshot_findings(findings)
+    baseline = snapshot_findings(findings, _enclosure(tmp_path))
     (findings / "a.md").write_text(FINDING, encoding="utf-8")
     (findings / "link.md").symlink_to(findings / "a.md")
     (findings / "dir.md").mkdir()
     imported = import_harness_findings(findings, harness="securevibes-agent",
                                        artifact_prefix="harness-findings",
                                        stage_dir=tmp_path / "raw" / "harness-findings",
-                                       baseline=baseline)
+                                       baseline=baseline, enclosure=_enclosure(tmp_path))
 
     assert [claim["claim_id"] for claim in imported.claims] == ["SV-AUTH-AUTHBYPASS-001"]
     assert imported.lost == 2
@@ -350,16 +362,32 @@ def _fake_harness_root(tmp_path: Path) -> Path:
 
 def _stub_driver(monkeypatch, records: dict[str, str], *, state_dir: str = ".securevibes",
                  plan_as_link: bool = False, output: dict | None = None,
-                 block_plan_staging: bool = False) -> None:
+                 block_plan_staging: bool = False, state_as_link: Path | None = None,
+                 stage_as_link: Path | None = None, observed: dict | None = None) -> None:
     """Stand in for the tsx driver and leave exactly the records a harness run would leave.
 
     No process is spawned and no model is called: the stub reads the driver config the adapter
     wrote and writes the finding records, the plan, and the driver output itself.
+
+    *state_as_link* makes the harness state directory a symbolic link to that path before it
+    writes anything, so the records it writes land outside the workspace and are reached only
+    through an ancestor. *stage_as_link* does the same to the directory the adapter stages
+    imported records into. *observed* collects the argv and environment the driver was started
+    with, for a test about what the process inherits.
     """
 
     def fake_run_command(argv, *, cwd, timeout_seconds, env, stdout_path, stderr_path, stdin_text=None):
         config = json.loads(Path(argv[-1]).read_text(encoding="utf-8"))
+        if observed is not None:
+            observed.update({"argv": list(argv), "env": dict(env)})
         state = Path(config["repo_path"]) / state_dir
+        if state_as_link is not None:
+            state_as_link.mkdir(parents=True, exist_ok=True)
+            state.symlink_to(state_as_link, target_is_directory=True)
+        if stage_as_link is not None:
+            stage_as_link.mkdir(parents=True, exist_ok=True)
+            (Path(config["output_path"]).parent / "harness-findings").symlink_to(
+                stage_as_link, target_is_directory=True)
         (state / "findings").mkdir(parents=True, exist_ok=True)
         for name, text in records.items():
             (state / "findings" / name).write_text(text, encoding="utf-8")
@@ -387,7 +415,8 @@ def _stub_driver(monkeypatch, records: dict[str, str], *, state_dir: str = ".sec
 def _stubbed_bundle(tmp_path: Path, monkeypatch, records: dict[str, str], *, run_id: str = "run-stub",
                     root_config: str | None = None, plan_as_link: bool = False,
                     trace_mode: str = "off", output: dict | None = None,
-                    block_plan_staging: bool = False) -> Path:
+                    block_plan_staging: bool = False, state_as_link: Path | None = None,
+                    stage_as_link: Path | None = None, observed: dict | None = None) -> Path:
     root = _fake_harness_root(tmp_path)
     sdk = tmp_path / "observer-sdk.js"
     sdk.write_text("// stub\n", encoding="utf-8")
@@ -397,7 +426,8 @@ def _stubbed_bundle(tmp_path: Path, monkeypatch, records: dict[str, str], *, run
         "runner": "mock", "observer_sdk": str(sdk)})
     preparation = adapter.prepare(spec, tmp_path / "cache")
     _stub_driver(monkeypatch, records, plan_as_link=plan_as_link, output=output,
-                 block_plan_staging=block_plan_staging)
+                 block_plan_staging=block_plan_staging, state_as_link=state_as_link,
+                 stage_as_link=stage_as_link, observed=observed)
     return run_invocation(prepared=_prepared(tmp_path), adapter=adapter, spec=spec, preparation=preparation,
                           out_dir=tmp_path / "out", run_id=run_id, timeout_seconds=60, trace_mode=trace_mode,
                           network_policy="none", clock=CLOCK)
@@ -510,13 +540,13 @@ def test_a_finding_record_the_input_already_shipped_is_not_imported_as_this_scan
     findings = tmp_path / "findings"
     findings.mkdir()
     (findings / "planted.md").write_text(PLANTED, encoding="utf-8")
-    baseline = snapshot_findings(findings)
+    baseline = snapshot_findings(findings, _enclosure(tmp_path))
     (findings / "produced.md").write_text(FINDING, encoding="utf-8")
 
     imported = import_harness_findings(findings, harness="securevibes-agent",
                                        artifact_prefix="harness-findings",
                                        stage_dir=tmp_path / "raw" / "harness-findings",
-                                       baseline=baseline)
+                                       baseline=baseline, enclosure=_enclosure(tmp_path))
 
     assert [claim["claim_id"] for claim in imported.claims] == ["SV-AUTH-AUTHBYPASS-001"]
     assert [artifact["id"] for artifact in imported.artifacts] == ["harness-findings/produced.md"]
@@ -530,13 +560,13 @@ def test_a_record_the_scan_rewrote_is_imported_even_though_its_name_was_already_
     findings = tmp_path / "findings"
     findings.mkdir()
     (findings / "a.md").write_text(PLANTED, encoding="utf-8")
-    baseline = snapshot_findings(findings)
+    baseline = snapshot_findings(findings, _enclosure(tmp_path))
     (findings / "a.md").write_text(FINDING, encoding="utf-8")
 
     imported = import_harness_findings(findings, harness="securevibes-agent",
                                        artifact_prefix="harness-findings",
                                        stage_dir=tmp_path / "raw" / "harness-findings",
-                                       baseline=baseline)
+                                       baseline=baseline, enclosure=_enclosure(tmp_path))
 
     assert [claim["claim_id"] for claim in imported.claims] == ["SV-AUTH-AUTHBYPASS-001"]
     assert imported.lost == 0
@@ -557,7 +587,8 @@ def test_a_findings_directory_that_cannot_be_listed_is_counted_and_noted(tmp_pat
         imported = import_harness_findings(findings, harness="securevibes-agent",
                                            artifact_prefix="harness-findings",
                                            stage_dir=tmp_path / "raw" / "harness-findings",
-                                           baseline=snapshot_findings(findings))
+                                           baseline=snapshot_findings(findings, _enclosure(tmp_path)),
+                                           enclosure=_enclosure(tmp_path))
     finally:
         findings.chmod(0o700)
 
@@ -574,7 +605,8 @@ def test_a_findings_path_that_is_not_a_directory_is_counted_and_noted(tmp_path):
     imported = import_harness_findings(findings, harness="securevibes-agent",
                                        artifact_prefix="harness-findings",
                                        stage_dir=tmp_path / "raw" / "harness-findings",
-                                       baseline=snapshot_findings(findings))
+                                       baseline=snapshot_findings(findings, _enclosure(tmp_path)),
+                                       enclosure=_enclosure(tmp_path))
 
     assert imported.lost == 1
     assert any("not a directory" in note for note in imported.notes)
@@ -594,7 +626,8 @@ def test_a_baseline_that_could_not_be_established_attributes_nothing_to_the_scan
     imported = import_harness_findings(findings, harness="securevibes-agent",
                                        artifact_prefix="harness-findings",
                                        stage_dir=tmp_path / "raw" / "harness-findings",
-                                       baseline=FindingsBaseline({}, False, "the directory could not be listed"))
+                                       baseline=FindingsBaseline({}, False, "the directory could not be listed"),
+                                       enclosure=_enclosure(tmp_path))
 
     assert imported.claims == [] and imported.lost == 2
     assert any("provenance could not be established" in note for note in imported.notes)
@@ -642,38 +675,88 @@ def test_an_input_that_ships_the_harness_state_directory_never_reaches_the_impor
 # --- area B: the findings directory itself, and capture that matches the record -----------
 
 
-def test_a_findings_directory_that_is_a_symbolic_link_is_refused_rather_than_followed(tmp_path):
-    """Each record was checked for symlink-ness; the directory holding them never was.
+def test_a_findings_path_that_leaves_the_workspace_is_refused_whether_the_link_is_it_or_above_it(tmp_path):
+    """Checking the last component of a path is not a containment check.
 
-    A link where the findings directory belongs points at bytes outside the workspace this scan
-    was handed, and every record behind it was imported as a finding of this scan, staged as an
-    artifact, and credited. The per-record check cannot see them, because they are reached only
-    through the directory link. The link is refused whole now, and the records nobody could read
-    are counted as loss, so the scan can earn neither completeness nor quiet credit.
+    The findings path itself was checked for being a link, and each record inside it was checked
+    too, but nothing checked the components in between. A link one level up, where the harness
+    state directory goes, points every record behind it at bytes outside the workspace this scan
+    was handed while each one still looks like an ordinary regular file in an ordinary directory:
+    they were imported as findings of this scan, staged into the bundle, and credited. Both
+    shapes are refused by one rule now, which resolves the whole path and proves it is still
+    inside the workspace, and the records nobody could read are counted as loss.
     """
-    state = tmp_path / "state"
-    state.mkdir()
-    findings = state / "findings"
-    # Before the harness runs there is no findings directory at all.
-    baseline = snapshot_findings(findings)
-    assert baseline.established and baseline.digests == {}
+    workspace = tmp_path / "source"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    (outside / "findings").mkdir(parents=True)
+    (outside / "findings" / "planted.md").write_text(FINDING, encoding="utf-8")
+    enclosure = _enclosure(workspace, tmp_path / "raw")
+
+    # The link one level above the path the importer checks: only the ancestor is a link.
+    (workspace / ".securevibes").symlink_to(outside, target_is_directory=True)
+    through_ancestor = workspace / ".securevibes" / "findings"
+    assert not through_ancestor.is_symlink() and through_ancestor.is_dir(), "the ancestor is the link"
+    assert (through_ancestor / "planted.md").is_file()
+
+    baseline = snapshot_findings(through_ancestor, enclosure)
+    imported = import_harness_findings(through_ancestor, harness="securevibes-agent",
+                                       artifact_prefix="harness-findings",
+                                       stage_dir=tmp_path / "raw" / "harness-findings",
+                                       baseline=baseline, enclosure=enclosure)
+
+    assert baseline.established is False, "nothing behind the link is attributed to this scan"
+    assert imported.claims == [] and imported.artifacts == []
+    assert imported.lost == 1
+    assert any("does not resolve inside the workspace" in note for note in imported.notes)
+    assert not (tmp_path / "raw").exists(), "nothing behind the link is staged"
+
+    # The same rule covers the older shape, a link at the findings directory itself.
+    direct = workspace / "findings"
+    direct.symlink_to(outside / "findings", target_is_directory=True)
+    at_the_path = import_harness_findings(direct, harness="securevibes-agent",
+                                          artifact_prefix="harness-findings",
+                                          stage_dir=tmp_path / "raw" / "harness-findings",
+                                          baseline=snapshot_findings(direct, enclosure),
+                                          enclosure=enclosure)
+
+    assert at_the_path.claims == [] and at_the_path.lost == 1
+    assert snapshot_findings(direct, enclosure).established is False
+    assert not (tmp_path / "raw").exists()
+    # The planted records are still exactly where they were: nothing outside was read or moved.
+    assert [path.name for path in (outside / "findings").iterdir()] == ["planted.md"]
+
+
+def test_a_link_where_the_staging_directory_goes_cannot_redirect_a_staged_record(tmp_path):
+    """The other end of the same copy: the harness owns the directory these records are copied to.
+
+    ``stage_record`` created the destination's parent with ``exist_ok=True``, which succeeds on a
+    symbolic link to a directory, and then copied through it, so a link the harness left where
+    the adapter stages evidence wrote the record to any absolute path the harness chose. The
+    destination is resolved and proved to be inside this run's raw output now, so the copy is
+    refused and the record is counted as loss instead of landing outside the bundle.
+    """
+    workspace = tmp_path / "source"
+    findings = workspace / "findings"
+    findings.mkdir(parents=True)
+    baseline = snapshot_findings(findings, _enclosure(workspace, tmp_path / "raw"))
+    (findings / "a.md").write_text(FINDING, encoding="utf-8")
+    raw = tmp_path / "raw"
+    raw.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
-    (outside / "planted.md").write_text(FINDING, encoding="utf-8")
-    findings.symlink_to(outside, target_is_directory=True)
+    (raw / "harness-findings").symlink_to(outside, target_is_directory=True)
 
     imported = import_harness_findings(findings, harness="securevibes-agent",
                                        artifact_prefix="harness-findings",
-                                       stage_dir=tmp_path / "raw" / "harness-findings",
-                                       baseline=baseline)
+                                       stage_dir=raw / "harness-findings", baseline=baseline,
+                                       enclosure=_enclosure(workspace, raw))
 
     assert imported.claims == [] and imported.artifacts == []
     assert imported.lost == 1
-    assert any("symbolic link" in note for note in imported.notes)
-    assert not (tmp_path / "raw" / "harness-findings").exists(), "nothing behind the link is staged"
-    # A baseline taken over the link is not established either, so nothing is attributed to the
-    # scan even if the link was already there when the snapshot was taken.
-    assert snapshot_findings(findings).established is False
+    assert any("could not be staged" in note and "does not resolve inside" in note
+               for note in imported.notes)
+    assert list(outside.iterdir()) == [], "the copy landed outside the bundle"
 
 
 def test_a_traced_run_reports_the_capture_gap_its_own_trace_record_carries(tmp_path, monkeypatch):
@@ -765,16 +848,55 @@ def test_a_scan_that_delivered_every_finding_it_reported_is_still_a_clean_succes
 
 
 def test_the_self_report_is_read_from_the_findings_the_harness_names():
-    """Ids where the summary carries records, a number where it carries a count, a note otherwise."""
+    """Ids where the summary carries records, a number where it carries a count, a count of what it could not read.
+
+    The fourth field is new: a part of the self-report the reader cannot parse is counted rather
+    than only noted. It stays out of ``total``, because an unreadable field says nothing about
+    how many records were written; it is evidence the run offered that the importer could not
+    use, which :func:`reconcile_import` turns into loss.
+    """
     report = read_self_report({"newFindings": [{"id": "A"}, {"id": "A"}, {"severity": "high"}],
                                "updatedFindings": [{"id": "B"}]})
     assert report.ids == ("A", "B") and report.unnamed == 1 and report.total == 3
+    assert report.unreadable == 0
 
     assert read_self_report({"newFindings": 3}).unnamed == 3
     unreadable = read_self_report({"updatedFindings": "two"})
     assert unreadable.total == 0 and "not a list of findings" in (unreadable.note or "")
-    assert read_self_report(None) == SelfReport((), 0, None)
-    assert read_self_report({}) == SelfReport((), 0, None)
+    assert unreadable.unreadable == 1
+    both = read_self_report({"newFindings": {"count": 2}, "updatedFindings": "two"})
+    assert both.unreadable == 2 and both.total == 0
+    # A summary that is not a mapping at all was offered and could not be read either.
+    assert read_self_report("done").unreadable == 1
+    assert "not a mapping" in (read_self_report("done").note or "")
+    # No self-report at all asserts nothing: the run that wrote no summary is failed already.
+    assert read_self_report(None) == SelfReport((), 0, 0, None)
+    assert read_self_report({}) == SelfReport((), 0, 0, None)
+
+
+def test_a_self_report_the_reader_cannot_parse_is_counted_as_loss_not_as_nothing_lost():
+    """An unreadable self-report produced a shortfall of zero, so losing everything read as clean.
+
+    The reconciliation compares what the harness says it wrote against what arrived. When the
+    part naming the findings is a shape the reader does not expect there is nothing to compare,
+    and treating that as agreement let a scan whose entire self-report was unreadable reach
+    scoring as a complete success. It is counted as loss now, one record per unreadable part,
+    which the message says is a floor rather than a measurement.
+    """
+    delivered = HarnessImport([{"claim_id": "A"}], [], [], ())
+
+    unreadable = reconcile_import(delivered, read_self_report({"newFindings": "two"}))
+    assert unreadable.lost == 1
+    assert "could not be read" in (unreadable.message or "") and "floor" in (unreadable.message or "")
+
+    # A readable part beside an unreadable one is still reconciled on its own terms: the claim
+    # that arrived accounts for the finding that was named, and only the unreadable part is loss.
+    mixed = reconcile_import(delivered, read_self_report({"newFindings": [{"id": "A"}],
+                                                         "updatedFindings": "two"}))
+    assert mixed.lost == 1
+    assert "did not arrive as claims" not in (mixed.message or "")
+    # The control: a self-report the reader can parse and the claims account for is no loss.
+    assert reconcile_import(delivered, read_self_report({"newFindings": [{"id": "A"}]})).lost == 0
 
 
 def test_a_record_the_harness_reported_and_the_importer_rejected_is_counted_once():
@@ -823,6 +945,105 @@ def test_a_plan_record_that_cannot_be_staged_is_noted_and_keeps_the_claims(tmp_p
     # The claim's own record is still staged and registered, which is what was being discarded.
     registered = {artifact["id"] for artifact in execution["raw_artifacts"]}
     assert result["claims"][0]["raw_artifact_id"] in registered
+
+
+def test_a_scanner_that_links_its_state_directory_out_of_the_workspace_imports_nothing(tmp_path, monkeypatch):
+    """End to end: a link one level above the findings directory, through a whole invocation.
+
+    The importer checked the findings path and each record for being a link and never the
+    components between them, so a harness that replaced its own state directory with a link to
+    anywhere on the host had every record behind it read, staged into the bundle, and imported as
+    a claim of this scan. Nothing outside the workspace is read or written now: the records are
+    counted as import loss, the plan record behind the same link is noted rather than staged, the
+    state capture refuses the link, and the planted files are exactly where they were.
+    """
+    outside = tmp_path / "outside"
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {"planted.md": FINDING}, run_id="run-ancestor",
+                             state_as_link=outside, output=REPORTED_TWO)
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert result["claims"] == [], "a record reached through a link out of the workspace is not a claim"
+    assert result["status"] == "partial" and result["bundles_resolved"] is False
+    assert result["error"]["code"] == "import_loss"
+    assert any("does not resolve inside the workspace" in note for note in execution["notes"])
+    assert any("bootstrap-plan.md" in note and "not staged" in note for note in execution["notes"])
+    # The capture refuses the same link from the other side, so nothing behind it is preserved.
+    assert execution["provenance"]["captured_state_dirs"] == []
+    assert not (bundle / "raw" / "harness-state").exists()
+    assert not (bundle / "raw" / "harness-findings").exists()
+    # Nothing outside the workspace was read, moved, or written: the planted files are untouched.
+    assert sorted(path.name for path in outside.iterdir()) == ["bootstrap-plan.md", "findings"]
+    assert (outside / "findings" / "planted.md").read_text(encoding="utf-8") == FINDING
+    assert not list(bundle.rglob("planted.md"))
+
+
+def test_a_link_where_the_adapter_stages_records_writes_nothing_outside_the_bundle(tmp_path, monkeypatch):
+    """The same rule on the destination, through a whole invocation.
+
+    The harness writes into the staging directory while it runs, so a link it leaves where the
+    adapter copies imported records sent each copy to an absolute path of its choosing. The
+    destination is proved to resolve back inside this run's raw output now.
+    """
+    outside = tmp_path / "outside"
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {"a.md": FINDING}, run_id="run-stage-link",
+                             stage_as_link=outside)
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert result["claims"] == [] and result["status"] == "partial"
+    assert result["error"]["code"] == "import_loss"
+    assert any("could not be staged" in note and "does not resolve inside" in note
+               for note in execution["notes"])
+    assert list(outside.iterdir()) == [], "a record was copied outside the bundle"
+
+
+def test_a_self_report_the_reader_cannot_parse_does_not_reach_scoring_as_a_clean_success(tmp_path, monkeypatch):
+    """A harness that reported its findings in an unexpected shape read as one that reported none.
+
+    ``read_self_report`` produced a note and no number, the reconciliation had nothing to
+    compare, and the shortfall was zero, so the scan reached scoring as a complete success with
+    full credit for saying nothing. An unreadable self-report is missing evidence, so it is loss.
+    """
+    unreadable = {**DRIVER_OUTPUT, "summary": {**DRIVER_OUTPUT["summary"], "newFindings": "two"}}
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {"a.md": FINDING}, run_id="run-unreadable",
+                             output=unreadable)
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert [claim["claim_id"] for claim in result["claims"]] == ["SV-AUTH-AUTHBYPASS-001"]
+    assert result["status"] == "partial" and result["bundles_resolved"] is False
+    assert result["error"]["code"] == "import_loss"
+    assert "not a list of findings" in result["error"]["message"]
+    assert any("Import loss" in note for note in execution["notes"])
+
+    plan, decisions = _quiet_review(result)
+    report = score(plan, result, decisions)
+    controls = report["metrics"]["controls"]["capability_safe"]
+    assert controls["completed"] == 0 and controls["resolved"] == 0
+    assert "Incomplete or failed execution cannot establish a successful negative control." in report["warnings"]
+
+
+def test_node_options_is_not_forwarded_from_the_operator_environment_to_the_driver(tmp_path, monkeypatch):
+    """NODE_OPTIONS names code for node to run, so forwarding it let the operator environment in.
+
+    ``--require`` or ``--import`` in that variable runs before the driver's own entry point, so
+    one variable in the shell that started the run changed what the run did, while the execution
+    record listed only the variable's name and never its value. It is not passed through now, and
+    the record's passthrough list, which is built from the same tuple, says so.
+    """
+    monkeypatch.setenv("NODE_OPTIONS", "--require /tmp/injected.js")
+    observed: dict = {}
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {"a.md": FINDING}, run_id="run-node-options",
+                             observed=observed)
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert "NODE_OPTIONS" not in observed["env"], "the driver inherited a code-injection channel"
+    assert "NODE_OPTIONS" not in execution["environment"]["passthrough"]
+    assert "NODE_OPTIONS" not in get_adapter("llm-harness").env_passthrough
+    # The keys the harness needs to call a model are still passed: this removed one variable.
+    assert "ANTHROPIC_API_KEY" in get_adapter("llm-harness").env_passthrough
+    assert "injected" not in json.dumps(execution)
 
 
 def test_the_harness_provenance_is_read_from_the_harness_root_not_an_inherited_git_dir(tmp_path, monkeypatch):

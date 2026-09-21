@@ -32,13 +32,19 @@ from scaneval.cases import (
     load_pack,
     mechanical_checks,
     new_pack,
+    pack_sha256,
     pack_summary,
+    record_review,
     save_pack,
     set_disposition,
 )
 from scaneval.contracts import (
     ContractError,
+    admission_chain_digest,
+    check_set_digest,
     effective_level,
+    pack_anchor_digest,
+    recorded_check_state,
     review_chain_digest,
     validate_document,
 )
@@ -88,11 +94,50 @@ def safe_control(control_id: str = "C-widget-shell-safe") -> dict:
     }
 
 
-def chain_review(validation: dict, entry: dict) -> dict:
+def rebuild_check_set(validation: dict, snapshot_id: str) -> dict:
+    """Restate the check set record over the checks as they now stand, as a forger must.
+
+    The record says what the set decided and hashes itself together with its own checks, so a
+    hand-edited set has to be rebuilt deliberately: editing or deleting a check alone leaves the
+    record hashing to something that is no longer there.
+    """
+    checks = [check for check in validation["checks"] if check.get("snapshot_id") == snapshot_id]
+    record = dict(validation["check_sets"][snapshot_id])
+    record["result"] = "pass" if checks and all(c["result"] == "pass" for c in checks) else "fail"
+    record["checks_sha256"] = check_set_digest(snapshot_id, record, checks)
+    validation["check_sets"][snapshot_id] = record
+    return record
+
+
+def rechain_admissions(pack: dict) -> list[dict]:
+    """Rebuild the admission chain and the pack anchor after a hand edit, as a forger must."""
+    previous = None
+    for admission in pack["admissions"]:
+        admission.pop("chain_sha256", None)
+        admission["chain_sha256"] = admission_chain_digest(previous, admission)
+        previous = admission["chain_sha256"]
+    reanchor(pack)
+    return pack["admissions"]
+
+
+def reanchor(pack: dict) -> dict:
+    """Rebuild the pack anchor over the cases, histories, and admissions as they now stand.
+
+    Hand-editing a record a planning decision reads costs this: the anchor names the case roster,
+    where each review history ends, and where the admission history ends, so an edit that leaves
+    one of them somewhere else has to be anchored again deliberately. That is what the anchor is
+    for, and a test reproducing a forgery pays the same price a forger does.
+    """
+    pack["anchor_sha256"] = pack_anchor_digest(pack)
+    return pack
+
+
+def chain_review(pack: dict, validation: dict, entry: dict) -> dict:
     """Append one hand-written review to *validation*, chained as the write path chains it.
 
-    A test that hand-edits a history has to rebuild the chain and the recorded end of it, which is
-    the point of both: an unchained entry is refused before anything reads its decision.
+    A test that hand-edits a history has to rebuild the chain, the recorded end of it, and the pack
+    anchor that names that end, which is the point of all three: an unchained entry is refused
+    before anything reads its decision.
     """
     recorded = dict(entry)
     reviews = validation["reviews"]
@@ -100,10 +145,11 @@ def chain_review(validation: dict, entry: dict) -> dict:
         reviews[-1]["chain_sha256"] if reviews else None, recorded)
     reviews.append(recorded)
     validation["reviews_sha256"] = recorded["chain_sha256"]
+    reanchor(pack)
     return recorded
 
 
-def rechain(validation: dict) -> list[dict]:
+def rechain(pack: dict, validation: dict) -> list[dict]:
     """Rebuild the chain over a hand-edited history, which is what a forger would have to do."""
     previous = None
     for review in validation["reviews"]:
@@ -114,6 +160,7 @@ def rechain(validation: dict) -> list[dict]:
         validation.pop("reviews_sha256", None)
     else:
         validation["reviews_sha256"] = previous
+    reanchor(pack)
     return validation["reviews"]
 
 
@@ -228,10 +275,16 @@ def test_plan_degrades_to_draft_and_needs_explicit_approval_for_reviewed(tmp_pat
     set_disposition(pack, "widget-shell", "validate", "evidence reviewed, worth validating")
     approve_case(pack, "widget-shell", reviewer="second", role="independent_reviewer", level="L3", note="label established", clock=CLOCK)
     plan, _ = build_plan(pack, "widget-abc", HASH)
-    assert plan["scope"] == "reviewed" and plan["targets"][0]["validation_level"] == "L3"
+    # Changed deliberately: an approval alone used to reach a reviewed-scope plan. The pack says a
+    # label becomes evidence through recorded review and admission, and only an explicit admitted
+    # decision admits, so an approved case nobody has decided on is planned at the level its review
+    # earned, in the draft-scope plan that says nobody has admitted it yet.
+    assert plan["scope"] == "draft" and plan["targets"][0]["validation_level"] == "L3"
     assert pack["cases"][0]["validation"]["reviews"][-1]["reviewer"] == "second"
     admit_case(pack, "widget-shell", decision="admitted", by="second", reason="pilot", clock=CLOCK)
     assert pack["admissions"][0]["decision"] == "admitted"
+    plan, _ = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "reviewed" and plan["targets"][0]["validation_level"] == "L3"
 
     with pytest.raises(ContractError, match="requires disposition validate"):
         set_disposition(pack, "widget-shell", "exclude", "duplicate target")
@@ -494,24 +547,41 @@ def test_the_contract_rejects_label_states_that_contradict_the_recorded_checks(t
     mechanical_checks(pack, "widget-fixed", source, FIXED_HASH, clock=CLOCK)
     assert validate_document("case-pack", pack) is pack
 
+    # Changed deliberately: deleting the checks of a set used to read as a set that was never
+    # recorded, so this asked for the missing-set message. The set is one record now, and the
+    # record is still there naming checks that are not, which is the more specific complaint.
     broken = json.loads(json.dumps(pack))
     broken["cases"][0]["validation"]["checks"] = [
         check for check in broken["cases"][0]["validation"]["checks"]
         if check["snapshot_id"] != "widget-fixed"]
+    with pytest.raises(ContractError, match="no recorded check carries that snapshot"):
+        validate_document("case-pack", broken)
+
+    # Dropping the record with them is the missing set, and that is what the state rule says.
+    broken["cases"][0]["validation"]["check_sets"].pop("widget-fixed")
     with pytest.raises(ContractError, match="missing or failed for: widget-fixed"):
         validate_document("case-pack", broken)
 
+    # Changed deliberately: flipping a recorded check used to be enough to restate the set. The
+    # set record hashes itself together with its own checks, so an edited check no longer matches.
     broken = json.loads(json.dumps(pack))
     for check in broken["cases"][0]["validation"]["checks"]:
         if check["snapshot_id"] == "widget-fixed":
             check["result"] = "fail"
+    with pytest.raises(ContractError, match="a check was deleted, unattributed, reordered, or edited"):
+        validate_document("case-pack", broken)
+
+    # Restating the set over the edited checks is what that costs, and then the set reads failed.
+    rebuild_check_set(broken["cases"][0]["validation"], "widget-fixed")
     with pytest.raises(ContractError, match="missing or failed for: widget-fixed"):
         validate_document("case-pack", broken)
 
+    # Changed deliberately: a check used to be able to leave its set by dropping the attribution,
+    # which turned a failing set into a passing one. Every check names the set it belongs to.
     broken = json.loads(json.dumps(pack))
     for check in broken["cases"][0]["validation"]["checks"]:
         check.pop("snapshot_id")
-    with pytest.raises(ContractError, match="missing or failed for: widget-abc, widget-fixed"):
+    with pytest.raises(ContractError, match="'snapshot_id' is a required property"):
         validate_document("case-pack", broken)
 
     broken = json.loads(json.dumps(pack))
@@ -665,7 +735,7 @@ def test_a_check_set_the_contract_refuses_leaves_the_pack_exactly_as_it_was(tmp_
     approve_case(pack, "widget-shell", reviewer="R. Eviewer", role="independent_reviewer", level="L3",
                  note="label established", clock=CLOCK)
     # Hand-edited into a state the contract refuses: the latest review rejected the case.
-    chain_review(case_by_id(pack, "widget-shell")["validation"],
+    chain_review(pack, case_by_id(pack, "widget-shell")["validation"],
                  {"reviewer": "A. Djudicator", "role": "adjudicator", "decision": "reject",
                   "level": "L3", "at": "2026-09-20T17:00:00+00:00", "note": "evidence withdrawn"})
     before = dump_json(pack)
@@ -685,36 +755,38 @@ def test_the_contract_refuses_an_approval_whose_checks_are_missing_or_rejected(t
     assert validate_document("case-pack", pack) is pack
 
     broken = json.loads(json.dumps(pack))
-    # The record of which tree a check set read goes with the set, so both are dropped here.
+    # The checks and the record that states what the set decided are one set, so both go here.
     broken["cases"][0]["validation"]["checks"] = []
-    broken["cases"][0]["validation"]["checked_trees"] = {}
+    broken["cases"][0]["validation"].pop("check_sets")
     with pytest.raises(ContractError, match="human_approved requires a recorded passing check set"):
         validate_document("case-pack", broken)
     # The flag is what an approved case records when a check set failed; it is then consistent.
     broken["cases"][0]["validation"]["checks_failed"] = True
     assert validate_document("case-pack", broken) is broken
-    # Keeping the record of the tree while dropping the set it belongs to claims a check that is
-    # not in the pack, so the entry is refused rather than read as evidence of an export.
+    # Keeping the record while dropping the checks it hashes claims a check set that is not in the
+    # pack, so the record is refused rather than read as evidence that anything ran.
     orphaned = json.loads(json.dumps(broken))
-    orphaned["cases"][0]["validation"]["checked_trees"] = {"widget-abc": HASH}
-    with pytest.raises(ContractError, match="no recorded check set ran against that snapshot"):
+    orphaned["cases"][0]["validation"]["check_sets"] = {
+        "widget-abc": pack["cases"][0]["validation"]["check_sets"]["widget-abc"]}
+    with pytest.raises(ContractError, match="no recorded check carries that snapshot"):
         validate_document("case-pack", orphaned)
 
     broken = json.loads(json.dumps(pack))
     for check in broken["cases"][0]["validation"]["checks"]:
         check["result"] = "fail"
+    rebuild_check_set(broken["cases"][0]["validation"], "widget-abc")
     with pytest.raises(ContractError, match="missing or failed for: widget-abc"):
         validate_document("case-pack", broken)
 
     broken = json.loads(json.dumps(pack))
-    chain_review(broken["cases"][0]["validation"],
+    chain_review(broken, broken["cases"][0]["validation"],
                  {"reviewer": "A. Djudicator", "role": "adjudicator", "decision": "reject",
                   "level": "L3", "at": "2026-09-20T17:00:00+00:00", "note": "evidence withdrawn"})
     with pytest.raises(ContractError, match="latest recorded review rejected"):
         validate_document("case-pack", broken)
     # A later approving decision reinstates it, because only the latest review decides. It carries
     # no digest of these labels, so the weaker rule applies and the case plans nothing.
-    chain_review(broken["cases"][0]["validation"],
+    chain_review(broken, broken["cases"][0]["validation"],
                  {"reviewer": "A. Djudicator", "role": "adjudicator", "decision": "approve",
                   "level": "L3", "at": "2026-09-20T18:00:00+00:00", "note": "evidence restored"})
     assert validate_document("case-pack", broken) is broken
@@ -803,12 +875,19 @@ def test_a_legacy_fix_commit_without_an_advisory_is_not_a_public_disclosure():
 
 
 def approved_pack(tmp_path: Path) -> dict:
-    """One checked case, screened as worth validating and approved at L3 by an independent reviewer."""
+    """One checked case, screened as worth validating, approved at L3, and admitted.
+
+    The admission is part of the fixture because a reviewed-scope plan needs all four: the case is
+    evidence only once a named person has decided to admit it, and only an explicit ``admitted``
+    decision says that.
+    """
     pack = make_pack()
     mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)
     set_disposition(pack, "widget-shell", "validate", "evidence reviewed")
     approve_case(pack, "widget-shell", reviewer="R. Eviewer", role="independent_reviewer", level="L3",
                  note="label established", clock=CLOCK)
+    admit_case(pack, "widget-shell", decision="admitted", by="J. Curator",
+               reason="reviewed label, admitted to the evaluation slice", clock=CLOCK)
     return pack
 
 
@@ -994,7 +1073,7 @@ def test_an_approval_recorded_before_digests_covers_no_current_labels(tmp_path):
     document = json.loads(json.dumps(pack))
     for review in document["cases"][0]["validation"]["reviews"]:
         del review["labels_sha256"]
-    rechain(document["cases"][0]["validation"])
+    rechain(document, document["cases"][0]["validation"])
 
     assert validate_document("case-pack", document) is document, \
         "a pack whose reviews never named their content still loads once its chain is consistent"
@@ -1009,16 +1088,27 @@ PILOT_PACK = Path(__file__).resolve().parents[1] / "corpus" / "pilot" / "pack.js
 
 
 @pytest.mark.skipif(not PILOT_PACK.is_file(), reason="no pilot pack in this checkout")
-def test_the_shipped_pilot_pack_still_loads_and_still_plans():
-    """The pilot pack predates the digest field and is draft, so nothing there needs rewriting."""
-    pack = load_pack(PILOT_PACK)
+def test_the_shipped_pilot_pack_predates_the_check_set_record_and_is_refused_until_rechecked():
+    """Changed deliberately: this used to assert that the shipped pilot pack still loads and plans.
 
-    assert pack_summary(pack)["review_states"]["human_approved"] == 0
-    for snapshot in pack["snapshots"]:
-        plan, notes = build_plan(pack, snapshot["snapshot_id"], snapshot["tree_hash"])
-        assert plan["scope"] == "draft"
-        assert plan["targets"] or plan["controls"], notes
-        assert not any("after the review" in note for note in notes)
+    It recorded its mechanical checks as an array of attributed results, before a check set was one
+    record, and that array is exactly the shape the blocker this round closes was written against:
+    a set reconstituted by membership, where deleting or unattributing a failing check turns a
+    failed set into a passing one. Reading such a pack as checked is the tolerance that leaves the
+    hole open, so it is refused, naming the record that is missing. Re-running ``corpus validate``
+    against the same exports rewrites the pack with one anchored record per set and an anchor over
+    its roster, and the checks it records are the checks that ran; nothing here rewrites it,
+    because a recorded check is evidence of what ran and every plan names its pack by content hash.
+    When the pilot pack is re-recorded against its exports, this is the test to update: it should
+    then assert that the pack loads and plans again, which is what it asserted before this round.
+    """
+    with pytest.raises(ContractError, match="validation.check_sets records no check set for it"):
+        load_pack(PILOT_PACK)
+
+    document = json.loads(PILOT_PACK.read_text(encoding="utf-8"))
+    assert all(case["validation"]["review_state"] != "human_approved" for case in document["cases"]), \
+        "the pilot pack is draft evidence, so no recorded approval is lost by re-running its checks"
+    assert "anchor_sha256" not in document
 
 
 def test_the_contract_refuses_a_level_no_recorded_approval_carries(tmp_path):
@@ -1066,7 +1156,7 @@ def test_the_contract_refuses_a_reviewed_level_no_independent_reviewer_approved(
 
     broken = json.loads(json.dumps(pack))
     broken["cases"][0]["validation"]["reviews"][0]["role"] = role
-    rechain(broken["cases"][0]["validation"])
+    rechain(broken, broken["cases"][0]["validation"])
 
     with pytest.raises(ContractError, match="requires an approving review at L3 or higher by an "
                                             "independent_reviewer"):
@@ -1079,7 +1169,7 @@ def test_a_rejecting_review_does_not_carry_a_level(tmp_path):
 
     broken = json.loads(json.dumps(pack))
     broken["cases"][0]["validation"]["reviews"][0]["decision"] = "unresolved"
-    rechain(broken["cases"][0]["validation"])
+    rechain(broken, broken["cases"][0]["validation"])
 
     with pytest.raises(ContractError, match="requires at least one recorded approving review"):
         validate_document("case-pack", broken)
@@ -1114,39 +1204,54 @@ def test_editing_a_snapshot_tree_hash_cannot_retarget_a_standing_approval(tmp_pa
     assert plan["scope"] == "reviewed" and notes == []
 
 
-def test_a_check_set_that_does_not_say_which_tree_it_ran_against_is_not_planned(tmp_path):
-    """Dropping the record of the tree leaves five passing checks bound to no export at all."""
+def test_a_check_set_is_one_record_so_its_export_cannot_be_dropped_out_from_under_it(tmp_path):
+    """Changed deliberately: a check set could once be recorded bound to no export at all.
+
+    The record of which tree a set ran against used to be a separate mapping beside the checks,
+    so deleting it, and the passing hash check with it, left five passing checks that named no
+    export; the plan excluded the case on that. The export is now part of the one record that is
+    the check set, and the record requires it, so there is no set to speak of without one: what
+    remains after dropping it is a case with no recorded check set for the snapshot, which is what
+    the pack and the plan both say.
+    """
     pack = approved_pack(tmp_path)
     document = json.loads(json.dumps(pack))
     validation = document["cases"][0]["validation"]
-    del validation["checked_trees"]
+    del validation["check_sets"]["widget-abc"]
     validation["checks"] = [check for check in validation["checks"]
-                            if check["check"] != "snapshot_hash_recorded"]
+                            if check["snapshot_id"] != "widget-abc"]
+    with pytest.raises(ContractError, match="human_approved requires a recorded passing check set"):
+        validate_document("case-pack", document)
+    validation["checks_failed"] = True
     assert validate_document("case-pack", document) is document
 
     plan, notes = build_plan(document, "widget-abc", HASH)
 
     assert plan["scope"] == "draft" and plan["targets"] == []
-    assert any("do not say which tree they ran against" in note for note in notes)
+    assert any("a mechanical check set failed after approval" in note for note in notes)
     assert checked_tree_hash(document["cases"][0], "widget-abc") is None
 
 
-def test_a_check_set_recorded_before_checked_trees_is_read_from_its_detail(tmp_path):
-    """An older record kept the hash in the detail only; it is read there, not rewritten."""
+def test_a_check_set_recorded_before_the_anchor_is_not_a_recorded_check_set(tmp_path):
+    """Changed deliberately: a set recorded before the anchor used to be read from its detail.
+
+    An older pack kept the export in the detail of its passing hash check and nowhere else, and
+    this module read it there rather than rewriting it. That tolerance is the hole the blocker this
+    round closes: a set read out of the checks that carry a snapshot id is a set a deletion can
+    restate. A set with no record is no set, the case is unchecked for that snapshot, and the
+    remedy is re-running the checks, which is what writes the record.
+    """
     pack = approved_pack(tmp_path)
     document = json.loads(json.dumps(pack))
-    del document["cases"][0]["validation"]["checked_trees"]
-    assert validate_document("case-pack", document) is document
+    del document["cases"][0]["validation"]["check_sets"]
+    with pytest.raises(ContractError, match="validation.check_sets records no check set for it"):
+        validate_document("case-pack", document)
 
-    assert checked_tree_hash(document["cases"][0], "widget-abc") == HASH
+    assert checked_tree_hash(document["cases"][0], "widget-abc") == HASH, \
+        "the detail still says which export ran; what it cannot say is that a set was recorded"
     plan, notes = build_plan(document, "widget-abc", HASH)
-    assert plan["scope"] == "reviewed" and notes == []
-
-    other = "sha256:" + "c" * 64
-    document["snapshots"][0]["tree_hash"] = other
-    plan, notes = build_plan(document, "widget-abc", other)
-    assert plan["targets"] == []
-    assert any("ran against a different tree" in note for note in notes)
+    assert plan["scope"] == "draft" and plan["targets"] == []
+    assert any("no recorded passing mechanical check set" in note for note in notes)
 
 
 def test_a_trailing_unresolved_review_is_the_operative_one_and_stops_planning(tmp_path):
@@ -1154,7 +1259,7 @@ def test_a_trailing_unresolved_review_is_the_operative_one_and_stops_planning(tm
     pack = approved_pack(tmp_path)
     assert build_plan(pack, "widget-abc", HASH)[0]["scope"] == "reviewed"
 
-    chain_review(case_by_id(pack, "widget-shell")["validation"],
+    chain_review(pack, case_by_id(pack, "widget-shell")["validation"],
                  {"reviewer": "A. Djudicator", "role": "adjudicator", "decision": "unresolved",
                   "level": "L3", "at": "2026-09-20T18:00:00+00:00",
                   "note": "reopened: the deployment assumption is unclear"})
@@ -1181,7 +1286,7 @@ def test_a_trailing_unresolved_review_is_the_operative_one_and_stops_planning(tm
 def test_a_trailing_rejecting_review_is_also_the_operative_one(tmp_path):
     """The contract refuses this pack at load; planning refuses it too, on the pack in memory."""
     pack = approved_pack(tmp_path)
-    chain_review(case_by_id(pack, "widget-shell")["validation"],
+    chain_review(pack, case_by_id(pack, "widget-shell")["validation"],
                  {"reviewer": "A. Djudicator", "role": "adjudicator", "decision": "reject",
                   "level": "L3", "at": "2026-09-20T18:00:00+00:00", "note": "evidence withdrawn"})
 
@@ -1268,19 +1373,22 @@ def test_a_plan_reads_its_level_from_the_review_that_covers_the_labels(tmp_path)
 def test_a_two_field_tree_edit_contradicts_the_third_record_of_the_export(tmp_path):
     """Reproduces the retargeted export: three records name the tree the checks read, and they agree.
 
-    Editing the snapshot's declared hash and the ``checked_trees`` entry together used to point a
-    standing approval at an export the checks never ran against, because nothing compared either
-    with the digest the passing ``snapshot_hash_recorded`` check already carried.
+    Editing the snapshot's declared hash and the check set's recorded export together used to point
+    a standing approval at an export the checks never ran against, because nothing compared either
+    with the digest the passing ``snapshot_hash_recorded`` check already carried. The set record
+    hashes its own fields now, so restating its export is the deliberate rebuild a forger has to
+    make; the third record still contradicts it.
     """
     pack = approved_pack(tmp_path)
     other = "sha256:" + "c" * 64
     case = case_by_id(pack, "widget-shell")
-    assert case["validation"]["checked_trees"] == {"widget-abc": HASH}
+    assert case["validation"]["check_sets"]["widget-abc"]["tree_hash"] == HASH
     assert [check["detail"] for check in case["validation"]["checks"]
             if check["check"] == "snapshot_hash_recorded"] == [HASH]
 
     pack["snapshots"][0]["tree_hash"] = other
-    case["validation"]["checked_trees"]["widget-abc"] = other
+    case["validation"]["check_sets"]["widget-abc"]["tree_hash"] = other
+    rebuild_check_set(case["validation"], "widget-abc")
 
     with pytest.raises(ContractError, match="the checks ran against an export the snapshot no "
                                             "longer names"):
@@ -1301,7 +1409,9 @@ def test_a_two_field_tree_edit_contradicts_the_third_record_of_the_export(tmp_pa
     assert any("disagree with each other" in note for note in notes)
 
     # The records agreeing again is what plans the case, and they agree on one export only.
-    case_by_id(pack, "widget-shell")["validation"]["checked_trees"]["widget-abc"] = HASH
+    validation = case_by_id(pack, "widget-shell")["validation"]
+    validation["check_sets"]["widget-abc"]["tree_hash"] = HASH
+    rebuild_check_set(validation, "widget-abc")
     assert validate_document("case-pack", pack) is pack
     plan, notes = build_plan(pack, "widget-abc", HASH)
     assert plan["scope"] == "reviewed" and notes == []
@@ -1340,6 +1450,9 @@ def test_renaming_two_cases_cannot_swap_a_rejected_admission_onto_another(tmp_pa
     case_by_id(pack, "widget-shell")["case_id"] = "widget-held"
     case_by_id(pack, "widget-path")["case_id"] = "widget-shell"
     case_by_id(pack, "widget-held")["case_id"] = "widget-path"
+    # The anchor names the case roster, so a rename is anchored again before anything reads it:
+    # what this test is about is what the swap does to a decision, not what it costs to attempt.
+    reanchor(pack)
 
     with pytest.raises(ContractError, match="the decision no longer resolves to the content it named"):
         validate_document("case-pack", pack)
@@ -1359,6 +1472,7 @@ def test_renaming_one_case_keeps_its_decision_and_names_what_the_pack_must_say(t
                reason="the mechanism duplicates an admitted target", clock=CLOCK)
 
     case_by_id(pack, "widget-shell")["case_id"] = "widget-shell-renamed"
+    reanchor(pack)
 
     with pytest.raises(ContractError, match="unknown case widget-shell"):
         validate_document("case-pack", pack)
@@ -1367,7 +1481,10 @@ def test_renaming_one_case_keeps_its_decision_and_names_what_the_pack_must_say(t
     assert any("widget-shell-renamed: excluded by the latest admission decision" in note
                for note in notes)
 
+    # Tidying the record is a deliberate edit of a recorded decision, so it costs rebuilding the
+    # chain that binds the decisions to each other and the anchor that says where they end.
     pack["admissions"][0]["case_id"] = "widget-shell-renamed"
+    rechain_admissions(pack)
     assert validate_document("case-pack", pack) is pack
 
 
@@ -1383,7 +1500,7 @@ def test_a_curator_review_cannot_reach_a_reviewed_plan_by_recording_a_lower_leve
     pack = approved_pack(tmp_path)
     case = case_by_id(pack, "widget-shell")
     case["validation"]["reviews"][-1].update({"level": "L4", "role": "curator"})
-    rechain(case["validation"])
+    rechain(pack, case["validation"])
     case["validation"]["level"] = "L2"
     case["disposition"] = {"value": "needs_evidence", "reason": "screened back after approval"}
 
@@ -1401,7 +1518,7 @@ def test_a_curator_review_cannot_reach_a_reviewed_plan_by_recording_a_lower_leve
     # review, because the review is what the plan reads.
     honest = copy.deepcopy(pack)
     case_by_id(honest, "widget-shell")["validation"]["reviews"][-1]["role"] = "independent_reviewer"
-    rechain(case_by_id(honest, "widget-shell")["validation"])
+    rechain(honest, case_by_id(honest, "widget-shell")["validation"])
     with pytest.raises(ContractError, match="the recorded level is a cached copy of that review"):
         validate_document("case-pack", honest)
     assert effective_level(honest, case_by_id(honest, "widget-shell")) is None
@@ -1475,9 +1592,9 @@ def test_deleting_the_review_that_withdrew_an_approval_cannot_pass_unnoticed(tmp
     """
     pack = approved_pack(tmp_path)
     validation = case_by_id(pack, "widget-shell")["validation"]
-    chain_review(validation, {"reviewer": "A. Djudicator", "role": "adjudicator",
-                              "decision": "unresolved", "level": "L3",
-                              "at": "2026-09-20T18:00:00+00:00", "note": "reopened"})
+    chain_review(pack, validation, {"reviewer": "A. Djudicator", "role": "adjudicator",
+                                    "decision": "unresolved", "level": "L3",
+                                    "at": "2026-09-20T18:00:00+00:00", "note": "reopened"})
     assert validate_document("case-pack", pack) is pack
     assert build_plan(pack, "widget-abc", HASH)[0]["scope"] == "draft"
 
@@ -1510,7 +1627,7 @@ def test_deleting_the_review_that_withdrew_an_approval_cannot_pass_unnoticed(tmp
     # Rebuilding the chain and the head is what a deletion costs, and it is a deliberate act: the
     # pack loads again, and the history it now states is one the person who edited it wrote.
     rebuilt = copy.deepcopy(withdrawn)
-    rechain(case_by_id(rebuilt, "widget-shell")["validation"])
+    rechain(rebuilt, case_by_id(rebuilt, "widget-shell")["validation"])
     assert validate_document("case-pack", rebuilt) is rebuilt
     assert build_plan(rebuilt, "widget-abc", HASH)[0]["scope"] == "reviewed"
 
@@ -1550,7 +1667,7 @@ def test_the_three_reproductions_are_refused_end_to_end(tmp_path):
         """A review recorded above the claim, measured against the claim and never against itself."""
         validation = case_by_id(document, "widget-shell")["validation"]
         validation["reviews"][-1].update({"level": "L4", "role": "curator"})
-        rechain(validation)
+        rechain(document, validation)
         validation["level"] = "L2"
 
     def repin_the_snapshot(document: dict) -> None:
@@ -1561,9 +1678,9 @@ def test_the_three_reproductions_are_refused_end_to_end(tmp_path):
     def delete_the_withdrawal(document: dict) -> None:
         """A withdrawal recorded, then deleted, leaving the approval under it standing."""
         validation = case_by_id(document, "widget-shell")["validation"]
-        chain_review(validation, {"reviewer": "A. Djudicator", "role": "adjudicator",
-                                  "decision": "unresolved", "level": "L3",
-                                  "at": "2026-09-20T18:00:00+00:00", "note": "reopened"})
+        chain_review(document, validation, {"reviewer": "A. Djudicator", "role": "adjudicator",
+                                            "decision": "unresolved", "level": "L3",
+                                            "at": "2026-09-20T18:00:00+00:00", "note": "reopened"})
         del validation["reviews"][-1]
 
     _, notes = refuse(lower_the_claim, "carries the role curator")
@@ -1581,3 +1698,319 @@ def test_the_three_reproductions_are_refused_end_to_end(tmp_path):
     assert [entry["decision"] for entry in
             case_by_id(withdrawn, "widget-shell")["validation"]["reviews"]] == ["approve"], \
         "the deletion succeeded; what it cannot do is pass for the history it came from"
+
+def test_deleting_a_failing_check_cannot_turn_a_failed_set_into_a_passing_one(tmp_path):
+    """Reproduces the reconstituted check set: a set read by membership loses its failing check.
+
+    A check set used to be whichever recorded checks carried the snapshot id, so deleting the one
+    that failed, or dropping its attribution so it left the set, left five passing checks that read
+    as a passing set. The set is one record now: it states what the set decided and hashes that
+    together with its own checks, so both routes leave the record hashing to something that is no
+    longer there, and every gate reads the record.
+    """
+    pack = make_pack()
+    case_by_id(pack, "widget-shell")["target"]["accepted_locations"][0]["path"] = "src/moved.py"
+    outcomes = mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)
+    validation = case_by_id(pack, "widget-shell")["validation"]
+    assert outcomes[0]["passed"] is False
+    assert validation["check_sets"]["widget-abc"]["result"] == "fail"
+    assert validation["review_state"] == "draft" and validation["level"] is None
+
+    deleted = json.loads(json.dumps(pack))
+    edited = deleted["cases"][0]["validation"]
+    edited["checks"] = [check for check in edited["checks"] if check["result"] == "pass"]
+    edited["review_state"] = "mechanically_checked"
+    edited["level"] = "L1"
+    with pytest.raises(ContractError, match="a check was deleted, unattributed, reordered, or edited"):
+        validate_document("case-pack", deleted)
+    assert recorded_check_state(edited, "widget-abc") is None
+    plan, notes = build_plan(deleted, "widget-abc", HASH)
+    assert plan["targets"] == [] and plan["scope"] == "draft"
+    assert any("no recorded passing mechanical check set" in note for note in notes)
+
+    unattributed = json.loads(json.dumps(pack))
+    edited = unattributed["cases"][0]["validation"]
+    for check in edited["checks"]:
+        if check["result"] == "fail":
+            del check["snapshot_id"]
+    edited["review_state"] = "mechanically_checked"
+    edited["level"] = "L1"
+    with pytest.raises(ContractError, match="'snapshot_id' is a required property"):
+        validate_document("case-pack", unattributed)
+
+    moved = json.loads(json.dumps(pack))
+    edited = moved["cases"][0]["validation"]
+    for check in edited["checks"]:
+        if check["result"] == "fail":
+            check["snapshot_id"] = "widget-elsewhere"
+    with pytest.raises(ContractError, match="a check was deleted, unattributed, reordered, or edited"):
+        validate_document("case-pack", moved)
+    assert recorded_check_state(edited, "widget-abc") is None
+
+    # Restating the set over the checks that remain is what the deletion costs, and it is a
+    # deliberate act: what the pack then records is a set the person who edited it wrote.
+    rebuild_check_set(deleted["cases"][0]["validation"], "widget-abc")
+    assert validate_document("case-pack", deleted) is deleted
+    assert recorded_check_state(deleted["cases"][0]["validation"], "widget-abc") == "pass"
+
+
+def test_deleting_a_recorded_rejection_cannot_restore_the_case_it_kept_out(tmp_path):
+    """Reproduces the restored admission: an unchained array loses a decision without a trace.
+
+    Admissions used to be an append-only array anchored by nothing, so deleting the rejection that
+    kept a case out of a plan left a pack that had never rejected anything. They are a chain now,
+    and the pack anchor records where the chain ends, so a deletion from the middle leaves the
+    decisions after it chaining to nothing and a deletion off the end leaves the pack anchoring to
+    a decision it no longer holds.
+    """
+    pack = approved_pack(tmp_path)
+    admit_case(pack, "widget-shell", decision="rejected", by="J. Curator",
+               reason="the mechanism duplicates an admitted target", clock=CLOCK)
+    assert [entry["decision"] for entry in pack["admissions"]] == ["admitted", "rejected"]
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["targets"] == []
+    assert any("latest admission decision (rejected by J. Curator" in note for note in notes)
+
+    truncated = json.loads(json.dumps(pack))
+    del truncated["admissions"][-1]
+    with pytest.raises(ContractError, match="a case, a review history, or an admission was deleted"):
+        validate_document("case-pack", truncated)
+    with pytest.raises(ContractError, match="anchored records do not verify"):
+        build_plan(truncated, "widget-abc", HASH)
+    with pytest.raises(ContractError, match="anchored records do not verify"):
+        admit_case(truncated, "widget-shell", decision="admitted", by="J. Curator",
+                   reason="a write cannot re-anchor what was deleted", clock=CLOCK)
+
+    middle = json.loads(json.dumps(pack))
+    del middle["admissions"][0]
+    with pytest.raises(ContractError, match="does not chain to the admission before it"):
+        validate_document("case-pack", middle)
+
+    edited = json.loads(json.dumps(pack))
+    edited["admissions"][-1]["decision"] = "admitted"
+    with pytest.raises(ContractError, match="does not chain to the admission before it"):
+        validate_document("case-pack", edited)
+
+    unchained = json.loads(json.dumps(pack))
+    del unchained["admissions"][-1]["chain_sha256"]
+    with pytest.raises(ContractError, match="records no chain_sha256"):
+        validate_document("case-pack", unchained)
+
+    # Rebuilding the chain and the anchor is what a deletion costs, and the pack that results is
+    # one the person who edited it wrote: the plan is reviewed again, under no recorded rejection.
+    rechain_admissions(truncated)
+    assert validate_document("case-pack", truncated) is truncated
+    assert build_plan(truncated, "widget-abc", HASH)[0]["scope"] == "reviewed"
+    assert pack_sha256(truncated) != pack_sha256(pack)
+
+
+def test_wiping_a_review_history_whole_is_not_a_case_that_never_had_one(tmp_path):
+    """Reproduces the erased withdrawal: an empty history used to verify like a deleted one.
+
+    The chain binds the entries to each other and ``reviews_sha256`` says where they end, but both
+    live inside the history, so wiping it took the record that would have complained. The pack
+    anchor records where each case's review history ends, and a case that never had one anchors a
+    null, which is how the two stay distinguishable.
+    """
+    pack = approved_pack(tmp_path)
+    record_review(pack, "widget-shell", reviewer="A. Djudicator", role="adjudicator",
+                  decision="reject", note="the label names the wrong mechanism", clock=CLOCK)
+    validation = case_by_id(pack, "widget-shell")["validation"]
+    assert [entry["decision"] for entry in validation["reviews"]] == ["approve", "reject"]
+
+    wiped = json.loads(json.dumps(pack))
+    edited = wiped["cases"][0]["validation"]
+    edited["reviews"] = []
+    del edited["reviews_sha256"]
+    with pytest.raises(ContractError, match="a case, a review history, or an admission was deleted"):
+        validate_document("case-pack", wiped)
+    with pytest.raises(ContractError, match="anchored records do not verify"):
+        build_plan(wiped, "widget-abc", HASH)
+
+    # Keeping the head while dropping the entries is the older refusal, unchanged.
+    named = json.loads(json.dumps(pack))
+    named["cases"][0]["validation"]["reviews"] = []
+    with pytest.raises(ContractError, match="the history it names was deleted whole"):
+        validate_document("case-pack", named)
+
+    # A case that has never been reviewed records no history and anchors none, and loads.
+    never = make_pack()
+    mechanical_checks(never, "widget-abc", tmp_path / "source", HASH, clock=CLOCK)
+    unreviewed = case_by_id(never, "widget-shell")["validation"]
+    assert unreviewed["reviews"] == [] and "reviews_sha256" not in unreviewed
+    assert validate_document("case-pack", never) is never
+    assert build_plan(never, "widget-abc", HASH)[0]["scope"] == "draft"
+
+
+def test_deleting_a_whole_case_cannot_turn_a_draft_plan_into_a_reviewed_one(tmp_path):
+    """Reproduces the deleted case: scope is all or nothing, and the case list was anchored by nothing.
+
+    A plan is reviewed only when every case in it is, so a pack holding one unreviewed case plans
+    draft. Deleting that case, its chained review history and all, used to leave a pack that was
+    consistent in every other respect and a plan that claimed reviewed scope. The anchor records
+    the roster, so the case that is gone is visible as gone.
+    """
+    pack = approved_pack(tmp_path)
+    add_case(pack, draft_case(
+        "widget-path", snapshot_id="widget-abc", kind="path_traversal", description="join of a user path",
+        represents=REPRESENTS, workload="conventional_application", component_role="application", aliases=[],
+        evidence=[evidence("note", origin="research_note", kind="source_inspection", reference="src/app.py")],
+        accepted_locations=[{"path": "src/app.py", "start_line": 1, "end_line": 1, "role": "sink"}],
+    ))
+    mechanical_checks(pack, "widget-abc", tmp_path / "source", HASH, clock=CLOCK)
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "draft" and notes == []
+    assert {target["target_id"] for target in plan["targets"]} == {"T-widget-shell", "T-widget-path"}
+
+    document = json.loads(json.dumps(pack))
+    document["cases"] = [case for case in document["cases"] if case["case_id"] != "widget-path"]
+    with pytest.raises(ContractError, match="a case, a review history, or an admission was deleted"):
+        validate_document("case-pack", document)
+    with pytest.raises(ContractError, match="anchored records do not verify"):
+        build_plan(document, "widget-abc", HASH)
+
+    # Reordering the roster is the same refusal: the anchor names the list as it was recorded.
+    reordered = json.loads(json.dumps(pack))
+    reordered["cases"].reverse()
+    with pytest.raises(ContractError, match="a case, a review history, or an admission was deleted"):
+        validate_document("case-pack", reordered)
+
+    # Re-anchoring is what the deletion costs, and the pack that results no longer hashes to the
+    # pack the earlier plans named, so a plan built from it cannot pass for one built from this.
+    reanchor(document)
+    assert validate_document("case-pack", document) is document
+    plan, _ = build_plan(document, "widget-abc", HASH)
+    assert plan["scope"] == "reviewed"
+    assert plan["provenance"]["pack_sha256"] != pack_sha256(pack)
+
+
+def test_only_an_explicit_admitted_decision_reaches_a_reviewed_scope_plan(tmp_path):
+    """Changed deliberately: an approved case with no admission used to reach a reviewed plan.
+
+    The pack says a label becomes evidence through recorded human review and admission, and the
+    admission decisions are ``admitted``, ``rejected``, and ``deferred``. Only ``rejected`` did
+    anything, so a deferred decision and no decision at all were both read as admission. A case is
+    admitted when a named person recorded that it is.
+    """
+    pack = make_pack()
+    mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)
+    set_disposition(pack, "widget-shell", "validate", "evidence reviewed")
+    approve_case(pack, "widget-shell", reviewer="R. Eviewer", role="independent_reviewer", level="L3",
+                 note="label established", clock=CLOCK)
+
+    assert latest_admission(pack, "widget-shell") is None
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "draft" and notes == []
+    assert [target["validation_level"] for target in plan["targets"]] == ["L3"]
+
+    admit_case(pack, "widget-shell", decision="deferred", by="J. Curator",
+               reason="held for the second reviewer", clock=CLOCK)
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "draft" and notes == []
+    assert [target["target_id"] for target in plan["targets"]] == ["T-widget-shell"], \
+        "a deferred decision holds the case back from evidence, it does not remove it"
+
+    admit_case(pack, "widget-shell", decision="admitted", by="J. Curator",
+               reason="the second reviewer read it", clock=CLOCK)
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "reviewed" and notes == []
+
+    admit_case(pack, "widget-shell", decision="deferred", by="J. Curator",
+               reason="reopened while the fix commit is re-read", clock=CLOCK)
+    assert build_plan(pack, "widget-abc", HASH)[0]["scope"] == "draft"
+
+
+def test_swapping_the_evidence_under_an_approved_control_leaves_the_approval_behind(tmp_path):
+    """Reproduces the swapped evidence: the one control field the label digest did not cover.
+
+    A control rests on the evidence records it names, so what a reviewer approved includes which
+    of them it names. The ids used to sit outside the digest, so a control could be pointed at
+    other evidence after approval without the approval lapsing.
+    """
+    pack = make_pack()
+    case = case_by_id(pack, "widget-shell")
+    case["evidence"].append(evidence("inspection", origin="research_note", kind="source_inspection",
+                                     reference="src/app.py", note="a second read of the call site"))
+    case["controls"].append(safe_control())
+    mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)
+    set_disposition(pack, "widget-shell", "validate", "evidence reviewed")
+    approve_case(pack, "widget-shell", reviewer="R. Eviewer", role="independent_reviewer", level="L3",
+                 note="the control and the evidence under it were read", clock=CLOCK)
+    admit_case(pack, "widget-shell", decision="admitted", by="J. Curator", reason="pilot slice",
+               clock=CLOCK)
+    assert build_plan(pack, "widget-abc", HASH)[0]["scope"] == "reviewed"
+
+    case = case_by_id(pack, "widget-shell")
+    before = label_digest(pack, case)
+    case["controls"][0]["evidence_ids"] = ["inspection"]
+
+    assert label_digest(pack, case) != before
+    assert approval_is_current(pack, case) is False
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "draft" and plan["targets"] == [] and plan["controls"] == []
+    assert any("the labels changed after the review" in note for note in notes)
+
+    # Reordering the ids is not a change to the labels, as reordering aliases is not.
+    case["controls"][0]["evidence_ids"] = ["fix", "inspection"]
+    approve_case(pack, "widget-shell", reviewer="R. Eviewer", role="independent_reviewer", level="L3",
+                 note="both records read", clock=CLOCK)
+    case = case_by_id(pack, "widget-shell")  # the write validated a copy and swapped it in
+    reordered = label_digest(pack, case)
+    case["controls"][0]["evidence_ids"] = ["inspection", "fix"]
+    assert label_digest(pack, case) == reordered
+    assert approval_is_current(pack, case) is True
+
+
+def test_a_reviewer_can_record_a_withdrawal_or_a_reopening_through_the_library(tmp_path):
+    """The withdrawal the design rests on is a supported write, not a hand edit of a pack.
+
+    Every gate reads the latest recorded review, and a rejection or an unresolved reopening is how
+    a reviewer withdraws an approval. Until now the only writer was :func:`approve_case`, so the
+    only way to record one was to edit the file and rebuild the chain by hand.
+    """
+    pack = approved_pack(tmp_path)
+    assert build_plan(pack, "widget-abc", HASH)[0]["scope"] == "reviewed"
+
+    reopened = copy.deepcopy(pack)
+    entry = record_review(reopened, "widget-shell", reviewer="A. Djudicator", role="adjudicator",
+                          decision="unresolved", note="the deployment assumption needs a second read",
+                          clock=CLOCK)
+    validation = case_by_id(reopened, "widget-shell")["validation"]
+    assert entry["decision"] == "unresolved" and entry["level"] == "L3"
+    assert validation["reviews_sha256"] == entry["chain_sha256"]
+    assert validation["review_state"] == "human_approved" and validation["level"] == "L3", \
+        "reopening a question says nothing about the mechanical checks, so it moves no state"
+    assert validate_document("case-pack", reopened) is reopened
+    plan, notes = build_plan(reopened, "widget-abc", HASH)
+    assert plan["targets"] == [] and plan["scope"] == "draft"
+    assert any("reopened the question and left it unresolved" in note for note in notes)
+
+    rejected = copy.deepcopy(pack)
+    record_review(rejected, "widget-shell", reviewer="A. Djudicator", role="adjudicator",
+                  decision="reject", note="the label names the wrong mechanism", clock=CLOCK)
+    validation = case_by_id(rejected, "widget-shell")["validation"]
+    assert [review["decision"] for review in validation["reviews"]] == ["approve", "reject"]
+    assert validation["review_state"] == "mechanically_checked" and validation["level"] == "L1", \
+        "a rejected case falls back to what its own mechanical checks earn"
+    assert validate_document("case-pack", rejected) is rejected
+    plan, notes = build_plan(rejected, "widget-abc", HASH)
+    assert plan["targets"] == [] and plan["scope"] == "draft"
+    assert any("the latest recorded review rejected this case" in note for note in notes), \
+        "withdrawing an approval is not a way of handing the case back to its mechanical L1"
+
+    before = dump_json(rejected)
+    with pytest.raises(ContractError, match="requires an explicit reviewer name"):
+        record_review(rejected, "widget-shell", reviewer="​", role="adjudicator",
+                      decision="reject", note="", clock=CLOCK)
+    with pytest.raises(ContractError, match="decision must be one of"):
+        record_review(rejected, "widget-shell", reviewer="A. Djudicator", role="adjudicator",
+                      decision="withdrawn", note="", clock=CLOCK)
+    assert dump_json(rejected) == before
+
+    approve_case(rejected, "widget-shell", reviewer="R. Eviewer", role="independent_reviewer",
+                 level="L3", note="the mechanism was re-read and the label holds", clock=CLOCK)
+    assert build_plan(rejected, "widget-abc", HASH)[0]["scope"] == "reviewed"
+    assert [review["decision"] for review in
+            case_by_id(rejected, "widget-shell")["validation"]["reviews"]] == [
+        "approve", "reject", "approve"]
+

@@ -6,9 +6,11 @@ raise a case beyond that, and the plan builder degrades to the lowest state pres
 
 Mechanical checks are recorded per snapshot, so a case spanning a vulnerable and a fixed
 snapshot reaches L1 only once every snapshot it references has passed. Nothing here reads
-source semantics, establishes a root cause, infers a reviewer, or withdraws a human review:
-a check that fails after approval is recorded and keeps the case out of a plan, and the
-recorded review state and level stay exactly as the reviewer left them.
+source semantics, establishes a root cause, infers a reviewer, or withdraws a human review of
+its own accord: a check that fails after approval is recorded and keeps the case out of a plan,
+and the recorded review state and level stay exactly as the reviewer left them. A withdrawal is
+a decision a named reviewer records, through :func:`record_review`, and the state that follows
+it is the state the reviewer's decision leaves the case in.
 
 An approval covers the label content it was recorded against, not the case id: each approving
 review carries :func:`label_digest` of what the case claims to be, its target, its controls, and
@@ -33,11 +35,27 @@ an L4 curator approval is neither loaded nor planned, where before it loaded and
 no independent reviewer behind it. Every decision reads
 :func:`scaneval.contracts.effective_level`, which is the covering review's own level.
 
-The recorded reviews are a chain rather than an array. Each carries ``chain_sha256`` over its own
-fields and the entry before it, and ``validation.reviews_sha256`` records where the chain ends, so
-deleting the review that withdrew an approval cannot quietly restore it, from the middle of the
-history or off the end; :func:`scaneval.contracts.review_chain_gap` says what that does and does
-not prove.
+Every record a planning decision reads is anchored, so that deleting one is visible rather than
+quiet. The recorded reviews are a chain rather than an array: each carries ``chain_sha256`` over
+its own fields and the entry before it, and ``validation.reviews_sha256`` records where the chain
+ends. The admissions are a chain in the same way. A mechanical check set is one record in
+``validation.check_sets``, carrying what the set decided, the export it read, and a digest over
+both together with its own checks, so a check set is never reconstituted by gathering whichever
+checks still carry a snapshot id. And ``anchor_sha256`` records the case roster, where each case's
+review history ends, and where the admission history ends, which is what a case or an admission
+cannot record for itself: deleting it takes the record that would have complained with it.
+:func:`scaneval.contracts.review_chain_gap` and :func:`scaneval.contracts.pack_anchor_gap` say what
+all of that does and does not prove. In short, anyone who can edit the pack can recompute an
+anchor; what an anchor removes is the deletion that looks like the file it came from.
+
+A review is recorded through one write path, :func:`record_review`, whether it approves a label or
+withdraws that approval, so an approval and its withdrawal share every gate and every record. A
+rejection moves the case back to the state its mechanical checks earn, and the case is planned
+under neither: the latest recorded review is the operative one.
+
+Admission is an explicit decision, never an absence. Only a recorded ``admitted`` decision admits a
+case to a reviewed-scope plan; a case nobody has decided on, or one recorded ``deferred``, is
+planned as the draft evidence it is.
 
 Case identity stays outside the digest, because an identifier says where a label came from rather
 than what it alleges. Admissions are bound to content instead: each records the ``target_id`` it
@@ -46,8 +64,8 @@ longer names the target of the case it names is refused. Renaming two cases arou
 rejection therefore moves neither.
 
 An approval also covers the tree the checks behind it ran against. Which export a check set read
-is recorded twice in a case, in ``validation.checked_trees`` and in the ``detail`` of its passing
-``snapshot_hash_recorded`` check, and a third time in the snapshot's declared ``tree_hash``.
+is recorded twice in a case, in its ``validation.check_sets`` record and in the ``detail`` of its
+passing ``snapshot_hash_recorded`` check, and a third time in the snapshot's declared ``tree_hash``.
 Loading a pack requires the three to agree, and :func:`build_plan` leaves out a case whose records
 disagree or whose checks ran against a tree the snapshot no longer declares, so editing any two of
 the three contradicts the third instead of pointing a standing approval at a different export.
@@ -66,13 +84,17 @@ import unicodedata
 
 from .contracts import (
     ContractError,
+    admission_chain_digest,
     canonical_json,
     canonical_sha256,
+    check_set_digest,
     claimed_level_gap,
     covering_review,
     effective_level,
     label_digest,
     load_document,
+    pack_anchor_digest,
+    pack_anchor_gap,
     recorded_check_state,
     recorded_level_gap,
     review_chain_digest,
@@ -85,6 +107,8 @@ PACK_KIND = "case-pack"
 LEVELS = ("L1", "L2", "L3", "L4")
 DISPOSITIONS = ("validate", "needs_evidence", "extended_regression", "exclude")
 REVIEWED_LEVELS = ("L3", "L4")
+# The three decisions a recorded review can carry: one approval and the two withdrawals.
+REVIEW_DECISIONS = ("approve", "reject", "unresolved")
 # A public identifier must be well formed, so a typo in a CVE or GHSA id is caught. Any other
 # identifier shape is accepted: a private pack names its cases by internal ticket or review id,
 # and the design states a CVE is neither required nor sufficient.
@@ -148,16 +172,28 @@ def _require_stated(value: Any, message: str) -> str:
 
 
 def _apply_validated(pack: dict, mutate: Callable[[dict], Any]) -> Any:
-    """Apply *mutate* to a deep copy of *pack*, validate it, and only then swap it in.
+    """Apply *mutate* to a deep copy of *pack*, re-anchor and validate it, then swap it in.
 
     A refused change leaves *pack* exactly as it was, because the mutation never touched it.
     On success the validated copy replaces the pack's contents in place, so the caller's
     pack reference stays valid while references taken to nested objects beforehand point at
     the superseded copy. Validation checks the document against the contract; it does not
     check that the change was a good idea.
+
+    Every write goes through here, so this is where ``anchor_sha256`` is kept true: the pack the
+    caller hands in must already anchor to the cases, review histories, and admissions it holds,
+    and the copy is re-anchored after the change. Refusing first is the point of the order. A pack
+    whose anchor does not verify has had a record deleted, and writing to it would replace the
+    evidence of that with a fresh anchor over what remains, so a hand-edited pack cannot be
+    laundered by calling any function in this module on it.
     """
+    gap = pack_anchor_gap(pack)
+    if gap:
+        raise ContractError(
+            f"this pack's anchored records do not verify, so nothing may be written to it: {gap}")
     candidate = copy.deepcopy(pack)
     result = mutate(candidate)
+    candidate["anchor_sha256"] = pack_anchor_digest(candidate)
     validate_document(PACK_KIND, candidate)
     pack.clear()
     pack.update(candidate)
@@ -173,6 +209,7 @@ def new_pack(namespace: str, pack_id: str, description: str, *, version: str = "
         "snapshots": [], "cases": [], "admissions": [],
         "notes": ["Draft pack. Labels become evidence only after recorded human review and admission."],
     }
+    pack["anchor_sha256"] = pack_anchor_digest(pack)
     return validate_document(PACK_KIND, pack)
 
 
@@ -484,9 +521,34 @@ def _approval_gap(pack: dict, case: dict) -> str:
             or "the recorded approval does not stand for these labels")
 
 
+def _planning_review_gap(pack: dict, case: dict) -> str | None:
+    """Why the recorded reviews keep *case* out of a plan, or ``None`` when they do not.
+
+    Every question a plan asks of a review history is asked here. A case with no recorded review is
+    planned on its mechanical state, which is what an L1 case is. Once a review is recorded the
+    latest one is the operative record, whatever review state the case carries: it must be an
+    approval, so a rejection or an unresolved reopening keeps the case out even after the rejection
+    moved it back to ``mechanically_checked``, and withdrawing an approval is therefore not a way
+    of handing a case back to its mechanical L1. An approved case must also be covered by that
+    review at the level it records (see :func:`approval_is_current`). The reason is
+    :func:`_approval_gap`, so the plan states which of those it was.
+    """
+    review = latest_review(case)
+    if review is not None and review["decision"] != "approve":
+        return _approval_gap(pack, case)
+    if case["validation"]["review_state"] == "human_approved" and not approval_is_current(pack, case):
+        return _approval_gap(pack, case)
+    return None
+
+
 def _recorded_check_state(case: dict, snapshot_id: str) -> str | None:
-    """One case's recorded check state for *snapshot_id*: ``pass``, ``fail``, or ``None``."""
-    return recorded_check_state(case["validation"]["checks"], snapshot_id)
+    """One case's recorded check state for *snapshot_id*: ``pass``, ``fail``, or ``None``.
+
+    Read from the one anchored check set record, never gathered from the checks that carry the
+    snapshot id (see :func:`scaneval.contracts.recorded_check_state`), so a set edited into
+    disagreeing with itself reads as no set at all rather than as a passing one.
+    """
+    return recorded_check_state(case["validation"], snapshot_id)
 
 
 def _unchecked_snapshots(case: dict) -> list[str]:
@@ -498,16 +560,15 @@ def _unchecked_snapshots(case: dict) -> list[str]:
 def _tree_records(case: dict, snapshot_id: str) -> set[str]:
     """Every digest *case* records as the export its check set for *snapshot_id* read.
 
-    Two records can speak. ``validation.checked_trees`` carries the digest :func:`mechanical_checks`
-    writes for every set it records, and the ``detail`` of that set's passing
-    ``snapshot_hash_recorded`` check carries the same digest, which is where a set recorded before
-    that field existed holds it. A failing set of that vintage wrote a sentence in the detail
-    instead and so names nothing here, which costs nothing because a failing set keeps the case out
-    of a plan anyway. A value that is not a sha256 digest is not a record of an export and is left
-    out. The set is returned rather than one preferred record, so a caller can see the two records
-    disagreeing instead of reading whichever was edited last.
+    Two records speak. The ``validation.check_sets`` record for the snapshot names the export the
+    set ran against, and the ``detail`` of that set's passing ``snapshot_hash_recorded`` check
+    names it again. A failing set writes a sentence in that detail instead, so it names only the
+    one record, which costs nothing because a failing set keeps the case out of a plan anyway. A
+    value that is not a sha256 digest is not a record of an export and is left out. The set is
+    returned rather than one preferred record, so a caller can see the two records disagreeing
+    instead of reading whichever was edited last.
     """
-    recorded = [case["validation"].get("checked_trees", {}).get(snapshot_id)]
+    recorded = [(case["validation"].get("check_sets", {}).get(snapshot_id) or {}).get("tree_hash")]
     recorded += [check["detail"] for check in case["validation"]["checks"]
                  if check.get("snapshot_id") == snapshot_id and check["result"] == "pass"
                  and check["check"] == "snapshot_hash_recorded"]
@@ -517,16 +578,15 @@ def _tree_records(case: dict, snapshot_id: str) -> set[str]:
 def checked_tree_hash(case: dict, snapshot_id: str) -> str | None:
     """The export *case*'s recorded check set for *snapshot_id* ran against, or ``None``.
 
-    ``None`` when nothing in the record says which tree the checks ran against, which is what a
-    check set carrying neither a ``checked_trees`` entry nor a passing hash check says. ``None``
-    too when the records that do speak disagree: two records of one fact that contradict each
-    other establish neither, so no export is returned and :func:`build_plan` leaves the case out.
-    Editing one of them to match a newly declared ``tree_hash`` therefore contradicts the other
-    rather than retargeting the check set; loading such a pack is refused outright.
+    ``None`` when no check set is recorded for the snapshot at all, since the record that would
+    name the export is the record that is missing. ``None`` too when the records that do speak
+    disagree: two records of one fact that contradict each other establish neither, so no export is
+    returned and :func:`build_plan` leaves the case out. Editing one of them to match a newly
+    declared ``tree_hash`` therefore contradicts the other rather than retargeting the check set;
+    loading such a pack is refused outright.
 
-    An older record is read where it stands rather than rewritten: a recorded check is evidence of
-    what ran, and every plan names its pack by content hash, so migrating one in place would
-    change the pack those plans name. Re-running the checks is what writes the field.
+    A recorded set always names an export, because the record requires one, so there is no case
+    where a set ran against a tree nothing names. Re-running the checks is what writes the record.
     """
     records = _tree_records(case, snapshot_id)
     return records.pop() if len(records) == 1 else None
@@ -548,12 +608,6 @@ def _retargeted_snapshots(pack: dict, case: dict) -> list[str]:
         if checked is not None and checked != _declared_tree_hash(pack, snapshot):
             retargeted.append(snapshot)
     return retargeted
-
-
-def _unbound_snapshots(case: dict) -> list[str]:
-    """Referenced snapshots whose recorded checks never say which tree they ran against."""
-    return [snapshot for snapshot in referenced_snapshots(case)
-            if not _tree_records(case, snapshot)]
 
 
 def _disputed_snapshots(case: dict) -> list[str]:
@@ -591,8 +645,14 @@ def mechanical_checks(pack: dict, snapshot_id: str, source_dir: Path, tree_hash:
     edited label earns. Nothing here withdraws the review, and no second flag records the same
     fact: the digest already says the approval covers other bytes.
 
-    Each check set also records the digest of the export it ran against, under that snapshot's id
-    in ``validation.checked_trees``, beside the same digest in the ``detail`` of its passing
+    A check set is recorded as one record under that snapshot's id in ``validation.check_sets``:
+    what the set decided, the digest of the export it ran against, and a ``checks_sha256`` covering
+    both together with every check of the set. Every gate reads that record rather than gathering
+    whichever checks still carry the snapshot id, so deleting a failing check, or dropping its
+    ``snapshot_id`` so it leaves the set, leaves the record hashing to something that is no longer
+    there instead of quietly turning a failed set into a passing one.
+
+    The export digest is also written into the ``detail`` of the set's passing
     ``snapshot_hash_recorded`` check. The two are records of one fact and must agree, and a pack
     load requires the snapshot's declared hash to agree with them as well, so a declared hash
     edited afterwards contradicts both rather than retargeting the set: :func:`build_plan` then
@@ -649,10 +709,13 @@ def mechanical_checks(pack: dict, snapshot_id: str, source_dir: Path, tree_hash:
             validation = case["validation"]
             validation["checks"] = [c for c in validation["checks"]
                                     if c.get("snapshot_id") != snapshot_id] + checks
-            # One check set ran against one export, so the digest of that export is recorded once
-            # for the set rather than repeated on each of its checks.
-            validation.setdefault("checked_trees", {})[snapshot_id] = tree_hash
             passed = all(c["result"] == "pass" for c in checks)
+            # The set is recorded once, as one record: what it decided, the export it ran against,
+            # and the digest of both together with its own checks. Everything downstream reads the
+            # record, so no later deletion inside the array can restate what this set decided.
+            recorded_set = {"result": "pass" if passed else "fail", "tree_hash": tree_hash}
+            recorded_set["checks_sha256"] = check_set_digest(snapshot_id, recorded_set, checks)
+            validation.setdefault("check_sets", {})[snapshot_id] = recorded_set
             every_snapshot_passed = not _unchecked_snapshots(case)
             if validation["review_state"] == "human_approved":
                 # A snapshot that failed and one that was never checked are both missing evidence
@@ -674,54 +737,104 @@ def mechanical_checks(pack: dict, snapshot_id: str, source_dir: Path, tree_hash:
     return _apply_validated(pack, mutate)
 
 
-def approve_case(pack: dict, case_id: str, *, reviewer: str, role: str, level: str, note: str,
-                 clock: Callable[[], datetime] | None = None) -> dict:
-    """Record one explicit human review of a case label.
+def record_review(pack: dict, case_id: str, *, reviewer: str, role: str, decision: str,
+                  note: str, level: str | None = None,
+                  clock: Callable[[], datetime] | None = None) -> dict:
+    """Record one explicit human review decision on a case label: an approval or a withdrawal.
+
+    ``approve`` is the decision :func:`approve_case` records, and it requires the *level* it
+    claims. ``reject`` and ``unresolved`` are the two withdrawals the contract names: a rejection
+    says the label is wrong, and ``unresolved`` says the reviewer reopened the question without
+    settling it. Both are recorded as reviews, because the history of what reviewers decided is the
+    record every gate reads, and the latest entry is the operative one.
 
     The review carries :func:`label_digest` of the target, the controls, and the identity of the
-    snapshots they name as they stand at approval time, so it says which content it covers, down to
-    the export. A later edit to those labels, or a repin of one of those snapshots, leaves the
-    review recorded and covering the old content, and :func:`build_plan` then leaves the case out;
+    snapshots they name as they stand at the time, so it says which content it covers, down to the
+    export. A later edit to those labels, or a repin of one of those snapshots, leaves the review
+    recorded and covering the old content, and :func:`build_plan` then leaves the case out;
     approving again is what covers the new content.
 
     The review is also chained to the one before it by ``chain_sha256``, and becomes the history's
     recorded end in ``validation.reviews_sha256`` (see
-    :func:`scaneval.contracts.review_chain_gap`), so the history it joins cannot later lose an entry
-    unnoticed, from the middle or off the end. ``validation.level`` is set to this review's level
-    and is a cached copy of it: the contract refuses a pack where the two disagree, and every
-    decision reads the review.
+    :func:`scaneval.contracts.review_chain_gap`), which the pack anchor in turn records, so the
+    history it joins cannot later lose an entry unnoticed, from the middle, off the end, or by
+    being wiped whole.
+
+    An approval sets ``validation.level`` to its own level, and that field is a cached copy of it:
+    the contract refuses a pack where the two disagree, and every decision reads the review.
+
+    A withdrawal also moves the recorded state, because a case cannot be ``human_approved`` under a
+    review that rejected it. A rejected case falls back to the state its mechanical checks earn:
+    ``mechanically_checked`` at L1 when every snapshot it references still records a passing check
+    set, and ``draft`` with no level otherwise. It is not planned either way while the rejection is
+    the latest review (see :func:`build_plan`), so withdrawing an approval is not a way of handing
+    a case back to its mechanical L1. An ``unresolved`` reopening leaves the recorded state and
+    level exactly as the earlier reviewer left them and stops the planning instead: reopening a
+    question is not a finding about the mechanical checks. A withdrawal carries the level it
+    withdraws, which is the level the case records, or L1 when it records none; only an approving
+    review's level is read by any gate.
 
     The reviewer name comes from the caller and is stored verbatim; a name holding no character
-    beyond spaces, zero-width marks, or control characters is refused, because an unnamed
-    approval is not an approval. This does not authenticate the reviewer, check their
-    independence, or verify that anything was read, and it records a claim of review rather than
-    establishing the label. A refused approval leaves the pack unchanged.
+    beyond spaces, zero-width marks, or control characters is refused, because an unnamed decision
+    is not a decision. This does not authenticate the reviewer, check their independence, or verify
+    that anything was read, and it records a claim of review rather than establishing the label. A
+    refused decision leaves the pack unchanged.
     """
-    if level not in LEVELS:
-        raise ContractError(f"level must be one of {LEVELS}")
-    _require_stated(reviewer, "approval requires an explicit reviewer name; the tool never supplies one")
+    if decision not in REVIEW_DECISIONS:
+        raise ContractError(f"decision must be one of {REVIEW_DECISIONS}")
+    approving = decision == "approve"
+    _require_stated(reviewer, f"{'approval' if approving else 'a recorded withdrawal'} requires an "
+                              "explicit reviewer name; the tool never supplies one")
     case = case_by_id(pack, case_id)
-    if case["validation"]["review_state"] == "draft":
-        raise ContractError(f"case {case_id} has not passed mechanical checks; run corpus validate first")
-    if level in REVIEWED_LEVELS and role != "independent_reviewer":
-        raise ContractError("L3/L4 labels require an independent_reviewer decision")
-    if level in REVIEWED_LEVELS and case["disposition"]["value"] != "validate":
-        raise ContractError("L3/L4 require disposition validate")
-    review = {"reviewer": reviewer, "role": role, "decision": "approve", "level": level, "at": _now(clock),
-              "note": note, "labels_sha256": label_digest(pack, case)}
+    if approving:
+        if level not in LEVELS:
+            raise ContractError(f"level must be one of {LEVELS}")
+        if case["validation"]["review_state"] == "draft":
+            raise ContractError(f"case {case_id} has not passed mechanical checks; run corpus validate first")
+        if level in REVIEWED_LEVELS and role != "independent_reviewer":
+            raise ContractError("L3/L4 labels require an independent_reviewer decision")
+        if level in REVIEWED_LEVELS and case["disposition"]["value"] != "validate":
+            raise ContractError("L3/L4 require disposition validate")
+    else:
+        level = level or case["validation"]["level"] or "L1"
+        if level not in LEVELS:
+            raise ContractError(f"level must be one of {LEVELS}")
+    review = {"reviewer": reviewer, "role": role, "decision": decision, "level": level,
+              "at": _now(clock), "note": note, "labels_sha256": label_digest(pack, case)}
 
     def mutate(candidate: dict) -> dict:
-        validation = case_by_id(candidate, case_id)["validation"]
+        recorded_case = case_by_id(candidate, case_id)
+        validation = recorded_case["validation"]
         recorded = dict(review)
         previous = validation["reviews"][-1]["chain_sha256"] if validation["reviews"] else None
         recorded["chain_sha256"] = review_chain_digest(previous, recorded)
         validation["reviews"].append(recorded)
         validation["reviews_sha256"] = recorded["chain_sha256"]
-        validation["review_state"] = "human_approved"
-        validation["level"] = level
+        if approving:
+            validation["review_state"] = "human_approved"
+            validation["level"] = level
+        elif decision == "reject" and validation["review_state"] == "human_approved":
+            # A rejected case cannot stay human_approved, so it falls back to what its own
+            # mechanical checks earn. Nothing here re-runs a check; this reads what is recorded.
+            checked = not _unchecked_snapshots(recorded_case)
+            validation["review_state"] = "mechanically_checked" if checked else "draft"
+            validation["level"] = "L1" if checked else None
+            validation.pop("checks_failed", None)
         return validation["reviews"][-1]
 
     return _apply_validated(pack, mutate)
+
+
+def approve_case(pack: dict, case_id: str, *, reviewer: str, role: str, level: str, note: str,
+                 clock: Callable[[], datetime] | None = None) -> dict:
+    """Record one explicit human approval of a case label at *level*.
+
+    This is :func:`record_review` with an approving decision, and the two share every gate and
+    every record they write, so an approval and the withdrawal of one cannot drift apart. A
+    refused approval leaves the pack unchanged.
+    """
+    return record_review(pack, case_id, reviewer=reviewer, role=role, decision="approve",
+                         level=level, note=note, clock=clock)
 
 
 def set_disposition(pack: dict, case_id: str, value: str, reason: str) -> dict:
@@ -779,6 +892,12 @@ def admit_case(pack: dict, case_id: str, *, decision: str, by: str, reason: str,
     where a label came from and not what it alleges, and this is the binding that keeps that choice
     from routing a decision by name alone.
 
+    The decision is chained to the one before it by ``chain_sha256``, and the pack anchor records
+    where the chain now ends, so the admissions are a history rather than an append-only array that
+    anything can be lifted out of: deleting the rejection that kept a case out of a plan leaves the
+    decisions after it chaining to something that is no longer there, and deleting the last one
+    leaves the pack anchoring to a decision it no longer holds.
+
     The name and reason come from the caller and are stored verbatim; a value holding no
     character beyond spaces, zero-width marks, or control characters is refused. This records
     who decided, not that the decision is correct, and it does not change a case's review state
@@ -791,7 +910,10 @@ def admit_case(pack: dict, case_id: str, *, decision: str, by: str, reason: str,
                  "by": by, "at": _now(clock), "reason": reason}
 
     def mutate(candidate: dict) -> dict:
-        candidate["admissions"].append(dict(admission))
+        recorded = dict(admission)
+        previous = candidate["admissions"][-1]["chain_sha256"] if candidate["admissions"] else None
+        recorded["chain_sha256"] = admission_chain_digest(previous, recorded)
+        candidate["admissions"].append(recorded)
         return candidate["admissions"][-1]
 
     return _apply_validated(pack, mutate)
@@ -811,16 +933,25 @@ def planned_level(pack: dict, case: dict) -> str | None:
     return effective_level(pack, case)
 
 
-def plan_scope(planned: list[tuple[dict, str]]) -> str:
-    """``reviewed`` only when every planned case is approved and planned at a reviewed level.
+def plan_scope(planned: list[tuple[dict, str, dict | None]]) -> str:
+    """``reviewed`` only when every planned case is approved, reviewed-level, and admitted.
 
-    Takes the cases with the level each is planned at, because the level a plan may claim comes
-    from the review covering the labels (see :func:`planned_level`) rather than from the case
-    record's own field.
+    Takes each planned case with the level it is planned at and the admission decision covering its
+    content, because neither is on the case record: the level comes from the review covering the
+    labels (see :func:`planned_level`) and the decision from the admission history (see
+    :func:`latest_admission`).
+
+    Only an explicit ``admitted`` decision admits. A case the pack records no decision about has
+    not been admitted, it has not been decided, and a case recorded ``deferred`` was decided the
+    other way for now; both are planned as draft evidence, which is what they are. Reading the
+    absence of a decision as an admission would have made ``deferred`` mean nothing at all and made
+    a reviewed-scope plan reachable without the admission step the pack says it needs.
     """
-    states = {case["validation"]["review_state"] for case, _ in planned}
-    levels = {level for _, level in planned}
-    if planned and states == {"human_approved"} and levels <= {"L3", "L4"}:
+    states = {case["validation"]["review_state"] for case, _, _ in planned}
+    levels = {level for _, level, _ in planned}
+    admitted = all(admission is not None and admission["decision"] == "admitted"
+                   for _, _, admission in planned)
+    if planned and admitted and states == {"human_approved"} and levels <= {"L3", "L4"}:
         return "reviewed"
     return "draft"
 
@@ -830,13 +961,26 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
 
     A case is planned only when its disposition is not ``exclude``, no check set failed after
     approval, the latest admission decision covering its content is not ``rejected``, the pack
-    records a passing mechanical check set for every snapshot it references, and an approved
-    case's labels are still the ones its latest approving review covered. The check state is read
-    per snapshot, so a case approved on one snapshot is still left out while another snapshot it
+    records a passing mechanical check set for every snapshot it references, and the recorded
+    reviews do not stand in the way (see :func:`_planning_review_gap`): the latest review must not
+    be a rejection or an unresolved reopening, and an approved case's labels must still be the ones
+    that review covered. The check state is read per snapshot from the one anchored check set
+    record for it, so a case approved on one snapshot is still left out while another snapshot it
     references is unchecked or failing. Admissions are matched by the ``target_id`` they were
     recorded against (see :func:`latest_admission`), so renaming cases does not move a rejection
     onto content nobody rejected. Planned items keep their real validation level; the plan's scope,
     not a rewritten level, says whether the labels are reviewed drafts.
+
+    Scope is the narrower claim of the two. A plan is ``reviewed`` only when every case in it is
+    approved, planned at a reviewed level, and admitted by an explicit ``admitted`` decision (see
+    :func:`plan_scope`); a case with no recorded decision, or one recorded ``deferred``, is planned
+    as the draft evidence it is.
+
+    A pack whose anchored records do not verify is refused outright rather than planned around,
+    because the record that would say what is missing is the record that was deleted: a case
+    dropped whole, a review history wiped, or an admission lifted out leaves nothing to exclude and
+    nothing to note. That is :func:`scaneval.contracts.pack_anchor_gap`, the same question the pack
+    load asks, asked here too because this can be handed a pack that never went through a load.
 
     That level is read from the review covering the labels rather than from ``validation.level``
     (see :func:`planned_level`), so the review deciding whether the case is planned is the same
@@ -865,16 +1009,19 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
     checks describe some exported tree, and without the hash nothing says it was this one.
 
     A case is also left out when its recorded checks for a snapshot it references ran against a
-    tree that snapshot no longer declares, when the pack's two records of which tree that was
-    disagree, and when they never said which tree they ran against at all (see
-    :func:`checked_tree_hash`). Editing a declared tree hash therefore cannot point a standing
-    check set, or an approval resting on one, at a different export: what was checked is read from
-    the check records, not from the field being edited, and editing one of those records to agree
-    with the edited field leaves it contradicting the other.
+    tree that snapshot no longer declares, and when the pack's two records of which tree that was
+    disagree (see :func:`checked_tree_hash`). Editing a declared tree hash therefore cannot point a
+    standing check set, or an approval resting on one, at a different export: what was checked is
+    read from the check records, not from the field being edited, and editing one of those records
+    to agree with the edited field leaves it contradicting the other.
 
     This builds a plan. It does not approve, admit, re-check, or correct anything, and a case
     left out here is unplanned for this input, not judged wrong.
     """
+    anchor = pack_anchor_gap(pack)
+    if anchor:
+        raise ContractError(
+            f"this pack's anchored records do not verify, so no plan can be built from it: {anchor}")
     snapshot = snapshot_by_id(pack, snapshot_id)
     if snapshot.get("tree_hash") and snapshot["tree_hash"] != tree_hash:
         raise ContractError(f"snapshot {snapshot_id} tree hash does not match the materialized input")
@@ -885,11 +1032,12 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
             f"snapshot {snapshot_id} records mechanical checks but carries no tree hash, so nothing "
             "binds those checks to this export; re-run the checks against the materialized input")
     notes: list[str] = []
-    included: list[tuple[dict, str]] = []
+    included: list[tuple[dict, str, dict | None]] = []
     for case in cases_for_snapshot(pack, snapshot_id):
         case_id = case["case_id"]
         validation = case["validation"]
         admission = latest_admission(pack, case_id)
+        review_gap = _planning_review_gap(pack, case)
         if case["disposition"]["value"] == "exclude":
             notes.append(f"{case_id}: excluded by disposition ({case['disposition']['reason']})")
         elif validation.get("checks_failed"):
@@ -912,12 +1060,8 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
                          f"{', '.join(_retargeted_snapshots(pack, case))} ran against a different "
                          "tree than the pack now declares; re-run the checks against the "
                          "materialized input")
-        elif _unbound_snapshots(case):
-            notes.append(f"{case_id}: excluded because the recorded checks for snapshot(s) "
-                         f"{', '.join(_unbound_snapshots(case))} do not say which tree they ran "
-                         "against; re-run the checks against the materialized input")
-        elif validation["review_state"] == "human_approved" and not approval_is_current(pack, case):
-            notes.append(f"{case_id}: excluded because {_approval_gap(pack, case)}; the recorded "
+        elif review_gap is not None:
+            notes.append(f"{case_id}: excluded because {review_gap}; the recorded "
                          "review stands as recorded, and a review of the labels as they stand is "
                          "needed")
         elif planned_level(pack, case) is None:
@@ -925,10 +1069,10 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
                          f"level for it ({recorded_level_gap(pack, case) or 'no level is recorded'})"
                          "; not planned")
         else:
-            included.append((case, planned_level(pack, case)))
+            included.append((case, planned_level(pack, case), admission))
     scope = plan_scope(included)
     targets, controls = [], []
-    for case, level in included:
+    for case, level, _ in included:
         target = case["target"]
         if target["snapshot_id"] == snapshot_id:
             targets.append({"target_id": target["target_id"], "description": target["description"],
@@ -948,7 +1092,7 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
         "review_budgets": list(pack["review_budgets"]["full" if mode == "full" else "pr"]),
         "provenance": {"namespace": pack["namespace"], "pack_id": pack["pack_id"], "pack_version": pack["version"],
                        "pack_sha256": pack_sha256(pack), "snapshot_id": snapshot_id, "mode": mode,
-                       "case_ids": [case["case_id"] for case, _ in included]},
+                       "case_ids": [case["case_id"] for case, _, _ in included]},
     }
     validate_document("evaluation-plan", plan)
     if not targets and not controls:

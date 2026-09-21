@@ -133,68 +133,157 @@ def _unique(values: list[str], label: str) -> None:
         raise ContractError(f"{label} values must be unique")
 
 
-def recorded_check_state(checks: list[dict[str, Any]], snapshot_id: str) -> str | None:
+def check_set_digest(snapshot_id: str, record: dict[str, Any], checks: list[dict[str, Any]]) -> str:
+    """The digest a check set record carries: its own fields together with the checks it holds.
+
+    The record's own ``checks_sha256`` is left out, exactly as a review's ``chain_sha256`` is left
+    out of its chain value, so the digest covers the result, the export, and every check of the
+    set in recorded order.
+    """
+    entry = {key: value for key, value in record.items() if key != "checks_sha256"}
+    return canonical_sha256({"snapshot_id": snapshot_id, "set": entry, "checks": checks})
+
+
+def recorded_checks(validation: dict[str, Any], snapshot_id: str) -> list[dict[str, Any]]:
+    """The checks *validation* records against *snapshot_id*, in recorded order."""
+    return [check for check in validation["checks"] if check.get("snapshot_id") == snapshot_id]
+
+
+def check_set_gap(validation: dict[str, Any], snapshot_id: str) -> str | None:
+    """Why the recorded check set for *snapshot_id* does not verify, or ``None``.
+
+    ``None``, too, when no set is recorded for it: a set that is not there is absent, not broken,
+    and the case is unchecked for that snapshot.
+
+    A check set is one record in ``validation.check_sets``, not the checks that happen to carry a
+    snapshot id. The record states the result and the export the set ran against, and its
+    ``checks_sha256`` covers those fields together with every check of the set, so deleting a
+    failing check, dropping its ``snapshot_id`` so it leaves the set, reordering two of them, or
+    editing one leaves the record hashing to something that is no longer there. The recorded result
+    must also be the result its own checks state, so the two records of that one fact cannot
+    disagree.
+
+    What this proves is the same narrow thing the review chain proves: anyone who can edit the pack
+    can delete a check and rebuild the record around it. What it removes is the quiet deletion, the
+    edit that looks like the file it came from and turns a failed set into a passing one.
+    """
+    record = (validation.get("check_sets") or {}).get(snapshot_id)
+    checks = recorded_checks(validation, snapshot_id)
+    if record is None:
+        if checks:
+            return (f"validation.checks records {len(checks)} check(s) against snapshot "
+                    f"{snapshot_id}, but validation.check_sets records no check set for it; a check "
+                    "set is one record, not the checks that still carry its snapshot")
+        return None
+    if not checks:
+        return (f"validation.check_sets records a check set for snapshot {snapshot_id}, but no "
+                "recorded check carries that snapshot; the checks it names were deleted")
+    recorded = record.get("checks_sha256")
+    expected = check_set_digest(snapshot_id, record, checks)
+    if recorded != expected:
+        return (f"validation.check_sets[{snapshot_id}] records {recorded}, and the set as it now "
+                f"stands hashes to {expected}; a check was deleted, unattributed, reordered, or "
+                "edited")
+    stated = "pass" if all(check["result"] == "pass" for check in checks) else "fail"
+    if record["result"] != stated:
+        return (f"validation.check_sets[{snapshot_id}] records {record['result']}, but the checks it "
+                f"holds are {stated}")
+    return None
+
+
+def recorded_check_state(validation: dict[str, Any], snapshot_id: str) -> str | None:
     """``pass`` or ``fail`` for one snapshot's recorded check set; ``None`` when none is recorded.
 
-    A check set is every recorded check carrying *snapshot_id*, and it passes only when all of
-    them passed. Checks recorded before check sets carried a ``snapshot_id`` belong to no
-    snapshot and are ignored here rather than deleted, so they neither promote nor demote a
-    case. Nothing is re-run: this reads what the pack already records.
+    The state is read from the one anchored record in ``validation.check_sets``, never
+    reconstituted by gathering whichever checks still carry the snapshot id. ``None`` when that
+    record is absent and ``None`` when it does not verify (see :func:`check_set_gap`), so a set
+    edited into disagreeing with itself neither promotes nor demotes a case: it leaves the case
+    unchecked for that snapshot, and a pack recording one is refused at load. Nothing is re-run
+    here; this reads what the pack already records.
     """
-    recorded = [check for check in checks if check.get("snapshot_id") == snapshot_id]
-    if not recorded:
+    if check_set_gap(validation, snapshot_id) is not None:
         return None
-    return "pass" if all(check["result"] == "pass" for check in recorded) else "fail"
+    record = (validation.get("check_sets") or {}).get(snapshot_id)
+    return None if record is None else record["result"]
+
+
+def chain_digest(previous: str | None, entry: dict[str, Any], kind: str) -> str:
+    """The chain value of *entry*, a record of *kind*, recorded after the one valued *previous*.
+
+    The digest covers every field of the entry except the chain value itself, the kind of record it
+    is, and the chain value of the one before it, so each entry commits to the whole history that
+    precedes it and a record of one kind cannot be replayed as a record of another. ``None`` as
+    *previous* starts a history.
+    """
+    fields = {key: value for key, value in entry.items() if key != "chain_sha256"}
+    return canonical_sha256({"previous": previous, "kind": kind, "entry": fields})
 
 
 def review_chain_digest(previous: str | None, review: dict[str, Any]) -> str:
-    """The chain value of *review* recorded after the review whose chain value is *previous*.
+    """The chain value of *review* recorded after the review whose chain value is *previous*."""
+    return chain_digest(previous, review, "review")
 
-    The digest covers every field of the review except the chain value itself, together with the
-    chain value of the one before it, so each entry commits to the whole history that precedes it.
-    ``None`` as *previous* starts a history.
+
+def admission_chain_digest(previous: str | None, admission: dict[str, Any]) -> str:
+    """The chain value of *admission* recorded after the one whose chain value is *previous*."""
+    return chain_digest(previous, admission, "admission")
+
+
+def chain_link_gap(entries: list[dict[str, Any]], *, kind: str, label: str) -> tuple[str | None, str | None]:
+    """Why the entries of a chain do not account for each other, and where the chain now ends.
+
+    Every entry carries ``chain_sha256``, which covers its own fields and the chain value of the
+    entry before it, so the history is a chain rather than an array of entries that stand alone.
+    Editing any field, reordering two entries, or deleting one from the middle leaves every later
+    entry chaining to something that is no longer there. An entry recorded without a chain value is
+    refused too: an optional chain would be no chain at all, because dropping the field is the same
+    deletion the chain exists to make visible.
+
+    The head is returned rather than compared here, because what a chain cannot see on its own is
+    the deletion off the end: the entries that remain still chain to each other. Every caller
+    therefore holds the head somewhere the deletion would have to be rewritten deliberately.
     """
-    entry = {key: value for key, value in review.items() if key != "chain_sha256"}
-    return canonical_sha256({"previous": previous, "review": entry})
+    previous: str | None = None
+    for index, entry in enumerate(entries):
+        recorded = entry.get("chain_sha256")
+        if not recorded:
+            return (f"{label}[{index}] records no chain_sha256, so nothing binds it to the "
+                    f"{kind}s recorded before it"), previous
+        expected = chain_digest(previous, entry, kind)
+        if recorded != expected:
+            return (f"{label}[{index}] does not chain to the {kind} before it: it records "
+                    f"{recorded}, and the history as it now stands hashes to {expected}; a {kind} "
+                    "was deleted, reordered, or edited"), previous
+        previous = recorded
+    return None, previous
 
 
 def review_chain_gap(reviews: list[dict[str, Any]], head: str | None) -> str | None:
     """Why a recorded review history does not verify, or ``None`` when it does.
 
-    Every review carries ``chain_sha256``, which covers its own fields and the chain value of the
-    review before it, so the history is a chain rather than an array of entries that stand alone.
-    Editing any field of a review, reordering two of them, or deleting one from the middle leaves
-    every later entry chaining to something that is no longer there.
+    The entries are a chain (see :func:`chain_link_gap`), and the history also records where it
+    ends: ``validation.reviews_sha256`` is the chain value of the last review, present exactly when
+    there is a review, and a history that ends anywhere else is refused. That is what catches the
+    truncation, because dropping the trailing review that withdrew an approval would otherwise
+    restore the approval under it.
 
-    A chain alone does not catch a truncation, because the entries that remain still chain to each
-    other, and the deletion that matters is exactly that one: dropping the trailing review that
-    withdrew an approval would otherwise restore the approval under it. So the history also records
-    where it ends. ``validation.reviews_sha256`` is the chain value of the last review, present
-    exactly when there is a review, and a history that ends anywhere else is refused.
+    An empty history with no recorded end verifies here, and on its own that would be the same
+    deletion one step further: wiping a history whole leaves nothing for a head to disagree with.
+    What makes an empty history distinguishable from a deleted one is not in this function and
+    cannot be, because nothing inside a case survives the wipe. The pack anchor records, for each
+    case, where its review history ends, so a wiped history is an anchored ``null`` where the
+    anchor says a digest belongs (see :func:`pack_anchor_gap`). A history that was always empty is
+    what the anchor says it is.
 
-    What all of that proves is narrow, and it is worth being exact about. Anyone who can edit the
-    pack can also recompute the chain and rewrite the head, so this is not a signature: it says
-    nothing about who recorded a review, whether they read anything, or whether an entry that
-    verifies was ever written by the person it names. What it removes is the quiet deletion. A
-    history cannot lose a review through an edit that looks like the file it came from; the entries
-    after it and the recorded end of the history have to be rebuilt deliberately, which is a
-    different act from deleting a line.
-
-    A review recorded without a chain value is refused too. An optional chain would be no chain at
-    all, because dropping the field is the same deletion the chain exists to make visible.
+    What all of this proves is narrow, and it is worth being exact about. Anyone who can edit the
+    pack can also recompute the chain and rewrite the head and the anchor, so this is not a
+    signature: it says nothing about who recorded a review, whether they read anything, or whether
+    an entry that verifies was ever written by the person it names. What it removes is the quiet
+    deletion. A history cannot lose a review through an edit that looks like the file it came from.
     """
-    previous: str | None = None
-    for index, review in enumerate(reviews):
-        recorded = review.get("chain_sha256")
-        if not recorded:
-            return (f"validation.reviews[{index}] records no chain_sha256, so nothing binds it to "
-                    "the reviews recorded before it")
-        expected = review_chain_digest(previous, review)
-        if recorded != expected:
-            return (f"validation.reviews[{index}] does not chain to the review before it: it "
-                    f"records {recorded}, and the history as it now stands hashes to {expected}; a "
-                    "review was deleted, reordered, or edited")
-        previous = recorded
+    gap, previous = chain_link_gap(reviews, kind="review", label="validation.reviews")
+    if gap:
+        return gap
     if previous is None:
         if head is not None:
             return (f"validation.reviews_sha256 records {head}, but this case records no review at "
@@ -206,6 +295,73 @@ def review_chain_gap(reviews: list[dict[str, Any]], head: str | None) -> str | N
     if head != previous:
         return (f"validation.reviews_sha256 records {head}, but the recorded history ends at "
                 f"{previous}; a review was deleted from the end of it")
+    return None
+
+
+def pack_anchor_projection(pack: dict[str, Any]) -> dict[str, Any]:
+    """The pack-level records whose deletion a planning decision would not otherwise see.
+
+    Three things are anchored here, and each of them is something a case or an admission cannot
+    anchor for itself, because deleting it takes the record that would have complained with it.
+
+    The case roster: each case's identifier and the target it carries, in recorded order. Deleting
+    a case whole, its chained review history included, leaves every case that remains consistent,
+    and :func:`scaneval.cases.plan_scope` reads the cases that are there: dropping the one draft
+    case out of a pack of approved ones would otherwise turn a draft plan into a reviewed one. The
+    target identifier is in the roster because it is what an admission decision is routed by, so
+    the roster says which decisions the pack's cases still resolve to and not only how many cases
+    there are.
+
+    Where each case's review history ends: the ``reviews_sha256`` it records, or ``null`` when it
+    records none. A history wiped whole is an anchored ``null`` against a recorded digest, which is
+    how an empty history stays distinguishable from a deleted one.
+
+    Where the admission history ends: the chain value of the last recorded admission, or ``null``
+    when the pack records none. The admission chain binds each decision to the one before it, and
+    this is what catches the deletion off the end of it, the one that would restore a case to a
+    reviewed-scope plan by dropping the rejection that kept it out.
+    """
+    return {
+        "cases": [{"case_id": case["case_id"],
+                   "target_id": case["target"]["target_id"],
+                   "reviews_sha256": case["validation"].get("reviews_sha256")}
+                  for case in pack["cases"]],
+        "admissions_sha256": (pack["admissions"][-1].get("chain_sha256")
+                              if pack["admissions"] else None),
+    }
+
+
+def pack_anchor_digest(pack: dict[str, Any]) -> str:
+    """The digest a pack's ``anchor_sha256`` carries for the records it now holds."""
+    return canonical_sha256(pack_anchor_projection(pack))
+
+
+def pack_anchor_gap(pack: dict[str, Any]) -> str | None:
+    """Why a pack's anchored records do not verify, or ``None`` when they do.
+
+    The admission history is checked as a chain, and the case roster, each case's review head, and
+    the end of the admission history are checked against ``anchor_sha256`` (see
+    :func:`pack_anchor_projection`). A pack recording no anchor at all is refused rather than read
+    leniently, because an optional anchor is no anchor: dropping the field is the same deletion it
+    exists to make visible.
+
+    Every path that reads a planning decision out of a pack passes through here: the pack load in
+    :func:`_validate_case_pack`, every library write, and :func:`scaneval.cases.build_plan`, which
+    can be handed a pack that never went through a load. As with the review chain, anyone who can
+    edit the pack can recompute this; what it removes is the deletion that passes unnoticed.
+    """
+    gap, _ = chain_link_gap(pack["admissions"], kind="admission", label="admissions")
+    if gap:
+        return gap
+    recorded = pack.get("anchor_sha256")
+    if not recorded:
+        return ("anchor_sha256 is missing, so nothing says which cases, review histories, and "
+                "admissions this pack recorded, and deleting one of them would leave no trace")
+    expected = pack_anchor_digest(pack)
+    if recorded != expected:
+        return (f"anchor_sha256 records {recorded}, and the cases, review histories, and "
+                f"admissions as they now stand anchor to {expected}; a case, a review history, or "
+                "an admission was deleted, reordered, or renamed")
     return None
 
 
@@ -253,10 +409,17 @@ def _label_projection(pack: dict[str, Any], case: dict[str, Any]) -> dict[str, A
     what a reviewer read. The target's own identifier is projected, so an admission recorded
     against that identifier is bound to content this digest covers.
 
-    Two orderings are normalized because neither carries content: controls are projected in
-    ``control_id`` order, which the contract keeps unique pack-wide, and aliases are sorted, which
-    the contract keeps unique within the case. Reordering either list alone is therefore not a
-    content change, while adding, removing, renaming, or editing an entry is.
+    A control's ``evidence_ids`` are projected too, because they are the evidence that control
+    rests on: swapping a control onto other evidence changes what the control is asserted from,
+    which is part of what a reviewer read. The evidence records themselves stay outside, as every
+    other record of where a label came from does; what is projected is which of them each control
+    names.
+
+    Three orderings are normalized because none carries content: controls are projected in
+    ``control_id`` order, which the contract keeps unique pack-wide, aliases are sorted, which the
+    contract keeps unique within the case, and each control's evidence ids are sorted. Reordering
+    one of those lists alone is therefore not a content change, while adding, removing, renaming,
+    or editing an entry is.
     """
     target = case["target"]
     canonical = case["canonical_target"]
@@ -294,6 +457,7 @@ def _label_projection(pack: dict[str, Any], case: dict[str, Any]) -> dict[str, A
                 "assumptions": control["assumptions"],
                 "ruled_out_allegation": control["ruled_out_allegation"],
                 "locations": control["locations"],
+                "evidence_ids": sorted(control["evidence_ids"]),
             }
             for control in sorted(case["controls"], key=lambda control: control["control_id"])
         ],
@@ -305,10 +469,11 @@ def label_digest(pack: dict[str, Any], case: dict[str, Any]) -> str:
 
     A recorded approval carries this digest, so an approval is bound to the content it covered
     rather than to the case it sits on. Adding, removing, or editing a control changes it, as
-    does editing the target's mechanism, description, affected input, accepted locations,
-    assumptions, or matching rules, and so does editing what the case says it represents: its
-    canonical kind, variant family, aliases, coverage signature, represents statement, workload,
-    component role, or model involvement. None of those can ride on an earlier review.
+    does pointing a control at other evidence, as does editing the target's mechanism,
+    description, affected input, accepted locations, assumptions, or matching rules, and so does
+    editing what the case says it represents: its canonical kind, variant family, aliases,
+    coverage signature, represents statement, workload, component role, or model involvement.
+    None of those can ride on an earlier review.
 
     The snapshots each label names are projected too, by commit and recorded tree hash as well as
     by name: moving a target or a control onto a different snapshot changes what was reviewed, and
@@ -582,23 +747,26 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
     level must be one some recorded approval carries, so the pack still cannot claim a review
     nobody recorded.
 
-    The recorded reviews are a chain, not an array: each carries ``chain_sha256`` over its own
-    fields and the entry before it, ``validation.reviews_sha256`` records where the chain ends, and
-    :func:`review_chain_gap` refuses a history that does not verify either way. Deleting the review
-    that withdrew an approval therefore cannot quietly restore it, from the middle of the history or
-    off the end of it. That docstring says what this does and does not prove; in short, anyone who
-    can edit the pack can recompute the chain and the head, so it catches the quiet deletion rather
-    than a determined forger.
+    Every record a planning decision reads is anchored, so deleting one is visible rather than
+    quiet, and the three anchors are checked here as they are everywhere else. The recorded reviews
+    are a chain ending at ``validation.reviews_sha256`` (:func:`review_chain_gap`). Each mechanical
+    check set is one record in ``validation.check_sets`` whose digest covers its result, its
+    export, and its own checks (:func:`check_set_gap`), so deleting or unattributing a failing
+    check cannot turn a failed set into a passing one. The admissions are a chain, and the case
+    roster, each case's review head, and the end of the admission history are anchored by
+    ``anchor_sha256`` (:func:`pack_anchor_gap`), so deleting an admission, wiping a case's review
+    history, or deleting a whole case is not a consistent pack. Those docstrings say what that does
+    and does not prove; in short, anyone who can edit the pack can recompute an anchor, so they
+    catch the quiet deletion rather than a determined forger.
 
     Which export a check set read is recorded three times, and the three must agree: the
-    ``checked_trees`` entry for the snapshot, the ``detail`` of that set's passing
+    ``check_sets`` record for the snapshot, the ``detail`` of that set's passing
     ``snapshot_hash_recorded`` check, and the ``tree_hash`` the snapshot declares. A passing set
-    that names its export must carry the check confirming it, and a ``checked_trees`` entry for a
-    snapshot no recorded check set ran against records a check that never happened. Editing any
-    two of the three therefore contradicts the third rather than pointing a standing approval at
-    an export the checks never ran against. A failing set is exempt from the comparison with the
-    declared hash, because recording the export that was read and rejected is exactly what it is
-    for; a failing set keeps the case out of a plan anyway.
+    must carry the check confirming its export. Editing any two of the three therefore contradicts
+    the third rather than pointing a standing approval at an export the checks never ran against. A
+    failing set is exempt from the comparison with the declared hash, because recording the export
+    that was read and rejected is exactly what it is for; a failing set keeps the case out of a
+    plan anyway.
 
     Every recorded review names a reviewer and every admission names who decided it, by the same
     :func:`is_stated` rule the write paths apply, so a hand-edited pack cannot claim a review or an
@@ -653,10 +821,19 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
         chain = review_chain_gap(reviews, validation.get("reviews_sha256"))
         if chain:
             raise ContractError(f"{label}: {chain}")
+        # Every recorded check set, before anything reads a state out of one. A set that does not
+        # verify says nothing about the snapshot it names, so the state rules below read `None`
+        # for it and would otherwise report a missing set rather than a broken record.
+        recorded_sets = validation.get("check_sets", {})
+        attributed = {check.get("snapshot_id") for check in validation["checks"]}
+        for snapshot_id in sorted(set(recorded_sets) | attributed):
+            broken = check_set_gap(validation, snapshot_id)
+            if broken:
+                raise ContractError(f"{label}: {broken}")
         approvals = [r for r in reviews if r["decision"] == "approve"]
         referenced = [target["snapshot_id"]] + [control["snapshot_id"] for control in case["controls"]]
         unchecked = sorted({snapshot for snapshot in referenced
-                            if recorded_check_state(validation["checks"], snapshot) != "pass"})
+                            if recorded_check_state(validation, snapshot) != "pass"})
         if state == "human_approved" and not approvals:
             raise ContractError(f"{label}: human_approved requires at least one recorded approving review")
         if state == "human_approved" and validation["level"] is None:
@@ -711,18 +888,13 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
         # The three records of which export each check set read, compared with each other. These
         # run after the state rules so that a pack missing a check set is told that first: a
         # record of a set that is not there is a narrower complaint than the set being absent.
-        recorded_trees = validation.get("checked_trees", {})
-        for snapshot_id, entry in sorted(recorded_trees.items()):
-            if not any(check.get("snapshot_id") == snapshot_id for check in validation["checks"]):
-                raise ContractError(
-                    f"{label}: validation.checked_trees records {entry} for snapshot {snapshot_id}, "
-                    "but no recorded check set ran against that snapshot")
         for snapshot_id in sorted(set(referenced)):
             confirmed = {check["detail"] for check in validation["checks"]
                          if check.get("snapshot_id") == snapshot_id
                          and check["check"] == "snapshot_hash_recorded" and check["result"] == "pass"}
             declared = snapshot_hashes.get(snapshot_id)
-            entry = recorded_trees.get(snapshot_id)
+            recorded_set = recorded_sets.get(snapshot_id)
+            entry = None if recorded_set is None else recorded_set["tree_hash"]
             if confirmed and not declared:
                 raise ContractError(
                     f"{label}: snapshot {snapshot_id} records a passing snapshot_hash_recorded check "
@@ -734,13 +906,13 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
                     "checks ran against an export the snapshot no longer names")
             if entry is not None and confirmed and {entry} != confirmed:
                 raise ContractError(
-                    f"{label}: validation.checked_trees records {entry} for snapshot {snapshot_id}, "
+                    f"{label}: validation.check_sets records {entry} for snapshot {snapshot_id}, "
                     f"but that check set's passing snapshot_hash_recorded check records "
                     f"{', '.join(sorted(confirmed))}")
             if (entry is not None and not confirmed
-                    and recorded_check_state(validation["checks"], snapshot_id) == "pass"):
+                    and recorded_check_state(validation, snapshot_id) == "pass"):
                 raise ContractError(
-                    f"{label}: validation.checked_trees records {entry} for snapshot {snapshot_id}, "
+                    f"{label}: validation.check_sets records {entry} for snapshot {snapshot_id}, "
                     "but that passing check set carries no passing snapshot_hash_recorded check to "
                     "confirm it")
     _unique(target_ids, "target_id")
@@ -758,6 +930,11 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
         if not is_stated(admission["by"]):
             raise ContractError(
                 f"a recorded admission must name who decided it; admissions[{index}].by is blank")
+    # The pack-level anchor last: it says which cases, review histories, and admissions were
+    # recorded, so a complaint about one of them that is still there is the more specific one.
+    anchor = pack_anchor_gap(document)
+    if anchor:
+        raise ContractError(anchor)
 
 
 def _validate_review_record(document: dict[str, Any]) -> None:

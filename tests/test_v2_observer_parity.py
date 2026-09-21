@@ -17,18 +17,20 @@ factory, the same sink, and the same redactor, and compare five things for every
 
 The matrix is the point of this file. A rejected event consumes no sequence number, no event ID,
 and no clock read in either language, which is only safe while both languages refuse exactly the
-same inputs, so the matrix carries every rejection shape the contract names as well as the
-payload shapes that could plausibly serialize differently: every event type, all three recording
-modes, an explicitly unavailable capture status, integral, non-integral, negative, non-finite,
-null and beyond-safe-integer durations, a payload nested one container past the shared depth
-limit and one exactly at it, an unknown field name, a missing metadata, a metadata that is a list
-and one that is a string, an empty and a non-string link ID, a cyclic payload, a non-finite
+same inputs, so the matrix carries every rejection shape the contract names as well as the payload
+shapes that could plausibly serialize differently: every event type, all three recording modes, an
+explicitly unavailable capture status, integral, non-integral, negative, non-finite, null and
+beyond-safe-integer durations, the same shapes again as payload numbers, where the two languages
+disagree about a trailing ``.0``, about a negative zero, about an integer past the safe-integer
+bound, and about where plain decimal notation ends, a payload nested one container past the shared
+depth limit and one exactly at it, an unknown field name, a missing metadata, a metadata that is a
+list and one that is a string, an empty and a non-string link ID, a cyclic payload, a non-finite
 number inside a payload, an unpaired surrogate in a payload and in a link ID against an astral
 character that is written, credential-like and Unicode payload keys, a redactor that returns a
 structurally equal copy of a container, a redactor that returns an equal copy of a scalar, a
-redactor that throws, a sink that throws an ordinary error, a sink that throws a value that is
-not an error, an ID factory that throws, a clock that throws, a clock that steps backwards, and
-an observer with no sink at all.
+redactor that throws, a sink that throws an ordinary error, a sink that throws a value that is not
+an error, an ID factory that throws, a clock that throws, a clock that steps backwards, and an
+observer with no sink at all.
 
 The operation-boundary helpers are compared too, not only ``emit``: Python's ``observe_async``
 and TypeScript's ``observeAsync`` are driven over the same success, failure and unmeasurable
@@ -41,16 +43,17 @@ a property of how fast the test ran, and it is compared as a shape rather than a
 name, in ``REAL_TIME_OPERATIONS``.
 
 What these tests do not prove: that the two emitters share code, that either is correct about a
-harness that never emits, or that a trace says anything about a scanner's findings. Three known
-representational limits are excluded from the byte comparison rather than hidden: an integral
-float in a payload writes as ``1.0`` from Python and ``1`` from JavaScript, a payload key that
-looks like an array index sorts ahead of its siblings in JavaScript only, and a timestamp cannot
-carry sub-millisecond precision in either language because the TypeScript ``Clock`` hands back a
-``Date``. Those three are representational limits of the two languages, not defects, and they
-are excluded from the byte comparison by name rather than by loosening it. The fourth exclusion
-is not a limit but a measurement: the one operation scenario that injects no monotonic source
-has each language time the same trivial operation with its own real one, so that duration is
-compared as a shape and blanked before the bytes are. Every behavioral divergence found by
+harness that never emits, or that a trace says anything about a scanner's findings. Two known
+representational limits are excluded from the byte comparison rather than hidden: a payload key
+that looks like an array index sorts ahead of its siblings in JavaScript only, and a timestamp
+cannot carry sub-millisecond precision in either language because the TypeScript ``Clock`` hands
+back a ``Date``. Those two are representational limits of the two languages, not defects, and they
+are excluded from the byte comparison by name rather than by loosening it. An integral float in a
+payload was a third until the emitters stopped leaving it to chance: it is stored as the integer
+it equals in both languages now, so the matrix carries it rather than avoiding it. The third
+exclusion is not a limit but a measurement: the one operation scenario that injects no monotonic
+source has each language time the same trivial operation with its own real one, so that duration
+is compared as a shape and blanked before the bytes are. Every behavioral divergence found by
 review has been closed, so both divergence sets below are empty. All of this is recorded in
 ``docs/OBSERVER_SDK.md``.
 
@@ -70,6 +73,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+import math
 from pathlib import Path
 import shutil
 import subprocess
@@ -896,10 +900,59 @@ ACCEPTED_EVENTS = [
     event("model.request", metadata={"empty_list": [], "empty_object": {}}, content={}),
 ]
 
+# Payload numbers the two languages would write as different bytes, so neither accepts them.
+# Each name says which half of the rule refuses it: the safe-integer bound duration_ms already
+# carries, or the plain-decimal window below which the two switch to exponent notation at
+# different magnitudes and spell an exponent differently.
+PAYLOAD_NUMBER_REJECTIONS = {
+    "payload_integer_one_past_the_safe_integer_bound": event(
+        "tool.start", metadata={"count": 2**53}
+    ),
+    "payload_integer_far_past_the_safe_integer_bound": event(
+        "tool.start", metadata={"count": 10**30}
+    ),
+    "payload_negative_integer_past_the_safe_integer_bound": event(
+        "tool.start", metadata={"count": -(2**53)}
+    ),
+    "payload_integral_float_past_the_safe_integer_bound": event(
+        "tool.start", metadata={"count": 1e16}
+    ),
+    "payload_number_past_the_safe_integer_bound_in_a_list": event(
+        "tool.start", metadata={"counts": [1, 2**53]}
+    ),
+    "payload_number_past_the_safe_integer_bound_nested": event(
+        "tool.start", metadata={"nested": {"count": 2**53}}
+    ),
+    # Python writes 1e-05 where JavaScript writes 0.00001.
+    "payload_float_below_the_plain_decimal_window": event(
+        "tool.start", metadata={"ratio": 1e-5}
+    ),
+    # The double just below the floor: Python writes 9.999999999999999e-05 where JavaScript
+    # writes 0.00009999999999999999, so the boundary is tested from beneath as well as on it.
+    "payload_float_just_below_the_plain_decimal_window": event(
+        "tool.start", metadata={"ratio": 9.999999999999999e-05}
+    ),
+    # Both use an exponent here and still disagree: Python pads it to two digits, 1e-07, and
+    # JavaScript does not, 1e-7.
+    "payload_float_with_a_single_digit_exponent": event(
+        "tool.start", metadata={"ratio": 1e-7}
+    ),
+    # Below 1e-9 both languages use a two-digit exponent and write the same bytes, and both
+    # refuse these anyway: the accepted range is one window, not two with a hole between them.
+    "payload_float_far_below_the_plain_decimal_window": event(
+        "tool.start", metadata={"ratio": 1e-10}
+    ),
+}
+
 # Every input the shared rejection rule refuses. Each is refused by both emitters, and refusing
 # one must cost no sequence number, no event ID, and no clock read in either.
 REJECTED_EVENTS = {
     "unknown_field_name": event("tool.start", unknown_field=1),
+    # A field named for the receiver of the Python method. Python binds arguments before the
+    # first statement of ``emit`` runs, so this used to be a TypeError out of the call itself,
+    # counted nowhere, while JavaScript refused it as the unknown field name it is. It is an
+    # unknown field name in both now.
+    "field_named_self": event("tool.start", self="shadowed"),
     "misspelled_field_name": event("tool.start", metdata={"tool": "grep"}),
     "missing_metadata": {"type": "tool.start", "capture_status": "complete"},
     "metadata_is_null": event("tool.start", metadata=None),
@@ -949,12 +1002,22 @@ REJECTED_EVENTS = {
     "metadata_lists_nested_past_the_depth_limit": event(
         "tool.start", metadata=nested_lists(MAX_PAYLOAD_DEPTH + 1)
     ),
+    # Folded in rather than kept beside: every count in this file is derived from
+    # REJECTED_EVENTS, so a rejection shape that lived in its own dict would be refused by both
+    # emitters and counted by none of the assertions.
+    **PAYLOAD_NUMBER_REJECTIONS,
 }
 
 # Refused in content mode only, because metadata mode never copies content and therefore never
 # sees the payload the copy would refuse. Both languages must draw that line in the same place.
 CONTENT_ONLY_REJECTIONS = {
     "cyclic_content": event("tool.start", content={"loop": CYCLE}),
+    "payload_number_past_the_safe_integer_bound_in_content": event(
+        "tool.start", content={"count": 2**53}
+    ),
+    "payload_float_below_the_plain_decimal_window_in_content": event(
+        "tool.start", content={"ratio": 1e-5}
+    ),
     "unpaired_surrogate_in_content": event("tool.start", content={"text": SURROGATE}),
     "non_finite_number_in_content": event("tool.start", content={"score": INFINITY}),
     "content_nested_past_the_depth_limit": event(
@@ -1032,6 +1095,35 @@ SCALAR_REDACTOR_PROBE_EVENTS = [
         "tool.start",
         metadata={"argv": ["grep", "-n"], "flags": {"case": True}},
         content={"note": "another string that CPython has no reason to intern"},
+    ),
+]
+
+# Payload numbers both languages write as the same bytes, and the two normalizations that make
+# that true. An integral float is stored as the integer it equals, because JavaScript has one
+# number type and writes 5 where json.dumps writes 5.0, and a negative zero is stored as zero
+# for the same reason. Everything else here sits on a boundary: the largest and smallest safe
+# integers, the smallest non-integral magnitude both spell in plain decimal notation, and a
+# list and a content payload so the rule is shown to apply wherever a number can sit rather
+# than only at the top of metadata.
+NUMBER_EDGE_EVENTS = [
+    event(
+        "model.response",
+        metadata={
+            "ratio": 1.5,
+            "small": 0.0001,
+            "negative_small": -0.0001,
+            "integral_float": 2.0,
+            "negative_zero": -0.0,
+            "zero": 0,
+            "max_safe": MAX_SAFE_INTEGER,
+            "min_safe": -MAX_SAFE_INTEGER,
+            "large_integral_float": 1.5e15,
+        },
+        content={"scores": [1.5, 2.0, -0.0, 0.0001], "nested": {"cost": 0.125}},
+    ),
+    event(
+        "model.response",
+        metadata={"counts": [0, 1, MAX_SAFE_INTEGER], "deep": {"inner": {"ratio": -2.5}}},
     ),
 ]
 
@@ -1131,6 +1223,11 @@ def matrix_plan() -> dict:
         ),
         scenario("payload-edges", "content", PAYLOAD_EDGE_EVENTS),
         scenario("payload-edges-metadata-mode", "metadata", PAYLOAD_EDGE_EVENTS),
+        # The numbers both languages write alike, including the two a Python emitter has to
+        # normalize to write them alike at all. Metadata mode repeats them because it never
+        # copies content, so the content numbers are only checked by the content-mode run.
+        scenario("payload-numbers", "content", NUMBER_EDGE_EVENTS),
+        scenario("payload-numbers-metadata-mode", "metadata", NUMBER_EDGE_EVENTS),
         # A clock that raises on two of its reads. The event is still emitted, with the epoch
         # timestamp, downgraded to partial, and marked in its own metadata, in both languages.
         scenario("clock-throws", "content", DEGRADED_EVENTS, clock_throws_on=[0, 2]),
@@ -1380,7 +1477,7 @@ def test_both_emitters_write_byte_identical_jsonl_for_the_whole_parity_matrix(ma
         written += len(python_case["lines"])
     # Guard against a matrix that agreed because it recorded nothing. The count only grows as
     # cases are added, so a shrinking matrix fails here rather than passing on less evidence.
-    assert written >= 180
+    assert written >= 221
     # Key order is the schema's declaration order in both, on every line either wrote.
     declared = list(
         json.loads((ROOT / "schema/v2/trace-event.schema.json").read_text())["properties"]
@@ -1795,6 +1892,115 @@ def test_both_emitters_refuse_a_duration_past_the_safe_integer_bound(matrix_pair
 
 
 @needs_node
+def test_both_emitters_write_one_spelling_for_every_payload_number_they_accept(matrix_pairs):
+    """A number either language accepts is a number both write as the same bytes.
+
+    Two of them need a normalization to be true at all, and both are Python's, because
+    JavaScript has one number type: an integral float is stored as the integer it equals, so
+    ``2.0`` is written ``2`` and not ``2.0``, and a negative zero is stored as zero, which is
+    what ``JSON.stringify`` writes for it. Neither changes the value, only which of two
+    spellings of it reaches the wire. The rest of the matrix sits on the boundaries: the
+    largest and smallest safe integers, and the smallest non-integral magnitude both languages
+    spell in plain decimal notation.
+    """
+    for name in ("payload-numbers", "payload-numbers-metadata-mode"):
+        python_case, node_case = matrix_pairs[name]
+        assert python_case["lines"] == node_case["lines"], name
+        assert python_case["recorded"] == node_case["recorded"] == [True, True], name
+        assert python_case["state"] == node_case["state"], name
+
+    python_case, _ = matrix_pairs["payload-numbers"]
+    first, second = parsed(python_case["lines"])
+    assert first["metadata"] == {
+        "ratio": 1.5,
+        "small": 0.0001,
+        "negative_small": -0.0001,
+        "integral_float": 2,
+        "negative_zero": 0,
+        "zero": 0,
+        "max_safe": MAX_SAFE_INTEGER,
+        "min_safe": -MAX_SAFE_INTEGER,
+        "large_integral_float": 1500000000000000,
+    }
+    assert first["content"] == {"scores": [1.5, 2, 0, 0.0001], "nested": {"cost": 0.125}}
+    assert second["metadata"]["deep"] == {"inner": {"ratio": -2.5}}
+    # The bytes, not only the parsed values: a trailing ".0" or a "-0" is exactly what the two
+    # languages would otherwise disagree about, and it would survive a parsed comparison.
+    line = python_case["lines"][0]
+    assert '"integral_float":2,' in line
+    assert '"negative_zero":0,' in line
+    assert '"ratio":1.5' in line and '"small":0.0001' in line
+    assert '"scores":[1.5,2,0,0.0001]' in line
+    assert ".0," not in line and "-0," not in line and "e-" not in line
+    # Nothing was lost to get there: an accepted number is stored, never dropped or reshaped.
+    assert python_case["state"] == {
+        "dropped_events": 0,
+        "capture_gap": False,
+        "last_sink_error": None,
+    }
+
+
+@needs_node
+def test_both_emitters_refuse_the_payload_numbers_they_would_spell_differently(matrix_pairs):
+    """A payload number outside the shared range is a capture gap in both, never a rounded value.
+
+    Two bounds, both shared. An integral number past ``2 ** 53 - 1`` is refused because a JSON
+    number stops distinguishing neighbouring integers there, so Python could write a count a
+    JavaScript reader would read as a different one: the bound ``duration_ms`` already carries,
+    applied to the numbers a caller puts in a payload. A non-integral number below 1e-4 is
+    refused because the two languages leave plain decimal notation at different magnitudes and
+    spell an exponent differently, so one payload would leave the two emitters as different
+    bytes. ``payload_float_far_below_the_plain_decimal_window`` is the deliberate over-refusal:
+    below 1e-9 both languages use a two-digit exponent and write the same bytes, and both refuse
+    it anyway, so the accepted range is one window rather than two with a hole between them.
+    """
+    python_case, node_case = matrix_pairs["rejected-inputs-only"]
+    refusals = list({**REJECTED_EVENTS, **CONTENT_ONLY_REJECTIONS})
+    names = (
+        *PAYLOAD_NUMBER_REJECTIONS,
+        "payload_number_past_the_safe_integer_bound_in_content",
+        "payload_float_below_the_plain_decimal_window_in_content",
+    )
+    for name in names:
+        index = refusals.index(name)
+        assert python_case["recorded"][index] is False, name
+        assert node_case["recorded"][index] is False, name
+    # Refusing costs nothing but the event: no line, and the same sequence numbers on both
+    # sides, which is the whole reason the rejection set has to be identical.
+    assert python_case["lines"] == node_case["lines"] == []
+    assert python_case["sequences"] == node_case["sequences"]
+
+    # Content is copied, and therefore number checked, only in content mode, exactly as the
+    # depth and surrogate rules are. Both emitters draw that line in the same place.
+    metadata_mode = matrix_pairs["rejections-interleaved-metadata"][0]["recorded"][::2]
+    node_metadata_mode = matrix_pairs["rejections-interleaved-metadata"][1]["recorded"][::2]
+    interleaved = list({**REJECTED_EVENTS, **CONTENT_ONLY_REJECTIONS})
+    in_content = interleaved.index("payload_number_past_the_safe_integer_bound_in_content")
+    in_metadata = interleaved.index("payload_integer_one_past_the_safe_integer_bound")
+    assert metadata_mode[in_content] is node_metadata_mode[in_content] is True
+    assert metadata_mode[in_metadata] is node_metadata_mode[in_metadata] is False
+
+
+@needs_node
+def test_a_field_named_for_the_python_receiver_is_refused_and_counted_in_both(matrix_pairs):
+    """``emit(self=...)`` is an unknown field name, not a TypeError out of the call itself.
+
+    Python binds arguments before the first statement of a method runs, so a caller field named
+    ``self`` raised from the call rather than from anything inside it: the one field name the
+    contract happens to share with the receiver escaped into the harness and was counted
+    nowhere, while the TypeScript emitter refused the same key as the unknown field name it is.
+    The receiver is positional only now, so the two rejection sets cover this name as they cover
+    ``metdata``.
+    """
+    python_case, node_case = matrix_pairs["rejected-inputs-only"]
+    refusals = list({**REJECTED_EVENTS, **CONTENT_ONLY_REJECTIONS})
+    index = refusals.index("field_named_self")
+    assert python_case["recorded"][index] is False
+    assert node_case["recorded"][index] is False
+    assert python_case["state"]["dropped_events"] == node_case["state"]["dropped_events"]
+
+
+@needs_node
 def test_a_clock_that_throws_degrades_both_emitters_identically(matrix_pairs):
     """The clock is caller code: a read that raises is a recorded gap in both, not an escape.
 
@@ -2087,8 +2293,31 @@ def test_the_parity_matrix_covers_every_input_shape_the_contract_names():
         "non_finite_number_in_metadata",
         "metadata_nested_past_the_depth_limit",
         "metadata_lists_nested_past_the_depth_limit",
+        "field_named_self",
     }
     assert required_rejections <= set(REJECTED_EVENTS)
+    # Every payload-number shape the rule names, on both sides of both bounds.
+    assert set(PAYLOAD_NUMBER_REJECTIONS) <= set(REJECTED_EVENTS)
+    assert {
+        "payload_integer_one_past_the_safe_integer_bound",
+        "payload_integral_float_past_the_safe_integer_bound",
+        "payload_float_below_the_plain_decimal_window",
+        "payload_float_with_a_single_digit_exponent",
+    } <= set(PAYLOAD_NUMBER_REJECTIONS)
+    assert {
+        "payload_number_past_the_safe_integer_bound_in_content",
+        "payload_float_below_the_plain_decimal_window_in_content",
+    } <= set(CONTENT_ONLY_REJECTIONS)
+    # The accepted side of the same rule: the bounds themselves, and the two spellings Python
+    # has to normalize to write what JavaScript writes.
+    numbers = [value for fields in NUMBER_EDGE_EVENTS for value in fields["metadata"].values()]
+    assert MAX_SAFE_INTEGER in numbers and -MAX_SAFE_INTEGER in numbers
+    assert 0.0001 in numbers
+    assert any(isinstance(value, float) and value.is_integer() for value in numbers)
+    assert any(
+        isinstance(value, float) and math.copysign(1.0, value) < 0 and value == 0
+        for value in numbers
+    )
     assert {
         "cyclic_content",
         "non_finite_number_in_content",

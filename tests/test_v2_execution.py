@@ -1508,6 +1508,170 @@ def test_a_state_directory_that_is_a_symbolic_link_is_not_followed_into_the_bund
     assert (outside / "id_rsa").is_file()
 
 
+def test_a_link_where_the_captured_state_goes_writes_nothing_outside_the_bundle(tmp_path):
+    """The destination of the capture is a path the scanner owns, and it was never checked.
+
+    The scanner writes into the staging directory while it runs, so a link it leaves at
+    ``raw/harness-state`` redirected this copy to any absolute path it chose: the source of the
+    copy was checked for being a link and the destination was not, and ``mkdir(exist_ok=True)``
+    succeeds on a link to a directory. The destination is resolved and proved to be inside the
+    staged raw output now, so nothing is copied and the record says where it did not go.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    class RedirectingAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            (kwargs["raw_dir"] / "harness-state").symlink_to(outside, target_is_directory=True)
+            return outcome
+
+    bundle = run(tmp_path, RedirectingAdapter())
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "success", "a refused destination is not a failure of the scan"
+    assert execution["provenance"]["captured_state_dirs"] == []
+    assert any("does not resolve inside the staged raw output" in note for note in execution["notes"])
+    assert list(outside.iterdir()) == [], "the capture was copied outside the bundle"
+    assert not list(bundle.rglob("notes.md"))
+
+
+def test_a_source_replaced_by_a_link_is_not_read_after_the_scan(tmp_path):
+    """The exported source is a path the scanner can replace too, and everything else reads it.
+
+    A link where the workspace source belongs points the state capture and the re-hash at
+    whatever it names, so both would walk and copy a tree outside the workspace and the bundle
+    would report it as the scan's own observation. It is resolved and proved to be inside the
+    private workspace before either of them runs.
+    """
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "id_rsa").write_text("a host file the scan never produced\n", encoding="utf-8")
+
+    class SourceSwappingAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            source = Path(kwargs["source_dir"])
+            shutil.rmtree(source)
+            source.symlink_to(outside, target_is_directory=True)
+            return outcome
+
+    bundle = run(tmp_path, SourceSwappingAdapter())
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "outcome_contract_violation"
+    assert "the exported source no longer resolves inside the private workspace" in result["error"]["message"]
+    assert execution["provenance"]["captured_state_dirs"] == []
+    assert execution["provenance"]["source_modified"] is False, "the comparison never completed"
+    # Nothing behind the link was read or copied: the host file is nowhere in the bundle.
+    assert "id_rsa" not in json.dumps(execution)
+    assert not list(bundle.rglob("id_rsa")) and (outside / "id_rsa").is_file()
+
+
+def test_a_nested_git_directory_is_not_a_place_a_scanner_can_hide_what_it_wrote(tmp_path):
+    """Every ``.git`` component was excluded from the input tree, not only the one the runner makes.
+
+    That gave a scanner one directory name it could write under at any depth and stay out of the
+    map entirely: the files it left there were not hashed, not compared, and the bundle recorded
+    a clean observation of a tree it had changed. Only the top-level ``.git`` this module creates
+    for a git-dependent adapter is excluded now.
+    """
+
+    class NestedGitAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            hidden = Path(kwargs["source_dir"]) / "vendor" / ".git"
+            hidden.mkdir(parents=True)
+            (hidden / "planted.py").write_text("written by the scanner\n", encoding="utf-8")
+            return outcome
+
+    bundle = run(tmp_path, NestedGitAdapter("git", requires_git=True))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["provenance"]["source_modified"] is True
+    assert execution["provenance"]["modified_paths"] == ["vendor/.git/planted.py"]
+    assert result["status"] == "partial" and result["error"]["code"] == "source_modified"
+    # The one the runner creates itself is still excluded, so its bookkeeping is not a change.
+    assert execution["provenance"]["synthetic_history"]["message"] == "snapshot"
+    assert not any(path.startswith(".git/") for path in execution["provenance"]["modified_paths"])
+
+
+def test_a_run_whose_observer_reported_a_capture_gap_is_not_recorded_as_a_clean_success(tmp_path):
+    """The gap lived only in the execution record while the result said success.
+
+    A run that recorded its own capture as broken cannot also stand as a complete observation of
+    what the scanner did, so the result is partial with an explicit code. It is not import loss:
+    the claims all arrived, so ``bundles_resolved`` is left alone and the claim set is untouched.
+    """
+
+    class GappyAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            (kwargs["trace_dir"] / "events.jsonl").write_text('{"type":"model.request"}\n', encoding="utf-8")
+            outcome.trace_path = kwargs["trace_dir"] / "events.jsonl"
+            outcome.capture_state = {"capture_gap": True, "dropped_events": 4}
+            return outcome
+
+    bundle = run(tmp_path, GappyAdapter(), trace_mode="content")
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "partial" and result["error"]["code"] == "trace_capture_gap"
+    assert "a capture gap and 4 dropped event(s)" in result["error"]["message"]
+    assert result["bundles_resolved"] is True, "a dropped trace event is not a lost claim"
+    assert [claim["claim_id"] for claim in result["claims"]] == ["c1"]
+    assert execution["status"] == "partial" and execution["error"] == result["error"]
+    assert execution["trace"]["capture_gap"] is True and execution["trace"]["dropped_events"] == 4
+    assert any("not a complete record of what the scanner did" in note for note in execution["notes"])
+
+
+def test_a_run_whose_observer_reported_no_gap_is_still_a_clean_success(tmp_path):
+    """The control: only a reported break degrades the result, not tracing itself.
+
+    A state that reports neither a gap nor a dropped event, and a run that reported no state at
+    all, both leave the outcome exactly as the adapter gave it.
+    """
+
+    class CleanTraceAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            (kwargs["trace_dir"] / "events.jsonl").write_text('{"type":"model.request"}\n', encoding="utf-8")
+            outcome.trace_path = kwargs["trace_dir"] / "events.jsonl"
+            outcome.capture_state = {"capture_gap": False, "dropped_events": 0}
+            return outcome
+
+    traced = load_document(run(tmp_path / "a", CleanTraceAdapter(), trace_mode="content") / "result.json",
+                           "scan-result")
+    silent = load_document(run(tmp_path / "b", FakeAdapter(), trace_mode="content") / "result.json",
+                           "scan-result")
+
+    assert traced["status"] == "success" and "error" not in traced
+    assert silent["status"] == "success" and "error" not in silent
+
+
+def test_a_capture_gap_does_not_overwrite_the_failure_the_adapter_already_named(tmp_path):
+    """A run that degraded on its own keeps its own code; the gap travels as a note beside it."""
+
+    class DegradedGappyAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            outcome.status = "partial"
+            outcome.error = {"code": "scanner_degraded", "message": "half the rules failed"}
+            outcome.capture_state = {"capture_gap": False, "dropped_events": 2}
+            return outcome
+
+    bundle = run(tmp_path, DegradedGappyAdapter(), trace_mode="content")
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "partial" and result["error"]["code"] == "scanner_degraded"
+    assert any("2 dropped event(s)" in note for note in execution["notes"])
+
+
 def test_a_link_inside_the_captured_state_is_preserved_rather_than_resolved(tmp_path):
     """The same copy, one level down: a link inside the state directory was followed too.
 

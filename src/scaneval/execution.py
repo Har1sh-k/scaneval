@@ -33,6 +33,19 @@ is the one copy, for the exported input on the way in and for the scanner's stat
 the way out, and it preserves a link as a link or refuses one, so a link the scanner planted
 cannot pull a host file into the bundle.
 
+Every path this module reads or writes after the scanner returns is a path the scanner could
+have replaced, and any component of it can be a link, not only the last one. So each of them,
+the exported source, the destination of the harness-state capture, a declared artifact, and a
+declared trace file, is resolved whole against the directory it is supposed to be inside by
+:func:`~scaneval.materialize.resolve_within` before it is touched. A path that resolves out is
+refused with a note or a recorded violation, never followed.
+
+A run whose observer reported a capture gap or a dropped event is recorded as ``partial`` with
+error code ``trace_capture_gap`` when nothing else already failed, and keeps the adapter's own
+``bundles_resolved``. Losing trace events is not losing a claim, so nothing about the claim set
+is withdrawn; what is withdrawn is the result's standing as a clean complete observation, which
+the execution record was already contradicting by carrying the gap beside a success.
+
 Directory separation documents the boundary; it does not enforce it. Network and
 filesystem policy are declared here and must be enforced outside this process.
 """
@@ -54,7 +67,13 @@ from . import __version__
 from .adapters.base import Adapter, NativeOutcome, SystemSpec
 from .contracts import ContractError, canonical_json, canonical_sha256, validate_document
 from .kinds import mapping_version
-from .materialize import prepare_synthetic_history, sha256_file, tree_hash, walk_regular_files
+from .materialize import (
+    prepare_synthetic_history,
+    resolve_within,
+    sha256_file,
+    tree_hash,
+    walk_regular_files,
+)
 
 
 NETWORK_POLICIES = ("none", "model_provider_only", "unrestricted")
@@ -183,23 +202,6 @@ def _failure_message(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {str(exc) or repr(exc)}"[:2000]
 
 
-def _resolves_inside(path: Path, base: Path) -> bool:
-    """True when *path* resolves inside *base*, every symbolic link on the way followed first.
-
-    Used to refuse a path an adapter reported that leaves the bundle through a link. It compares
-    resolved paths only: it does not follow bind mounts or hard links, so it catches the obvious
-    escape and is not an isolation boundary. A path that cannot be resolved at all is not inside
-    anything: the filesystem refused it (``OSError``) or it is not a path the filesystem accepts,
-    such as one holding an embedded NUL byte (``ValueError``).
-    """
-    try:
-        resolved = path.resolve()
-        root = base.resolve()
-    except (OSError, ValueError):
-        return False
-    return resolved == root or resolved.is_relative_to(root)
-
-
 def _copy_tree_unresolved(source: Path, destination: Path) -> list[str]:
     """Copy one directory tree without following a symbolic link, and name the links it kept.
 
@@ -275,12 +277,17 @@ def _input_tree(source_dir: Path, state_dirs: frozenset[str]) -> dict[str, str]:
     cannot be a path the other ignores.
 
     Excluded, and why. Symbolic links and anything that is not a regular file, because they
-    have no content of their own to hash. Any path with a ``.git`` component, because this
-    module writes one itself when an adapter requires git
+    have no content of their own to hash. A top-level ``.git`` component, because this module
+    writes one itself when an adapter requires git
     (:func:`~scaneval.materialize.prepare_synthetic_history`), so counting it would report the
     runner's own bookkeeping as a scanner modification. Each of the adapter's declared
     *state_dirs*, because they are the scanner's private scratch space, are preserved separately
     under ``raw/harness-state/``, and exist only because the scanner created them.
+
+    Only the top-level ``.git`` is excluded. Excluding every path with a ``.git`` component
+    anywhere gave a scanner one directory name it could write under at any depth and stay out of
+    this map entirely, which is the same escape as the state directories without even needing an
+    adapter to declare one.
 
     That last exclusion is sound only while the exported input contains no such directory
     itself. :func:`run_invocation` establishes that by comparing this map's hash against
@@ -298,6 +305,25 @@ def _input_tree(source_dir: Path, state_dirs: frozenset[str]) -> dict[str, str]:
     """
     return {relative: sha256_file(path)[0]
             for relative, path in sorted(walk_regular_files(source_dir, skip_top_level=state_dirs).items())}
+
+
+def _capture_break(capture_state: dict | None) -> str | None:
+    """How the observer said capture broke during this run, or ``None`` when it said it did not.
+
+    Read off the same ``capture_state`` the trace record carries, so the sentence in the notes
+    and the numbers in ``trace`` cannot describe different runs. A state that reports neither a
+    gap nor a dropped event, and a run that reported no state at all, both yield ``None``: this
+    reports what the observer said broke, and asserts nothing about a run that said nothing.
+    """
+    if not isinstance(capture_state, dict):
+        return None
+    reasons = []
+    if capture_state.get("capture_gap") is True:
+        reasons.append("a capture gap")
+    dropped = capture_state.get("dropped_events")
+    if isinstance(dropped, int) and not isinstance(dropped, bool) and dropped > 0:
+        reasons.append(f"{dropped} dropped event(s)")
+    return " and ".join(reasons) or None
 
 
 def _empty_trace(trace_mode: str) -> dict:
@@ -323,7 +349,7 @@ def _read_trace(outcome: NativeOutcome, staged_areas: list[tuple[Path, Path, Pat
     recorded_trace_path = None
     if events_path.is_symlink():
         outcome.notes.append("declared trace file is a symbolic link; it was not read or counted")
-    elif not _resolves_inside(events_path, bundle):
+    elif resolve_within(events_path, bundle) is None:
         outcome.notes.append("declared trace file is outside the bundle; it was not read or counted")
     elif events_path.exists() and not events_path.is_file():
         outcome.notes.append("declared trace file is not a regular file; it was not read or "
@@ -501,12 +527,24 @@ def run_invocation(
     execution record carries a note naming the directory still on disk, which is a leak an
     operator can find rather than one that was swallowed.
 
-    Harness state is captured without following a link. A state directory that is a symbolic
-    link, or that is not a directory at all, is left out of ``captured_state_dirs`` and named in
-    a note instead of copied through, because what lies behind it is not the scratch space this
-    run created; a link inside one is preserved as a link and counted in a note. None of that is
-    a violation of the outcome: nothing failed and no claim is affected, but the bundle says
-    plainly that it does not hold what the link pointed at.
+    Harness state is captured without following a link, at both ends of the copy. A state
+    directory that is a symbolic link, or that is not a directory at all, is left out of
+    ``captured_state_dirs`` and named in a note instead of copied through, because what lies
+    behind it is not the scratch space this run created; a link inside one is preserved as a
+    link and counted in a note. The destination is checked the same way, because the scanner
+    writes into the staging directory too: a ``raw/harness-state`` it replaced with a link no
+    longer resolves inside the staged raw output, so nothing is copied and the note says so
+    rather than the copy landing wherever the link pointed. None of that is a violation of the
+    outcome: nothing failed and no claim is affected, but the bundle says plainly that it does
+    not hold what the link pointed at.
+
+    A run the observer could not record completely is not a clean one. When ``capture_state``
+    reports a capture gap or a dropped event, an outcome that still carries claims is recorded
+    as ``partial``, with error code ``trace_capture_gap`` unless the adapter already named a
+    failure of its own, and a note saying what the observer reported. ``bundles_resolved`` is
+    untouched: a dropped trace event is not a lost claim, and saying otherwise would withdraw
+    the claim budget over a hole in the trace. The status is what changes, because that is what
+    a reader and the scoring contract take as the run's claim to be complete.
     """
     if network_policy not in NETWORK_POLICIES:
         raise ExecutionError(f"unknown network policy {network_policy!r}")
@@ -591,8 +629,18 @@ def run_invocation(
                 # An outcome this module cannot read is a recorded failure too, checked here so
                 # that nothing further reads an attribute the adapter did not really supply.
                 violation = _outcome_violation(outcome)
+        # Everything below this line reads or writes a path the scanner had write access to,
+        # so each one is resolved whole and proved to be inside the directory it belongs to
+        # before it is touched. This is the first of them: the exported source itself is one
+        # component inside the private workspace, and a scanner that replaced it with a link
+        # would otherwise have the capture and the re-hash walk whatever it pointed at.
+        source_inside = resolve_within(source, resolved_workspace) is not None
+        if not source_inside:
+            violation = violation or (
+                "the exported source no longer resolves inside the private workspace, so "
+                "nothing under it was read after the scan")
         try:
-            for name in sorted(state_dirs):
+            for name in sorted(state_dirs) if source_inside else ():
                 state_path = source / name
                 if state_path.is_symlink():
                     # Checked before exists(), which follows the link and would report the
@@ -610,6 +658,15 @@ def run_invocation(
                         f"the harness state path {name} is not a directory; it was not captured")
                     continue
                 destination = staging_raw / "harness-state" / name.lstrip(".")
+                if resolve_within(destination, staging_raw) is None:
+                    # The scanner owns the destination as well as the source: it writes into the
+                    # staging directory while it runs, so a link at ``harness-state`` sends this
+                    # copy to any absolute path it chooses. Nothing is created along a path that
+                    # does not resolve back inside the staged raw output.
+                    capture_notes.append(
+                        f"the harness state destination for {name} does not resolve inside the "
+                        "staged raw output; nothing was copied there")
+                    continue
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 links = _copy_tree_unresolved(state_path, destination)
                 captured_state.append(name)
@@ -623,7 +680,7 @@ def run_invocation(
             # never a crash of the run, and the directories copied before it stay recorded.
             violation = violation or f"harness state could not be captured: {_failure_message(exc)}"
         try:
-            after = _input_tree(source, state_dirs)
+            after = _input_tree(source, state_dirs) if source_inside else dict(before)
         except Exception as exc:
             # The comparison never completed, so nothing is claimed about the source: `before`
             # stands in for `after`, the provenance reports no observed modification, and the
@@ -669,7 +726,7 @@ def run_invocation(
                 # this bundle preserved, and need not be inside the bundle at all.
                 outcome.notes.append(f"declared artifact is a symbolic link and was not followed: {artifact['id']}")
                 continue
-            if path.exists() and not _resolves_inside(path, bundle):
+            if path.exists() and resolve_within(path, bundle) is None:
                 outcome.notes.append(f"declared artifact resolves outside the bundle: {artifact['id']}")
                 continue
             if not path.exists():
@@ -803,6 +860,20 @@ def run_invocation(
             "message": (f"the scanner modified {len(modified)} path(s) of the exported source "
                         f"during the scan ({', '.join(modified[:3])}); the result is not a clean "
                         f"observation of the frozen input")[:2000]}
+
+    capture_break = _capture_break(outcome.capture_state) if violation is None else None
+    if capture_break and outcome.status in ("success", "partial"):
+        # The run itself recorded that the observation of it broke, so the result must not read
+        # as a clean complete one. Only the status changes: ``bundles_resolved`` is left as the
+        # adapter reported it, because a dropped trace event is not a lost claim.
+        outcome.status = "partial"
+        outcome.notes.append(
+            f"The observer reported {capture_break} during this run, so the trace is not a "
+            "complete record of what the scanner did. The claims themselves are unaffected.")
+        outcome.error = outcome.error or {
+            "code": "trace_capture_gap",
+            "message": (f"the observer reported {capture_break}; this result is a complete claim "
+                        f"set over an incomplete observation of the run")[:2000]}
 
     if violation is not None:
         outcome = _violation_outcome(violation)

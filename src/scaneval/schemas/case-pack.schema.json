@@ -22,6 +22,10 @@
     "snapshots": {"type": "array", "items": {"$ref": "#/$defs/snapshot"}},
     "cases": {"type": "array", "items": {"$ref": "#/$defs/case"}},
     "admissions": {"type": "array", "items": {"$ref": "#/$defs/admission"}},
+    "anchor_sha256": {
+      "type": "string", "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "The digest of the records a planning decision reads whose deletion nothing else would see: the case roster in recorded order, each case's id and target_id, where each case's review history ends, and where the admission history ends. Computed by scaneval.contracts.pack_anchor_digest. Every pack carries one: the field is optional here only so that a pack without it is refused by the rule that says why rather than by a shape error, and a pack that omits it is refused all the same, because an optional anchor is no anchor. Deleting a whole case with its chained review history, wiping a case's review history so an empty one is indistinguishable from a deleted one, or deleting the admission that kept a case out of a plan each leave the pack anchoring to something else. Anyone who can edit the pack can recompute this, so it makes such a deletion visible rather than impossible."
+    },
     "notes": {"type": "array", "items": {"type": "string"}}
   },
   "$defs": {
@@ -132,8 +136,8 @@
       }
     },
     "check": {
-      "type": "object", "additionalProperties": false, "required": ["check", "result", "at", "detail"],
-      "description": "One mechanical (L1) check result. snapshot_id names the snapshot the check was run against; it is absent only on check sets recorded before results were attributed per snapshot.",
+      "type": "object", "additionalProperties": false, "required": ["check", "result", "at", "detail", "snapshot_id"],
+      "description": "One mechanical (L1) check result, and one member of the check set recorded for the snapshot it names. snapshot_id is required: a check that belongs to no set is a check no record accounts for, and dropping the field would take a failing check out of its set.",
       "properties": {"check": {"type": "string", "minLength": 1}, "result": {"enum": ["pass", "fail", "skipped"]},
                      "at": {"type": "string", "minLength": 1}, "detail": {"type": "string"},
                      "snapshot_id": {"$ref": "#/$defs/id"}}
@@ -180,11 +184,19 @@
             "level": {"enum": [null, "L1", "L2", "L3", "L4"], "description": "A cached copy of the level the case's own records establish, never a fact in its own right and never read to decide anything. For a human_approved case that level is the level of the one review covering the labels as they stand, and this field must be exactly it: a value above or below that review is refused, so a case cannot be recorded at L2 under an L4 curator approval and then planned at L4. That covering review must also earn what it records, which for L3 and L4 means it was itself made by an independent_reviewer. For a mechanically_checked case the level is L1, and a draft carries none. L3 and L4 also require disposition validate, because a reviewed label rests on the screening decision behind it."},
             "review_state": {"enum": ["draft", "mechanically_checked", "human_approved"], "description": "mechanically_checked means level L1 and a recorded passing check set, carrying snapshot_id, for every snapshot the case references; it is never a claim that a person read anything."},
             "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
-            "checked_trees": {
+            "check_sets": {
               "type": "object",
-              "description": "The digest of the exported tree each recorded check set ran against, keyed by snapshot_id. One check set reads one export, so the digest is recorded once for the set. It is the third of three records of that one fact, beside the detail of the set's passing snapshot_hash_recorded check and the snapshot's declared tree_hash, and loading a pack requires all three to agree: editing any two contradicts the third instead of retargeting a standing check set, or an approval resting on one, at a different export. A failing set records the export it read and rejected, which the declared hash is not expected to match. Absent for sets recorded before this field existed, where the passing snapshot_hash_recorded check holds the same digest in its detail.",
+              "description": "One record per mechanical check set, keyed by the snapshot_id it ran against. The set is this record, never the checks that happen to carry a snapshot id: result is what the set decided, tree_hash is the export it read, and checks_sha256 covers both together with every check of the set, so deleting a failing check, unattributing one, reordering two, or editing one no longer turns a failed set into a passing one. Absent when the case records no check set. tree_hash is also the third of three records of one fact, beside the detail of the set's passing snapshot_hash_recorded check and the snapshot's declared tree_hash, and loading a pack requires all three to agree: editing any two contradicts the third instead of retargeting a standing check set, or an approval resting on one, at a different export. A failing set records the export it read and rejected, which the declared hash is not expected to match.",
               "propertyNames": {"$ref": "#/$defs/id"},
-              "additionalProperties": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+              "additionalProperties": {
+                "type": "object", "additionalProperties": false,
+                "required": ["result", "tree_hash", "checks_sha256"],
+                "properties": {
+                  "result": {"enum": ["pass", "fail"]},
+                  "tree_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                  "checks_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+                }
+              }
             },
             "checks_failed": {"type": "boolean", "description": "Absent by default. Set when a mechanical check set failed for a snapshot this case references after the case was human approved: the recorded review and level stand, and planning leaves the case out until a correction decision resolves it."},
             "reviews": {"type": "array", "items": {"$ref": "#/$defs/review"}},
@@ -200,10 +212,14 @@
     },
     "admission": {
       "type": "object", "additionalProperties": false, "required": ["case_id", "target_id", "decision", "by", "at", "reason"],
-      "description": "One admission decision made by a named person. It names both the case it was recorded on and the target_id that case carried at the time; the target_id is inside the label digest, so the decision is bound to content a review covers rather than to a name. A pack whose admission no longer resolves to the target of the case it names is refused, and planning routes each decision by target_id, so renaming two cases cannot move a rejection onto different content.",
+      "description": "One admission decision made by a named person. It names both the case it was recorded on and the target_id that case carried at the time; the target_id is inside the label digest, so the decision is bound to content a review covers rather than to a name. A pack whose admission no longer resolves to the target of the case it names is refused, and planning routes each decision by target_id, so renaming two cases cannot move a rejection onto different content. Only an explicit admitted decision admits: a case with no recorded decision, or one recorded deferred, is planned as a draft and never reaches a reviewed-scope plan.",
       "properties": {"case_id": {"$ref": "#/$defs/id"}, "target_id": {"$ref": "#/$defs/id"},
                      "decision": {"enum": ["admitted", "rejected", "deferred"]},
-                     "by": {"type": "string", "minLength": 1}, "at": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}
+                     "by": {"type": "string", "minLength": 1}, "at": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1},
+                     "chain_sha256": {
+                       "type": "string", "pattern": "^sha256:[0-9a-f]{64}$",
+                       "description": "This decision's place in the admission chain: the digest of its own fields together with the chain value of the decision recorded before it, computed by scaneval.contracts.admission_chain_digest. Every recorded admission carries one, and the pack anchor records where the chain ends, so deleting the rejection that kept a case out of a plan cannot quietly restore it, from the middle of the history or off the end."
+                     }}
     }
   }
 }

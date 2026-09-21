@@ -15,12 +15,19 @@ summary, and :func:`reconcile_import` compares that self-report against the clai
 delivered: a finding the harness says it wrote that did not arrive is the same loss, counted
 the same way. Counting only what the importer could see made the worst case invisible, because
 a scan that lost every finding before the import left nothing to count and read as a clean
-success.
+success. A self-report in a shape the reader cannot parse is counted as loss for the same
+reason: unreadable evidence is missing evidence, not evidence that nothing was lost.
 
 Only records this scan produced are imported. The findings directory is snapshotted before
 the harness process starts, and a record already present with the same bytes is left out, so
 a finding record the repository under test shipped cannot be counted as a detection. That
 establishes that the bytes are new to the workspace, not that the harness's model wrote them.
+
+Every path this adapter touches after the harness process starts is a path the harness could
+have replaced, and any component of it can be a symbolic link, not only the last one. So each
+read and each copy destination goes through one :class:`Enclosure`, which resolves the whole
+path and proves it is still inside the workspace the scanner was handed or the staging
+directory this run created. A path that resolves out is refused and counted, never followed.
 """
 
 from __future__ import annotations
@@ -35,7 +42,7 @@ import subprocess
 from typing import Any, NamedTuple
 
 from ..kinds import kind_for_harness_class
-from ..materialize import HARNESS_STATE_DIRS, git_command
+from ..materialize import HARNESS_STATE_DIRS, git_command, resolve_within
 from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command, tail_text
 
 
@@ -124,6 +131,35 @@ def _split_items(inner: str) -> list[str]:
     return [item for item in items if item.strip()]
 
 
+class Enclosure(NamedTuple):
+    """The two directories this adapter may touch once the harness has started, and the rule.
+
+    ``workspace`` is the exported source the scanner was handed: every read after the harness
+    process starts must resolve inside it. ``staging`` is this run's raw output directory: every
+    copy destination must resolve inside that. Both checks are
+    :func:`~scaneval.materialize.resolve_within`, which resolves the path whole, so a link
+    anywhere along it is caught and not only one in the last component.
+
+    That is the difference this class exists for. The importer used to check each record for
+    being a link and never its ancestors, so a link one level up, at the harness state directory
+    or at any parent of it, left every record behind it looking like an ordinary regular file in
+    an ordinary directory. Records from anywhere on the host were read, staged into the bundle,
+    and imported as claims of this scan. Checking the last component is not a containment check;
+    resolving the whole path is.
+    """
+
+    workspace: Path
+    staging: Path
+
+    def read(self, path: Path) -> Path | None:
+        """*path* when it still resolves inside the workspace the scanner was handed, else ``None``."""
+        return resolve_within(path, self.workspace)
+
+    def write(self, path: Path) -> Path | None:
+        """*path* when it still resolves inside this run's staging directory, else ``None``."""
+        return resolve_within(path, self.staging)
+
+
 class LostRecord(NamedTuple):
     """One finding record this scan produced that did not become a claim.
 
@@ -186,7 +222,7 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _list_markdown(directory: Path) -> tuple[list[str], str | None, bool]:
+def _list_markdown(directory: Path, enclosure: Enclosure) -> tuple[list[str], str | None, bool]:
     """Sorted ``*.md`` names in *directory*, a note naming any failure, and whether it exists.
 
     Enumeration is explicit rather than delegated to :meth:`Path.glob`, which swallows the
@@ -195,14 +231,15 @@ def _list_markdown(directory: Path) -> tuple[list[str], str | None, bool]:
     absent; a directory that exists and cannot be listed returns true with a note, so the
     caller counts the records it could not see instead of reporting none.
 
-    A findings path that is itself a symbolic link is one of those failures, not a directory to
-    read: what lies behind it is not the workspace this scan was given, so records found there
-    were not shown to be anything this scan wrote. The link is refused whole, which is stricter
-    than the per-record symlink check below and has to be, since that check never sees a record
-    reached only through the directory link.
+    A findings path that does not resolve inside the workspace is one of those failures, not a
+    directory to read: what lies behind it is not the workspace this scan was given, so records
+    found there were not shown to be anything this scan wrote. It is refused whole, before
+    anything in it is listed, because a per-record check never sees a record reached only
+    through a link above it.
     """
-    if directory.is_symlink():
-        return [], "the findings path is a symbolic link and was not followed", True
+    if enclosure.read(directory) is None:
+        return [], ("the findings path does not resolve inside the workspace the scan was "
+                    "given; it was not followed"), True
     try:
         with os.scandir(directory) as entries:
             names = sorted(entry.name for entry in entries)
@@ -215,22 +252,28 @@ def _list_markdown(directory: Path) -> tuple[list[str], str | None, bool]:
     return [name for name in names if name.endswith(".md")], None, True
 
 
-def snapshot_findings(findings_dir: Path) -> FindingsBaseline:
+def snapshot_findings(findings_dir: Path, enclosure: Enclosure) -> FindingsBaseline:
     """Record the finding records present before the scan, so the import can exclude them.
 
     Call this before the harness process starts. Each ``*.md`` file is hashed; one that cannot
     be read is recorded with a ``None`` digest, which no content hash equals, so the importer
     treats it as pre-existing rather than as something the scan produced. A directory that
-    cannot be listed yields ``established`` false, and the importer then attributes nothing to
-    the scan instead of guessing.
+    cannot be listed, or that does not resolve inside the workspace, yields ``established``
+    false, and the importer then attributes nothing to the scan instead of guessing.
     """
-    names, note, exists = _list_markdown(findings_dir)
+    names, note, exists = _list_markdown(findings_dir, enclosure)
     if not exists:
         return FindingsBaseline({}, True, None)
     if note:
         return FindingsBaseline({}, False, note)
     digests: dict[str, str | None] = {}
     for name in names:
+        if enclosure.read(findings_dir / name) is None:
+            # A name that resolves out of the workspace is recorded with no digest, which no
+            # content hash equals, so the importer treats it as pre-existing and credits the
+            # scan with nothing found behind it.
+            digests[name] = None
+            continue
         try:
             digests[name] = _digest((findings_dir / name).read_bytes())
         except OSError:
@@ -238,7 +281,7 @@ def snapshot_findings(findings_dir: Path) -> FindingsBaseline:
     return FindingsBaseline(digests, True, None)
 
 
-def stage_record(source: Path, destination: Path) -> str | None:
+def stage_record(source: Path, destination: Path, enclosure: Enclosure) -> str | None:
     """Copy one harness record into the staging directory; return a failure message, never raise.
 
     Every record this adapter stages goes through here: the finding records, whose failure is
@@ -247,13 +290,22 @@ def stage_record(source: Path, destination: Path) -> str | None:
     it would discard every claim the importer had already built and turn the whole scan into an
     adapter failure. The scanner owns both ends of this copy, so both ends can fail.
 
+    Both ends are checked against the enclosure, and that is what makes the destination safe.
+    The harness writes into the staging directory while it runs, so a link it left where these
+    records go redirected the copy to any absolute path it chose and this wrote outside the
+    bundle: ``mkdir(exist_ok=True)`` succeeds on a link to a directory and
+    :func:`shutil.copyfile` follows one. Neither is reached now unless the destination resolves
+    back inside the staging directory.
+
     Only a regular file is copied. Both callers classify the record before they get here, but
     the guard belongs to the copy as well: :func:`shutil.copyfile` follows a symbolic link and
     would preserve a host file the scan never wrote, and opening a named pipe for reading would
     block until something wrote to it, which nothing here ever does.
     """
-    if source.is_symlink() or not source.is_file():
-        return "the record is not a regular file; it was not followed or copied"
+    if enclosure.read(source) is None or source.is_symlink() or not source.is_file():
+        return "the record is not a regular file inside the workspace; it was not followed or copied"
+    if enclosure.write(destination) is None:
+        return "the staging destination does not resolve inside this run's raw output"
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
@@ -263,7 +315,8 @@ def stage_record(source: Path, destination: Path) -> str | None:
 
 
 def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix: str,
-                            stage_dir: Path, baseline: FindingsBaseline) -> HarnessImport:
+                            stage_dir: Path, baseline: FindingsBaseline,
+                            enclosure: Enclosure) -> HarnessImport:
     """Stage the ``findings/*.md`` records this scan produced and translate each into a claim.
 
     A finding record is a ``*.md`` file in *findings_dir*, which is what the harness's own
@@ -274,9 +327,11 @@ def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix
     carries an unusable ``file_path``, or cannot be staged yields no claim and becomes one
     :class:`LostRecord`, which is both the loss and the note it reads as. The directory is listed
     explicitly, so a listing that fails is counted and noted rather than read as an empty
-    directory, and a findings path that is itself a symbolic link is one of those failures:
-    nothing behind it is read, because it is not the workspace this scan was handed. The full
-    native allegation text is preserved; line ranges are never invented.
+    directory, and a findings path that does not resolve inside *enclosure* is one of those
+    failures: nothing behind it is read, because it is not the workspace this scan was handed.
+    Every record read and every staged copy goes through the same enclosure, so a link anywhere
+    above a record is refused exactly like a record that is a link. The full native allegation
+    text is preserved; line ranges are never invented.
 
     Provenance. *baseline* is :func:`snapshot_findings` taken before the harness process
     started, and a record whose name and bytes are both in it is not imported: it was already
@@ -302,7 +357,7 @@ def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix
         losses.append(loss)
         notes.append(loss.note)
 
-    names, listing_failure, exists = _list_markdown(findings_dir)
+    names, listing_failure, exists = _list_markdown(findings_dir, enclosure)
     if not exists:
         return HarnessImport(claims, artifacts, ["no findings directory was written by the harness"], ())
     if listing_failure:
@@ -321,6 +376,9 @@ def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix
         return HarnessImport(claims, artifacts, notes, tuple(losses))
     for name in names:
         path = findings_dir / name
+        if enclosure.read(path) is None:
+            lose(path.name, None, "finding record does not resolve inside the workspace; not imported")
+            continue
         if path.is_symlink() or not path.is_file():
             lose(path.name, None, "finding record is not a regular file; not imported")
             continue
@@ -349,7 +407,7 @@ def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix
             lose(path.name, finding_id,
                  f"unusable file_path {file_path!r}; not imported, see the raw finding record")
             continue
-        failure = stage_record(path, stage_dir / path.name)
+        failure = stage_record(path, stage_dir / path.name, enclosure)
         if failure:
             # The claim would name an artifact the bundle does not hold, so the record is
             # counted as lost rather than imported against a copy that was never made.
@@ -382,12 +440,18 @@ class SelfReport(NamedTuple):
 
     ``ids`` are the distinct finding ids it named in ``newFindings`` and ``updatedFindings``,
     each of which the engine writes as one ``findings/*.md`` record. ``unnamed`` counts reported
-    entries carrying no usable id, which can still be compared by number. ``note`` names a
-    summary shape this could not read at all.
+    entries carrying no usable id, which can still be compared by number. ``unreadable`` counts
+    the parts of the self-report this could not read at all, and ``note`` names them.
+
+    ``unreadable`` is separate from ``total`` on purpose. A part this cannot read says nothing
+    about how many records the harness wrote, so it cannot be added to a count; what it is, is
+    evidence the run offered and the importer could not use, and :func:`reconcile_import` counts
+    each one as a lost record rather than as nothing at all.
     """
 
     ids: tuple[str, ...]
     unnamed: int
+    unreadable: int
     note: str | None
 
     @property
@@ -400,12 +464,23 @@ def read_self_report(summary: object) -> SelfReport:
     """Read the harness's own count of the finding records it wrote.
 
     A summary that names no findings yields an empty report, which asserts nothing: this is a
-    cross-check against a scanner's own words, not a guarantee. A summary whose ``newFindings``
-    or ``updatedFindings`` is a shape this cannot read yields a note instead of a number, for
-    the same reason: an unreadable self-report disagrees with nothing.
+    cross-check against a scanner's own words, not a guarantee. ``None``, an absent key, and a
+    summary that is not a mapping at all are all that case: no self-report was offered, and the
+    run that produced no summary is already reported as a failed one.
+
+    A self-report that was offered and cannot be parsed is the opposite case and is counted.
+    ``newFindings`` or ``updatedFindings`` in a shape this cannot read used to yield a note and
+    no number, which reconciled to a shortfall of zero: a run whose entire self-report was a
+    shape the reader did not expect reached scoring as a clean success. An unreadable part is
+    missing evidence, not evidence that nothing was written, so each one is counted in
+    ``unreadable`` for the caller to treat as loss.
     """
     if not isinstance(summary, dict):
-        return SelfReport((), 0, None)
+        if summary is None:
+            return SelfReport((), 0, 0, None)
+        return SelfReport((), 0, 1,
+                          f"the harness summary is a {type(summary).__name__}, not a mapping, so "
+                          "the findings it reports could not be read")
     ids: list[str] = []
     unnamed = 0
     unreadable: list[str] = []
@@ -426,7 +501,7 @@ def read_self_report(summary: object) -> SelfReport:
                 ids.append(identifier)
             else:
                 unnamed += 1
-    return SelfReport(tuple(dict.fromkeys(ids)), unnamed, "; ".join(unreadable) or None)
+    return SelfReport(tuple(dict.fromkeys(ids)), unnamed, len(unreadable), "; ".join(unreadable) or None)
 
 
 class ImportAccounting(NamedTuple):
@@ -458,12 +533,16 @@ def reconcile_import(imported: HarnessImport, report: SelfReport) -> ImportAccou
     as a rejected record. A rejected record is assumed to be one of the reported findings, so a
     record that was both reported and rejected is counted once, as a rejection with a reason.
 
+    A part of the self-report that could not be read at all is counted too, one lost record
+    each, which is a floor rather than a number: it says at least one record may be behind it,
+    not how many. It used to produce a shortfall of zero, so a run whose whole self-report was
+    unreadable read as a scan that reported nothing and lost nothing.
+
     The limits. This trusts the self-report only as a lower bound on what was written: a harness
-    that reports nothing, or reports a shape :func:`read_self_report` cannot read, produces no
-    shortfall, and a harness that under-reports hides the same way. The comparison is by id, so
-    a record the harness rewrote byte for byte is excluded by the import baseline and then shows
-    up here as a shortfall, which is the conservative direction: it was reported, and no claim
-    for it arrived.
+    that reports nothing produces no shortfall, and one that under-reports hides the same way.
+    The comparison is by id, so a record the harness rewrote byte for byte is excluded by the
+    import baseline and then shows up here as a shortfall, which is the conservative direction:
+    it was reported, and no claim for it arrived.
     """
     delivered = {str(claim.get("claim_id") or "") for claim in imported.claims}
     named_lost = {loss.finding_id for loss in imported.losses if loss.finding_id}
@@ -478,7 +557,11 @@ def reconcile_import(imported: HarnessImport, report: SelfReport) -> ImportAccou
         detail = ", ".join(unattributed[:10]) if unattributed else "none of them carried an id"
         reasons.append(f"the harness reported writing {report.total} finding record(s) and "
                        f"{shortfall} of them did not arrive as claims ({detail})")
-    lost = imported.lost + shortfall
+    if report.unreadable:
+        reasons.append(f"the harness self-report could not be read ({report.note}), so the "
+                       f"findings it names could not be compared with the claims that arrived; "
+                       f"counted as {report.unreadable} lost record(s), which is a floor")
+    lost = imported.lost + shortfall + report.unreadable
     message = None
     if lost:
         message = (f"{lost} harness finding record(s) could not be imported: "
@@ -527,7 +610,14 @@ class LlmHarnessAdapter(Adapter):
     adapter_version = "2.1.0"
     requires_git = True
     supported_languages = frozenset({"python", "javascript", "typescript", "go", "rust"})
-    env_passthrough = ("NODE_OPTIONS", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "XDG_CONFIG_HOME")
+    # What the driver process inherits from the operator environment, on top of the base set in
+    # :mod:`scaneval.adapters.base`, and recorded as ``environment.passthrough`` in every
+    # execution record. ``NODE_OPTIONS`` is deliberately not here: node executes what it names,
+    # so ``--require`` or ``--import`` in the operator's environment would run code inside the
+    # driver, changing what the run did while the record showed only the variable's name and
+    # never its value. The provider keys are here because the harness needs them to call a
+    # model; they are secrets, so they are passed and never recorded.
+    env_passthrough = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "XDG_CONFIG_HOME")
     # Derived from the one list the export strips, so a repository shipping a top-level
     # harness state directory cannot be stripped by one of them and treated as ordinary
     # content by the other.
@@ -614,9 +704,13 @@ class LlmHarnessAdapter(Adapter):
             "flush_timeout_ms": int(spec.config.get("flush_timeout_ms", 30000)),
         }
         state_dir = source_dir / preset["state_dir"]
+        # The one enclosure every read and every copy destination below goes through: the
+        # harness may read from and write to both of these directories while it runs, so each
+        # path is resolved whole and proved to be inside the one it belongs to.
+        enclosure = Enclosure(Path(source_dir), Path(raw_dir))
         # Taken before the harness process starts: whatever is in the findings directory now
         # came with the exported input, not from this scan.
-        findings_baseline = snapshot_findings(state_dir / "findings")
+        findings_baseline = snapshot_findings(state_dir / "findings", enclosure)
         config_path = raw_dir / "driver-config.json"
         config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         (raw_dir / "driver-progress.log").write_text("", encoding="utf-8")
@@ -634,7 +728,7 @@ class LlmHarnessAdapter(Adapter):
         imported = import_harness_findings(state_dir / "findings", harness=harness,
                                            artifact_prefix="harness-findings",
                                            stage_dir=raw_dir / "harness-findings",
-                                           baseline=findings_baseline)
+                                           baseline=findings_baseline, enclosure=enclosure)
         claims = imported.claims
         artifacts.extend(imported.artifacts)
         # The harness writes its plan and scan log inside the workspace, which is removed once
@@ -645,13 +739,18 @@ class LlmHarnessAdapter(Adapter):
         for name in ("bootstrap-plan.md", "pr-plan.md", "batch-plan.md", "hypothesis-scanned-files.md",
                      "specialists.json", "specialists.md", "scan-log.md", "threat-model.md", "codebase-profile.json"):
             written = state_dir / name
-            if written.is_symlink() or (written.exists() and not written.is_file()):
+            if enclosure.read(written) is None:
+                # Reached through a link that leaves the workspace, so it is not a record this
+                # scan wrote and nothing behind it is read or copied.
+                plan_notes.append(f"{name}: harness record does not resolve inside the workspace; "
+                                  "it was not staged as an artifact")
+            elif written.is_symlink() or (written.exists() and not written.is_file()):
                 # Not staged and not hashed, and said so rather than dropped in silence. These
                 # are plan records, not claims, so this does not degrade the scan status.
                 plan_notes.append(f"{name}: harness record is not a regular file; it was not staged as an artifact")
             elif written.is_file():
                 copied = plans / name
-                failure = stage_record(written, copied)
+                failure = stage_record(written, copied, enclosure)
                 if failure:
                     # Contained, not raised: a plan record is evidence, and a copy that fails
                     # must not discard the claims the importer already built. The scanner owns
@@ -661,22 +760,34 @@ class LlmHarnessAdapter(Adapter):
                 else:
                     artifacts.append({"id": f"harness-{name}", "path": copied})
         output: dict[str, Any] = {}
-        try:
-            output = json.loads((raw_dir / "driver-output.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            output = {}
+        driver_output = raw_dir / "driver-output.json"
+        if enclosure.write(driver_output) is None:
+            # The harness writes this file, so it can also leave a link there. Nothing outside
+            # the staging directory is parsed as this run's own output.
+            notes_prefix = ["the driver output path does not resolve inside this run's raw "
+                            "output; it was not read"]
+        else:
+            notes_prefix = []
+            try:
+                output = json.loads(driver_output.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                output = {}
+        # Only a mapping is a summary this can read. A truthy value of any other shape is not
+        # one, and treating it as one crashed the scan on the first ``.get`` below; it is a
+        # self-report that could not be read, which :func:`read_self_report` counts as loss.
         summary = output.get("summary") if isinstance(output, dict) else None
+        usable_summary = summary if isinstance(summary, dict) and summary else None
         trace = output.get("trace") if isinstance(output, dict) else None
         capture_state = (trace or {}).get("state") if isinstance(trace, dict) else None
         routes = sorted({str(route) for route in (output.get("observed_routes") or [])}) if isinstance(output, dict) else []
         mock_only = routes == ["mock"]
-        capture = capture_status(trace_mode, routes, has_summary=bool(summary), capture_state=capture_state)
+        capture = capture_status(trace_mode, routes, has_summary=bool(usable_summary), capture_state=capture_state)
         # One accounting of import loss, reconciling the records the importer could read against
         # the findings the harness says it wrote. Every branch below reads this and nothing else:
         # the status, the resolved-bundle flag, the error message, and the notes.
         accounting = reconcile_import(imported, read_self_report(summary))
         loss_message = accounting.message
-        notes = list(imported.notes) + plan_notes + list(accounting.notes)
+        notes = notes_prefix + list(imported.notes) + plan_notes + list(accounting.notes)
         notes.append("Model requests are captured per logical harness call; retries inside the harness runner and token usage are not observable at this boundary.")
         for route in routes:
             policy = TOOL_POLICY.get(route)
@@ -701,6 +812,16 @@ class LlmHarnessAdapter(Adapter):
                                    "harness_package": str(preparation["harness"].get("package_version")),
                                    "driver": str(output.get("driver_version", "unknown"))})
 
+        def stderr_tail() -> str:
+            """The tail of this run's own driver stderr, empty when that path left the staging area.
+
+            The file is created here before the driver starts, but the driver can replace it with
+            a link, and this text goes into the recorded error message: without the check a
+            scanner could choose which host file the bundle quotes.
+            """
+            stderr_path = raw_dir / "driver-stderr.txt"
+            return tail_text(stderr_path) if enclosure.write(stderr_path) is not None else ""
+
         def with_loss(message: str) -> str:
             """The branch's own message, with the import loss named beside it.
 
@@ -714,33 +835,33 @@ class LlmHarnessAdapter(Adapter):
             return NativeOutcome(status="timeout", exit_code=None, timed_out=True,
                                  error={"code": "timeout",
                                         "message": with_loss(f"harness exceeded {timeout_seconds}s")}, **base)
-        if not summary:
+        if not usable_summary:
             failure = (output.get("error") or {}) if isinstance(output, dict) else {}
-            message = failure.get("message") or tail_text(raw_dir / "driver-stderr.txt")
+            message = failure.get("message") or stderr_tail()
             return NativeOutcome(status="error", exit_code=result.exit_code,
                                  error={"code": f"driver_exit_{result.exit_code}",
                                         "message": with_loss(str(message)[:2000])}, **base)
-        budget = summary.get("budget") or {}
+        budget = usable_summary.get("budget") or {}
         if isinstance(budget, dict) and "estimatedSpentUsd" in budget:
             notes.append(f"Harness cost estimate (not measured): {budget.get('estimatedSpentUsd')} USD "
                          f"for {budget.get('actualLlmFilesScanned')} LLM files; measured cost unavailable.")
-        scan_stats = summary.get("bootstrapScan") or {}
+        scan_stats = usable_summary.get("bootstrapScan") or {}
         llm_calls = int(scan_stats.get("llmCalls") or 0)
         failed_calls = int(scan_stats.get("failedCalls") or 0)
         notes.append(f"Harness self-report: llm_calls={llm_calls} failed_calls={failed_calls} "
                      f"coverage={scan_stats.get('hypothesisCoverage')} status={scan_stats.get('status')} "
-                     f"runtime_profile={summary.get('runtimeProfile')} degraded={summary.get('degraded')}")
+                     f"runtime_profile={usable_summary.get('runtimeProfile')} degraded={usable_summary.get('degraded')}")
         if result.exit_code not in (0, 2):
             return NativeOutcome(status="error", exit_code=result.exit_code,
                                  error={"code": f"driver_exit_{result.exit_code}",
-                                        "message": with_loss(tail_text(raw_dir / "driver-stderr.txt"))}, **base)
+                                        "message": with_loss(stderr_tail())}, **base)
         if llm_calls and failed_calls >= llm_calls:
             return NativeOutcome(status="partial", exit_code=result.exit_code,
                                  error={"code": "llm_path_failed", "message": with_loss("every harness model call failed; findings come from deterministic passes only")}, **base)
-        if summary.get("degradation") or scan_stats.get("status") == "inconclusive":
+        if usable_summary.get("degradation") or scan_stats.get("status") == "inconclusive":
             return NativeOutcome(status="partial", exit_code=result.exit_code,
                                  error={"code": "harness_inconclusive",
-                                        "message": with_loss(f"degradation={summary.get('degradation')} scan_status={scan_stats.get('status')} reasons={scan_stats.get('reasons')}")}, **base)
+                                        "message": with_loss(f"degradation={usable_summary.get('degradation')} scan_status={scan_stats.get('status')} reasons={scan_stats.get('reasons')}")}, **base)
         if loss_message:
             # A scan whose findings did not all survive the import is not a clean run: it is
             # partial, and the count and the reason travel with it as an explicit error.

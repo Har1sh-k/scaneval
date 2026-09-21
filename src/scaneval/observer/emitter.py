@@ -30,13 +30,14 @@ downgraded to ``partial`` and marked with ``observer_capture_gap`` in its metada
 left claiming to be a measurement. A gap says the trace is incomplete; an absent event is not
 evidence of absent activity.
 
-``dropped_events`` counts events that reached no sink, and nothing else. A clock read, an ID
-read, or an elapsed-time read that failed sets ``capture_gap`` and marks the event it degraded,
-but it does not increment the counter, because the event was still delivered: counting it there
-would report a loss that did not happen and hide the ones that did. A write queued on an event
-loop that is torn down before it runs, one cancelled before it ever starts, and one whose sink
-handed back an iterator nobody drives are the opposite case, and are counted, because those
-events reached nobody.
+``dropped_events`` counts events no sink acknowledged taking, and nothing else; the exact
+promise, and why acknowledgement rather than arrival is the word, is on :class:`CaptureState`.
+A clock read, an ID read, or an elapsed-time read that failed sets ``capture_gap`` and marks
+the event it degraded, but it does not increment the counter, because the sink still took that
+event: counting it there would report a loss that did not happen and hide the ones that did. A
+write queued on an event loop that is torn down before it runs, one cancelled before it ever
+starts, and one whose sink handed back an iterator nobody drives are the opposite case, and are
+counted, because those events reached nobody.
 
 The wire contract is shared with ``sdk/typescript``, so the two emitters accept and reject the
 same inputs and, where they once differed, the stricter rule is the shared one:
@@ -48,6 +49,15 @@ same inputs and, where they once differed, the stricter rule is the shared one:
   and an integral float is stored as an integer so both languages write the same bytes. The
   bound is JavaScript's: past it a JSON number stops round-tripping, so a value Python could
   hold exactly would reach a reader as a different one.
+* A number in a payload is stored only when both languages write it as the same bytes, which
+  :func:`_wire_number` decides for every payload number in one place. An integral one is held
+  to the same safe-integer bound as ``duration_ms`` and stored as an integer, because
+  JavaScript has one number type and writes ``5`` where ``json.dumps`` writes ``5.0``. A
+  non-integral one must be at least :data:`_MIN_PLAIN_DECIMAL` in magnitude, the plain decimal
+  window the two share; below it they switch to exponent notation at different magnitudes and
+  spell an exponent differently. Anything else is refused as a capture gap rather than written
+  as bytes a reader in the other language would read as a different number, or fail to read,
+  and that includes the magnitudes below 1e-9 where the two agree again.
 * A field name the contract does not list is refused, so a misspelling is loud rather than
   silently dropped.
 * The default redactor folds case over ASCII only (``re.IGNORECASE | re.ASCII``), so it hides
@@ -123,9 +133,25 @@ CAPTURE_STATUSES = ("complete", "partial", "redacted", "unavailable")
 # without a documented limit. Raising it is a contract change in both languages at once.
 MAX_PAYLOAD_DEPTH = 32
 
-# JavaScript's Number.MAX_SAFE_INTEGER. Past it a JSON number no longer round-trips through a
-# double, so a duration above this would reach a reader as a different value than it left as.
+# JavaScript's Number.MAX_SAFE_INTEGER. Past it a JSON number no longer distinguishes
+# neighbouring integers, so a value above this would reach a reader as a different one than it
+# left as. It bounds every integer the wire carries: a ``duration_ms`` and, through
+# :func:`_wire_number`, a number a caller put in a payload.
 _MAX_SAFE_INTEGER = 2**53 - 1
+
+# The smallest magnitude both languages spell in plain decimal notation, and therefore the
+# smallest number the wire carries that is not an integer. Python's ``repr`` switches to
+# exponent notation below 1e-4 and JavaScript's number formatting below 1e-6, and where both do
+# use an exponent they spell it differently: Python pads it to two digits, writing ``1e-07``
+# where JavaScript writes ``1e-7``. A smaller payload number would therefore leave the two
+# emitters as different bytes, up to a point: below 1e-9 every exponent has two digits in both
+# languages and the two agree again. Those are refused all the same, so the accepted range is
+# one window rather than two with a hole from 1e-9 to 1e-4 in the middle of it. A harness
+# carrying numbers that small scales them once, into a unit the wire carries, rather than
+# discovering that 1e-10 is written and 1e-8 is not. The window needs no upper end: every
+# double at or above ``2 ** 52`` is an integer, so a non-integral number never reaches the
+# magnitude where Python's ``repr`` switches to an exponent.
+_MIN_PLAIN_DECIMAL = 1e-4
 
 # The category of an event is a property of its type, never an independent claim by the caller.
 _CATEGORY_FOR = {event_type: event_type.split(".", 1)[0] for event_type in EVENT_TYPES}
@@ -196,11 +222,23 @@ class TraceSink(Protocol):
 class CaptureState:
     """What the emitter failed to record. It is a snapshot, so it never changes underfoot.
 
-    ``dropped_events`` counts events that reached no sink, not scanner findings and not
+    ``dropped_events`` counts events no sink acknowledged taking, not scanner findings and not
     instrumentation failures in general: a clock, ID, or elapsed-time read that failed sets
-    ``capture_gap`` and marks the event it degraded, but the event was delivered, so it is not
-    counted here. ``capture_gap`` is therefore the broader flag, and it can be true while the
-    counter is zero.
+    ``capture_gap`` and marks the event it degraded, but the sink still took that event, so it
+    is not counted here. ``capture_gap`` is therefore the broader flag, and it can be true while
+    the counter is zero.
+
+    Acknowledgement is the exact word, and it is the only thing the emitter can observe. A sink
+    is caller code the emitter never looks inside: it learns that an event arrived when a
+    synchronous write returns or an asynchronous one completes, and it learns nothing at all
+    from a write that was cut short. A write cancelled while the sink's own coroutine was
+    suspended is the case where that matters, because the sink may well have stored the event
+    before it suspended, and this counter charges it anyway. That is deliberate and it is the
+    safe direction: the count is an upper bound on what the trace is missing, so zero still
+    means nothing was lost, while a counter that guessed "delivered" from a cancellation would
+    report a complete trace for a write that really did reach nobody. Read a nonzero count as
+    "this many events the sink never acknowledged", not as proof that exactly that many lines
+    are missing from the file.
 
     ``last_sink_error`` is one opaque constant, ``"observer instrumentation failure"``, for
     every failure the emitter contains. It reports that capture broke, never which call broke
@@ -300,16 +338,61 @@ def _running_loop() -> Any:
         return None
 
 
+def _wire_number(value: int | float) -> int | float:
+    """Return the one spelling of a payload number both emitters write, or refuse it.
+
+    A number is stored only when Python and JavaScript write it as the same bytes. This is the
+    single place that decides that, for every number in every payload, because a trace one
+    language can write and the other cannot read is worse than a missing event: it looks
+    complete.
+
+    An integral value, a Python ``int`` or a ``float`` with nothing after the point, must be a
+    safe integer. Past ``2 ** 53 - 1`` a JSON number stops distinguishing neighbouring integers,
+    so Python could hold a count a JavaScript reader would round to a different one. That is the
+    bound ``duration_ms`` already carries, applied to the numbers a caller puts in a payload.
+    The value is stored as an ``int`` because JavaScript has one number type and writes ``5``
+    where :func:`json.dumps` writes ``5.0`` for the same number; ``duration_ms`` is normalized
+    the same way for the same reason. It is also why ``-0.0`` is stored as ``0``, which is what
+    JavaScript writes for it.
+
+    A non-integral value must be at least :data:`_MIN_PLAIN_DECIMAL` in magnitude, the plain
+    decimal window the two languages share. Below it they switch to exponent notation at
+    different magnitudes and spell an exponent differently, so one payload would leave the two
+    emitters as different bytes. Below 1e-9 they agree again, and those are refused all the
+    same: the accepted range is one window, not two with a hole between them, and the constant
+    says why.
+
+    Refusing is a capture gap, never a rounded or reshaped value: a silently altered number
+    would misdescribe the run it claims to observe.
+    """
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise TypeError("non-finite JSON number")
+        if not value.is_integer():
+            if abs(value) < _MIN_PLAIN_DECIMAL:
+                raise TypeError("JSON number below the shared plain-decimal window")
+            return value
+        # An integral float is the integer it equals, converted here so the bound below is the
+        # one safe-integer check a payload number meets, rather than one per spelling of it.
+        value = int(value)
+    if abs(value) > _MAX_SAFE_INTEGER:
+        raise TypeError("JSON number outside the shared safe-integer range")
+    return value
+
+
 def _copy_json(value: Any, seen: set[int] | None = None, depth: int = 1) -> Any:
     """Deep copy into plain JSON types, refusing anything that would not survive the wire.
 
-    Non-finite floats, cyclic structures, non-string object keys, a string or a key carrying an
-    unpaired surrogate, objects that are not dicts, lists, tuples, or JSON scalars, and
-    containers nested deeper than :data:`MAX_PAYLOAD_DEPTH` raise :class:`TypeError`. ``depth``
-    counts containers, and the payload object a caller passed is the first, so the limit is a
-    property of the payload rather than of this call.
+    Non-finite floats, numbers outside the range both languages write alike, cyclic structures,
+    non-string object keys, a string or a key carrying an unpaired surrogate, objects that are
+    not dicts, lists, tuples, or JSON scalars, and containers nested deeper than
+    :data:`MAX_PAYLOAD_DEPTH` raise :class:`TypeError`. ``depth`` counts containers, and the
+    payload object a caller passed is the first, so the limit is a property of the payload
+    rather than of this call.
     This is a copy, not a coercion: nothing is stringified or truncated to make it fit, because
-    a silently reshaped payload would misdescribe the run it claims to observe.
+    a silently reshaped payload would misdescribe the run it claims to observe. The one thing it
+    does normalize is the spelling of an integral number, in :func:`_wire_number`, which chooses
+    between two spellings of one value rather than changing the value.
     """
     if value is None or isinstance(value, bool):
         return value
@@ -319,12 +402,10 @@ def _copy_json(value: Any, seen: set[int] | None = None, depth: int = 1) -> Any:
             # emitters would otherwise write different bytes for the same payload.
             raise TypeError("JSON string carries an unpaired surrogate")
         return value
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise TypeError("non-finite JSON number")
-        return value
+    if isinstance(value, (int, float)):
+        # One branch for both spellings: which of the two a caller used is not a property of
+        # the number, and the wire carries the number.
+        return _wire_number(value)
     seen = set() if seen is None else seen
     marker = id(value)
     if marker in seen:
@@ -558,9 +639,11 @@ class _Delivery:
     path where the sink accepted the event. :meth:`settle` ends the write: it counts one lost
     event unless the write was confirmed, and does nothing at all the second time it is called.
     That is what makes it safe for an exit to settle a write another exit may already have
-    settled, so no path has to know what the others did. An event that reached no sink is
+    settled, so no path has to know what the others did. An event no sink acknowledged is
     counted once however many paths notice it, and an event the sink accepted is never counted
-    at all, however the task that carried it was later marked.
+    at all, however the task that carried it was later marked. Acknowledgement, not arrival, is
+    the line: a cancelled write that had already handed its event to a sink acknowledged
+    nothing and is charged, which :class:`CaptureState` states as the promise it is.
     """
 
     __slots__ = ("_observer", "_confirmed", "_settled")
@@ -722,7 +805,7 @@ class Observer:
             last_sink_error=self._last_sink_error,
         )
 
-    def emit(self, **fields: Any) -> JsonObject | None:
+    def emit(self, /, *positional: Any, **fields: Any) -> JsonObject | None:
         """Record one event and return it, or return None when nothing was recorded.
 
         Not a coroutine: a synchronous harness calls this directly. The event is validated
@@ -746,9 +829,20 @@ class Observer:
         than a :class:`RecursionError`. The one thing the emitter cannot contain is the
         interpreter refusing to enter this method at all, which is the same wall the harness's
         own next call would hit.
+
+        How the call is spelled cannot raise into the harness either, which is why the receiver
+        is positional only and stray positional arguments are swallowed rather than bound.
+        Python binds arguments before the first statement of a method runs, so a field named
+        ``self`` was a :class:`TypeError` raised by the call itself, before any guard existed to
+        contain it: the one field name the contract happens to share with the receiver cost the
+        harness an exception and the capture state nothing, and the same event named anything
+        else was a counted refusal. It is an unknown field name now, exactly like ``metdata``,
+        refused and counted once. A positional argument is the other half of that mistake and
+        reaches the same refusal by the same path, because the tuple that collects it is not a
+        Mapping.
         """
         try:
-            return self._emit_fields(fields)
+            return self._emit_fields(positional or fields)
         except BaseException as error:
             if isinstance(error, _INTERRUPTS):
                 raise
@@ -1459,7 +1553,7 @@ class Observer:
         self._last_sink_error = _GAP_MESSAGE
 
     def _lost_event(self) -> None:
-        """One event reached no sink.
+        """One event no sink acknowledged taking, which is what :class:`CaptureState` counts.
 
         Reached once per lost event: for a write, only from :meth:`_Delivery.settle`, which
         takes that transition once; for an event that never got as far as a write, from the
