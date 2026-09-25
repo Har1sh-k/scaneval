@@ -25,6 +25,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import sys
 import threading
@@ -156,8 +157,11 @@ def do_process(argv):
         for name in batch:
             path = base / "files" / (name + ".json")
             record = json.loads(path.read_text(encoding="utf-8"))
+            # 2.3.10 divides the wall clock among the batch's files; an older one wrote the
+            # whole batch clock onto each of them, which is what the knob reproduces.
+            wall = 9000 if settings.get("duplicated_duration") else 9000.0 / share
             entry = {"runId": run_id, "investigatedAt": "2026-09-25T12:01:00.000Z",
-                     "durationMs": 9000.0 / share, "durationApiMs": 6000.0 / share,
+                     "durationMs": wall, "durationApiMs": 6000.0 / share,
                      "agentType": "claude-agent-sdk", "model": model,
                      "modelConfig": {"model": model}, "agentSessionId": session,
                      "findingCount": 1, "numTurns": 4.0 / share, "phase": "process",
@@ -206,6 +210,10 @@ def do_process(argv):
                  "toolUseResult": {"file": {"filePath": real + "/src/server.js",
                                             "startLine": 1, "numLines": 1,
                                             "content": "const x = 1;\\n"}}},
+                {"type": "assistant", "uuid": "u3", "sessionId": session, "message": {
+                    "role": "assistant", "model": model,
+                    "usage": {"input_tokens": 20, "output_tokens": 40},
+                    "content": [{"type": "text", "text": "That file shells out."}]}},
             ]) + "\\n", encoding="utf-8")
     if settings.get("parse_error"):
         dump = base / "debug" / "parse-error-investigate-2026-09-25T12-01-30-000Z.txt"
@@ -1253,6 +1261,13 @@ def test_the_adapter_composes_with_the_real_claude_code_collector(tmp_path):
          "toolUseResult": {"file": {"filePath": "src/server.js", "startLine": 1, "numLines": 2,
                                     "content": "const { exec } = require('child_process');\n"
                                                "const express = require('express');\n"}}},
+        # The turn that consumes the read. The collector claims a context selection only for a
+        # file a later model turn actually saw, so a transcript that ends on the tool result
+        # describes a read nothing consumed.
+        {"type": "assistant", "uuid": "u3", "sessionId": "session-aaaa", "message": {
+            "role": "assistant", "model": "claude-haiku-4-5",
+            "usage": {"input_tokens": 1400, "output_tokens": 90},
+            "content": [{"type": "text", "text": "The handler shells out with request input."}]}},
     ]) + "\n", encoding="utf-8")
 
     bundle = invoke(tmp_path, root, claude_projects_dir=str(tmp_path / "claude-projects"))
@@ -1334,22 +1349,59 @@ def test_the_note_naming_the_spellings_never_writes_a_raw_home_path(tmp_path, mo
     assert "the collectors compare textually" in note
 
 
-def test_the_batch_wall_clock_is_taken_once_rather_than_summed_over_the_files_that_repeat_it():
-    """Every other number on an AnalysisEntry is a share; ``durationMs`` is not.
+def test_the_batch_wall_clock_is_summed_from_its_shares_like_every_other_number():
+    """DeepSec 2.3.10 divides ``durationMs`` among the batch's files, so it is summed.
 
-    A real run wrote ``durationMs: 40847`` onto all three files of one batch while dividing
-    ``durationApiMs``, ``numTurns``, ``costUsd`` and every token count by three. Summing it
-    reported a forty-second batch as a two-minute one.
+    A real run of this adapter recorded 45316.33 ms on each of a batch's three files for a
+    batch its own stdout timed at 135.9 seconds. Taking a maximum, which an older DeepSec's
+    duplicated whole numbers had suggested, reported that batch as a third of its length.
     """
     files = tuple((f"f{i}.py.json", {"filePath": f"f{i}.py", "analysisHistory": [{
         "runId": "r1", "agentSessionId": "s1", "model": "m",
-        "durationMs": 40847, "durationApiMs": 121684 / 3, "numTurns": 13 / 3,
+        "durationMs": 135949 / 3, "durationApiMs": 121684 / 3, "numTurns": 13 / 3,
         "costUsd": 0.15 / 3}]}) for i in range(3))
     session = sessions_from(files)[0]
-    assert session.duration_ms == 40847, "the wall clock is repeated, not divided"
+    assert session.duration_ms == pytest.approx(135949)
+    assert session.duration_suspect is False
     assert session.duration_api_ms == pytest.approx(121684)
     assert session.num_turns == pytest.approx(13)
     assert session.cost_usd == pytest.approx(0.15)
+
+
+def test_the_older_duplicated_wall_clock_is_flagged_and_never_guessed_at():
+    """An older DeepSec wrote the whole batch clock onto every file instead of dividing it.
+
+    The sum is wrong for such a record and there is no honest way to know which version wrote
+    it, so the number stays the sum and the run says the number may be duplicated. Guessing a
+    different total from a guess about the writer would be worse than a flagged one.
+    """
+    old = tuple((f"f{i}.py.json", {"filePath": f"f{i}.py", "analysisHistory": [{
+        "runId": "r1", "agentSessionId": "s1", "model": "m",
+        "durationMs": 40847, "durationApiMs": 121684 / 3, "numTurns": 13 / 3,
+        "costUsd": 0.15 / 3}]}) for i in range(3))
+    session = sessions_from(old)[0]
+    assert session.duration_suspect is True
+    assert session.duration_ms == pytest.approx(3 * 40847), "the number is not guessed at"
+
+    # One file in a batch is one share and one whole at the same time, so it is never suspect.
+    single = (("f0.py.json", {"analysisHistory": [{
+        "runId": "r1", "agentSessionId": "s1", "durationMs": 40847, "numTurns": 4.5}]}),)
+    assert sessions_from(single)[0].duration_suspect is False
+
+    # Nor is a batch whose other shares are whole numbers too: there is nothing to contrast.
+    whole = tuple((f"f{i}.py.json", {"analysisHistory": [{
+        "runId": "r1", "agentSessionId": "s1", "durationMs": 100, "numTurns": 2,
+        "costUsd": 1}]}) for i in range(2))
+    assert sessions_from(whole)[0].duration_suspect is False
+
+
+def test_a_suspect_duration_is_named_in_the_run_record(tmp_path, monkeypatch):
+    root = fake_deepsec_root(tmp_path, duplicated_duration=True)
+    stub_collector(monkeypatch, tmp_path, found=False)
+    bundle = invoke(tmp_path, root)
+    _result, execution = documents(bundle)
+    note = next(note for note in execution["notes"] if "durationMs" in note)
+    assert "possibly duplicated" in note and "older than 2.3.10" in note
 
 
 def test_the_response_event_carries_the_batch_wall_clock_as_the_schema_s_own_duration(tmp_path, monkeypatch):
@@ -1413,12 +1465,12 @@ def test_a_transcript_naming_the_workspace_by_its_real_path_still_yields_a_relat
     assert external and rendered.startswith("external:")
 
 
-def test_the_guide_states_the_two_spellings_and_the_duration_field_that_is_not_a_share():
+def test_the_guide_states_the_two_spellings_and_the_share_every_number_on_a_record_is():
     """Both findings came out of a real run; a guide that omits them would mislead the next one."""
     text = DOC.read_text(encoding="utf-8")
     assert "source_dir.resolve()" in text
     assert "external:server.js" in text, "the guide names the failure the fix closes"
-    assert "durationMs" in text and "maximum, not a sum" in text
+    assert "durationMs" in text and "It is summed." in text
     assert "cacheReadInputTokens" in text
 
 
@@ -1437,16 +1489,18 @@ def test_files_the_ai_stage_never_reached_are_counted_because_silence_about_them
     assert result["error"]["code"] == "scope_incomplete"
     assert "1 of 2 file record(s)" in result["error"]["message"]
     assert "under config.limit 1" in result["error"]["message"]
+    assert "(pending)" in result["error"]["message"]
     assert result["bundles_resolved"] is False, "no quiet credit for a file nothing opened"
-    note = next(note for note in execution["notes"] if "'pending'" in note)
+    note = next(note for note in execution["notes"] if "left unfinished" in note)
     assert "config.limit (1)" in note and "not a negative result" in note
     assert len(result["claims"]) == 1, "the finding the run did produce is still reported"
 
 
-def test_the_guide_says_a_limited_run_is_a_success_that_covered_part_of_the_tree():
+def test_the_guide_says_a_limited_run_is_partial_because_it_covered_part_of_the_tree():
     text = DOC.read_text(encoding="utf-8")
-    assert 'status: "pending"' in text
+    assert "`partial`, not `success`" in text
     assert "not a negative result about it" in text
+    assert "Only `analyzed` means DeepSec finished with a file." in text
 
 
 # --- reading a path the scanner owns -------------------------------------------------------
@@ -1875,3 +1929,172 @@ def test_the_guide_says_observer_error_is_emitted_and_why_it_has_no_row():
     assert "no `capture_status` key" in text
     assert "parse-failure dump" in text
     assert "refused or truncated" in text
+
+
+# --- only ``analyzed`` says DeepSec finished with a file ------------------------------------
+
+
+def test_every_status_but_analyzed_is_classified_as_unfinished_or_unreadable():
+    """DeepSec declares four statuses and exactly one of them means it is done.
+
+    ``pending`` and ``processing`` were not treated alike: only ``pending`` counted, so a record
+    a run was still holding when it ended read as a finished one. A status the enum does not
+    have, or none at all, is not a state to interpret at all.
+    """
+    from scaneval.adapters.deepsec import RECORD_STATUSES, record_statuses
+
+    assert RECORD_STATUSES == ("pending", "processing", "analyzed", "error")
+    statuses = record_statuses((
+        ("done.json", {"status": "analyzed"}),
+        ("held.json", {"status": "processing"}),
+        ("waiting.json", {"status": "pending"}),
+        ("broken.json", {"status": "error"}),
+        ("odd.json", {"status": "finished"}),
+        ("silent.json", {}),
+        ("numeric.json", {"status": 3}),
+    ))
+    assert statuses.finished == 1
+    assert statuses.unfinished == ("held.json (processing)", "waiting.json (pending)")
+    assert statuses.errored == ("broken.json",)
+    assert [name for name, _reason in statuses.invalid] == ["numeric.json", "odd.json", "silent.json"]
+    assert statuses.incomplete == 5
+
+
+@pytest.mark.parametrize("status,code", [
+    ("processing", "scope_incomplete"),
+    ("pending", "scope_incomplete"),
+    ("finished-ish", "invalid_record_status"),
+    (None, "invalid_record_status"),
+])
+def test_a_record_deepsec_did_not_finish_never_earns_quiet_credit(tmp_path, monkeypatch, status, code):
+    """A run that abandoned a file in flight used to return success with bundles resolved."""
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "export":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            if status is None:
+                record.pop("status", None)
+            else:
+                record["status"] = status
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    assert result["status"] == "partial", execution["error"]
+    assert result["error"]["code"] == code
+    assert result["bundles_resolved"] is False
+    assert result["claims"], "the findings the run did produce are still reported"
+
+
+def test_a_record_with_no_readable_status_is_named_in_the_run_record(tmp_path, monkeypatch):
+    from scaneval.adapters.deepsec import record_statuses
+
+    statuses = record_statuses((("odd.json", {"status": "halfway"}),))
+    assert "is not one DeepSec declares" in statuses.invalid[0][1]
+    assert record_statuses((("x.json", {}),)).invalid[0][1] == "the record carries no status at all"
+
+
+# --- a record path this run refused is import loss, never an absent record -------------------
+
+
+def _scan_with_planted(tmp_path, monkeypatch, plant) -> tuple[dict, dict]:
+    """Run a whole scan, letting *plant* touch the record tree after the last step."""
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "export":
+            plant(Path(kwargs["cwd"]))
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    return documents(bundle)
+
+
+def test_a_symlinked_record_directory_is_counted_rather_than_passed_over(tmp_path, monkeypatch):
+    """Refusing to follow it is right; reading the run as complete without it is not.
+
+    A link standing where a record directory belongs matched neither the directory branch nor
+    the record branch of the walk, so every record behind it vanished in silence and a
+    two-file scan read as a complete one.
+    """
+    def plant(workspace: Path) -> None:
+        files = next(iter((workspace / "data").glob("*/files")))
+        directory = next(entry for entry in files.iterdir() if entry.is_dir())
+        elsewhere = workspace.parent / "not-this-run"
+        elsewhere.mkdir(exist_ok=True)
+        shutil.rmtree(directory)
+        directory.symlink_to(elsewhere, target_is_directory=True)
+
+    result, execution = _scan_with_planted(tmp_path, monkeypatch, plant)
+    assert result["status"] == "partial"
+    assert result["error"]["code"] == "import_loss"
+    assert result["bundles_resolved"] is False
+    assert any("symbolic link" in note and "nothing behind it was read" in note
+               for note in execution["notes"]), execution["notes"]
+    assert execution["capture"]["finding_candidate"] == "partial"
+
+
+def test_a_symlinked_record_file_is_counted_rather_than_passed_over(tmp_path, monkeypatch):
+    def plant(workspace: Path) -> None:
+        files = next(iter((workspace / "data").glob("*/files")))
+        record = sorted(files.rglob("*.json"))[0]
+        record.unlink()
+        record.symlink_to(workspace.parent / "elsewhere.json")
+
+    result, execution = _scan_with_planted(tmp_path, monkeypatch, plant)
+    assert result["status"] == "partial" and result["error"]["code"] == "import_loss"
+    assert result["bundles_resolved"] is False
+    assert any("symbolic link" in note for note in execution["notes"]), execution["notes"]
+
+
+def test_a_named_pipe_wearing_a_record_name_is_counted_rather_than_opened(tmp_path, monkeypatch):
+    def plant(workspace: Path) -> None:
+        files = next(iter((workspace / "data").glob("*/files")))
+        os.mkfifo(files / "pretend.json")
+
+    result, execution = _scan_with_planted(tmp_path, monkeypatch, plant)
+    assert result["status"] == "partial" and result["error"]["code"] == "import_loss"
+    assert any("not a regular file" in note for note in execution["notes"]), execution["notes"]
+
+
+def test_a_file_under_files_that_is_not_a_record_is_not_counted_as_loss(tmp_path, monkeypatch):
+    """Only a path that should have been read counts; an ordinary stray file is not one."""
+    def plant(workspace: Path) -> None:
+        files = next(iter((workspace / "data").glob("*/files")))
+        (files / "notes.txt").write_text("not a record\n", encoding="utf-8")
+
+    result, _execution = _scan_with_planted(tmp_path, monkeypatch, plant)
+    assert result["status"] == "success"
+    assert result["bundles_resolved"] is True
+
+
+def test_the_guide_states_the_status_rule_the_refusal_rule_and_the_duration_rule():
+    text = DOC.read_text(encoding="utf-8")
+    assert "invalid_record_status" in text
+    assert "pending | processing | analyzed | error" in text
+    assert "import loss, never an absent record" in text
+    assert "45316.33" in text and "may be duplicated rather than divided" in text
+    assert "taken as a maximum" not in text

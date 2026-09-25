@@ -455,6 +455,66 @@ def build_workspace(raw_dir: Path, source_dir: Path, project_id: str, config: Se
     return workspace
 
 
+# DeepSec's own FileRecord status enum, from the schema in its 2.3.10 bundle. ``analyzed`` is
+# the only value that says the AI stage finished with the file: ``pending`` has not started,
+# ``processing`` is a run still holding it, and ``error`` is a run that crashed on it. DeepSec's
+# own metrics count everything but ``analyzed`` as not done, and so does this.
+RECORD_STATUSES = ("pending", "processing", "analyzed", "error")
+FINISHED_STATUS = "analyzed"
+UNFINISHED_STATUSES = ("pending", "processing")
+
+
+class RecordStatuses(NamedTuple):
+    """How many FileRecords this run finished, left unfinished, failed on, and cannot read.
+
+    ``unfinished`` is every record in a state DeepSec's own enum says is not done: ``pending``
+    for one the AI stage never reached, and ``processing`` for one a run was still holding when
+    it ended. Only ``pending`` used to count, so a record left mid-flight read as a finished
+    one and a run that abandoned a file in flight returned ``success`` with its bundles
+    resolved, which is quiet credit for a file no verdict was ever reached on.
+
+    ``invalid`` is a record whose status is missing, is not a string, or is a value the enum
+    does not have. That is not a state to interpret: this adapter cannot say whether the file
+    was finished, so it says so, and the run is partial with its bundles unresolved rather than
+    guessing in the direction that earns credit.
+    """
+
+    finished: int
+    unfinished: tuple[str, ...]
+    errored: tuple[str, ...]
+    invalid: tuple[tuple[str, str], ...]
+
+    @property
+    def incomplete(self) -> int:
+        """Records this run cannot stand as a complete observation of."""
+        return len(self.unfinished) + len(self.invalid)
+
+
+def record_statuses(files: tuple[tuple[str, dict], ...]) -> RecordStatuses:
+    """Classify every FileRecord by DeepSec's own status enum, refusing to guess at the rest."""
+    finished = 0
+    unfinished: list[str] = []
+    errored: list[str] = []
+    invalid: list[tuple[str, str]] = []
+    for name, record in files:
+        status = record.get("status") if isinstance(record, dict) else None
+        if status == FINISHED_STATUS:
+            finished += 1
+        elif status in UNFINISHED_STATUSES:
+            unfinished.append(f"{name} ({status})")
+        elif status == "error":
+            errored.append(name)
+        elif status is None:
+            invalid.append((name, "the record carries no status at all"))
+        elif not isinstance(status, str):
+            invalid.append((name, f"the status is a {_shape(status)}, not a string"))
+        else:
+            invalid.append((name, f"the status {status!r} is not one DeepSec declares "
+                                  f"({', '.join(RECORD_STATUSES)})"))
+    return RecordStatuses(finished, tuple(sorted(unfinished)), tuple(sorted(errored)),
+                          tuple(sorted(invalid)))
+
+
 class Records(NamedTuple):
     """Everything this adapter could read out of one run's ``data/<project>`` tree.
 
@@ -484,6 +544,15 @@ def _json_records(directory: Path, enclosure: Enclosure, *, suffix: str = ".json
     through :func:`~scaneval.adapters.llm_harness.read_record`, so a record that is a symbolic
     link, that resolves outside this run's raw output, or that is not a regular file is a
     counted failure rather than a followed path or a blocked invocation.
+
+    One rule for every entry this walk refuses, and it is the whole point of counting them: a
+    path this cannot safely read is import loss, never an absent record. A symbolic link was
+    the hole. A link to a record file was already refused by the read and counted; a link
+    standing where a record *directory* belongs matched neither branch and was passed over in
+    silence, so every record behind it vanished and the run read as a complete scan of what
+    remained. Replacing one directory under ``files/`` turned a two-file scan from partial into
+    success. Every refusal is in ``failures`` now, named with its reason, and the caller makes
+    the run partial with its bundles unresolved.
     """
     records: list[tuple[str, dict, Path]] = []
     failures: list[str] = []
@@ -503,12 +572,28 @@ def _json_records(directory: Path, enclosure: Enclosure, *, suffix: str = ".json
             continue
         for entry in sorted(entries, key=lambda item: item.name):
             path = Path(entry.path)
+            relative = path.relative_to(directory).as_posix()
+            if entry.is_symlink():
+                # Refusing to follow it is right; treating it as absent is not. A symbolic
+                # link where a record directory belongs hid every record behind it, and the
+                # run read as a complete scan of the files it could still see: replacing one
+                # directory under ``files/`` turned a two-file scan from partial into success.
+                # Counted here, it is import loss, which makes the run partial with its
+                # bundles unresolved.
+                failures.append(f"{relative}: the entry is a symbolic link; it was not followed "
+                                "and nothing behind it was read")
+                continue
             if entry.is_dir(follow_symlinks=False):
                 pending.append(path)
                 continue
             if not path.name.endswith(suffix):
                 continue
-            relative = path.relative_to(directory).as_posix()
+            if not entry.is_file(follow_symlinks=False):
+                # A named pipe or a socket wearing a record's name. Nothing opens it, and it is
+                # not an absent record either.
+                failures.append(f"{relative}: the entry is not a regular file, so the record it "
+                                "names was not read")
+                continue
             data, failure = read_record(path, enclosure.write(path))
             if data is None:
                 failures.append(f"{relative}: the record could not be read ({failure})")
@@ -610,8 +695,14 @@ class Session(NamedTuple):
     this carries ``aggregation: "sum_of_per_file_shares"``. A sum is not a measurement of a
     single model call and must never be read as one.
 
-    ``durationMs`` is the exception, found in a real run: it is written whole onto every file of
-    the batch rather than divided, so it is taken as a maximum. Everything else is summed.
+    ``durationMs`` is summed like the rest. An older DeepSec wrote it whole onto every file of
+    the batch instead, and a record from that version was read as evidence that the installed
+    one does too; it does not. The installed 2.3.10 divides it, and a real run of this adapter
+    recorded 45316.33 ms on each of a batch's three files for a batch its own stdout timed at
+    135.9 seconds. Taking a maximum reported that batch as having taken a third as long as it
+    did. ``duration_suspect`` marks the shape the older version produced, so a bundle read from
+    one says the number may be a duplicate rather than a share; it never changes the number,
+    because a guess at a different total would be worse than a flagged one.
 
     ``correlated`` says whether DeepSec named the session at all. Entries carrying no
     ``agentSessionId`` used to share one empty key, so unrelated batches were merged into a
@@ -628,8 +719,7 @@ class Session(NamedTuple):
     paths: tuple[str, ...]
     num_turns: float
     cost_usd: float
-    # The batch wall clock, observed once. Unlike every other number here it is repeated on
-    # each file rather than divided among them, so it is taken as a maximum and not a sum.
+    # The batch wall clock, summed from the per-file shares like everything else.
     duration_ms: float
     duration_api_ms: float
     usage: dict[str, int]
@@ -637,6 +727,10 @@ class Session(NamedTuple):
     correlated: bool
     key: str
     external_paths: int
+    # True when every entry of this group carried the same whole-number ``durationMs`` while
+    # its other shares were fractional, which is how the older DeepSec wrote a duplicated wall
+    # clock. The sum is still the sum; this only says a reader should not trust it.
+    duration_suspect: bool = False
 
     @property
     def call_id(self) -> str:
@@ -677,6 +771,21 @@ def _refusal(entry: dict, path: str, external: bool, roots: tuple[Path, ...]) ->
     return Refusal(path, code, relocate_paths(reason, roots) if roots else reason, external)
 
 
+def _duplicated_duration(durations: list[float], fractional: bool) -> bool:
+    """Whether this group's ``durationMs`` looks repeated rather than divided.
+
+    The shape an older DeepSec wrote: the same whole-number wall clock on every file of the
+    batch while every other number on those files was a fraction of one. It is a heuristic and
+    it only ever sets a flag: the sum stays the sum, because inventing a different total from a
+    guess about which version wrote the record would be worse than reporting one with a caveat.
+    A single-entry group is never suspect, since one share and one whole are the same number.
+    """
+    if len(durations) < 2 or not fractional:
+        return False
+    first = durations[0]
+    return first > 0 and first == int(first) and all(value == first for value in durations)
+
+
 def sessions_from(files: tuple[tuple[str, dict], ...],
                   roots: tuple[Path, ...] = ()) -> tuple[Session, ...]:
     """Group every ``analysisHistory`` entry into the model call it belongs to.
@@ -709,29 +818,35 @@ def sessions_from(files: tuple[tuple[str, dict], ...],
             bucket = grouped.setdefault(key, {
                 "run_id": run_id, "session_id": session_id, "correlated": correlated,
                 "models": [], "paths": [], "turns": 0.0, "cost": 0.0, "duration": 0.0,
-                "api": 0.0, "usage": {}, "refusals": [], "external": 0})
+                "api": 0.0, "usage": {}, "refusals": [], "external": 0,
+                "durations": [], "fractional": False})
             model = entry.get("model")
             if isinstance(model, str) and model:
                 bucket["models"].append(model)
             if path not in bucket["paths"]:
                 bucket["paths"].append(path)
                 bucket["external"] += int(external)
-            bucket["turns"] += _number(entry.get("numTurns"))
-            bucket["cost"] += _number(entry.get("costUsd"))
-            # ``durationMs`` is the one field in the entry that is NOT a per-file share: a real
-            # run wrote the identical batch wall clock (40847 ms) onto all three files of a
-            # batch while dividing every other number by three. Summing it would report the
-            # batch as having taken three times as long as it did, so the largest value is
-            # taken instead, which is that one wall clock however many files repeat it.
-            bucket["duration"] = max(bucket["duration"], _number(entry.get("durationMs")))
-            bucket["api"] += _number(entry.get("durationApiMs"))
+            turns, cost = _number(entry.get("numTurns")), _number(entry.get("costUsd"))
+            api, duration = _number(entry.get("durationApiMs")), _number(entry.get("durationMs"))
+            bucket["turns"] += turns
+            bucket["cost"] += cost
+            bucket["duration"] += duration
+            bucket["api"] += api
+            bucket["durations"].append(duration)
+            # Whether anything else in this entry was written as a fraction. It is what tells a
+            # duplicated whole-number duration apart from a batch of one file whose share
+            # happens to be whole.
+            bucket["fractional"] = bucket["fractional"] or any(
+                value != int(value) for value in (turns, cost, api))
             usage = entry.get("usage")
             if isinstance(usage, dict):
                 for source, target in (("inputTokens", "input_tokens"),
                                        ("outputTokens", "output_tokens"),
                                        ("cacheReadInputTokens", "cache_read_input_tokens"),
                                        ("cacheCreationInputTokens", "cache_creation_input_tokens")):
-                    bucket["usage"][target] = bucket["usage"].get(target, 0.0) + _number(usage.get(source))
+                    share = _number(usage.get(source))
+                    bucket["usage"][target] = bucket["usage"].get(target, 0.0) + share
+                    bucket["fractional"] = bucket["fractional"] or share != int(share)
             refused = _refusal(entry, path, external, roots)
             if refused is not None:
                 bucket["refusals"].append(refused)
@@ -748,7 +863,8 @@ def sessions_from(files: tuple[tuple[str, dict], ...],
             # sum is rounded once, here, rather than written as a fraction of a token.
             usage={name: int(round(value)) for name, value in sorted(bucket["usage"].items())},
             refusals=tuple(bucket["refusals"]), correlated=bucket["correlated"], key=key,
-            external_paths=bucket["external"]))
+            external_paths=bucket["external"],
+            duration_suspect=_duplicated_duration(bucket["durations"], bucket["fractional"])))
     return tuple(sessions)
 
 
@@ -1435,16 +1551,17 @@ class DeepsecAdapter(Adapter):
         roots = workspace_spellings(Path(source_dir))
         candidates = candidates_from(records.files, roots)
         sessions = sessions_from(records.files, roots)
-        errored_files = sorted(name for name, record in records.files
-                               if record.get("status") == "error")
-        # Files the scan found and the AI stage never reached, which is what ``--limit`` does by
-        # design: a real run left 29 of 35 records pending. No model opened those files, so
-        # silence about them is not a negative result about them, and a run that leaves any of
-        # them is not a complete observation of the input it was handed.
-        pending_files = sum(1 for _name, record in records.files
-                            if record.get("status") == "pending")
+        # Only ``analyzed`` says the AI stage finished with a file. ``pending`` is one it never
+        # reached, which is what ``--limit`` does by design; ``processing`` is one a run was
+        # still holding when it ended; a status DeepSec does not declare, or none at all, is a
+        # record this adapter cannot classify and must not classify in the direction that earns
+        # credit. None of the three is a file silence says anything about.
+        statuses = record_statuses(records.files)
+        errored_files = list(statuses.errored)
+        unfinished_files = len(statuses.unfinished)
         refusals = sum(len(session.refusals) for session in sessions)
         batches_failed = len(errored_files) + len(records.debug) + refusals
+        suspect_durations = [session.call_id for session in sessions if session.duration_suspect]
 
         exported: Any = None
         export_failure = None
@@ -1549,14 +1666,26 @@ class DeepsecAdapter(Adapter):
         if refusals:
             notes.append(f"{refusals} agent refusal report(s) were recorded on this run's analysis "
                          "entries; the files they name reached no verdict.")
-        if pending_files:
+        if unfinished_files:
             notes.append(
-                f"{pending_files} of {len(records.files)} file record(s) were left in status "
-                "'pending': DeepSec's scan stage found them but the AI stage never investigated "
-                f"them, which is what config.limit"
+                f"{unfinished_files} of {len(records.files)} file record(s) were left unfinished "
+                f"({', '.join(statuses.unfinished[:5])}): DeepSec's scan stage found them and its "
+                "AI stage either never reached them, which is what config.limit"
                 + (f" ({config.limit})" if config.limit is not None else "")
-                + " does. No model looked at those files, so silence about them is not a "
-                "negative result about them.")
+                + " does, or was still holding them when the run ended. No model reached a "
+                "verdict on those files, so silence about them is not a negative result.")
+        if statuses.invalid:
+            notes.append(
+                f"{len(statuses.invalid)} file record(s) carry a status this adapter cannot "
+                "classify, so whether DeepSec finished with them is unknown: "
+                + "; ".join(f"{name}: {reason}" for name, reason in statuses.invalid[:5]))
+        if suspect_durations:
+            notes.append(
+                f"{len(suspect_durations)} agent session(s) carry the same whole-number "
+                "durationMs on every file of the batch while their other shares are fractional, "
+                "which is how a DeepSec older than 2.3.10 wrote a duplicated wall clock rather "
+                "than a divided one. The recorded duration is still the sum of the shares; read "
+                f"it as possibly duplicated for: {', '.join(suspect_durations[:5])}")
 
         command = [*scan_argv, "&&", *process_argv, "&&", *export_argv]
         base = dict(command=command, artifacts=artifacts, tool_versions=tool_versions,
@@ -1567,7 +1696,7 @@ class DeepsecAdapter(Adapter):
                     # scoring contract must not read a claim budget off it, and must not grant
                     # quiet credit for a file no model opened.
                     bundles_resolved=(imported.lost == 0 and not records.failures
-                                      and pending_files == 0))
+                                      and statuses.incomplete == 0))
         exit_code = None
         for step in ("export", "process", "scan"):
             result = results.get(step)
@@ -1624,18 +1753,31 @@ class DeepsecAdapter(Adapter):
                                                    f"{len(records.debug)} parse-failure dump(s) and "
                                                    f"{refusals} refusal(s): part of the input reached "
                                                    "no verdict"}, **base)
-        if pending_files:
-            # The AI stage never opened these files. A ``success`` here would let the scoring
-            # contract treat every assigned control as completed and grant quiet credit for a
-            # file no model looked at, which is the one thing this adapter's notes say the run
-            # does not establish. The status now says it too.
+        if statuses.invalid:
+            # A record whose state this cannot read is not a record this run can claim to have
+            # finished. Reported before the unfinished ones because it is the stronger failure:
+            # there, the run knows what it did not do; here, it does not know what it did.
+            return NativeOutcome(status="partial", exit_code=exit_code, claims=imported.claims,
+                                 error={"code": "invalid_record_status",
+                                        "message": f"{len(statuses.invalid)} of {len(records.files)} "
+                                                   "file record(s) carry a status DeepSec does not "
+                                                   "declare, so whether it finished with them cannot "
+                                                   "be read: "
+                                                   + "; ".join(f"{name}: {reason}"
+                                                               for name, reason in statuses.invalid[:5])
+                                        }, **base)
+        if unfinished_files:
+            # The AI stage never finished with these files. A ``success`` here would let the
+            # scoring contract treat every assigned control as completed and grant quiet credit
+            # for a file no model reached a verdict on, which is the one thing this adapter's
+            # notes say the run does not establish. The status now says it too.
             limit = f" under config.limit {config.limit}" if config.limit is not None else ""
             return NativeOutcome(status="partial", exit_code=exit_code, claims=imported.claims,
                                  error={"code": "scope_incomplete",
-                                        "message": f"{pending_files} of {len(records.files)} file "
-                                                   f"record(s) were left in status 'pending'{limit}: "
-                                                   "DeepSec's scan stage found them and its AI stage "
-                                                   "never investigated them, so this run observed "
+                                        "message": f"{unfinished_files} of {len(records.files)} file "
+                                                   f"record(s) were left unfinished{limit} "
+                                                   f"({', '.join(statuses.unfinished[:5])}): DeepSec "
+                                                   "reached no verdict on them, so this run observed "
                                                    "part of the input and says nothing about the "
                                                    "rest"}, **base)
         return NativeOutcome(status="success", exit_code=exit_code, claims=imported.claims, **base)
