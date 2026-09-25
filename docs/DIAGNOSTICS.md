@@ -43,9 +43,16 @@ file content is read and none is needed.
 ### Classification
 
 A **target** is classified per **invocation**. An invocation is a group of `context.selection`
-events sharing a `call_id`; an event carrying no usable one — absent, or not a non-empty string,
-which the schema forbids anyway — is its own group, keyed by its `event_id`, because two such
-events say nothing about belonging together.
+events sharing a `call_id` **within one `producer_id`**. A call ID is minted by whoever emits it
+and is unique only to that emitter, so two producers that both number their first invocation
+`call-1` are two invocations, not one: pooling their spans would let a target whose halves went to
+two different producers read as fully included in one prompt that never existed. The union across
+invocations is where that question belongs, and `scattered` is how it answers.
+
+An event carrying no usable `call_id` or no usable `producer_id` — absent, or not a non-empty
+string, which the schema forbids anyway — is its own group, keyed by its `event_id`, because two
+such events say nothing about belonging together. `group_key` is the `call_id`, or the `event_id`
+for an uncorrelated group; it identifies a group only together with `producer_id`.
 
 Within a group, the spans on one path are merged into a union of closed, 1-based line intervals.
 Intervals that touch merge as well as ones that overlap: lines 10-14 and 15-20 are one contiguous
@@ -93,6 +100,12 @@ the same size. That split is the whole judgement of this diagnostic:
   overlap in an incompletely captured invocation means no overlap was *recorded*.
 - **An unlocated span on the target's own path** blocks `absent` for that invocation. Text from
   that very file reached the prompt at lines nobody can place; it may have been the target's.
+- **A hole where the answer would have come from** blocks `absent` for that invocation: a context
+  event that reported no `spans` list at all, a span naming the target's path with coordinates
+  that cannot be read, or a span this cannot read even as a path. What a record does not say was
+  supplied cannot be shown not to have been supplied.
+- **Any of those in any invocation** blocks `absent` for the *target* — in `best` and in `union`.
+  A target's absence answers for every invocation, not for the tidiest one.
 - **A label location with no line range** caps the target at `partial`: a pack may name a file
   whose exact region has not been reviewed yet, and nothing here invents a boundary the label did
   not draw. `included` would overclaim; `absent` would deny something never looked at.
@@ -101,7 +114,8 @@ Then, per target:
 
 - `best` is the best classification any single invocation earned (`included` > `partial` >
   `absent` > `unknown`). It never counts the union, and it is weakened from `absent` to `unknown`
-  when the run's own capture record is not `complete` — see the next section.
+  when the run's own capture record is not `complete`, or when any invocation could not prove its
+  own absence — see the next section.
 - `union` classifies the union of spans across every invocation. `scattered: true` means the union
   beats every single invocation — the region was delivered, but in pieces no one invocation held.
 - `event_ids` maps each classification to the events it rests on.
@@ -148,14 +162,27 @@ which is precisely what a run-level `partial` admits to. So `best` can be weaker
 entry in `by_invocation`, and that is not a bug: the per-invocation row and the `overlap`
 arithmetic are untouched, so the evidence stays visible under the weaker headline.
 
-**Scoped to one target** (in that target's `reasons`, and for the last one in the per-invocation
-`reasons` too):
+**Scoped to one invocation, for every target** — the record of what that invocation supplied has a
+hole in it, and a hole could have held anything. These appear in the per-invocation `reasons` and
+in the `reasons` of every target:
+
+| code | what happened |
+|---|---|
+| `context_event_without_spans` | a `context.selection` event of that invocation carried no `spans` list at all |
+| `unusable_span_without_path` | a span this could not read even as a path, so nothing about it can be attributed |
+
+**Scoped to one target** (in that target's `reasons`, and in the per-invocation `reasons` of the
+invocation that caused them):
 
 | code | what happened |
 |---|---|
 | `target_locations_unavailable` | the plan names the target but no pack case locates it |
 | `target_locations_without_line_range` | at least one accepted location names a file and no lines |
 | `unlocated_span_on_target_path` | an invocation supplied text from a path this target names, at lines that are not file lines |
+| `unusable_span_on_target_path` | an invocation supplied a span naming a path this target names, with coordinates that cannot be read |
+
+Every code in these last two groups also blocks the **target-level** `absent` in `best` and
+`union`, not only the invocation it arose in.
 
 Even where a verdict is `unknown`, the arithmetic is still reported: `overlap`, `covered_lines`
 and `needed_lines` say what the spans actually showed, so a reader can see that the lines *were*
@@ -173,6 +200,8 @@ The document carries these as `notes`, verbatim, every time:
   absent event is never evidence of absent activity.
 - A span marked `location_known: false` **covers nothing**, and one on a target's own path blocks
   `absent` for that invocation.
+- A **missing or unreadable** span is a hole, not a negative: an event with no `spans` list, a
+  span whose coordinates cannot be read, and a span with no readable path all block `absent`.
 - A span's line range is the range of the text actually supplied, so a **truncated** span is not
   discounted; `truncated` feeds counts only, and `null` there is unknown, never untruncated.
 - Whether a candidate the harness produced was later **filtered out** is a different question.
@@ -224,7 +253,8 @@ or a refused overwrite. A capture gap is none of these: it produces a document, 
 ### Output
 
 Sorted keys, two-space indent, one trailing newline. Targets sorted by `target_id`, invocations by
-first sequence then group key, event IDs by sequence then ID, reason codes lexically. No clock, no
+first sequence then producer then group key, event IDs by sequence then ID, reason codes
+lexically. No clock, no
 randomness, and no timestamp of its own: two runs over one bundle produce the same bytes.
 
 The document is not a registered contract. It is derived from documents that have contracts, the
@@ -262,6 +292,8 @@ capture                   the facts every classification here rests on
   spans                   usable located spans
   unusable_spans          spans missing a path, or - when located - missing a line range or
                           carrying impossible lines
+  unusable_spans_without_path
+                          the subset of those that named no readable path at all
   unlocated_spans         spans whose location_known is present and not true: a path, no
                           file position
   truncated_spans         located spans claiming truncated: true
@@ -283,13 +315,15 @@ counts
   scattered_targets
 
 invocations               one per context.selection group; counts only, never a supplied path
-  call_id                 null for an event that carried none
-  group_key               the call_id, or the event_id for a group of one
+  producer_id             null for a group that carried no usable one
+  call_id                 null for a group that carried no usable one
+  group_key               the call_id, or the event_id for an uncorrelated group; identifies a
+                          group only together with producer_id
   first_sequence
   events, event_ids
   capture_status          the distinct statuses in the group, sorted
   all_capture_complete
-  spans, unusable_spans, unlocated_spans, paths
+  spans, unusable_spans, unlocated_spans, events_without_spans, paths
 
 targets                   sorted by target_id
   target_id
@@ -302,16 +336,18 @@ targets                   sorted by target_id
     covered_lines, needed_lines, locations_covered, locations_total
     locations             per accepted location: path, start_line, end_line, lines,
                           covered_lines, coverage ("full" | "partial" | "none")
-  by_invocation           sorted by first sequence then group key
-    call_id, group_key, first_sequence
+  by_invocation           sorted by first sequence, then producer, then group key
+    producer_id, call_id, group_key, first_sequence
     classification
     event_ids             every event of the group
     contributing_event_ids
                           the events whose own spans covered a labeled line
     capture_status, all_capture_complete
     unlocated_spans         spans in this group that named no file position
-    unlocated_target_paths  paths this target names that such a span landed on, sorted
-    reasons                 unlocated_span_on_target_path, when it applies
+    events_without_spans    events in this group that carried no spans list
+    unlocated_target_paths  paths this target names that an unlocated span landed on, sorted
+    unusable_target_paths   paths this target names that an unreadable span landed on, sorted
+    reasons                 the invocation- and target-scoped codes that apply here, sorted
     overlap, covered_lines, needed_lines, locations_covered, locations_total, locations
   event_ids               {classification: [event_id, ...]}
   locations               the judgeable accepted locations: path, start_line, end_line, lines

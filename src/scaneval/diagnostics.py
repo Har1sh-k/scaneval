@@ -39,10 +39,10 @@ The output is a plain JSON document, not a registered contract. It is derived fr
 have contracts, the way a score record is, and nothing binds to its shape, so registering a kind
 for it would widen ``scaneval validate`` with no reader on the other side.
 
-Determinism. Targets are sorted by ``target_id``, invocations by first sequence then group key,
-event IDs by sequence then ID, and reason codes lexically. No clock, no randomness, and no
-timestamp of this module's own reaches the document, so two runs over the same bundle produce the
-same bytes.
+Determinism. Targets are sorted by ``target_id``, invocations by first sequence then producer
+then group key, event IDs by sequence then ID, and reason codes lexically. No clock, no
+randomness, and no timestamp of this module's own reaches the document, so two runs over the same
+bundle produce the same bytes.
 
 Nothing here lists supplied source: the per-invocation records carry counts of spans and of
 distinct paths, never the paths themselves. The only paths in the document are the evaluator's own
@@ -89,6 +89,8 @@ _OBSERVED_CAPTURE = ("complete", "partial", "redacted")
 #                  absent is a statement about the events that invocation produced, and stays
 #                  true; a target-level one would also have to answer for the invocations that
 #                  produced no event at all, which is exactly what a run-level partial admits to.
+# "invocation"     scoped to one invocation, for every target: the record of what that invocation
+#                  supplied has a hole in it, and a hole could have held anything.
 # "target"         scoped to one target, or to one target within one invocation.
 REASON_EFFECTS = {
     "capture_context_selection_not_observed": "blanket",
@@ -101,9 +103,12 @@ REASON_EFFECTS = {
     "trace_dropped_events": "absence",
     "trace_events_malformed": "absence",
     "trace_lines_unparsed": "absence",
+    "context_event_without_spans": "invocation",
+    "unusable_span_without_path": "invocation",
     "target_locations_unavailable": "target",
     "target_locations_without_line_range": "target",
     "unlocated_span_on_target_path": "target",
+    "unusable_span_on_target_path": "target",
 }
 REASON_CODES = tuple(sorted(REASON_EFFECTS))
 
@@ -129,6 +134,10 @@ NOTES = (
     "whose line numbers count the supplied text rather than the file. Such a span covers nothing "
     "here, and one landing on a target's own path blocks absent for that invocation: the "
     "target's lines may well have been inside it.",
+    "An event that reported no spans at all, and a span this could not read, block absent for "
+    "their invocation the same way. What a record does not say was supplied cannot be shown not "
+    "to have been supplied, and a span missing its coordinates is a hole exactly where the "
+    "answer would have come from.",
     "A span's line range is the range of the text actually supplied, so a truncated span is not "
     "discounted for being truncated. The truncated flag is read only for the counts in capture, "
     "where a null value is counted as unknown and never as untruncated.",
@@ -173,17 +182,26 @@ def _normal_path(value: str) -> str:
 
 
 # What one span item turned out to be. A located span places text at file lines; an unlocated one
-# names a file but numbers its lines against the prompt, so it fixes a path and nothing else.
+# names a file but numbers its lines against the prompt; an unusable one names a file and nothing
+# this can read. The last two fix a path and no position, which is still worth holding: text from
+# that file reached the prompt, so an absence on that path is no longer provable.
 _LOCATED = "located"
 _UNLOCATED = "unlocated"
+_UNUSABLE = "unusable"
 
 
 def _span_item(item: object) -> tuple[str, str, int, int] | None:
-    """Read one span item as a file position, as a path with no position, or as nothing usable.
+    """Read one span item as a file position, as a path with no position, or as nothing at all.
 
     Returns ``(_LOCATED, path, start, end)`` when the lines are file lines,
-    ``(_UNLOCATED, path, 0, 0)`` when they are not, and ``None`` when the item can be read as
-    neither.
+    ``(_UNLOCATED, path, 0, 0)`` when they are not, ``(_UNUSABLE, path, 0, 0)`` when the
+    coordinates cannot be read but the path can, and ``None`` when not even the path can.
+
+    The difference between the last two is the difference between a hole this can attribute and
+    one it cannot. A span naming the target's file with coordinates this cannot read may well
+    have carried the target's lines, and saying ``absent`` over it would be a false negative
+    built out of a defect in the emitter. Dropping the path, as this used to, threw away the one
+    piece of the span that was still readable.
 
     ``location_known: false`` marks supplied text the harness reassembled out of fragments: the
     line numbers run 1..N over what was placed in the prompt and name nothing in the file.
@@ -212,11 +230,11 @@ def _span_item(item: object) -> tuple[str, str, int, int] | None:
         return (_UNLOCATED, normalized, 0, 0)
     start, end = item.get("start_line"), item.get("end_line")
     if isinstance(start, bool) or isinstance(end, bool):
-        return None
+        return (_UNUSABLE, normalized, 0, 0)
     if not isinstance(start, int) or not isinstance(end, int):
-        return None
+        return (_UNUSABLE, normalized, 0, 0)
     if start < 1 or end < start:
-        return None
+        return (_UNUSABLE, normalized, 0, 0)
     return (_LOCATED, normalized, start, end)
 
 
@@ -273,8 +291,9 @@ def _location(item: object) -> tuple[str, int, int] | None:
 class _ContextEvent:
     """One usable ``context.selection`` event, reduced to what coverage attribution reads."""
 
-    __slots__ = ("event_id", "sequence", "call_id", "capture_status", "spans", "unlocated_paths",
-                 "span_count", "unusable_spans", "unlocated_spans", "truncated_spans",
+    __slots__ = ("event_id", "sequence", "call_id", "producer_id", "capture_status", "spans",
+                 "unlocated_paths", "unusable_paths", "span_count", "unusable_spans",
+                 "unusable_spans_without_path", "unlocated_spans", "truncated_spans",
                  "truncation_unknown_spans", "has_span_list")
 
     def __init__(self, event: Mapping) -> None:
@@ -282,19 +301,29 @@ class _ContextEvent:
         self.sequence: int = event["sequence"]
         call_id = event.get("call_id")
         self.call_id: str | None = call_id if isinstance(call_id, str) and call_id else None
+        producer = event.get("producer_id")
+        self.producer_id: str | None = producer if isinstance(producer, str) and producer else None
         self.capture_status: str = event["capture_status"]
         metadata = event.get("metadata")
         raw = metadata.get("spans") if isinstance(metadata, Mapping) else None
         self.has_span_list = isinstance(raw, list)
         by_path: dict[str, list[tuple[int, int]]] = {}
         unlocated: set[str] = set()
-        usable = unusable = adrift = truncated = truncation_unknown = 0
+        unreadable: set[str] = set()
+        usable = unusable = pathless = adrift = truncated = truncation_unknown = 0
         for item in raw if isinstance(raw, list) else ():
             span = _span_item(item)
             if span is None:
+                # Not even a path. Nothing here can be attributed to a target, so it counts
+                # against the invocation as a whole rather than against any one of them.
                 unusable += 1
+                pathless += 1
                 continue
             kind, path, start, end = span
+            if kind == _UNUSABLE:
+                unusable += 1
+                unreadable.add(path)
+                continue
             if kind == _UNLOCATED:
                 # The path is all this span establishes, and that is still worth holding: text
                 # from this file reached the prompt, at lines nobody can place.
@@ -311,8 +340,10 @@ class _ContextEvent:
                 truncation_unknown += 1
         self.spans = {path: _merge(ranges) for path, ranges in by_path.items()}
         self.unlocated_paths = unlocated
+        self.unusable_paths = unreadable
         self.span_count = usable
         self.unusable_spans = unusable
+        self.unusable_spans_without_path = pathless
         self.unlocated_spans = adrift
         self.truncated_spans = truncated
         self.truncation_unknown_spans = truncation_unknown
@@ -325,32 +356,53 @@ class _ContextEvent:
 class _Group:
     """The ``context.selection`` events of one invocation, and the union of their spans.
 
-    An event carrying no usable ``call_id`` - absent, or not a non-empty string, which the wire
-    contract forbids anyway - is its own group, keyed by its event ID. Two such events say
-    nothing about belonging together, and merging them would let one invocation's spans cover
-    another's target.
+    An invocation is a ``call_id`` *within one producer*, never a ``call_id`` alone. A call ID is
+    minted by whoever emits it and is unique only to that emitter, so two producers that both
+    number their first invocation ``call-1`` are two invocations. Merging them would pool their
+    spans, and a target whose halves were supplied to two different producers would read as
+    fully included in one prompt that never existed. The union across invocations is where that
+    question belongs, and it answers it with ``scattered``.
+
+    An event carrying no usable ``call_id`` or no usable ``producer_id`` - absent, or not a
+    non-empty string, which the wire contract forbids anyway - is its own group, keyed by its
+    event ID. Two such events say nothing about belonging together.
     """
 
-    __slots__ = ("call_id", "key", "events", "spans", "unlocated_paths")
+    __slots__ = ("call_id", "producer_id", "key", "group_key", "events", "spans",
+                 "unlocated_paths", "unusable_paths")
 
-    def __init__(self, call_id: str | None, key: str, events: list[_ContextEvent]) -> None:
-        self.call_id = call_id
+    def __init__(self, key: tuple[str | None, str], events: list[_ContextEvent]) -> None:
         self.key = key
         self.events = sorted(events, key=lambda event: event.sort_key)
+        first = self.events[0]
+        correlated = key[0] is not None
+        self.producer_id = first.producer_id if correlated else None
+        self.call_id = first.call_id if correlated else None
+        # Readable, and unique only beside ``producer_id``: two producers may both say "call-1".
+        self.group_key = self.call_id if correlated else first.event_id
         self.spans = _union_spans(self.events)
         self.unlocated_paths = _union_unlocated_paths(self.events)
+        self.unusable_paths = _union_unusable_paths(self.events)
 
     @property
     def first_sequence(self) -> int:
         return self.events[0].sequence
 
     @property
-    def sort_key(self) -> tuple[int, str]:
-        return (self.first_sequence, self.key)
+    def sort_key(self) -> tuple[int, str, str]:
+        return (self.first_sequence, self.producer_id or "", self.group_key)
 
     @property
     def all_complete(self) -> bool:
         return all(event.capture_status == "complete" for event in self.events)
+
+    @property
+    def events_without_spans(self) -> int:
+        return sum(1 for event in self.events if not event.has_span_list)
+
+    @property
+    def unusable_spans_without_path(self) -> int:
+        return sum(event.unusable_spans_without_path for event in self.events)
 
 
 def _union_spans(events: Iterable[_ContextEvent]) -> dict[str, list[tuple[int, int]]]:
@@ -366,6 +418,14 @@ def _union_unlocated_paths(events: Iterable[_ContextEvent]) -> set[str]:
     paths: set[str] = set()
     for event in events:
         paths |= event.unlocated_paths
+    return paths
+
+
+def _union_unusable_paths(events: Iterable[_ContextEvent]) -> set[str]:
+    """Every path some span named with coordinates this could not read."""
+    paths: set[str] = set()
+    for event in events:
+        paths |= event.unusable_paths
     return paths
 
 
@@ -541,11 +601,20 @@ def _read_context_events(events: Iterable[Mapping] | None) -> tuple[list[_Contex
 
 
 def _group(events: Sequence[_ContextEvent]) -> list[_Group]:
-    by_key: dict[str, tuple[str | None, list[_ContextEvent]]] = {}
+    """Partition context events into invocations, keyed by producer and call together.
+
+    The key is a pair rather than a string so no spelling of a producer or a call ID can collide
+    with another pair by concatenation. An event missing either half is keyed by its own event ID
+    under a ``None`` producer, which cannot collide with a correlated key.
+    """
+    by_key: dict[tuple[str | None, str], list[_ContextEvent]] = {}
     for event in events:
-        key = event.call_id if event.call_id is not None else event.event_id
-        by_key.setdefault(key, (event.call_id, []))[1].append(event)
-    groups = [_Group(call_id, key, members) for key, (call_id, members) in by_key.items()]
+        if event.call_id is not None and event.producer_id is not None:
+            key: tuple[str | None, str] = (event.producer_id, event.call_id)
+        else:
+            key = (None, event.event_id)
+        by_key.setdefault(key, []).append(event)
+    groups = [_Group(key, members) for key, members in by_key.items()]
     return sorted(groups, key=lambda group: group.sort_key)
 
 
@@ -597,7 +666,6 @@ def context_coverage(*, plan_targets: Iterable[Mapping], events: Iterable[Mappin
     absence_blocked_run = "absence" in effects
     absence_blocked_target = absence_blocked_run or "target_absence" in effects
     run_spans = _union_spans(context_events)
-    run_unlocated = _union_unlocated_paths(context_events)
     run_complete = all(event.capture_status == "complete" for event in context_events)
 
     targets = []
@@ -613,17 +681,29 @@ def context_coverage(*, plan_targets: Iterable[Mapping], events: Iterable[Mappin
         by_invocation = []
         for group in groups:
             detail = _overlap(locations, group.spans)
-            # Text from this very file reached this invocation's prompt at lines nobody can
-            # place. It may have been the target's lines. Absence is not provable here.
             adrift = sorted(group.unlocated_paths & target_paths)
+            unreadable = sorted(group.unusable_paths & target_paths)
+            # Every way this invocation's record of what it supplied has a hole in it. Each is a
+            # place the target's lines could have been without the trace showing it, so each
+            # takes absent to unknown and leaves a recorded span exactly where it was.
+            group_reasons = []
+            if group.events_without_spans:
+                group_reasons.append("context_event_without_spans")
+            if group.unusable_spans_without_path:
+                group_reasons.append("unusable_span_without_path")
+            if adrift:
+                group_reasons.append("unlocated_span_on_target_path")
+            if unreadable:
+                group_reasons.append("unusable_span_on_target_path")
+            group_reasons.sort()
             classification = _classify(detail["overlap"], all_complete=group.all_complete,
                                        blanket_unknown=blanket, unjudgeable=unjudgeable,
-                                       absence_blocked=absence_blocked_run or bool(adrift))
-            if adrift:
-                target_reasons.add("unlocated_span_on_target_path")
+                                       absence_blocked=absence_blocked_run or bool(group_reasons))
+            target_reasons.update(group_reasons)
             by_invocation.append({
+                "producer_id": group.producer_id,
                 "call_id": group.call_id,
-                "group_key": group.key,
+                "group_key": group.group_key,
                 "first_sequence": group.first_sequence,
                 "classification": classification,
                 "event_ids": _event_ids(group.events),
@@ -632,22 +712,26 @@ def context_coverage(*, plan_targets: Iterable[Mapping], events: Iterable[Mappin
                 "all_capture_complete": group.all_complete,
                 "unlocated_spans": sum(event.unlocated_spans for event in group.events),
                 "unlocated_target_paths": adrift,
-                "reasons": ["unlocated_span_on_target_path"] if adrift else [],
+                "unusable_target_paths": unreadable,
+                "events_without_spans": group.events_without_spans,
+                "reasons": group_reasons,
                 **detail,
             })
 
+        # A target's absence has to answer for every invocation, so one invocation that cannot
+        # prove its own absence is enough to stop the target claiming one. Without this, an
+        # invocation with a hole in its record reads unknown while a second, cleaner one carries
+        # the target-level verdict all the way to absent - the false negative in miniature.
+        blocked_anywhere = any(entry["reasons"] for entry in by_invocation)
         best = max((entry["classification"] for entry in by_invocation),
                    key=lambda name: _RANK[name], default="unknown")
-        if best == "absent" and absence_blocked_target:
-            # An invocation may honestly report that its own recorded spans missed the target.
-            # The target's own verdict cannot rest on that while the run admits it did not
-            # observe every context selection it made.
+        if best == "absent" and (absence_blocked_target or blocked_anywhere):
             best = "unknown"
         union_detail = _overlap(locations, run_spans)
         union_classification = _classify(
             union_detail["overlap"], all_complete=run_complete, blanket_unknown=blanket,
             unjudgeable=unjudgeable,
-            absence_blocked=absence_blocked_target or bool(run_unlocated & target_paths))
+            absence_blocked=absence_blocked_target or blocked_anywhere)
         scattered = bool(by_invocation) and all(
             _RANK[union_classification] > _RANK[entry["classification"]] for entry in by_invocation)
         # Grouped by verdict, then ordered the way every other event list here is ordered, so a
@@ -703,8 +787,9 @@ def context_coverage(*, plan_targets: Iterable[Mapping], events: Iterable[Mappin
         "counts": _counts(targets),
         "invocations": [
             {
+                "producer_id": group.producer_id,
                 "call_id": group.call_id,
-                "group_key": group.key,
+                "group_key": group.group_key,
                 "first_sequence": group.first_sequence,
                 "events": len(group.events),
                 "event_ids": _event_ids(group.events),
@@ -713,6 +798,7 @@ def context_coverage(*, plan_targets: Iterable[Mapping], events: Iterable[Mappin
                 "spans": sum(event.span_count for event in group.events),
                 "unusable_spans": sum(event.unusable_spans for event in group.events),
                 "unlocated_spans": sum(event.unlocated_spans for event in group.events),
+                "events_without_spans": group.events_without_spans,
                 "paths": len(group.spans),
             }
             for group in groups
@@ -762,6 +848,8 @@ def _capture_facts(execution_record: Mapping | None, *, trace_read: bool, events
         "invocations_with_context": len(groups),
         "spans": sum(event.span_count for event in context_events),
         "unusable_spans": sum(event.unusable_spans for event in context_events),
+        "unusable_spans_without_path": sum(event.unusable_spans_without_path
+                                           for event in context_events),
         "unlocated_spans": sum(event.unlocated_spans for event in context_events),
         "truncated_spans": sum(event.truncated_spans for event in context_events),
         "truncation_unknown_spans": sum(event.truncation_unknown_spans

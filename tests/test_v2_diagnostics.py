@@ -89,13 +89,14 @@ def span(path: str, start: int, end: int, **overrides) -> dict:
 
 
 def event(sequence: int, *, spans=(), call_id="call-1", capture_status="complete",
-          event_id=None, event_type="context.selection", metadata=None) -> dict:
+          event_id=None, event_type="context.selection", metadata=None,
+          producer_id="example-producer") -> dict:
     """One trace event with the fields the v2 schema requires, spans in metadata only."""
     record = {
         "schema_version": "2.0",
         "event_id": event_id or f"event-{sequence}",
         "run_id": RUN_ID,
-        "producer_id": "example-producer",
+        "producer_id": producer_id,
         "sequence": sequence,
         "type": event_type,
         "category": event_type.split(".", 1)[0],
@@ -569,6 +570,69 @@ def test_an_event_without_a_call_id_is_its_own_invocation(tmp_path):
     assert target["union"]["scattered"] is True
 
 
+def test_two_producers_sharing_a_call_id_are_two_invocations(tmp_path):
+    """A call ID is minted by whoever emits it and is unique only to that emitter.
+
+    Pooling them would let a target whose halves went to two different producers read as fully
+    included in one prompt that never existed.
+    """
+    invocation = build_bundle(
+        tmp_path,
+        locations=[region("src/a.py", 1, 5), region("src/b.py", 1, 5)],
+        events=[event(1, call_id="call-1", producer_id="producer-one",
+                      spans=[span("src/a.py", 1, 5)]),
+                event(2, call_id="call-1", producer_id="producer-two",
+                      spans=[span("src/b.py", 1, 5)])])
+
+    document = diagnostics.context_coverage_for_invocation(invocation)
+
+    assert [entry["producer_id"] for entry in document["invocations"]] == ["producer-one",
+                                                                          "producer-two"]
+    assert [entry["call_id"] for entry in document["invocations"]] == ["call-1", "call-1"]
+    target = only_target(document)
+    assert [entry["classification"] for entry in target["by_invocation"]] == ["partial", "partial"]
+    assert target["best"] == "partial"
+    # The union is still allowed to say the region reached the run, in pieces.
+    assert target["union"]["classification"] == "included"
+    assert target["union"]["scattered"] is True
+
+
+def test_one_producer_reusing_a_call_id_is_still_one_invocation(tmp_path):
+    invocation = build_bundle(
+        tmp_path,
+        locations=[region("src/a.py", 1, 5), region("src/b.py", 1, 5)],
+        events=[event(1, call_id="call-1", producer_id="producer-one",
+                      spans=[span("src/a.py", 1, 5)]),
+                event(2, call_id="call-1", producer_id="producer-one",
+                      spans=[span("src/b.py", 1, 5)])])
+
+    target = only_target(diagnostics.context_coverage_for_invocation(invocation))
+
+    assert len(target["by_invocation"]) == 1
+    assert target["best"] == "included"
+    assert target["union"]["scattered"] is False
+
+
+@pytest.mark.parametrize("producer_id", ["", 7, None], ids=["empty", "not-a-string", "absent"])
+def test_an_event_with_no_usable_producer_keeps_its_own_group(tmp_path, producer_id):
+    first = event(1, call_id="call-1", spans=[span("src/a.py", 1, 5)])
+    second = event(2, call_id="call-1", spans=[span("src/b.py", 1, 5)])
+    for record in (first, second):
+        if producer_id is None:
+            del record["producer_id"]
+        else:
+            record["producer_id"] = producer_id
+    invocation = build_bundle(
+        tmp_path, locations=[region("src/a.py", 1, 5), region("src/b.py", 1, 5)],
+        events=[first, second])
+
+    document = diagnostics.context_coverage_for_invocation(invocation)
+
+    assert [entry["group_key"] for entry in document["invocations"]] == ["event-1", "event-2"]
+    assert [entry["producer_id"] for entry in document["invocations"]] == [None, None]
+    assert only_target(document)["best"] == "partial"
+
+
 @pytest.mark.parametrize("call_id", ["", 7, None], ids=["empty", "not-a-string", "absent"])
 def test_a_call_id_the_wire_contract_would_reject_is_treated_as_none_at_all(tmp_path, call_id):
     """An empty or non-string call_id correlates nothing, so it must not correlate two events."""
@@ -607,6 +671,7 @@ def test_a_leading_dot_slash_on_the_label_side_normalizes_too(tmp_path):
 
 
 def test_a_span_that_does_not_say_where_it_landed_is_counted_and_covers_nothing(tmp_path):
+    """Corrected: two of these name the target's own file, so absence is no longer provable."""
     invocation = build_bundle(
         tmp_path, locations=[region("src/example.py", 10, 20)],
         events=[event(1, spans=[{"path": "src/example.py", "chars": 100},
@@ -617,11 +682,26 @@ def test_a_span_that_does_not_say_where_it_landed_is_counted_and_covers_nothing(
     document = diagnostics.context_coverage_for_invocation(invocation)
 
     assert document["capture"]["unusable_spans"] == 3
+    assert document["capture"]["unusable_spans_without_path"] == 1
     assert document["capture"]["spans"] == 1
+    assert only_target(document)["union"]["covered_lines"] == 0
+    assert only_target(document)["best"] == "unknown"
+
+
+def test_unusable_spans_that_name_no_path_this_target_uses_leave_absence_provable(tmp_path):
+    invocation = build_bundle(
+        tmp_path, locations=[region("src/example.py", 10, 20)],
+        events=[event(1, spans=[{"path": "src/elsewhere.py", "chars": 100},
+                                span("src/example.py", 30, 40)])])
+
+    document = diagnostics.context_coverage_for_invocation(invocation)
+
+    assert document["capture"]["unusable_spans"] == 1
     assert only_target(document)["best"] == "absent"
 
 
 def test_a_span_whose_lines_run_backwards_is_unusable(tmp_path):
+    """Corrected: it names the target's own file, so it blocks the negative claim."""
     invocation = build_bundle(
         tmp_path, locations=[region("src/example.py", 10, 20)],
         events=[event(1, spans=[span("src/example.py", 20, 10)])])
@@ -629,7 +709,79 @@ def test_a_span_whose_lines_run_backwards_is_unusable(tmp_path):
     document = diagnostics.context_coverage_for_invocation(invocation)
 
     assert document["capture"]["unusable_spans"] == 1
-    assert only_target(document)["best"] == "absent"
+    target = only_target(document)
+    assert target["best"] == "unknown"
+    assert target["reasons"] == ["unusable_span_on_target_path"]
+    assert target["by_invocation"][0]["unusable_target_paths"] == ["src/example.py"]
+
+
+def test_a_span_naming_the_target_file_with_coordinates_that_cannot_be_read_blocks_absence(
+        tmp_path):
+    """The false negative this closes: a defect in the emitter must not read as a clean miss."""
+    invocation = build_bundle(
+        tmp_path, locations=[region("src/example.py", 10, 20)],
+        events=[event(1, spans=[{"path": "src/example.py", "start_line": "10", "end_line": "20"},
+                                span("src/other.py", 1, 400)])])
+
+    document = diagnostics.context_coverage_for_invocation(invocation)
+
+    target = only_target(document)
+    assert target["best"] == "unknown"
+    assert target["by_invocation"][0]["reasons"] == ["unusable_span_on_target_path"]
+
+
+def test_a_context_event_that_reported_no_spans_at_all_blocks_absence(tmp_path):
+    """What a record does not say was supplied cannot be shown not to have been supplied."""
+    invocation = build_bundle(
+        tmp_path, locations=[region("src/example.py", 10, 20)],
+        events=[event(1, metadata={"source": "harness_self_report", "stage": "llm-static.file"}),
+                event(2, spans=[span("src/other.py", 1, 400)])])
+
+    document = diagnostics.context_coverage_for_invocation(invocation)
+
+    target = only_target(document)
+    assert target["best"] == "unknown"
+    assert "context_event_without_spans" in target["reasons"]
+    assert target["by_invocation"][0]["events_without_spans"] == 1
+
+
+def test_an_unusable_span_with_no_path_blocks_absence_for_every_target_of_its_invocation(tmp_path):
+    """Nothing about it can be attributed, so it counts against the invocation as a whole."""
+    invocation = build_bundle(
+        tmp_path, locations=[region("src/example.py", 10, 20)],
+        events=[event(1, spans=[{"start_line": 1, "end_line": 50},
+                                span("src/other.py", 1, 400)])])
+
+    document = diagnostics.context_coverage_for_invocation(invocation)
+
+    target = only_target(document)
+    assert target["best"] == "unknown"
+    assert target["by_invocation"][0]["reasons"] == ["unusable_span_without_path"]
+
+
+def test_a_hole_in_one_invocation_stops_a_cleaner_one_carrying_the_target_to_absent(tmp_path):
+    """A target's absence answers for every invocation, not for the tidiest one."""
+    invocation = build_bundle(
+        tmp_path, locations=[region("src/example.py", 10, 20)],
+        events=[event(1, call_id="call-a", spans=[span("src/example.py", 20, 10)]),
+                event(2, call_id="call-b", spans=[span("src/other.py", 1, 400)])])
+
+    target = only_target(diagnostics.context_coverage_for_invocation(invocation))
+
+    assert [entry["classification"] for entry in target["by_invocation"]] == ["unknown", "absent"]
+    assert target["best"] == "unknown"
+    assert target["union"]["classification"] == "unknown"
+
+
+def test_a_missing_span_list_does_not_weaken_a_span_that_was_recorded(tmp_path):
+    invocation = build_bundle(
+        tmp_path, locations=[region("src/example.py", 10, 20)],
+        events=[event(1, metadata={"source": "harness_self_report"}),
+                event(2, spans=[span("src/example.py", 1, 40)])])
+
+    target = only_target(diagnostics.context_coverage_for_invocation(invocation))
+
+    assert target["best"] == "included"
 
 
 def adrift(path: str, start: int, end: int, **overrides) -> dict:
@@ -733,6 +885,7 @@ def test_an_unlocated_span_needs_no_line_range_to_fix_a_path(tmp_path):
 
 
 def test_an_unlocated_span_with_no_usable_path_is_merely_unusable(tmp_path):
+    """It is still a hole: nothing about it can be attributed, so absence is not provable."""
     invocation = build_bundle(
         tmp_path, locations=[region("src/example.py", 10, 20)],
         events=[event(1, spans=[{"location_known": False, "role": "fragment"},
@@ -741,8 +894,9 @@ def test_an_unlocated_span_with_no_usable_path_is_merely_unusable(tmp_path):
     document = diagnostics.context_coverage_for_invocation(invocation)
 
     assert document["capture"]["unusable_spans"] == 1
+    assert document["capture"]["unusable_spans_without_path"] == 1
     assert document["capture"]["unlocated_spans"] == 0
-    assert only_target(document)["best"] == "absent"
+    assert only_target(document)["best"] == "unknown"
 
 
 def test_a_truncated_span_still_covers_the_lines_it_names(tmp_path):
@@ -1060,6 +1214,9 @@ def every_reason_the_module_can_emit(tmp_path: Path) -> set[str]:
         dict(record=execution_record(capture={"context_selection": "partial"}),
              events=[event(1)]),
         dict(events=[event(1, spans=[adrift("src/example.py", 1, 40)])]),
+        dict(events=[event(1, metadata={"source": "harness_self_report"})]),
+        dict(events=[event(1, spans=[{"start_line": 1, "end_line": 2}])]),
+        dict(events=[event(1, spans=[{"path": "src/example.py", "start_line": 1}])]),
     ]
     for index, case in enumerate(cases):
         case.setdefault("locations", [region()])
@@ -1095,7 +1252,7 @@ def test_the_reason_table_names_an_effect_for_every_published_code():
     """A code with no effect would weaken nothing, and the split is the whole judgement here."""
     assert set(diagnostics.REASON_EFFECTS) == set(diagnostics.REASON_CODES)
     assert set(diagnostics.REASON_EFFECTS.values()) == {"blanket", "absence", "target_absence",
-                                                        "target"}
+                                                        "invocation", "target"}
 
 
 def test_a_reason_the_table_does_not_name_blocks_absence_and_nothing_else():
