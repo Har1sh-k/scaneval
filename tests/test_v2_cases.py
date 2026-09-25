@@ -1166,27 +1166,32 @@ PILOT_PACK = Path(__file__).resolve().parents[1] / "corpus" / "pilot" / "pack.js
 
 
 @pytest.mark.skipif(not PILOT_PACK.is_file(), reason="no pilot pack in this checkout")
-def test_the_shipped_pilot_pack_predates_the_check_set_record_and_is_refused_until_rechecked():
-    """Changed deliberately: this used to assert that the shipped pilot pack still loads and plans.
+def test_the_shipped_pilot_pack_loads_with_one_anchored_check_set_per_snapshot_and_plans():
+    """Changed deliberately, back to what it asserted before the check-set record existed.
 
-    It recorded its mechanical checks as an array of attributed results, before a check set was one
-    record, and that array is exactly the shape the blocker this round closes was written against:
-    a set reconstituted by membership, where deleting or unattributing a failing check turns a
-    failed set into a passing one. Reading such a pack as checked is the tolerance that leaves the
-    hole open, so it is refused, naming the record that is missing. Re-running ``corpus validate``
-    against the same exports rewrites the pack with one anchored record per set and an anchor over
-    its roster, and the checks it records are the checks that ran; nothing here rewrites it,
-    because a recorded check is evidence of what ran and every plan names its pack by content hash.
-    When the pilot pack is re-recorded against its exports, this is the test to update: it should
-    then assert that the pack loads and plans again, which is what it asserted before this round.
+    The pilot pack once recorded its mechanical checks as a bare array, before a check set was
+    one anchored record, and this test asserted that such a pack is refused until it is
+    re-recorded. It has been: each case's stale checks were reset to draft, the pack was anchored
+    over what it then held, and ``corpus validate --snapshot-id`` re-ran the L1 checks against the
+    same exports, recording one check set per snapshot and promoting every case back to
+    ``mechanically_checked``. So the pack loads, every referenced snapshot carries a passing
+    anchored check set, and every snapshot plans, which is what the shipped corpus has to be able
+    to do for a frozen run configuration to start at all.
     """
-    with pytest.raises(ContractError, match="validation.check_sets records no check set for it"):
-        load_pack(PILOT_PACK)
+    pack = load_pack(PILOT_PACK)
 
-    document = json.loads(PILOT_PACK.read_text(encoding="utf-8"))
-    assert all(case["validation"]["review_state"] != "human_approved" for case in document["cases"]), \
-        "the pilot pack is draft evidence, so no recorded approval is lost by re-running its checks"
-    assert "anchor_sha256" not in document
+    assert pack["anchor_sha256"]
+    assert pack_summary(pack)["review_states"]["human_approved"] == 0
+    for case in pack["cases"]:
+        validation = case["validation"]
+        assert validation["review_state"] == "mechanically_checked" and validation["level"] == "L1"
+        recorded = validation["check_sets"][case["target"]["snapshot_id"]]
+        assert recorded["result"] == "pass" and recorded["checks_sha256"]
+    for snapshot in pack["snapshots"]:
+        plan, notes = build_plan(pack, snapshot["snapshot_id"], snapshot["tree_hash"])
+        assert plan["scope"] == "draft"
+        assert plan["targets"] or plan["controls"], notes
+        assert not any("after the review" in note for note in notes)
 
 
 def test_the_contract_refuses_a_level_no_recorded_approval_carries(tmp_path):

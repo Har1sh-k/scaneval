@@ -211,47 +211,54 @@
           {
             "check": "locations_exist_in_snapshot",
             "result": "pass",
-            "at": "2026-09-20T08:37:12+00:00",
+            "at": "2026-09-25T05:48:49+00:00",
             "detail": "2 locations found",
             "snapshot_id": "oauth2-proxy-f4b33b64"
           },
           {
             "check": "line_ranges_within_files",
             "result": "pass",
-            "at": "2026-09-20T08:37:12+00:00",
+            "at": "2026-09-25T05:48:49+00:00",
             "detail": "all ranges within file length",
             "snapshot_id": "oauth2-proxy-f4b33b64"
           },
           {
             "check": "aliases_well_formed",
             "result": "pass",
-            "at": "2026-09-20T08:37:12+00:00",
+            "at": "2026-09-25T05:48:49+00:00",
             "detail": "CVE-2025-54576, GHSA-7rh7-c77v-6434",
             "snapshot_id": "oauth2-proxy-f4b33b64"
           },
           {
             "check": "represents_statement",
             "result": "pass",
-            "at": "2026-09-20T08:37:12+00:00",
+            "at": "2026-09-25T05:48:49+00:00",
             "detail": "template: This case tests ... under ..., and adds ...",
             "snapshot_id": "oauth2-proxy-f4b33b64"
           },
           {
             "check": "evidence_recorded",
             "result": "pass",
-            "at": "2026-09-20T08:37:12+00:00",
-            "detail": "5 evidence records",
+            "at": "2026-09-25T05:48:49+00:00",
+            "detail": "6 evidence records",
             "snapshot_id": "oauth2-proxy-f4b33b64"
           },
           {
             "check": "snapshot_hash_recorded",
             "result": "pass",
-            "at": "2026-09-20T08:37:12+00:00",
+            "at": "2026-09-25T05:48:49+00:00",
             "detail": "sha256:aab29bfad6368fa4f4f5e5fa5724cc37aaba6e46b80062032df74e2d8d6c1426",
             "snapshot_id": "oauth2-proxy-f4b33b64"
           }
         ],
-        "reviews": []
+        "reviews": [],
+        "check_sets": {
+          "oauth2-proxy-f4b33b64": {
+            "result": "pass",
+            "tree_hash": "sha256:aab29bfad6368fa4f4f5e5fa5724cc37aaba6e46b80062032df74e2d8d6c1426",
+            "checks_sha256": "sha256:75ec9372b14c1ea82069097463d25e01f549bbb7342260ef032b4cd33889ad9e"
+          }
+        }
       },
       "split": "development",
       "notes": [
@@ -371,47 +378,54 @@
           {
             "check": "locations_exist_in_snapshot",
             "result": "pass",
-            "at": "2026-09-20T08:37:13+00:00",
+            "at": "2026-09-25T05:48:50+00:00",
             "detail": "1 locations found",
             "snapshot_id": "fastmcp-c861862a"
           },
           {
             "check": "line_ranges_within_files",
             "result": "pass",
-            "at": "2026-09-20T08:37:13+00:00",
+            "at": "2026-09-25T05:48:50+00:00",
             "detail": "all ranges within file length",
             "snapshot_id": "fastmcp-c861862a"
           },
           {
             "check": "aliases_well_formed",
             "result": "pass",
-            "at": "2026-09-20T08:37:13+00:00",
+            "at": "2026-09-25T05:48:50+00:00",
             "detail": "CVE-2026-32871, GHSA-vv7q-7jx5-f767",
             "snapshot_id": "fastmcp-c861862a"
           },
           {
             "check": "represents_statement",
             "result": "pass",
-            "at": "2026-09-20T08:37:13+00:00",
+            "at": "2026-09-25T05:48:50+00:00",
             "detail": "template: This case tests ... under ..., and adds ...",
             "snapshot_id": "fastmcp-c861862a"
           },
           {
             "check": "evidence_recorded",
             "result": "pass",
-            "at": "2026-09-20T08:37:13+00:00",
-            "detail": "5 evidence records",
+            "at": "2026-09-25T05:48:50+00:00",
+            "detail": "6 evidence records",
             "snapshot_id": "fastmcp-c861862a"
           },
           {
             "check": "snapshot_hash_recorded",
             "result": "pass",
-            "at": "2026-09-20T08:37:13+00:00",
+            "at": "2026-09-25T05:48:50+00:00",
             "detail": "sha256:a6a93cb57b8e3171bd0c6190b73515eeecfd7ce571cff0593df175a3e94ba713",
             "snapshot_id": "fastmcp-c861862a"
           }
         ],
-        "reviews": []
+        "reviews": [],
+        "check_sets": {
+          "fastmcp-c861862a": {
+            "result": "pass",
+            "tree_hash": "sha256:a6a93cb57b8e3171bd0c6190b73515eeecfd7ce571cff0593df175a3e94ba713",
+            "checks_sha256": "sha256:6a5cd7de5e558cb66668e2c83cf535432fdf10c032d5a2cebbb95d4e73da8189"
+          }
+        }
       },
       "split": "development",
       "notes": [
@@ -532,47 +546,54 @@
           {
             "check": "locations_exist_in_snapshot",
             "result": "pass",
-            "at": "2026-09-20T08:37:13+00:00",
+            "at": "2026-09-25T05:48:50+00:00",
             "detail": "1 locations found",
             "snapshot_id": "fastify-v5.12.1"
           },
           {
             "check": "line_ranges_within_files",
             "result": "pass",
-            "at": "2026-09-20T08:37:13+00:00",
+            "at": "2026-09-25T05:48:50+00:00",
             "detail": "all ranges within file length",
             "snapshot_id": "fastify-v5.12.1"
           },
           {
             "check": "aliases_well_formed",
             "result": "pass",
-            "at": "2026-09-20T08:37:13+00:00",
+            "at": "2026-09-25T05:48:50+00:00",
             "detail": "CVE-2026-76169, GHSA-p68q-wchp-6fh7",
             "snapshot_id": "fastify-v5.12.1"
           },
           {
             "check": "represents_statement",
             "result": "pass",
-            "at": "2026-09-20T08:37:13+00:00",
+            "at": "2026-09-25T05:48:50+00:00",
             "detail": "template: This case tests ... under ..., and adds ...",
             "snapshot_id": "fastify-v5.12.1"
           },
           {
             "check": "evidence_recorded",
             "result": "pass",
-            "at": "2026-09-20T08:37:13+00:00",
-            "detail": "5 evidence records",
+            "at": "2026-09-25T05:48:50+00:00",
+            "detail": "6 evidence records",
             "snapshot_id": "fastify-v5.12.1"
           },
           {
             "check": "snapshot_hash_recorded",
             "result": "pass",
-            "at": "2026-09-20T08:37:13+00:00",
+            "at": "2026-09-25T05:48:50+00:00",
             "detail": "sha256:a3554a9499f76544d02d706b0df69c2220da3aff2b66e77a5a744486b047a9e7",
             "snapshot_id": "fastify-v5.12.1"
           }
         ],
-        "reviews": []
+        "reviews": [],
+        "check_sets": {
+          "fastify-v5.12.1": {
+            "result": "pass",
+            "tree_hash": "sha256:a3554a9499f76544d02d706b0df69c2220da3aff2b66e77a5a744486b047a9e7",
+            "checks_sha256": "sha256:d3a5a8ad1fc47ac06d5e08dcdc44123f67a7baaca4c970f8f35436c821238b15"
+          }
+        }
       },
       "split": "development",
       "notes": [
@@ -587,5 +608,6 @@
     "Snapshots are pinned by full commit SHA; vulnerable snapshots are the parent of the named fix commit unless stated.",
     "Rust is absent from this pilot; conventional automation and AI-assisted application workloads are not covered.",
     "Licenses recorded from repository metadata are unverified until checked against the exact snapshot and paths."
-  ]
+  ],
+  "anchor_sha256": "sha256:26de845a936baeaeaa25fb859ac727ebab143a16812d0f05d9603e99bd3b4cdf"
 }
