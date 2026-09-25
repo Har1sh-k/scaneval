@@ -2888,12 +2888,14 @@ TS_SOURCE = ROOT / "sdk/typescript/src/index.ts"
 TS_SUITE = ROOT / "sdk/typescript/test/observer.test.mjs"
 CAPTURE_SECTION = "What the securevibes-agent and Fieldglass integration actually captures"
 # The keyword arguments ``capture_status`` takes, in the order the guide's column table lists
-# them. The names are asserted against that header rather than assumed.
-CAPTURE_INPUTS = ("trace_mode", "routes", "has_summary", "capture_state")
+# them. The names are asserted against that header rather than assumed. ``hooks`` joined them
+# when what the adapter can see stopped being fixed: it is the harness observation surfaces the
+# driver found, so two harness builds differ in this table the way two trace modes do.
+CAPTURE_INPUTS = ("trace_mode", "routes", "has_summary", "capture_state", "hooks", "hook_failures")
 # The guide counts small things in words. Spelling them out here is what lets a sentence like
 # "the ten wire event types" be compared with ``len(EVENT_TYPES)``.
-COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "ten": 10,
-               "fourteen": 14, "tenth": 10, "fourth": 4}
+COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+               "eight": 8, "ten": 10, "fourteen": 14, "tenth": 10, "fourth": 4}
 
 
 def doc_text() -> str:
@@ -3077,6 +3079,14 @@ def test_the_documented_capture_matrix_is_the_one_capture_status_returns():
     says and this counts: the covered and uncovered totals are compared with the three numbers
     the guide states. What holds across the whole space is driven across the whole space.
 
+    What the adapter can see stopped being fixed when the harness grew its own observation
+    surfaces, so ``hooks`` is an input here like the trace mode is, and so is ``hook_failures``,
+    the engine's own count of hooks that threw: those records were lost before the emitter saw
+    them, so no capture state can report them and only the count can. The two counts of what the
+    adapter captures -- with the harness hooks and without them -- are read out of the guide's
+    sentence and counted off real calls. The sentence they replaced said "fewer than half",
+    which stayed true while the number moved.
+
     The adapter is imported inside the test rather than at module scope: this file also pins that
     importing the observer does not import the evaluator, and that boundary is checked in a
     subprocess so nothing here can quietly depend on the order the tests run in.
@@ -3101,6 +3111,7 @@ def test_the_documented_capture_matrix_is_the_one_capture_status_returns():
                 returned = capture_status(
                     call["trace_mode"], call["routes"],
                     has_summary=call["has_summary"], capture_state=call["capture_state"],
+                    hooks=call["hooks"], hook_failures=call["hook_failures"],
                 )
                 for key in keys:
                     assert returned[key] == documented[0], (key, column, call)
@@ -3112,10 +3123,27 @@ def test_the_documented_capture_matrix_is_the_one_capture_status_returns():
     returned = capture_status("content", ["claude"], has_summary=True, capture_state=gapless)
     assert documented_keys == set(returned)
     assert documented_types | {"observer.error"} == set(EVENT_TYPES)
-    # "fewer than half of them", in the sentence above the table, counted rather than asserted.
-    captured = [key for key, value in returned.items()
-                if value not in ("unavailable", "not_applicable")]
-    assert len(captured) * 2 < len(EVENT_TYPES)
+
+    # What the guide claims it captures, counted. This was one sentence saying "fewer than half
+    # of them" and one assertion that two times the count was under ten, which stayed true
+    # whether the adapter captured four categories or one. The guide states both numbers now,
+    # the hooked run and the unhooked one, and each is counted off a real call: a category the
+    # harness hooks made observable has to move the sentence, and a category that quietly
+    # stopped being captured has to move it the other way.
+    def captured_count(hooks: dict | None) -> int:
+        matrix = capture_status("content", ["claude"], has_summary=True,
+                                capture_state=gapless, hooks=hooks, hook_failures=0)
+        return len([key for key, value in matrix.items()
+                    if value not in ("unavailable", "not_applicable")])
+
+    counted = re.search(
+        r"captures (\w+) of the (\w+) without the harness hooks and (\w+) of the (\w+) with them",
+        "\n".join(section),
+    )
+    assert counted, "the guide no longer states what it captures in the sentence this reads"
+    assert COUNT_WORDS[counted.group(1)] == captured_count(None)
+    assert COUNT_WORDS[counted.group(3)] == captured_count({"runner": 1, "engine": 1})
+    assert COUNT_WORDS[counted.group(2)] == COUNT_WORDS[counted.group(4)] == len(EVENT_TYPES)
 
     # The columns are a sample of the space, and the guide states by how much. Every column's
     # runs must be runs the space enumerates, or the sample would be of something else.
@@ -3135,16 +3163,30 @@ def test_the_documented_capture_matrix_is_the_one_capture_status_returns():
     assert int(stated.group(4)) == len(every) - len(covered)
 
     # What the guide claims across the whole space, driven across the whole space: the columns
-    # cover 28 runs, so a claim about all 120 needs the other 92 exercised too.
+    # cover a fraction of the runs, so a claim about all of them needs the rest exercised too.
+    # The finding categories used to be one claim, that all three were always unavailable. The
+    # engine observer made two of them observable, so the claim is now four narrower ones, each
+    # still true of every run in the space and each stated in the guide.
     for call in space:
         every_run = capture_status(
             call["trace_mode"], call["routes"],
             has_summary=call["has_summary"], capture_state=call["capture_state"],
+            hooks=call["hooks"], hook_failures=call["hook_failures"],
         )
+        engine_hooks = bool((call["hooks"] or {}).get("engine"))
         assert set(every_run) == documented_keys, call
         assert (every_run["tool_calls"] == "not_applicable") == (call["routes"] == ["mock"]), call
-        for key in ("finding_candidate", "finding_validation", "finding_filtered"):
-            assert every_run[key] == "unavailable", (key, call)
+        assert (every_run["finding_validation"] == "not_applicable") == engine_hooks, call
+        assert every_run["finding_candidate"] == every_run["finding_filtered"], call
+        if not engine_hooks:
+            assert every_run["finding_candidate"] == "unavailable", call
+        assert every_run["model_requests"] == every_run["model_responses"], call
+        if engine_hooks and call["hook_failures"] != 0:
+            # A hook that failed lost its record before the emitter saw it, so nothing the
+            # capture state reports can rule that loss out. Nothing the hooks feed may read
+            # complete in such a run, whatever the rest of the inputs say.
+            for key in ("finding_candidate", "finding_filtered", "finding_submitted"):
+                assert every_run[key] != "complete", (key, call)
 
 
 def test_the_documented_python_api_is_the_package_export_list():

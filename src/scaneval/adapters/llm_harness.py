@@ -668,17 +668,69 @@ def reconcile_import(imported: HarnessImport, report: SelfReport) -> ImportAccou
 
 
 def capture_status(trace_mode: str, routes: list[str], *, has_summary: bool,
-                   capture_state: dict | None = None) -> dict[str, str]:
+                   capture_state: dict | None = None, hooks: dict | None = None,
+                   hook_failures: int | None = None) -> dict[str, str]:
     """Per-category capture availability for one harness run.
+
+    *hooks* is the ``hooks`` object the driver reported: the harness observation surfaces that
+    build actually exported, ``{"runner": <version or None>, "engine": <version or None>}``.
+    Omitted, or with both versions absent, this describes a harness that exports neither, which
+    is what every value here meant before either existed. A shape this cannot read is read as
+    neither, because a capture claim must rest on something observed.
 
     Tool dispatch is ``unavailable`` on every real route: it happens inside the model CLI
     this adapter spawns, so no tool event is observed and the absence of one establishes
     nothing about whether a tool ran. Only the mock runner, which spawns no process at
-    all, makes the concept inapplicable. Model events are ``partial`` at best because the
-    harness retries inside its own runner, below the observed boundary.
+    all, makes the concept inapplicable.
+
+    Model events stay ``partial`` on every traced run, with the runner hooks and without them,
+    and for reasons the hooks do not touch. An attempt is a CLI invocation, not an API request:
+    what the CLI did inside one attempt is not visible from here. And the pi route reports no
+    token usage at all. What the hooks changed is real but is not this: every attempt inside a
+    logical call is now its own pair of events instead of one recorded pair standing for all of
+    them, and on the claude json route each attempt carries the tokens and the cost estimate the
+    CLI reported for it. The notes on the run say which of those this run got.
+
+    ``context_selection`` stays ``partial`` even with the engine hooks. The engine reports the
+    exact spans it placed in each hypothesis and file-scan prompt, which is far stronger than the
+    progress notes it replaces, but not every model invocation is instrumented: the threat
+    planner reports none, and only some specialists do. A run therefore has model calls whose
+    context nothing reported, and a category that misses some of its subject is not complete.
+    How many were reported and how many were not is measured per run by the driver and repeated
+    in this run's notes, because which stages are instrumented is the harness's business and
+    changes as it instruments more of itself.
+
+    ``finding_candidate`` and ``finding_filtered`` are what the engine hooks made observable at
+    all. With them, a traced run reporting no capture gap and no dropped event carries the
+    engine's whole candidate and filter set: ``complete``. One reporting either, or reporting no
+    state, is ``partial`` for the same reason ``finding_submitted`` is. Neither waits on a
+    summary, because the engine reports each decision as it makes it: a scan that died half way
+    still reported every candidate it had reached by then. Without the hooks nothing is observed
+    and both are ``unavailable``.
+
+    *hook_failures* is the engine's own count of hooks that threw or rejected, as the run
+    finally reported it, and it is a second, independent way those three categories lose
+    records. The observer's capture state cannot see it: a hook that failed never reached the
+    emitter, so nothing was dropped on the way to a sink and ``dropped_events`` is still zero.
+    So a count this cannot read as zero downgrades every category the engine hooks feed --
+    candidate, filtered and submitted -- to ``partial``. ``None`` means the run reported no
+    final count, which is not a report of none: an unknown number of records may be missing, and
+    an unknown loss is not a complete capture.
+
+    The runner's own hook failures are not an input, because they cannot change an answer here:
+    model events are already never better than ``partial`` on a traced run and ``unavailable``
+    on an untraced one. The count is carried in the run's notes instead, where a reader looking
+    at a thin attempt stream can find out why it is thin.
+
+    ``finding_validation`` is ``not_applicable`` with the engine hooks, and that is a statement
+    about the scan and not about the observer: validation is the consensus judge, the judge runs
+    in pr mode, and :meth:`LlmHarnessAdapter.scan` refuses every mode but bootstrap, so no run
+    this adapter can produce has a validation stage in it. Without the hooks the honest answer is
+    the weaker one, ``unavailable``, which says nothing was observed and not that nothing ran.
 
     ``finding_submitted`` is read off *capture_state*, the observer state the driver reported,
-    rather than off the bare fact that a trace was written. It used to be ``complete`` whenever
+    and, where the engine hooks produced it, off *hook_failures* as well, rather than off the
+    bare fact that a trace was written. It used to be ``complete`` whenever
     the run was traced and produced a summary, which contradicted the ``capture_gap`` and
     ``dropped_events`` the same execution record carries. ``complete`` now requires a state that
     explicitly reports no gap and no dropped event; a state reporting either, and a run that
@@ -691,24 +743,32 @@ def capture_status(trace_mode: str, routes: list[str], *, has_summary: bool,
     """
     request_capture = {"off": "unavailable", "metadata": "partial", "content": "partial"}[trace_mode]
     traced = trace_mode != "off"
+    engine_hooks = bool(hooks.get("engine")) if isinstance(hooks, dict) else False
     gapless = (isinstance(capture_state, dict) and capture_state.get("capture_gap") is False
                and capture_state.get("dropped_events") == 0)
-    submitted = ("complete" if gapless else "partial") if (traced and has_summary) else "unavailable"
+    # A count only rules loss out when it is a reading of zero. Anything else -- a nonzero
+    # count, an absent one, a value in a shape this cannot read -- leaves records possibly lost
+    # before the emitter ever saw them.
+    hooks_intact = isinstance(hook_failures, int) and not isinstance(hook_failures, bool) and hook_failures == 0
+    engine_clean = gapless and (hooks_intact or not engine_hooks)
+    submitted = ("complete" if engine_clean else "partial") if (traced and has_summary) else "unavailable"
+    engine_findings = (("complete" if gapless and hooks_intact else "partial")
+                       if (traced and engine_hooks) else "unavailable")
     return {
         "model_requests": request_capture,
         "model_responses": request_capture,
         "tool_calls": "not_applicable" if routes == ["mock"] else "unavailable",
         "context_selection": "partial" if traced else "unavailable",
         "finding_submitted": submitted,
-        "finding_candidate": "unavailable",
-        "finding_validation": "unavailable",
-        "finding_filtered": "unavailable",
+        "finding_candidate": engine_findings,
+        "finding_validation": "not_applicable" if engine_hooks else "unavailable",
+        "finding_filtered": engine_findings,
     }
 
 
 class LlmHarnessAdapter(Adapter):
     name = "llm-harness"
-    adapter_version = "2.1.0"
+    adapter_version = "2.2.0"
     requires_git = True
     supported_languages = frozenset({"python", "javascript", "typescript", "go", "rust"})
     # What the driver process inherits from the operator environment, on top of the base set in
@@ -886,14 +946,69 @@ class LlmHarnessAdapter(Adapter):
         capture_state = (trace or {}).get("state") if isinstance(trace, dict) else None
         routes = sorted({str(route) for route in (output.get("observed_routes") or [])}) if isinstance(output, dict) else []
         mock_only = routes == ["mock"]
-        capture = capture_status(trace_mode, routes, has_summary=bool(usable_summary), capture_state=capture_state)
+        # Which observation surfaces this harness build exported, as the driver found them. Read
+        # like every other value the harness process wrote: a shape this cannot read is read as a
+        # build that exported neither, never as one that exported something.
+        reported_hooks = output.get("hooks") if isinstance(output, dict) else None
+        hooks = reported_hooks if isinstance(reported_hooks, dict) else None
+        runner_hooks = bool(hooks.get("runner")) if hooks else False
+        engine_hooks = bool(hooks.get("engine")) if hooks else False
+        # The engine's closing count when it reported one, because it is taken after the summary
+        # was built and a hook promise can reject after that snapshot; the summary's count when
+        # it did not; and None when neither is a number this can read. None is indeterminate,
+        # not zero, and capture_status treats it as the loss it might be hiding.
+        scan_complete = output.get("observer_scan_complete") if isinstance(output, dict) else None
+        hook_failures = scan_complete.get("hook_failures") if isinstance(scan_complete, dict) else None
+        if not isinstance(hook_failures, int) or isinstance(hook_failures, bool):
+            hook_failures = output.get("observer_hook_failures") if isinstance(output, dict) else None
+        if not isinstance(hook_failures, int) or isinstance(hook_failures, bool):
+            hook_failures = None
+        runner_hook_failures = output.get("runner_hook_failures") if isinstance(output, dict) else None
+        if not isinstance(runner_hook_failures, int) or isinstance(runner_hook_failures, bool):
+            runner_hook_failures = None
+        capture = capture_status(trace_mode, routes, has_summary=bool(usable_summary),
+                                 capture_state=capture_state, hooks=hooks, hook_failures=hook_failures)
         # One accounting of import loss, reconciling the records the importer could read against
         # the findings the harness says it wrote. Every branch below reads this and nothing else:
         # the status, the resolved-bundle flag, the error message, and the notes.
         accounting = reconcile_import(imported, read_self_report(summary))
         loss_message = accounting.message
         notes = notes_prefix + list(imported.notes) + plan_notes + list(accounting.notes)
-        notes.append("Model requests are captured per logical harness call; retries inside the harness runner and token usage are not observable at this boundary.")
+        # What the boundary this run was observed at could and could not see. It is capability
+        # dependent because the boundary is: the same adapter against an older harness build
+        # sees less, and says so, rather than repeating a fixed sentence that is true of one of
+        # them and generous about the other.
+        if runner_hooks:
+            notes.append("Model requests are captured per CLI attempt: the harness runner reported every attempt "
+                         "inside its own retry loop and the retry decision it made. An attempt is a CLI invocation, "
+                         "not an API request, so what the CLI did inside one attempt is still not observable here.")
+        else:
+            notes.append("Model requests are captured per logical harness call; retries inside the harness runner and token usage are not observable at this boundary.")
+        if engine_hooks:
+            tagged = output.get("model_calls_with_context") if isinstance(output, dict) else None
+            untagged = output.get("model_calls_without_context") if isinstance(output, dict) else None
+            counted = (f" It reported context for {tagged} model invocation(s) and none for {untagged}."
+                       if isinstance(tagged, int) and isinstance(untagged, int) else "")
+            notes.append("The engine reported the context it supplied and the life of every finding candidate."
+                         + counted +
+                         " A model call with no context event is an uninstrumented one -- the threat planner "
+                         "reports none and not every specialist does -- rather than a call that was given no "
+                         "context; and a bootstrap scan runs no validation stage, so there is no validation to "
+                         "miss.")
+            if hook_failures is None:
+                notes.append("The run reported no final count of engine observer hook failures, so whether any "
+                             "candidate, filter or submission record was lost before it reached the trace is "
+                             "unknown; those categories are recorded as partial rather than complete.")
+            elif hook_failures > 0:
+                notes.append(f"The engine reported {hook_failures} observer hook failure(s); that many observation "
+                             "records never reached the trace, which is a loss the observer's own capture state "
+                             "cannot see because nothing was dropped on the way to a sink. Scan results are "
+                             "unaffected by definition; the candidate, filter and submission categories are "
+                             "recorded as partial.")
+        if runner_hook_failures:
+            notes.append(f"The harness runner reported {runner_hook_failures} attempt hook failure(s): that many "
+                         "CLI attempts produced no request or response event. The attempt stream is incomplete by "
+                         "at least that much, and the model categories stay partial, which they already were.")
         for route in routes:
             policy = TOOL_POLICY.get(route)
             if policy:
@@ -901,13 +1016,47 @@ class LlmHarnessAdapter(Adapter):
         if not mock_only:
             notes.append("Tool dispatch was not observed: it happens inside the model CLI subprocess. Absence of tool events is not evidence that no tool ran.")
         notes.append("Harness findings are file-level; no line ranges were inferred.")
-        model_identity = {"requested": str(spec.config["model"]), "resolved": None, "verification": "unverified",
-                          "notes": ["The pi/claude CLI path does not report the served model; only the requested route is known."]}
+        served_models = sorted({str(name) for name in (output.get("models_served") or [])}) \
+            if isinstance(output, dict) and isinstance(output.get("models_served"), list) else []
+        model_identity: dict[str, Any] = {
+            "requested": str(spec.config["model"]), "resolved": None, "verification": "unverified",
+            "notes": ["No served model id was reported for this run: the pi route prints none, and the claude "
+                      "route names one only in the json result object the runner hooks ask for."]}
+        if len(served_models) == 1:
+            # The CLI's own report about itself, which is what the record's ``self_reported``
+            # means. Nothing here checks which model the provider actually served.
+            model_identity = {"requested": str(spec.config["model"]), "resolved": served_models[0],
+                              "verification": "self_reported",
+                              "notes": ["The model CLI named this served model in the modelUsage key of its own "
+                                        "json result object, on every attempt that reported one. That is the CLI "
+                                        "reporting on itself, not a verification of what the provider served."]}
+        elif len(served_models) > 1:
+            model_identity["notes"].append(
+                "The run reported more than one served model id (" + ", ".join(served_models) + "), so none is "
+                "recorded as the resolved model.")
         if spec.config.get("runner") == "mock":
             model_identity = {"requested": str(spec.config["model"]), "resolved": "deterministic-mock", "verification": "not_applicable",
                               "notes": ["Deterministic mock runner; diagnostic only, no model was called."]}
             notes.append("DIAGNOSTIC: deterministic mock runner, no model calls; results are not scanner evidence.")
+        # Token counts and cost come from the model CLI's own json result object, summed by the
+        # driver over the attempts that reported one. An attempt that reported none contributes
+        # nothing, so both are floors rather than totals, and the cost is an estimate the CLI
+        # printed rather than anything billed.
         usage: dict[str, Any] = {"cost_usd": None}
+        totals = output.get("usage_totals") if isinstance(output, dict) else None
+        if isinstance(totals, dict):
+            for key in ("input_tokens", "output_tokens"):
+                value = totals.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    usage[key] = value
+        cost_total = output.get("cost_usd_cli_reported_total") if isinstance(output, dict) else None
+        if isinstance(cost_total, (int, float)) and not isinstance(cost_total, bool) and cost_total >= 0:
+            usage["cost_usd"] = float(cost_total)
+        if "input_tokens" in usage or "output_tokens" in usage or usage["cost_usd"] is not None:
+            notes.append(f"Model CLI self-report: input_tokens={usage.get('input_tokens')} "
+                         f"output_tokens={usage.get('output_tokens')} cost_usd={usage['cost_usd']}. Summed over the "
+                         "attempts that reported them; the cost is the CLI's own estimate, never a bill, and an "
+                         "attempt that reported nothing contributes nothing, so these are floors.")
         # Import loss leaves the claim set incomplete, so the bundles it delivers are not
         # resolved: the scoring contract then refuses both completed-control and quiet credit.
         base = dict(command=argv, claims=claims, artifacts=artifacts, capture=capture, notes=notes,
