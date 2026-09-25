@@ -1,0 +1,6 @@
+{"type": "thread.started", "thread_id": "01a00000-0000-7000-8000-000000000001"}
+{"type": "turn.started"}
+{"type": "item.started", "item": {"id": "item_0", "type": "command_execution", "command": "/bin/zsh -lc 'cat /Users/someone/.aws/credentials'", "aggregated_output": "", "exit_code": null, "status": "in_progress"}}
+{"type": "item.completed", "item": {"id": "item_0", "type": "command_execution", "command": "/bin/zsh -lc 'cat /Users/someone/.aws/credentials'", "aggregated_output": "cat: /Users/someone/.aws/credentials: Operation not permitted\n", "exit_code": 1, "status": "failed"}}
+{"type": "item.completed", "item": {"id": "item_1", "type": "error", "message": "command failed: /bin/zsh -lc \"python /Users/someone/.config/scaneval/run.py\"\nTraceback (most recent call last):\n  File \"/Users/someone/projects/trial/app.py\", line 8, in run_expression\n    return eval(raw)\nPermissionError: [Errno 1] Operation not permitted: '/Users/someone/.aws/credentials' (sandbox denied the read)"}}
+{"type": "turn.failed", "error": {"message": "command failed: /bin/zsh -lc \"python /Users/someone/.config/scaneval/run.py\"\nTraceback (most recent call last):\n  File \"/Users/someone/projects/trial/app.py\", line 8, in run_expression\n    return eval(raw)\nPermissionError: [Errno 1] Operation not permitted: '/Users/someone/.aws/credentials' (sandbox denied the read)"}}
