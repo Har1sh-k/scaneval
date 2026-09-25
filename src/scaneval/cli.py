@@ -39,8 +39,13 @@ read-only commands read whatever path they are given.
 
 Exit codes. 2 means the command could not be carried out: a usage or contract error, a refused
 overwrite, a failed fetch or export. 1 means the command ran and reports a negative result: a
-mechanical check set failed, or a run produced no usable scan from some system. 0 means it ran
-and reports nothing wrong, which is not a statement that any label or decision is correct.
+mechanical check set failed, a run produced no usable scan from some system, or ``diagnose`` was
+given something that is not a bundle it can read. 0 means it ran and reports nothing wrong, which
+is not a statement that any label or decision is correct.
+
+``diagnose`` reads a saved invocation bundle and writes a diagnostic document. It scores nothing,
+changes nothing in the bundle, and its answer never reaches a metric: a target whose code was
+never supplied to the model is still a target the scan did not detect.
 """
 
 import argparse
@@ -58,6 +63,7 @@ from .adapters.base import AdapterError
 from .cases import _is_stated
 from .contracts import CONTRACT_KINDS, ContractError, canonical_json, load_document
 from .demo import SOURCE, demo_documents
+from .diagnostics import DiagnosticsError, context_coverage_for_invocation
 from .execution import ExecutionError
 from .materialize import MaterializationError
 from .report import render_report
@@ -100,6 +106,17 @@ def _write_new(path: Path, content: str) -> None:
 
 def _json(value: dict) -> str:
     return canonical_json(value) + "\n"
+
+
+def _readable_json(value: dict) -> str:
+    """Sorted keys, indented two spaces, one trailing newline.
+
+    A diagnostic document is read by a person and diffed between runs, not hashed and not bound
+    to by anything, so it is printed rather than written in the compact canonical form the
+    contract documents use. Keys are still sorted, so two runs over one bundle are byte-identical
+    and a diff shows only what changed about the run.
+    """
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, indent=2) + "\n"
 
 
 def _read_json(path: Path) -> dict:
@@ -634,6 +651,36 @@ def _run(args: argparse.Namespace) -> int:
     return 1 if incomplete or manifest["status"] != "completed" else 0
 
 
+def _diagnose_context_coverage(args: argparse.Namespace) -> int:
+    """Attribute each labeled target to the invocations that were supplied its code region.
+
+    Nothing is written into the bundle: a diagnostic is a reading of a run, not a part of it, and
+    a bundle that grew a file every time someone asked a question of it would stop being the
+    record the run left. The output path is create-only like every other one here.
+
+    A bundle this cannot read is reported as 1 rather than 2, because the command ran and has an
+    answer: this is not a bundle coverage attribution can be computed over. A usage error, a
+    refused overwrite or an unreadable output path is still 2, from :func:`main`.
+    """
+    if args.out is not None:
+        _refuse_trial_path(args.out)
+    try:
+        document = context_coverage_for_invocation(args.invocation, pack_path=args.pack)
+    except DiagnosticsError as exc:
+        print(f"scaneval: {exc}", file=sys.stderr)
+        return 1
+    content = _readable_json(document)
+    if args.out is not None:
+        _write_new(args.out, content)
+    else:
+        sys.stdout.write(content)
+    return 0
+
+
+def _diagnose(args: argparse.Namespace) -> int:
+    return {"context-coverage": _diagnose_context_coverage}[args.diagnose_command](args)
+
+
 def _warn_unreviewed(state: str) -> None:
     """Say on stderr that a bundle carries no recorded review. The report itself is unchanged."""
     if state in UNREVIEWED_REVIEW_STATES:
@@ -727,6 +774,22 @@ def _add_corpus_commands(sub: argparse._SubParsersAction) -> None:
     _add_new_version(disposition)
 
 
+def _add_diagnose_commands(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser("diagnose", help="read one saved invocation bundle and report a "
+                                             "diagnostic; no score changes")
+    commands = parser.add_subparsers(dest="diagnose_command", required=True)
+
+    coverage = commands.add_parser(
+        "context-coverage",
+        help="for each labeled target, whether its code region was supplied to the model, "
+             "and in which invocation")
+    coverage.add_argument("invocation", type=Path, help="an invocations/<name>/ directory")
+    coverage.add_argument("--pack", type=Path,
+                          help="case pack holding the accepted locations; default is "
+                               "evaluator/pack.json of the run the invocation belongs to")
+    coverage.add_argument("--out", type=Path, help="new JSON file; default stdout")
+
+
 def _add_review_commands(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("review", help="draft, record, approve, and inspect the review of one bundle")
     commands = parser.add_subparsers(dest="review_command", required=True)
@@ -777,6 +840,7 @@ def build_parser() -> argparse.ArgumentParser:
     planning.add_argument("--output", required=True, type=Path, help="new JSON file, outside any trial directory")
     planning.add_argument("--mode", choices=("full", "pr"), default="full")
     _add_review_commands(sub)
+    _add_diagnose_commands(sub)
     running = sub.add_parser("run", help="execute one frozen run configuration into a new directory")
     running.add_argument("config", type=Path)
     running.add_argument("--output", required=True, type=Path, help="new directory, must not exist")
@@ -794,8 +858,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Valid {args.kind}: {args.path}")
         elif args.command == "demo":
             _demo(args.directory)
-        elif args.command in ("corpus", "plan", "review", "run"):
-            return {"corpus": _corpus, "plan": _plan, "review": _review, "run": _run}[args.command](args)
+        elif args.command in ("corpus", "diagnose", "plan", "review", "run"):
+            return {"corpus": _corpus, "diagnose": _diagnose, "plan": _plan, "review": _review,
+                    "run": _run}[args.command](args)
         else:
             if args.output:
                 _refuse_trial_path(args.output)
