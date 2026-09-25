@@ -821,6 +821,33 @@ def test_an_artifact_symlink_out_of_the_bundle_is_refused_rather_than_hashed(tmp
     assert secret.read_text(encoding="utf-8") == "not part of the scan output\n"
 
 
+def test_a_cut_link_into_the_operator_home_is_recorded_with_a_tilde_not_the_account_name(tmp_path, monkeypatch):
+    """The record keeps where the link went, not whose machine it went to.
+
+    A run record travels with the bundle, and a cut link's target is written into it as a fact
+    about the run. A target under the home directory would put the operator's account name into
+    every copy, which is the leak class ``docs/THREAT_MODEL.md`` names, so the home prefix is
+    spelled ``~`` and the rest of the path is kept: the DeepSec adapter's workspace links its
+    ``node_modules`` to the operator's installation, and that note is where the target appears.
+    """
+    home = tmp_path / "home"
+    (home / "tools" / "node_modules").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    class LinkingAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            (kwargs["raw_dir"] / "node_modules").symlink_to(home / "tools" / "node_modules")
+            return outcome
+
+    bundle = run(tmp_path, LinkingAdapter())
+
+    execution = load_document(bundle / "execution.json", "execution-record")
+    note = next(note for note in execution["notes"] if "were cut" in note)
+    assert "node_modules -> ~/tools/node_modules" in note
+    assert str(home) not in note
+
+
 def test_an_adapter_version_the_record_cannot_carry_writes_no_bundle_documents(tmp_path):
     """The execution record copies the adapter's own version, so a float makes it unwritable.
 

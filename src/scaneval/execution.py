@@ -359,6 +359,21 @@ def _copy_tree_unresolved(source: Path, destination: Path) -> list[str]:
     return sorted(links)
 
 
+
+def _home_relative(rendered: str) -> str:
+    """Spell a path under the operator's home directory with a leading ``~``.
+
+    A cut link's target is recorded as a fact about the run, and a run record travels: a target
+    under the home directory would carry the operator's account name into every copy of the
+    bundle, which is the one thing a record must never do (see ``docs/THREAT_MODEL.md``). The
+    directory structure below the home is kept, because that is what says where the link went;
+    only the prefix that names the machine and the account is replaced.
+    """
+    home = str(Path.home())
+    if home and (rendered == home or rendered.startswith(home + os.sep)):
+        return "~" + rendered[len(home):]
+    return rendered
+
 def _privatize(root: Path) -> tuple[list[str], list[str], list[str]]:
     """Make every path under *root* name a file inside it; name what was copied, cut, and failed.
 
@@ -448,7 +463,7 @@ def _privatize(root: Path) -> tuple[list[str], list[str], list[str]]:
                 continue
             if stat.S_ISLNK(status.st_mode):
                 try:
-                    target = os.readlink(path)
+                    target = _home_relative(os.readlink(path))
                 except OSError:
                     target = "an unreadable target"
                 try:
