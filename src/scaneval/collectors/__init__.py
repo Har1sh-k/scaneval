@@ -77,8 +77,10 @@ EXTERNAL_PREFIX = "external:"
 # command that failed, the output it produced, a source excerpt, and an absolute path on the
 # operator's machine. Copying one into metadata would walk all of that straight past the
 # metadata/content separation the rest of this package keeps, through a field nobody reads as
-# a content field. So metadata carries a code from this set plus a bounded, path-relocated
-# summary, and the message itself goes to ``content.error`` in content mode or nowhere.
+# a content field. So metadata carries a code from this set and nothing else: not the message
+# and not a bounded prefix of it either, because the first hundred characters of a traceback
+# are the line of source that raised, and bounded source is still source. The message goes to
+# ``content.error`` in content mode, or nowhere at all.
 FAILURE_KINDS = ("turn_failed", "item_error", "result_error", "unknown")
 
 
@@ -220,7 +222,7 @@ def relocate_paths(text: Any, workspace_root: Any) -> Any:
     """Rewrite every absolute path embedded in free text to its workspace-relative form.
 
     A shell command is the leak nobody plans for. ``file_path`` is obviously a path and gets
-    relativized; ``command`` is a string, and ``cat /Users/someone/.aws/credentials`` puts a
+    relativized; ``command`` is a string, and ``cat /outside/private/credentials`` puts a
     home directory into ``metadata.input_summary`` by a field no one audits as a path field.
     Contract 3 says a home directory never appears in an event, so the rule is applied to the
     text rather than to the fields somebody remembered to list.
@@ -351,21 +353,28 @@ class _Import:
         rendered = value if isinstance(value, str) else json.dumps(value, sort_keys=True)
         return clip(relocate_paths(rendered, self.workspace_root), limit)
 
-    def failure(self, kind: str | None, text: Any) -> tuple[str | None, str | None]:
-        """Classify a native failure and bound its message. Returns ``(kind, summary)``.
+    def failure(self, kind: str | None, text: Any) -> str | None:
+        """Classify a native failure. Returns the closed kind and nothing else.
 
-        The raw message is deliberately not among the return values: a caller that wants it
-        asks for it separately and puts it in ``content``, so there is no path by which the
-        classification and the prose travel together into a metadata payload. That is the
-        rule this method exists to make hard to break rather than easy to remember.
+        It takes the message and gives none of it back, which is the entire design. A first
+        attempt returned a 120-character relocated summary beside the kind, and that summary
+        was still a prefix of prose the CLI wrote: relocating it made an operator path
+        impossible, but nothing made the first 120 characters stop being whatever the
+        message happened to open with, which for a traceback is the line of source that
+        raised. Bounded source is still source, and metadata may hold none. So the prose has
+        exactly one destination, ``content`` under content mode, and a caller that wants it
+        reads it from the record itself rather than receiving it from here.
+
+        ``text`` is still a parameter because passing it is how a caller says a failure has
+        a message at all: a kind with no text and no kind at all are different facts.
 
         An unrecognized kind becomes ``"unknown"`` rather than being passed through, because
         ``failure_kind`` is a field consumers group by: one CLI's stray string appearing
         there would turn a closed vocabulary into an open one without anyone deciding to.
         """
         if kind is None and text is None:
-            return None, None
-        return (kind if kind in FAILURE_KINDS else "unknown"), self.summarize(text)
+            return None
+        return kind if kind in FAILURE_KINDS else "unknown"
 
     def unknown(self, native_type: Any) -> None:
         """Count a record this importer does not translate and remember what it was called."""

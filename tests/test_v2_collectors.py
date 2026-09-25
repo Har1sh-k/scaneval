@@ -5,8 +5,8 @@ against a two-file synthetic repository and then scrubbed by
 ``scripts/sanitize_native_trace.py``. Three are hand-built in the same record shape, for the
 branches a short successful run cannot reach: ``claude-code-edge-cases.jsonl`` for damaged
 and unpaired records, and ``codex-exec-edge-cases.jsonl`` and
-``claude-code-stream-json-error.jsonl`` for failure messages that quote an operator's home
-path and a source excerpt. That provenance is the point: these tests assert what the CLIs
+``claude-code-stream-json-error.jsonl`` for failure messages that quote an absolute path
+outside the workspace and a source excerpt. That provenance is the point: these tests assert what the CLIs
 actually write, so a record shape that changes under us fails here rather than silently
 producing a thinner trace.
 
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -40,15 +41,18 @@ STREAM = FIXTURES / "claude-code-stream-json.jsonl"
 EDGE = FIXTURES / "claude-code-edge-cases.jsonl"
 CODEX = FIXTURES / "codex-exec.jsonl"
 RESULT = FIXTURES / "claude-code-result.json"
-# Hand-built, and built for one purpose: their failure text quotes an operator's absolute
-# home path and an excerpt of the source that was being read, which is exactly what a CLI
+# Hand-built, and built for one purpose: their failure text quotes an absolute path outside
+# the workspace and an excerpt of the source that was being read, which is exactly what a CLI
 # writes into an error message and exactly what must not reach metadata.
 CODEX_ERRORS = FIXTURES / "codex-exec-edge-cases.jsonl"
 STREAM_ERROR = FIXTURES / "claude-code-stream-json-error.jsonl"
-# The line of the fixtures' failure text that is a source excerpt, and the credential path
-# it names. Both are asserted absent from metadata and present in content.
+# The line of the fixtures' failure text that is a source excerpt, and the out-of-workspace
+# credential path it names. Both are asserted absent from metadata and present in content.
+# Deliberately not spelled as a home-directory path: no file of this package spells one in
+# any form, not even with a placeholder account name, and an absolute path outside the
+# workspace exercises exactly the same relocation branch.
 SOURCE_EXCERPT = "return eval(raw)"
-HOME_PATH = "/Users/someone/.aws/credentials"
+OUTSIDE_PATH = "/outside/private/credentials"
 
 # The root the fixtures were scrubbed to. It is spelled absolutely so a fixture stays a file
 # the importers parse exactly as they parse a real one.
@@ -552,7 +556,10 @@ def test_a_codex_turn_that_failed_becomes_a_response_that_says_so():
     )
     response = of_type(seen, "model.response")[0]
     assert response["metadata"]["is_error"] is True
-    assert response["metadata"]["error"] == "sandbox denied the write"
+    assert response["metadata"]["failure_kind"] == "turn_failed"
+    # Not even a bounded prefix of the CLI's message: metadata says a failure happened and
+    # what kind, never what it said.
+    assert response["metadata"]["error"] is None
     assert response["metadata"]["result_subtype"] == "failed"
     assert response["metadata"]["session_id"] == "thread-1"
     assert summary.model_turns == 1
@@ -815,7 +822,7 @@ def test_every_event_names_the_record_it_was_read_out_of(name, importer):
         ("/workspace/./src/../app.py", "app.py", False),
         ("/etc/passwd", "external:passwd", True),
         ("/workspace/../secrets.env", "external:secrets.env", True),
-        ("/Users/someone/.claude/projects/a.jsonl", "external:a.jsonl", True),
+        ("/outside/private/a.jsonl", "external:a.jsonl", True),
         ("", None, False),
         (None, None, False),
     ],
@@ -835,7 +842,7 @@ def test_an_absolute_path_inside_a_shell_command_is_rewritten_before_it_reaches_
     from scaneval.collectors import relocate_paths
 
     rewritten = relocate_paths(
-        "cat /workspace/app.py && cat /Users/someone/.aws/credentials", Path("/workspace")
+        "cat /workspace/app.py && cat /outside/private/credentials", Path("/workspace")
     )
     assert rewritten == "cat app.py && cat external:credentials"
     assert relocate_paths("rg -n 'eval' app.py", Path("/workspace")) == "rg -n 'eval' app.py"
@@ -847,6 +854,124 @@ def test_a_codex_command_summary_names_the_command_without_naming_the_machine():
     summaries = [e["metadata"]["input_summary"] for e in of_type(events, "tool.start")]
     assert all("app.py" in summary for summary in summaries)
     assert all("/" not in summary.split()[0] for summary in summaries)
+
+
+# --- reading a file somebody else is writing ------------------------------------------------
+
+
+def test_a_symlinked_transcript_is_refused_rather_than_followed(tmp_path: Path):
+    """The transcript is written by another process after the scan began, so it is input.
+
+    Between the run and the import the name can become a link to a host file. Following it
+    would import that file's contents into a trace as though the agent had read them, which
+    is both a false trace and an exfiltration path out of whatever the importer can open.
+    """
+    secret = tmp_path / "host-file.jsonl"
+    secret.write_text(json.dumps({"type": "user", "message": {
+        "role": "user", "content": "a host file, not a transcript"}}) + "\n")
+    link = tmp_path / "transcript.jsonl"
+    link.symlink_to(secret)
+
+    events, summary = import_file(link)
+
+    assert summary.events == 1
+    assert of_type(events, "observer.error")[0]["capture_status"] == "unavailable"
+    assert summary.model_turns == 0
+    assert any(note.startswith("refused:") for note in summary.notes)
+    # Unavailable, not partial: a refused read captured none of any category, and an adapter
+    # that saw "partial" here would report a thin trace as a working one.
+    assert summary.capture["model_requests"] == "unavailable"
+    assert summary.capture["tool_calls"] == "unavailable"
+
+
+def test_find_transcripts_does_not_return_a_symlinked_or_non_regular_candidate(tmp_path: Path):
+    """Discovery refuses by name; the read refuses again on the descriptor. Both are needed."""
+    projects = tmp_path / "projects"
+    slug = projects / "-repo"
+    slug.mkdir(parents=True)
+    real = slug / "session-1.jsonl"
+    real.write_text("{}\n")
+    assert claude_code.find_transcripts("session-1", projects_dir=projects) == [real]
+
+    real.unlink()
+    (tmp_path / "elsewhere.jsonl").write_text("{}\n")
+    real.symlink_to(tmp_path / "elsewhere.jsonl")
+    assert claude_code.find_transcripts("session-1", projects_dir=projects) == []
+
+
+def test_a_transcript_swapped_for_a_fifo_does_not_block_the_import(tmp_path: Path):
+    """``O_NONBLOCK`` is the whole reason this returns at all.
+
+    Opening a FIFO for reading blocks until somebody opens the write end, so without the
+    flag a swapped-in named pipe stops the importing process forever, with no error and
+    nothing to time out. The thread and its join timeout are the guard: if the import ever
+    starts blocking again this fails instead of hanging the suite.
+    """
+    import threading
+
+    fifo = tmp_path / "transcript.jsonl"
+    os.mkfifo(fifo)
+    box: dict[str, ImportSummary] = {}
+
+    def run():
+        _, box["summary"] = import_file(fifo)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=10)
+
+    assert not worker.is_alive(), "import blocked on a FIFO"
+    summary = box["summary"]
+    assert any(note.startswith("refused:") for note in summary.notes)
+    assert summary.capture["model_requests"] == "unavailable"
+
+
+def test_an_oversized_transcript_is_truncated_and_the_loss_is_recorded(monkeypatch, tmp_path: Path):
+    """Read what fits, keep what it produced, and say plainly that the rest was not read.
+
+    The events already emitted are real and are not thrown away; what is unknown is what
+    came after the bound, and the summary and an ``observer.error`` both say so.
+    """
+    monkeypatch.setattr(claude_code, "MAX_TRANSCRIPT_BYTES", 2048)
+    records = [
+        {"type": "user", "uuid": "u-1", "sessionId": "s-1",
+         "message": {"role": "user", "content": "go"}},
+        {"type": "assistant", "uuid": "a-1", "sessionId": "s-1", "requestId": "r-1",
+         "message": {"id": "m-1", "role": "assistant", "model": "claude-haiku-4-5",
+                     "usage": {"input_tokens": 1, "output_tokens": 1},
+                     "content": [{"type": "text", "text": "ok"}]}},
+    ]
+    padding = [{"type": "queue-operation", "operation": "x" * 200} for _ in range(50)]
+    transcript = tmp_path / "big.jsonl"
+    transcript.write_text("".join(json.dumps(r) + "\n" for r in records + padding))
+    assert transcript.stat().st_size > 2048
+
+    events, summary = import_file(transcript)
+
+    assert summary.model_turns == 1, "records inside the bound are still imported"
+    assert any(note.startswith("truncated:") for note in summary.notes)
+    errors = of_type(events, "observer.error")
+    assert errors and errors[-1]["metadata"]["max_bytes"] == 2048
+    assert errors[-1]["capture_status"] == "unavailable"
+
+
+def test_a_truncated_read_does_not_blame_the_file_for_a_half_line(monkeypatch, tmp_path: Path):
+    """The trailing partial line is dropped, not counted as damage this reader caused."""
+    monkeypatch.setattr(claude_code, "MAX_TRANSCRIPT_BYTES", 64)
+    transcript = tmp_path / "big.jsonl"
+    transcript.write_text(json.dumps({"type": "mode", "mode": "x" * 500}) + "\n")
+
+    _, summary = import_file(transcript)
+
+    assert summary.malformed_lines == 0
+    assert any(note.startswith("truncated:") for note in summary.notes)
+
+
+def test_a_transcript_that_fits_reports_no_loss_at_all():
+    """The bound must be invisible to every real file, which is every file in the fixtures."""
+    _, summary = import_file(TRANSCRIPT)
+    assert not any(note.startswith(("truncated:", "refused:")) for note in summary.notes)
+    assert summary.capture["model_requests"] == "partial"
 
 
 # --- failure text ------------------------------------------------------------------------------
@@ -886,9 +1011,13 @@ def test_a_native_failure_message_never_reaches_metadata_whole(name, importer):
         events, _ = importer(mode)
         for event in events:
             for text in metadata_strings(event):
-                assert HOME_PATH not in text, f"{name}/{mode}: home path in metadata"
+                assert OUTSIDE_PATH not in text, f"{name}/{mode}: outside path in metadata"
                 assert SOURCE_EXCERPT not in text, f"{name}/{mode}: source excerpt in metadata"
-                assert "Traceback (most recent call last)" not in text or len(text) <= 120
+                # Not a fragment of it either. Metadata holds no prose the CLI wrote, so
+                # there is nothing here to bound and nothing left to argue about.
+                assert "Traceback" not in text, f"{name}/{mode}: failure prose in metadata"
+                assert "PermissionError" not in text, f"{name}/{mode}: failure prose in metadata"
+                assert "command failed" not in text, f"{name}/{mode}: failure prose in metadata"
 
 
 @pytest.mark.parametrize(
@@ -898,15 +1027,20 @@ def test_a_native_failure_message_never_reaches_metadata_whole(name, importer):
         ("stream-json", lambda: import_stream(STREAM_ERROR), "result_error"),
     ],
 )
-def test_a_failure_is_named_by_a_closed_kind_and_summarized_within_the_bound(
+def test_a_failure_is_named_by_a_closed_kind_and_metadata_carries_no_prose_at_all(
     name, importer, expected_kind
 ):
     """``failure_kind`` is a field consumers group by, so its vocabulary is closed.
 
     One CLI's stray string appearing there would turn a closed vocabulary into an open one
     without anybody deciding to.
+
+    ``error`` stays null beside it. An earlier version put a 120-character relocated summary
+    there; relocating made an operator path impossible, but nothing made the first 120
+    characters stop being whatever the message opened with, and for a traceback that is the
+    line of source that raised. Bounded source is still source.
     """
-    from scaneval.collectors import FAILURE_KINDS, SUMMARY_CHARS
+    from scaneval.collectors import FAILURE_KINDS
 
     events, _ = importer()
     failed = [e for e in of_type(events, "model.response") if e["metadata"]["failure_kind"]]
@@ -914,11 +1048,7 @@ def test_a_failure_is_named_by_a_closed_kind_and_summarized_within_the_bound(
     for response in failed:
         assert response["metadata"]["failure_kind"] == expected_kind
         assert response["metadata"]["failure_kind"] in FAILURE_KINDS
-        summary = response["metadata"]["error"]
-        assert summary and len(summary) <= SUMMARY_CHARS
-        # Relocated, not merely shortened: the paths that survive the bound are workspace
-        # relative or external, never the operator's.
-        assert "external:credentials" in summary or "/" not in summary
+        assert response["metadata"]["error"] is None
 
 
 @pytest.mark.parametrize(
@@ -933,7 +1063,7 @@ def test_the_whole_failure_message_is_kept_in_content_mode_and_nowhere_else(name
     events, _ = importer("content")
     payloads = [e["content"]["error"] for e in events if "error" in e.get("content", {})]
     assert payloads, name
-    assert any(HOME_PATH in payload for payload in payloads)
+    assert any(OUTSIDE_PATH in payload for payload in payloads)
     assert any(SOURCE_EXCERPT in payload for payload in payloads)
 
     events, _ = importer("metadata")
@@ -946,7 +1076,7 @@ def test_a_codex_error_item_is_reported_on_the_turn_it_happened_in():
         json.dumps({"type": "turn.started"}),
         json.dumps({"type": "item.completed", "item": {
             "id": "item_0", "type": "error",
-            "message": f"read blocked: {HOME_PATH}\n    {SOURCE_EXCERPT}"}}),
+            "message": f"read blocked: {OUTSIDE_PATH}\n    {SOURCE_EXCERPT}"}}),
         json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1}}),
     ]
     seen, observer = recording("content")
@@ -958,8 +1088,8 @@ def test_a_codex_error_item_is_reported_on_the_turn_it_happened_in():
     # trace reports both rather than picking one.
     assert response["metadata"]["is_error"] is False
     assert response["metadata"]["result_subtype"] == "completed"
-    assert HOME_PATH not in json.dumps(response["metadata"])
-    assert HOME_PATH in response["content"]["error"]
+    assert OUTSIDE_PATH not in json.dumps(response["metadata"])
+    assert OUTSIDE_PATH in response["content"]["error"]
 
 
 def test_a_turn_that_failed_outranks_an_error_item_inside_it():
@@ -988,8 +1118,9 @@ def test_an_unrecognized_failure_kind_is_recorded_as_unknown_rather_than_passed_
 
     tracker = _Import(Observer(mode="off"), source="s", route="r",
                       workspace_root=WORKSPACE, call_id="call-1")
-    assert tracker.failure("something_new", "boom") == ("unknown", "boom")
-    assert tracker.failure(None, None) == (None, None)
+    assert tracker.failure("something_new", "boom") == "unknown"
+    assert tracker.failure("turn_failed", "boom") == "turn_failed"
+    assert tracker.failure(None, None) is None
 
 
 def test_a_cli_authored_status_string_is_bounded_before_it_reaches_metadata():

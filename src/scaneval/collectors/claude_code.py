@@ -30,7 +30,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 import json
+import os
 from pathlib import Path
+import stat
 from typing import Any
 
 from . import (
@@ -56,6 +58,14 @@ PROJECTS_DIR = (".claude", "projects")
 # to build ``input_summary``; a tool absent from here still gets a summary, from its input.
 PATH_INPUT_KEYS = ("file_path", "path", "notebook_path")
 
+# The most a single transcript may contribute to memory. A transcript is written by another
+# process after the scan began, so its size is not a number this collector gets to assume:
+# past this bound the read stops and the import says it was truncated. 64 MiB is far above
+# any real session (the largest observed was under 200 KiB) and far below a figure that
+# could exhaust a scanning host.
+MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024
+_READ_CHUNK = 1 << 20
+
 # The usage keys Contract 3 fixes for ``metadata.usage``, mapped from the names the
 # Anthropic message usage object uses. The mapping is the identity for Claude and is spelled
 # out anyway, because :mod:`scaneval.collectors.codex` maps a different vocabulary onto the
@@ -68,6 +78,98 @@ USAGE_KEYS = {
 }
 
 
+def _inside(candidate: Path, boundary: Path) -> bool:
+    """True when ``candidate`` is a regular file whose directory really is under ``boundary``.
+
+    Two checks, because one is not enough. ``lstat`` refuses a symlink, a FIFO, a socket and
+    a device *at the name itself*, without following it. Resolving the parent then refuses a
+    symlinked directory somewhere above the name, which is the redirection ``lstat`` on the
+    leaf cannot see: swapping ``<projects>/<slug>`` for a link to ``/etc`` would otherwise
+    make every ``*.jsonl`` under it look like a transcript.
+
+    This function resolves symlinks, which the rest of the package never does. The two rules
+    are about different things and do not conflict: workspace paths are *rendered* for a
+    trace that may be read on another machine, so resolving them would answer a question
+    about the reader's filesystem, while this is a security check on the very filesystem the
+    read is about to happen on, where the resolved answer is the only true one.
+    """
+    try:
+        if not stat.S_ISREG(os.lstat(candidate).st_mode):
+            return False
+        parent = candidate.parent.resolve(strict=True)
+    except OSError:
+        return False
+    return parent == boundary or boundary in parent.parents
+
+
+def _read_transcript(path: Path) -> tuple[list[str], str | None]:
+    """Read a transcript safely. Returns ``(lines, loss)``; ``loss`` is the capture loss.
+
+    ``loss`` is ``None``, ``"refused"`` or ``"truncated"``, and it is a return value rather
+    than an exception because a harness calling this has already finished its scan: a log
+    that turned out to be a device node must cost the trace, never the run.
+
+    Three guards, and each one closes a hole the others leave open.
+
+    ``O_NOFOLLOW`` refuses a symlink at the moment of opening rather than at the moment of
+    listing, which is the only moment that counts: the file is written by another process
+    after the scan began, so a name that was a regular file when :func:`find_transcripts`
+    checked it can be a link to ``/etc/shadow`` by the time it is opened.
+
+    ``O_NONBLOCK`` is why a FIFO cannot hang the import. Opening a FIFO for reading blocks
+    until somebody opens the write end, so without this flag swapping a transcript for a
+    named pipe stops the importing process forever, with no error and nothing to time out.
+    With it the open returns at once and ``fstat`` on the descriptor then refuses the pipe
+    for what it is. The flag is cleared afterwards, because on a regular file it would turn
+    a slow read into a spurious ``EAGAIN``.
+
+    ``fstat`` on the *descriptor* is what makes the check race-free. Stat-then-open asks
+    about a name twice and can get two different files; this asks about the one object that
+    is actually open.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return [], "refused"
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            return [], "refused"
+        os.set_blocking(descriptor, True)
+        stream = os.fdopen(descriptor, "rb", closefd=True)
+    except OSError:
+        os.close(descriptor)
+        return [], "refused"
+
+    lines: list[str] = []
+    pending = b""
+    used = 0
+    truncated = False
+    try:
+        with stream:
+            while True:
+                room = MAX_TRANSCRIPT_BYTES - used
+                if room <= 0:
+                    # One byte past the bound decides whether anything was actually left.
+                    truncated = bool(stream.read(1))
+                    break
+                chunk = stream.read(min(_READ_CHUNK, room))
+                if not chunk:
+                    break
+                used += len(chunk)
+                parts = (pending + chunk).split(b"\n")
+                pending = parts.pop()
+                lines.extend(part.decode("utf-8", "replace") for part in parts)
+            if pending and not truncated:
+                lines.append(pending.decode("utf-8", "replace"))
+            # A trailing partial line is dropped when the read was cut short: it is not a
+            # damaged record, it is half of one this reader chose not to finish, and
+            # counting it as malformed would blame the file for the bound.
+    except OSError:
+        return lines, "refused"
+    return lines, ("truncated" if truncated else None)
+
+
 def find_transcripts(session_id: str, *, projects_dir: Path | None = None) -> list[Path]:
     """Locate the transcript files one session wrote, main file first, then subagents.
 
@@ -78,6 +180,14 @@ def find_transcripts(session_id: str, *, projects_dir: Path | None = None) -> li
     therefore not evidence that no subagent ran, only that none wrote a file here, which is
     why this returns what exists rather than asserting a count.
 
+    The boundary is captured once, before anything is listed, and every candidate must be a
+    regular file that really lives under it. These files are written by a CLI *after* the
+    scan this collector is describing began, by a process the collector does not control, so
+    between the run and the import a name here can become a link to a host file, a FIFO, or
+    something that is not a transcript at all. Discovery refuses those by name; the read in
+    :func:`import_transcript` refuses them again on the descriptor, because a name that was
+    safe when it was listed can be something else by the time it is opened.
+
     Returns an empty list when nothing matches. A missing transcript is an ordinary outcome
     for a harness that ran a CLI which was configured not to keep one, and a collector that
     raised on it would turn a capture gap into a scan failure.
@@ -85,14 +195,18 @@ def find_transcripts(session_id: str, *, projects_dir: Path | None = None) -> li
     if not session_id or "/" in session_id or "\\" in session_id or session_id in (".", ".."):
         return []
     root = projects_dir if projects_dir is not None else Path.home().joinpath(*PROJECTS_DIR)
-    if not root.is_dir():
+    try:
+        boundary = root.resolve(strict=True)
+    except OSError:
+        return []
+    if not boundary.is_dir():
         return []
     found: list[Path] = []
     for main in sorted(root.glob(f"*/{session_id}.jsonl")):
-        if main.is_file():
+        if _inside(main, boundary):
             found.append(main)
     for sub in sorted(root.glob(f"*/{session_id}/subagents/*.jsonl")):
-        if sub.is_file():
+        if _inside(sub, boundary):
             found.append(sub)
     return found
 
@@ -140,13 +254,16 @@ def import_transcript(
 
     A file that cannot be read at all is reported as a capture gap rather than raised: a
     harness calling this has already finished its scan, and a permission error on a log must
-    not retroactively fail it. An unusable ``workspace_root`` does raise, before the file is
-    opened, because that is wiring rather than a record.
+    not retroactively fail it. The same is true of a file that is refused for what it is (a
+    symlink, a FIFO, a device) or that ran past :data:`MAX_TRANSCRIPT_BYTES`: both come back
+    as a note, an ``observer.error``, and a downgraded ``capture``, so a caller learns the
+    trace is thin from the summary it already reads rather than from an exception it has to
+    know to catch. An unusable ``workspace_root`` does raise, before the file is opened,
+    because that is wiring rather than a record.
     """
     workspace_root = workspace_roots(workspace_root)
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
+    lines, loss = _read_transcript(path)
+    if loss == "refused":
         tracker = _Import(
             observer,
             source=SOURCE_TRANSCRIPT,
@@ -160,11 +277,11 @@ def import_transcript(
             call_id=call_id,
             metadata={
                 "source": SOURCE_TRANSCRIPT,
-                "error": "transcript could not be read",
+                "error": "transcript could not be read, or was not a regular file",
             },
         )
-        tracker.notes.append("transcript could not be read")
-        return tracker.summary(_capture(tracker, context="unavailable"))
+        tracker.notes.append("refused: transcript could not be read, or was not a regular file")
+        return tracker.summary(_unavailable())
     return _import_records(
         observer,
         lines,
@@ -173,6 +290,7 @@ def import_transcript(
         call_id=call_id,
         sidechain=sidechain,
         agent_id=agent_id,
+        loss=loss,
         output_format=None,
     )
 
@@ -214,7 +332,27 @@ def import_stream_json(
     )
 
 
-def _capture(tracker: _Import, *, context: str = "partial") -> dict[str, str]:
+def _unavailable() -> dict[str, str]:
+    """Capture for an import that read nothing at all. Every observable key is unavailable.
+
+    Not ``partial``: partial says some of a category was captured, and a refused read
+    captured none of it. The difference is the whole question a consumer asks of this dict,
+    and an adapter that saw ``partial`` here would report a thin trace as a working one.
+    """
+    return {
+        "model_requests": "unavailable",
+        "model_responses": "unavailable",
+        "tool_calls": "unavailable",
+        "context_selection": "unavailable",
+        "finding_submitted": "not_applicable",
+        "finding_candidate": "not_applicable",
+        "finding_validation": "not_applicable",
+        "finding_filtered": "not_applicable",
+    }
+
+
+def _capture(tracker: _Import, *, context: str = "partial",
+             truncated: bool = False) -> dict[str, str]:
     """What this import can claim, per Contract 3 key.
 
     Nothing is ever ``complete``. A transcript records the turns that happened and not the
@@ -387,6 +525,7 @@ def _import_records(
     sidechain: bool,
     agent_id: str | None,
     output_format: str | None,
+    loss: str | None = None,
 ) -> ImportSummary:
     """The one reader both Claude formats go through."""
     tracker = _Import(
@@ -455,7 +594,24 @@ def _import_records(
     if state.result_note:
         tracker.notes.append(state.result_note)
     tracker.report_malformed()
-    return tracker.summary(_capture(tracker))
+    if loss == "truncated":
+        # The events already emitted are real and are kept. What is unknown is what came
+        # after the bound, so the loss is reported and every count stays as measured.
+        tracker.emit(
+            type="observer.error",
+            capture_status="unavailable",
+            call_id=call_id,
+            metadata={
+                "source": source,
+                "error": "transcript exceeded the read bound and was truncated",
+                "max_bytes": MAX_TRANSCRIPT_BYTES,
+            },
+        )
+        tracker.notes.append(
+            f"truncated: transcript exceeded {MAX_TRANSCRIPT_BYTES} bytes and was read only "
+            "up to that bound"
+        )
+    return tracker.summary(_capture(tracker, truncated=loss == "truncated"))
 
 
 def _message_key(record: dict[str, Any]) -> str | None:
@@ -647,7 +803,7 @@ class _State:
         mode, and never writes it into ``metadata``. On a failed invocation the ``result``
         field is not the model's answer but the CLI's error message, which is free text that
         can quote a command, a source excerpt or an absolute path; metadata gets the closed
-        ``failure_kind`` and a bounded, path-relocated summary of it instead.
+        ``failure_kind`` and nothing else.
         """
         tracker = self.tracker
         record = self.result_record or {}
@@ -668,11 +824,12 @@ class _State:
                 metadata["usage_available"] = True
         raw_error = record.get("result") if metadata["is_error"] else None
         raw_error = raw_error if isinstance(raw_error, str) and raw_error else None
-        failure_kind, summary = tracker.failure(
+        metadata["failure_kind"] = tracker.failure(
             "result_error" if metadata["is_error"] else None, raw_error
         )
-        metadata["failure_kind"] = failure_kind
-        metadata["error"] = summary
+        # Stays null. See :meth:`~scaneval.collectors._Import.failure`: the CLI's message is
+        # prose, and a bounded prefix of prose is still prose.
+        metadata["error"] = None
         note = (
             f"result: subtype={metadata['result_subtype']} is_error={metadata['is_error']} "
             f"num_turns={metadata['num_turns']} session_id={metadata['session_id']} "

@@ -135,12 +135,15 @@ def import_exec_jsonl(
             raw_error, kind = item_errors[0], "item_error"
         else:
             raw_error, kind = None, None
-        failure_kind, error = tracker.failure(kind, raw_error)
+        failure_kind = tracker.failure(kind, raw_error)
         text = "".join(answer)
         metadata: dict[str, Any] = {
             "source": SOURCE,
             "exit_code": None,
-            "error": error,
+            # Always null. The CLI's failure prose is free text and metadata holds none of
+            # it, not even a bounded prefix; ``failure_kind`` beside this is the signal, and
+            # ``content.error`` is where the message itself lives.
+            "error": None,
             "attempt": 1,
             "will_retry": False,
             "failure_kind": failure_kind,

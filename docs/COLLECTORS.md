@@ -12,9 +12,12 @@ wherever the reading was derived rather than observed. **An event a collector di
 not evidence that the thing did not happen.** It is evidence that the CLI did not write it
 down where the collector could read it.
 
-Nothing here spawns a process, patches a client, or makes a network call. The importers are
-pure readers over text you hand them; `find_transcripts` is the one function that touches the
-filesystem, and only to glob a directory you name.
+Nothing here spawns a process, patches a client, or makes a network call. `import_stream_json`
+and `import_exec_jsonl` are pure readers over text you hand them. `find_transcripts` and
+`import_transcript` are the two functions that touch the filesystem — to glob a directory you
+name and to open a file it returned — and they treat those files as hostile input, because
+they are written by another process after the scan began. See
+[A transcript is a file somebody else is still writing](#a-transcript-is-a-file-somebody-else-is-still-writing).
 
 ## The API
 
@@ -27,7 +30,7 @@ from scaneval.collectors import claude_code, codex
 |---|---|
 | `ImportSummary` | Frozen dataclass returned by every importer: `events`, `model_turns`, `tool_calls`, `tool_results`, `spans`, `unknown_records`, `malformed_lines`, `unmatched_tool_results`, `capture` (the Contract 3 capture-status keys), `notes`. |
 | `claude_code.find_transcripts(session_id, *, projects_dir=None)` | Returns the main transcript `<projects_dir>/*/<session_id>.jsonl` followed by `<projects_dir>/*/<session_id>/subagents/*.jsonl`. `projects_dir` defaults to `~/.claude/projects`. Returns `[]` rather than raising when nothing matches. |
-| `claude_code.import_transcript(observer, path, *, workspace_root, call_id, sidechain=False, agent_id=None)` | Reads one transcript file. `sidechain` and `agent_id` are defaults; a record that states its own wins. |
+| `claude_code.import_transcript(observer, path, *, workspace_root, call_id, sidechain=False, agent_id=None)` | Reads one transcript file, no-follow and size-bounded. `sidechain` and `agent_id` are defaults; a record that states its own wins. A refused or truncated read is reported in the returned summary, never raised. |
 | `claude_code.import_stream_json(observer, lines, *, workspace_root, call_id)` | Reads `claude -p --output-format stream-json --verbose` output. |
 | `claude_code.parse_result_object(text)` | Parses `claude -p --output-format json` stdout. Returns `None` for anything that is not a `type: "result"` object. |
 | `codex.import_exec_jsonl(observer, lines, *, workspace_root, call_id)` | Reads `codex exec --json` output. |
@@ -49,11 +52,11 @@ Consistent with Contract 3. `metadata.source` is `claude_code_transcript`,
 | Event | When | Notable metadata |
 |---|---|---|
 | `model.request` | Once per assistant **message** (Claude) or per `turn.started` (Codex) | `attempt: 1`, `retries_observable: false`, `model_requested: null` |
-| `model.response` | Paired with each request by `attempt_id` | `usage` (four counters), `usage_available`, `model_served`, `session_id`, `stdout_chars`, `failure_kind`, `error` |
+| `model.response` | Paired with each request by `attempt_id` | `usage` (four counters), `usage_available`, `model_served`, `session_id`, `stdout_chars`, `failure_kind` (`error` is always `null` — see below) |
 | `tool.start` | Per `tool_use` block / per tool `item.started` | `tool_name`, `input_summary`, `sidechain`, `agent_id` |
 | `tool.end` | Per `tool_result` / per tool `item.completed` | `is_error`, `result_chars`, `spans`, and for Codex `exit_code` and `status` |
 | `context.selection` | Per tool result that delivered file text with a known path | `stage: "tool_result"`, `spans`, `span_count`, `capture_status: partial` |
-| `observer.error` | Once, when any line was unreadable | `malformed_lines`, `capture_status: unavailable` |
+| `observer.error` | Once per reading loss: unreadable lines, a refused file, a truncated read | `malformed_lines` or `max_bytes`, `capture_status: unavailable` |
 
 A span is `{path, start_line, end_line, chars, sha256, truncated, original_chars, role}` with
 `sha256` over exactly the text the tool delivered. `role` is always `"other"`: a role says why
@@ -165,26 +168,30 @@ So a failure is split in two:
   becomes `unknown` rather than being passed through, because `failure_kind` is a field
   consumers group by and one CLI's stray string would open the vocabulary without anyone
   deciding to.
-- **`metadata.error`** is a summary bounded to 120 characters that has been through
-  `relocate_paths`, so the paths that survive the bound are workspace-relative or
-  `external:<basename>`.
+- **`metadata.error`** is always `null`. Metadata carries no prose the CLI wrote — not the
+  message, and not a bounded prefix of it either.
 - **`content.error`** holds the message whole, and only in content mode. In `metadata` mode
-  it is read, bounded into the summary, and dropped.
+  it is read, used to decide the kind, and dropped.
 
-Every other CLI-authored string that reaches metadata is bounded the same way:
-`result_subtype` and a Codex item `status` are short enums today, and "today" is not a
-property metadata should rely on.
+An earlier version put a 120-character, path-relocated summary in `metadata.error`.
+Relocating made an operator path impossible, but nothing made the first 120 characters stop
+being whatever the message happened to open with — and for a traceback that is the line of
+source that raised. **Bounded source is still source**, and Contract rule 5 gives metadata
+none of it. So the summary is gone rather than shortened further: `failure_kind` says a
+failure happened and what kind, and the prose has exactly one destination.
 
-> **Residual, stated plainly.** The 120-character summary is a bounded *prefix of CLI prose*.
-> It is relocated, so it cannot carry an operator path, but within its bound it can carry
-> whatever the CLI printed first — including a line of source, if that is how the message
-> opens. A deployment that must hold zero CLI prose in metadata should read `failure_kind`
-> and ignore `error`.
+`_Import.failure` takes the message and returns only the kind, so there is no value in the
+codebase that carries a classification and prose together toward a metadata payload.
+
+The other CLI-authored strings that *do* reach metadata are identifiers and enums rather
+than prose — `result_subtype` and a Codex item `status` — and those are bounded to 60
+characters, because they are short enums today and "today" is not a property metadata should
+rely on.
 
 Two hand-built fixtures exist for exactly this and are used in both recording modes:
 `codex-exec-edge-cases.jsonl` (a `turn.failed`, an `error` item, and a failed
 `command_execution`) and `claude-code-stream-json-error.jsonl` (a result record whose
-`result` field is the error rather than the answer). Both quote `/Users/someone/.aws/credentials`
+`result` field is the error rather than the answer). Both quote `/outside/private/credentials`
 and a `return eval(raw)` source line, and the tests assert neither reaches metadata in either
 mode while both reach `content.error` in content mode.
 
@@ -232,6 +239,40 @@ An empty sequence, or an element that is not a path, raises `ValueError` — at 
 importer, before any file is opened. This is wiring rather than a record: a collector that
 accepted "no workspace" would mark every path in the run external and report a clean import
 while doing it.
+
+## A transcript is a file somebody else is still writing
+
+The files `find_transcripts` returns are written by the CLI, by a process this collector
+does not control, *after* the scan it is describing began. They are therefore input, not
+assets, and between the run and the import a name can become a link to a host file, a named
+pipe, a device node, or something enormous. Three guards, each closing a hole the others
+leave open:
+
+| Guard | Stops |
+|---|---|
+| `lstat` + resolved-parent boundary check in `find_transcripts` | A symlink at the name, and a symlinked *directory* above it — swapping `<projects>/<slug>` for a link to `/etc` would otherwise make every `*.jsonl` under it look like a transcript. |
+| `O_NOFOLLOW` on open | A symlink swapped in *after* discovery checked the name. Discovery and reading are two different moments, and only the second one counts. |
+| `O_NONBLOCK` on open, then `fstat` on the descriptor | A FIFO. Opening one for reading blocks until somebody opens the write end, so without the flag a swapped-in pipe stops the import forever, with no error and nothing to time out. With it the open returns at once and `fstat` refuses the pipe for what it is. Checking the *descriptor* rather than the name also makes the check race-free: stat-then-open asks about a name twice and can get two different files. |
+
+The read is then streamed in chunks under `MAX_TRANSCRIPT_BYTES` (64 MiB — far above any
+real session, the largest observed being under 200 KiB, and far below a figure that could
+exhaust a scanning host). Past the bound the read stops.
+
+**Neither refusal nor truncation raises.** A harness calling a collector has already
+finished its scan, and a log that turned out to be a device node must cost the trace and
+never the run. Both come back through the `ImportSummary` a caller already reads:
+
+- **Refused** — a `refused: …` note, an `observer.error` event, and `capture` with every
+  observable key `unavailable`. Not `partial`: partial says some of a category was captured,
+  and a refused read captured none of it.
+- **Truncated** — a `truncated: …` note and an `observer.error` carrying `max_bytes`. The
+  events already emitted are real and are kept; what is unknown is what came after the bound.
+  The trailing partial line is dropped rather than counted as malformed, because it is half
+  of a record this reader chose not to finish, and counting it as damage would blame the file
+  for the bound.
+
+`import_stream_json` and `import_exec_jsonl` take an iterable of lines rather than a path, so
+the caller owns that read and none of this applies to them.
 
 ## Transcripts are the operator's files
 
@@ -329,6 +370,9 @@ What it does:
   rules call for, spelled so it is still a path.
 - Any other absolute path becomes `/redacted/<basename>`.
 - Email addresses become `operator@example.invalid`.
+- No committed file of this package spells a home-directory path in any form — not even a
+  synthetic placeholder account. The adversarial fixtures use `/outside/private/...` instead,
+  which is an absolute path outside the workspace and exercises the same relocation branch.
 - Session, request, message, tool-use, thread and record UUIDs become fixed placeholders,
   **deterministically**: the same native ID always maps to the same stub, so `parentUuid` still
   points at a `uuid` and `tool_use_id` still points at a `tool_use`, and the fixture still
@@ -350,7 +394,7 @@ produce. Their code is synthetic and their shape is copied from the real files.
 | Fixture | Covers |
 |---|---|
 | `claude-code-edge-cases.jsonl` | A line that is not JSON, valid JSON that is not a record, a read outside the workspace, a truncated read, a `tool_result` whose `tool_use` was never seen, and a failed `Bash` call. |
-| `codex-exec-edge-cases.jsonl` | A `turn.failed`, an `error` item, and a failed `command_execution` — each with failure text quoting `/Users/someone/.aws/credentials` and a `return eval(raw)` source line. |
+| `codex-exec-edge-cases.jsonl` | A `turn.failed`, an `error` item, and a failed `command_execution` — each with failure text quoting `/outside/private/credentials` and a `return eval(raw)` source line. |
 | `claude-code-stream-json-error.jsonl` | A result record whose `result` field is the CLI's error message rather than the model's answer, carrying the same home path and source excerpt. |
 
 The last two exist to be *adversarial*: they are the input the closed-code-plus-bounded-summary
