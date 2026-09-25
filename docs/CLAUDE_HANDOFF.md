@@ -1,6 +1,6 @@
 # Claude continuation prompt
 
-Continue implementing ScanEval in this repository. An offline evaluator, a case-pack workflow, a live invocation runner, two real adapters, an observer connection to the own harness, and a review workflow already exist. Audit and extend them; do not restart from an empty project or treat the complete design as implemented.
+Continue implementing ScanEval in this repository. An offline evaluator, a case-pack workflow, a live invocation runner, three real adapters, an observer connection to the own harness, importers for what the Claude Code and Codex CLIs write for themselves, a context-coverage diagnostic, and a review workflow already exist. Audit and extend them; do not restart from an empty project or treat the complete design as implemented.
 
 ## Start here
 
@@ -22,7 +22,7 @@ Existing implementation commits:
 - `d36d4a8`, `c47a434`, `c2830d3`, `ca53346`, `16726ec`: the draft pilot pack with its fix-hunk evidence, the two preserved pilot runs, and the pilot report.
 - `f9fb52a`, `fa3b3f1`: private-pack case identifiers and the bring-your-own-corpus guide.
 
-Run `git log --oneline` before relying on this list; work was landing while it was written.
+Run `git log --oneline` before relying on this list; work was landing while it was written. Two of those commits preserved pilot run records in the repository; later commits removed every committed run record, and the frozen run configurations in `corpus/pilot/` are now the whole reproduction path.
 
 Read these files before planning implementation:
 
@@ -30,10 +30,11 @@ Read these files before planning implementation:
 2. `docs/EVALUATION_MATH.md`: scoring definitions, missing-data treatment, and reporting rules.
 3. `docs/INITIAL_BUILD.md`: what this branch actually implements and what is missing.
 4. `docs/PILOT.md`: the first real runs, their execution facts, and what they do not establish.
-5. `docs/OBSERVER_SDK.md`: event integration, passivity, flushing, and capture limitations.
-6. `docs/BRING_YOUR_OWN_CORPUS.md`: the organization-owned pack path as the code implements it.
-7. `docs/REPOSITORY_INVENTORY.md` and `docs/CVE_CORPUS_SHORTLIST.md`: source leads and candidate dossiers.
-8. `src/scaneval/`, `sdk/typescript/`, `schema/v2/`, `corpus/pilot/`, and `tests/test_v2*`: current code, preserved runs, and executable invariants.
+5. `docs/OBSERVER_SDK.md`: event integration, passivity, flushing, and the own-harness capture matrix. That matrix is the only copy and a test parses it; edit the document and the code together or not at all.
+6. `docs/COLLECTORS.md`, `docs/DEEPSEC.md`, `docs/DIAGNOSTICS.md`: the native CLI collectors, the third-party DeepSec adapter with its own parsed capture matrix, and the context-coverage diagnostic.
+7. `docs/BRING_YOUR_OWN_CORPUS.md`: the organization-owned pack path as the code implements it.
+8. `docs/REPOSITORY_INVENTORY.md` and `docs/CVE_CORPUS_SHORTLIST.md`: source leads and candidate dossiers. That inventory is a list of candidate repositories for the corpus, not an inventory of this repository's own modules; the README's repository layout is that.
+9. `src/scaneval/`, `sdk/typescript/`, `schema/v2/`, `corpus/pilot/`, and `tests/test_v2*`: current code, frozen run configurations, scrubbed fixtures, and executable invariants.
 
 The design and math describe the destination. The initial-build guide and inspected code describe current capabilities. Do not silently change a design decision to accommodate a shortcut in the alpha implementation.
 
@@ -48,22 +49,24 @@ The first release evaluates public workloads. Do not claim that public-case resu
 ## Current implementation
 
 - Python package `scaneval`, alpha version `2.0.0a1`.
-- `scaneval validate`, `score`, `replay`, `report`, `demo`, `corpus`, `plan`, `review`, and `run` commands. `corpus` has `init`, `add-snapshot`, `import`, `validate`, `approve`, `admit`, `disposition`; `review` has `init`, `record`, `approve`, `status`.
+- `scaneval validate`, `score`, `replay`, `report`, `demo`, `corpus`, `plan`, `review`, `run`, and `diagnose` commands. `corpus` has `init`, `add-snapshot`, `import`, `validate`, `approve`, `admit`, `disposition`; `review` has `init`, `record`, `approve`, `status`; `diagnose` has `context-coverage`.
 - `evaluate(plan, saved_result, frozen_decisions)` library entry point. This does not run an agent.
 - Nine strict JSON contracts: `scan-request`, `scan-result`, `execution-record`, `evaluation-plan`, `review-decisions`, `review-record`, `case-pack`, `run-config`, `run-manifest`.
 - Case packs with pinned snapshots, drafted cases, six mechanical (L1) checks per snapshot, recorded human approvals, admissions, and dispositions. Plan generation degrades to the lowest label state present.
 - Immutable source cache and pinned snapshot export with a recorded tree hash, stripped controller state, recorded instruction files, and preparation provenance. Only the `standard` profile is implemented; `metadata_blinded` is refused rather than downgraded.
 - An invocation runner that executes a frozen run configuration, freezes the pack copy, prepares each input, invokes each system per input per repetition into its own bundle, and writes a run manifest. A failure after the output directory exists writes a `failed` manifest rather than losing what finished.
-- Two real adapters: `semgrep` against a pinned local rules checkout with no registry download, and `llm-harness` running the securevibes-agent/Fieldglass engine through its own entry point. Only the securevibes-agent preset has been exercised against a live model, in `bootstrap` mode.
-- The TypeScript observer is connected to the own harness through `src/scaneval/adapters/llm_harness_driver.mts`, which wraps the harness's default model runner and emits model request/response, context selection from the harness's own progress notes, and finding submission.
+- Three real adapters: `semgrep` against a pinned local rules checkout with no registry download, `llm-harness` running the securevibes-agent/Fieldglass engine through its own entry point, and `deepsec` running the third-party DeepSec CLI (2.3.10) unchanged in a private workspace inside the run's raw output. Only the securevibes-agent preset has been exercised against a live model, in `bootstrap` mode.
+- The TypeScript observer is connected to the own harness through `src/scaneval/adapters/llm_harness_driver.mts` (driver `2.2.0`), which wraps the harness's default model runner and feature-detects two optional harness surfaces on top of that: the runner hooks (`PI_RUNNER_HOOKS_VERSION`) and the engine observer (`HARNESS_OBSERVER_VERSION`). Without them it emits one model request/response pair per logical call, context selection from the harness's own progress notes, and finding submission. With them it emits one pair per CLI attempt with the claude route's `--output-format json` result (token usage, CLI-reported cost estimate, turn count, session id, served model), the engine's own supplied-context spans, and candidate and filtering events. Each surface is detected and falls back independently; which were found is recorded per run.
+- `scaneval.collectors` imports Claude Code transcripts, `stream-json` output and `codex exec --json` into trace events, so a harness that shells out to one of those CLIs becomes observable without being edited. Fixtures under `schema/v2/fixtures/collectors/` are scrubbed real runs; `scripts/sanitize_native_trace.py` is the scrubber and audits its own output.
+- `scaneval.diagnostics` and `scaneval diagnose context-coverage` classify each labeled target per invocation as included, partial, absent or unknown from `context.selection` spans, evaluator-side and after the run. It scores nothing and reaches no metric.
 - A review workflow: machine-drafted decisions routed by accepted location path, all unresolved; `review record` re-drafts after a human edits the decisions; `review approve` records one explicit human approval bound to the saved result.
 - One-input scoring against all assigned targets and controls, with exact-duplicate handling, first-hit ranks, budgeted/full-output recall, unranked diagnostics, and completed-control bounds.
 - A fabricated conformance demo and standalone HTML score report. No real scanner runs in the demo.
 - A TypeScript observer emitter with explicit model/tool/context/finding events, recording modes, redaction of supplied copies, failure isolation, capture-gap state, and `flush()`.
-- Three real runs, described in `docs/PILOT.md`. The records are not committed; the frozen run configurations in `corpus/pilot/` reproduce them. They are pipeline demonstrations, not results.
+- Real runs across three systems, described in `docs/PILOT.md`: the 2026-09-20 pilot (Semgrep and the own harness, six invocations over three inputs) and two DeepSec runs on the Fastify input on 2026-09-25. The records are not committed; the frozen run configurations in `corpus/pilot/` reproduce them. They are pipeline demonstrations, not results.
 - Legacy `scripts/` and adapters remain unchanged and continue using old semantics. Do not assume their output or behavior conforms to the new contracts.
 
-Last verified on this checkout: 663 Python tests passed, 2 legacy snapshot tests skipped because their checkouts were unavailable; 13 TypeScript tests passed. The Python count moved during the session that recorded it, so treat it as a floor and recheck on the current checkout rather than as a permanent guarantee.
+Last verified on this checkout, 2026-09-25: 1390 Python tests passed and 7 skipped (four preserved-run tests with no committed bundle to read, two legacy Full Track snapshot tests whose checkouts were unavailable, and one test this filesystem cannot exercise); 43 TypeScript tests passed. The Python count moves as work lands, so treat it as a floor and recheck on the current checkout rather than as a permanent guarantee.
 
 **The corpus remains draft.** The pilot pack `corpus/pilot/pack.json` holds three cases, all `mechanically_checked` at L1 with disposition `needs_evidence` and no admission record. Every plan built from it therefore has `draft` scope, every matching decision in the preserved runs is `unresolved`, and confirmed detection is zero. Do not present any number from this repository as a detection result.
 
@@ -74,14 +77,15 @@ Important limitations:
 - Mechanical checks establish artifacts, paths, and ranges. They do not parse source, establish a root cause, or approve anything, so no check raises a case past L1.
 - Saved-result hashing is not source-tree verification, a digital signature, or sandbox enforcement. The demo's input hash uses a path/content map. A `human_approved` review record is the record's own assertion, not a verified one.
 - Directory separation and the path checks that keep evaluator material out of a trial directory are documented boundaries, not isolation. The declared network policy is recorded and never enforced by this package.
-- The observer connection captures the model boundary of the own harness only. Tool dispatch is `unavailable` on every real route because it happens inside the model CLI subprocess; an unavailable category establishes nothing about whether that activity happened. Candidate creation, validation, and filtering are unavailable, and token usage and in-runner retries are not observable at that boundary.
+- What the observer connection can see is a property of the harness build as much as of this package. Against a build that exports the hooks it sees every CLI attempt inside the harness's retry loop, the claude json route's token counts and CLI-reported cost estimate, the spans the engine placed in each prompt, and candidate and filtering events; against a build without them it sees one event per logical call, progress-note context, and submitted findings only. Tool dispatch is unobserved on every real route because it happens inside the model CLI subprocess, and the claude route runs with session persistence off so no transcript is left for the collectors either. An unavailable category establishes nothing about whether that activity happened. The finding-validation stage is `not_applicable` rather than unobserved on a hooked build: the judge runs in pr mode and this adapter refuses it.
+- Nothing the collectors or the DeepSec adapter report was watched as it happened. Both read records a CLI wrote after the fact, so their events are derived, say so in `metadata.source`, and carry `partial` capture wherever the reading was derived rather than observed. A record the CLI never wrote is a record nothing can recover.
 - No native/SARIF importer for saved vendor output, exporter, enforced isolation policy, multi-model planner, trace viewer, corpus aggregation, pair aggregation, precision sampling, promotion gate, native PR mode through an adapter, metadata blinding, or semantic duplicate review is implemented.
 - Control rates use completed observations. `observed_false_allegations` separately retains explicit reviewed allegations from incomplete output; do not erase those observations or include incomplete scans in a completed-only denominator.
 - The pilot pack defines no controls, so control rates are N/A rather than zero and no fixed-state snapshot has been prepared.
 
 ## Immediate objective
 
-The end-to-end slice is built and exercised: three prepared inputs, four real scanner invocations across two systems, preserved native output, machine-drafted decisions, observed harness model events, and offline replay. `docs/PILOT.md` records it. The organization-owned pack path runs through the same interface and is documented in `docs/BRING_YOUR_OWN_CORPUS.md`.
+The end-to-end slice is built and exercised: three prepared inputs, six real scanner invocations across two systems on 2026-09-20 and two more against a third system on 2026-09-25, preserved native output, machine-drafted decisions, observed harness model events, and offline replay. `docs/PILOT.md` records it. The organization-owned pack path runs through the same interface and is documented in `docs/BRING_YOUR_OWN_CORPUS.md`.
 
 What is missing is the human half. The next objective is to turn the preserved runs into reviewed evidence: human review of the routed candidates through `scaneval review record` and `scaneval review approve`, and independent review of the three case labels to L3 through `scaneval corpus approve` and `scaneval corpus admit`. That is the only path to a non-zero recall and the only path out of draft scope. After that, prepare fixed-state snapshots so the cases have property-specific negative controls, then run the own harness on the remaining inputs with repetitions before any comparison between systems.
 
@@ -117,7 +121,11 @@ Start with a short plan grounded in the existing code. Use the milestones below,
 
 ### 3. Add the first real adapter and observer integration
 
-**Status: both adapters exist and the observer is connected.** The own harness is `~/Documents/GitHub/securevibes-agent`, run unchanged through its own engine entry point inside its own `tsx`; the driver injects only the harness's default model runner wrapped by the observer plus a progress reporter, and no patch to that repository was needed. The pinned conventional scanner path is Semgrep OSS against a local rules checkout, independent of Inspect and Harbor. Finding submission is linked by the harness's own finding ids. Still missing: tool-dispatch visibility (it happens inside the model CLI subprocess), the candidate, validation, and filtering stages, token usage, tracing-on/off parity tests against a live route, and native PR mode. The guidance below still governs, in particular the rule that an unobserved category is never reported as an absence.
+**Status: three adapters exist and the observer is connected.** The own harness is `~/Documents/GitHub/securevibes-agent`, run unchanged through its own engine entry point inside its own `tsx`; the driver injects only the harness's default model runner wrapped by the observer, a progress reporter, and, against a build that exports the engine hooks, an engine observer the harness already has a place for. The pinned conventional scanner path is Semgrep OSS against a local rules checkout, independent of Inspect and Harbor. The third path is `deepsec`, which runs the third-party DeepSec CLI unchanged and reads its records afterwards. Finding submission is linked by each system's own finding ids.
+
+**The earlier claim that no patch to the harness repository was needed no longer holds for everything ScanEval can see.** The unpatched path still works and is what an older checkout gets, but the deeper observation surfaces live in the harness: `PI_RUNNER_HOOKS_VERSION` in `src/runtime/pi-runner.ts` and `HARNESS_OBSERVER_VERSION` in `src/runtime/observer-hooks.ts`, added on top of `c918011` and uncommitted in that repository at the time of writing. ScanEval's driver feature-detects both, records which it found, and falls back to the previous behavior for each one it does not find. That fallback is what keeps an unpatched checkout working; keep it working when either side changes, and keep any integration patch separate and authorized, as the guidance below requires.
+
+Still missing on this path: tool-dispatch visibility on the claude route (dispatch happens inside the model CLI subprocess, and that route runs with session persistence off, so no transcript is left for the collectors either), tracing-on/off parity tests against a live route, and native PR mode. Token usage, CLI-reported cost, in-runner retries, supplied-context spans, and the candidate and filtering stages are observable against a hooked build and not against an unhooked one; the validation stage is `not_applicable` rather than unobserved, because the judge runs in pr mode and this adapter refuses it. The guidance below still governs, in particular the rule that an unobserved category is never reported as an absence.
 
 - Inspect the available own-harness repository first. A likely local starting point is `~/Documents/GitHub/securevibes-agent`; verify its existence, actual invocation, and output structure. Do not invent a RunSortie command or assume its API matches SecureVibes. If the preferred first harness is ambiguous after inspection, ask one concise question.
 - Keep the harness's agent loop intact. Prefer shared model-client/tool-dispatch boundaries or existing callbacks. Request authorization before editing another repository and keep any integration patch separate.

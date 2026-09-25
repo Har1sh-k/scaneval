@@ -1,14 +1,20 @@
 # First real-case pilot, 2026-09-20
 
-This is the first end-to-end slice on real repositories: prepared inputs, two real
-scanner invocations, preserved native output, machine-drafted review records, and offline
-replay. It is a pipeline demonstration, not a benchmark result. No case has been
+This is the first end-to-end slice on real repositories: prepared inputs, six real
+scanner invocations across two systems, preserved native output, machine-drafted review
+records, and offline replay. It is a pipeline demonstration, not a benchmark result. No case has been
 independently reviewed, no matching decision has been approved, and every number below is
 therefore either an execution fact or a zero by construction.
 
 The run records are not committed. Every number below was read from the records this
 build produced, and the frozen run configurations in `corpus/pilot/` reproduce them. See
 "Reproducing the runs" below.
+
+Two things happened after this pilot and are recorded here rather than folded into it: the
+harness gained observation surfaces the driver now uses where it finds them, described
+under "What a hooked harness build changes", and two further runs on one input on
+2026-09-25 — a third system, and the harness itself through the hooked driver — described
+under "Later pipeline exercises".
 
 ## What was evaluated
 
@@ -123,11 +129,14 @@ The harness run captured 41 events with no capture gap and no dropped events: 19
 requests, 19 responses, and 3 submissions. Content mode stored the complete outgoing
 prompt for every call, which is the model-visible context after the harness selected it.
 
-What those statuses mean, stated as limits:
+What those statuses mean, stated as limits **of this run**. The harness build it ran
+against, `c918011`, exported no observation surface of its own, so the driver saw only
+what it could wrap from outside. A later build changed three of the four; what it changed
+and what it did not is the next subsection.
 
-- **Model events are partial, not complete.** The observer wraps the harness's own model
+- **Model events are partial, not complete.** The observer wrapped the harness's own model
   runner, and that runner retries internally, below the observed boundary. One event is
-  one logical call, not one attempt. Token usage is not exposed by the CLI path at all.
+  one logical call, not one attempt, and the text-mode CLI path exposed no token usage.
 - **Tool dispatch is unavailable, and that is not the same as absent.** The claude route
   denies only network and spawn tools; file tools such as Read and Bash remain permitted
   inside the CLI's isolated working directory. Those calls happen inside a subprocess this
@@ -135,17 +144,59 @@ What those statuses mean, stated as limits:
   nothing about whether a tool ran. Each route's declared tool policy is recorded as the
   harness's own declaration, never as an observation.
 - **The finding lifecycle is only observed at submission.** Candidate creation,
-  validation attempts and filtering happen inside the harness and are not exposed at the
-  boundaries this driver instruments. A question like "where did the harness drop this
-  finding" cannot be answered from these records yet.
+  validation attempts and filtering happened inside the harness and were not exposed at
+  the boundaries this driver instrumented. A question like "where did the harness drop
+  this finding" cannot be answered from these records.
 - **Context selection is partial.** Only the harness's own progress notes are recorded as
   context events. The complete outgoing prompt is captured separately as model-request
   content, which is the stronger evidence of what actually reached the model.
 
-Model identity is recorded as `unverified`: the requested route is known,
-`anthropic/claude-sonnet-5`, but neither CLI reports the model that served the call. Cost
-is recorded as unknown. The harness's own estimate for this run, 3.2 USD, is a file-count
-heuristic and is preserved as its self-report, not as a measurement.
+Model identity is recorded as `unverified` for this run: the requested route is known,
+`anthropic/claude-sonnet-5`, but neither CLI reported the model that served the call at
+that build. Cost is recorded as unknown. The harness's own estimate for this run, 3.2 USD,
+is a file-count heuristic and is preserved as its self-report, not as a measurement.
+
+### What a hooked harness build changes
+
+The harness gained two optional observation surfaces after this run, and the ScanEval
+driver (version 2.2.0) feature-detects each one rather than assuming it: the runner hooks
+(`PI_RUNNER_HOOKS_VERSION`) and the engine observer (`HARNESS_OBSERVER_VERSION`). A
+checkout exporting neither is observed exactly as this run was, which is what keeps an
+older checkout working. Nothing above became wrong; it became specific to the build it
+describes.
+
+Against a build that exports them:
+
+- **Retries are observable.** One model request/response pair per CLI attempt, from inside
+  the harness's own retry loop, each carrying the attempt number, the maximum, the retry
+  decision and its backoff, joined to its call by `call_id` with an `attempt_id` of
+  `<call_id>/attempt-<n>`.
+- **Token usage and a cost estimate exist on the claude route.** The driver asks for
+  `--output-format json`, so each attempt also carries the CLI's own token counts, its
+  cost estimate, the turn count, the session id and the served model id, while the engine
+  still receives exactly the text a text-mode run would have printed. The category stays
+  `partial` regardless: an attempt is a CLI invocation rather than an API request, so the
+  turns inside one attempt are not visible from here, and the pi route reports no usage at
+  all. A CLI-reported cost is an estimate, never a bill.
+- **Context selection becomes the engine's own report.** One event per instrumented
+  invocation carrying every span the engine placed in that prompt: path, line range,
+  character count, the sha256 of exactly the text supplied, the role it played, and
+  whether the text could be located in the file. The category stays `partial` for the run,
+  because the threat planner's model calls and some specialist invocations are not
+  instrumented, so a model request with no context event beside it is an uninstrumented
+  call, not a call that was given no context.
+- **Candidate creation and filtering become observable,** under the engine's own candidate
+  ids. Validation becomes `not_applicable` rather than `unavailable`: the validation stage
+  is the consensus judge, the judge runs in pr mode, and this adapter refuses every mode
+  but bootstrap. That is "this run had no such stage", which is a different statement from
+  "there was one and it could not be seen".
+- **Tool dispatch does not change.** It still happens inside the model CLI subprocess, and
+  the claude route runs with `--no-session-persistence`, so no session transcript is left
+  behind for `scaneval.collectors` to read either. It stays unobserved on that route.
+
+The full per-category matrix, per harness build, is in
+[the observer SDK guide](OBSERVER_SDK.md). That document is the only copy of it and a test
+parses it, so it is not repeated here.
 
 The run was marked `degraded` with a `lite` runtime profile because `qmd` is absent on
 this machine. One of 18 harness model calls failed, leaving hypothesis coverage at 0.889.
@@ -199,12 +250,171 @@ scaneval corpus validate corpus/pilot/pack.json --snapshot-id oauth2-proxy-f4b33
 # Pinned conventional scanner, all three inputs.
 scaneval run corpus/pilot/run-semgrep.json --output <new dir>
 
-# Own harness, one input, live model calls.
+# Own harness, one input, live model calls. This configuration is the Haiku one that
+# produced the 2026-09-25 run below, not the Sonnet configuration of 2026-09-20.
 scaneval run corpus/pilot/run-harness.json --output <new dir> --only-input fastify-v5.12.1
+
+# Third-party scanner, one input, live model calls.
+scaneval run corpus/pilot/run-deepsec.json --output <new dir> --only-input fastify-v5.12.1
 ```
 
 Output directories must not exist. The harness run makes real model calls through the
-local `claude` CLI login and took about 12 minutes for one input.
+local `claude` CLI login and took about nine minutes for one input at its current Haiku
+settings; the 2026-09-20 figures above came from a Sonnet configuration this file no
+longer carries, so that run reproduces as a run of the same shape, not as the same
+numbers.
+
+The DeepSec run makes real model calls too, and took about four and a half minutes for one
+input at `limit: 6`. It also needs an installed DeepSec workspace, and `run-deepsec.json`
+points at one under `~/Documents/GitHub/sec-test-repos/.deepsec`, which is a path you must
+change to your own.
+
+## Later pipeline exercises, 2026-09-25
+
+Two runs on the Fastify input, on the cheap model route, neither of them a detection
+result: a third system for the first time, and the own harness again against a build that
+exports the hooks.
+
+### DeepSec on Fastify
+
+A third system now has an adapter. DeepSec (`vercel-labs/deepsec`, pinned at 2.3.10) is a
+third-party scanner ScanEval runs unchanged through its own CLI: `scan` for regex
+candidates, `process` for the agent investigation, `export` for the findings. Nothing in
+it is patched or wrapped, and the adapter reads its records afterwards rather than
+observing it as it works. The frozen configuration is
+[`corpus/pilot/run-deepsec.json`](../corpus/pilot/run-deepsec.json) and the adapter,
+including its own capture matrix, is documented in [the DeepSec adapter](DEEPSEC.md).
+
+It was run twice on 2026-09-25 against the Fastify snapshot with `claude-haiku-4-5`,
+`thinking_level: low`, `limit: 6`, `batch_size: 3`, `concurrency: 1`, trace mode
+`content`. Both completed with status `success`.
+
+| Observation | First run | Second run |
+|---|---|---|
+| Trace events, capture gap, dropped events | 148, none, 0 | 118, none, 0 |
+| Agent sessions, transcripts imported | 2 of 2 | 2 of 2 |
+| File records written by `scan` | 35 | 35 |
+| Files `process` investigated | 6 | 6 |
+| File records left `pending` by the limit | 29 | 29 |
+| Regex candidates read from those records | 40 | 40 |
+| Claims | 5 | 2 |
+| Routed candidates | 0 | 0 |
+| DeepSec's own cost estimate | 0.2956 USD | 0.2618 USD |
+| Wall | 254.2 s | 267.8 s |
+
+**This is a pipeline exercise on the cheapest route with a file limit. It is not a
+detection result and not a measurement of DeepSec.** `limit: 6` means `process`
+investigated six of the 35 files `scan` had recorded and left the other 29 `pending`. The
+six it picked were all GitHub Actions workflow files; `lib/four-oh-four.js`, the file the
+Fastify case names, was never among them. Nothing routed, and at this limit nothing could
+have. Raising the limit is a cost decision, not a fix for these numbers.
+
+The two runs disagreeing on claim count, five against two, is the ordinary nondeterminism
+of an LLM-backed scanner at one configuration. Both are recorded; neither is averaged away
+and neither is the run.
+
+The cost and token numbers are DeepSec's own per-file shares of each batch, summed back
+into batch totals. They are CLI-reported estimates, never a bill, and no single number
+among them measures one model call.
+
+One defect this pair exposed and fixed. In the first run every context span was recorded
+as `external:<basename>` rather than workspace-relative: on macOS the scanned temporary
+directory is spelled `/var/folders/...` while the paths in the imported transcripts are
+its realpath under `/private/var/...`, so no span matched the workspace root and the
+adapter honestly recorded each one as outside the workspace. The collector now takes every
+spelling of the root, and the second run recorded all of its spans workspace-relative. The
+first run's trace still says what was observed then and was not rewritten.
+
+A second defect the pair exposed and fixed. DeepSec needs the installed `node_modules`,
+so the private workspace holds a symbolic link to it, and staging cuts that link and
+records where it pointed. In the first run that target was written out as the operator's
+absolute home path; it is now spelled with a leading `~`, which is what the second run
+recorded. The directory structure below the home is kept, because that is what says where
+the link went; only the prefix naming the machine and the account is replaced.
+
+### The own harness through the hooked driver, on Fastify
+
+The harness was then run again on the same input, this time against a build that exports
+both hooks, to see what the driver records when it finds them. Harness `c918011` with the
+hook changes in its working tree, which the driver records as a dirty checkout; driver
+version 2.2.0; model route `anthropic/claude-haiku-4-5`; `llm_max_files: 25`;
+`bootstrap` mode; trace mode `content`. Status `success`, and `degraded` with the `lite`
+runtime profile because `qmd` is absent on this machine, exactly as the 2026-09-20 run
+was.
+
+| Observation | Value |
+|---|---|
+| Hooks detected | runner 1, engine 1 |
+| Model invocations, CLI attempts, failed attempts | 13, 13, 0 |
+| Invocations the engine reported context for | 12 of 13 |
+| Context spans, spans outside the workspace | 197, 0 |
+| Distinct files supplied across those spans | 38 |
+| Trace events, capture gap, dropped events | 48, none, 0 |
+| Candidates, filtered, validations, submitted | 5, 0, 0, 5 |
+| Claims | 5 |
+| Routed candidates | 0 |
+| Served model, as the CLI reported it | `claude-haiku-4-5` |
+| CLI-reported cost estimate | 1.2358 USD |
+| Tokens: input, output, cache read, cache creation | 121, 49,057, 188,886, 485,765 |
+| Wall | 551 s |
+
+The 48 events are 13 model requests, 13 responses, 12 context selections, 5 candidates and
+5 submissions. Every one of them carries `capture_status: complete`, while the run-level
+context category is `partial`, and both are right: one invocation of the thirteen reported
+no context, and the run-level status is about the run rather than about any event in it.
+The candidates and submissions are the engine's own records, linked through the engine's
+own ids rather than read off the returned summary.
+
+Three things are recorded here that the 2026-09-20 run could only declare unobservable,
+because that run was against a build exporting neither hook:
+
+- **Attempts.** Thirteen CLI attempts behind thirteen invocations, none retried, none
+  failed; every request records `retries_observable: true`, `output_format: json` and a
+  maximum of five attempts. The count is dull precisely because nothing went wrong. What
+  it establishes is that a retry would now be an observation rather than an event folded
+  into its neighbour.
+- **Usage, cost and the served model.** Read from the claude CLI's own json result,
+  including the two cache counts the scan result's `usage` field does not carry and the
+  served model id the earlier run had to record as unverified. It is still the CLI
+  reporting on itself: `verification` stays `self_reported`, and the cost is an estimate,
+  never a bill. The token totals are floors, because an attempt that reported nothing
+  contributes nothing to them.
+- **The code the engine actually placed in each prompt.** 197 spans over 38 files, none
+  truncated, none reassembled out of fragments, and none outside the workspace. No home
+  path appears anywhere in the trace.
+
+One number is worth reading twice. The harness's own self-report says `llm_calls=12`; the
+runner hooks counted 13. The extra one is the invocation the engine reported no context
+for, recorded as `call-1` with no stage at all, and it ran before the twelve tagged
+hypothesis calls — which is where the threat planner runs, and the driver's own note says
+the planner reports no context. The record does not name it, so read the gap as what it
+is: one model call a self-report did not count, which a self-report is not in a position
+to notice about itself.
+
+Tool dispatch stayed unobserved, as it does on this route whatever the harness exports.
+
+Nothing routed. The five claims sit on `lib/config-validator.js`, `lib/reply.js`,
+`lib/validation.js`, `lib/error-handler.js` and a test script. None is on
+`lib/four-oh-four.js`, the file the Fastify case names, so no claim became a candidate for
+human review — where the Sonnet run of 2026-09-20 produced one. Two runs at different
+model routes and different file budgets; that difference is not a comparison.
+
+#### What the coverage diagnostic says about this run, and what it does not
+
+`scaneval diagnose context-coverage` on this bundle classifies the case's one target
+**`unknown`**, and records why: `target_locations_without_line_range`, because the pilot
+label for `lib/four-oh-four.js` declares a path and a note saying the exact accepted range
+is not yet reviewed, so there is no range for a span to cover; and
+`context_capture_partial_at_run_level`, because one invocation of the thirteen reported no
+context, which blocks any claim of absence for the whole run.
+
+Separately, and as a fact about the record rather than a classification: that file is not
+among the 38 the engine reported supplying. That is what the trace says and all it says.
+It is not a finding that the file was never read — a model's own tool call is not a
+context span, and tool dispatch is unobserved on this route — and with run-level capture
+partial it establishes no absence. The diagnostic's answer is `unknown`, and `unknown` is
+the answer. Giving the label a reviewed line range, and instrumenting the planner call,
+are the two things that would let the question be answered either way.
 
 ## What this pilot does not establish
 
@@ -219,12 +429,24 @@ local `claude` CLI login and took about 12 minutes for one input.
   are N/A rather than zero, and no fixed snapshot has been prepared.
 - **No claim that the harness cannot do better, or that Semgrep cannot.** One harness
   configuration, one mode, one model, one run.
+- **Nothing at all about DeepSec's detection ability.** Its two runs investigated six
+  files chosen by its own ordering under a cost limit, none of them the file the case
+  names. That measures the pipeline, not the scanner.
+- **Nothing about the harness on Haiku either, and no comparison with its Sonnet run.**
+  One run, one model route, one file budget, no repetition. The 2026-09-25 harness figures
+  demonstrate what the hooks record, not how well anything scans.
 
 ## Next
 
-1. Human review of the four routed candidates, recorded through `scaneval review record`
+1. Human review of the 13 routed candidates, recorded through `scaneval review record`
    and `scaneval review approve`, which is the only path to a non-zero recall.
 2. Independent review of the three case labels to L3, which is the only path out of draft
    scope.
 3. Fixed-state snapshots to give the cases property-specific negative controls.
 4. The harness on the remaining two inputs, and repetitions, before any comparison.
+5. The remaining two inputs against a hooked harness build. Fastify has been run that way;
+   oauth2-proxy and FastMCP have not, so retries, token usage, supplied-context spans and
+   the candidate lifecycle are still unrecorded for them.
+6. A reviewed line range on the Fastify target, and the planner invocation instrumented,
+   which are the two things that would move that target's coverage classification off
+   `unknown`.

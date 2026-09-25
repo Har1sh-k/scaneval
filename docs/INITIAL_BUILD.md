@@ -10,9 +10,11 @@ No detection result exists anywhere in this repository. Every case in the pilot 
 - Build an evaluator-side case pack: pin snapshots, draft cases from supplied artifacts, run mechanical (L1) checks against an exported tree, record explicit human reviews, admissions, and dispositions.
 - Fetch a pinned commit into an immutable source cache and export it to an isolated trial directory with a recorded tree hash and preparation provenance.
 - Execute a frozen run configuration: prepare every input, freeze the pack, invoke each system once per input per repetition, and write one bundle per invocation plus a run manifest.
-- Run two real adapters: pinned Semgrep OSS against a local rules checkout, and the own harness through its own engine entry point with the observer wrapped around its default model runner.
+- Run three real adapters: pinned Semgrep OSS against a local rules checkout, the own harness through its own engine entry point with the observer wrapped around its default model runner, and the third-party DeepSec scanner run unchanged through its own CLI.
 - Draft review decisions by routing claims to planned targets, then record and approve them through explicit human steps.
 - Score one saved output against all assigned targets and controls for that input, reporting full-output recall, first-hit ranks, native review-budget recall, exact duplicates, unresolved findings, and conditional control bounds.
+- Import the records an agent CLI wrote for itself — Claude Code transcripts and `stream-json`, and `codex exec --json` — into trace events, so a harness that shells out to one becomes observable without being edited.
+- Report, from a saved bundle, whether each labeled target's code region was supplied to the model and in which invocation.
 - Replay the same saved records without models or network access, and generate a standalone HTML report.
 
 The core does not determine whether an arbitrary natural-language allegation establishes a root cause. That decision comes from a frozen evaluator-side review record. Replaying that record is deterministic; producing the underlying security label or a live model response is not made deterministic by this package.
@@ -111,29 +113,55 @@ The declared network policy is recorded, never enforced. The runner computes sin
 
 ## Adapters
 
-Two adapters are registered, `semgrep` and `llm-harness`. An adapter runs the real product once, preserves its raw output, and translates native findings into normalized claims. It never receives labels and never decides whether a claim is true.
+Three adapters are registered: `semgrep`, `llm-harness`, and `deepsec`. An adapter runs the real product once, preserves its raw output, and translates native findings into normalized claims. It never receives labels and never decides whether a claim is true.
 
 **`semgrep`** runs Semgrep OSS against a local git checkout of a rules repository pinned to one commit, with `--metrics=off` and no registry download. A `p/...` or `r/...` registry config is refused because it is not a pin. Preparation records the ruleset commit, the number of rule files Semgrep's own `--config <directory>` walk would select, and one aggregate hash over those files; a symlink anywhere under a configured ruleset directory is refused rather than followed. Native rule identity is recorded relative to the pinned checkout so the cache path does not leak into the rule id. A run that scanned no paths and reported nothing is an error, not a quiet negative result.
 
-**`llm-harness`** runs the `securevibes-agent` and `fieldglass` engine family through its own engine entry point inside its own `tsx`. Presets exist for both; only `securevibes-agent` has been exercised against a live model. ScanEval injects only the harness's default model runner wrapped by the observer and a progress reporter. Findings are imported from the harness's own `findings/*.md` records; they are file-level, and this importer keeps them file-level and never invents line ranges. The harness plan, threat model, scan log, profile, and specialist records are copied into the staging directory so they survive as hashed raw artifacts, and the whole state directory is captured separately. Only `bootstrap` mode on a full scan is supported; native PR mode is not wired.
+**`llm-harness`** runs the `securevibes-agent` and `fieldglass` engine family through its own engine entry point inside its own `tsx`. Presets exist for both; only `securevibes-agent` has been exercised against a live model. ScanEval injects only the harness's default model runner wrapped by the observer, a progress reporter, and — when the harness build exports one — an engine observer the harness already has a place for. Nothing else about the scan is supplied or altered. Findings are imported from the harness's own `findings/*.md` records; they are file-level, and this importer keeps them file-level and never invents line ranges. The harness plan, threat model, scan log, profile, and specialist records are copied into the staging directory so they survive as hashed raw artifacts, and the whole state directory is captured separately. Only `bootstrap` mode on a full scan is supported; native PR mode is not wired.
+
+**`deepsec`** runs the third-party DeepSec CLI (`vercel-labs/deepsec`, pinned at 2.3.10) unchanged: `scan` for its regex candidates, `process` for its Claude Agent SDK investigation, `export` for the findings. No DeepSec code is modified, wrapped, or injected into, and nothing is written into the installed workspace. Because DeepSec resolves its configuration from the working directory, the adapter builds a private workspace inside the run's own raw output at `raw/deepsec-workspace/`, with one project, no plugins, and a symbolic link to the installed `node_modules`; everything DeepSec writes lands there and is captured. Events are reconstructed afterwards from DeepSec's own file records and from the Claude Code transcripts its agent sessions left behind, so every one of them carries `source: harness_record` or the transcript importer's own source, never a claim to have watched the scan happen. [The DeepSec adapter](DEEPSEC.md) is the full account, including its capture matrix.
 
 ## Observer connection: what is captured and what is not
 
-The TypeScript observer is connected to the own harness through [`llm_harness_driver.mts`](../src/scaneval/adapters/llm_harness_driver.mts). Importing the SDK still captures nothing on its own; this driver is what emits.
+The TypeScript observer is connected to the own harness through [`llm_harness_driver.mts`](../src/scaneval/adapters/llm_harness_driver.mts), driver version `2.2.0`. Importing the SDK still captures nothing on its own; this driver is what emits.
 
-It emits `model.request` and `model.response` around each logical model call, `context.selection` from the harness's own progress notes, and `finding.submitted` for each finding the engine finally wrote. It does not emit tool events or finding candidate, validation, and filtering events.
+What the driver can see is a property of the harness build as much as of this adapter, and it never assumes. It feature-detects two optional surfaces the harness may export — the runner hooks (`PI_RUNNER_HOOKS_VERSION`) and the engine observer (`HARNESS_OBSERVER_VERSION`) — records which of them it found as `hooks` in its own output, and falls back independently for each one it does not find. A checkout exporting neither is observed exactly as it was before either existed: one `model.request`/`model.response` pair per logical call, `context.selection` from the harness's own progress notes, and `finding.submitted` from the returned summary. That fallback is what keeps an unpatched harness checkout working.
 
-| Category | Status on a real route | Why |
-|---|---|---|
-| Model requests and responses | `partial` | One event is one logical call. The harness retries inside its own runner, below the observed boundary, and the CLI path exposes no token usage. |
-| Tool calls | `unavailable` | Dispatch happens inside the model CLI subprocess this driver spawns but cannot see into. No tool event is emitted, and that establishes nothing about whether a tool ran. |
-| Context selection | `partial` | Only the harness's own progress notes become context events. The complete outgoing prompt is captured separately as model-request content. |
-| Finding submitted | `complete` when the engine returned a summary | Read from the engine's own returned findings. |
-| Finding candidate, validation, filtered | `unavailable` | Those stages happen inside the harness and are not exposed at the boundaries this driver instruments. |
+Against a build that exports them, the driver additionally records:
 
-Each route's declared tool policy is recorded as the harness's own declaration, never as an observation. Model identity is recorded as `unverified` when the CLI path does not report the served model. Cost is recorded as unknown; a harness self-estimate is preserved as a self-report, never as a measurement.
+- one model request/response pair per **CLI attempt**, from inside the harness's own retry loop, so a retry is an observation rather than something folded into one event; the attempt number, the maximum, the retry decision and its backoff ride along, and each attempt joins its call by `call_id` with an `attempt_id` of `<call_id>/attempt-<n>`;
+- on the claude route, the CLI's own token counts, its cost estimate, the turn count, the session id and the served model id, because the driver asks that route for `--output-format json` while the engine still receives exactly the text a text-mode run would have printed;
+- `context.selection` as the engine's own report of what it placed in each prompt: every span's path, line range, character count, the sha256 of exactly the text supplied, the role it played, and whether that text could be located in the file;
+- `finding.candidate` and `finding.filtered` under the engine's own candidate ids, alongside the submitted records.
 
-`unavailable` is not `not_applicable`. The mock runner, which spawns no process at all, is the only case where tool dispatch is genuinely inapplicable.
+Three limits survive both surfaces, and one category changes meaning rather than becoming visible:
+
+- **Tool dispatch stays unobserved on the claude route.** It happens inside the model CLI subprocess this driver spawns but cannot see into, and that route runs with session persistence off, so no session transcript is left behind for the collectors to read either. No tool event is emitted, and that establishes nothing about whether a tool ran. Only the mock runner, which spawns no process at all, makes the concept genuinely inapplicable.
+- **Model events stay `partial`.** An attempt is a CLI invocation rather than an API request, so the turns taken inside one attempt are not visible from here, and the pi route reports no usage at all.
+- **Context selection stays `partial` for the run.** The threat planner's model calls and some specialist invocations are not instrumented, so a model request with no context event beside it is an uninstrumented call, not a call that was given no context.
+- **Validation becomes `not_applicable`, not visible.** The validation stage is the consensus judge, the judge runs in pr mode, and this adapter refuses every mode but bootstrap, so no run it can produce has that stage in it. That is a different statement from having one and being unable to see it.
+
+The per-category capture matrix — every cell, for every combination of trace mode, observed routes and detected hooks — lives in [the SDK guide](OBSERVER_SDK.md), and DeepSec's own matrix in [the DeepSec adapter](DEEPSEC.md). Each document is the only copy of its matrix: a test parses the cells out of it and compares them against what that adapter's `capture_status` returns, so the cells are deliberately not repeated here.
+
+Each route's declared tool policy is recorded as the harness's own declaration, never as an observation. Model identity is recorded as `unverified` when the path that ran does not report the served model. A harness self-estimate of cost is preserved as a self-report and a CLI-reported estimate as an estimate; neither is a measurement and neither is a bill.
+
+`unavailable` is not `not_applicable`, and neither is evidence of absence. Whatever a matrix cell claims, `scaneval.execution` rewrites every value claiming an observation to `unavailable` when the bundle it lands in holds no counted trace event.
+
+## Native CLI collectors
+
+`scaneval.collectors` reads the records an agent CLI wrote for itself and turns them into trace events, so a harness that shells out to Claude Code or Codex becomes observable **without being edited**. It imports Claude Code session transcripts, `claude -p --output-format stream-json --verbose` output, the single `--output-format json` result object, and `codex exec --json`. Nothing there spawns a process, patches a client, or makes a network call: the importers are readers over text handed to them, and only the transcript finder touches the filesystem.
+
+A collector is a reader, not a wrapper, and that is the limit as well as the point. It sees what the CLI chose to write down, so every event says where it was read from and carries `partial` capture wherever the reading was derived rather than observed. Retries a CLI made internally are invisible; a file read through a shell command is never a span, which is why Codex reports no context selection at all; a subagent transcript carries the delivered text with no path or line range, so it produces no spans. [The collectors guide](COLLECTORS.md) states each limit against the fixture that demonstrates it.
+
+The fixtures under `schema/v2/fixtures/collectors/` are real CLI runs against a two-file synthetic workspace, scrubbed by [`scripts/sanitize_native_trace.py`](../scripts/sanitize_native_trace.py). That script is an allowlist rather than a search-and-replace — the record types the collectors read are rewritten field by field and every other record is reduced to a stub — and it audits its own output, refusing to write a file in which a home path, an unscrubbed workspace path, or an email address survived. One fixture, `claude-code-edge-cases.jsonl`, is hand-built in the same record shape for branches a short successful run cannot produce.
+
+## Diagnostics
+
+`scaneval diagnose context-coverage <bundle>` answers one question about a saved run: for each labeled target, was the target's code region delivered to the model, and in which invocation. When a scan misses a known vulnerability, "the model was never shown the code" and "the model was shown the code and said nothing" look identical in the result, and only the second is a detection failure.
+
+It joins the pack's `accepted_locations` to the trace's `context.selection` spans — evaluator-side, after the run, so nothing a scanner saw could have been affected by it — and classifies each target per invocation as `included`, `partial`, `absent` or `unknown`. Spans live in `metadata`, so it works in `metadata` trace mode as well as `content` mode, and it reads no file content.
+
+It scores nothing and writes nothing into the bundle. `included` says the lines were delivered, not that the model attended to them or that what was delivered was sufficient. Partial capture turns `absent` into `unknown` and never the other way round, because an absent event is never evidence of absent activity. A target whose code was never supplied is still a target the scan did not detect: this explains a miss, it does not excuse one. [The diagnostics guide](DIAGNOSTICS.md) carries the classification table, the reason codes, and everything the document declines to claim.
 
 ## Case packs, mechanical checks, and explicit human approval
 
@@ -159,7 +187,7 @@ A human edits `evaluator/decisions.json`. `review record` then re-drafts the rev
 
 ## Run configuration
 
-A run configuration is a frozen document naming the pack, the inputs, the systems, the repetition count, the timeout, the trace mode, and the network policy. The two pilot configurations are [`corpus/pilot/run-semgrep.json`](../corpus/pilot/run-semgrep.json) and [`corpus/pilot/run-harness.json`](../corpus/pilot/run-harness.json).
+A run configuration is a frozen document naming the pack, the inputs, the systems, the repetition count, the timeout, the trace mode, and the network policy. The three pilot configurations are [`corpus/pilot/run-semgrep.json`](../corpus/pilot/run-semgrep.json), [`corpus/pilot/run-harness.json`](../corpus/pilot/run-harness.json), and [`corpus/pilot/run-deepsec.json`](../corpus/pilot/run-deepsec.json). The DeepSec one names an installed DeepSec workspace with a leading `~`, so it expands to whichever operator runs it rather than pinning one machine.
 
 `--only-input` and `--only-system` narrow a run. Naming something the configuration does not contain is an error rather than a silently empty run, and what was narrowed away is recorded in the manifest. `--workspace-root` chooses where the scanner's private workspace is created; a workspace inside the run output, the source cache, or an exported input is refused.
 
@@ -186,6 +214,7 @@ A run configuration is a frozen document naming the pack, the inputs, the system
 | `review approve <bundle> --reviewer --note` | Record one explicit human approval. | none |
 | `review status <bundle>` | Report missing, stale, draft, or human_approved. | none |
 | `run <config> --output <new dir>` | Execute one frozen run configuration. | depends on the configured systems |
+| `diagnose context-coverage <bundle>` | Report whether each labeled target's code was supplied to the model. Writes nothing into the bundle. | none |
 
 Exit codes: `2` means the command could not be carried out (a usage or contract error, a refused overwrite, a failed fetch or export). `1` means it ran and reports a negative result (a mechanical check set failed, or a run produced no usable scan from some system). `0` means it ran and reports nothing wrong, which is not a statement that any label or decision is correct.
 
@@ -259,6 +288,8 @@ The TypeScript emitter records supplied model/tool events, selected context, and
 
 Sink or other instrumentation errors create capture gaps without replacing the operation's result or exception. Missing events are not evidence that an operation did not happen. The HTML report currently shows scores, not a trace timeline.
 
+A Python emitter ships alongside it in `scaneval.observer`, and it is what the collectors and the DeepSec adapter write through. Both emitters are held to one parity contract, which [the SDK guide](OBSERVER_SDK.md) states and a test checks.
+
 ```sh
 cd sdk/typescript
 npm ci
@@ -272,8 +303,10 @@ npm test
 - **Directory separation is not isolation.** The declared network policy is recorded, not enforced. Path checks refuse the obvious mistake and do not follow bind mounts or hard links.
 - **Hashes identify documents.** They do not authenticate an author, verify a source snapshot, or prove that a reviewer read anything.
 - **Capture gaps are not absence.** An `unavailable` category establishes nothing about whether the underlying activity happened.
+- **Visibility depends on the build that was run, not only on this package.** The own-harness driver sees attempts, token usage, supplied-context spans and the candidate lifecycle only against a harness build that exports the hooks, and falls back for each surface it does not find. Tool dispatch on the claude route is unobserved either way. What a given run could see is recorded per run, not promised here.
+- **Nothing a collector or the DeepSec adapter reports was watched as it happened.** Both read records written after the fact, so their events are derived and say so; a record the CLI never wrote is a record nothing can recover.
 - **Single-invocation numbers only.** No corpus aggregation, pair aggregation, repeated-run uncertainty, precision sampling, promotion gate, trace viewer, exporter, or multi-model planner is implemented.
-- **Not implemented at all:** native PR mode through an adapter, metadata blinding, SARIF or native output import, and semantic duplicate review.
+- **Not implemented at all:** native PR mode through an adapter, metadata blinding, SARIF or saved vendor output import, and semantic duplicate review. The collectors import an agent CLI's own trace records; nothing imports a scanner's saved findings file produced outside a ScanEval invocation.
 - **The legacy `scripts/` runner and adapters are unchanged** and continue using old semantics. Their output does not conform to these contracts.
 
 ## Next implementation slice
@@ -282,7 +315,8 @@ npm test
 2. Independent review of the pilot case labels to L3, which is the only path out of draft scope.
 3. Fixed-state snapshots so the cases have property-specific negative controls.
 4. The own harness on the remaining inputs, plus repetitions, before any comparison between systems.
-5. Native PR integration, output import, corpus and pair aggregation, and the buyer report.
+5. A rerun of the harness inputs against a hooked harness build, so retries, token usage, supplied-context spans and the candidate lifecycle are recorded rather than declared unobservable, and `diagnose context-coverage` has spans to read.
+6. Native PR integration, output import, corpus and pair aggregation, and the buyer report.
 
 The Python core supports request language tags for Python, TypeScript/JavaScript, Go, and Rust. This does not imply equal corpus coverage or live support for every scanner. Inspect/Harbor selection, Jev corpus assistance, and the separate engineering improvement agent remain outside this slice.
 

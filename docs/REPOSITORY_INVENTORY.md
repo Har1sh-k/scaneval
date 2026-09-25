@@ -4,6 +4,8 @@ Research date: 2026-09-19. Initial language scope: **Python, TypeScript/JavaScri
 
 This is a source-mining list, not the selected corpus. The [CVE shortlist](CVE_CORPUS_SHORTLIST.md) identifies individual issues worth examining next. No entry here implies an audited project, a validated benchmark label, or permission to redistribute its source.
 
+It is also not an inventory of this repository's own code: the README's repository layout lists the modules, fixtures, scripts and run configurations ScanEval ships, and a scanner ScanEval evaluates, such as DeepSec, is a system in a run configuration rather than a corpus candidate.
+
 The inventory contains 103 distinct source leads: 97 in the area tables and 6 runtime/developer-tool leads. Excluded and pending-maintenance entries are listed separately and are not included in that count.
 
 ## Scope and selection

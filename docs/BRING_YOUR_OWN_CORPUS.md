@@ -436,8 +436,8 @@ admission before evaluation, enforce it by checking the pack, not by relying on 
 | `inputs[].snapshot_id` | yes | A snapshot the pack declares. Refused before anything is written otherwise. |
 | `inputs[].profile` | no | `standard` (default) or `metadata_blinded`. |
 | `systems[].system_id` | yes | Matches `^[A-Za-z0-9][A-Za-z0-9._-]*$`. |
-| `systems[].adapter` | yes | `semgrep` or `llm-harness` in this build. |
-| `systems[].config` | yes | Adapter configuration. For `semgrep` this pins a rules repository by url, commit, and paths. |
+| `systems[].adapter` | yes | `semgrep`, `llm-harness`, or `deepsec` in this build. |
+| `systems[].config` | yes | Adapter configuration. For `semgrep` this pins a rules repository by url, commit, and paths; for `deepsec` it names the installed DeepSec workspace and the model, and [the DeepSec adapter](DEEPSEC.md) lists every key. |
 | `systems[].model_id`, `model_revision` | no | Recorded in the scan request and the execution record. |
 | `systems[].network_policy` | no | Overrides the run-level policy for this system. |
 | `repetitions` | yes | Integer of at least 1. |
@@ -514,6 +514,14 @@ runs/2026-09-20/
 `trace/` appears in the bundle as well when `trace_mode` is not `off`. The invocation id is
 `<input>__<system>__r<repetition>`; a configuration whose ids would collide is refused before the
 output directory is created.
+
+A bundle that carries a trace answers one question the scores do not. `scaneval diagnose
+context-coverage <bundle>` reports, per labeled target, whether that target's code region was
+supplied to the model and in which invocation. It reads your pack's `accepted_locations` and the
+trace's `context.selection` spans, joins them evaluator-side after the run, writes nothing into
+the bundle, and reaches no metric: a target whose code was never supplied is still a target the
+scan did not detect. See [diagnostics](DIAGNOSTICS.md) for the classification table and for what
+the document refuses to claim.
 
 The run never edits the source pack on disk. Its mechanical check results land only in the frozen
 copy at `evaluator/pack.json`, which is written once, after every input is prepared and before the
@@ -672,7 +680,7 @@ These are limits of the current implementation, not guarantees about your enviro
 | Storage | Every pack, plan, decision, run directory, raw output, and trace is written to a local path you name. | Nothing uploads, syncs, or publishes. Enforcing "organization-controlled" is a property of the filesystem you point it at, not of this tool. |
 | Network during preparation | `git fetch` of the snapshot URL and of an adapter's pinned ruleset URL, with `GIT_TERMINAL_PROMPT=0`. | No advisory lookup, no registry ruleset download, no maintainer contact. |
 | Remote inference | The run configuration declares `network_policy` per run and per system, and the execution record states `{"declared": "none", "enforced": false, "note": "Policy is recorded, not enforced by this runner; enforce it in the execution environment."}`. | The runner does not block a single packet. A model-backed adapter sends source to its provider whenever it is configured to. An approved data-egress and retention policy is an organizational decision the tool only records as a string. |
-| Credentials | `--url`, `--historical-url`, and `--repo` refuse a URL whose authority carries userinfo, except the bare `git` user of an ssh clone URL. The run configuration has no credential field. Scanner subprocesses receive only `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR`, `TERM`, `USER`, `SHELL` unless the adapter adds more. | The check reads the URL authority only: a token in a path, a query, or an scp-style `git@host:path` address is not detected. The `llm-harness` adapter adds `NODE_OPTIONS`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, and `XDG_CONFIG_HOME` to that passthrough, so provider keys in your environment do reach that harness process. |
+| Credentials | `--url`, `--historical-url`, and `--repo` refuse a URL whose authority carries userinfo, except the bare `git` user of an ssh clone URL. The run configuration has no credential field. Scanner subprocesses receive only `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR`, `TERM`, `USER`, `SHELL` unless the adapter adds more. | The check reads the URL authority only: a token in a path, a query, or an scp-style `git@host:path` address is not detected. The `llm-harness` adapter adds `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, and `XDG_CONFIG_HOME` to that passthrough, and `deepsec` adds `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, so provider keys in your environment do reach those scanner processes; neither is recorded. `NODE_OPTIONS` is deliberately passed by neither, because node executes what it names and a `--require` in your environment would run code inside the scanner while the record showed only a variable name. |
 | Traces | `trace_mode` is `off`, `metadata`, or `content`. Metadata mode omits content. Content mode stores a cloned, redacted copy of metadata and content, including the outgoing model request, in the bundle's `trace/` directory. | Content-mode traces therefore contain the source that was sent to the model. Treat a content-mode bundle as source material, with the same handling rules. The default redactor replaces common credential-looking keys; it is not a secret scanner. |
 | Directory separation | Evaluator files live in `evaluator/` and in the pack; the scanner receives a private workspace copy of one export. The trial-path check refuses writing evaluator material inside an exported tree, and the runner refuses a workspace inside evaluator storage. | These compare resolved paths. They follow no bind mount or hard link, and they are not a sandbox. Directory separation documents the evaluator boundary; it does not enforce it. |
 | Exported trees | The export carries tracked regular files only, strips `.git`, `.securevibes`, `.scaneval`, and `.repos`, records skipped submodules and symlinks, and records retained instruction files such as `CLAUDE.md` or `AGENTS.md` as identity cues. | It is not a sandbox, and instruction files stay in the tree under the `standard` profile. |

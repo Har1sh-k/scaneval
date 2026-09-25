@@ -1,8 +1,8 @@
 # ScanEval
 
-> The replacement core is an alpha (`2.0.0a1`) that now runs end to end: versioned contracts, case packs with mechanical checks and explicit human approval, an immutable source cache and pinned snapshot export, an invocation runner, two real adapters (pinned Semgrep OSS and the own LLM harness), an observer connection at the harness model boundary, a review workflow, saved-output scoring and offline replay, and an HTML report. See [initial build](docs/INITIAL_BUILD.md) for what it does and does not do, and [the pilot report](docs/PILOT.md) for the first real runs.
+> The replacement core is an alpha (`2.0.0a1`) that now runs end to end: versioned contracts, case packs with mechanical checks and explicit human approval, an immutable source cache and pinned snapshot export, an invocation runner, three real adapters (pinned Semgrep OSS, the own LLM harness, and the third-party DeepSec scanner), an observer connection inside the own harness plus importers for the records the Claude Code and Codex CLIs write for themselves, a context-coverage diagnostic, a review workflow, saved-output scoring and offline replay, and an HTML report. See [initial build](docs/INITIAL_BUILD.md) for what it does and does not do, and [the pilot report](docs/PILOT.md) for the first real runs.
 >
-> **No benchmark result exists.** Every case in the repository is a draft, no matching decision has been approved, and confirmed detection is zero. The preserved pilot runs are pipeline demonstrations, not measurements of any scanner.
+> **No benchmark result exists.** Every case in the repository is a draft, no matching decision has been approved, and confirmed detection is zero. No run record is committed here; the runs described in [the pilot report](docs/PILOT.md) are pipeline demonstrations, not measurements of any scanner.
 >
 > The existing `scripts/` runner and historical scores still use legacy scoring and are labeled legacy throughout this file. The broader [design](docs/DESIGN_DECISIONS.md) is not fully implemented; repositories for the first public-workload release remain under selection.
 
@@ -19,7 +19,7 @@ scaneval replay results/diagnostic-demo --output results/diagnostic-replay.json
 # Open results/diagnostic-demo/report.html locally.
 ```
 
-This uses fabricated evaluator fixtures, not a live scanner or admitted CVEs. It tests scoring rules without model calls. Output paths must be new. The [SDK guide](docs/OBSERVER_SDK.md) covers opt-in harness visibility and capture limits.
+This uses fabricated evaluator fixtures, not a live scanner or admitted CVEs. It tests scoring rules without model calls. Output paths must be new. The [SDK guide](docs/OBSERVER_SDK.md) covers opt-in harness visibility and the per-category capture limits; [native CLI collectors](docs/COLLECTORS.md) covers reading what an agent CLI wrote for itself, [the DeepSec adapter](docs/DEEPSEC.md) the third-party scanner path, and [diagnostics](docs/DIAGNOSTICS.md) what a saved trace can and cannot answer.
 
 Replay a bundle offline, with no network and no model call. No run is committed to this repository, so produce one first with `scaneval run`, then replay it from wherever you wrote it:
 
@@ -43,10 +43,13 @@ That warning is the accurate state of every bundle in this repository.
 | `scaneval plan --pack --snapshot-id --tree-hash --output` | Build one evaluation plan for a materialized input. |
 | `scaneval run <config> --output <new dir>` | Execute one frozen run configuration into a new run directory. |
 | `scaneval review init\|record\|approve\|status` | Draft, re-draft, approve, and inspect the review of one invocation bundle. |
+| `scaneval diagnose context-coverage <bundle>` | Report, per labeled target, whether its code region was supplied to the model and in which invocation. Scores nothing. |
 
 Only `corpus validate --snapshot-id` and `run` reach the network; what `run` contacts depends on the configured systems. Everything else is offline. Exit code `2` means the command could not be carried out, `1` means it ran and reports a negative result, `0` means it ran and reports nothing wrong, which is not a statement that any label or decision is correct.
 
-Guides: [initial build](docs/INITIAL_BUILD.md) for the current build and its limits, [pilot report](docs/PILOT.md) for the first real runs, [bring your own corpus](docs/BRING_YOUR_OWN_CORPUS.md) for the organization-owned pack path, [design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) for the destination.
+Guides: [initial build](docs/INITIAL_BUILD.md) for the current build and its limits, [pilot report](docs/PILOT.md) for the real runs, [bring your own corpus](docs/BRING_YOUR_OWN_CORPUS.md) for the organization-owned pack path, [design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) for the destination.
+
+Visibility: [observer SDK](docs/OBSERVER_SDK.md) for the event contract and the own-harness capture matrix, [native CLI collectors](docs/COLLECTORS.md) for importing Claude Code and Codex records, [the DeepSec adapter](docs/DEEPSEC.md) for the third-party scanner path and its own capture matrix, [diagnostics](docs/DIAGNOSTICS.md) for what a saved trace answers about a miss.
 
 ### Evaluation core status
 
@@ -56,8 +59,10 @@ Guides: [initial build](docs/INITIAL_BUILD.md) for the current build and its lim
 | Case packs, mechanical (L1) checks, plan generation | Implemented |
 | Source cache, pinned export, provenance | Implemented; `standard` profile only, `metadata_blinded` refused |
 | Invocation runner, bundles, run manifest | Implemented for full scans |
-| Adapters | `semgrep` (pinned local rules) and `llm-harness` (own harness) |
-| Observer connection | Model boundary of the own harness only; tool dispatch and the finding lifecycle before submission are unavailable |
+| Adapters | `semgrep` (pinned local rules), `llm-harness` (own harness), `deepsec` (third-party scanner, run unchanged) |
+| Observer connection | Model boundary of the own harness; against a harness build that exports the hooks, also per-attempt retries, token usage and CLI-reported cost on the claude json route, the spans the engine placed in each prompt, and candidate and filtering events. Tool dispatch inside the model CLI stays unobserved on that route |
+| Native CLI collectors | Claude Code transcripts and `stream-json`, the `--output-format json` result object, and `codex exec --json`, read after a run into trace events |
+| Diagnostics | `context-coverage` only: was a labeled target's code supplied to the model, per invocation. It explains a miss; it never excuses one |
 | Review workflow | Machine drafts route candidates; approval requires an explicit reviewer name |
 | Reviewed labels, admitted cases, controls | **None.** Every case is draft, no control is defined |
 | Corpus aggregation, precision sampling, promotion gates, trace viewer, SARIF import, native PR mode, enforced isolation | Not implemented |
@@ -124,9 +129,9 @@ PR simulation mode is documented in [docs/PR_MODE.md](docs/PR_MODE.md).
 
 - Python 3.11+
 - Git (required by `scripts/setup_repos.py`, and by the new core's source cache and pinned export)
-- Node.js, only for the observer SDK and the own-harness adapter
+- Node.js, for the observer SDK, the own-harness adapter, and the `deepsec` adapter (which runs an installed DeepSec CLI)
 
-The new core uses `jsonschema` for contract validation. The legacy runner uses the Python standard library. Scanner CLIs are optional and can be installed separately or via the `official-adapters` extra. The `llm-harness` adapter additionally needs a local checkout of the harness and a built observer SDK (`npm ci && npm run build` in `sdk/typescript`).
+The new core uses `jsonschema` for contract validation. The legacy runner uses the Python standard library. Scanner CLIs are optional and can be installed separately or via the `official-adapters` extra. The `llm-harness` adapter additionally needs a local checkout of the harness and a built observer SDK (`npm ci && npm run build` in `sdk/typescript`). The `deepsec` adapter needs an installed DeepSec workspace holding `node_modules/.bin/deepsec`; nothing is ever written into it. See [the DeepSec adapter](docs/DEEPSEC.md).
 
 ### Legacy Full Track snapshots
 
@@ -345,19 +350,25 @@ scaneval/
 |- LICENSE
 |- pyproject.toml
 |- src/scaneval/     # Evaluation core: contracts, cases, materialize, runner,
-|  |                  # execution, review, scoring, report, CLI
+|  |                  # execution, review, scoring, diagnostics, report, CLI
 |  |- schemas/        # The nine versioned JSON contracts
-|  `- adapters/       # semgrep, llm-harness, and the harness driver
+|  |- adapters/       # semgrep, llm-harness with its harness driver, deepsec
+|  |- collectors/     # Readers for Claude Code and Codex CLI records
+|  `- observer/       # Python trace-event emitter
 |- sdk/typescript/    # Opt-in observer emitter
-|- corpus/pilot/      # Draft pilot pack, frozen run configs, preserved runs
-|- docs/              # Design, math, initial build, pilot, guides
-|- schema/            # Legacy JSON schemas for cases and results, plus schema/v2 trace events
+|- corpus/pilot/      # Draft pilot pack and the frozen run configurations
+|                     # (run-semgrep, run-harness, run-deepsec). No run record is committed.
+|- docs/              # Design, math, initial build, pilot, observer SDK, collectors,
+|                     # DeepSec adapter, diagnostics, guides
+|- schema/            # Legacy JSON schemas for cases and results, plus schema/v2 trace
+|                     # events and the scrubbed collector fixtures
 |- taxonomy/          # Legacy canonical kinds, capabilities, languages
 |- cases/
 |  |- core/           # Legacy synthetic vendored cases
 |  `- full/           # Legacy real-world disclosed cases
 |- adapters/          # Legacy scanner adapters (semgrep, bandit, etc.)
-|- scripts/           # Legacy run, validate, report
+|- scripts/           # Legacy run, validate, report, plus sanitize_native_trace.py,
+|                     # the scrubber that makes a real CLI run safe to commit as a fixture
 `- tests/             # Benchmark self-tests (new core and legacy)
 ```
 
