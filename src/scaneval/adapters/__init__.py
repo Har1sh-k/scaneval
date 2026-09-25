@@ -9,6 +9,7 @@ from .base import Adapter, AdapterError, NativeOutcome, SystemSpec
 _REGISTRY = {
     "semgrep": ("scaneval.adapters.semgrep", "SemgrepAdapter"),
     "llm-harness": ("scaneval.adapters.llm_harness", "LlmHarnessAdapter"),
+    "deepsec": ("scaneval.adapters.deepsec", "DeepsecAdapter"),
 }
 
 
