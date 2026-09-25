@@ -89,10 +89,6 @@ LEADING_DOT_SEGMENTS = re.compile(r"^(?:\./+)+")
 # How much of a DeepSec description a claim carries as evidence. The whole of it stays in the
 # export artifact the claim cites, so this bounds the record rather than dropping evidence.
 EVIDENCE_LIMIT = 4000
-# How much of a refusal reason a metadata field may carry. Metadata is read by
-# tooling and shown in summaries; the untouched reason goes to content, which the
-# observer stores only in content mode.
-REASON_SUMMARY_CHARS = 120
 # The capture-status keys Contract 3 names, in the order the guide tables them.
 CAPTURE_KEYS = ("model_requests", "model_responses", "tool_calls", "context_selection",
                 "finding_candidate", "finding_submitted", "finding_validation",
@@ -583,16 +579,23 @@ class Refusal(NamedTuple):
 
     ``code`` is a closed value derived from the *structure* of DeepSec's ``RefusalReport`` and
     never from classifying its prose: ``refused`` when it says so, ``refused_with_skipped_files``
-    when it also lists the files it skipped. ``summary`` is the reason with every absolute path
-    relocated against the workspace and then clipped, so a metadata field carries a sentence a
-    reader can act on rather than a paragraph of model prose that may quote source or name a
-    machine. ``reason`` is that prose untouched, for ``content``, which the observer stores only
-    in content mode and drops in metadata mode.
+    when it also lists the files it skipped. That code and the file path are the whole of what
+    reaches metadata.
+
+    A clipped prefix of the reason used to go there too. It was still model prose: a 120-
+    character window onto a sentence the model wrote, which can open mid-way through a line of
+    source it was quoting. Metadata is read by tooling and printed in summaries, and neither
+    source nor an operator's machine belongs in it at any length, so the window is gone rather
+    than narrowed.
+
+    ``reason`` is the reason with every absolute path relocated against the workspace, and it
+    goes only in ``content``, which the observer stores in content mode and drops in metadata
+    mode. Relocation happens even there because a home directory may not appear in an event at
+    all, whatever the recording mode.
     """
 
     path: str
     code: str
-    summary: str
     reason: str
     external: bool
 
@@ -654,21 +657,15 @@ def _number(value: Any) -> float:
     return float(value)
 
 
-def clip(text: Any, limit: int) -> str:
-    """*text* bounded to *limit* characters, with an ellipsis when it had to be cut."""
-    if not isinstance(text, str):
-        return ""
-    return text if len(text) <= limit else text[:limit - 1] + "…"
-
-
 def _refusal(entry: dict, path: str, external: bool, roots: tuple[Path, ...]) -> "Refusal | None":
     """One :class:`Refusal` from an ``AnalysisEntry``, or ``None`` when it refused nothing.
 
     The code comes from the report's shape and never from reading its prose, because a
     classifier over model text would be this adapter inventing a category DeepSec did not
-    record. The summary is the prose with every absolute path relocated against the workspace
-    first, then clipped: a refusal reason is free text a model wrote and can quote source or an
-    operator path, and Contract 3 says neither belongs in metadata.
+    record. The prose itself is kept only for ``content``, with every absolute path relocated
+    against the workspace first: a refusal reason is free text a model wrote, it can quote
+    source and name a machine, and Contract 3 allows neither into an event's paths at any
+    recording mode and no source at all into metadata.
     """
     refusal = entry.get("refusal")
     if not isinstance(refusal, dict) or refusal.get("refused") is not True:
@@ -677,8 +674,7 @@ def _refusal(entry: dict, path: str, external: bool, roots: tuple[Path, ...]) ->
     code = "refused_with_skipped_files" if isinstance(skipped, list) and skipped else "refused"
     raw = refusal.get("reason")
     reason = raw if isinstance(raw, str) else ""
-    summary = clip(relocate_paths(reason, roots) if roots else reason, REASON_SUMMARY_CHARS)
-    return Refusal(path, code, summary, reason, external)
+    return Refusal(path, code, relocate_paths(reason, roots) if roots else reason, external)
 
 
 def sessions_from(files: tuple[tuple[str, dict], ...],
@@ -981,10 +977,17 @@ def capture_status(trace_mode: str, *, transcripts_found: int, sessions: int,
     execution record that said ``complete`` on one line while its trace record admitted a hole
     on the next was answering one question twice.
 
-    ``tool_calls`` is the strictest: every session this run opened had a transcript found *and*
-    imported with no malformed line and no unmatched tool result, and the observer reported no
-    gap. One session without a transcript, or an import that reported either, is ``partial``; no
-    transcript at all, and a run with tracing off, is ``unavailable``.
+    ``tool_calls`` is the strictest. ``transcripts_found`` counts sessions whose transcript
+    import *captured something* — a turn, a tool call, a span — rather than sessions whose
+    transcript merely existed: the collector reports an unreadable transcript by returning a
+    summary carrying an error event and nothing else, so counting a returned import as a found
+    one let a session nobody could read stand behind a ``complete``. ``imports_clean`` is the
+    second half of it and is false whenever any import came back short of its file: a malformed
+    line, an unmatched tool result, a capture key the importer marked unavailable, a note it
+    attached for a refused or truncated read, or a main transcript that produced no model turn
+    at all. ``complete`` needs every session captured, every import clean, and no observer gap;
+    anything captured but not all of it is ``partial``; nothing captured, and tracing off, is
+    ``unavailable``.
 
     ``finding_validation`` and ``finding_filtered`` are always ``unavailable``. DeepSec's agent
     decides inside one session which candidates become findings and records only its outputs; a
@@ -1015,6 +1018,61 @@ def capture_status(trace_mode: str, *, transcripts_found: int, sessions: int,
         "finding_validation": "unavailable",
         "finding_filtered": "unavailable",
     }
+
+
+class ImportHealth(NamedTuple):
+    """What one transcript import actually delivered, read off the summary it returned.
+
+    The collector does not raise when it cannot read a transcript: a scan has already finished
+    by then, and a permission error on a log must not retroactively fail it. It returns a
+    summary carrying an ``observer.error`` event, zero turns, zero tool calls and a note. So a
+    call that returned is not a call that captured anything, and this is the difference. Taking
+    "it returned" for "it worked" suppressed the reconstructed model pair for a session whose
+    transcript had been read by nobody, and let ``tool_calls`` read ``complete`` over it.
+
+    ``turns`` is what decides whether the *main* transcript described the call: a fallback pair
+    is suppressed only when at least one model turn came out of it. ``captured`` is the weaker
+    question, whether anything at all was recorded, which is what separates a partial view from
+    no view. ``loss`` is every way the collector said this import was short of the file: a
+    malformed line, an unmatched tool result, a capture key it marked unavailable, and any note
+    it attached, which is where it reports a refused or truncated read.
+    """
+
+    turns: int
+    captured: bool
+    loss: tuple[str, ...]
+
+
+def import_health(summary: Any) -> ImportHealth:
+    """Read one :class:`~scaneval.collectors.ImportSummary` without trusting its shape.
+
+    Every field is read defensively because the summary comes from another package and may gain
+    fields; a missing one reads as zero rather than as an error, and a present one that is not a
+    number is ignored rather than compared.
+    """
+    def count(name: str) -> int:
+        value = getattr(summary, name, 0)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    turns = count("model_turns")
+    captured = bool(turns or count("tool_calls") or count("spans") or count("tool_results"))
+    loss: list[str] = []
+    malformed, unmatched = count("malformed_lines"), count("unmatched_tool_results")
+    if malformed:
+        loss.append(f"{malformed} malformed line(s)")
+    if unmatched:
+        loss.append(f"{unmatched} unmatched tool result(s)")
+    capture = getattr(summary, "capture", None)
+    if isinstance(capture, dict):
+        unavailable = sorted(name for name, value in capture.items() if value == "unavailable")
+        if unavailable:
+            loss.append("the importer reported no capture of " + ", ".join(unavailable))
+    for note in getattr(summary, "notes", ()) or ():
+        if isinstance(note, str) and note:
+            loss.append(note)
+    if not captured:
+        loss.append("nothing was captured from it")
+    return ImportHealth(turns, captured, tuple(loss))
 
 
 class TraceResult(NamedTuple):
@@ -1105,7 +1163,9 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                           "external_paths": int(candidate.external)})
         for session in sessions:
             call_id = session.call_id
-            imported_transcript = False
+            located = False
+            main_turns = 0
+            captured_anything = False
             if collectors is not None and session.session_id:
                 find, load = collectors
                 try:
@@ -1115,8 +1175,7 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                                  f"located ({type(exc).__name__}); none were imported")
                     imports_clean = False
                     paths = []
-                if paths:
-                    transcripts_found += 1
+                located = bool(paths)
                 for path in paths:
                     sidechain = Path(path).parent.name == "subagents"
                     try:
@@ -1128,21 +1187,34 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                                      f"({type(exc).__name__})")
                         imports_clean = False
                         continue
-                    imported_transcript = True
-                    malformed = getattr(summary, "malformed_lines", 0) or 0
-                    unmatched = getattr(summary, "unmatched_tool_results", 0) or 0
-                    if malformed or unmatched:
+                    health = import_health(summary)
+                    captured_anything = captured_anything or health.captured
+                    if not sidechain:
+                        main_turns += health.turns
+                    if health.loss:
                         imports_clean = False
-                        notes.append(f"transcript {Path(path).name} imported with {malformed} "
-                                     f"malformed line(s) and {unmatched} unmatched tool result(s)")
+                        notes.append(f"transcript {Path(path).name} was imported short of the "
+                                     f"file: {'; '.join(health.loss)}")
+            if located and main_turns <= 0:
+                # The transcript is there and it did not describe the call. Whatever else was
+                # read from it, this session's own turns were not, so no category may claim a
+                # complete view of them.
+                imports_clean = False
+                notes.append(f"the main transcript of session {session.session_id} produced no "
+                             "model turn, so the call is described by DeepSec's own record "
+                             "instead")
+            if captured_anything:
+                transcripts_found += 1
             if session.refusals:
                 notes.append(
                     f"DeepSec recorded {len(session.refusals)} refusal(s) on the analysis entries "
                     f"of call {call_id}: "
                     + "; ".join(f"{refusal.path} ({refusal.code})" for refusal in session.refusals))
-            if imported_transcript:
-                # The transcript is the record of this call, turn by turn. Adding a summed pair
-                # beside it would be the same call counted twice.
+            if main_turns > 0:
+                # The main transcript is the record of this call, turn by turn. Adding a summed
+                # pair beside it would be the same call counted twice. A transcript that is
+                # there but described no turn is not that record, so the fallback below still
+                # runs: a call must never disappear from the trace because a log was unreadable.
                 continue
             attempt_id = f"{call_id}/attempt-1"
             shared = {"source": "harness_record", "session_id": session.session_id,
@@ -1158,8 +1230,9 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                           "stage": "process", "attempt": 1, "max_attempts": 1,
                           "run_id_native": session.run_id,
                           "transcript_imported": False})
-            refusals = [{"file_path": refusal.path, "reason_code": refusal.code,
-                         "summary": refusal.summary} for refusal in session.refusals]
+            # A closed code and a path. Nothing the model wrote reaches metadata.
+            refusals = [{"file_path": refusal.path, "reason_code": refusal.code}
+                        for refusal in session.refusals]
             observer.emit(
                 type="model.response", category="model", capture_status="partial",
                 call_id=call_id, attempt_id=attempt_id,
@@ -1178,8 +1251,9 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                           "model_served": session.model,
                           "transcript_imported": False,
                           **({"refusals": refusals} if refusals else {})},
-                # The untouched reason is model prose and can quote source or name a machine, so
-                # it is content, which the observer stores only in content mode.
+                # The reason is model prose and can quote source, so it is content, which the
+                # observer stores only in content mode. Its paths are relocated even here,
+                # because a home directory may not appear in an event in any mode.
                 **({"content": {"refusal_reasons": [
                     {"file_path": refusal.path, "reason": refusal.reason}
                     for refusal in session.refusals]}} if refusals else {}))

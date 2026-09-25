@@ -352,12 +352,30 @@ def trace_events(bundle: Path) -> list[dict]:
 
 @dataclass
 class StubSummary:
-    """The shape of WP-D's ``ImportSummary`` this adapter reads, and nothing more."""
+    """The fields of WP-D's ``ImportSummary`` this adapter reads, and nothing more.
 
+    Kept independent of the collector's own hardening: the adapter reads the summary
+    defensively, so this carries the fields it asks for and a test sets whichever one it is
+    about. An unreadable transcript is the collector *returning* zeros and a note, never
+    raising, which is the case this stub exists to be able to produce.
+    """
+
+    model_turns: int = 1
+    tool_calls: int = 1
+    tool_results: int = 1
+    spans: int = 1
     malformed_lines: int = 0
     unmatched_tool_results: int = 0
     events: int = 2
     capture: dict = field(default_factory=dict)
+    notes: tuple = ()
+
+    @classmethod
+    def unreadable(cls) -> "StubSummary":
+        """What the collector returns for a transcript it could not read: no raise, no capture."""
+        return cls(model_turns=0, tool_calls=0, tool_results=0, spans=0, events=1,
+                   capture={"context_selection": "unavailable"},
+                   notes=("transcript could not be read",))
 
 
 def transcript_fixture(tmp_path: Path) -> Path:
@@ -384,7 +402,8 @@ def transcript_fixture(tmp_path: Path) -> Path:
 
 
 def stub_collector(monkeypatch, tmp_path: Path, *, found: bool = True, subagent: bool = False,
-                   malformed: int = 0, unmatched: int = 0) -> list[dict]:
+                   malformed: int = 0, unmatched: int = 0, main_unreadable: bool = False,
+                   ) -> list[dict]:
     """Replace the collector with a recording stub and return the list of calls it saw."""
     calls: list[dict] = []
     main = transcript_fixture(tmp_path)
@@ -416,6 +435,8 @@ def stub_collector(monkeypatch, tmp_path: Path, *, found: bool = True, subagent:
         observer.emit(type="tool.end", category="tool", capture_status="partial",
                       call_id="toolu_1", metadata={"source": "claude_code_transcript",
                                                    "is_error": False, "result_chars": 13})
+        if main_unreadable and not sidechain:
+            return StubSummary.unreadable()
         return StubSummary(malformed_lines=malformed, unmatched_tool_results=unmatched)
 
     monkeypatch.setattr(deepsec_module, "collector", lambda: (find_transcripts, import_transcript))
@@ -815,9 +836,9 @@ def test_a_refusal_rides_on_the_call_s_own_response_and_every_response_is_paired
     refused = [event for event in events if event["metadata"].get("refusals")]
     assert refused, "the refusal is recorded on the response of the call it belongs to"
     reported = refused[0]["metadata"]["refusals"][0]
+    assert set(reported) == {"file_path", "reason_code"}, "no model prose in metadata"
     assert reported["reason_code"] == "refused_with_skipped_files"
     assert reported["file_path"] == "src/db.js", "the path is where DeepSec put the record"
-    assert reported["summary"] == "the file was not readable"
     assert refused[0]["metadata"]["failure_kind"] == "refusal"
     assert refused[0]["metadata"]["is_error"] is True
 
@@ -1534,10 +1555,10 @@ def test_a_record_path_comes_from_where_deepsec_put_it_and_never_leaves_the_tree
     """
     from scaneval.adapters.deepsec import record_path
 
-    path, external = record_path(name, {"filePath": "/Users/someone/secret/thing.py"})
+    path, external = record_path(name, {"filePath": "/outside/the-workspace/thing.py"})
     assert path == expected
     assert external is (expected.startswith("external:"))
-    assert "/Users/" not in path
+    assert not path.startswith("/")
 
 
 def test_a_hostile_file_path_never_reaches_a_session_or_a_candidate(tmp_path, monkeypatch):
@@ -1657,8 +1678,12 @@ def test_a_correlated_session_says_so_on_its_events(tmp_path, monkeypatch):
 # --- what a refusal reason may carry ---------------------------------------------------------
 
 
-def test_a_refusal_reason_is_a_closed_code_and_a_bounded_relocated_summary():
-    """Free model prose can quote source and name a machine; metadata may carry neither."""
+def test_a_refusal_reason_is_a_closed_code_and_relocated_prose_kept_for_content():
+    """Free model prose can quote source and name a machine; metadata may carry neither.
+
+    A 120-character prefix of it used to. That was still prose, and a window that size can open
+    part way through a line of source the model was quoting, so it is gone rather than narrowed.
+    """
     from scaneval.adapters.deepsec import sessions_from
 
     reason = ("could not read /var/tmp/run/source/src/secret.py: " + "verbose model prose " * 40)
@@ -1667,10 +1692,12 @@ def test_a_refusal_reason_is_a_closed_code_and_a_bounded_relocated_summary():
         "refusal": {"refused": True, "reason": reason}}]}),)
     refusal = sessions_from(files, (Path("/var/tmp/run/source"),))[0].refusals[0]
     assert refusal.code == "refused", "no skipped list, so the structural code is the bare one"
-    assert len(refusal.summary) <= 120
-    assert "/var/tmp/run/source" not in refusal.summary
-    assert refusal.summary.startswith("could not read src/secret.py:")
-    assert refusal.reason == reason, "the untouched prose is kept for content"
+    assert not hasattr(refusal, "summary"), "there is no metadata-bound prefix any more"
+    # The prose is kept whole for content, with its paths relocated: an event may not carry a
+    # home directory in any recording mode.
+    assert "/var/tmp/run/source" not in refusal.reason
+    assert refusal.reason.startswith("could not read src/secret.py:")
+    assert "verbose model prose" in refusal.reason
 
     with_skips = (("src/a.py.json", {"analysisHistory": [{
         "runId": "r", "agentSessionId": "s",
@@ -1678,20 +1705,22 @@ def test_a_refusal_reason_is_a_closed_code_and_a_bounded_relocated_summary():
     assert sessions_from(with_skips)[0].refusals[0].code == "refused_with_skipped_files"
 
 
-def test_the_raw_refusal_reason_reaches_content_only_and_metadata_stays_bounded(tmp_path, monkeypatch):
+def test_the_refusal_reason_reaches_content_only_and_metadata_carries_a_code(tmp_path, monkeypatch):
     root = fake_deepsec_root(tmp_path, refusal=True)
     stub_collector(monkeypatch, tmp_path, found=False)
     content_bundle = invoke(tmp_path / "c", root, out="out-content", trace_mode="content")
     response = next(event for event in trace_events(content_bundle)
                     if event["metadata"].get("refusals"))
     assert response["content"]["refusal_reasons"][0]["reason"] == "the file was not readable"
-    assert "reason" not in response["metadata"]["refusals"][0]
+    assert set(response["metadata"]["refusals"][0]) == {"file_path", "reason_code"}
 
     metadata_bundle = invoke(tmp_path / "m", root, out="out-metadata", trace_mode="metadata")
     metadata_response = next(event for event in trace_events(metadata_bundle)
                              if event["metadata"].get("refusals"))
     assert "content" not in metadata_response, "metadata mode stores no reason text at all"
-    assert metadata_response["metadata"]["refusals"][0]["summary"]
+    assert metadata_response["metadata"]["refusals"][0]["reason_code"] == "refused_with_skipped_files"
+    text = json.dumps(metadata_response)
+    assert "not readable" not in text, "no prose from the model in a metadata-mode event"
 
 
 # --- the matrix no longer overclaims ----------------------------------------------------------
@@ -1758,3 +1787,91 @@ def test_the_pilot_notes_say_the_limited_run_is_recorded_as_partial():
     joined = " ".join(config["notes"])
     assert "scope_incomplete" in joined and "bundles_resolved false" in joined
     assert "scope_incomplete" in DOC.read_text(encoding="utf-8")
+
+
+# --- a transcript that exists is not a transcript that was read --------------------------
+
+
+def test_an_unreadable_main_transcript_keeps_the_fallback_pair_and_never_claims_complete(tmp_path, monkeypatch):
+    """The collector reports a read failure by returning, not by raising.
+
+    Taking "it returned" for "it worked" suppressed the reconstructed pair for a session whose
+    transcript nobody could read, so the call vanished from the trace, while ``tool_calls``
+    went on reading ``complete`` over it. A call must never disappear because a log was
+    unreadable.
+    """
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path, main_unreadable=True)
+    bundle = invoke(tmp_path, root)
+    result, execution = documents(bundle)
+    assert result["status"] == "success", execution["error"]
+
+    events = trace_events(bundle)
+    requests = [event for event in events if event["type"] == "model.request"]
+    responses = [event for event in events if event["type"] == "model.response"]
+    assert requests and len(requests) == len(responses), "the call is still in the trace"
+    assert all(event["metadata"]["source"] == "harness_record" for event in requests)
+    assert requests[0]["metadata"]["transcript_imported"] is False
+
+    assert execution["capture"]["tool_calls"] in ("partial", "unavailable")
+    assert execution["capture"]["tool_calls"] != "complete"
+    assert any("produced no model turn" in note for note in execution["notes"]), execution["notes"]
+    assert any("could not be read" in note for note in execution["notes"]), execution["notes"]
+
+
+def test_a_subagent_transcript_that_imported_does_not_rescue_an_unreadable_main_one(tmp_path, monkeypatch):
+    """Main failed, subagent imported: the sidechain is captured, the call is not."""
+    root = fake_deepsec_root(tmp_path, session_ids=["session-aaaa"])
+    stub_collector(monkeypatch, tmp_path, subagent=True, main_unreadable=True)
+    bundle = invoke(tmp_path, root)
+    _result, execution = documents(bundle)
+    events = trace_events(bundle)
+
+    # The subagent's tool events are there, so something was captured...
+    assert [event for event in events if event["type"] == "tool.start"]
+    # ...and the call itself is still described by DeepSec's own record.
+    requests = [event for event in events if event["type"] == "model.request"]
+    assert requests and requests[0]["metadata"]["source"] == "harness_record"
+    # Captured, but not completely: a session whose main transcript said nothing is not one
+    # this run saw the tool calls of.
+    assert execution["capture"]["tool_calls"] == "partial"
+    assert execution["capture"]["context_selection"] == "partial"
+
+
+def test_a_transcript_import_that_reports_a_capture_loss_is_never_clean(tmp_path, monkeypatch):
+    """Whatever the collector says it was short of, the matrix reads it."""
+    from scaneval.adapters.deepsec import ImportHealth, import_health
+
+    assert import_health(StubSummary()) == ImportHealth(1, True, ())
+    assert import_health(StubSummary.unreadable()).turns == 0
+    assert import_health(StubSummary.unreadable()).captured is False
+    assert "transcript could not be read" in import_health(StubSummary.unreadable()).loss
+    assert any("no capture of context_selection" in reason
+               for reason in import_health(StubSummary.unreadable()).loss)
+    assert import_health(StubSummary(malformed_lines=2)).loss == ("2 malformed line(s)",)
+    assert import_health(StubSummary(unmatched_tool_results=3)).loss == (
+        "3 unmatched tool result(s)",)
+    assert import_health(StubSummary(capture={"tool_calls": "unavailable"})).loss == (
+        "the importer reported no capture of tool_calls",)
+    assert import_health(StubSummary(notes=("transcript was truncated",))).loss == (
+        "transcript was truncated",)
+    # A summary from a collector this adapter has never seen must not raise or mislead.
+    assert import_health(object()).captured is False
+
+
+def test_a_reported_capture_loss_makes_tool_calls_partial_in_a_whole_run(tmp_path, monkeypatch):
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path, unmatched=2)
+    bundle = invoke(tmp_path, root)
+    _result, execution = documents(bundle)
+    assert execution["capture"]["tool_calls"] == "partial"
+    assert any("short of the file" in note and "unmatched tool result" in note
+               for note in execution["notes"]), execution["notes"]
+
+
+def test_the_guide_says_observer_error_is_emitted_and_why_it_has_no_row():
+    text = DOC.read_text(encoding="utf-8")
+    assert "never emits" not in text
+    assert "no `capture_status` key" in text
+    assert "parse-failure dump" in text
+    assert "refused or truncated" in text
