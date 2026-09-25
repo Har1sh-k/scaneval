@@ -460,9 +460,14 @@ def test_stream_json_puts_the_cli_result_record_on_the_last_response_and_in_the_
 
     assert last["metadata"]["result_subtype"] == "success"
     assert last["metadata"]["is_error"] is False
-    assert last["metadata"]["num_turns"] == 2
-    assert isinstance(last["metadata"]["cost_usd_cli_reported"], float)
-    assert isinstance(last["metadata"]["duration_api_ms"], int)
+    assert last["metadata"]["invocation_num_turns"] == 2
+    assert isinstance(last["metadata"]["invocation_cost_usd_cli_reported"], float)
+    assert isinstance(last["metadata"]["invocation_duration_api_ms"], int)
+    # The per-turn keys stay null: a transcript reports neither cost nor API duration per
+    # turn, and the invocation's figures are not this turn's.
+    assert last["metadata"]["cost_usd_cli_reported"] is None
+    assert last["metadata"]["duration_api_ms"] is None
+    assert last["metadata"]["num_turns"] is None
     assert all(e["metadata"]["result_subtype"] is None for e in earlier)
     assert all(e["metadata"]["cost_usd_cli_reported"] is None for e in earlier)
     assert any(note.startswith("result: subtype=success") for note in summary.notes)
@@ -856,6 +861,146 @@ def test_a_codex_command_summary_names_the_command_without_naming_the_machine():
     assert all("/" not in summary.split()[0] for summary in summaries)
 
 
+# --- returned is not delivered ----------------------------------------------------------------
+
+
+def truncated_after_read(source: Path, target: Path) -> Path:
+    """Copy a real fixture, cut off immediately after its file-read tool result."""
+    kept = []
+    for line in source.read_text().splitlines():
+        kept.append(line)
+        record = json.loads(line)
+        native = record.get("toolUseResult") or record.get("tool_use_result")
+        if isinstance(native, dict) and isinstance(native.get("file"), dict):
+            break
+    else:
+        raise AssertionError("fixture no longer contains a file-read tool result")
+    target.write_text("\n".join(kept) + "\n")
+    return target
+
+
+def test_a_file_read_no_later_turn_consumed_claims_no_context_selection(tmp_path: Path):
+    """A tool returning text and a model being given it are different facts.
+
+    The committed transcript is cut off immediately after its ``Read`` result, so nothing in
+    the record shows the text ever reaching a turn. The ``tool.end`` and its span stay — the
+    tool really did return that content — but the coverage claim does not, because a
+    diagnostic joining spans to labels would otherwise report the file as included on the
+    strength of a delivery the transcript never recorded.
+    """
+    cut = truncated_after_read(TRANSCRIPT, tmp_path / "cut.jsonl")
+
+    events, summary = import_file(cut)
+
+    ends = of_type(events, "tool.end")
+    assert len(ends) == 1
+    assert ends[0]["metadata"]["spans"][0]["path"] == "app.py"
+    assert summary.spans == 1
+
+    assert of_type(events, "context.selection") == []
+    assert summary.undelivered_tool_results == 1
+    assert any("no later model turn consumed" in note for note in summary.notes)
+
+
+def test_the_same_read_does_claim_a_selection_once_a_turn_follows_it():
+    """The whole fixture, uncut: the turn after the read is what releases the claim."""
+    events, summary = import_file(TRANSCRIPT)
+    assert len(of_type(events, "context.selection")) == 1
+    assert summary.undelivered_tool_results == 0
+
+
+def test_a_selection_is_emitted_before_the_turn_that_received_it():
+    """Ordering is the argument the event makes: these lines arrived, then the model ran."""
+    events, _ = import_file(TRANSCRIPT)
+    order = [event["type"] for event in events]
+    selection = order.index("context.selection")
+    assert order[selection + 1] == "model.request"
+    # And it is the second turn's request, not the first: the read happened between them.
+    assert order[:selection].count("model.request") == 1
+
+
+def test_stream_json_holds_a_selection_for_delivery_the_same_way(tmp_path: Path):
+    """The rule is about what a record shows, so it cannot differ between the two formats."""
+    cut = truncated_after_read(STREAM, tmp_path / "cut-stream.jsonl")
+
+    events, summary = import_stream(cut)
+
+    assert of_type(events, "tool.end")
+    assert of_type(events, "context.selection") == []
+    assert summary.undelivered_tool_results == 1
+
+    full_events, full_summary = import_stream(STREAM)
+    assert len(of_type(full_events, "context.selection")) == 1
+    assert full_summary.undelivered_tool_results == 0
+
+
+def test_an_undelivered_read_still_leaves_context_selection_capture_honest(tmp_path: Path):
+    """No selection was claimed, so the category is unavailable rather than partial."""
+    cut = truncated_after_read(TRANSCRIPT, tmp_path / "cut.jsonl")
+    _, summary = import_file(cut)
+    assert summary.capture["context_selection"] == "unavailable"
+
+
+# --- whose tokens are these -------------------------------------------------------------------
+
+
+def test_the_result_record_does_not_overwrite_the_last_turns_own_usage():
+    """Two scopes, two sets of keys. Mixing them made per-response sums double count.
+
+    The invocation total belongs to the whole ``claude -p`` call and the last turn is merely
+    where the CLI printed it. Writing it into ``usage`` made that turn claim the invocation's
+    figures as its own, so adding up ``usage`` across responses counted the last turn twice.
+    """
+    native = [json.loads(line) for line in STREAM.read_text().splitlines() if line.strip()]
+    # What each assistant message reported for itself, one entry per message id, in order.
+    own: dict[str, dict] = {}
+    for record in native:
+        message = record.get("message")
+        if record.get("type") == "assistant" and isinstance(message, dict) and "usage" in message:
+            own.setdefault(message["id"], message["usage"])
+    expected = [usage["input_tokens"] for usage in own.values()]
+
+    events, _ = import_stream(STREAM)
+    responses = of_type(events, "model.response")
+    reported = [response["metadata"]["usage"]["input_tokens"] for response in responses]
+
+    # Every response reports its own message's usage, the last one included. That is the
+    # defect stated exactly: before the fix the last entry was replaced by the invocation
+    # total and this list did not match the records it came from.
+    assert reported == expected
+
+    invocation = next(r for r in native if r.get("type") == "result")["usage"]
+    assert responses[-1]["metadata"]["invocation_usage"]["input_tokens"] == invocation["input_tokens"]
+    assert responses[-1]["metadata"]["usage"]["input_tokens"] == expected[-1]
+
+
+def test_only_the_last_response_carries_the_invocation_totals():
+    events, _ = import_stream(STREAM)
+    responses = of_type(events, "model.response")
+    for response in responses[:-1]:
+        assert response["metadata"]["invocation_usage"] is None
+        assert response["metadata"]["invocation_num_turns"] is None
+        assert response["metadata"]["invocation_cost_usd_cli_reported"] is None
+    assert responses[-1]["metadata"]["invocation_usage"] is not None
+
+
+def test_usage_available_describes_the_turns_own_usage_and_not_the_invocations():
+    """A turn with no usage of its own must not be made to look as though it had some."""
+    lines = [
+        json.dumps({"type": "assistant", "session_id": "s",
+                    "message": {"id": "m1", "role": "assistant", "model": "claude-haiku-4-5",
+                                "content": [{"type": "text", "text": "hi"}]}}),
+        json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
+                    "session_id": "s", "usage": {"input_tokens": 99, "output_tokens": 5}}),
+    ]
+    seen, observer = recording()
+    claude_code.import_stream_json(observer, lines, workspace_root=WORKSPACE, call_id="call-1")
+    response = of_type(seen, "model.response")[0]
+    assert response["metadata"]["usage_available"] is False
+    assert response["metadata"]["usage"] is None
+    assert response["metadata"]["invocation_usage"]["input_tokens"] == 99
+
+
 # --- reading a file somebody else is writing ------------------------------------------------
 
 
@@ -1185,6 +1330,15 @@ def transcript_reading(path: str, tmp_path: Path) -> Path:
          "toolUseResult": {"type": "text", "file": {
              "filePath": path, "content": delivered,
              "numLines": 2, "startLine": 1, "totalLines": 2}}},
+        # The turn that consumed the read. Without it the file would end on a tool result
+        # nothing received, and no context selection would be claimed for it.
+        {"type": "assistant", "uuid": "a-2", "parentUuid": "u-2", "sessionId": "s-1",
+         "requestId": "req-2", "isSidechain": False,
+         "message": {"id": "msg-2", "role": "assistant", "model": "claude-haiku-4-5",
+                     "usage": {"input_tokens": 7, "output_tokens": 8,
+                               "cache_read_input_tokens": 0,
+                               "cache_creation_input_tokens": 0},
+                     "content": [{"type": "text", "text": "Line 2 calls eval."}]}},
     ]
     target = tmp_path / "transcript.jsonl"
     target.write_text("".join(json.dumps(r) + "\n" for r in records))

@@ -103,6 +103,14 @@ class ImportSummary:
     because the import began mid-file; those still emit a ``tool.end``, because a result that
     arrived is a fact even when its request is missing.
 
+    ``undelivered_tool_results`` counts file reads whose text no later model turn consumed,
+    because the record ends first. They keep their ``tool.end`` and its spans — the tool
+    really did return that text — but they produce no ``context.selection``, because a tool
+    returning content and a model being given it are different facts and only the second one
+    is what a coverage claim rests on. A transcript cut short right after a read would
+    otherwise make a diagnostic report that file as included on the strength of a delivery
+    nothing in the record shows.
+
     ``capture`` carries the Contract 3 keys with values ``complete``, ``partial``,
     ``unavailable`` or ``not_applicable``. Collectors say ``complete`` for nothing: every
     reading here is derived from a record written for another purpose.
@@ -116,6 +124,7 @@ class ImportSummary:
     unknown_records: int
     malformed_lines: int
     unmatched_tool_results: int
+    undelivered_tool_results: int
     capture: dict[str, str]
     notes: tuple[str, ...]
 
@@ -317,9 +326,14 @@ class _Import:
         self.tool_calls = 0
         self.tool_results = 0
         self.spans = 0
+        # Selections actually claimed. Not the same as ``spans``: a span whose delivery to a
+        # model turn was never shown is counted as a span and claimed as no selection, and
+        # ``capture`` must follow the claims rather than the reads.
+        self.selections = 0
         self.unknown_records = 0
         self.malformed_lines = 0
         self.unmatched_tool_results = 0
+        self.undelivered_tool_results = 0
         self.external_paths = 0
         self.unknown_types: dict[str, int] = {}
         self.notes: list[str] = []
@@ -424,6 +438,11 @@ class _Import:
             notes.append(f"malformed lines: {self.malformed_lines}")
         if self.unmatched_tool_results:
             notes.append(f"tool results with no matching tool use: {self.unmatched_tool_results}")
+        if self.undelivered_tool_results:
+            notes.append(
+                f"file reads no later model turn consumed, so no context selection was "
+                f"claimed for them: {self.undelivered_tool_results}"
+            )
         return ImportSummary(
             events=self.events,
             model_turns=self.model_turns,
@@ -433,6 +452,7 @@ class _Import:
             unknown_records=self.unknown_records,
             malformed_lines=self.malformed_lines,
             unmatched_tool_results=self.unmatched_tool_results,
+            undelivered_tool_results=self.undelivered_tool_results,
             capture=dict(capture),
             notes=tuple(notes),
         )

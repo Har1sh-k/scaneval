@@ -28,7 +28,7 @@ from scaneval.collectors import claude_code, codex
 
 | Name | What it does |
 |---|---|
-| `ImportSummary` | Frozen dataclass returned by every importer: `events`, `model_turns`, `tool_calls`, `tool_results`, `spans`, `unknown_records`, `malformed_lines`, `unmatched_tool_results`, `capture` (the Contract 3 capture-status keys), `notes`. |
+| `ImportSummary` | Frozen dataclass returned by every importer: `events`, `model_turns`, `tool_calls`, `tool_results`, `spans`, `unknown_records`, `malformed_lines`, `unmatched_tool_results`, `undelivered_tool_results`, `capture` (the Contract 3 capture-status keys), `notes`. |
 | `claude_code.find_transcripts(session_id, *, projects_dir=None)` | Returns the main transcript `<projects_dir>/*/<session_id>.jsonl` followed by `<projects_dir>/*/<session_id>/subagents/*.jsonl`. `projects_dir` defaults to `~/.claude/projects`. Returns `[]` rather than raising when nothing matches. |
 | `claude_code.import_transcript(observer, path, *, workspace_root, call_id, sidechain=False, agent_id=None)` | Reads one transcript file, no-follow and size-bounded. `sidechain` and `agent_id` are defaults; a record that states its own wins. A refused or truncated read is reported in the returned summary, never raised. |
 | `claude_code.import_stream_json(observer, lines, *, workspace_root, call_id)` | Reads `claude -p --output-format stream-json --verbose` output. |
@@ -55,7 +55,7 @@ Consistent with Contract 3. `metadata.source` is `claude_code_transcript`,
 | `model.response` | Paired with each request by `attempt_id` | `usage` (four counters), `usage_available`, `model_served`, `session_id`, `stdout_chars`, `failure_kind` (`error` is always `null` — see below) |
 | `tool.start` | Per `tool_use` block / per tool `item.started` | `tool_name`, `input_summary`, `sidechain`, `agent_id` |
 | `tool.end` | Per `tool_result` / per tool `item.completed` | `is_error`, `result_chars`, `spans`, and for Codex `exit_code` and `status` |
-| `context.selection` | Per tool result that delivered file text with a known path | `stage: "tool_result"`, `spans`, `span_count`, `capture_status: partial` |
+| `context.selection` | Per file-read tool result **that a later model turn consumed** — see [Returned is not delivered](#returned-is-not-delivered) | `stage: "tool_result"`, `spans`, `span_count`, `capture_status: partial` |
 | `observer.error` | Once per reading loss: unreadable lines, a refused file, a truncated read | `malformed_lines` or `max_bytes`, `capture_status: unavailable` |
 
 A span is `{path, start_line, end_line, chars, sha256, truncated, original_chars, role}` with
@@ -105,8 +105,8 @@ accepts both spellings everywhere.
 - `system` / `init` names the model, the session ID and the tool list.
 - The final `result` record carries `subtype`, `is_error`, `num_turns`, `session_id`,
   `total_cost_usd`, `usage` and `duration_api_ms`. These are attached to the **last**
-  `model.response` (as `cost_usd_cli_reported`, `result_subtype`, and so on) and repeated in
-  `ImportSummary.notes`.
+  `model.response` under the `invocation_*` keys — never over that turn's own `usage`, see
+  [Whose tokens are these](#whose-tokens-are-these) — and repeated in `ImportSummary.notes`.
 - A real run also emitted `system` records with subtypes `hook_started`, `hook_progress` and
   `hook_response`, and `rate_limit_event` records. None are in any published record list.
   They are counted, never raised on.
@@ -239,6 +239,49 @@ An empty sequence, or an element that is not a path, raises `ValueError` — at 
 importer, before any file is opened. This is wiring rather than a record: a collector that
 accepted "no workspace" would mark every path in the run external and report a clean import
 while doing it.
+
+## Returned is not delivered
+
+A tool result proves the tool returned some text. It does not prove a model was given it.
+Those are different facts, and a coverage claim rests on the second one.
+
+So a file read produces its `tool.end` and its span immediately — the tool really did return
+that content — but the `context.selection` is **held** until a later assistant turn appears
+in the record. That turn is the evidence of delivery, and the selection is emitted just ahead
+of its `model.request`, so the trace reads in the order the conversation happened: these
+lines arrived, then the model was asked again.
+
+A record that stops right after a read therefore claims no selection for it. Those reads are
+counted in `ImportSummary.undelivered_tool_results` with a note, and `capture.context_selection`
+is `unavailable` rather than `partial` because no selection was claimed at all. Without this,
+a transcript truncated one line after a `Read` would make `scaneval.diagnostics` report that
+file as `included` on the strength of a delivery nothing in the record shows.
+
+The rule is about what a record shows, so it is identical for session transcripts and for
+stream-json.
+
+## Whose tokens are these
+
+Two scopes, two sets of keys, and they must not be mixed.
+
+`usage` and `usage_available` on a `model.response` are always **that turn's own**, read from
+its own `message.usage`. The `result` record's figures describe the whole `claude -p`
+invocation, and the last turn is merely where the CLI happened to print them, so they go on
+the last response under their own names:
+
+| Key | Scope |
+|---|---|
+| `usage`, `usage_available` | This turn |
+| `cost_usd_cli_reported`, `num_turns`, `duration_api_ms` | This turn — always `null`, because a transcript reports none of them per turn |
+| `invocation_usage`, `invocation_cost_usd_cli_reported`, `invocation_num_turns`, `invocation_duration_api_ms` | The whole invocation; non-null only on the last response |
+
+Writing the invocation totals into the per-turn keys made the last response claim the
+invocation's figures as its own, so summing `usage` across responses counted the last turn
+twice. In the committed fixture that was 10 and 18 input tokens per response against an
+invocation total of 18. Now a reader who wants the invocation total reads one `invocation_*`
+key, a reader who wants per-turn cost adds up `usage`, and neither can silently get the other.
+The four `invocation_*` keys are present and `null` on every other response, so consumers read
+one key shape rather than testing for absence.
 
 ## A transcript is a file somebody else is still writing
 

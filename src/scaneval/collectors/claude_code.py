@@ -367,7 +367,7 @@ def _capture(tracker: _Import, *, context: str = "partial",
         "model_requests": "partial",
         "model_responses": "partial",
         "tool_calls": "partial",
-        "context_selection": context if tracker.spans else "unavailable",
+        "context_selection": context if tracker.selections else "unavailable",
         "finding_submitted": "not_applicable",
         "finding_candidate": "not_applicable",
         "finding_validation": "not_applicable",
@@ -591,6 +591,11 @@ def _import_records(
             tracker.unknown(kind)
     state.flush()
 
+    # Whatever is still held never reached a model turn: the file ends here. The tool.end
+    # events and their spans stay exactly as they were emitted, because the tool really did
+    # return that text; what is withdrawn is only the claim that a model was given it.
+    tracker.undelivered_tool_results += state.drop_selections()
+
     if state.result_note:
         tracker.notes.append(state.result_note)
     tracker.report_malformed()
@@ -664,7 +669,21 @@ class _State:
         self.prompt: str | None = None
         # tool_use id -> what the start event knew, so the end event can be linked to it.
         self.open_tools: dict[str, dict[str, Any]] = {}
+        # File reads whose text has not yet been shown to reach a model turn. See
+        # :meth:`release_selections`.
+        self.pending_selections: list[tuple[dict[str, Any], str | None, str | None]] = []
         self.result_note: str | None = None
+
+    def release_selections(self) -> None:
+        """Emit the held selections. Called when a later assistant turn proves delivery."""
+        held, self.pending_selections = self.pending_selections, []
+        for span, delivered, end_event_id in held:
+            self._context_selection(span, delivered, end_event_id)
+
+    def drop_selections(self) -> int:
+        """Discard the selections no turn ever consumed and say how many there were."""
+        held, self.pending_selections = self.pending_selections, []
+        return len(held)
 
     def assistant(self, record: dict[str, Any]) -> None:
         key = _message_key(record)
@@ -705,10 +724,16 @@ class _State:
                 turn.session_id = value
 
     def flush(self) -> None:
-        """Emit the accumulated turn: request, response, then one start per tool use."""
+        """Emit the accumulated turn: request, response, then one start per tool use.
+
+        Any tool result waiting for proof of delivery is released first. This turn existing
+        is that proof, and emitting the selections just ahead of the request reads in the
+        order the conversation happened: these lines arrived, then the model was asked again.
+        """
         turn = self.pending
         if turn is None:
             return
+        self.release_selections()
         self.pending = None
         tracker = self.tracker
         self.turn_index += 1
@@ -766,6 +791,13 @@ class _State:
             "is_error": None,
             "duration_api_ms": None,
             "model_served": turn.model,
+            # Present on every response and null on all but the last, so a consumer reads
+            # one key shape rather than testing for absence. Only the response the CLI
+            # printed its totals against ever fills them.
+            "invocation_usage": None,
+            "invocation_cost_usd_cli_reported": None,
+            "invocation_num_turns": None,
+            "invocation_duration_api_ms": None,
             "stdout_chars": len(answer),
             "stderr_chars": None,
         }
@@ -813,15 +845,28 @@ class _State:
         # CLI chooses, and metadata should not depend on the CLI keeping it short.
         metadata["result_subtype"] = tracker.summarize(_as_str(record.get("subtype")), 60)
         metadata["is_error"] = record.get("is_error") if isinstance(record.get("is_error"), bool) else None
-        metadata["num_turns"] = _as_int(record.get("num_turns"))
         metadata["session_id"] = _as_str(record.get("session_id")) or metadata["session_id"]
-        metadata["duration_api_ms"] = _as_int(record.get("duration_api_ms"))
-        metadata["cost_usd_cli_reported"] = cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None
+        # Invocation scope, under its own names. These describe the whole ``claude -p`` call,
+        # not the turn this event is about, and the last turn is merely where the CLI happened
+        # to print them. Writing them into the per-turn keys made the last response claim the
+        # invocation's totals as its own, so summing ``usage`` across responses counted the
+        # last turn twice: in the committed fixture, 10 + 18 tokens of per-turn input against
+        # an invocation total of 18. A reader that wants the invocation total reads one
+        # ``invocation_*`` key; a reader that wants per-turn cost adds up ``usage``; and
+        # neither can silently get the other.
+        metadata["invocation_num_turns"] = _as_int(record.get("num_turns"))
+        metadata["invocation_duration_api_ms"] = _as_int(record.get("duration_api_ms"))
+        metadata["invocation_cost_usd_cli_reported"] = (
+            cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None
+        )
+        metadata["invocation_usage"] = None
         if isinstance(usage, dict):
             mapped, available = _usage({"usage": usage})
             if available:
-                metadata["usage"] = mapped
-                metadata["usage_available"] = True
+                metadata["invocation_usage"] = mapped
+        # Untouched. ``usage`` and ``usage_available`` stay this turn's own, as read from its
+        # own ``message.usage``, and the per-turn cost and duration keys stay null because a
+        # transcript reports neither per turn.
         raw_error = record.get("result") if metadata["is_error"] else None
         raw_error = raw_error if isinstance(raw_error, str) and raw_error else None
         metadata["failure_kind"] = tracker.failure(
@@ -832,9 +877,9 @@ class _State:
         metadata["error"] = None
         note = (
             f"result: subtype={metadata['result_subtype']} is_error={metadata['is_error']} "
-            f"num_turns={metadata['num_turns']} session_id={metadata['session_id']} "
-            f"cost_usd_cli_reported={metadata['cost_usd_cli_reported']} "
-            f"duration_api_ms={metadata['duration_api_ms']}"
+            f"num_turns={metadata['invocation_num_turns']} session_id={metadata['session_id']} "
+            f"cost_usd_cli_reported={metadata['invocation_cost_usd_cli_reported']} "
+            f"duration_api_ms={metadata['invocation_duration_api_ms']}"
         )
         self.result_note = note
         return raw_error
@@ -931,7 +976,11 @@ class _State:
 
         if span:
             tracker.spans += 1
-            self._context_selection(span, span_text, end_event_id)
+            # Held, not emitted. A tool result proves the tool returned the text, which is a
+            # different fact from the model having received it: a transcript that stops right
+            # here recorded a read whose output no turn ever consumed. The selection is
+            # released by :meth:`flush` once a later assistant turn proves delivery.
+            self.pending_selections.append((span, span_text, end_event_id))
 
     def _context_selection(
         self,
@@ -964,6 +1013,7 @@ class _State:
         if tracker.content_mode and delivered:
             fields["content"] = {"text": delivered}
         tracker.emit(**fields)
+        tracker.selections += 1
 
 
 def _content_payload(value: Any) -> Any:
