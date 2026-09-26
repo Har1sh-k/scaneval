@@ -32,6 +32,7 @@ from collections.abc import Iterable, Sequence
 import json
 import os
 from pathlib import Path
+import re
 import stat
 from typing import Any
 
@@ -58,6 +59,14 @@ PROJECTS_DIR = (".claude", "projects")
 # to build ``input_summary``; a tool absent from here still gets a summary, from its input.
 PATH_INPUT_KEYS = ("file_path", "path", "notebook_path")
 
+# The only shape a session ID may have. Claude Code issues UUIDs and names subagent files
+# ``agent-<hex>``, so this is generous about what it admits and strict about the characters
+# that make a lookup mean something other than itself. It excludes every glob metacharacter
+# (``*?[]{}``), whitespace, the dot, and both separators by construction rather than by a
+# separate blocklist, because a blocklist has to be complete and this has to admit a list.
+# Eight characters minimum: a one- or two-character ID would be a typo, not an identifier.
+SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{7,127}")
+
 # The most a single transcript may contribute to memory. A transcript is written by another
 # process after the scan began, so its size is not a number this collector gets to assume:
 # past this bound the read stops and the import says it was truncated. 64 MiB is far above
@@ -76,6 +85,33 @@ USAGE_KEYS = {
     "cache_read_input_tokens": "cache_read_input_tokens",
     "cache_creation_input_tokens": "cache_creation_input_tokens",
 }
+
+
+def session_id_is_usable(session_id: Any) -> bool:
+    """Whether this string may be looked up as a session ID at all.
+
+    A session ID is not a constant. It is read out of a CLI's stdout, or out of records a
+    scanner wrote, and it then names a path — so it is untrusted input that decides which
+    files get imported. :data:`SESSION_ID_PATTERN` is a strict literal shape: it admits the
+    UUIDs Claude Code actually issues and the ``agent-<hex>`` names beside them, and it
+    admits no glob metacharacter (``*?[]{}``), no whitespace, no dot, and no separator,
+    because none of those appear in a real ID and every one of them changes what a lookup
+    means.
+
+    Exported so an adapter can tell "this ID was refused" from "this session left no
+    transcript". :func:`find_transcripts` answers both with an empty list, which is right for
+    a lookup but wrong for a capture report: the first is a scanner record that cannot be
+    trusted and is worth a note, the second is an ordinary run that kept no log.
+    """
+    return isinstance(session_id, str) and SESSION_ID_PATTERN.fullmatch(session_id) is not None
+
+
+def _is_directory(candidate: Path) -> bool:
+    """True for a real directory at this exact name. Never true for a link to one."""
+    try:
+        return stat.S_ISDIR(os.lstat(candidate).st_mode)
+    except OSError:
+        return False
 
 
 def _inside(candidate: Path, boundary: Path) -> bool:
@@ -192,7 +228,7 @@ def find_transcripts(session_id: str, *, projects_dir: Path | None = None) -> li
     for a harness that ran a CLI which was configured not to keep one, and a collector that
     raised on it would turn a capture gap into a scan failure.
     """
-    if not session_id or "/" in session_id or "\\" in session_id or session_id in (".", ".."):
+    if not session_id_is_usable(session_id):
         return []
     root = projects_dir if projects_dir is not None else Path.home().joinpath(*PROJECTS_DIR)
     try:
@@ -201,13 +237,27 @@ def find_transcripts(session_id: str, *, projects_dir: Path | None = None) -> li
         return []
     if not boundary.is_dir():
         return []
+    try:
+        projects = sorted(entry for entry in root.iterdir() if _is_directory(entry))
+    except OSError:
+        return []
+
     found: list[Path] = []
-    for main in sorted(root.glob(f"*/{session_id}.jsonl")):
+    for project in projects:
+        main = project / f"{session_id}.jsonl"
         if _inside(main, boundary):
             found.append(main)
-    for sub in sorted(root.glob(f"*/{session_id}/subagents/*.jsonl")):
-        if _inside(sub, boundary):
-            found.append(sub)
+    for project in projects:
+        # Built by joining path components, never by interpolating into a pattern. The only
+        # glob in this function is the literal "*.jsonl" below, and it runs inside a
+        # directory whose name came from joining, so no character of the session ID is ever
+        # handed to the matcher.
+        subagents = project / session_id / "subagents"
+        if not _is_directory(subagents):
+            continue
+        for sub in sorted(subagents.glob("*.jsonl")):
+            if _inside(sub, boundary):
+                found.append(sub)
     return found
 
 
@@ -1032,6 +1082,7 @@ def _as_int(value: Any) -> int | None:
 
 
 __all__ = [
+    "MAX_TRANSCRIPT_BYTES",
     "ROUTE",
     "SOURCE_STREAM",
     "SOURCE_TRANSCRIPT",
@@ -1039,4 +1090,5 @@ __all__ = [
     "import_stream_json",
     "import_transcript",
     "parse_result_object",
+    "session_id_is_usable",
 ]

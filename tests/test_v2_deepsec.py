@@ -939,7 +939,7 @@ def test_a_payload_that_is_not_an_array_of_findings_is_refused_rather_than_read_
 def test_the_per_file_shares_of_one_batch_sum_back_to_the_batch(tmp_path):
     """DeepSec divides a batch's numbers across its files; one file's number measures nothing."""
     files = tuple((f"f{i}.py.json", {"filePath": f"f{i}.py", "analysisHistory": [{
-        "runId": "r1", "agentSessionId": "s1", "model": "claude-haiku-4-5",
+        "runId": "r1", "agentSessionId": "3348970b-6b99-46ad-a496-dd84c5a85613", "model": "claude-haiku-4-5",
         "numTurns": 4 / 3, "costUsd": 0.09 / 3, "durationMs": 900.0 / 3,
         "durationApiMs": 600.0 / 3,
         "usage": {"inputTokens": 999 / 3, "outputTokens": 300 / 3,
@@ -954,13 +954,13 @@ def test_the_per_file_shares_of_one_batch_sum_back_to_the_batch(tmp_path):
     assert session.usage == {"cache_creation_input_tokens": 3, "cache_read_input_tokens": 30,
                              "input_tokens": 999, "output_tokens": 300}
     assert session.model == "claude-haiku-4-5"
-    assert session.call_id == "deepsec/r1/s1"
+    assert session.call_id == "deepsec/r1/3348970b-6b99-46ad-a496-dd84c5a85613"
 
 
 def test_a_session_whose_entries_disagree_about_the_model_reports_none():
     files = (("a.py.json", {"filePath": "a.py", "analysisHistory": [
-        {"runId": "r", "agentSessionId": "s", "model": "one"},
-        {"runId": "r", "agentSessionId": "s", "model": "two"}]}),)
+        {"runId": "r", "agentSessionId": "09f298df-1c4e-4a30-9c07-6f2b0d51aa11", "model": "one"},
+        {"runId": "r", "agentSessionId": "09f298df-1c4e-4a30-9c07-6f2b0d51aa11", "model": "two"}]}),)
     assert sessions_from(files)[0].model is None
 
 
@@ -1357,7 +1357,7 @@ def test_the_batch_wall_clock_is_summed_from_its_shares_like_every_other_number(
     duplicated whole numbers had suggested, reported that batch as a third of its length.
     """
     files = tuple((f"f{i}.py.json", {"filePath": f"f{i}.py", "analysisHistory": [{
-        "runId": "r1", "agentSessionId": "s1", "model": "m",
+        "runId": "r1", "agentSessionId": "3348970b-6b99-46ad-a496-dd84c5a85613", "model": "m",
         "durationMs": 135949 / 3, "durationApiMs": 121684 / 3, "numTurns": 13 / 3,
         "costUsd": 0.15 / 3}]}) for i in range(3))
     session = sessions_from(files)[0]
@@ -1376,7 +1376,7 @@ def test_the_older_duplicated_wall_clock_is_flagged_and_never_guessed_at():
     different total from a guess about the writer would be worse than a flagged one.
     """
     old = tuple((f"f{i}.py.json", {"filePath": f"f{i}.py", "analysisHistory": [{
-        "runId": "r1", "agentSessionId": "s1", "model": "m",
+        "runId": "r1", "agentSessionId": "3348970b-6b99-46ad-a496-dd84c5a85613", "model": "m",
         "durationMs": 40847, "durationApiMs": 121684 / 3, "numTurns": 13 / 3,
         "costUsd": 0.15 / 3}]}) for i in range(3))
     session = sessions_from(old)[0]
@@ -1385,12 +1385,12 @@ def test_the_older_duplicated_wall_clock_is_flagged_and_never_guessed_at():
 
     # One file in a batch is one share and one whole at the same time, so it is never suspect.
     single = (("f0.py.json", {"analysisHistory": [{
-        "runId": "r1", "agentSessionId": "s1", "durationMs": 40847, "numTurns": 4.5}]}),)
+        "runId": "r1", "agentSessionId": "3348970b-6b99-46ad-a496-dd84c5a85613", "durationMs": 40847, "numTurns": 4.5}]}),)
     assert sessions_from(single)[0].duration_suspect is False
 
     # Nor is a batch whose other shares are whole numbers too: there is nothing to contrast.
     whole = tuple((f"f{i}.py.json", {"analysisHistory": [{
-        "runId": "r1", "agentSessionId": "s1", "durationMs": 100, "numTurns": 2,
+        "runId": "r1", "agentSessionId": "3348970b-6b99-46ad-a496-dd84c5a85613", "durationMs": 100, "numTurns": 2,
         "costUsd": 1}]}) for i in range(2))
     assert sessions_from(whole)[0].duration_suspect is False
 
@@ -1622,13 +1622,13 @@ def test_a_hostile_file_path_never_reaches_a_session_or_a_candidate(tmp_path, mo
     files = (
         ("/etc/passwd.json", {"filePath": "/etc/passwd",
                               "candidates": [{"vulnSlug": "x", "lineNumbers": [1]}],
-                              "analysisHistory": [{"runId": "r", "agentSessionId": "s"}]}),
+                              "analysisHistory": [{"runId": "r", "agentSessionId": "09f298df-1c4e-4a30-9c07-6f2b0d51aa11"}]}),
         ("../../escape.py.json", {"filePath": "../../escape.py",
                                   "candidates": [{"vulnSlug": "y", "lineNumbers": [2]}],
-                                  "analysisHistory": [{"runId": "r", "agentSessionId": "s"}]}),
+                                  "analysisHistory": [{"runId": "r", "agentSessionId": "09f298df-1c4e-4a30-9c07-6f2b0d51aa11"}]}),
         ("src/ok.py.json", {"filePath": "/var/tmp/run/source/src/ok.py",
                             "candidates": [{"vulnSlug": "z", "lineNumbers": [3]}],
-                            "analysisHistory": [{"runId": "r", "agentSessionId": "s"}]}),
+                            "analysisHistory": [{"runId": "r", "agentSessionId": "09f298df-1c4e-4a30-9c07-6f2b0d51aa11"}]}),
     )
     session = sessions_from(files)[0]
     assert session.paths == ("external:escape.py", "external:passwd", "src/ok.py")
@@ -1742,7 +1742,7 @@ def test_a_refusal_reason_is_a_closed_code_and_relocated_prose_kept_for_content(
 
     reason = ("could not read /var/tmp/run/source/src/secret.py: " + "verbose model prose " * 40)
     files = (("src/a.py.json", {"analysisHistory": [{
-        "runId": "r", "agentSessionId": "s",
+        "runId": "r", "agentSessionId": "09f298df-1c4e-4a30-9c07-6f2b0d51aa11",
         "refusal": {"refused": True, "reason": reason}}]}),)
     refusal = sessions_from(files, (Path("/var/tmp/run/source"),))[0].refusals[0]
     assert refusal.code == "refused", "no skipped list, so the structural code is the bare one"
@@ -1754,7 +1754,7 @@ def test_a_refusal_reason_is_a_closed_code_and_relocated_prose_kept_for_content(
     assert "verbose model prose" in refusal.reason
 
     with_skips = (("src/a.py.json", {"analysisHistory": [{
-        "runId": "r", "agentSessionId": "s",
+        "runId": "r", "agentSessionId": "09f298df-1c4e-4a30-9c07-6f2b0d51aa11",
         "refusal": {"refused": True, "reason": "x", "skipped": [{"filePath": "y"}]}}]}),)
     assert sessions_from(with_skips)[0].refusals[0].code == "refused_with_skipped_files"
 
@@ -2098,3 +2098,105 @@ def test_the_guide_states_the_status_rule_the_refusal_rule_and_the_duration_rule
     assert "import loss, never an absent record" in text
     assert "45316.33" in text and "may be duplicated rather than divided" in text
     assert "taken as a maximum" not in text
+
+
+# --- a session id is scanner-written text before it is a lookup key -------------------------
+
+
+@pytest.mark.parametrize("session_id,usable", [
+    ("3348970b-6b99-46ad-a496-dd84c5a85613", True),
+    ("09f298df1c4e4a309c076f2b0d51aa11", True),
+    ("session-aaaa", True),
+    ("*", False),
+    ("?", False),
+    ("[abcdefgh]", False),
+    ("{a,b}cdefgh", False),
+    ("**/../secrets", False),
+    ("../../etc/passwd", False),
+    ("with space and more", False),
+    ("with\ttab-chars", False),
+    ("short", False),
+    ("", False),
+    ("-leading-hyphen", False),
+    ("a" * 129, False),
+    (None, False),
+    (12345678, False),
+])
+def test_only_an_id_transcript_discovery_may_be_handed_is_usable(session_id, usable):
+    """The id comes off a scanner-written record and is handed to a lookup, so it is checked."""
+    from scaneval.adapters.deepsec import session_id_usable
+
+    assert session_id_usable(session_id) is usable
+
+
+def test_a_crafted_session_id_never_reaches_discovery_and_imports_nobody_else(tmp_path, monkeypatch):
+    """``*`` interpolated into a glob pulled every transcript on the machine into one trace.
+
+    Discovery is literal now; this is the other half, at the boundary where the value enters.
+    The projects directory here holds transcripts of unrelated sessions, and none of them may
+    appear in this run's trace.
+    """
+    projects = tmp_path / "claude-projects" / "-some-other-run"
+    projects.mkdir(parents=True)
+    for other in ("11111111-1111-4111-8111-111111111111",
+                  "22222222-2222-4222-8222-222222222222"):
+        (projects / f"{other}.jsonl").write_text(json.dumps(
+            {"type": "assistant", "uuid": "u1", "sessionId": other, "message": {
+                "role": "assistant", "model": "someone-elses-model",
+                "usage": {"input_tokens": 9, "output_tokens": 9},
+                "content": [{"type": "text", "text": "not this run"}]}}) + "\n", encoding="utf-8")
+
+    root = fake_deepsec_root(tmp_path, session_ids=["*"])
+    calls = stub_collector(monkeypatch, tmp_path)
+    bundle = invoke(tmp_path, root, claude_projects_dir=str(tmp_path / "claude-projects"))
+    result, execution = documents(bundle)
+    assert result["status"] == "success", execution["error"]
+
+    assert calls == [], "an unusable id is never handed to the finder"
+    events = trace_events(bundle)
+    assert "someone-elses-model" not in json.dumps(events)
+    assert not [event for event in events if event["metadata"].get("source")
+                == "claude_code_transcript"]
+
+    # It is treated exactly like a missing id: its own uncorrelated call, saying which.
+    requests = [event for event in events if event["type"] == "model.request"]
+    assert requests, "the call is still described by DeepSec's own record"
+    assert all(event["metadata"]["correlation"] == "invalid_session_id" for event in requests)
+    assert all(event["call_id"].startswith("deepsec/uncorrelated/") for event in requests)
+    assert any("not one transcript discovery may be handed" in note
+               for note in execution["notes"]), execution["notes"]
+    assert execution["capture"]["tool_calls"] == "unavailable"
+
+
+def test_a_valid_session_id_still_resolves_to_its_own_transcript(tmp_path, monkeypatch):
+    """The control: the rule must not cost a real lookup."""
+    root = fake_deepsec_root(tmp_path, session_ids=["3348970b-6b99-46ad-a496-dd84c5a85613"])
+    calls = stub_collector(monkeypatch, tmp_path)
+    bundle = invoke(tmp_path, root)
+    _result, execution = documents(bundle)
+    assert [call["session_id"] for call in calls if call["call"] == "find"] == [
+        "3348970b-6b99-46ad-a496-dd84c5a85613"]
+    request = next((event for event in trace_events(bundle)
+                    if event["type"] == "model.request"
+                    and event["metadata"].get("source") == "harness_record"), None)
+    assert request is None, "the transcript described the call, so no fallback pair"
+    assert execution["capture"]["tool_calls"] == "complete"
+
+
+def test_an_unusable_id_is_its_own_call_and_never_merged_with_another():
+    files = (
+        ("src/a.py.json", {"analysisHistory": [{"runId": "r", "agentSessionId": "*"}]}),
+        ("src/b.py.json", {"analysisHistory": [{"runId": "r", "agentSessionId": "*"}]}),
+        ("src/c.py.json", {"analysisHistory": [{"runId": "r", "agentSessionId": ""}]}),
+    )
+    groups = sessions_from(files)
+    assert [group.correlation for group in groups] == [
+        "invalid_session_id", "invalid_session_id", "missing_session_id"]
+    assert len({group.key for group in groups}) == 3
+    assert all(not group.correlated for group in groups)
+
+
+def test_the_guide_states_the_session_id_rule():
+    text = DOC.read_text(encoding="utf-8")
+    assert "invalid_session_id" in text
+    assert "`^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$`" in text

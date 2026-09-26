@@ -89,6 +89,11 @@ LEADING_DOT_SEGMENTS = re.compile(r"^(?:\./+)+")
 # How much of a DeepSec description a claim carries as evidence. The whole of it stays in the
 # export artifact the claim cites, so this bounds the record rather than dropping evidence.
 EVIDENCE_LIMIT = 4000
+# What a Claude Agent SDK session id may look like before it is handed to transcript
+# discovery. A UUID satisfies it; a glob, a path, and anything with whitespace do not.
+SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$")
+# Stated rather than left implicit in the class above, so what is refused is visible.
+SESSION_ID_FORBIDDEN = re.compile(r"[*?\[\]{}!~^/\\\s]")
 # The capture-status keys Contract 3 names, in the order the guide tables them.
 CAPTURE_KEYS = ("model_requests", "model_responses", "tool_calls", "context_selection",
                 "finding_candidate", "finding_submitted", "finding_validation",
@@ -119,6 +124,32 @@ def collector() -> tuple[Any, Any] | None:
     if find is None or load is None:
         return None
     return find, load
+
+
+def session_id_usable(session_id: Any) -> bool:
+    """Whether an ``agentSessionId`` may be handed to transcript discovery.
+
+    The id comes off a record the scanner wrote, and discovery looks a transcript up by it. An
+    id interpolated into a glob made ``*`` match every session on the machine, so a record
+    could pull transcripts of unrelated runs into this run's trace; discovery is literal now,
+    and this is the other half of the same fix, at the boundary where the value enters.
+
+    The collector's own :func:`session_id_is_usable` is the rule when it is installed, so the
+    two cannot drift. The fallback is the same rule spelled here: a Claude Agent SDK session id
+    is a UUID, so it starts alphanumeric, continues in ``[A-Za-z0-9_-]``, runs 8 to 128
+    characters, and carries no glob metacharacter, no path separator and no whitespace — which
+    the character class already excludes, and which :data:`SESSION_ID_FORBIDDEN` restates so a
+    reader can see what is being refused rather than infer it.
+    """
+    if not isinstance(session_id, str):
+        return False
+    try:
+        helper = getattr(import_module("scaneval.collectors"), "session_id_is_usable", None)
+    except ImportError:
+        helper = None
+    if helper is not None:
+        return bool(helper(session_id))
+    return bool(SESSION_ID.match(session_id)) and not SESSION_ID_FORBIDDEN.search(session_id)
 
 
 def kind_for_slug(slug: str | None) -> str:
@@ -704,13 +735,16 @@ class Session(NamedTuple):
     one says the number may be a duplicate rather than a share; it never changes the number,
     because a guess at a different total would be worse than a flagged one.
 
-    ``correlated`` says whether DeepSec named the session at all. Entries carrying no
-    ``agentSessionId`` used to share one empty key, so unrelated batches were merged into a
-    single call with their paths, turns, cost and tokens added together: the one case where the
-    native identifier is missing is the one case where correlation was being invented. Each such
-    entry is its own group now, and the events built from it carry
-    ``correlation: "missing_session_id"`` so a reader knows the call boundary is this adapter's
-    guess at one entry rather than DeepSec's own.
+``correlation`` says how the call boundary was arrived at, and only one of its three values
+    means DeepSec supplied it.
+
+    ``agent_session_id`` is DeepSec's own. ``missing_session_id`` is an entry that carried none:
+    those used to share one empty key, so unrelated batches were merged into a single call with
+    their paths, turns, cost and tokens added together, which is correlation being invented at
+    exactly the moment the native identifier was absent. ``invalid_session_id`` is an entry
+    whose id is not one transcript discovery may be handed — the value is scanner-written, and
+    an id like ``*`` reached a glob and imported the transcripts of unrelated sessions. Both of
+    the latter get their own per-entry group and are never passed to discovery.
     """
 
     run_id: str
@@ -724,7 +758,7 @@ class Session(NamedTuple):
     duration_api_ms: float
     usage: dict[str, int]
     refusals: tuple[Refusal, ...]
-    correlated: bool
+    correlation: str
     key: str
     external_paths: int
     # True when every entry of this group carried the same whole-number ``durationMs`` while
@@ -738,9 +772,9 @@ class Session(NamedTuple):
         return f"deepsec/{self.key}"
 
     @property
-    def correlation(self) -> str:
-        """How this call was correlated, for the event that has to say so."""
-        return "agent_session_id" if self.correlated else "missing_session_id"
+    def correlated(self) -> bool:
+        """Whether DeepSec itself named this call, which is what discovery may be given."""
+        return self.correlation == "agent_session_id"
 
 
 def _number(value: Any) -> float:
@@ -797,6 +831,11 @@ def sessions_from(files: tuple[tuple[str, dict], ...],
     exactly the moment the scanner had failed to record one, and it added the paths, turns, cost
     and tokens of unrelated batches together.
 
+    An id that :func:`session_id_usable` refuses is treated exactly like a missing one and never
+    reaches transcript discovery. The value is scanner-written, and discovery used to
+    interpolate it into a glob, so a record naming its session ``*`` imported every transcript
+    on the machine into this run's trace.
+
     Paths come from :func:`record_path`, which reads where DeepSec put the record rather than
     what the record says about itself, so no scanner-written absolute path reaches an event. The
     model is kept only when every entry in the group names the same one, because a group whose
@@ -813,10 +852,16 @@ def sessions_from(files: tuple[tuple[str, dict], ...],
                 continue
             run_id = str(entry.get("runId") or "")
             session_id = str(entry.get("agentSessionId") or "")
-            correlated = bool(session_id)
+            if not session_id:
+                correlation = "missing_session_id"
+            elif not session_id_usable(session_id):
+                correlation = "invalid_session_id"
+            else:
+                correlation = "agent_session_id"
+            correlated = correlation == "agent_session_id"
             key = f"{run_id}/{session_id}" if correlated else f"uncorrelated/{path}/{index}"
             bucket = grouped.setdefault(key, {
-                "run_id": run_id, "session_id": session_id, "correlated": correlated,
+                "run_id": run_id, "session_id": session_id, "correlation": correlation,
                 "models": [], "paths": [], "turns": 0.0, "cost": 0.0, "duration": 0.0,
                 "api": 0.0, "usage": {}, "refusals": [], "external": 0,
                 "durations": [], "fractional": False})
@@ -862,7 +907,7 @@ def sessions_from(files: tuple[tuple[str, dict], ...],
             # Token counts are whole tokens; the per-file shares are fractions of them, so the
             # sum is rounded once, here, rather than written as a fraction of a token.
             usage={name: int(round(value)) for name, value in sorted(bucket["usage"].items())},
-            refusals=tuple(bucket["refusals"]), correlated=bucket["correlated"], key=key,
+            refusals=tuple(bucket["refusals"]), correlation=bucket["correlation"], key=key,
             external_paths=bucket["external"],
             duration_suspect=_duplicated_duration(bucket["durations"], bucket["fractional"])))
     return tuple(sessions)
@@ -1282,7 +1327,9 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
             located = False
             main_turns = 0
             captured_anything = False
-            if collectors is not None and session.session_id:
+            # ``correlated`` is the gate, not the bare presence of an id: an id discovery may
+            # not be handed is treated exactly like a missing one.
+            if collectors is not None and session.correlated:
                 find, load = collectors
                 try:
                     paths = list(find(session.session_id, projects_dir=projects_dir))
@@ -1396,6 +1443,13 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
         observer.flush()
         state = observer.get_state()
         observer.close()
+    invalid = [session.paths[0] if session.paths else session.key
+               for session in sessions if session.correlation == "invalid_session_id"]
+    if invalid:
+        notes.append(
+            f"{len(invalid)} analysis entr(ies) carried an agentSessionId that is not one "
+            "transcript discovery may be handed, so each became its own uncorrelated call and "
+            "none was looked up: " + ", ".join(sorted(invalid)[:5]))
     if sessions:
         notes.append(f"{transcripts_found} of {len(sessions)} agent session(s) had a Claude Code "
                      "transcript this run could import. A session with a transcript is described "

@@ -183,6 +183,117 @@ def test_find_transcripts_refuses_a_session_id_that_would_escape_the_projects_di
     assert claude_code.find_transcripts("", projects_dir=projects) == []
 
 
+def populated_projects(tmp_path: Path) -> Path:
+    """A projects directory holding two unrelated sessions, each with a subagent file."""
+    projects = tmp_path / "projects"
+    for slug, session in (("-repo-one", "aaaaaaaa-1111-4111-8111-111111111111"),
+                          ("-repo-two", "bbbbbbbb-2222-4222-8222-222222222222")):
+        directory = projects / slug
+        (directory / session / "subagents").mkdir(parents=True)
+        (directory / f"{session}.jsonl").write_text("{}\n")
+        (directory / session / "subagents" / "agent-aaa.jsonl").write_text("{}\n")
+    return projects
+
+
+# Every one of these changes what a lookup means, and a session ID reaches this function from
+# a CLI's stdout or from records a scanner wrote. The bare "*" is the one that mattered: as a
+# glob it matched every session under the projects directory, so an unrelated conversation
+# could be imported into a trace as though it belonged to the scan.
+UNUSABLE_IDS = [
+    "*",
+    "?",
+    "[a-z]*",
+    "aaaaaaaa-1111-4111-8111-11111111111?",
+    "session one",
+    "session\tone",
+    "{a,b}aaaaaa",
+    "aaaaaaaa-1111-4111-8111-111111111111 ",
+    "../../etc",
+    "..",
+    ".",
+    "",
+    "short",
+    "/absolute/path",
+    "back\\slash",
+    "-leading-dash",
+    "a" * 129,
+    None,
+    12345678,
+]
+
+
+@pytest.mark.parametrize("session_id", UNUSABLE_IDS)
+def test_an_unusable_session_id_finds_nothing_even_when_other_sessions_exist(
+    session_id, tmp_path: Path
+):
+    """A pattern must never be built from an ID, so a pattern in an ID must match nothing."""
+    projects = populated_projects(tmp_path)
+    assert claude_code.find_transcripts(session_id, projects_dir=projects) == []
+
+
+@pytest.mark.parametrize("session_id", UNUSABLE_IDS)
+def test_session_id_is_usable_refuses_exactly_what_the_lookup_refuses(session_id):
+    """The helper and the lookup answer the same table, so an adapter can ask before calling."""
+    assert claude_code.session_id_is_usable(session_id) is False
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        "aaaaaaaa-1111-4111-8111-111111111111",
+        "agent-ac499d11fcc4ace1d",
+        "abcdefgh",
+        "A1_b2-C3_d4",
+        "0" * 128,
+    ],
+)
+def test_session_id_is_usable_accepts_the_shapes_the_cli_actually_issues(session_id):
+    assert claude_code.session_id_is_usable(session_id) is True
+
+
+def test_a_valid_session_id_finds_its_own_files_and_nothing_from_a_sibling(tmp_path: Path):
+    """Literal joining, so a lookup returns one session's files and no neighbour's."""
+    projects = populated_projects(tmp_path)
+    wanted = "aaaaaaaa-1111-4111-8111-111111111111"
+    other = "bbbbbbbb-2222-4222-8222-222222222222"
+
+    found = claude_code.find_transcripts(wanted, projects_dir=projects)
+
+    assert found == [
+        projects / "-repo-one" / f"{wanted}.jsonl",
+        projects / "-repo-one" / wanted / "subagents" / "agent-aaa.jsonl",
+    ]
+    assert not any(other in str(path) for path in found)
+
+
+def test_the_only_glob_left_runs_inside_a_directory_built_by_joining(tmp_path: Path):
+    """A subagent file named with a metacharacter is still found, because it is not a pattern.
+
+    The remaining "*.jsonl" matches file names the CLI chose, inside a directory whose name
+    was joined rather than interpolated. This pins that the fix narrowed what is treated as a
+    pattern rather than what can be found.
+    """
+    projects = populated_projects(tmp_path)
+    session = "aaaaaaaa-1111-4111-8111-111111111111"
+    odd = projects / "-repo-one" / session / "subagents" / "agent-[b].jsonl"
+    odd.write_text("{}\n")
+
+    found = claude_code.find_transcripts(session, projects_dir=projects)
+
+    assert odd in found
+
+
+def test_a_session_id_that_is_a_prefix_of_another_does_not_pick_up_its_files(tmp_path: Path):
+    projects = tmp_path / "projects"
+    (projects / "-repo").mkdir(parents=True)
+    (projects / "-repo" / "abcdefgh.jsonl").write_text("{}\n")
+    (projects / "-repo" / "abcdefgh-extra.jsonl").write_text("{}\n")
+
+    found = claude_code.find_transcripts("abcdefgh", projects_dir=projects)
+
+    assert found == [projects / "-repo" / "abcdefgh.jsonl"]
+
+
 # --- turns ------------------------------------------------------------------------------
 
 

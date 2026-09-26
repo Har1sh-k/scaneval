@@ -29,7 +29,8 @@ from scaneval.collectors import claude_code, codex
 | Name | What it does |
 |---|---|
 | `ImportSummary` | Frozen dataclass returned by every importer: `events`, `model_turns`, `tool_calls`, `tool_results`, `spans`, `unknown_records`, `malformed_lines`, `unmatched_tool_results`, `undelivered_tool_results`, `capture` (the Contract 3 capture-status keys), `notes`. |
-| `claude_code.find_transcripts(session_id, *, projects_dir=None)` | Returns the main transcript `<projects_dir>/*/<session_id>.jsonl` followed by `<projects_dir>/*/<session_id>/subagents/*.jsonl`. `projects_dir` defaults to `~/.claude/projects`. Returns `[]` rather than raising when nothing matches. |
+| `claude_code.find_transcripts(session_id, *, projects_dir=None)` | Returns the main transcript for that session followed by its `subagents/*.jsonl`. `projects_dir` defaults to `~/.claude/projects`. Returns `[]` rather than raising when nothing matches **or when the ID is refused** — see [A session ID is untrusted input](#a-session-id-is-untrusted-input). |
+| `claude_code.session_id_is_usable(session_id)` | Whether an ID may be looked up at all. Call it first to tell "refused" from "no transcript". |
 | `claude_code.import_transcript(observer, path, *, workspace_root, call_id, sidechain=False, agent_id=None)` | Reads one transcript file, no-follow and size-bounded. `sidechain` and `agent_id` are defaults; a record that states its own wins. A refused or truncated read is reported in the returned summary, never raised. |
 | `claude_code.import_stream_json(observer, lines, *, workspace_root, call_id)` | Reads `claude -p --output-format stream-json --verbose` output. |
 | `claude_code.parse_result_object(text)` | Parses `claude -p --output-format json` stdout. Returns `None` for anything that is not a `type: "result"` object. |
@@ -282,6 +283,34 @@ invocation total of 18. Now a reader who wants the invocation total reads one `i
 key, a reader who wants per-turn cost adds up `usage`, and neither can silently get the other.
 The four `invocation_*` keys are present and `null` on every other response, so consumers read
 one key shape rather than testing for absence.
+
+## A session ID is untrusted input
+
+A session ID is not a constant. It is read out of a CLI's stdout or out of records a scanner
+wrote, and it then names a path — so it decides which files get imported.
+
+`find_transcripts` used to interpolate it into a glob pattern
+(`projects_dir.glob(f"*/{session_id}.jsonl")`). A recorded ID of `*` or `[a-f]*` therefore
+matched **every session under the projects directory**, and unrelated conversations could be
+imported into a trace as though they belonged to the scan. Two changes close it:
+
+1. **The ID is validated against a literal shape first**, `SESSION_ID_PATTERN` =
+   `^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$`. That admits the UUIDs Claude Code issues and the
+   `agent-<hex>` names beside them, and admits no glob metacharacter (`*?[]{}`), no
+   whitespace, no dot and no separator — by construction rather than by a blocklist, because
+   a blocklist has to be complete while an allowlist only has to be correct.
+2. **Lookup is by joining, never by pattern.** The project directories are iterated and
+   `directory / f"{session_id}.jsonl"` and `directory / session_id / "subagents"` are tested
+   by `lstat`, with the same regular-file and boundary checks as everywhere else. The only
+   glob left is a literal `*.jsonl` *inside* the joined subagents directory, so no character
+   of the ID ever reaches the matcher. A subagent file whose own name contains a
+   metacharacter is still found, because the narrowing is about what counts as a pattern, not
+   about what can be found.
+
+`find_transcripts` answers both "refused" and "no transcript" with an empty list, which is
+right for a lookup and wrong for a capture report. `session_id_is_usable(session_id)` is
+exported so an adapter can tell them apart: the first is a scanner record that cannot be
+trusted and is worth a note, the second is an ordinary run that kept no log.
 
 ## A transcript is a file somebody else is still writing
 
