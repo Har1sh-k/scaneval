@@ -50,9 +50,17 @@ two different producers read as fully included in one prompt that never existed.
 invocations is where that question belongs, and `scattered` is how it answers.
 
 An event carrying no usable `call_id` or no usable `producer_id` — absent, or not a non-empty
-string, which the schema forbids anyway — is its own group, keyed by its `event_id`, because two
-such events say nothing about belonging together. `group_key` is the `call_id`, or the `event_id`
-for an uncorrelated group; it identifies a group only together with `producer_id`.
+string, which the schema forbids anyway — is a group of its own, correlated with nothing. Not even
+with another event spelling its `event_id` the same way: an event ID is unique only within the
+Observer that minted it, two Observers hand out the same fallback IDs, and a group built out of
+that coincidence would pool the context of two unrelated producers. Such groups are keyed
+internally by the event's position in the trace, which cannot collide.
+
+An uncorrelated row still reports the `producer_id` and `call_id` its event carried — hiding a
+call ID this declined to correlate on would hide the fact a reader needs in order to check it —
+with `correlated: false` to say the grouping rested on neither. `group_key` is the `call_id`, or
+the `event_id` for an uncorrelated group: readable identification, not a key. Use `event_ids` to
+tell two rows apart.
 
 Within a group, the spans on one path are merged into a union of closed, 1-based line intervals.
 Intervals that touch merge as well as ones that overlap: lines 10-14 and 15-20 are one contiguous
@@ -105,7 +113,12 @@ the same size. That split is the whole judgement of this diagnostic:
   that cannot be read, or a span this cannot read even as a path. What a record does not say was
   supplied cannot be shown not to have been supplied.
 - **Any of those in any invocation** blocks `absent` for the *target* — in `best` and in `union`.
-  A target's absence answers for every invocation, not for the tidiest one.
+  A target's absence answers for every invocation, not for the tidiest one. That covers incomplete
+  capture as well as holes: `best` may be `absent` only when *every* invocation claimed complete
+  capture and none of them blocks. `best` is a maximum, and a maximum would otherwise step over
+  the doubtful invocation to reach the confident one — reporting `absent` for a target the
+  doubtful one may well have supplied. `best` and `union` are computed from one boolean so they
+  cannot drift apart.
 - **A label location with no line range** caps the target at `partial`: a pack may name a file
   whose exact region has not been reviewed yet, and nothing here invents a boundary the label did
   not draw. `included` would overclaim; `absent` would deny something never looked at.
@@ -253,8 +266,9 @@ or a refused overwrite. A capture gap is none of these: it produces a document, 
 ### Output
 
 Sorted keys, two-space indent, one trailing newline. Targets sorted by `target_id`, invocations by
-first sequence then producer then group key, event IDs by sequence then ID, reason codes
-lexically. No clock, no
+first sequence then producer then group key then position in the trace, event IDs by sequence
+then ID, reason codes lexically — every one of those orders total, so nothing falls back on
+insertion order. No clock, no
 randomness, and no timestamp of its own: two runs over one bundle produce the same bytes.
 
 The document is not a registered contract. It is derived from documents that have contracts, the
@@ -315,10 +329,12 @@ counts
   scattered_targets
 
 invocations               one per context.selection group; counts only, never a supplied path
-  producer_id             null for a group that carried no usable one
-  call_id                 null for a group that carried no usable one
-  group_key               the call_id, or the event_id for an uncorrelated group; identifies a
-                          group only together with producer_id
+  producer_id             as carried; null when the event carried no usable one
+  call_id                 as carried; null when the event carried no usable one
+  correlated              whether the grouping rested on producer_id and call_id together; false
+                          for a group of one that could not be correlated with anything
+  group_key               the call_id, or the event_id for an uncorrelated group: readable
+                          identification, not a key - use event_ids to tell two rows apart
   first_sequence
   events, event_ids
   capture_status          the distinct statuses in the group, sorted
@@ -336,8 +352,8 @@ targets                   sorted by target_id
     covered_lines, needed_lines, locations_covered, locations_total
     locations             per accepted location: path, start_line, end_line, lines,
                           covered_lines, coverage ("full" | "partial" | "none")
-  by_invocation           sorted by first sequence, then producer, then group key
-    producer_id, call_id, group_key, first_sequence
+  by_invocation           sorted by first sequence, producer, group key, position in trace
+    producer_id, call_id, correlated, group_key, first_sequence
     classification
     event_ids             every event of the group
     contributing_event_ids

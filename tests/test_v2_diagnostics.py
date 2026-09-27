@@ -570,6 +570,87 @@ def test_an_event_without_a_call_id_is_its_own_invocation(tmp_path):
     assert target["union"]["scattered"] is True
 
 
+def test_one_partly_captured_invocation_stops_another_carrying_the_target_to_absent(tmp_path):
+    """A maximum happily steps over the doubtful invocation to reach the confident one.
+
+    Neither invocation recorded the target. The first did not claim complete capture, so it may
+    well have supplied it; only the second can honestly say it did not. ``best`` is the best of
+    the two and must not read that as the target never having been supplied at all.
+    """
+    invocation = build_bundle(
+        tmp_path, locations=[region("src/example.py", 10, 20)],
+        events=[event(1, call_id="call-a", capture_status="partial",
+                      spans=[span("src/other.py", 1, 40)]),
+                event(2, call_id="call-b", capture_status="complete",
+                      spans=[span("src/other.py", 1, 40)])])
+
+    target = only_target(diagnostics.context_coverage_for_invocation(invocation))
+
+    assert [entry["classification"] for entry in target["by_invocation"]] == ["unknown", "absent"]
+    assert target["best"] == "unknown"
+    assert target["union"]["classification"] == "unknown"
+
+
+def test_two_fully_captured_invocations_that_missed_the_target_are_absent(tmp_path):
+    """The mirror: with nothing in doubt, the negative claim still stands."""
+    invocation = build_bundle(
+        tmp_path, locations=[region("src/example.py", 10, 20)],
+        events=[event(1, call_id="call-a", capture_status="complete",
+                      spans=[span("src/other.py", 1, 40)]),
+                event(2, call_id="call-b", capture_status="complete",
+                      spans=[span("src/other.py", 1, 40)])])
+
+    target = only_target(diagnostics.context_coverage_for_invocation(invocation))
+
+    assert [entry["classification"] for entry in target["by_invocation"]] == ["absent", "absent"]
+    assert target["best"] == "absent"
+    assert target["union"]["classification"] == "absent"
+
+
+def test_two_producers_with_no_call_ids_and_colliding_event_ids_are_two_invocations(tmp_path):
+    """Two Observers mint the same fallback event IDs; that coincidence correlates nothing.
+
+    Keying an uncorrelated event on its event ID pooled the context of two unrelated producers,
+    and a target whose halves were delivered separately read as one fully included prompt.
+    """
+    first = event(1, call_id=None, producer_id="producer-one", event_id="event-1",
+                  spans=[span("src/a.py", 1, 5)])
+    second = event(2, call_id=None, producer_id="producer-two", event_id="event-1",
+                   spans=[span("src/b.py", 1, 5)])
+    invocation = build_bundle(
+        tmp_path, locations=[region("src/a.py", 1, 5), region("src/b.py", 1, 5)],
+        events=[first, second])
+
+    document = diagnostics.context_coverage_for_invocation(invocation)
+
+    assert len(document["invocations"]) == 2
+    assert [entry["producer_id"] for entry in document["invocations"]] == ["producer-one",
+                                                                          "producer-two"]
+    assert [entry["correlated"] for entry in document["invocations"]] == [False, False]
+    target = only_target(document)
+    assert "included" not in [entry["classification"] for entry in target["by_invocation"]]
+    assert target["best"] == "partial"
+    # The union may still say the region reached the run, in pieces.
+    assert target["union"]["classification"] == "included"
+    assert target["union"]["scattered"] is True
+
+
+def test_colliding_event_ids_from_one_producer_still_do_not_correlate(tmp_path):
+    """Uncorrelated means uncorrelated: an event ID is not a call ID, whoever minted it."""
+    first = event(1, call_id=None, event_id="event-1", spans=[span("src/a.py", 1, 5)])
+    second = event(2, call_id=None, event_id="event-1", spans=[span("src/b.py", 1, 5)])
+    invocation = build_bundle(
+        tmp_path, locations=[region("src/a.py", 1, 5), region("src/b.py", 1, 5)],
+        events=[first, second])
+
+    document = diagnostics.context_coverage_for_invocation(invocation)
+
+    assert len(document["invocations"]) == 2
+    assert only_target(document)["best"] == "partial"
+    second_read = diagnostics.context_coverage_for_invocation(invocation)
+    assert json.dumps(document, sort_keys=True) == json.dumps(second_read, sort_keys=True)
+
+
 def test_two_producers_sharing_a_call_id_are_two_invocations(tmp_path):
     """A call ID is minted by whoever emits it and is unique only to that emitter.
 
@@ -630,6 +711,9 @@ def test_an_event_with_no_usable_producer_keeps_its_own_group(tmp_path, producer
 
     assert [entry["group_key"] for entry in document["invocations"]] == ["event-1", "event-2"]
     assert [entry["producer_id"] for entry in document["invocations"]] == [None, None]
+    assert [entry["correlated"] for entry in document["invocations"]] == [False, False]
+    # The call ID is reported as carried even though the grouping could not rest on it.
+    assert [entry["call_id"] for entry in document["invocations"]] == ["call-1", "call-1"]
     assert only_target(document)["best"] == "partial"
 
 

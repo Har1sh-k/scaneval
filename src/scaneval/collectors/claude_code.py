@@ -597,7 +597,7 @@ def _import_records(
             result_record = record
         elif kind == "system" and record.get("subtype") == "init":
             init_record = record
-        elif kind == "assistant":
+        elif kind == "assistant" and _is_model_message(record):
             key = _message_key(record)
             if key and key not in message_order:
                 message_order.append(key)
@@ -646,6 +646,11 @@ def _import_records(
     # return that text; what is withdrawn is only the claim that a model was given it.
     tracker.undelivered_tool_results += state.drop_selections()
 
+    if state.unusable_model_records:
+        tracker.notes.append(
+            f"assistant records carrying no model response, which released no context and "
+            f"opened no turn: {state.unusable_model_records}"
+        )
     if state.result_note:
         tracker.notes.append(state.result_note)
     tracker.report_malformed()
@@ -667,6 +672,31 @@ def _import_records(
             "up to that bound"
         )
     return tracker.summary(_capture(tracker, truncated=loss == "truncated"))
+
+
+def _is_model_message(record: dict[str, Any]) -> bool:
+    """Whether an assistant record actually carries a model response.
+
+    The test is about shape, deliberately, and not about any CLI version: it asks whether
+    this record contains a response, not whether it looks like one a particular release
+    writes. A record needs a ``message`` object holding either content or a usage report;
+    anything else is a marker, an error stub, or a damaged line.
+
+    It matters because a turn is the evidence that a file read reached the model. A
+    transcript that ends just after a read reports that read as undelivered, and one bare
+    ``{"type": "assistant", "uuid": "..."}`` appended to it would otherwise flip the answer
+    to delivered without a single model response existing. Proof of delivery has to be a
+    response, so anything that is not one releases nothing.
+    """
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return False
+    content = message.get("content")
+    if isinstance(content, list) and any(isinstance(block, dict) for block in content):
+        return True
+    if isinstance(content, str) and content:
+        return True
+    return isinstance(message.get("usage"), dict)
 
 
 def _message_key(record: dict[str, Any]) -> str | None:
@@ -722,6 +752,12 @@ class _State:
         # File reads whose text has not yet been shown to reach a model turn. See
         # :meth:`release_selections`.
         self.pending_selections: list[tuple[dict[str, Any], str | None, str | None]] = []
+        # Message keys already emitted as a turn, so the same message arriving again is a
+        # replay rather than a second turn.
+        self.seen_messages: set[str] = set()
+        # Assistant records that were not a usable model message. Counted here as well as in
+        # ``unknown_records`` so the note can say what their presence cost.
+        self.unusable_model_records = 0
         self.result_note: str | None = None
 
     def release_selections(self) -> None:
@@ -737,14 +773,28 @@ class _State:
 
     def assistant(self, record: dict[str, Any]) -> None:
         key = _message_key(record)
-        if key is None:
-            self.tracker.unknown("assistant")
+        if key is None or not _is_model_message(record):
+            # Not a model turn, so it proves nothing and releases nothing. A record shaped
+            # like ``{"type": "assistant", "uuid": "..."}`` carries no response at all, and
+            # letting it open a turn would let a damaged line stand in for the evidence that
+            # a file read reached the model.
+            self.tracker.unknown("assistant:not-a-model-message")
+            self.unusable_model_records += 1
             return
-        if self.pending is not None and self.pending.message_id != key:
+        if self.pending is not None and self.pending.message_id == key:
+            # The ordinary case: another content block of the message already open.
+            turn = self.pending
+        elif key in self.seen_messages:
+            # The same message again after its turn was already emitted. Accepting it would
+            # double a turn's usage and, worse, would count as a second delivery.
+            self.tracker.unknown("assistant:replayed-message")
+            self.unusable_model_records += 1
+            return
+        else:
             self.flush()
-        if self.pending is None:
+            self.seen_messages.add(key)
             self.pending = _Turn(key)
-        turn = self.pending
+            turn = self.pending
         message = record.get("message")
         if isinstance(message, dict):
             model = message.get("model")

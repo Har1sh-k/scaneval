@@ -261,6 +261,29 @@ file as `included` on the strength of a delivery nothing in the record shows.
 The rule is about what a record shows, so it is identical for session transcripts and for
 stream-json.
 
+### What counts as proof
+
+Since a turn is the evidence, an importer that accepted any `assistant` record as a turn
+would accept a damaged line as evidence. A record releases held context only when it is a
+**valid, distinct model message**:
+
+- it carries a `message` object holding either content or a usage report — a bare
+  `{"type": "assistant", "uuid": "..."}` is a marker or an error stub, not a response;
+- its `message.id` (or fallback key) has not already been emitted as a turn, so a replayed
+  record is the message we already saw rather than a second one. Accepting one would double
+  that turn's usage and count as a second delivery.
+
+The per-block records a real message is written as are *not* replays: they share a
+`message.id` with the turn currently open and accumulate into it, and the replay check only
+sees a key whose turn was already emitted.
+
+Records failing the test open no turn, release nothing, and are counted in `unknown_records`
+under the names `assistant:not-a-model-message` and `assistant:replayed-message`, with a note
+saying how many there were and what their presence did not buy.
+
+The test is written about **shape**, not about any CLI version — it asks whether a record
+contains a response, not whether it looks like one a particular release writes.
+
 ## Whose tokens are these
 
 Two scopes, two sets of keys, and they must not be mixed.

@@ -40,7 +40,9 @@ have contracts, the way a score record is, and nothing binds to its shape, so re
 for it would widen ``scaneval validate`` with no reader on the other side.
 
 Determinism. Targets are sorted by ``target_id``, invocations by first sequence then producer
-then group key, event IDs by sequence then ID, and reason codes lexically. No clock, no
+then group key then position in the trace, event IDs by sequence then ID, and reason codes
+lexically. Every one of those orders is total, so nothing here can fall back on the order a
+dictionary happened to be built in. No clock, no
 randomness, and no timestamp of this module's own reaches the document, so two runs over the same
 bundle produce the same bytes.
 
@@ -291,12 +293,16 @@ def _location(item: object) -> tuple[str, int, int] | None:
 class _ContextEvent:
     """One usable ``context.selection`` event, reduced to what coverage attribution reads."""
 
-    __slots__ = ("event_id", "sequence", "call_id", "producer_id", "capture_status", "spans",
-                 "unlocated_paths", "unusable_paths", "span_count", "unusable_spans",
+    __slots__ = ("event_id", "sequence", "ordinal", "call_id", "producer_id", "capture_status",
+                 "spans", "unlocated_paths", "unusable_paths", "span_count", "unusable_spans",
                  "unusable_spans_without_path", "unlocated_spans", "truncated_spans",
                  "truncation_unknown_spans", "has_span_list")
 
-    def __init__(self, event: Mapping) -> None:
+    def __init__(self, event: Mapping, ordinal: int) -> None:
+        # Where this event sat in the trace as read. The one identifier certainly unique across
+        # every producer in the file: an event ID is unique only within the Observer that minted
+        # it, and two Observers hand out the same fallback IDs.
+        self.ordinal = ordinal
         self.event_id: str = event["event_id"]
         self.sequence: int = event["sequence"]
         call_id = event.get("call_id")
@@ -364,22 +370,28 @@ class _Group:
     question belongs, and it answers it with ``scattered``.
 
     An event carrying no usable ``call_id`` or no usable ``producer_id`` - absent, or not a
-    non-empty string, which the wire contract forbids anyway - is its own group, keyed by its
-    event ID. Two such events say nothing about belonging together.
+    non-empty string, which the wire contract forbids anyway - is a group of its own, correlated
+    with nothing. Not even with another event spelling its ``event_id`` the same way: an event ID
+    is unique only within the Observer that minted it, two Observers mint the same fallback IDs,
+    and a group built out of that coincidence would pool the context of two unrelated producers.
+    An uncorrelated group still reports the producer and call ID its event carried, with
+    ``correlated`` false to say the grouping rested on neither.
     """
 
-    __slots__ = ("call_id", "producer_id", "key", "group_key", "events", "spans",
+    __slots__ = ("call_id", "producer_id", "correlated", "key", "group_key", "events", "spans",
                  "unlocated_paths", "unusable_paths")
 
-    def __init__(self, key: tuple[str | None, str], events: list[_ContextEvent]) -> None:
+    def __init__(self, key: tuple, events: list[_ContextEvent]) -> None:
         self.key = key
         self.events = sorted(events, key=lambda event: event.sort_key)
         first = self.events[0]
-        correlated = key[0] is not None
-        self.producer_id = first.producer_id if correlated else None
-        self.call_id = first.call_id if correlated else None
-        # Readable, and unique only beside ``producer_id``: two producers may both say "call-1".
-        self.group_key = self.call_id if correlated else first.event_id
+        self.correlated = key[0] == "call"
+        # Reported as carried, whether or not the grouping could rest on them. Hiding a call ID
+        # this declined to correlate on would hide the very fact a reader needs to check it.
+        self.producer_id = first.producer_id
+        self.call_id = first.call_id
+        # Readable identification, not a key: two producers may both say "call-1".
+        self.group_key = first.call_id if self.correlated else first.event_id
         self.spans = _union_spans(self.events)
         self.unlocated_paths = _union_unlocated_paths(self.events)
         self.unusable_paths = _union_unusable_paths(self.events)
@@ -389,8 +401,11 @@ class _Group:
         return self.events[0].sequence
 
     @property
-    def sort_key(self) -> tuple[int, str, str]:
-        return (self.first_sequence, self.producer_id or "", self.group_key)
+    def sort_key(self) -> tuple[int, str, str, int]:
+        # The ordinal last, so the order is total even where two events share a sequence, a
+        # producer and an event ID. Nothing here may depend on dictionary insertion order.
+        return (self.first_sequence, self.producer_id or "", self.group_key,
+                self.events[0].ordinal)
 
     @property
     def all_complete(self) -> bool:
@@ -596,23 +611,30 @@ def _read_context_events(events: Iterable[Mapping] | None) -> tuple[list[_Contex
                 or not isinstance(status, str)):
             malformed += 1
             continue
-        usable.append(_ContextEvent(event))
+        usable.append(_ContextEvent(event, len(usable)))
     return usable, total, malformed
 
 
 def _group(events: Sequence[_ContextEvent]) -> list[_Group]:
-    """Partition context events into invocations, keyed by producer and call together.
+    """Partition context events into invocations. Correlation is used, never invented.
 
-    The key is a pair rather than a string so no spelling of a producer or a call ID can collide
-    with another pair by concatenation. An event missing either half is keyed by its own event ID
-    under a ``None`` producer, which cannot collide with a correlated key.
+    Two events belong to one invocation only when both name the same producer and the same call
+    within it. The key is a tagged tuple rather than a joined string, so no spelling of a
+    producer or a call ID can collide with another pair by concatenation, and the correlated and
+    uncorrelated namespaces cannot collide with each other either.
+
+    Everything else is a group of one, keyed by the event's ordinal in this read. Ordinal rather
+    than event ID: an event ID is unique only within the Observer that minted it, two Observers
+    hand out the same fallback IDs, so keying on one would pool the context of two unrelated
+    producers into a single invocation and let a target's two halves read as one whole prompt.
+    The ordinal is unique across the whole file by construction.
     """
-    by_key: dict[tuple[str | None, str], list[_ContextEvent]] = {}
+    by_key: dict[tuple, list[_ContextEvent]] = {}
     for event in events:
         if event.call_id is not None and event.producer_id is not None:
-            key: tuple[str | None, str] = (event.producer_id, event.call_id)
+            key: tuple = ("call", event.producer_id, event.call_id)
         else:
-            key = (None, event.event_id)
+            key = ("event", event.ordinal)
         by_key.setdefault(key, []).append(event)
     groups = [_Group(key, members) for key, members in by_key.items()]
     return sorted(groups, key=lambda group: group.sort_key)
@@ -703,6 +725,7 @@ def context_coverage(*, plan_targets: Iterable[Mapping], events: Iterable[Mappin
             by_invocation.append({
                 "producer_id": group.producer_id,
                 "call_id": group.call_id,
+                "correlated": group.correlated,
                 "group_key": group.group_key,
                 "first_sequence": group.first_sequence,
                 "classification": classification,
@@ -719,19 +742,22 @@ def context_coverage(*, plan_targets: Iterable[Mapping], events: Iterable[Mappin
             })
 
         # A target's absence has to answer for every invocation, so one invocation that cannot
-        # prove its own absence is enough to stop the target claiming one. Without this, an
-        # invocation with a hole in its record reads unknown while a second, cleaner one carries
-        # the target-level verdict all the way to absent - the false negative in miniature.
-        blocked_anywhere = any(entry["reasons"] for entry in by_invocation)
+        # prove its own absence is enough to stop the target claiming one, however clean the
+        # others are. Two ways an invocation fails to prove it: a hole in its record, and a
+        # context event that did not claim complete capture. Both are checked here, because
+        # ``best`` is a maximum and a maximum happily steps over the doubtful invocation to reach
+        # the confident one - reporting absent for a target the doubtful one may well have
+        # supplied. ``best`` and ``union`` take the same boolean so they cannot drift apart.
+        absence_unprovable = absence_blocked_target or any(
+            entry["reasons"] or not entry["all_capture_complete"] for entry in by_invocation)
         best = max((entry["classification"] for entry in by_invocation),
                    key=lambda name: _RANK[name], default="unknown")
-        if best == "absent" and (absence_blocked_target or blocked_anywhere):
+        if best == "absent" and absence_unprovable:
             best = "unknown"
         union_detail = _overlap(locations, run_spans)
         union_classification = _classify(
             union_detail["overlap"], all_complete=run_complete, blanket_unknown=blanket,
-            unjudgeable=unjudgeable,
-            absence_blocked=absence_blocked_target or blocked_anywhere)
+            unjudgeable=unjudgeable, absence_blocked=absence_unprovable)
         scattered = bool(by_invocation) and all(
             _RANK[union_classification] > _RANK[entry["classification"]] for entry in by_invocation)
         # Grouped by verdict, then ordered the way every other event list here is ordered, so a
@@ -789,6 +815,7 @@ def context_coverage(*, plan_targets: Iterable[Mapping], events: Iterable[Mappin
             {
                 "producer_id": group.producer_id,
                 "call_id": group.call_id,
+                "correlated": group.correlated,
                 "group_key": group.group_key,
                 "first_sequence": group.first_sequence,
                 "events": len(group.events),

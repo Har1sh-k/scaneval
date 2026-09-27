@@ -1045,6 +1045,116 @@ def test_stream_json_holds_a_selection_for_delivery_the_same_way(tmp_path: Path)
     assert full_summary.undelivered_tool_results == 0
 
 
+def append_records(source: Path, target: Path, records: list[dict]) -> Path:
+    target.write_text(
+        source.read_text() + "".join(json.dumps(record) + "\n" for record in records)
+    )
+    return target
+
+
+def last_assistant_record(path: Path) -> dict:
+    records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return [r for r in records if r.get("type") == "assistant"][-1]
+
+
+def test_a_bare_assistant_record_does_not_stand_in_for_a_model_response(tmp_path: Path):
+    """Proof of delivery has to be a response, so a marker with no response is not proof.
+
+    The truncated transcript reports its read as undelivered. Appending one record shaped
+    like ``{"type": "assistant", "uuid": "..."}`` — no message, no content, no usage — must
+    not flip that answer, because no model response exists anywhere in the file.
+    """
+    cut = truncated_after_read(TRANSCRIPT, tmp_path / "cut.jsonl")
+    forged = append_records(cut, tmp_path / "forged.jsonl", [
+        {"type": "assistant", "uuid": "error-only-record"},
+    ])
+
+    events, summary = import_file(forged)
+
+    assert of_type(events, "context.selection") == []
+    assert summary.undelivered_tool_results == 1
+    assert summary.model_turns == 1, "the bare record opened no turn of its own"
+    assert any("no model response" in note for note in summary.notes)
+
+
+@pytest.mark.parametrize(
+    "forgery",
+    [
+        pytest.param({"type": "assistant", "uuid": "error-only-record"}, id="no-message"),
+        pytest.param({"type": "assistant", "uuid": "u-x", "message": {}}, id="empty-message"),
+        pytest.param({"type": "assistant", "uuid": "u-x", "message": {"id": "m-x"}},
+                     id="message-without-content-or-usage"),
+        pytest.param({"type": "assistant", "uuid": "u-x",
+                      "message": {"id": "m-x", "content": []}}, id="empty-content-list"),
+        pytest.param({"type": "assistant", "uuid": "u-x",
+                      "message": {"id": "m-x", "content": ""}}, id="empty-content-string"),
+        pytest.param({"type": "assistant", "uuid": "u-x", "message": "not an object"},
+                     id="message-not-an-object"),
+    ],
+)
+def test_no_shape_of_empty_assistant_record_releases_held_context(forgery, tmp_path: Path):
+    """The rule is about shape, not about any CLI version, so it is asserted over shapes."""
+    cut = truncated_after_read(TRANSCRIPT, tmp_path / "cut.jsonl")
+    forged = append_records(cut, tmp_path / "forged.jsonl", [forgery])
+
+    events, summary = import_file(forged)
+
+    assert of_type(events, "context.selection") == []
+    assert summary.undelivered_tool_results == 1
+
+
+def test_a_replayed_assistant_record_does_not_stand_in_for_a_new_turn(tmp_path: Path):
+    """The same message again is the message we already saw, not a second one.
+
+    Accepting it would double that turn's usage and, worse, would count as a second
+    delivery — so a file that ends by repeating an earlier record still has an undelivered
+    read at the end of it.
+    """
+    cut = truncated_after_read(TRANSCRIPT, tmp_path / "cut.jsonl")
+    # A record from the cut file itself, so it really is a repeat of a message already
+    # emitted as a turn rather than a later message that happens to be last in the original.
+    replay = last_assistant_record(cut)
+    forged = append_records(cut, tmp_path / "forged.jsonl", [replay])
+
+    events, summary = import_file(forged)
+
+    assert of_type(events, "context.selection") == []
+    assert summary.undelivered_tool_results == 1
+    assert summary.model_turns == 1, "the replay was counted as a turn"
+    assert any("no model response" in note for note in summary.notes)
+
+
+def test_a_genuine_later_assistant_message_still_releases_the_held_read(tmp_path: Path):
+    """The guard must refuse forgeries without refusing the real thing.
+
+    This is the same cut transcript with a real, distinct model message appended, and it is
+    what the uncut fixture does naturally: the read is delivered and claimed.
+    """
+    cut = truncated_after_read(TRANSCRIPT, tmp_path / "cut.jsonl")
+    genuine = append_records(cut, tmp_path / "genuine.jsonl", [
+        {"type": "assistant", "uuid": "u-new", "parentUuid": "u-prev", "sessionId": "s-1",
+         "requestId": "req-new", "isSidechain": False,
+         "message": {"id": "msg-new", "role": "assistant", "model": "claude-haiku-4-5",
+                     "usage": {"input_tokens": 3, "output_tokens": 4,
+                               "cache_read_input_tokens": 0,
+                               "cache_creation_input_tokens": 0},
+                     "content": [{"type": "text", "text": "Line 8 calls eval."}]}},
+    ])
+
+    events, summary = import_file(genuine)
+
+    assert len(of_type(events, "context.selection")) == 1
+    assert summary.undelivered_tool_results == 0
+    assert summary.model_turns == 2
+
+
+def test_a_multi_block_message_is_still_one_turn_and_is_not_read_as_a_replay():
+    """The replay guard must not fire on the per-block records every real message is written as."""
+    _, summary = import_file(TRANSCRIPT)
+    assert summary.model_turns == 2
+    assert not any("no model response" in note for note in summary.notes)
+
+
 def test_an_undelivered_read_still_leaves_context_selection_capture_honest(tmp_path: Path):
     """No selection was claimed, so the category is unavailable rather than partial."""
     cut = truncated_after_read(TRANSCRIPT, tmp_path / "cut.jsonl")
