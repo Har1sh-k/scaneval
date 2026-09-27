@@ -24,7 +24,6 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import stat
 import sys
@@ -55,7 +54,7 @@ from scaneval.materialize import hash_exported_tree
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DOC = ROOT / "docs" / "DEEPSEC.md"
+CAPTURE_MATRIX = ROOT / "tests" / "fixtures" / "deepsec-capture-matrix.json"
 RUN_CONFIG = ROOT / "corpus" / "pilot" / "run-deepsec.json"
 CLOCK = lambda: datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)  # noqa: E731
 
@@ -1011,79 +1010,31 @@ def test_a_path_that_cannot_name_a_file_inside_the_tree_is_returned_with_its_rea
 # --- the capture matrix -----------------------------------------------------------------
 
 
-def doc_table(header_first_cell: str) -> tuple[list[str], list[list[str]]]:
-    """The one markdown table in ``docs/DEEPSEC.md`` whose first header cell is *header_first_cell*."""
-    rows = [line for line in DOC.read_text(encoding="utf-8").splitlines() if line.startswith("|")]
-    cells = [[cell.strip() for cell in line.strip("|").split("|")] for line in rows]
-    for index, row in enumerate(cells):
-        if row and row[0] == header_first_cell:
-            body = []
-            for candidate in cells[index + 1:]:
-                if set("".join(candidate)) <= set("- "):
-                    continue
-                if len(candidate) != len(row):
-                    break
-                body.append(candidate)
-            return row, body
-    raise AssertionError(f"docs/DEEPSEC.md has no table headed {header_first_cell!r}")
+def test_capture_status_matches_the_frozen_matrix():
+    """Keep every scenario and expected cell independent of the adapter implementation."""
+    from itertools import product
 
-
-def doc_values(cell: str) -> list[str]:
-    return re.findall(r"`([^`]+)`", cell)
-
-
-def documented_columns() -> dict[str, list[dict]]:
-    """Every call each documented column stands for, built from the column table in the guide.
-
-    The column definitions live in the document rather than here on purpose: a definition the
-    test owned could be changed on one side alone, and then the guide could describe a column
-    nothing ever checked.
-    """
-    header, rows = doc_table("Column")
-    names = ("trace_mode", "transcripts_found", "sessions", "batches_failed", "imports_clean",
-             "record_failures", "findings_lost", "capture_gap")
-    assert header[1:] == [f"`{name}`" for name in names], header
-    columns: dict[str, list[dict]] = {}
-    for row in rows:
-        calls = [{}]
-        for name, cell in zip(names, row[1:], strict=True):
-            values = [json.loads(value) for value in doc_values(cell)]
-            assert values, (row[0], name, cell)
-            calls = [{**call, name: value} for call in calls for value in values]
-        columns[row[0]] = calls
-    return columns
-
-
-def test_the_documented_capture_matrix_is_the_one_capture_status_returns():
-    """``docs/DEEPSEC.md`` is the only copy of this matrix, and this is what makes that true.
-
-    Both tables are read out of the guide: the column definitions and the cells. Every run a
-    column describes is built and compared against :func:`capture_status`, so a guide edited
-    into disagreeing with the code fails here rather than being quoted by a reader.
-    """
-    columns = documented_columns()
-    header, rows = doc_table("Event type")
-    assert header[1] == "`capture_status` key"
-    assert header[2:] == list(columns), (header[2:], list(columns))
-    documented_keys: set[str] = set()
-    for row in rows:
-        keys = doc_values(row[1])
-        documented_keys |= set(keys)
-        for column, cell in zip(header[2:], row[2:], strict=True):
-            expected = doc_values(cell)
-            assert len(expected) == 1, (row[0], column, cell)
-            for call in columns[column]:
-                returned = capture_status(
-                    call["trace_mode"],
-                    **{name: call[name] for name in call if name != "trace_mode"})
-                for key in keys:
-                    assert returned[key] == expected[0], (row[0], column, key, call, returned[key])
-    assert documented_keys == set(capture_status("off", transcripts_found=0, sessions=0,
-                                                 batches_failed=0)), documented_keys
+    matrix = json.loads(CAPTURE_MATRIX.read_text(encoding="utf-8"))
+    names = ["trace_mode", "transcripts_found", "sessions", "batches_failed", "imports_clean",
+             "record_failures", "findings_lost", "capture_gap"]
+    assert matrix["fields"] == names
+    assert len(matrix["columns"]) == 9
+    assert set(matrix["expectations"]) == set(capture_status(
+        "off", transcripts_found=0, sessions=0, batches_failed=0))
+    for expected in matrix["expectations"].values():
+        assert len(expected) == len(matrix["columns"])
+    for index, (column, value_lists) in enumerate(matrix["columns"].items()):
+        assert len(value_lists) == len(names) and all(value_lists)
+        for values in product(*value_lists):
+            call = dict(zip(names, values, strict=True))
+            mode = call.pop("trace_mode")
+            returned = capture_status(mode, **call)
+            expected = {key: row[index] for key, row in matrix["expectations"].items()}
+            assert returned == expected, (column, mode, call, returned)
 
 
 def test_two_claims_hold_across_the_whole_input_space_the_columns_only_sample():
-    """What the guide says holds everywhere is driven everywhere, not only in the columns."""
+    """Global invariants hold beyond the sampled matrix columns."""
     from itertools import product
 
     space = product(("off", "metadata", "content"), (0, 1, 2, 5), (0, 1, 2), (0, 1, 7),
@@ -1110,18 +1061,6 @@ def test_two_claims_hold_across_the_whole_input_space_the_columns_only_sample():
 def test_capture_status_refuses_a_trace_mode_no_run_can_have():
     with pytest.raises(AdapterError, match="unknown trace mode"):
         capture_status("verbose", transcripts_found=0, sessions=0, batches_failed=0)
-
-
-def test_the_guide_describes_the_commands_the_adapter_actually_builds(tmp_path):
-    """A document that named a flag the adapter never passes would mislead an operator."""
-    text = DOC.read_text(encoding="utf-8")
-    for flag in ("--project-id", "--root", "--agent", "--model", "--concurrency",
-                 "--thinking-level", "--limit", "--batch-size", "--max-turns",
-                 "--format json", "--out"):
-        assert flag in text, flag
-    for key in ("deepsec_root", "model", "agent", "thinking_level", "limit", "batch_size",
-                "concurrency", "max_turns", "claude_projects_dir", "claude_code_executable"):
-        assert f"`{key}`" in text, key
 
 
 # --- the frozen pilot run ----------------------------------------------------------------
@@ -1465,15 +1404,6 @@ def test_a_transcript_naming_the_workspace_by_its_real_path_still_yields_a_relat
     assert external and rendered.startswith("external:")
 
 
-def test_the_guide_states_the_two_spellings_and_the_share_every_number_on_a_record_is():
-    """Both findings came out of a real run; a guide that omits them would mislead the next one."""
-    text = DOC.read_text(encoding="utf-8")
-    assert "source_dir.resolve()" in text
-    assert "external:server.js" in text, "the guide names the failure the fix closes"
-    assert "durationMs" in text and "It is summed." in text
-    assert "cacheReadInputTokens" in text
-
-
 def test_files_the_ai_stage_never_reached_are_counted_because_silence_about_them_proves_nothing(tmp_path, monkeypatch):
     """``--limit`` is a cost bound, and a real run left 29 of 35 records pending.
 
@@ -1494,13 +1424,6 @@ def test_files_the_ai_stage_never_reached_are_counted_because_silence_about_them
     note = next(note for note in execution["notes"] if "left unfinished" in note)
     assert "config.limit (1)" in note and "not a negative result" in note
     assert len(result["claims"]) == 1, "the finding the run did produce is still reported"
-
-
-def test_the_guide_says_a_limited_run_is_partial_because_it_covered_part_of_the_tree():
-    text = DOC.read_text(encoding="utf-8")
-    assert "`partial`, not `success`" in text
-    assert "not a negative result about it" in text
-    assert "Only `analyzed` means DeepSec finished with a file." in text
 
 
 # --- reading a path the scanner owns -------------------------------------------------------
@@ -1840,7 +1763,6 @@ def test_the_pilot_notes_say_the_limited_run_is_recorded_as_partial():
     config = load_document(RUN_CONFIG, "run-config")
     joined = " ".join(config["notes"])
     assert "scope_incomplete" in joined and "bundles_resolved false" in joined
-    assert "scope_incomplete" in DOC.read_text(encoding="utf-8")
 
 
 # --- a transcript that exists is not a transcript that was read --------------------------
@@ -1921,14 +1843,6 @@ def test_a_reported_capture_loss_makes_tool_calls_partial_in_a_whole_run(tmp_pat
     assert execution["capture"]["tool_calls"] == "partial"
     assert any("short of the file" in note and "unmatched tool result" in note
                for note in execution["notes"]), execution["notes"]
-
-
-def test_the_guide_says_observer_error_is_emitted_and_why_it_has_no_row():
-    text = DOC.read_text(encoding="utf-8")
-    assert "never emits" not in text
-    assert "no `capture_status` key" in text
-    assert "parse-failure dump" in text
-    assert "refused or truncated" in text
 
 
 # --- only ``analyzed`` says DeepSec finished with a file ------------------------------------
@@ -2091,15 +2005,6 @@ def test_a_file_under_files_that_is_not_a_record_is_not_counted_as_loss(tmp_path
     assert result["bundles_resolved"] is True
 
 
-def test_the_guide_states_the_status_rule_the_refusal_rule_and_the_duration_rule():
-    text = DOC.read_text(encoding="utf-8")
-    assert "invalid_record_status" in text
-    assert "pending | processing | analyzed | error" in text
-    assert "import loss, never an absent record" in text
-    assert "45316.33" in text and "may be duplicated rather than divided" in text
-    assert "taken as a maximum" not in text
-
-
 # --- a session id is scanner-written text before it is a lookup key -------------------------
 
 
@@ -2194,9 +2099,3 @@ def test_an_unusable_id_is_its_own_call_and_never_merged_with_another():
         "invalid_session_id", "invalid_session_id", "missing_session_id"]
     assert len({group.key for group in groups}) == 3
     assert all(not group.correlated for group in groups)
-
-
-def test_the_guide_states_the_session_id_rule():
-    text = DOC.read_text(encoding="utf-8")
-    assert "invalid_session_id" in text
-    assert "`^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$`" in text

@@ -436,7 +436,7 @@ admission before evaluation, enforce it by checking the pack, not by relying on 
 | `inputs[].profile` | no | `standard` (default) or `metadata_blinded`. |
 | `systems[].system_id` | yes | Matches `^[A-Za-z0-9][A-Za-z0-9._-]*$`. |
 | `systems[].adapter` | yes | `semgrep`, `llm-harness`, or `deepsec` in this build. |
-| `systems[].config` | yes | Adapter configuration. For `semgrep` this pins a rules repository by url, commit, and paths; for `deepsec` it names the installed DeepSec workspace and the model, and [the DeepSec adapter](DEEPSEC.md) lists every key. |
+| `systems[].config` | yes | Adapter configuration. For `semgrep` this pins a rules repository by url, commit, and paths; for `deepsec` it names the installed workspace and the model. See the [example configuration](../corpus/pilot/run-deepsec.json). |
 | `systems[].model_id`, `model_revision` | no | Recorded in the scan request and the execution record. |
 | `systems[].network_policy` | no | Overrides the run-level policy for this system. |
 | `repetitions` | yes | Integer of at least 1. |

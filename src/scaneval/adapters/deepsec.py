@@ -16,9 +16,8 @@ request is reconstructed from an ``analysisHistory`` entry, so retries inside th
 invisible and ``retries_observable`` is false. The numbers on one file are that file's
 *share* of a batch, which is why every aggregate this module builds is a sum over the
 files that name one ``agentSessionId`` and carries ``aggregation:
-"sum_of_per_file_shares"`` saying so. :func:`capture_status` states the rest of that
-matrix, and ``docs/DEEPSEC.md`` documents it; a test parses the document and compares it
-cell for cell against this function, so the two cannot drift apart.
+"sum_of_per_file_shares"`` saying so. :func:`capture_status` states the per-category
+availability, checked against a frozen matrix in the adapter tests.
 
 The private workspace. DeepSec resolves ``deepsec.config.ts`` from the current working
 directory, walking up, and writes ``data/`` beside it. So this adapter builds a workspace
@@ -1123,7 +1122,7 @@ def capture_status(trace_mode: str, *, transcripts_found: int, sessions: int,
                    batches_failed: int, imports_clean: bool = True,
                    record_failures: int = 0, findings_lost: int = 0,
                    capture_gap: bool = False) -> dict[str, str]:
-    """Per-category capture availability for one DeepSec run. See ``docs/DEEPSEC.md``.
+    """Per-category capture availability for one DeepSec run.
 
     Nothing here is observed as it happens. DeepSec's records and the Claude Code transcripts
     are read after the run, so a model request is a reconstruction and never better than

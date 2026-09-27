@@ -13,7 +13,7 @@ Install ScanEval using the [setup guide](INITIAL_BUILD.md#try-it), then configur
 |---|---|
 | [`run-semgrep.json`](../corpus/pilot/run-semgrep.json) | Install Semgrep. The adapter fetches the pinned ruleset rather than loading registry rules at scan time. |
 | [`run-harness.json`](../corpus/pilot/run-harness.json) | Set `config.root` to your securevibes-agent checkout with its dependencies installed. Build the [TypeScript Observer](OBSERVER_SDK.md) and configure the requested model route. |
-| [`run-deepsec.json`](../corpus/pilot/run-deepsec.json) | Set `config.deepsec_root` to an installed DeepSec workspace and configure CLI authentication. See the [adapter guide](DEEPSEC.md). |
+| [`run-deepsec.json`](../corpus/pilot/run-deepsec.json) | Set `config.deepsec_root` to an installed DeepSec workspace and configure CLI authentication. |
 
 Review model, budget, input, and tracing settings before running. The harness and DeepSec
 configurations make live model calls and can incur charges. Source preparation fetches pinned

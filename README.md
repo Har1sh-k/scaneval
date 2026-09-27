@@ -19,7 +19,7 @@ scaneval replay results/diagnostic-demo --output results/diagnostic-replay.json
 # Open results/diagnostic-demo/report.html locally.
 ```
 
-This uses fabricated evaluator fixtures, not a live scanner or admitted CVEs. It tests scoring rules without model calls. Output paths must be new. The [SDK guide](docs/OBSERVER_SDK.md) covers opt-in harness visibility and the per-category capture limits; [native CLI collectors](docs/COLLECTORS.md) covers reading what an agent CLI wrote for itself, [the DeepSec adapter](docs/DEEPSEC.md) the third-party scanner path, and [diagnostics](docs/DIAGNOSTICS.md) what a saved trace can and cannot answer.
+This uses fabricated evaluator fixtures, not a live scanner or admitted CVEs. It tests scoring rules without model calls. Output paths must be new. The [SDK guide](docs/OBSERVER_SDK.md) covers opt-in harness visibility and capture limits, [native CLI collectors](docs/COLLECTORS.md) covers importing agent CLI records, and [diagnostics](docs/DIAGNOSTICS.md) explains what a saved trace can and cannot answer.
 
 Replay a bundle offline, with no network and no model call. No run is committed to this repository, so produce one first with `scaneval run`, then replay it from wherever you wrote it:
 
@@ -49,7 +49,7 @@ Only `corpus validate --snapshot-id` and `run` reach the network; what `run` con
 
 Guides: [initial build](docs/INITIAL_BUILD.md) for the current build and its limits, [draft pilot](docs/PILOT.md) for scanner setup and local execution, [bring your own corpus](docs/BRING_YOUR_OWN_CORPUS.md) for organization-owned packs, [design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) for the intended behavior.
 
-Visibility: [observer SDK](docs/OBSERVER_SDK.md) for the event contract and the own-harness capture matrix, [native CLI collectors](docs/COLLECTORS.md) for importing Claude Code and Codex records, [the DeepSec adapter](docs/DEEPSEC.md) for the third-party scanner path and its own capture matrix, [diagnostics](docs/DIAGNOSTICS.md) for what a saved trace answers about a miss.
+Visibility: [observer SDK](docs/OBSERVER_SDK.md) for the event contract and the own-harness capture matrix, [native CLI collectors](docs/COLLECTORS.md) for importing Claude Code and Codex records, and [diagnostics](docs/DIAGNOSTICS.md) for what a saved trace answers about a miss.
 
 ### Evaluation core status
 
@@ -131,7 +131,7 @@ PR simulation mode is documented in [docs/PR_MODE.md](docs/PR_MODE.md).
 - Git (required by `scripts/setup_repos.py`, and by the new core's source cache and pinned export)
 - Node.js, for the observer SDK, the own-harness adapter, and the `deepsec` adapter (which runs an installed DeepSec CLI)
 
-The new core uses `jsonschema` for contract validation. The legacy runner uses the Python standard library. Scanner CLIs are optional and can be installed separately or via the `official-adapters` extra. The `llm-harness` adapter additionally needs a local checkout of the harness and a built observer SDK (`npm ci && npm run build` in `sdk/typescript`). The `deepsec` adapter needs an installed DeepSec workspace holding `node_modules/.bin/deepsec`; nothing is ever written into it. See [the DeepSec adapter](docs/DEEPSEC.md).
+The new core uses `jsonschema` for contract validation. The legacy runner uses the Python standard library. Scanner CLIs are optional and can be installed separately or via the `official-adapters` extra. The `llm-harness` adapter additionally needs a local checkout of the harness and a built observer SDK (`npm ci && npm run build` in `sdk/typescript`). The `deepsec` adapter needs an installed DeepSec workspace holding `node_modules/.bin/deepsec`; nothing is ever written into it.
 
 ### Legacy Full Track snapshots
 
@@ -359,7 +359,7 @@ scaneval/
 |- corpus/pilot/      # Draft pilot pack and the frozen run configurations
 |                     # (run-semgrep, run-harness, run-deepsec). No run record is committed.
 |- docs/              # Design, math, initial build, pilot, observer SDK, collectors,
-|                     # DeepSec adapter, diagnostics, guides
+|                     # diagnostics, guides
 |- schema/            # Legacy JSON schemas for cases and results, plus schema/v2 trace
 |                     # events and the scrubbed collector fixtures
 |- taxonomy/          # Legacy canonical kinds, capabilities, languages

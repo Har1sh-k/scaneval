@@ -48,6 +48,6 @@
     "Cost and token numbers in the result are DeepSec's own per-file shares of each batch, summed back into batch totals. They are CLI-reported estimates, never a bill.",
     "max_turns 60 is well below DeepSec's default of 150 and bounds a batch that goes in circles; a batch that hits it is recorded as a batch that reached no verdict, not as a clean scan.",
     "Content-mode traces stay local; they contain the source that was sent to the model, and the imported Claude Code transcripts contain the tool results the agent read.",
-    "Tool calls, context selection and per-turn model events come only from the Claude Code transcripts the agent sessions leave under ~/.claude/projects. A run whose transcripts have been cleaned up records those categories as unavailable, which is not evidence that no tool ran. docs/DEEPSEC.md carries the full capture matrix."
+    "Tool calls, context selection and per-turn model events come only from the Claude Code transcripts the agent sessions leave under ~/.claude/projects. A run whose transcripts have been cleaned up records those categories as unavailable, which is not evidence that no tool ran. Per-category capture status is included in the execution record."
   ]
 }
