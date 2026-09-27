@@ -1,0 +1,14 @@
+{
+  "schema_version": "2.0",
+  "event_id": "event-example-1",
+  "run_id": "run-example-1",
+  "producer_id": "dispatcher-example",
+  "sequence": 0,
+  "type": "model.request",
+  "category": "model",
+  "capture_status": "redacted",
+  "timestamp": "2026-09-20T12:00:00.000Z",
+  "call_id": "call-example-1",
+  "metadata": { "model": "example-model", "input_tokens": 42 },
+  "content": { "authorization": "[REDACTED]" }
+}

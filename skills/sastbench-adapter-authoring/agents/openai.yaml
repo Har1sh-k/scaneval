@@ -1,3 +1,0 @@
-interface:
-  display_name: "SASTbench Adapter Authoring"
-  short_description: "Build or update a SASTbench scanner adapter"

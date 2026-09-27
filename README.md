@@ -1,29 +1,92 @@
-# SASTbench
+# ScanEval
 
-> Can your scanner find real vulnerabilities in agentic repos without flagging the code the agent is supposed to run?
+> Alpha (`2.0.0a1`): versioned case packs, scanner adapters, offline scoring and replay, an Observer SDK, native CLI collectors, and context-coverage diagnostics. See [current capabilities and limits](docs/INITIAL_BUILD.md) and [running the draft pilot](docs/PILOT.md).
+>
+> **No benchmark results are published.** The pilot cases have mechanical checks only, with no approved labels or matching decisions. Scanner outputs and traces stay local; the public examples do not establish scanner performance.
+>
+> The existing `scripts/` runner and historical scores still use legacy scoring and are labeled legacy throughout this file. The broader [design](docs/DESIGN_DECISIONS.md) is not fully implemented; repositories for the first public-workload release remain under selection.
 
-SASTbench evaluates whether static analyzers can detect real vulnerabilities in agentic codebases without treating intentional agent capabilities as vulnerabilities.
+> Can your scanner find real vulnerabilities without flagging authorized capabilities?
 
-## What SASTbench Is and Is Not
+ScanEval evaluates whether static analyzers find real vulnerabilities at an acceptable review cost. The proposed [workload scope](docs/DESIGN_DECISIONS.md#workload-classification) covers conventional applications, conventional automation, AI-assisted applications, and agentic applications, with separate scorecards. The legacy `cases/` corpus is agentic-heavy, and its `agentic`/`generic` CLI profiles are legacy selections, not the proposed workflow classifications. The new core's corpus is the draft pilot pack under `corpus/pilot/`, which covers three cases and no controls.
+
+## Try the new evaluation core
+
+```bash
+python -m pip install -e ".[dev]"
+scaneval demo results/diagnostic-demo
+scaneval replay results/diagnostic-demo --output results/diagnostic-replay.json
+# Open results/diagnostic-demo/report.html locally.
+```
+
+This uses fabricated evaluator fixtures, not a live scanner or admitted CVEs. It tests scoring rules without model calls. Output paths must be new. The [SDK guide](docs/OBSERVER_SDK.md) covers opt-in harness visibility and capture limits, [native CLI collectors](docs/COLLECTORS.md) covers importing agent CLI records, and [diagnostics](docs/DIAGNOSTICS.md) explains what a saved trace can and cannot answer.
+
+Replay a bundle offline, with no network and no model call. No run is committed to this repository, so produce one first with `scaneval run`, then replay it from wherever you wrote it:
+
+```bash
+scaneval replay <your run directory>/invocations/<invocation id>
+# scaneval: review state draft: these numbers come from decisions with no recorded human approval
+```
+
+The warning means the bundle lacks recorded human approval. It is not a detection result.
+
+### Evaluation core commands
+
+| Command | What it does |
+|---|---|
+| `scaneval validate <kind> <path>` | Validate one of nine versioned contracts: `scan-request`, `scan-result`, `execution-record`, `evaluation-plan`, `review-decisions`, `review-record`, `case-pack`, `run-config`, `run-manifest`. |
+| `scaneval demo <new dir>` | Create the fabricated conformance bundle. No scanner or model runs. |
+| `scaneval score --plan --result --decisions` | Score separately stored records. |
+| `scaneval replay <bundle>` | Recompute a saved bundle offline. |
+| `scaneval report <bundle> --output` | Render a standalone HTML report for a saved bundle. |
+| `scaneval corpus init\|add-snapshot\|import\|validate\|approve\|admit\|disposition` | Build and mechanically check an evaluator-side case pack, and record explicit human reviews, admissions, and dispositions. |
+| `scaneval plan --pack --snapshot-id --tree-hash --output` | Build one evaluation plan for a materialized input. |
+| `scaneval run <config> --output <new dir>` | Execute one frozen run configuration into a new run directory. |
+| `scaneval review init\|record\|approve\|status` | Draft, re-draft, approve, and inspect the review of one invocation bundle. |
+| `scaneval diagnose context-coverage <bundle>` | Report, per labeled target, whether its code region was supplied to the model and in which invocation. Scores nothing. |
+
+Only `corpus validate --snapshot-id` and `run` reach the network; what `run` contacts depends on the configured systems. Everything else is offline. Exit code `2` means the command could not be carried out, `1` means it ran and reports a negative result, `0` means it ran and reports nothing wrong, which is not a statement that any label or decision is correct.
+
+Guides: [initial build](docs/INITIAL_BUILD.md) for the current build and its limits, [draft pilot](docs/PILOT.md) for scanner setup and local execution, [bring your own corpus](docs/BRING_YOUR_OWN_CORPUS.md) for organization-owned packs, [design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) for the intended behavior.
+
+Visibility: [observer SDK](docs/OBSERVER_SDK.md) for the event contract and the own-harness capture matrix, [native CLI collectors](docs/COLLECTORS.md) for importing Claude Code and Codex records, and [diagnostics](docs/DIAGNOSTICS.md) for what a saved trace answers about a miss.
+
+### Evaluation core status
+
+| Area | State |
+|---|---|
+| Contracts, scoring, replay, report | Implemented |
+| Case packs, mechanical (L1) checks, plan generation | Implemented |
+| Source cache, pinned export, provenance | Implemented; `standard` profile only, `metadata_blinded` refused |
+| Invocation runner, bundles, run manifest | Implemented for full scans |
+| Adapters | `semgrep` (pinned local rules), `llm-harness` (own harness), `deepsec` (third-party scanner, run unchanged) |
+| Observer connection | Model boundary of the own harness; against a harness build that exports the hooks, also per-attempt retries, token usage and CLI-reported cost on the claude json route, the spans the engine placed in each prompt, and candidate and filtering events. Tool dispatch inside the model CLI stays unobserved on that route |
+| Native CLI collectors | Claude Code transcripts and `stream-json`, the `--output-format json` result object, and `codex exec --json`, read after a run into trace events |
+| Diagnostics | `context-coverage` only: was a labeled target's code supplied to the model, per invocation. It explains a miss; it never excuses one |
+| Review workflow | Machine drafts route candidates; approval requires an explicit reviewer name |
+| Reviewed labels, admitted cases, controls | **None.** Every case is draft, no control is defined |
+| Corpus aggregation, precision sampling, promotion gates, trace viewer, SARIF import, native PR mode, enforced isolation | Not implemented |
+
+## Legacy runner: what gets scored
 
 **What gets scored:**
-SASTbench measures whether a static analyzer can detect annotated vulnerable code regions (true positives) without flooding the user with false positives on nearby code.
+ScanEval measures whether a static analyzer can detect annotated vulnerable code regions (true positives) without flooding the user with false positives on nearby code.
 Scoring uses six canonical vulnerability kinds (`command_injection`, `path_traversal`, `ssrf`, `auth_bypass`, `authz_bypass`, `sql_injection`) and region-level overlap matching.
 
 **Why capability-safe regions matter:**
-Agentic code often calls dangerous APIs on purpose — `subprocess.run()`, `fs.writeFile()`, `requests.get()`.
+Conventional automation and agentic code often call dangerous APIs on purpose: `subprocess.run()`, `fs.writeFile()`, `requests.get()`.
 A good scanner should flag those calls only when the guard is missing, not every time they appear.
 Capability-safe cases contain properly guarded dangerous code.
-The Capability FP Rate metric measures how often a scanner flags guarded code that it should leave alone.
+The legacy Capability FP Rate currently covers six synthetic safe regions, not a real-world safe-control corpus. The design requires reviewed, property-specific controls for buyer-facing results.
 
-**What SASTbench does not measure:**
+**What ScanEval does not measure:**
 - Prompt injection as a runtime attack (it measures whether tainted prompt data reaches code sinks)
 - Secret scanning quality
 - Severity calibration across vendors
 - End-to-end agent runtime exploits
 - General non-security code quality
 
-## Quick Start
+## Legacy runner quick start
 
 ```bash
 # Install the harness plus pytest
@@ -65,11 +128,12 @@ PR simulation mode is documented in [docs/PR_MODE.md](docs/PR_MODE.md).
 ### Requirements
 
 - Python 3.11+
-- Git (required for `scripts/setup_repos.py`)
+- Git (required by `scripts/setup_repos.py`, and by the new core's source cache and pinned export)
+- Node.js, for the observer SDK, the own-harness adapter, and the `deepsec` adapter (which runs an installed DeepSec CLI)
 
-The benchmark harness itself only uses the Python standard library. Scanner CLIs are optional and can be installed separately or via the `official-adapters` extra.
+The new core uses `jsonschema` for contract validation. The legacy runner uses the Python standard library. Scanner CLIs are optional and can be installed separately or via the `official-adapters` extra. The `llm-harness` adapter additionally needs a local checkout of the harness and a built observer SDK (`npm ci && npm run build` in `sdk/typescript`). The `deepsec` adapter needs an installed DeepSec workspace holding `node_modules/.bin/deepsec`; nothing is ever written into it.
 
-### Full Track Snapshots
+### Legacy Full Track snapshots
 
 Full Track cases reference pinned snapshots under `.repos/`. Populate them with:
 
@@ -85,9 +149,9 @@ After setup, validate the full benchmark surface with:
 python scripts/validate.py --track full
 ```
 
-### PR Simulation Mode
+### Legacy PR simulation mode
 
-SASTbench also supports benchmarked PR simulation with:
+ScanEval also supports benchmarked PR simulation with:
 
 ```bash
 python scripts/run.py --scanner semgrep --mode pr --track core
@@ -103,13 +167,13 @@ python scripts/verify_pr_strict.py
 
 PR simulation (`baseCommit`/`headCommit`) and remediation verification (`fixCommit`/`fixValidation`) are separate concerns. PR mode runtime does not use `fixCommit`. See [docs/PR_MODE.md](docs/PR_MODE.md#pr-pair-verification-vs-remediation-verification) for details.
 
-### LLM Model Tracking
+### Legacy LLM model tracking
 
 Adapters for LLM-backed scanners can expose an `LLM_MODEL` constant. When present, results JSON includes `scanner.llmModel` and the model is printed at run start. Set via environment variable (e.g. `SECUREVIBES_LLM_MODEL`).
 
-### Model-Specific Benchmarks (knowledge-cutoff gating)
+### Legacy model-specific benchmarks (knowledge-cutoff gating)
 
-The central validity threat for any LLM-backed vulnerability detector is **training-data contamination**: if a model saw the advisory or the fix commit during training, a "hit" may be memorization rather than detection. SASTbench controls for this by gating real-world cases on each model's **knowledge cutoff**.
+Prior exposure to advisories or fixes can affect LLM-backed scanner performance. The legacy runner's knowledge-cutoff gate aims to reduce one exposure route; it does not establish absence of memorization. The design retains credit for correct findings regardless of prior knowledge and uses freshness as a reporting slice.
 
 Every real-world case records public-knowledge dates under `realWorld.disclosure`:
 
@@ -120,7 +184,7 @@ Every real-world case records public-knowledge dates under `realWorld.disclosure
 }
 ```
 
-The **knowledge horizon** of a case is the earliest public signal that the code path is a problem — `min(ghsaPublished, fixCommitDate, cvePublished)`. A case "counts" for a model only when its horizon is **strictly after** the model's cutoff (exact gate, no buffer).
+The **legacy implementation's horizon** is `min(ghsaPublished, fixCommitDate, cvePublished)` over available metadata. Its gate retains dated cases only when that value is strictly after the selected cutoff. A commit timestamp alone does not establish first public availability. The proposed [freshness policy](docs/DESIGN_DECISIONS.md#7-freshness-and-memorization-audit) requires evidenced public artifacts, explicit unknown states, and reporting-time slices rather than this pre-scan filter.
 
 Run a model-specific benchmark with `--model <id>` (resolved against [`taxonomy/models.json`](taxonomy/models.json), aliases supported) or an explicit `--since YYYY-MM-DD`:
 
@@ -128,7 +192,7 @@ Run a model-specific benchmark with `--model <id>` (resolved against [`taxonomy/
 python scripts/run.py --scanner securevibes-agent --track full --model opus-4.8
 ```
 
-The runner prints how many dated cases were excluded as pre-cutoff, and the results JSON carries a `cutoff` block (`model`, `date`, `excludedCount`, `excludedCaseIds`). Cases without disclosure dates (synthetic core, capability-safe, mixed-intent) are author-written and not subject to contamination gating, so they are always retained.
+The runner prints how many dated cases were excluded as pre-cutoff, and the results JSON carries a `cutoff` block (`model`, `date`, `excludedCount`, `excludedCaseIds`). The legacy gate also retains records with missing disclosure dates; retention does not establish freshness. In the new design, applicable but missing dates remain unknown, while model-cutoff gating is not applicable to diagnostic fixtures.
 
 Predefined models in `taxonomy/models.json`: `opus-4.8`, `opus-4.7`, `opus-4.6`, `sonnet-4.6`, `sonnet-4.5`, `gpt-5.5`, `gpt-5.4` (aliases accepted, e.g. `claude-sonnet-4-5`). `opus-4.8` is confirmed against the model card. The other Claude cutoffs are self-reported via `claude -p` and the GPT cutoffs via `codex exec` (3/3 consistent each); all are marked `"verified": false`, the runner prints a warning when they are used, and they should be confirmed against the official vendor model card before use in published results.
 
@@ -148,7 +212,9 @@ Run benchmark self-tests from the repo root with:
 python -m pytest -q
 ```
 
-### Smoke Tests for Official Adapters
+One suite covers both the evaluation core (`tests/test_v2*`) and the legacy runner. Two legacy snapshot tests skip when their checkouts are unavailable. No real CVE is silently imported and no paid model evaluation runs during these tests.
+
+### Legacy smoke tests for official adapters
 
 Verify your scanner installation works before running the full benchmark:
 
@@ -162,35 +228,39 @@ python scripts/run.py --scanner bandit --track core --case-id SB-PY-SV-001
 
 Both should show `TARGET HIT` for SB-PY-SV-001 (SSRF in reference fetcher).
 
-## Tracks
+## Legacy tracks
 
 - **Core Track**: Self-contained, vendored cases. 5-minute quickstart, deterministic runs.
 - **Full Track**: Core Track plus pinned snapshots from real public repositories.
 
-## Profiles
+## Legacy profiles
 
 Cases carry an `agentic` boolean. The `--profile` flag filters runs by profile:
 
-- `agentic` — only agentic cases (the default agentic-code thesis).
-- `generic` — only non-agentic real-world cases (`caseType: real_world_generic`).
-- `all` — both, with separate per-profile breakdown in the report.
+- `agentic`: only agentic cases (the default agentic-code thesis).
+- `generic`: only non-agentic real-world cases (`caseType: real_world_generic`).
+- `all`: both, with separate per-profile breakdown in the report.
 
 Legacy cases without an `agentic` field are treated as agentic.
 
-## Status
+## Legacy corpus status
+
+These counts describe the legacy `cases/` tree scored by `scripts/run.py`. They are not the new core's corpus, which is the draft pilot pack under `corpus/pilot/`.
 
 - **17 Core Track** cases (synthetic vulnerable, capability safe, mixed intent)
-- **189 Full Track** cases — 156 real-world disclosed (agentic) + 33 real-world generic (non-agentic)
+- **189 Full Track** cases: 156 real-world disclosed (agentic) + 33 real-world generic (non-agentic)
 - **206 total cases** across Python, TypeScript, Rust, Swift, Go, Java, and Clojure
 
-## Official Adapters
+## Legacy official adapters
 
 - `semgrep`
 - `bandit`
 
-## Baseline Reference Results
+The new core's adapters are separate: `semgrep` against a pinned local rules checkout, and `llm-harness` for the own harness.
 
-These were measured on March 24, 2026 against the Core Track using the current official adapters in this repository:
+## Legacy baseline reference results
+
+Historical legacy results measured on March 24, 2026 against the synthetic Core Track. They are not results under the proposed scoring design. Capability FP Rate uses six annotated synthetic safe regions; the composite Agentic Score is retained here only as a historical field.
 
 | Adapter | Version | Rule Set Used | Recall | Precision | Cap FP Rate | Agentic Score | Notes |
 |---------|---------|---------------|--------|-----------|-------------|---------------|-------|
@@ -204,10 +274,10 @@ Bandit results above use the default built-in rule set because the official adap
 
 If you want another agent to work on this repo, use these repo-local skills:
 
-- [skills/sastbench-results-validation/SKILL.md](skills/sastbench-results-validation/SKILL.md): verify claimed benchmark or PR-mode results, rerun scanners, confirm the exact rule set used, and distinguish valid runs from environment or scanner failures.
-- [skills/sastbench-adapter-authoring/SKILL.md](skills/sastbench-adapter-authoring/SKILL.md): build or update a SASTbench scanner adapter, including rule mapping, metadata capture, PR-mode support, tests, and harness validation.
+- [skills/scaneval-results-validation/SKILL.md](skills/scaneval-results-validation/SKILL.md): verify claimed benchmark or PR-mode results, rerun scanners, confirm the exact rule set used, and distinguish valid runs from environment or scanner failures.
+- [skills/scaneval-adapter-authoring/SKILL.md](skills/scaneval-adapter-authoring/SKILL.md): build or update a ScanEval scanner adapter, including rule mapping, metadata capture, PR-mode support, tests, and harness validation.
 
-## V1 Canonical Vulnerability Kinds
+## Legacy V1 canonical vulnerability kinds
 
 | Kind | Capability Surface |
 |------|--------------------|
@@ -218,22 +288,24 @@ If you want another agent to work on this repo, use these repo-local skills:
 | `authz_bypass` | Enforcing per-identity permission scopes |
 | `sql_injection` | Querying and mutating data stores |
 
-## Scoring
+## Legacy scoring labels
 
-Default reporting uses security-readable labels:
+This section describes legacy report labels. The replacement [scoring contract](docs/DESIGN_DECISIONS.md#4-scoring-without-exhaustive-repository-labels) separates known-target detection, reviewed precision, controls, and operational outcomes without a composite score.
+
+Legacy reporting uses security-readable labels:
 
 - **Target Hit Rate**: did the scanner detect the disclosed/annotated vulnerability?
 - **Intent Accuracy**: in mixed-intent cases (safe + unsafe code together), did the scanner correctly hit the target without flagging the guarded code?
 - **Capability Noise**: how often did the scanner flag properly guarded capability code?
 - **Additional Findings**: findings beyond the annotated target (on Full Track real-world cases these may be legitimate, not necessarily wrong)
 
-Verbose mode (`--verbose`) also shows the underlying benchmark internals: Recall, Precision, Capability FP Rate, Mixed-Intent Accuracy, and Benchmark Index (geometric mean of Recall, 1 - Capability FP Rate, Intent Accuracy).
+Verbose mode (`--verbose`) also shows legacy Recall, Precision, Capability FP Rate, Mixed-Intent Accuracy, and Benchmark Index (geometric mean of Recall, 1 - Capability FP Rate, Intent Accuracy). Benchmark Index and Agentic Score are not part of the proposed buyer scorecard.
 
 ### Core Track vs Full Track scoring language
 
 **Core Track** cases are closed-world synthetic benchmarks. Every finding outside the annotated region is a known false positive. Strict scoring labels apply.
 
-**Full Track** cases are real-world repo snapshots with one disclosed vulnerability. Additional findings may be legitimate issues in the repo. The benchmark only scores whether the disclosed target was detected - it does not claim that every other finding is wrong.
+**Full Track** records identify targets in real-world snapshots, sometimes shared by several cases. Additional findings may be legitimate. The proposed scorer preserves unreviewed outcomes and evaluates all assigned targets per scan. The legacy scorer still treats unmatched findings as false positives and counts TP findings rather than unique targets, so its precision and recall must not be read as implementing that design.
 
 ### PR mode scoring language
 
@@ -245,11 +317,11 @@ PR mode uses a different top-level summary:
 
 See [docs/PR_MODE.md](docs/PR_MODE.md) for the full PR-mode model and output schema.
 
-## OWASP Agentic Top 10 Alignment
+## Legacy OWASP Agentic Top 10 alignment
 
-SASTbench cases are mapped to the [OWASP Top 10 for Agentic Applications for 2026](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) as a reporting crosswalk. Each case carries a `standards.owaspAgenticTop10` field with primary and optional secondary ASI category labels. This mapping enables filtering and aggregating results by OWASP category without changing how the benchmark scores findings.
+ScanEval cases are mapped to the [OWASP Top 10 for Agentic Applications for 2026](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) as a reporting crosswalk. Each case carries a `standards.owaspAgenticTop10` field with primary and optional secondary ASI category labels. This mapping enables filtering and aggregating results by OWASP category without changing how the benchmark scores findings.
 
-SASTbench currently has strong coverage for ASI02 (Tool Misuse & Exploitation), ASI03 (Identity & Privilege Abuse), and ASI05 (Unexpected Code Execution), plus targeted coverage for ASI01, ASI04, ASI06, and ASI07.
+ScanEval currently has strong coverage for ASI02 (Tool Misuse & Exploitation), ASI03 (Identity & Privilege Abuse), and ASI05 (Unexpected Code Execution), plus targeted coverage for ASI01, ASI04, ASI06, and ASI07.
 
 ASI08 (Cascading Failures), ASI09 (Human-Agent Trust Exploitation), and ASI10 (Rogue Agents) remain out of scope for the benchmark's current scoring model because they depend on system-level runtime behavior, human-in-the-loop evaluation, or long-horizon agent behavior rather than stable region-level SAST findings.
 
@@ -261,8 +333,8 @@ These directories are created at runtime and excluded from git via `.gitignore`:
 
 | Directory | Created by | Contents |
 |-----------|-----------|----------|
-| `results/` | `scripts/run.py` | Results JSON, HTML reports, raw scanner artifacts |
-| `.repos/` | `scripts/setup_repos.py` | Cloned real-world repo snapshots for Full Track |
+| `results/` | `scripts/run.py`, `scaneval demo` | Results JSON, HTML reports, raw scanner artifacts |
+| `.repos/` | `scripts/setup_repos.py`, `scaneval corpus validate`, `scaneval run` | Legacy Full Track snapshots and the new core's immutable source cache |
 | `.securevibes/` | securevibes-agent scanner | Scanner knowledge-base state (cleaned up by adapter) |
 | `.claude/` | Some LLM-backed scanners | Scanner config/skills state (cleaned up by adapter) |
 | `__pycache__/` | Python | Bytecode cache |
@@ -273,18 +345,31 @@ Do not commit these directories. If you see them in `git status`, check `.gitign
 ## Repository Layout
 
 ```text
-sastbench/
+scaneval/
 |- manifest.json
 |- LICENSE
 |- pyproject.toml
-|- schema/            # JSON schemas for cases and results
-|- taxonomy/          # Canonical kinds, capabilities, languages
+|- src/scaneval/     # Evaluation core: contracts, cases, materialize, runner,
+|  |                  # execution, review, scoring, diagnostics, report, CLI
+|  |- schemas/        # The nine versioned JSON contracts
+|  |- adapters/       # semgrep, llm-harness with its harness driver, deepsec
+|  |- collectors/     # Readers for Claude Code and Codex CLI records
+|  `- observer/       # Python trace-event emitter
+|- sdk/typescript/    # Opt-in observer emitter
+|- corpus/pilot/      # Draft pilot pack and the frozen run configurations
+|                     # (run-semgrep, run-harness, run-deepsec). No run record is committed.
+|- docs/              # Design, math, initial build, pilot, observer SDK, collectors,
+|                     # diagnostics, guides
+|- schema/            # Legacy JSON schemas for cases and results, plus schema/v2 trace
+|                     # events and the scrubbed collector fixtures
+|- taxonomy/          # Legacy canonical kinds, capabilities, languages
 |- cases/
-|  |- core/           # Synthetic vendored cases
-|  `- full/           # Real-world disclosed cases
-|- adapters/          # Scanner adapters (semgrep, bandit, etc.)
-|- scripts/           # run, validate, report
-`- tests/             # Benchmark self-tests
+|  |- core/           # Legacy synthetic vendored cases
+|  `- full/           # Legacy real-world disclosed cases
+|- adapters/          # Legacy scanner adapters (semgrep, bandit, etc.)
+|- scripts/           # Legacy run, validate, report, plus sanitize_native_trace.py,
+|                     # the scrubber that makes a real CLI run safe to commit as a fixture
+`- tests/             # Benchmark self-tests (new core and legacy)
 ```
 
 ## License

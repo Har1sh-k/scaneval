@@ -1,6 +1,6 @@
 # PR Mode
 
-SASTbench supports a second execution mode for benchmarked pull request simulation:
+ScanEval supports a second execution mode for benchmarked pull request simulation:
 
 ```bash
 python scripts/run.py --scanner semgrep --mode pr --track core
@@ -15,7 +15,7 @@ This mode is meant to approximate a security review workflow, not just a whole-r
 
 ## What PR Mode Does
 
-For each PR-capable case, SASTbench:
+For each PR-capable case, ScanEval:
 
 1. Materializes a clean base tree and a vulnerable head tree.
 2. Computes the changed files and a unified diff.
@@ -34,7 +34,7 @@ The output is review-oriented:
 
 Current PR mode is benchmark PR simulation only.
 
-It works on SASTbench cases that satisfy both conditions:
+It works on ScanEval cases that satisfy both conditions:
 
 - the case has `prSimulation` metadata
 - the case has non-empty `expectedOutcome.mustDetectRegionIds`
@@ -68,7 +68,7 @@ Used mostly for Core Track cases.
 - the clean baseline lives in `pr/base/`
 - the vulnerable head lives in the normal `files.root` tree, usually `project/`
 
-At runtime, SASTbench copies both trees into a temporary directory and scans those temp copies symmetrically.
+At runtime, ScanEval copies both trees into a temporary directory and scans those temp copies symmetrically.
 
 ### `git_commit_pair`
 
@@ -87,7 +87,7 @@ Used for selected Full Track real-world cases.
 - `baseCommit` is required
 - `headCommit` is optional and defaults to `realWorld.vulnerableCommit`
 
-SASTbench uses `git archive` against the pinned repo snapshot to materialize both commits into temporary directories before scanning.
+ScanEval uses `git archive` against the pinned repo snapshot to materialize both commits into temporary directories before scanning.
 
 ## Adapter Behavior
 
@@ -95,7 +95,7 @@ PR mode prefers native PR-aware adapters when available.
 
 ### Native PR scan
 
-If an adapter implements `scan_pr_with_metadata(...)`, SASTbench passes:
+If an adapter implements `scan_pr_with_metadata(...)`, ScanEval passes:
 
 - `base_root`
 - `head_root`
@@ -108,7 +108,7 @@ This gives agent-style scanners the same inputs a human PR reviewer would inspec
 
 ### Fallback dual-scan mode
 
-If an adapter does not implement native PR support, or native PR mode fails, SASTbench falls back to:
+If an adapter does not implement native PR support, or native PR mode fails, ScanEval falls back to:
 
 1. scan base tree
 2. scan head tree
@@ -197,7 +197,7 @@ See [schema/results.schema.json](../schema/results.schema.json) for the full sch
 
 To participate in PR mode, a case must:
 
-1. already be a valid SASTbench case
+1. already be a valid ScanEval case
 2. include `prSimulation`
 3. have at least one region in `expectedOutcome.mustDetectRegionIds`
 
@@ -216,7 +216,7 @@ For Full Track real-world cases:
 
 Mixed-intent cases are especially useful in PR mode.
 
-They let SASTbench ask both questions at once:
+They let ScanEval ask both questions at once:
 
 - did the scanner report the newly introduced vulnerable region?
 - did it avoid flagging nearby capability-safe code that already existed or remained properly guarded?

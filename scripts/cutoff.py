@@ -1,4 +1,4 @@
-"""Model knowledge-cutoff gating for SASTbench.
+"""Model knowledge-cutoff gating for ScanEval.
 
 A real-world case is only a fair test for a model if the vulnerability's public
 disclosure postdates the model's training knowledge cutoff. Otherwise a "hit"

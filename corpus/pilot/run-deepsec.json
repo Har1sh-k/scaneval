@@ -1,0 +1,53 @@
+{
+  "schema_version": "2.0",
+  "run_id": "pilot-deepsec-haiku",
+  "pack": "pack.json",
+  "cache_root": "../../.repos",
+  "inputs": [
+    {
+      "snapshot_id": "oauth2-proxy-f4b33b64",
+      "profile": "standard"
+    },
+    {
+      "snapshot_id": "fastmcp-c861862a",
+      "profile": "standard"
+    },
+    {
+      "snapshot_id": "fastify-v5.12.1",
+      "profile": "standard"
+    }
+  ],
+  "systems": [
+    {
+      "system_id": "deepsec-2.3.10-claude-haiku-4-5",
+      "adapter": "deepsec",
+      "model_id": "claude-haiku-4-5",
+      "config": {
+        "deepsec_root": "~/Documents/GitHub/sec-test-repos/.deepsec",
+        "agent": "claude",
+        "model": "claude-haiku-4-5",
+        "thinking_level": "low",
+        "limit": 6,
+        "batch_size": 3,
+        "concurrency": 1,
+        "max_turns": 60
+      },
+      "network_policy": "model_provider_only"
+    }
+  ],
+  "repetitions": 1,
+  "timeout_seconds": 3600,
+  "trace_mode": "content",
+  "network_policy": "model_provider_only",
+  "notes": [
+    "Third-party scanner run. DeepSec 2.3.10 is invoked unchanged through its own CLI: scan (regex matchers), process (Claude Agent SDK investigation), export (findings as JSON). No DeepSec code is modified and nothing is written to the installed workspace.",
+    "The adapter builds a private DeepSec workspace inside the run's raw output with one project, no plugins, and ai: {mode: local, provider: local}, so the run uses the operator's own CLI login and no API key is configured or recorded.",
+    "The DeepSec root is operator-specific. It is written with a leading ~ so it expands to the operator's home rather than pinning one machine; point it at your own workspace.",
+    "Cost bound: limit 6 with batch_size 3 and concurrency 1 means at most two agent batches per input, six files each run, three inputs. Haiku is the deliberate choice because this is a pipeline exercise, not a model comparison, so the cheapest capable route is the right one. Raise limit only for a run whose purpose needs it, and expect cost to rise with it roughly linearly.",
+    "Because limit 6 leaves most of each repository scanned but never investigated, every invocation of this run is recorded as partial with error code scope_incomplete and bundles_resolved false. That is correct and expected: no model opened those files, so silence about them is not a negative result and the run must not earn quiet credit for them. Raise limit to cover a whole input if a run needs a complete observation of it.",
+    "Cost and token numbers in the result are DeepSec's own per-file shares of each batch, summed back into batch totals. They are CLI-reported estimates, never a bill.",
+    "max_turns 60 is well below DeepSec's default of 150 and bounds a batch that goes in circles; a batch that hits it is recorded as a batch that reached no verdict, not as a clean scan.",
+    "Content-mode traces stay local; they contain the source that was sent to the model, and the imported Claude Code transcripts contain the tool results the agent read.",
+    "Tool calls, context selection and per-turn model events come only from the Claude Code transcripts the agent sessions leave under ~/.claude/projects. A run whose transcripts have been cleaned up records those categories as unavailable, which is not evidence that no tool ran. Per-category capture status is included in the execution record."
+  ]
+}

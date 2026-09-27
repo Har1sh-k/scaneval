@@ -1,4 +1,4 @@
-"""SASTbench adapter for securevibes-agent.
+"""ScanEval adapter for securevibes-agent.
 
 Runs securevibes-agent in bootstrap mode on a case directory and normalizes
 output to the benchmark's canonical finding format.  For PR mode, creates a
@@ -25,7 +25,7 @@ _sv_env = os.environ.get("SECUREVIBES_AGENT_DIR", "").strip()
 if _sv_env:
     SECUREVIBES_AGENT_DIR = Path(_sv_env)
 else:
-    # Try to find it as a sibling of the sast-bench repo
+    # Try to find it as a sibling of the scaneval repo
     _repo_root = Path(__file__).resolve().parent.parent.parent
     SECUREVIBES_AGENT_DIR = _repo_root.parent / "securevibes-agent"
 
@@ -188,7 +188,7 @@ def _read_finding_files(findings_dir: Path) -> list[dict]:
 
 
 def _normalize_findings(kb_records: list[dict], scan_root: Path) -> list[dict]:
-    """Convert KB finding records into SASTbench-normalized finding dicts."""
+    """Convert KB finding records into ScanEval-normalized finding dicts."""
     findings = []
     scan_root_str = str(scan_root).replace("\\", "/")
 
@@ -313,8 +313,8 @@ def _create_pr_repo(base_root: Path, head_root: Path) -> tuple[Path, str, str]:
         ).stdout.strip()
 
     _git("init")
-    _git("config", "user.email", "bench@sastbench.dev")
-    _git("config", "user.name", "SASTbench")
+    _git("config", "user.email", "bench@scaneval.dev")
+    _git("config", "user.name", "ScanEval")
     # Disable git-lfs filters so operations work without lfs installed
     _git("config", "filter.lfs.clean", "cat")
     _git("config", "filter.lfs.smudge", "cat")

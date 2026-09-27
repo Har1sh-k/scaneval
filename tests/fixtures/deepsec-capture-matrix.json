@@ -1,0 +1,24 @@
+{
+  "fields": ["trace_mode", "transcripts_found", "sessions", "batches_failed", "imports_clean", "record_failures", "findings_lost", "capture_gap"],
+  "columns": {
+    "trace off": [["off"], [0, 2], [0, 2], [0, 1], [true, false], [0, 1], [0, 1], [true, false]],
+    "every transcript": [["metadata", "content"], [2], [2], [0], [true], [0], [0], [false]],
+    "some transcripts": [["metadata", "content"], [1], [2], [0], [true], [0], [0], [false]],
+    "import not clean": [["metadata", "content"], [2], [2], [0], [false], [0], [0], [false]],
+    "no transcript": [["metadata", "content"], [0], [2], [0], [true, false], [0], [0], [false]],
+    "a batch failed": [["metadata", "content"], [2], [2], [1, 3], [true], [0], [0], [false]],
+    "records lost": [["metadata", "content"], [2], [2], [0], [true], [1, 4], [0], [false]],
+    "findings lost": [["metadata", "content"], [2], [2], [0], [true], [0], [1, 2], [false]],
+    "capture gap": [["metadata", "content"], [2], [2], [0], [true], [0], [0], [true]]
+  },
+  "expectations": {
+    "model_requests": ["unavailable", "partial", "partial", "partial", "partial", "partial", "partial", "partial", "partial"],
+    "model_responses": ["unavailable", "partial", "partial", "partial", "partial", "partial", "partial", "partial", "partial"],
+    "tool_calls": ["unavailable", "complete", "partial", "partial", "unavailable", "complete", "complete", "complete", "partial"],
+    "context_selection": ["unavailable", "partial", "partial", "partial", "unavailable", "partial", "partial", "partial", "partial"],
+    "finding_candidate": ["unavailable", "complete", "complete", "complete", "complete", "complete", "partial", "complete", "partial"],
+    "finding_submitted": ["unavailable", "complete", "complete", "complete", "complete", "partial", "complete", "partial", "partial"],
+    "finding_validation": ["unavailable", "unavailable", "unavailable", "unavailable", "unavailable", "unavailable", "unavailable", "unavailable", "unavailable"],
+    "finding_filtered": ["unavailable", "unavailable", "unavailable", "unavailable", "unavailable", "unavailable", "unavailable", "unavailable", "unavailable"]
+  }
+}

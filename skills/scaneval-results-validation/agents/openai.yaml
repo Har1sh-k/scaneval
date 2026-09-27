@@ -1,0 +1,4 @@
+interface:
+  display_name: "ScanEval Results Validation"
+  short_description: "Verify claimed ScanEval run results"
+  default_prompt: "Use $scaneval-results-validation to verify a claimed ScanEval run and report the exact scanner version, rule set, metrics, and any invalid-run artifacts."

@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+build/
+dist/
 .venv/
 venv/
 
@@ -19,7 +22,7 @@ node_modules/
 .DS_Store
 Thumbs.db
 
-# SASTbench
+# ScanEval
 .repos/
 results/
 *.html

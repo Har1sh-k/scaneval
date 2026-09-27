@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/review-record.schema.json",
+  "title": "ScanEval review record",
+  "description": "Evaluator-side sidecar that says who produced a decisions file and whether it is a draft or a recorded human review. It binds to the decisions by hash; scoring never reads it.",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "run_id", "decisions_sha256", "plan_sha256", "state", "created_at", "reviews", "notes"],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "decisions_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "plan_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "state": {"enum": ["draft", "human_approved"]},
+    "created_at": {"type": "string", "minLength": 1},
+    "reviews": {"type": "array", "items": {
+      "type": "object", "additionalProperties": false, "required": ["reviewer", "at", "decisions_sha256", "note"],
+      "properties": {"reviewer": {"type": "string", "minLength": 1}, "at": {"type": "string", "minLength": 1},
+                     "decisions_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "note": {"type": "string"}}}},
+    "notes": {"type": "array", "items": {"type": "string"}}
+  }
+}

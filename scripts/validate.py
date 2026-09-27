@@ -1,4 +1,4 @@
-"""SASTbench case validator.
+"""ScanEval case validator.
 
 Validates all case.json files against the case schema and checks
 that referenced files and line ranges exist.
@@ -371,7 +371,7 @@ def find_cases_for_track(track: str) -> list[Path]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate SASTbench case definitions")
+    parser = argparse.ArgumentParser(description="Validate ScanEval case definitions")
     parser.add_argument(
         "--track",
         choices=["core", "full"],

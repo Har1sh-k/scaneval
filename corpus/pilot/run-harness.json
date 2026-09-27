@@ -1,0 +1,52 @@
+{
+  "schema_version": "2.0",
+  "run_id": "pilot-harness-haiku",
+  "pack": "pack.json",
+  "cache_root": "../../.repos",
+  "inputs": [
+    {
+      "snapshot_id": "oauth2-proxy-f4b33b64",
+      "profile": "standard"
+    },
+    {
+      "snapshot_id": "fastmcp-c861862a",
+      "profile": "standard"
+    },
+    {
+      "snapshot_id": "fastify-v5.12.1",
+      "profile": "standard"
+    }
+  ],
+  "systems": [
+    {
+      "system_id": "securevibes-agent-claude-haiku-4-5-bootstrap",
+      "adapter": "llm-harness",
+      "model_id": "anthropic/claude-haiku-4-5",
+      "config": {
+        "harness": "securevibes-agent",
+        "root": "~/Documents/GitHub/securevibes-agent",
+        "model": "anthropic/claude-haiku-4-5",
+        "mode": "bootstrap",
+        "runner": "default",
+        "qmd_profile": "lite",
+        "llm_max_files": 25,
+        "llm_timeout_ms": 180000,
+        "flush_timeout_ms": 30000
+      },
+      "network_policy": "model_provider_only"
+    }
+  ],
+  "repetitions": 1,
+  "timeout_seconds": 3600,
+  "trace_mode": "content",
+  "network_policy": "model_provider_only",
+  "notes": [
+    "Own-harness run through the harness's own engine with the observer wrapped around its default model runner.",
+    "Model route anthropic/claude-haiku-4-5 resolves to the claude CLI under the local claude.ai login. Haiku is the deliberate choice for routine pilot runs: this workload is a pipeline exercise, not a model comparison, so the cheapest capable route is the right one.",
+    "Per-call cost is not metered on this path and is recorded as unknown. llm_max_files bounds how many files reach the model; raise it only for a run whose purpose needs it.",
+    "Keep the input list small. Adding repositories multiplies model calls with no gain until the existing cases carry reviewed labels.",
+    "The harness root is operator-specific. It is written with a leading ~ so it expands to the operator's home rather than pinning one machine; point it at your own checkout.",
+    "qmd is absent on this machine, so the harness reports a lite runtime profile and marks the run degraded.",
+    "Content-mode traces stay local; they contain the source that was sent to the model."
+  ]
+}

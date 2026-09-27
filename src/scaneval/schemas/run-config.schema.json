@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/run-config.schema.json",
+  "title": "ScanEval run configuration",
+  "description": "Frozen description of one evaluation run: which pack snapshots to materialize, which systems to invoke, how often, and under which declared limits. Contains no labels and no credentials.",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "run_id", "pack", "inputs", "systems", "repetitions", "timeout_seconds", "trace_mode", "network_policy"],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "pack": {"type": "string", "minLength": 1, "description": "Path to the case pack, relative to this file."},
+    "cache_root": {"type": "string", "minLength": 1, "description": "Immutable source cache directory, relative to this file. Default .repos"},
+    "inputs": {"type": "array", "minItems": 1, "items": {
+      "type": "object", "additionalProperties": false, "required": ["snapshot_id"],
+      "properties": {"snapshot_id": {"type": "string", "minLength": 1},
+                     "profile": {"enum": ["standard", "metadata_blinded"], "default": "standard"}}}},
+    "systems": {"type": "array", "minItems": 1, "items": {
+      "type": "object", "additionalProperties": false, "required": ["system_id", "adapter", "config"],
+      "properties": {"system_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+                     "adapter": {"type": "string", "minLength": 1}, "config": {"type": "object"},
+                     "model_id": {"type": "string", "minLength": 1}, "model_revision": {"type": "string", "minLength": 1},
+                     "network_policy": {"enum": ["none", "model_provider_only", "unrestricted"]}}}},
+    "repetitions": {"type": "integer", "minimum": 1},
+    "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
+    "trace_mode": {"enum": ["off", "metadata", "content"]},
+    "network_policy": {"enum": ["none", "model_provider_only", "unrestricted"]},
+    "notes": {"type": "array", "items": {"type": "string"}}
+  }
+}

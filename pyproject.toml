@@ -3,16 +3,25 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sastbench"
-version = "1.0.0-dev"
-description = "A benchmark for static analysis on agentic codebases."
+name = "scaneval"
+version = "2.0.0a1"
+description = "Reproducible evaluation and observability contracts for security scanners."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [
-  { name = "SASTbench contributors" },
+  { name = "ScanEval contributors" },
 ]
-dependencies = []
+dependencies = ["jsonschema>=4.23,<5"]
+
+[project.scripts]
+scaneval = "scaneval.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+scaneval = ["schemas/*.json", "mappings/*.json", "adapters/*.mts"]
 
 [project.optional-dependencies]
 dev = [
@@ -25,6 +34,7 @@ official-adapters = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 norecursedirs = [
   ".git",
   ".repos",

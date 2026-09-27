@@ -1,4 +1,0 @@
-interface:
-  display_name: "SASTbench Results Validation"
-  short_description: "Verify claimed SASTbench run results"
-  default_prompt: "Use $sastbench-results-validation to verify a claimed SASTbench run and report the exact scanner version, rule set, metrics, and any invalid-run artifacts."

@@ -1,4 +1,4 @@
-"""SASTbench adapter for Semgrep.
+"""ScanEval adapter for Semgrep.
 
 Runs Semgrep on a case directory and returns normalized findings plus
 scanner invocation metadata for auditability.

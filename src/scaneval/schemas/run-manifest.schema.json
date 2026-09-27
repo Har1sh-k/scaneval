@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/run-manifest.schema.json",
+  "title": "ScanEval run manifest",
+  "description": "What one run executed, what it left out, and where every artifact landed. It is an evaluator-side record of a run, not a score, a comparison, or a label: nothing here says a claim was correct. A manifest with status 'failed' is the partial record written when a run raised, so its invocation list stops at the last one that finished.",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "run_id", "status", "created_at", "config_sha256", "pack", "selection", "inputs", "systems", "invocations", "warnings"],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["completed", "failed"], "description": "Whether the invocation loop finished. A completed run can still contain failed, skipped, and unsupported invocations."},
+    "created_at": {"type": "string", "minLength": 1},
+    "config_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "failure": {
+      "type": "object", "additionalProperties": false, "required": ["type", "message"],
+      "description": "Present exactly when status is 'failed': the exception class name and message that stopped the run. It is not a scan outcome.",
+      "properties": {"type": {"type": "string", "minLength": 1}, "message": {"type": "string"}}
+    },
+    "pack": {"$ref": "#/$defs/pack_summary"},
+    "selection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["only_inputs", "only_systems", "excluded_inputs", "excluded_systems"],
+      "description": "Which configured inputs and systems this run actually covered. A null filter means no filter was supplied, not that nothing was excluded.",
+      "properties": {
+        "only_inputs": {"type": ["array", "null"], "items": {"type": "string", "minLength": 1}},
+        "only_systems": {"type": ["array", "null"], "items": {"type": "string", "minLength": 1}},
+        "excluded_inputs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "excluded_systems": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "inputs": {"type": "array", "items": {"$ref": "#/$defs/input"}},
+    "systems": {"type": "array", "items": {"$ref": "#/$defs/system"}},
+    "invocations": {"type": "array", "items": {"$ref": "#/$defs/invocation"}},
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1},
+    "check": {
+      "type": "object", "additionalProperties": false, "required": ["check", "result", "at", "detail"],
+      "properties": {"check": {"type": "string", "minLength": 1}, "result": {"enum": ["pass", "fail", "skipped"]},
+                     "at": {"type": "string", "minLength": 1}, "detail": {"type": "string"},
+                     "snapshot_id": {"$ref": "#/$defs/id"}}
+    },
+    "mechanical_check_outcome": {
+      "type": "object", "additionalProperties": false,
+      "required": ["case_id", "passed", "checks", "review_state", "level"],
+      "description": "One case's L1 outcome for one snapshot. 'passed' covers this snapshot's check set only; review_state and level are the case's state after the check, which needs every referenced snapshot to pass.",
+      "properties": {
+        "case_id": {"$ref": "#/$defs/id"},
+        "passed": {"type": "boolean"},
+        "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+        "review_state": {"enum": ["draft", "mechanically_checked", "human_approved"]},
+        "level": {"enum": [null, "L1", "L2", "L3", "L4"]}
+      }
+    },
+    "pack_summary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["namespace", "pack_id", "version", "status", "snapshots", "cases", "review_states", "dispositions", "sha256"],
+      "properties": {
+        "namespace": {"type": "string", "minLength": 1},
+        "pack_id": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "status": {"enum": ["draft", "reviewed", "released"]},
+        "snapshots": {"type": "integer", "minimum": 0},
+        "cases": {"type": "integer", "minimum": 0},
+        "review_states": {
+          "type": "object", "additionalProperties": false,
+          "required": ["draft", "mechanically_checked", "human_approved"],
+          "properties": {"draft": {"type": "integer", "minimum": 0},
+                         "mechanically_checked": {"type": "integer", "minimum": 0},
+                         "human_approved": {"type": "integer", "minimum": 0}}
+        },
+        "dispositions": {
+          "type": "object", "additionalProperties": false,
+          "required": ["validate", "needs_evidence", "extended_regression", "exclude"],
+          "properties": {"validate": {"type": "integer", "minimum": 0},
+                         "needs_evidence": {"type": "integer", "minimum": 0},
+                         "extended_regression": {"type": "integer", "minimum": 0},
+                         "exclude": {"type": "integer", "minimum": 0}}
+        },
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "input": {
+      "type": "object", "additionalProperties": false,
+      "required": ["snapshot_id", "tree_hash", "provenance_path", "mechanical_checks"],
+      "properties": {
+        "snapshot_id": {"$ref": "#/$defs/id"},
+        "tree_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "provenance_path": {"type": "string", "minLength": 1},
+        "mechanical_checks": {"type": "array", "items": {"$ref": "#/$defs/mechanical_check_outcome"}}
+      }
+    },
+    "system": {
+      "type": "object", "additionalProperties": false,
+      "required": ["system_id", "adapter", "adapter_version", "preparation", "skipped_reason"],
+      "description": "One configured system after adapter resolution. 'skipped_reason' is the adapter's own message when resolution or preparation failed; a system with one was never invoked.",
+      "properties": {
+        "system_id": {"$ref": "#/$defs/id"},
+        "adapter": {"type": "string", "minLength": 1},
+        "adapter_version": {"type": ["string", "null"], "minLength": 1},
+        "preparation": {"type": "object"},
+        "skipped_reason": {"type": ["string", "null"], "minLength": 1}
+      }
+    },
+    "invocation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["invocation_id", "input_id", "system_id", "repetition", "status", "claim_records",
+                   "plan_scope", "targets_assigned", "targets_detected", "pending_matching_count",
+                   "bundle_path", "review_state", "skipped_reason"],
+      "description": "One (input, system, repetition). 'skipped' is manifest-only: it means this runner never invoked the system, so no scan happened and no scan result carries that status. Every other status is the saved scan result's own status. A null metric is unavailable, not zero.",
+      "properties": {
+        "invocation_id": {"type": "string", "minLength": 1},
+        "input_id": {"$ref": "#/$defs/id"},
+        "system_id": {"$ref": "#/$defs/id"},
+        "repetition": {"type": "integer", "minimum": 1},
+        "status": {"enum": ["success", "partial", "unsupported", "error", "timeout", "skipped"]},
+        "claim_records": {"type": ["integer", "null"], "minimum": 0},
+        "plan_scope": {"enum": [null, "diagnostic", "draft", "reviewed"]},
+        "targets_assigned": {"type": ["integer", "null"], "minimum": 0},
+        "targets_detected": {"type": ["integer", "null"], "minimum": 0},
+        "pending_matching_count": {"type": ["integer", "null"], "minimum": 0},
+        "bundle_path": {"type": ["string", "null"], "minLength": 1},
+        "review_state": {"enum": [null, "draft", "human_approved"]},
+        "skipped_reason": {"type": ["string", "null"], "minLength": 1}
+      }
+    }
+  }
+}

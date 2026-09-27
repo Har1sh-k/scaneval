@@ -1,0 +1,613 @@
+{
+  "schema_version": "2.0",
+  "namespace": "scaneval.public",
+  "pack_id": "pilot-2026-09",
+  "version": "0.1.0-draft",
+  "status": "draft",
+  "description": "First real-case pilot: three repositories, three languages, three mechanisms. Draft labels only; no independent review has been recorded.",
+  "review_budgets": {
+    "full": [
+      5,
+      10,
+      20,
+      50
+    ],
+    "pr": [
+      5,
+      10,
+      20
+    ]
+  },
+  "snapshots": [
+    {
+      "tree_hash": "sha256:aab29bfad6368fa4f4f5e5fa5724cc37aaba6e46b80062032df74e2d8d6c1426",
+      "git_tree": null,
+      "role": "vulnerable",
+      "snapshot_id": "oauth2-proxy-f4b33b64",
+      "repository": {
+        "url": "https://github.com/oauth2-proxy/oauth2-proxy.git",
+        "name": "oauth2-proxy/oauth2-proxy"
+      },
+      "commit": "f4b33b64bd66ad28e9b0d63bea51837b83c00ca1",
+      "reference": "parent of fix commit 9ffafad4b2d2f9f7668e5504565f356a7c047b77 (verified 2026-09-20 via git); last state before v7.11.0 repair",
+      "languages": [
+        "go"
+      ],
+      "workload": "conventional_application",
+      "component_role": "infrastructure",
+      "production_use_evidence": "Widely deployed authentication reverse proxy; project docs describe production deployments.",
+      "license": {
+        "spdx": "MIT",
+        "verified": false,
+        "note": "Repository LICENSE reported as MIT; not yet verified for the exact snapshot and paths."
+      }
+    },
+    {
+      "tree_hash": "sha256:a6a93cb57b8e3171bd0c6190b73515eeecfd7ce571cff0593df175a3e94ba713",
+      "git_tree": null,
+      "role": "vulnerable",
+      "snapshot_id": "fastmcp-c861862a",
+      "repository": {
+        "url": "https://github.com/PrefectHQ/fastmcp.git",
+        "name": "PrefectHQ/fastmcp"
+      },
+      "commit": "c861862aededc7294cea5634d77e6926444ca101",
+      "reference": "parent of fix commit 40bdfb6b1de0ce30609ee9ba5bb95ecd04a9fb71 (PR #3507, committed 2026-03-15; verified 2026-09-20 via git)",
+      "languages": [
+        "python"
+      ],
+      "workload": "agentic_application",
+      "component_role": "library_sdk",
+      "production_use_evidence": "MCP server framework used by downstream agent deployments; vendor docs only.",
+      "license": {
+        "spdx": "Apache-2.0",
+        "verified": false,
+        "note": "Reported Apache-2.0; not yet verified for the exact snapshot and paths."
+      }
+    },
+    {
+      "tree_hash": "sha256:a3554a9499f76544d02d706b0df69c2220da3aff2b66e77a5a744486b047a9e7",
+      "git_tree": null,
+      "role": "vulnerable",
+      "snapshot_id": "fastify-v5.12.1",
+      "repository": {
+        "url": "https://github.com/fastify/fastify.git",
+        "name": "fastify/fastify"
+      },
+      "commit": "7d196a998c422062a3aaa3f8041db91ad576cea0",
+      "reference": "tag v5.12.1 (7d196a99), the last release in the advisory's affected range >=4.0.0,<5.12.2; the named fix commit d66ebd12 landed on main (6.0.0-alpha line) and its backport into v5.12.2 (tag 942a2be8) is not yet verified",
+      "languages": [
+        "javascript"
+      ],
+      "workload": "conventional_application",
+      "component_role": "library_sdk",
+      "production_use_evidence": "Node.js HTTP framework with production documentation.",
+      "license": {
+        "spdx": "MIT",
+        "verified": false,
+        "note": "Reported MIT; not yet verified for the exact snapshot and paths."
+      }
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "oauth2-proxy-cve-2025-54576",
+      "represents": "This case tests path-versus-full-URI confusion in regex-based skip_auth_routes matching at an authentication proxy boundary under the assumption that a configured skip regex can match attacker-controlled query text and the upstream tolerates that query, and adds a justified replication of legacy case SB-GO-RG-001 so the v2 pipeline is exercised on a Go target whose vulnerable commit, regions, and fix anchors were already mapped.",
+      "workload": "conventional_application",
+      "component_role": "infrastructure",
+      "model_involvement": {
+        "state": "not_applicable",
+        "reason": "No model participates in the mechanism."
+      },
+      "coverage_signature": {
+        "idiom": "Go net/http reverse proxy with operator-configured regex allowlists",
+        "input_source": "HTTP request target and X-Forwarded-Uri header",
+        "trust_boundary": "unauthenticated client to authentication gate",
+        "security_operation": "authentication skip decision",
+        "guard_failure": "allowlist regex evaluated against path plus query instead of path only",
+        "analysis_span": "two functions across two files (util.go GetRequestURI, oauthproxy.go isAllowedPath)"
+      },
+      "canonical_target": {
+        "kind": "auth_bypass",
+        "variant_family": "oauth2-proxy-cve-2025-54576",
+        "aliases": [
+          "CVE-2025-54576",
+          "GHSA-7rh7-c77v-6434"
+        ]
+      },
+      "target": {
+        "target_id": "T-oauth2-proxy-cve-2025-54576",
+        "snapshot_id": "oauth2-proxy-f4b33b64",
+        "kind": "auth_bypass",
+        "description": "GetRequestURI returns the full request URI including the query string, and isAllowedPath matches the configured skip_auth_routes regex against that full URI. An attacker can append crafted query parameters to a protected path so the regex still matches a public allowlist entry, letting unauthenticated requests reach protected backends.",
+        "affected_input_or_authority": "Query string appended by an unauthenticated client to a protected path",
+        "accepted_locations": [
+          {
+            "path": "pkg/requests/util/util.go",
+            "role": "other",
+            "note": "legacy region R1 label=vulnerable capability=authentication",
+            "start_line": 37,
+            "end_line": 44
+          },
+          {
+            "path": "oauthproxy.go",
+            "role": "other",
+            "note": "legacy region R2 label=vulnerable capability=authentication",
+            "start_line": 582,
+            "end_line": 590
+          }
+        ],
+        "assumptions": [
+          "A skip_auth_routes regex is configured that attacker-controlled query text can satisfy.",
+          "The upstream tolerates the appended query."
+        ],
+        "matching_rules": [
+          "Accept an allegation that the skip-auth path match is evaluated on the full request URI including the query, at either the URI extraction (util.go) or the match site (oauthproxy.go).",
+          "Reject generic 'regex allowlist bypass' claims that do not identify query inclusion as the failure."
+        ]
+      },
+      "controls": [],
+      "evidence": [
+        {
+          "evidence_id": "legacy-record",
+          "origin": "legacy_case_record",
+          "kind": "other",
+          "reference": "cases/full/real_world_generic/SB-GO-RG-001/case.json",
+          "note": "Legacy case SB-GO-RG-001 (real_world_generic); prior draft regions, not v2-reviewed labels."
+        },
+        {
+          "evidence_id": "fix-commit",
+          "origin": "public_advisory_and_maintainer_fix",
+          "kind": "fix_commit",
+          "reference": "oauth2-proxy/oauth2-proxy@9ffafad4b2d2f9f7668e5504565f356a7c047b77",
+          "note": "Fix commit named by the legacy record."
+        },
+        {
+          "evidence_id": "ghsa",
+          "origin": "public_advisory_and_maintainer_fix",
+          "kind": "ghsa_advisory",
+          "reference": "https://github.com/advisories/GHSA-7rh7-c77v-6434",
+          "note": ""
+        },
+        {
+          "evidence_id": "cve",
+          "origin": "public_advisory_and_maintainer_fix",
+          "kind": "cve_record",
+          "reference": "https://www.cve.org/CVERecord?id=CVE-2025-54576",
+          "note": ""
+        },
+        {
+          "evidence_id": "fix-parent-check",
+          "origin": "research_note",
+          "kind": "source_inspection",
+          "reference": "git: 9ffafad4b2d2f9f7668e5504565f356a7c047b77^ == f4b33b64bd66ad28e9b0d63bea51837b83c00ca1",
+          "note": "Verified 2026-09-20 with a shallow fetch; the pinned vulnerable snapshot is the direct parent of the fix.",
+          "retrieved": "2026-09-20"
+        },
+        {
+          "evidence_id": "fix-hunks",
+          "origin": "public_advisory_and_maintainer_fix",
+          "kind": "source_inspection",
+          "reference": "git diff 9ffafad4^..9ffafad4 -- oauthproxy.go pkg/requests/util/util.go",
+          "note": "Verified 2026-09-20: oauthproxy.go line 583 changes route.pathRegex.MatchString(requestutil.GetRequestURI(req)) to GetRequestPath(req), and util.go gains GetRequestPath, which parses the URI and returns only its path component. Both repaired sites fall inside the accepted locations carried over from the legacy record, and the diff confirms the root cause is the full-URI match rather than the regex itself.",
+          "retrieved": "2026-09-20"
+        }
+      ],
+      "disclosure": {
+        "earliest_public_artifact": "2025-07-30",
+        "cve_published": null,
+        "ghsa_published": "2025-07-30",
+        "fix_commit_date": "2025-07-30",
+        "note": "GHSA-7rh7-c77v-6434 published 2025-07-30; fix commit 9ffafad4 committed 2025-07-30 (git). Earliest artifact assumed equal to the GHSA date pending a search of earlier public references."
+      },
+      "disposition": {
+        "value": "needs_evidence",
+        "reason": "Migrated from a legacy v1 record: mapped regions are prior draft evidence and need v2 review."
+      },
+      "validation": {
+        "level": "L1",
+        "review_state": "mechanically_checked",
+        "checks": [
+          {
+            "check": "locations_exist_in_snapshot",
+            "result": "pass",
+            "at": "2026-09-25T05:48:49+00:00",
+            "detail": "2 locations found",
+            "snapshot_id": "oauth2-proxy-f4b33b64"
+          },
+          {
+            "check": "line_ranges_within_files",
+            "result": "pass",
+            "at": "2026-09-25T05:48:49+00:00",
+            "detail": "all ranges within file length",
+            "snapshot_id": "oauth2-proxy-f4b33b64"
+          },
+          {
+            "check": "aliases_well_formed",
+            "result": "pass",
+            "at": "2026-09-25T05:48:49+00:00",
+            "detail": "CVE-2025-54576, GHSA-7rh7-c77v-6434",
+            "snapshot_id": "oauth2-proxy-f4b33b64"
+          },
+          {
+            "check": "represents_statement",
+            "result": "pass",
+            "at": "2026-09-25T05:48:49+00:00",
+            "detail": "template: This case tests ... under ..., and adds ...",
+            "snapshot_id": "oauth2-proxy-f4b33b64"
+          },
+          {
+            "check": "evidence_recorded",
+            "result": "pass",
+            "at": "2026-09-25T05:48:49+00:00",
+            "detail": "6 evidence records",
+            "snapshot_id": "oauth2-proxy-f4b33b64"
+          },
+          {
+            "check": "snapshot_hash_recorded",
+            "result": "pass",
+            "at": "2026-09-25T05:48:49+00:00",
+            "detail": "sha256:aab29bfad6368fa4f4f5e5fa5724cc37aaba6e46b80062032df74e2d8d6c1426",
+            "snapshot_id": "oauth2-proxy-f4b33b64"
+          }
+        ],
+        "reviews": [],
+        "check_sets": {
+          "oauth2-proxy-f4b33b64": {
+            "result": "pass",
+            "tree_hash": "sha256:aab29bfad6368fa4f4f5e5fa5724cc37aaba6e46b80062032df74e2d8d6c1426",
+            "checks_sha256": "sha256:75ec9372b14c1ea82069097463d25e01f549bbb7342260ef032b4cd33889ad9e"
+          }
+        }
+      },
+      "split": "development",
+      "notes": [
+        "legacy_id=SB-GO-RG-001",
+        "legacy_title=oauth2-proxy skip_auth_routes bypass via query parameter inclusion"
+      ]
+    },
+    {
+      "case_id": "fastmcp-cve-2026-32871",
+      "represents": "This case tests URL construction from MCP-client-supplied path parameters in an OpenAPI-backed tool provider (RequestDirector._build_url) under the assumption that the OpenAPI provider is enabled with authorization headers attached and the backend exposes reachable sibling endpoints, and adds the pilot's only agentic-workflow SSRF target where model-selected tool arguments reach an outbound-request sink.",
+      "workload": "agentic_application",
+      "component_role": "library_sdk",
+      "model_involvement": "Model-selected tool arguments supply the path parameter; the model need not originate the input.",
+      "coverage_signature": {
+        "idiom": "Python httpx/OpenAPI request director",
+        "input_source": "MCP tool call arguments",
+        "trust_boundary": "MCP client to authorized backend request",
+        "security_operation": "outbound request URL construction",
+        "guard_failure": "missing URL encoding of path parameters before URL join",
+        "analysis_span": "single class, single file"
+      },
+      "canonical_target": {
+        "kind": "ssrf",
+        "variant_family": "openapi-path-parameter-url-escape",
+        "aliases": [
+          "CVE-2026-32871",
+          "GHSA-vv7q-7jx5-f767"
+        ]
+      },
+      "target": {
+        "target_id": "T-fastmcp-cve-2026-32871",
+        "snapshot_id": "fastmcp-c861862a",
+        "kind": "ssrf",
+        "description": "RequestDirector._build_url in src/fastmcp/utilities/openapi/director.py substitutes MCP-client-controlled path parameters into the OpenAPI backend URL without encoding, so a crafted parameter escapes the intended API prefix while the provider's authorization headers are still attached (backend URL traversal / SSRF, not filesystem traversal).",
+        "affected_input_or_authority": {
+          "state": "not_reviewed"
+        },
+        "accepted_locations": [
+          {
+            "path": "src/fastmcp/utilities/openapi/director.py",
+            "start_line": 194,
+            "end_line": 216,
+            "role": "sink",
+            "note": "candidate: RequestDirector._build_url; unencoded str(param_value) substitution (lines 209-213) then urljoin (line 216) at commit c861862a"
+          }
+        ],
+        "assumptions": [
+          "The OpenAPI provider is enabled and attaches authorization headers to backend requests.",
+          "The backend exposes sibling endpoints reachable from the same host prefix."
+        ],
+        "matching_rules": [
+          "Accept an allegation that path parameters reach backend URL construction without encoding so a client can escape the intended endpoint prefix.",
+          "Reject filesystem path-traversal allegations that do not concern the outbound request URL."
+        ]
+      },
+      "controls": [],
+      "evidence": [
+        {
+          "evidence_id": "ghsa",
+          "origin": "public_advisory_and_maintainer_fix",
+          "kind": "ghsa_advisory",
+          "reference": "https://github.com/PrefectHQ/fastmcp/security/advisories/GHSA-vv7q-7jx5-f767",
+          "note": "Repository advisory, published 2026-03-31 per dossier."
+        },
+        {
+          "evidence_id": "cve",
+          "origin": "public_advisory_and_maintainer_fix",
+          "kind": "cve_record",
+          "reference": "https://www.cve.org/CVERecord?id=CVE-2026-32871",
+          "note": "CVE record published 2026-04-02 per dossier."
+        },
+        {
+          "evidence_id": "fix-commit",
+          "origin": "public_advisory_and_maintainer_fix",
+          "kind": "fix_commit",
+          "reference": "PrefectHQ/fastmcp@40bdfb6b1de0ce30609ee9ba5bb95ecd04a9fb71",
+          "note": "Subject: fix: URL-encode path params to prevent SSRF/path traversal (GHSA-vv7q-7jx5-f767) (#3507); committed 2026-03-15 (git, verified 2026-09-20)."
+        },
+        {
+          "evidence_id": "fix-pr",
+          "origin": "public_advisory_and_maintainer_fix",
+          "kind": "fix_pull_request",
+          "reference": "https://github.com/PrefectHQ/fastmcp/pull/3507",
+          "note": ""
+        },
+        {
+          "evidence_id": "dossier",
+          "origin": "research_note",
+          "kind": "other",
+          "reference": "docs/CVE_CORPUS_SHORTLIST.md#03-fastmcp",
+          "note": "Research dossier; files named there are inspection starting points, not accepted regions."
+        },
+        {
+          "evidence_id": "fix-hunks",
+          "origin": "public_advisory_and_maintainer_fix",
+          "kind": "source_inspection",
+          "reference": "git diff 40bdfb6b^..40bdfb6b -- src/fastmcp/utilities/openapi/director.py",
+          "note": "Verified 2026-09-20: the fix imports quote and replaces url_path.replace(placeholder, str(param_value)) with quote(str(param_value), safe='').replace('.', '%2E') inside RequestDirector._build_url (two hunks, 8 changed lines, plus 129 lines of new tests in tests/utilities/openapi/test_director.py). The repaired line is the unencoded substitution the accepted location covers.",
+          "retrieved": "2026-09-20"
+        }
+      ],
+      "disclosure": {
+        "earliest_public_artifact": "2026-03-15",
+        "cve_published": "2026-04-02",
+        "ghsa_published": "2026-03-31",
+        "fix_commit_date": "2026-03-15",
+        "note": "Fix commit date from git; advisory dates from the dossier and not yet re-verified against the CVE Program record."
+      },
+      "disposition": {
+        "value": "needs_evidence",
+        "reason": "High-evidence public fix; accepted line ranges and the exact vulnerable release tag are not yet mapped, and no independent review has been recorded."
+      },
+      "validation": {
+        "level": "L1",
+        "review_state": "mechanically_checked",
+        "checks": [
+          {
+            "check": "locations_exist_in_snapshot",
+            "result": "pass",
+            "at": "2026-09-25T05:48:50+00:00",
+            "detail": "1 locations found",
+            "snapshot_id": "fastmcp-c861862a"
+          },
+          {
+            "check": "line_ranges_within_files",
+            "result": "pass",
+            "at": "2026-09-25T05:48:50+00:00",
+            "detail": "all ranges within file length",
+            "snapshot_id": "fastmcp-c861862a"
+          },
+          {
+            "check": "aliases_well_formed",
+            "result": "pass",
+            "at": "2026-09-25T05:48:50+00:00",
+            "detail": "CVE-2026-32871, GHSA-vv7q-7jx5-f767",
+            "snapshot_id": "fastmcp-c861862a"
+          },
+          {
+            "check": "represents_statement",
+            "result": "pass",
+            "at": "2026-09-25T05:48:50+00:00",
+            "detail": "template: This case tests ... under ..., and adds ...",
+            "snapshot_id": "fastmcp-c861862a"
+          },
+          {
+            "check": "evidence_recorded",
+            "result": "pass",
+            "at": "2026-09-25T05:48:50+00:00",
+            "detail": "6 evidence records",
+            "snapshot_id": "fastmcp-c861862a"
+          },
+          {
+            "check": "snapshot_hash_recorded",
+            "result": "pass",
+            "at": "2026-09-25T05:48:50+00:00",
+            "detail": "sha256:a6a93cb57b8e3171bd0c6190b73515eeecfd7ce571cff0593df175a3e94ba713",
+            "snapshot_id": "fastmcp-c861862a"
+          }
+        ],
+        "reviews": [],
+        "check_sets": {
+          "fastmcp-c861862a": {
+            "result": "pass",
+            "tree_hash": "sha256:a6a93cb57b8e3171bd0c6190b73515eeecfd7ce571cff0593df175a3e94ba713",
+            "checks_sha256": "sha256:6a5cd7de5e558cb66668e2c83cf535432fdf10c032d5a2cebbb95d4e73da8189"
+          }
+        }
+      },
+      "split": "development",
+      "notes": [
+        "Vulnerable release tag (last 3.1.x) not yet resolved; snapshot pinned as the fix parent."
+      ]
+    },
+    {
+      "case_id": "fastify-cve-2026-76169",
+      "represents": "This case tests router normalization of malformed request targets across encapsulated plugin prefixes and lifecycle-hook placement in a Node.js HTTP framework under the assumption that a sibling plugin defines a custom not-found handler returning protected information and relies on its own preHandler for authentication, and adds a JavaScript conventional-application auth-bypass target with a one-file fix whose disclosure post-dates every registered model cutoff.",
+      "workload": "conventional_application",
+      "component_role": "library_sdk",
+      "model_involvement": {
+        "state": "not_applicable",
+        "reason": "No model participates in the mechanism."
+      },
+      "coverage_signature": {
+        "idiom": "Node.js framework router with encapsulated plugin prefixes",
+        "input_source": "malformed HTTP request target",
+        "trust_boundary": "unauthenticated client to plugin-scoped handler",
+        "security_operation": "lifecycle hook enforcement before handler dispatch",
+        "guard_failure": "not-found dispatch occurs before request-target validation",
+        "analysis_span": "router dispatch across plugin encapsulation contexts"
+      },
+      "canonical_target": {
+        "kind": "auth_bypass",
+        "variant_family": "malformed-target-hook-skip",
+        "aliases": [
+          "CVE-2026-76169",
+          "GHSA-p68q-wchp-6fh7"
+        ]
+      },
+      "target": {
+        "target_id": "T-fastify-cve-2026-76169",
+        "snapshot_id": "fastify-v5.12.1",
+        "kind": "auth_bypass",
+        "description": "A malformed request target under one plugin prefix reaches a sibling plugin's custom not-found handler and skips that handler's preHandler hook, so a not-found handler that relies on its own preHandler for authentication can return protected information to unauthenticated clients (lib/four-oh-four.js).",
+        "affected_input_or_authority": {
+          "state": "not_reviewed"
+        },
+        "accepted_locations": [
+          {
+            "path": "lib/four-oh-four.js",
+            "role": "missing_guard",
+            "note": "candidate at v5.12.1: custom 404 route registration (router.all with prefix wildcard, lines 160-170) and fourOhFourFallBack (lines 172-193) dispatch before request-target validation; exact accepted range not yet reviewed"
+          }
+        ],
+        "assumptions": [
+          "A private or tenant plugin registers a custom not-found handler that returns protected information.",
+          "That handler relies on its own preHandler hook for authentication rather than a global onRequest hook."
+        ],
+        "matching_rules": [
+          "Accept an allegation that malformed request targets bypass the custom not-found handler's preHandler or lifecycle hooks under a sibling prefix.",
+          "Reject generic 'missing authentication on 404' claims that do not involve malformed-target routing."
+        ]
+      },
+      "controls": [],
+      "evidence": [
+        {
+          "evidence_id": "ghsa",
+          "origin": "public_advisory_and_maintainer_fix",
+          "kind": "ghsa_advisory",
+          "reference": "https://github.com/fastify/fastify/security/advisories/GHSA-p68q-wchp-6fh7",
+          "note": "Repository advisory, CWE-288 per dossier."
+        },
+        {
+          "evidence_id": "cve",
+          "origin": "public_advisory_and_maintainer_fix",
+          "kind": "cve_record",
+          "reference": "https://www.cve.org/CVERecord?id=CVE-2026-76169",
+          "note": "CVE record published 2026-09-04 per dossier."
+        },
+        {
+          "evidence_id": "fix-commit",
+          "origin": "public_advisory_and_maintainer_fix",
+          "kind": "fix_commit",
+          "reference": "fastify/fastify@d66ebd121c5a621ab0b03569fc75bd1cf829e52a",
+          "note": "Subject: fix: reject malformed URLs before custom 404 handlers; committed 2026-09-03 (git, verified 2026-09-20)."
+        },
+        {
+          "evidence_id": "dossier",
+          "origin": "research_note",
+          "kind": "other",
+          "reference": "docs/CVE_CORPUS_SHORTLIST.md#13-fastify",
+          "note": "Research dossier; files named there are inspection starting points, not accepted regions."
+        },
+        {
+          "evidence_id": "tag-check",
+          "origin": "research_note",
+          "kind": "source_inspection",
+          "reference": "git ls-remote refs/tags/v5.12.1 -> 7d196a998c422062a3aaa3f8041db91ad576cea0; refs/tags/v5.12.2 -> 942a2be8704244db778f8db9a0bb4951b8825156",
+          "note": "Tag SHAs recorded 2026-09-20; fix parent 0c170ca1 on main has package version 6.0.0-alpha.2, so the release line was pinned instead.",
+          "retrieved": "2026-09-20"
+        },
+        {
+          "evidence_id": "fix-hunks",
+          "origin": "public_advisory_and_maintainer_fix",
+          "kind": "source_inspection",
+          "reference": "git diff d66ebd12^..d66ebd12 -- lib/four-oh-four.js",
+          "note": "Verified 2026-09-20: the fix removes 23 lines from lib/four-oh-four.js across six hunks and adds 77 lines to test/404s.test.js plus 24 to test/router-options.test.js. The changed file is the accepted location. The diff is against main, whose package version is 6.0.0-alpha.2, so its line numbers do not map onto the pinned v5.12.1 tree; the accepted location is therefore file-level and the backport into v5.12.2 remains unverified.",
+          "retrieved": "2026-09-20"
+        }
+      ],
+      "disclosure": {
+        "earliest_public_artifact": "2026-09-03",
+        "cve_published": "2026-09-04",
+        "ghsa_published": null,
+        "fix_commit_date": "2026-09-03",
+        "note": "Fix commit date from git; GHSA publication date not yet recorded."
+      },
+      "disposition": {
+        "value": "needs_evidence",
+        "reason": "High-evidence public fix; exact vulnerable release, accepted line ranges, and applicability assumptions need review, and no independent review has been recorded."
+      },
+      "validation": {
+        "level": "L1",
+        "review_state": "mechanically_checked",
+        "checks": [
+          {
+            "check": "locations_exist_in_snapshot",
+            "result": "pass",
+            "at": "2026-09-25T05:48:50+00:00",
+            "detail": "1 locations found",
+            "snapshot_id": "fastify-v5.12.1"
+          },
+          {
+            "check": "line_ranges_within_files",
+            "result": "pass",
+            "at": "2026-09-25T05:48:50+00:00",
+            "detail": "all ranges within file length",
+            "snapshot_id": "fastify-v5.12.1"
+          },
+          {
+            "check": "aliases_well_formed",
+            "result": "pass",
+            "at": "2026-09-25T05:48:50+00:00",
+            "detail": "CVE-2026-76169, GHSA-p68q-wchp-6fh7",
+            "snapshot_id": "fastify-v5.12.1"
+          },
+          {
+            "check": "represents_statement",
+            "result": "pass",
+            "at": "2026-09-25T05:48:50+00:00",
+            "detail": "template: This case tests ... under ..., and adds ...",
+            "snapshot_id": "fastify-v5.12.1"
+          },
+          {
+            "check": "evidence_recorded",
+            "result": "pass",
+            "at": "2026-09-25T05:48:50+00:00",
+            "detail": "6 evidence records",
+            "snapshot_id": "fastify-v5.12.1"
+          },
+          {
+            "check": "snapshot_hash_recorded",
+            "result": "pass",
+            "at": "2026-09-25T05:48:50+00:00",
+            "detail": "sha256:a3554a9499f76544d02d706b0df69c2220da3aff2b66e77a5a744486b047a9e7",
+            "snapshot_id": "fastify-v5.12.1"
+          }
+        ],
+        "reviews": [],
+        "check_sets": {
+          "fastify-v5.12.1": {
+            "result": "pass",
+            "tree_hash": "sha256:a3554a9499f76544d02d706b0df69c2220da3aff2b66e77a5a744486b047a9e7",
+            "checks_sha256": "sha256:d3a5a8ad1fc47ac06d5e08dcdc44123f67a7baaca4c970f8f35436c821238b15"
+          }
+        }
+      },
+      "split": "development",
+      "notes": [
+        "Snapshot pinned to release tag v5.12.1 after finding that the fix parent on main carries version 6.0.0-alpha.2.",
+        "Backport of d66ebd12 into v5.12.2 and the exact changed lines at v5.12.1 are not yet verified."
+      ]
+    }
+  ],
+  "admissions": [],
+  "notes": [
+    "Draft pack for pipeline exercise. Every case is disposition needs_evidence until a human reviewer records L3 evidence.",
+    "Snapshots are pinned by full commit SHA; vulnerable snapshots are the parent of the named fix commit unless stated.",
+    "Rust is absent from this pilot; conventional automation and AI-assisted application workloads are not covered.",
+    "Licenses recorded from repository metadata are unverified until checked against the exact snapshot and paths."
+  ],
+  "anchor_sha256": "sha256:26de845a936baeaeaa25fb859ac727ebab143a16812d0f05d9603e99bd3b4cdf"
+}

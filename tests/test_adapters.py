@@ -1,4 +1,4 @@
-"""Tests for official SASTbench adapters."""
+"""Tests for official ScanEval adapters."""
 
 import importlib.util
 import json

@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/scan-result.schema.json",
+  "title": "ScanEval scan result",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "run_id", "system_id", "input_hash", "status", "ranking", "claims", "bundles_resolved", "usage"],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "system_id": {"type": "string", "minLength": 1},
+    "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "status": {"enum": ["success", "partial", "unsupported", "error", "timeout"]},
+    "ranking": {"enum": ["native", "unranked"]},
+    "claims": {"type": "array", "items": {"$ref": "#/$defs/claim"}},
+    "bundles_resolved": {"type": "boolean"},
+    "usage": {
+      "type": "object", "additionalProperties": false, "required": ["wall_seconds"],
+      "properties": {
+        "wall_seconds": {"type": "number", "minimum": 0},
+        "setup_seconds": {"type": "number", "minimum": 0},
+        "cost_usd": {"type": ["number", "null"], "minimum": 0},
+        "input_tokens": {"type": "integer", "minimum": 0},
+        "output_tokens": {"type": "integer", "minimum": 0}
+      }
+    },
+    "error": {
+      "type": "object", "additionalProperties": false,
+      "required": ["message", "code"],
+      "properties": {
+        "message": {"type": "string"}, "code": {"type": "string"}
+      }
+    },
+    "raw_artifacts": {"type": "array", "items": {"$ref": "#/$defs/artifact"}}
+  },
+  "$defs": {
+    "location": {
+      "type": "object", "additionalProperties": false, "required": ["path"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "start_line": {"type": "integer", "minimum": 1},
+        "end_line": {"type": "integer", "minimum": 1}
+      }
+    },
+    "claim": {
+      "type": "object", "additionalProperties": false,
+      "required": ["claim_id", "allegation", "kind", "primary_location"],
+      "properties": {
+        "claim_id": {"type": "string", "minLength": 1},
+        "allegation": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "primary_location": {"$ref": "#/$defs/location"},
+        "native_id": {"type": "string", "minLength": 1},
+        "native_rule_id": {"type": "string", "minLength": 1},
+        "native_severity": {"type": "string", "minLength": 1},
+        "native_cwe": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "evidence_text": {"type": "string"},
+        "related_locations": {"type": "array", "items": {"$ref": "#/$defs/location"}},
+        "rank": {"type": "integer", "minimum": 1},
+        "raw_artifact_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "artifact": {
+      "type": "object", "additionalProperties": false, "required": ["id", "path", "sha256"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

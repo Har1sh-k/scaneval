@@ -1,12 +1,14 @@
-# OWASP Agentic Top 10 -- SASTbench Mapping
+# OWASP Agentic Top 10 -- ScanEval Mapping
 
-SASTbench aligns with the [OWASP Top 10 for Agentic Applications for 2026](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) as a **reporting crosswalk**, not a replacement for the benchmark's own scoring taxonomy.
+> This page describes the legacy mapping and scoring implementation. Its case lists are historical, non-exhaustive examples, not the next release manifest. See the proposed [scoring contract](DESIGN_DECISIONS.md#4-scoring-without-exhaustive-repository-labels); the composite Agentic Score is legacy only.
 
-The mapping documented here enables users and report consumers to filter or aggregate SASTbench results by OWASP ASI category. It does not change how cases are scored. SASTbench scoring always uses its own 5-kind canonical taxonomy (`command_injection`, `path_traversal`, `ssrf`, `auth_bypass`, `authz_bypass`) plus region overlap matching. The OWASP mapping is metadata layered on top.
+ScanEval aligns with the [OWASP Top 10 for Agentic Applications for 2026](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) as a **reporting crosswalk**, not a replacement for the benchmark's own scoring taxonomy. Under the broader [workload design](DESIGN_DECISIONS.md#workload-classification), apply agentic mappings only where the annotated mechanism fits; conventional cases do not require an ASI label.
+
+The mapping enables users and report consumers to filter or aggregate results by OWASP ASI category. The six-kind canonical taxonomy is `command_injection`, `path_traversal`, `ssrf`, `auth_bypass`, `authz_bypass`, and `sql_injection`. The legacy scorer uses kind and region overlap; the design adds claim/property validation. OWASP mappings remain reporting metadata and do not establish ground truth or change scoring.
 
 ## Mapping Table
 
-| ASI ID | OWASP Category | SASTbench Focus | Coverage | SAST Suitability |
+| ASI ID | OWASP Category | ScanEval Focus | Coverage | SAST Suitability |
 |--------|----------------|-----------------|----------|------------------|
 | ASI01 | Agent Goal Hijack | `command_injection` | Targeted coverage | Medium -- SAST can often trace goal-carrying prompt/context data into powerful sinks, but it cannot fully reason about agent intent. |
 | ASI02 | Tool Misuse & Exploitation | `ssrf`, `path_traversal`, selected `command_injection` secondaries | Strong coverage | High -- this is the benchmark's best static-analysis fit because it reduces cleanly to taint and guard validation at tool boundaries. |
@@ -153,7 +155,7 @@ No cases are currently mapped to this category.
 
 ## Why ASI08-ASI10 Are Out of Scope
 
-SASTbench is a static analysis benchmark. Its scoring is built around region-level matching of concrete source-code findings. Three OWASP categories remain intentionally out of scope for that model:
+ScanEval is a static analysis benchmark. Its scoring is built around region-level matching of concrete source-code findings. Three OWASP categories remain intentionally out of scope for that model:
 
 - **ASI08 (Cascading Failures)**: This category is about system-wide propagation, chained automation effects, and blast radius across components. Those effects are emergent runtime behaviors rather than stable file-local vulnerabilities.
 
@@ -161,31 +163,32 @@ SASTbench is a static analysis benchmark. Its scoring is built around region-lev
 
 - **ASI10 (Rogue Agents)**: This category is about long-horizon autonomy, concealment, and behavior that drifts beyond intended goals. That requires runtime evaluation, adversarial simulation, or longitudinal testing rather than static code scanning.
 
-These categories are valuable for agentic security programs, but they belong in runtime exercises, red teaming, behavioral evaluation, or operational governance rather than in SASTbench's current scoring model.
+These categories are valuable for agentic security programs, but they belong in runtime exercises, red teaming, behavioral evaluation, or operational governance rather than in ScanEval's current scoring model.
 
-## Relationship Between SASTbench Scoring and the OWASP Mapping
+## Relationship Between ScanEval Scoring and the OWASP Mapping
 
-SASTbench uses its own 5-kind canonical taxonomy for scoring:
+ScanEval uses its own six-kind canonical taxonomy:
 
 - `command_injection`
 - `path_traversal`
 - `ssrf`
 - `auth_bypass`
 - `authz_bypass`
+- `sql_injection`
 
-The official metrics (Recall, Capability FP Rate, Mixed-Intent Accuracy, Agentic Score) are computed entirely from this taxonomy. A finding is scored based on whether the adapter maps it to the correct canonical kind and whether it overlaps the correct annotated region.
+Legacy metrics (Recall, Capability FP Rate, Mixed-Intent Accuracy, Agentic Score) use kind/region matching. They are not the proposed claim-based scorecard, and Agentic Score is scheduled for retirement. Capability FP results currently cover six synthetic safe regions, not validated real-world controls.
 
 The OWASP mapping is **metadata** stored in each case's `standards.owaspAgenticTop10` field. It enables:
 
 - Filtering results by ASI category in reports
 - Aggregating coverage statistics by OWASP category for compliance narratives
-- Mapping SASTbench findings to organizational risk frameworks that reference the OWASP Agentic Top 10
+- Mapping ScanEval findings to organizational risk frameworks that reference the OWASP Agentic Top 10
 
 The OWASP mapping does **not**:
 
 - Change how true positives, false positives, or false negatives are determined
 - Replace the canonical kind as the matching key
-- Affect the Agentic Score computation
+- Affect the legacy Agentic Score computation or introduce a new composite score
 - Require adapters to emit ASI category labels
 
 In short, the OWASP mapping is a reporting crosswalk that sits alongside the scoring system without replacing it.

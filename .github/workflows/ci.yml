@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, feat/evaluation-core]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python ${{ matrix.python }} and TypeScript
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.13']
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      SEMGREP_SEND_METRICS: 'off'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - name: Install test dependencies
+        run: |
+          python -m pip install -e '.[dev]' build 'semgrep==1.177.0'
+          npm ci --prefix sdk/typescript
+      - name: TypeScript tests and build
+        run: npm test --prefix sdk/typescript
+      - name: Python tests including Observer parity
+        # Tests use fixtures and mock runners, never paid models. Tests requiring
+        # external harness checkouts or preserved private bundles report skips.
+        run: python -m pytest -q -rs
+      - name: Build wheel
+        run: python -m build --wheel --outdir "$RUNNER_TEMP/scaneval-dist"
+      - name: Installed-wheel demo and replay
+        working-directory: ${{ runner.temp }}
+        env:
+          PYTHONPATH: ''
+        run: |
+          python -m venv "$RUNNER_TEMP/scaneval-wheel-env"
+          "$RUNNER_TEMP/scaneval-wheel-env/bin/python" -m pip install "$RUNNER_TEMP"/scaneval-dist/*.whl
+          "$RUNNER_TEMP/scaneval-wheel-env/bin/scaneval" demo "$RUNNER_TEMP/scaneval-demo"
+          "$RUNNER_TEMP/scaneval-wheel-env/bin/scaneval" replay "$RUNNER_TEMP/scaneval-demo" --output "$RUNNER_TEMP/scaneval-replay.json"
+          cmp "$RUNNER_TEMP/scaneval-demo/evaluation.json" "$RUNNER_TEMP/scaneval-replay.json"

@@ -1,4 +1,4 @@
-"""SASTbench PR mode runner.
+"""ScanEval PR mode runner.
 
 Implements PR simulation benchmark: scans base and head trees,
 computes diff, synthesizes review findings, and scores whether
@@ -37,7 +37,7 @@ from run import (
     write_artifact,
 )
 
-B = "\033[1;36m[SASTbench]\033[0m"
+B = "\033[1;36m[ScanEval]\033[0m"
 SEP = "\033[2m" + "-" * 45 + "\033[0m"
 
 # Directories to exclude from PR tree copies and diffs.
@@ -94,7 +94,7 @@ def _git_init(directory: Path) -> None:
         timeout=30,
     )
     subprocess.run(
-        ["git", "-c", "user.name=SASTbench", "-c", "user.email=bench@local",
+        ["git", "-c", "user.name=ScanEval", "-c", "user.email=bench@local",
          "commit", "-m", "initial", "--allow-empty"],
         cwd=str(directory),
         capture_output=True,
@@ -451,7 +451,7 @@ def run_pr_benchmark(
         return 1
 
     skipped = len(all_cases) - len(pr_cases) - no_targets_skipped
-    print(f"{B} Running SASTbench PR mode ({track} track) with {scanner_name}")
+    print(f"{B} Running ScanEval PR mode ({track} track) with {scanner_name}")
     if cutoff_label:
         print(f"{B} Cutoff: {cutoff_label} -> {len(excluded_by_cutoff)} dated case(s) excluded as pre-cutoff")
     if llm_model:
@@ -464,7 +464,7 @@ def run_pr_benchmark(
     print()
 
     # Clean stale PR temp dirs from previous runs before starting.
-    for stale in _glob.glob(os.path.join(tempfile.gettempdir(), "sastbench_pr_*")):
+    for stale in _glob.glob(os.path.join(tempfile.gettempdir(), "scaneval_pr_*")):
         shutil.rmtree(stale, ignore_errors=True)
 
     case_results = []
@@ -488,7 +488,7 @@ def run_pr_benchmark(
 
         tmp_dir = None
         try:
-            tmp_dir = Path(tempfile.mkdtemp(prefix=f"sastbench_pr_{current_case_id}_"))
+            tmp_dir = Path(tempfile.mkdtemp(prefix=f"scaneval_pr_{current_case_id}_"))
 
             # Materialize trees
             if pr_mode == "vendored_base":
