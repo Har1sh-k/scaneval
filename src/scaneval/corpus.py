@@ -24,7 +24,6 @@ from .cases import (
     cases_for_snapshot,
     control_paths,
     draft_case,
-    draft_case_from_legacy,
     evidence,
     field_state,
     load_pack,
@@ -50,7 +49,7 @@ from .materialize import (
 __all__ = [
     "PACK_KIND", "new_pack", "load_pack", "save_pack", "pack_sha256", "pack_summary",
     "add_snapshot", "snapshot_by_id", "add_case", "case_by_id", "cases_for_snapshot",
-    "draft_case", "draft_case_from_legacy", "evidence", "field_state", "not_reviewed",
+    "draft_case", "evidence", "field_state", "not_reviewed",
     "alias_problem", "mechanical_checks", "approve_case", "admit_case", "set_disposition",
     "build_plan", "accepted_paths_for_targets", "control_paths",
     "fetch_snapshot", "export_snapshot", "write_provenance", "hash_exported_tree",

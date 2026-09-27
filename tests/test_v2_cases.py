@@ -22,7 +22,6 @@ from scaneval.cases import (
     case_by_id,
     checked_tree_hash,
     draft_case,
-    draft_case_from_legacy,
     dump_json,
     evidence,
     label_digest,
@@ -65,6 +64,13 @@ FIXED_SNAPSHOT = {**SNAPSHOT, "snapshot_id": "widget-fixed", "commit": "e" * 40,
 LATER_SNAPSHOT = {**SNAPSHOT, "snapshot_id": "widget-later", "commit": "f" * 40, "role": "fixed",
                   "reference": "a later maintainer release"}
 FIXED_HASH = "sha256:" + "d" * 64
+
+
+def test_retired_case_importer_is_not_a_library_entry_point():
+    from scaneval import cases, corpus
+
+    assert not hasattr(cases, "draft_case_from_legacy")
+    assert not hasattr(corpus, "draft_case_from_legacy")
 
 
 def fixed_control(case_id: str = "widget-shell") -> dict:
@@ -298,30 +304,6 @@ def test_approval_requires_prior_mechanical_checks():
     pack = make_pack()
     with pytest.raises(ContractError, match="mechanical checks"):
         approve_case(pack, "widget-shell", reviewer="r", role="independent_reviewer", level="L3", note="", clock=CLOCK)
-
-
-def test_legacy_migration_keeps_regions_as_draft_evidence(tmp_path):
-    legacy = {
-        "id": "SB-GO-RG-001", "caseType": "real_world_generic", "canonicalKind": "auth_bypass", "title": "skip regex on full URI",
-        "description": "regex matched path plus query", "regions": [{"id": "R1", "path": "oauthproxy.go", "startLine": 582, "endLine": 590,
-                                                                     "label": "vulnerable", "capability": "authentication"}],
-        "realWorld": {"repo": "oauth2-proxy/oauth2-proxy", "vulnerableCommit": "f" * 40, "fixCommit": "9" * 40,
-                      "ghsa": "GHSA-7rh7-c77v-6434", "cve": "CVE-2025-54576",
-                      "disclosure": {"ghsaPublished": "2025-07-30", "fixCommitDate": "2025-07-29"}},
-    }
-    case = draft_case_from_legacy(legacy, case_id="oauth2-proxy-cve-2025-54576", snapshot_id="widget-abc",
-                                  legacy_path="cases/full/real_world_generic/SB-GO-RG-001/case.json",
-                                  workload="conventional_application", component_role="infrastructure", represents=REPRESENTS)
-    pack = new_pack("scaneval.public", "pilot", "x")
-    add_snapshot(pack, SNAPSHOT)
-    add_case(pack, case)
-    assert case["validation"]["review_state"] == "draft" and case["validation"]["level"] is None
-    assert case["target"]["accepted_locations"] == [{"path": "oauthproxy.go", "start_line": 582, "end_line": 590, "role": "other",
-                                                     "note": "legacy region R1 label=vulnerable capability=authentication"}]
-    assert case["canonical_target"]["aliases"] == ["CVE-2025-54576", "GHSA-7rh7-c77v-6434"]
-    assert {e["kind"] for e in case["evidence"]} == {"other", "fix_commit", "ghsa_advisory", "cve_record"}
-    assert case["evidence"][0]["origin"] == "legacy_case_record"
-    assert case["disclosure"]["ghsa_published"] == "2025-07-30" and case["disclosure"]["earliest_public_artifact"] is None
 
 
 def test_blank_reviewer_and_admission_names_are_refused(tmp_path):
@@ -686,56 +668,6 @@ def test_a_write_refuses_a_pack_shape_it_cannot_read_rather_than_crashing(pack, 
         add_snapshot(pack, SNAPSHOT)
 
 
-LEGACY = {
-    "id": "SB-GO-RG-001", "caseType": "real_world_generic", "canonicalKind": "auth_bypass",
-    "title": "skip regex on full URI", "description": "regex matched path plus query",
-    "regions": [{"id": "R1", "path": "oauthproxy.go", "startLine": 582, "endLine": 590,
-                 "label": "vulnerable", "capability": "authentication"}],
-    "realWorld": {"repo": "oauth2-proxy/oauth2-proxy", "fixCommit": "9" * 40,
-                  "disclosure": {"ghsaPublished": "2025-07-30", "fixCommitDate": "2025-07-29"}},
-}
-
-
-@pytest.mark.parametrize(
-    ("field", "value", "message"),
-    [
-        ("regions", {"R1": {"path": "a.go"}}, "must be a list of region objects"),
-        ("regions", [["oauthproxy.go", 1, 2]], "must be a JSON object"),
-        ("regions", [{"id": "R1"}], "must name its path as a non-empty string"),
-        ("regions", [{"id": "R1", "path": ""}], "must name its path as a non-empty string"),
-        ("regions", [{"id": "R1", "path": 7}], "must name its path as a non-empty string"),
-        ("regions", [{"path": "a.go", "startLine": 5}], "supplied together; got only startLine"),
-        ("regions", [{"path": "a.go", "endLine": 5}], "supplied together; got only endLine"),
-        ("regions", [{"path": "a.go", "startLine": True, "endLine": 5}], "integer line number"),
-        ("regions", [{"path": "a.go", "startLine": "5", "endLine": 9}], "integer line number"),
-        ("regions", [{"path": "a.go", "startLine": 0, "endLine": 9}], "integer line number"),
-        ("regions", [{"path": "a.go", "startLine": 1, "endLine": 2.5}], "integer line number"),
-        ("realWorld", "CVE-2025-54576", "realWorld must be a JSON object"),
-        ("realWorld", {"disclosure": []}, "realWorld.disclosure must be a JSON object"),
-    ],
-)
-def test_a_legacy_record_this_cannot_read_faithfully_is_refused(field, value, message):
-    """A malformed legacy shape is refused, never guessed at or silently dropped."""
-    legacy = {**LEGACY, field: value}
-    with pytest.raises(ContractError, match=message):
-        draft_case_from_legacy(legacy, case_id="legacy-case", snapshot_id="widget-abc",
-                               legacy_path="cases/full/x/case.json", workload="conventional_application",
-                               component_role="infrastructure", represents=REPRESENTS)
-
-
-def test_a_legacy_record_without_regions_or_a_real_world_block_still_migrates():
-    case = draft_case_from_legacy({"id": "SB-1", "title": "t", "description": "d"},
-                                  case_id="legacy-bare", snapshot_id="widget-abc",
-                                  legacy_path="cases/full/x/case.json",
-                                  workload="conventional_application", component_role="application",
-                                  represents=REPRESENTS)
-    assert case["target"]["accepted_locations"] == []
-    assert case["canonical_target"]["aliases"] == []
-    assert case["disclosure"] == {"earliest_public_artifact": None, "cve_published": None,
-                                  "ghsa_published": None, "fix_commit_date": None,
-                                  "note": "Dates copied from the legacy record; earliest public artifact not yet established."}
-
-
 def test_a_line_or_paragraph_separator_is_not_a_stated_name_or_reason(tmp_path):
     """U+2028 and U+2029 separate lines; a value made only of them states nothing."""
     pack = make_pack()
@@ -921,27 +853,6 @@ def test_a_malformed_public_identifier_still_fails_the_check(tmp_path, alias, pr
     assert outcome["passed"] is False
     failed = [c for c in outcome["checks"] if c["check"] == "aliases_well_formed"]
     assert failed and failed[0]["result"] == "fail" and problem in failed[0]["detail"]
-
-
-def test_a_legacy_fix_commit_without_an_advisory_is_not_a_public_disclosure():
-    legacy = {"id": "SB-INT-001", "caseType": "internal", "canonicalKind": "auth_bypass", "title": "internal fix",
-              "description": "found in review", "regions": [],
-              "realWorld": {"repo": "acme/widget", "fixCommit": "d" * 40}}
-
-    case = draft_case_from_legacy(legacy, case_id="internal-1", snapshot_id="widget-abc",
-                                  legacy_path="cases/internal.json", workload="conventional_application",
-                                  component_role="application", represents=REPRESENTS)
-
-    fix = [e for e in case["evidence"] if e["evidence_id"] == "fix-commit"][0]
-    assert fix["origin"] == "fix_without_advisory"
-    assert "names no advisory" in fix["note"]
-    assert case["canonical_target"]["aliases"] == []
-
-    advised = draft_case_from_legacy({**legacy, "realWorld": {**legacy["realWorld"], "cve": "CVE-2025-54576"}},
-                                     case_id="public-1", snapshot_id="widget-abc", legacy_path="cases/public.json",
-                                     workload="conventional_application", component_role="application",
-                                     represents=REPRESENTS)
-    assert [e for e in advised["evidence"] if e["evidence_id"] == "fix-commit"][0]["origin"] == "public_advisory_and_maintainer_fix"
 
 
 def approved_pack(tmp_path: Path) -> dict:

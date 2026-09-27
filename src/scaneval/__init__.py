@@ -1,6 +1,6 @@
 """Framework-independent ScanEval evaluation core.
 
-Live scanner integrations and legacy results remain separate from this protocol.
+Live scanner integrations remain separate from this protocol.
 """
 
 __version__ = "2.0.0a1"

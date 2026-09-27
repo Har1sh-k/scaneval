@@ -241,75 +241,6 @@ def _reject_credentials(option: str, url: str) -> None:
             "and keep the credential in the git or network configuration")
 
 
-def _legacy_line(value, label: str) -> None:
-    """Refuse a legacy line number that is not an integer of at least 1. ``True`` is not 1."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ContractError(f"{label} must be an integer of at least 1, not {value!r}")
-
-
-def _legacy_document(path: Path) -> dict:
-    """Load a legacy v1 case record and refuse the shapes the migration cannot read.
-
-    This checks structure, not truth: it says nothing about whether the record's regions,
-    identifiers, or dates are correct, and every value it accepts still enters the pack as
-    draft evidence. It exists so a malformed file is reported as a refusal naming the file
-    rather than raising out of :func:`scaneval.cases.draft_case_from_legacy` as a traceback,
-    so every refusal here names the file. Fields the migration does not read are left alone,
-    and the schema check in ``cases`` remains the authority on the case this produces.
-
-    The strings the migration copies into a case must already be strings: an identifier, kind,
-    title, or description of another type would become an alias or a description that misstates
-    the record, and a ``canonicalKind``, ``title``, ``description``, ``cve``, ``ghsa``, or
-    ``fixCommit`` key present as ``null`` is refused rather than read as absent, so a record
-    that meant to name one is corrected instead of quietly losing it. ``canonicalKind`` in
-    particular is read with a default by the migration, so a present ``null`` would defeat that
-    default and fail later against the case schema instead of here. A line bound present as
-    ``null`` counts as present, because dropping it would silently widen the region to the whole
-    file, and a fix commit without a repository is refused because the evidence reference it
-    would produce is ``'<repo>@<sha>'``.
-    """
-    legacy = _read_json(path)
-    for key in ("canonicalKind", "title", "description"):
-        if key in legacy and not isinstance(legacy[key], str):
-            raise ContractError(f"{path}: {key} must be a string")
-    real = legacy.get("realWorld")
-    if real is not None and not isinstance(real, dict):
-        raise ContractError(f"{path}: realWorld must be a JSON object")
-    real = real or {}
-    disclosure = real.get("disclosure")
-    if disclosure is not None and not isinstance(disclosure, dict):
-        raise ContractError(f"{path}: realWorld.disclosure must be a JSON object")
-    for key in ("cve", "ghsa", "fixCommit"):
-        if key in real and not isinstance(real[key], str):
-            raise ContractError(f"{path}: realWorld.{key} must be a string")
-    repository = real.get("repo")
-    if repository is not None:
-        if not isinstance(repository, str):
-            raise ContractError(f"{path}: realWorld.repo must be a string")
-        _reject_credentials(f"{path}: realWorld.repo", repository)
-    if real.get("fixCommit") and not _is_stated(repository):
-        raise ContractError(f"{path}: realWorld.fixCommit needs realWorld.repo as a non-blank "
-                            "string; the fix evidence is recorded as '<repo>@<sha>'")
-    regions = legacy.get("regions", [])
-    if not isinstance(regions, list):
-        raise ContractError(f"{path}: regions must be a list of region objects")
-    for index, region in enumerate(regions):
-        label = f"{path}: regions[{index}]"
-        if not isinstance(region, dict):
-            raise ContractError(f"{label} must be a JSON object")
-        if not _is_stated(region.get("path")):
-            raise ContractError(f"{label} must carry a non-blank path string")
-        bounds = [key for key in ("startLine", "endLine") if key in region]
-        if len(bounds) == 1:
-            raise ContractError(
-                f"{label}: startLine and endLine must be supplied together; {bounds[0]} is alone")
-        for key in bounds:
-            _legacy_line(region[key], f"{label}.{key}")
-        if bounds and region["startLine"] > region["endLine"]:
-            raise ContractError(f"{label}: startLine must not exceed endLine")
-    return legacy
-
-
 def _finding_lines(finding: dict, source: Path) -> dict:
     """The ``start_line``/``end_line`` pair of a supplied allegation, or an empty mapping.
 
@@ -466,13 +397,7 @@ def _supplied_artifact(args: argparse.Namespace) -> dict:
 
 def _corpus_import(args: argparse.Namespace) -> int:
     pack = _pack_for_change(args)
-    if args.legacy_case:
-        case = cases.draft_case_from_legacy(
-            _legacy_document(args.legacy_case), case_id=args.case_id, snapshot_id=args.snapshot_id,
-            legacy_path=str(args.legacy_case), workload=args.workload,
-            component_role=args.component_role, represents=args.represents)
-    else:
-        case = cases.draft_case(args.case_id, snapshot_id=args.snapshot_id, **_supplied_artifact(args))
+    case = cases.draft_case(args.case_id, snapshot_id=args.snapshot_id, **_supplied_artifact(args))
     cases.add_case(pack, case)
     _save_pack(args.pack, pack)
     validation = case["validation"]
@@ -729,7 +654,6 @@ def _add_corpus_commands(sub: argparse._SubParsersAction) -> None:
     imported.add_argument("--workload", required=True, choices=WORKLOADS)
     imported.add_argument("--component-role", required=True, choices=COMPONENT_ROLES)
     artifact = imported.add_mutually_exclusive_group(required=True)
-    artifact.add_argument("--legacy-case", type=Path, help="legacy v1 case record")
     artifact.add_argument("--fix-commit", help="fix commit SHA; requires --repo")
     artifact.add_argument("--finding", type=Path, help="JSON allegation: allegation, path, kind, lines, source")
     artifact.add_argument("--document", type=Path, help="internal document to reference")
