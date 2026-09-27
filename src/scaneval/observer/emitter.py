@@ -905,15 +905,24 @@ class Observer:
         reaches the same refusal by the same path, because the tuple that collects it is not a
         Mapping.
         """
+        # A plain attribute load and no call, so it needs no frame. It is what lets the guard
+        # below charge each lost event exactly once: a guard further in can count the loss and
+        # then die in its own handler, which is what a RecursionError does to the `isinstance`
+        # call on Python 3.11, where C calls share the interpreter's recursion counter. The
+        # count has already moved by then, and charging again here reported two lost events
+        # for one emit.
+        before = self._dropped_events
         try:
             return self._emit_fields(positional or fields)
         except BaseException as error:
             if isinstance(error, _INTERRUPTS):
                 raise
             # Recorded inline: a RecursionError leaves no stack to call a helper with. The
-            # event never reached a sink, so it counts as a lost one.
-            self._gaps += 1
-            self._dropped_events += 1
+            # event never reached a sink, so it counts as a lost one, unless a guard further
+            # in counted it before it died.
+            if self._dropped_events == before:
+                self._gaps += 1
+                self._dropped_events += 1
             self._capture_gap = True
             self._last_sink_error = _GAP_MESSAGE
             return None
@@ -1266,6 +1275,9 @@ class Observer:
         """Build and write one event. Nothing but a caller's own interrupt leaves this method."""
         if self._mode == "off":
             return None
+        # See emit(): the count this call started from, so a loss a guard further in already
+        # charged before dying is not charged again by the guards here.
+        before = self._dropped_events
         try:
             if self._closed:
                 self._lost_event()
@@ -1276,9 +1288,10 @@ class Observer:
                 raise
             # Reached only when a guard further in could not run, which is what a
             # RecursionError does to a handler that has to call something. Recorded inline
-            # for the same reason.
-            self._gaps += 1
-            self._dropped_events += 1
+            # for the same reason, and only when that guard did not get as far as counting.
+            if self._dropped_events == before:
+                self._gaps += 1
+                self._dropped_events += 1
             self._capture_gap = True
             self._last_sink_error = _GAP_MESSAGE
             return None
@@ -1289,8 +1302,12 @@ class Observer:
         except BaseException as error:
             if isinstance(error, _INTERRUPTS):
                 raise
-            self._gaps += 1
-            self._dropped_events += 1
+            # _write settles its own delivery record in a finally, which is the one place a
+            # write is charged; this is reached only when even that could not finish, and it
+            # charges only if the settle did not.
+            if self._dropped_events == before:
+                self._gaps += 1
+                self._dropped_events += 1
             self._capture_gap = True
             self._last_sink_error = _GAP_MESSAGE
         return event
@@ -1308,11 +1325,13 @@ class Observer:
         Past that read, :meth:`_emit_built` owns the builder call and counts its own losses, so
         this guard re-raises an interrupt without counting it a second time.
         """
+        before = self._dropped_events
         try:
             elapsed = self._elapsed_ms(began)
         except BaseException as failure:
-            self._gaps += 1
-            self._dropped_events += 1
+            if self._dropped_events == before:
+                self._gaps += 1
+                self._dropped_events += 1
             self._capture_gap = True
             self._last_sink_error = _GAP_MESSAGE
             if isinstance(failure, _INTERRUPTS):
@@ -1324,8 +1343,11 @@ class Observer:
         except BaseException as failure:
             if isinstance(failure, _INTERRUPTS):
                 raise
-            self._gaps += 1
-            self._dropped_events += 1
+            # _emit_built and _emit_fields own the losses inside them; this charges only a loss
+            # neither of them got as far as counting.
+            if self._dropped_events == before:
+                self._gaps += 1
+                self._dropped_events += 1
             self._capture_gap = True
             self._last_sink_error = _GAP_MESSAGE
             return None
