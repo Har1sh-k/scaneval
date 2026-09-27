@@ -4,10 +4,10 @@ This guide documents the organization-owned case pack path as the code implement
 package version `2.0.0a1`. It is the documentation deliverable named in
 [design decisions section 9](DESIGN_DECISIONS.md#9-bring-your-own-test-cases).
 
-Every command below was run against a throwaway pack under `/private/tmp/byoc` whose snapshot
-source was a local `git init` repository, so nothing in this guide needs the network. Where the
-design asks for something the code does not do yet, the gap is stated in the section it belongs
-to. Section 9 collects the gaps.
+Examples use a throwaway pack under `/private/tmp/byoc` with a local Git repository as its
+snapshot source. Substitute your own paths and commit IDs. Where the design asks for something
+the code does not do yet, the gap is stated in the section it belongs to. Section 9 collects
+the gaps.
 
 Two conventions used throughout:
 
@@ -127,7 +127,14 @@ Added vulnerable snapshot reporting-main at 8cfdba14ed72; license verified: fals
 `ai_assisted_application`, `agentic_application`. `--component-role` accepts `application`,
 `library_sdk`, `infrastructure`. `--role` accepts `vulnerable` (the default), `fixed`, `ordinary`.
 
-Then one import per supplied artifact. Section 3 covers the four forms; this is the legacy record:
+Then one import per supplied artifact. Section 3 covers the three forms. For a finding, save a
+JSON object such as this in `$BYOC/finding.json`, using a path and lines from your snapshot:
+
+```json
+{"allegation":"An unauthenticated reporting request controls a shell command.",
+ "path":"src/app.py","start_line":5,"end_line":5,"kind":"command_injection",
+ "source":"internal security review"}
+```
 
 ```sh
 $SB corpus import "$BYOC/pack.json" \
@@ -135,11 +142,11 @@ $SB corpus import "$BYOC/pack.json" \
   --snapshot-id reporting-main \
   --represents "This case tests shell command construction from an HTTP query parameter under the assumption that the reporting endpoint is reachable by unauthenticated users, and adds the organization's only process-execution mechanism in a Flask handler." \
   --workload conventional_application --component-role application \
-  --legacy-case "$BYOC/legacy-case.json"
+  --finding "$BYOC/finding.json"
 ```
 
 ```
-Imported draft case acme-report-shell: 2 evidence records, disposition needs_evidence, review state draft, level None
+Imported draft case acme-report-shell: 1 evidence records, disposition needs_evidence, review state draft, level None
 ```
 
 `corpus validate` with no `--snapshot-id` schema-checks the pack and prints a summary:
@@ -148,13 +155,9 @@ Imported draft case acme-report-shell: 2 evidence records, disposition needs_evi
 $SB corpus validate "$BYOC/pack.json"
 ```
 
-```json
-{"cases":4,"dispositions":{"exclude":0,"extended_regression":0,"needs_evidence":4,"validate":0},
- "namespace":"acme.security","pack_id":"internal-pilot",
- "review_states":{"draft":4,"human_approved":0,"mechanically_checked":0},
- "sha256":"sha256:3ff236502817723166463e74202badbf5276b280c518cc890edc0605a0e368c8",
- "snapshots":1,"status":"draft","version":"0.1.0-draft"}
-```
+The summary reports the namespace, pack id, version, status, snapshot and case counts,
+disposition and review-state counts, and the pack hash. The import above adds one draft case
+with disposition `needs_evidence`; it grants no approval.
 
 With `--snapshot-id` it fetches the commit into an immutable cache, exports it into a new trial
 directory, and runs the L1 checks:
@@ -165,6 +168,9 @@ $SB corpus validate "$BYOC/pack.json" \
   --cache-root "$BYOC/.repos" \
   --trial-root "$BYOC/trials"
 ```
+
+For example, a pack with two imported findings, a fix reference, and an incident document
+can report the following. References without source locations do not pass the location check:
 
 ```
 scaneval: mechanical checks failed for 2 case(s): acme-report-fix, acme-report-incident; the results are recorded in the pack
@@ -235,18 +241,17 @@ Reopening re-checks nothing, approves nothing, and withdraws no recorded review 
 
 The evaluation step is section 6.
 
-## 3. The four intake forms
+## 3. The three intake forms
 
-`corpus import` takes exactly one artifact flag. The four are mutually exclusive and one is
+`corpus import` takes exactly one artifact flag. The three are mutually exclusive and one is
 required:
 
 ```
-scaneval corpus import: error: one of the arguments --legacy-case --fix-commit --finding --document is required
+scaneval corpus import: error: one of the arguments --fix-commit --finding --document is required
 ```
 
 | Flag | Evidence `origin` | Evidence `kind` | `reference` | Accepted locations |
 |---|---|---|---|---|
-| `--legacy-case FILE` | `legacy_case_record` for the record itself; a named GHSA or CVE is `public_advisory_and_maintainer_fix`, and a fix commit takes that origin only when an advisory is named too, otherwise `fix_without_advisory` | `other`, plus `fix_commit`, `ghsa_advisory`, `cve_record` as present | the file path, and `<repo>@<sha>` for the fix commit | each legacy region becomes a candidate location with role `other` |
 | `--fix-commit SHA --repo URL` | `fix_without_advisory` | `fix_commit` | `<repo>@<sha>` | none |
 | `--finding FILE` | `research_note` | `scanner_allegation` | the file path | one location from the allegation's `path` and optional line pair, role `other`, note `imported allegation, not a reviewed label` |
 | `--document FILE [--section S]` | `research_note` | `internal_document` | the file path | none |
@@ -284,7 +289,7 @@ Stated plainly:
   is not fetched, and the one commit the tool does fetch is the snapshot commit named in
   `add-snapshot`.
 
-Three details that matter for internal material:
+Two details that matter for internal material:
 
 - `--alias` takes the identifiers your organization already uses. An internal ticket or review
   id passes the L1 check `aliases_well_formed` unchanged, because a CVE is neither required nor
@@ -294,11 +299,6 @@ Three details that matter for internal material:
   ```
   acme-alias-probe: fail (draft, level None); failed: CVE-2026-1 is not a well formed CVE or GHSA identifier
   ```
-
-- The legacy migration records a fix commit as `public_advisory_and_maintainer_fix` only when the
-  legacy record also names a CVE or a GHSA. A record with a fix commit and no advisory, the
-  ordinary shape of an internal fix, is recorded as `fix_without_advisory` with a note saying no
-  public disclosure is claimed.
 
 - A supplied allegation must carry `allegation` and `path`. `start_line` and `end_line` must be
   supplied together and each must be an integer of at least 1; anything else is refused rather
