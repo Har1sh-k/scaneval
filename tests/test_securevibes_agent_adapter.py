@@ -10,6 +10,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "adapters" / "se
 
 import adapter
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def agent_checkout(tmp_path, monkeypatch):
+    """Point the adapter at a checkout that exists, so no test depends on the developer's disk.
+
+    The adapter refuses to scan when its securevibes-agent directory is missing and returns no
+    findings with a skip reason. These tests mock the scanner process, but they used to leave
+    the directory check alone, so they passed on a machine with the harness checked out beside
+    this repository and failed everywhere else, which is what a CI runner is. A stand-in
+    directory with the one file the adapter reads makes the tests about the adapter rather than
+    about the machine; the missing-checkout behavior has its own test below.
+    """
+    checkout = tmp_path / "securevibes-agent"
+    checkout.mkdir()
+    (checkout / "package.json").write_text('{"name": "securevibes-agent", "version": "0.0.0-test"}\n',
+                                           encoding="utf-8")
+    monkeypatch.setattr(adapter, "SECUREVIBES_AGENT_DIR", checkout)
+    return checkout
+
+
+def test_scan_reports_a_missing_checkout_as_a_skip_not_as_findings(tmp_path, monkeypatch):
+    """Without the harness directory the adapter must say so, not scan and not fabricate."""
+    monkeypatch.setattr(adapter, "SECUREVIBES_AGENT_DIR", tmp_path / "absent-checkout")
+    scan_root = tmp_path / "project"
+    scan_root.mkdir()
+    with patch("adapter.subprocess.run") as run:
+        findings, command, _stdout, _stderr, skip_reason = adapter._run_scan(scan_root, "python")
+    assert findings == [] and command == []
+    assert skip_reason == "securevibes-agent not found (set SECUREVIBES_AGENT_DIR)"
+    run.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # map_vuln_class

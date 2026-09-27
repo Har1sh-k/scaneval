@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, feat/evaluation-core]
+    branches: [main]
   workflow_dispatch:
 
 permissions:

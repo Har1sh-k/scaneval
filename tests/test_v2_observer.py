@@ -1503,6 +1503,33 @@ def at_depth(frames: int, call):
     return at_depth(frames - 1, call)
 
 
+def test_a_loss_an_inner_guard_counted_before_dying_is_not_counted_again(monkeypatch):
+    """One emit, one lost event, however many guards the failure travels through.
+
+    The innermost guard counts a loss and then calls ``isinstance`` to decide whether to
+    re-raise. On Python 3.11 a C call shares the interpreter's recursion counter, so with the
+    stack nearly exhausted that call raises after the count has moved, and the guard outside
+    it, seeing an exception, counted the same event a second time. The stack-limit test above
+    caught it only on that interpreter; this drives the same shape deterministically on every
+    one, with a build step that charges the loss the way the inner guard does and then fails
+    to finish.
+    """
+    seen, sink = recorder()
+    observer = Observer(mode="content", sink=sink)
+
+    def build_that_counts_then_dies(fields, drop_duration=False):
+        observer._gaps += 1
+        observer._dropped_events += 1
+        observer._capture_gap = True
+        raise RuntimeError("the guard died after counting")
+
+    monkeypatch.setattr(observer, "_build", build_that_counts_then_dies)
+    assert observer.emit(**event_fields()) is None
+    assert observer.get_state().dropped_events == 1
+    assert observer.get_state().capture_gap is True
+    assert seen == []
+
+
 def test_emit_near_the_stack_limit_records_a_gap_instead_of_raising():
     seen, sink = recorder()
     observer = Observer(mode="content", sink=sink)
