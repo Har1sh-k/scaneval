@@ -1088,8 +1088,40 @@ def test_a_bare_assistant_record_does_not_stand_in_for_a_model_response(tmp_path
                       "message": {"id": "m-x", "content": []}}, id="empty-content-list"),
         pytest.param({"type": "assistant", "uuid": "u-x",
                       "message": {"id": "m-x", "content": ""}}, id="empty-content-string"),
+        pytest.param({"type": "assistant", "uuid": "u-x",
+                      "message": {"id": "m-x", "content": "   "}}, id="whitespace-content"),
         pytest.param({"type": "assistant", "uuid": "u-x", "message": "not an object"},
                      id="message-not-an-object"),
+        # The narrower forms of the same hole: a dict is present, so a check that only asked
+        # the type would read either as evidence that a response happened.
+        pytest.param({"type": "assistant", "uuid": "u-x",
+                      "message": {"id": "new", "usage": {}}}, id="empty-usage-object"),
+        pytest.param({"type": "assistant", "uuid": "u-x",
+                      "message": {"id": "new", "content": [{}]}}, id="empty-content-block"),
+        pytest.param({"type": "assistant", "uuid": "u-x",
+                      "message": {"id": "new", "content": [{"type": "text", "text": ""}]}},
+                     id="text-block-with-empty-text"),
+        pytest.param({"type": "assistant", "uuid": "u-x",
+                      "message": {"id": "new", "content": [{"type": "tool_use", "id": "t1"}]}},
+                     id="tool-use-block-with-no-name"),
+        pytest.param({"type": "assistant", "uuid": "u-x",
+                      "message": {"id": "new", "content": [{"type": "text"}]}},
+                     id="typed-block-with-no-payload"),
+        pytest.param({"type": "assistant", "uuid": "u-x",
+                      "message": {"id": "new", "content": [{"text": "hi"}]}},
+                     id="untyped-block"),
+        pytest.param({"type": "assistant", "uuid": "u-x",
+                      "message": {"id": "new", "usage": {"input_tokens": "12"}}},
+                     id="usage-count-as-a-string"),
+        pytest.param({"type": "assistant", "uuid": "u-x",
+                      "message": {"id": "new", "usage": {"input_tokens": True}}},
+                     id="usage-count-as-a-bool"),
+        pytest.param({"type": "assistant", "uuid": "u-x",
+                      "message": {"id": "new", "usage": {"input_tokens": -1}}},
+                     id="usage-count-negative"),
+        pytest.param({"type": "assistant", "uuid": "u-x",
+                      "message": {"id": "new", "usage": {"service_tier": "standard"}}},
+                     id="usage-without-any-counter"),
     ],
 )
 def test_no_shape_of_empty_assistant_record_releases_held_context(forgery, tmp_path: Path):
@@ -1101,6 +1133,47 @@ def test_no_shape_of_empty_assistant_record_releases_held_context(forgery, tmp_p
 
     assert of_type(events, "context.selection") == []
     assert summary.undelivered_tool_results == 1
+
+
+@pytest.mark.parametrize(
+    "message,expected,why",
+    [
+        # Evidence of a response.
+        ({"content": [{"type": "text", "text": "hello"}]}, True, "a real text block"),
+        ({"content": [{"type": "thinking", "thinking": "considering"}]}, True, "a thinking block"),
+        ({"content": [{"type": "tool_use", "id": "t", "name": "Read"}]}, True, "a named tool use"),
+        ({"usage": {"output_tokens": 0}}, True, "zero is a measurement, not an absence"),
+        ({"usage": {"cache_read_input_tokens": 5}}, True, "any one counter is enough"),
+        ({"content": "a plain string answer"}, True, "content may be a bare string"),
+        ({"content": [{"type": "future_block", "payload": "something"}], },
+         True, "an unknown block type with a real payload"),
+        ({"content": [{"type": "future_block", "payload": {"a": 1}}], },
+         True, "an unknown block type with a non-empty object payload"),
+        # No evidence of a response.
+        ({}, False, "nothing at all"),
+        ({"usage": {}}, False, "a usage report with no measurement in it"),
+        ({"content": [{}]}, False, "a block with no shape"),
+        ({"content": [{"type": "text", "text": ""}]}, False, "a text block with empty text"),
+        ({"content": [{"type": "text", "text": "  "}]}, False, "a text block of whitespace"),
+        ({"content": [{"type": "thinking", "thinking": ""}]}, False, "empty thinking"),
+        ({"content": [{"type": "tool_use", "id": "t"}]}, False, "a tool use with no name"),
+        ({"content": [{"type": ""}]}, False, "an empty type"),
+        ({"content": [{"type": "future_block"}]}, False, "an unknown block with no payload"),
+        ({"content": [{"type": "future_block", "payload": {}}]}, False, "an empty object payload"),
+        ({"usage": {"input_tokens": "12"}}, False, "a count that is a string"),
+        ({"usage": {"input_tokens": True}}, False, "a count that is a bool"),
+        ({"content": []}, False, "an empty content list"),
+    ],
+)
+def test_the_response_test_asks_for_a_payload_and_not_merely_a_shape(message, expected, why):
+    """Presence is what an empty shape has, so every clause asks for a payload instead.
+
+    Driven directly against the predicate as a table, because the rule is a list of shapes
+    and a handful of end-to-end examples would pin only the handful.
+    """
+    from scaneval.collectors.claude_code import _is_model_message
+
+    assert _is_model_message({"type": "assistant", "message": message}) is expected, why
 
 
 def test_a_replayed_assistant_record_does_not_stand_in_for_a_new_turn(tmp_path: Path):

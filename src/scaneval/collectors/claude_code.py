@@ -674,29 +674,88 @@ def _import_records(
     return tracker.summary(_capture(tracker, truncated=loss == "truncated"))
 
 
+def _is_count(value: Any) -> bool:
+    """A non-negative whole count, booleans excluded. ``True`` is not a token total.
+
+    Zero counts. ``output_tokens: 0`` is a real measurement of a real response, and refusing
+    it would make an empty answer look like a record that reported nothing.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _reports_usage(message: dict[str, Any]) -> bool:
+    """Whether a usage report carries an actual measurement rather than being a shell.
+
+    ``"usage": {}`` is the narrower form of the same hole an empty message was: a dict is
+    present, so a test that only asked its type would read it as evidence that a response
+    happened. At least one of the four counters has to actually be there, as a number.
+    """
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return False
+    return any(_is_count(usage.get(key)) for key in USAGE_KEYS)
+
+
+def _is_content_block(block: Any) -> bool:
+    """Whether one content block carries a payload, rather than merely having a shape.
+
+    ``{}`` and ``{"type": "text"}`` are not content. The three block types Claude Code
+    actually writes are checked against the field that holds their payload; any other typed
+    block is admitted on any non-empty string or non-empty object value beside ``type``, so
+    a block type added by a later release still counts without this reader knowing its name.
+
+    A block whose only payload is a list is deliberately not admitted. That errs toward
+    reporting a delivery as unproven rather than proving one on a value this reader cannot
+    interpret, which is the safe direction for every claim in this package: under-claiming
+    costs a coverage result, over-claiming invents one.
+    """
+    if not isinstance(block, dict):
+        return False
+    kind = block.get("type")
+    if not isinstance(kind, str) or not kind:
+        return False
+    payload_field = {"text": "text", "thinking": "thinking", "tool_use": "name"}.get(kind)
+    if payload_field is not None:
+        value = block.get(payload_field)
+        return isinstance(value, str) and bool(value.strip())
+    for name, value in block.items():
+        if name == "type":
+            continue
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, dict) and value:
+            return True
+    return False
+
+
 def _is_model_message(record: dict[str, Any]) -> bool:
     """Whether an assistant record actually carries a model response.
 
     The test is about shape, deliberately, and not about any CLI version: it asks whether
     this record contains a response, not whether it looks like one a particular release
-    writes. A record needs a ``message`` object holding either content or a usage report;
-    anything else is a marker, an error stub, or a damaged line.
+    writes. A record needs a ``message`` object holding either real content or a real usage
+    report; anything else is a marker, an error stub, or a damaged line.
 
     It matters because a turn is the evidence that a file read reached the model. A
     transcript that ends just after a read reports that read as undelivered, and one bare
     ``{"type": "assistant", "uuid": "..."}`` appended to it would otherwise flip the answer
     to delivered without a single model response existing. Proof of delivery has to be a
     response, so anything that is not one releases nothing.
+
+    Every part of the test is about payload rather than presence, because presence is what
+    an empty shape has. ``{"usage": {}}`` and ``{"content": [{}]}`` each satisfy a
+    type-only check while carrying no evidence whatever, and admitting either reopens that
+    same hole one level further in.
     """
     message = record.get("message")
     if not isinstance(message, dict):
         return False
     content = message.get("content")
-    if isinstance(content, list) and any(isinstance(block, dict) for block in content):
+    if isinstance(content, list) and any(_is_content_block(block) for block in content):
         return True
-    if isinstance(content, str) and content:
+    if isinstance(content, str) and content.strip():
         return True
-    return isinstance(message.get("usage"), dict)
+    return _reports_usage(message)
 
 
 def _message_key(record: dict[str, Any]) -> str | None:

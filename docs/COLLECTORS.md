@@ -267,7 +267,7 @@ Since a turn is the evidence, an importer that accepted any `assistant` record a
 would accept a damaged line as evidence. A record releases held context only when it is a
 **valid, distinct model message**:
 
-- it carries a `message` object holding either content or a usage report — a bare
+- it carries a `message` object holding either real content or a real usage report — a bare
   `{"type": "assistant", "uuid": "..."}` is a marker or an error stub, not a response;
 - its `message.id` (or fallback key) has not already been emitted as a turn, so a replayed
   record is the message we already saw rather than a second one. Accepting one would double
@@ -281,8 +281,26 @@ Records failing the test open no turn, release nothing, and are counted in `unkn
 under the names `assistant:not-a-model-message` and `assistant:replayed-message`, with a note
 saying how many there were and what their presence did not buy.
 
+Every clause asks for a **payload**, never merely for presence, because presence is exactly
+what an empty shape has. `{"usage": {}}` and `{"content": [{}]}` both satisfy a type-only
+check while carrying no evidence whatever, and admitting either reopens the same hole one
+level further in:
+
+| Part | Counts only when |
+|---|---|
+| A content block | It is a dict with a non-empty string `type` **and** a payload for that type: `text` with non-empty `text`, `thinking` with non-empty `thinking`, `tool_use` with a non-empty `name`. Any other typed block counts on at least one non-empty string or non-empty object value besides `type`, so a block type a later release adds still counts without this reader knowing its name. |
+| A string `content` | It is non-empty after stripping whitespace. |
+| `usage` | It is a dict with at least one of `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` present as a non-negative integer. Booleans are excluded — `True` is not a token total — and `0` counts, because `output_tokens: 0` is a measurement of a real response rather than an absence. |
+
+A block whose only payload is a **list** is deliberately not admitted. That errs toward
+reporting a delivery as unproven rather than proving one on a value this reader cannot
+interpret, which is the safe direction for every claim here: under-claiming costs a coverage
+result, over-claiming invents one.
+
 The test is written about **shape**, not about any CLI version — it asks whether a record
-contains a response, not whether it looks like one a particular release writes.
+contains a response, not whether it looks like one a particular release writes. The same
+predicate gates both passes, so the turn the result record's invocation totals are aimed at
+is always a turn that is actually emitted.
 
 ## Whose tokens are these
 
