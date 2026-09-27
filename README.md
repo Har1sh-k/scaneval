@@ -1,8 +1,8 @@
 # ScanEval
 
-> The replacement core is an alpha (`2.0.0a1`) that now runs end to end: versioned contracts, case packs with mechanical checks and explicit human approval, an immutable source cache and pinned snapshot export, an invocation runner, three real adapters (pinned Semgrep OSS, the own LLM harness, and the third-party DeepSec scanner), an observer connection inside the own harness plus importers for the records the Claude Code and Codex CLIs write for themselves, a context-coverage diagnostic, a review workflow, saved-output scoring and offline replay, and an HTML report. See [initial build](docs/INITIAL_BUILD.md) for what it does and does not do, and [the pilot report](docs/PILOT.md) for the first real runs.
+> Alpha (`2.0.0a1`): versioned case packs, scanner adapters, offline scoring and replay, an Observer SDK, native CLI collectors, and context-coverage diagnostics. See [current capabilities and limits](docs/INITIAL_BUILD.md) and [running the draft pilot](docs/PILOT.md).
 >
-> **No benchmark result exists.** Every case in the repository is a draft, no matching decision has been approved, and confirmed detection is zero. No run record is committed here; the runs described in [the pilot report](docs/PILOT.md) are pipeline demonstrations, not measurements of any scanner.
+> **No benchmark results are published.** The pilot cases have mechanical checks only, with no approved labels or matching decisions. Scanner outputs and traces stay local; the public examples do not establish scanner performance.
 >
 > The existing `scripts/` runner and historical scores still use legacy scoring and are labeled legacy throughout this file. The broader [design](docs/DESIGN_DECISIONS.md) is not fully implemented; repositories for the first public-workload release remain under selection.
 
@@ -28,7 +28,7 @@ scaneval replay <your run directory>/invocations/<invocation id>
 # scaneval: review state draft: these numbers come from decisions with no recorded human approval
 ```
 
-That warning is the accurate state of every bundle in this repository.
+The warning means the bundle lacks recorded human approval. It is not a detection result.
 
 ### Evaluation core commands
 
@@ -47,7 +47,7 @@ That warning is the accurate state of every bundle in this repository.
 
 Only `corpus validate --snapshot-id` and `run` reach the network; what `run` contacts depends on the configured systems. Everything else is offline. Exit code `2` means the command could not be carried out, `1` means it ran and reports a negative result, `0` means it ran and reports nothing wrong, which is not a statement that any label or decision is correct.
 
-Guides: [initial build](docs/INITIAL_BUILD.md) for the current build and its limits, [pilot report](docs/PILOT.md) for the real runs, [bring your own corpus](docs/BRING_YOUR_OWN_CORPUS.md) for the organization-owned pack path, [design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) for the destination.
+Guides: [initial build](docs/INITIAL_BUILD.md) for the current build and its limits, [draft pilot](docs/PILOT.md) for scanner setup and local execution, [bring your own corpus](docs/BRING_YOUR_OWN_CORPUS.md) for organization-owned packs, [design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) for the intended behavior.
 
 Visibility: [observer SDK](docs/OBSERVER_SDK.md) for the event contract and the own-harness capture matrix, [native CLI collectors](docs/COLLECTORS.md) for importing Claude Code and Codex records, [the DeepSec adapter](docs/DEEPSEC.md) for the third-party scanner path and its own capture matrix, [diagnostics](docs/DIAGNOSTICS.md) for what a saved trace answers about a miss.
 

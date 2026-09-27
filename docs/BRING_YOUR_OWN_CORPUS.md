@@ -2,8 +2,7 @@
 
 This guide documents the organization-owned case pack path as the code implements it today, in
 package version `2.0.0a1`. It is the documentation deliverable named in
-[design decisions section 9](DESIGN_DECISIONS.md#9-bring-your-own-test-cases) and it follows the
-bring-your-own-case path in [the handoff](CLAUDE_HANDOFF.md).
+[design decisions section 9](DESIGN_DECISIONS.md#9-bring-your-own-test-cases).
 
 Every command below was run against a throwaway pack under `/private/tmp/byoc` whose snapshot
 source was a local `git init` repository, so nothing in this guide needs the network. Where the
@@ -76,7 +75,7 @@ A pack is not these things:
 
 ## 2. The authoring path end to end
 
-The handoff states the path as: supplied artifact, then candidate and evidence draft, then human
+The authoring path is: supplied artifact, then candidate and evidence draft, then human
 approval, then versioned pack, then evaluation. The commands map onto it directly.
 
 | Step | Command | What it records |

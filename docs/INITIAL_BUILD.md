@@ -2,7 +2,7 @@
 
 This alpha implements step 1 of [the design's build order](DESIGN_DECISIONS.md#10-packaging-deliverables-and-build-order) and the first vertical slice of step 2. It is not the completed benchmark and does not replace the legacy `scripts/` runner yet. Package version is `2.0.0a1`.
 
-No detection result exists anywhere in this repository. Every case in the pilot pack carries mechanical checks only, so every plan built from it has draft scope; no matching decision has been approved, and confirmed detection is zero. The first real scanner invocations, with their execution facts and their limits, are recorded in [the pilot report](PILOT.md); read that rather than this document for what was actually run.
+No benchmark results are published. Every case in the pilot pack carries mechanical checks only, so every plan built from it has draft scope; no matching decision has been approved. The [pilot guide](PILOT.md) explains prerequisites, local execution, and review requirements. It contains no scanner results.
 
 ## What works
 
@@ -309,14 +309,12 @@ npm test
 - **Not implemented at all:** native PR mode through an adapter, metadata blinding, SARIF or saved vendor output import, and semantic duplicate review. The collectors import an agent CLI's own trace records; nothing imports a scanner's saved findings file produced outside a ScanEval invocation.
 - **The legacy `scripts/` runner and adapters are unchanged** and continue using old semantics. Their output does not conform to these contracts.
 
-## Next implementation slice
+## Requirements for a reviewed comparison
 
-1. Human review of the routed candidates from [the pilot](PILOT.md), recorded through `scaneval review record` and `scaneval review approve`, which is the only path to a non-zero recall.
-2. Independent review of the pilot case labels to L3, which is the only path out of draft scope.
-3. Fixed-state snapshots so the cases have property-specific negative controls.
-4. The own harness on the remaining inputs, plus repetitions, before any comparison between systems.
-5. A rerun of the harness inputs against a hooked harness build, so retries, token usage, supplied-context spans and the candidate lifecycle are recorded rather than declared unobservable, and `diagnose context-coverage` has spans to read.
-6. Native PR integration, output import, corpus and pair aggregation, and the buyer report.
+- Independently review case labels to L3 and record admission before reporting reviewed-label scores.
+- Review routed claims through `scaneval review record` and `scaneval review approve`; a draft match is not a confirmed detection.
+- Validate property-specific fixed/safe controls before reporting control rates.
+- Declare configurations, repetitions, budgets, and capture limits before comparing systems. Traces explain recorded behavior; they do not replace label or finding review.
 
 The Python core supports request language tags for Python, TypeScript/JavaScript, Go, and Rust. This does not imply equal corpus coverage or live support for every scanner. Inspect/Harbor selection, Jev corpus assistance, and the separate engineering improvement agent remain outside this slice.
 
