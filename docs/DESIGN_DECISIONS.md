@@ -32,26 +32,17 @@ Two comparisons use the same evaluation contracts:
 
 Report each workload separately, with full-repository scans and native PR review also separate. Scanners receive ordinary task inputs, not a selected CVE, expected location, or hint that a vulnerability must exist. Any combined workload result needs predeclared membership and weights; do not let available CVE counts determine them implicitly. Use a workload-specific scorecard, not one composite leaderboard score.
 
-The first release compares systems on public workloads only. Repositories and snapshots are not selected yet: assess candidates against the admission rules, then freeze the release manifest before comparison. The inventory below is not that manifest. Results describe performance on the frozen workload, not resistance to benchmark-specific tuning. A sealed or private slice is not a first-release requirement; organization-owned packs remain supported by the design.
+The first release compares systems on public workloads only. Repositories and snapshots are not selected yet: assess candidates against the admission rules, then freeze the release manifest before comparison. The draft pilot below is not that manifest. Results describe performance on the frozen workload, not resistance to benchmark-specific tuning. A sealed or private slice is not a first-release requirement; organization-owned packs remain supported by the design.
 
 SecureVibes may appear in the first comparison; inclusion and independent reviewer assignment remain publication decisions. If included, disclose the authors' relationship to it and apply the same workload, scoring, and review rules. Disputed findings involving it should be adjudicated by a reviewer not involved in the tool. Record who reviewed them and do not claim independent adjudication where it was unavailable. No special adapter or scoring path is needed.
 
 ### Current starting point
 
-Metadata recounted on 2026-09-17, with disclosed-subset repository/language counts checked on 2026-09-18. These counts do not independently validate labels. The existing agentic/generic inventory groups are legacy selections, not assignments to the workflow classes above.
-
-| Corpus | Cases | Repositories | Repo/commit snapshots | Snapshot/root/language groups |
-|---|---:|---:|---:|---:|
-| Legacy disclosed agentic subset | 156 | 10 | 103 | 104 |
-| All real-world | 189 | 16 | 128 | 129 |
-
-Of the 156 disclosed cases, 128 (82%) come from OpenClaw, n8n, and Flowise, and 127 (81%) are annotated as TypeScript. Twenty-three snapshots are shared, with up to 12 cases on one snapshot. Only 49 real-world cases have PR-pair metadata. There are zero real-world capability-safe annotations. Retain useful cases, but expand conventional-workflow coverage and independent applications deliberately; a higher CVE count alone does not fix the imbalance.
-
-The candidate inventory is TypeScript-heavy. Across the 189 real-world records, language counts are TypeScript 138, Python 16, Rust 11, Clojure 8, Go 7, Java 6, and Swift 3. Within the separate 156-case disclosed subset, kind counts are command injection 41, authorization bypass 34, authentication bypass 29, SSRF 23, path traversal 20, and SQL injection 9. All nine SQL-injection records are TypeScript cases from two repositories. These are inventory counts, not validated release coverage.
+The [draft pilot](PILOT.md) has three cases across three repository snapshots. They have mechanical checks but no human-approved labels or matching decisions, and no controls. They exercise integration; they do not establish release coverage or scanner performance.
 
 Each release reports workload and component-role coverage alongside a kind-by-language-by-repository matrix for admitted targets and controls. Show counts, denominators, and uncertainty; mark sparse slices and avoid generalizing from them. No universal minimum such as ten targets from three repositories is assumed. The release's workload and language claims must follow its admitted corpus.
 
-The existing [case schema](../schema/case.schema.json) already has `capability_safe`, `capability`, and `requiredGuards`. The [current scorer](../scripts/scoring.py) still classifies these findings by location overlap and capability-kind agreement, not by the validated security property. The richer annotation workflow, scorer changes, SDK, and invocation interfaces below are planned work, not existing guarantees. This document and the math companion define the current design.
+The [case-pack contract](../src/scaneval/schemas/case-pack.schema.json) records target/control properties, evidence, and review state. [Current capabilities](INITIAL_BUILD.md) distinguishes implemented contracts, scoring, execution, and observability from planned features. This document and the math companion define the broader design.
 
 ## 2. Corpus admission and ground truth
 
@@ -511,7 +502,7 @@ Build in this order:
 3. Native PR integration, review workflow, repeated-run pilot, backend comparison, and buyer report. Expand validated coverage, including the ten-repository safe-control pilot.
 4. Broader protected splits, release gates, and selected follow-on experiments.
 
-Migrate reviewed cases, raw results, and ingestion utilities rather than discarding them. Replace per-case execution and unmatched-as-FP scoring, remove ground truth from adapter requests, bind actual models, and replace live Semgrep rule selection. Fix finding-count TP versus region-count FN inflation, represent zero assessable controls as N/A, and retire the composite `agenticScore` requirement from the result schema. Adapter errors must have explicit status, not empty successful output; update the adapter guide accordingly. Make sv-agent setup explicit and the PR runner's dual-scan fallback opt-in. Keep README and mapping documentation synchronized and legacy results clearly labeled. These are pending implementation changes, not fixes made by this design. New scoring is not directly comparable to old headline scores.
+Maintain one supported CLI and evaluator. The retired scripts, adapters, scoring schemas, and import compatibility path are not fallbacks. Any prior case evidence must pass the current intake and review requirements; old labels and scores are not inherited. Keep usage guides aligned with the implemented contracts and mark planned features explicitly.
 
 Reuse prior art with clear boundaries: [Delta-Bench](https://doi.org/10.1109/ESEM.2017.24) for differential vulnerable/fixed SAST evaluation, [OpenSSF CVE Benchmark](https://github.com/ossf-cve-benchmark/ossf-cve-benchmark) for affected/patched product evaluation, [IRIS](https://arxiv.org/abs/2405.17238) for whole-project LLM-assisted static analysis behind [CWE-Bench-Java](https://github.com/iris-sast/cwe-bench-java), and [PrimeVul](https://arxiv.org/abs/2403.18624) for pair evaluation. The separately published [SastBench](https://arxiv.org/abs/2601.02941) is triage prior art whose approximate negative labels are not equivalent to our reviewed safe controls. SWE-bench release/prediction separation and CyberGym/ExploitGym packaging/isolation are further review leads, not a commitment to adopt exploitation tasks or their oracles.
 

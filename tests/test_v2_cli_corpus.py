@@ -164,14 +164,6 @@ def test_every_import_produces_an_unapproved_draft_with_recorded_provenance(tmp_
     assert main(snapshot_argv(pack, repo, commit)) == 0
     document = tmp_path / "incident.md"
     document.write_text("internal write-up\n", encoding="utf-8")
-    legacy = tmp_path / "legacy.json"
-    legacy.write_text(json.dumps({
-        "id": "legacy-1", "caseType": "real-world", "title": "shell injection",
-        "description": "cmd reaches subprocess with shell=True", "canonicalKind": "command_injection",
-        "realWorld": {"cve": "CVE-2026-0001", "repo": "acme/widget", "fixCommit": "c" * 40},
-        "regions": [{"id": "r1", "path": "src/app.py", "startLine": 5, "endLine": 5,
-                     "label": "sink", "capability": "exec"}],
-    }) + "\n", encoding="utf-8")
 
     code, out, _ = cli(capsys, *import_argv(pack, "case-fix", "--fix-commit", "a" * 40, "--repo",
                                             "https://example.invalid/acme/widget"))
@@ -180,8 +172,6 @@ def test_every_import_produces_an_unapproved_draft_with_recorded_provenance(tmp_
     assert code == 0
     code, _, _ = cli(capsys, *import_argv(pack, "case-doc", "--document", str(document),
                                           "--section", "3.2"))
-    assert code == 0
-    code, _, _ = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
     assert code == 0
 
     fix = case_by_id(pack, "case-fix")
@@ -200,9 +190,6 @@ def test_every_import_produces_an_unapproved_draft_with_recorded_provenance(tmp_
     doc = case_by_id(pack, "case-doc")
     assert doc["evidence"][0]["kind"] == "internal_document"
     assert doc["evidence"][0]["reference"] == str(document) and "section 3.2" in doc["evidence"][0]["note"]
-    legacy_case = case_by_id(pack, "case-legacy")
-    assert {item["kind"] for item in legacy_case["evidence"]} == {"other", "fix_commit", "cve_record"}
-    assert legacy_case["canonical_target"]["aliases"] == ["CVE-2026-0001"]
 
     for case in read_pack(pack)["cases"]:
         assert case["disposition"]["value"] == "needs_evidence"
@@ -222,6 +209,27 @@ def test_import_refuses_a_fix_commit_without_a_repository_and_two_artifacts_at_o
 
     with pytest.raises(SystemExit):
         main(import_argv(pack, "case-two", "--fix-commit", "a" * 40, "--document", str(tmp_path / "x.md")))
+
+
+def test_retired_import_flag_is_rejected_without_mutating_the_pack(checked_pack, tmp_path, capsys):
+    pack = checked_pack["pack"]
+    before = pack.read_bytes()
+    # Supply a supported artifact too, so rejection is specifically the removed flag.
+    with pytest.raises(SystemExit) as exc:
+        main(import_argv(pack, "case-old", "--finding", str(write_finding(tmp_path)),
+                         "--legacy-case", str(tmp_path / "old-case.json")))
+    assert exc.value.code == 2
+    assert "unrecognized arguments: --legacy-case" in capsys.readouterr().err
+    assert pack.read_bytes() == before
+
+
+def test_corpus_help_advertises_only_current_intake_forms(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["corpus", "import", "--help"])
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--legacy-case" not in help_text
+    assert all(flag in help_text for flag in ("--fix-commit", "--finding", "--document"))
 
 
 def test_corpus_validate_exports_the_snapshot_and_records_mechanical_checks_only(tmp_path, capsys, upstream):
@@ -967,67 +975,6 @@ def test_corpus_validate_refuses_a_trial_root_inside_a_trial_directory(tmp_path,
     assert not nested.exists() and not (tmp_path / "second-cache").exists()
 
 
-def legacy_record(**fields) -> dict:
-    """A minimal legacy v1 record; every test below breaks exactly one of its shapes."""
-    return {"id": "legacy-1", "caseType": "real-world", "title": "shell injection",
-            "canonicalKind": "command_injection", **fields}
-
-
-@pytest.mark.parametrize("fields, message", [
-    ({"regions": {"path": "src/app.py"}}, "regions must be a list"),
-    ({"regions": ["src/app.py"]}, "regions[0] must be a JSON object"),
-    ({"regions": [{"startLine": 5, "endLine": 5}]}, "regions[0] must carry a non-blank path string"),
-    ({"regions": [{"path": 5, "endLine": 5}]}, "regions[0] must carry a non-blank path string"),
-    ({"regions": [{"path": "src/app.py", "startLine": "5", "endLine": 9}]}, "startLine must be an integer"),
-    ({"regions": [{"path": "src/app.py", "startLine": True, "endLine": 9}]}, "startLine must be an integer"),
-    ({"regions": [{"path": "src/app.py", "startLine": 0, "endLine": 9}]}, "startLine must be an integer"),
-    ({"regions": [{"path": "src/app.py", "startLine": 5, "endLine": 0}]}, "endLine must be an integer"),
-    ({"realWorld": ["CVE-2026-0001"]}, "realWorld must be a JSON object"),
-    ({"realWorld": {"disclosure": "2026-01-01"}}, "realWorld.disclosure must be a JSON object"),
-    ({"realWorld": {"repo": ["acme/widget"]}}, "realWorld.repo must be a string"),
-])
-def test_import_refuses_a_malformed_legacy_record_without_a_traceback(tmp_path, capsys, upstream,
-                                                                     fields, message):
-    pack = pack_with_snapshot(tmp_path, upstream)
-    legacy = tmp_path / "legacy.json"
-    legacy.write_text(json.dumps(legacy_record(**fields)) + "\n", encoding="utf-8")
-    capsys.readouterr()
-
-    code, _, err = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
-    assert code == 2 and message in err
-    assert err.startswith("scaneval: ") and "Traceback" not in err
-    assert str(legacy) in err
-    assert read_pack(pack)["cases"] == []
-
-
-def test_import_refuses_a_legacy_repository_url_that_carries_credentials(tmp_path, capsys, upstream):
-    pack = pack_with_snapshot(tmp_path, upstream)
-    legacy = tmp_path / "legacy.json"
-    legacy.write_text(json.dumps(legacy_record(
-        realWorld={"repo": "https://user:token@example.invalid/acme/widget", "fixCommit": "c" * 40},
-        regions=[{"id": "r1", "path": "src/app.py", "startLine": 5, "endLine": 5}])) + "\n",
-        encoding="utf-8")
-    capsys.readouterr()
-
-    code, _, err = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
-    assert code == 2 and "realWorld.repo carries credentials in the URL authority" in err
-    assert read_pack(pack)["cases"] == []
-
-
-def test_import_accepts_a_well_formed_legacy_record_with_file_only_regions(tmp_path, capsys, upstream):
-    pack = pack_with_snapshot(tmp_path, upstream)
-    legacy = tmp_path / "legacy.json"
-    legacy.write_text(json.dumps(legacy_record(
-        realWorld={"repo": "ssh://git@example.invalid/acme/widget", "fixCommit": "c" * 40},
-        regions=[{"id": "r1", "path": "src/app.py", "label": "sink"}])) + "\n", encoding="utf-8")
-    capsys.readouterr()
-
-    code, _, _ = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
-    assert code == 0
-    [location] = case_by_id(pack, "case-legacy")["target"]["accepted_locations"]
-    assert location["path"] == "src/app.py" and "start_line" not in location
-
-
 def test_new_version_is_stripped_and_refused_when_it_repeats_the_current_version(tmp_path, capsys,
                                                                                 checked_pack):
     pack = checked_pack["pack"]
@@ -1128,45 +1075,6 @@ def test_review_commands_refuse_a_bundle_inside_a_trial_directory(tmp_path, caps
     assert not bundle.exists()
 
 
-@pytest.mark.parametrize("fields, message", [
-    ({"realWorld": {"cve": 7}}, "realWorld.cve must be a string"),
-    ({"realWorld": {"cve": None}}, "realWorld.cve must be a string"),
-    ({"realWorld": {"ghsa": ["GHSA-aaaa-bbbb-cccc"]}}, "realWorld.ghsa must be a string"),
-    ({"realWorld": {"fixCommit": "c" * 40}}, "realWorld.fixCommit needs realWorld.repo"),
-    ({"realWorld": {"fixCommit": "c" * 40, "repo": "   "}}, "realWorld.fixCommit needs realWorld.repo"),
-    ({"realWorld": {"fixCommit": True, "repo": "acme/widget"}}, "realWorld.fixCommit must be a string"),
-    ({"realWorld": {"fixCommit": ["c" * 40], "repo": "acme/widget"}}, "realWorld.fixCommit must be a string"),
-    ({"realWorld": {"fixCommit": 7, "repo": "acme/widget"}}, "realWorld.fixCommit must be a string"),
-    ({"realWorld": {"fixCommit": None, "repo": "acme/widget"}}, "realWorld.fixCommit must be a string"),
-    ({"canonicalKind": ["command_injection"]}, "canonicalKind must be a string"),
-    ({"canonicalKind": None}, "canonicalKind must be a string"),
-    ({"title": 7}, "title must be a string"),
-    ({"title": None}, "title must be a string"),
-    ({"description": {"text": "shell injection"}}, "description must be a string"),
-    ({"description": None}, "description must be a string"),
-    ({"regions": [{"path": "src/app.py", "startLine": 5}]}, "must be supplied together"),
-    ({"regions": [{"path": "src/app.py", "endLine": None}]}, "must be supplied together"),
-    ({"regions": [{"path": "src/app.py", "startLine": 5, "endLine": None}]},
-     "endLine must be an integer of at least 1"),
-    ({"regions": [{"path": "src/app.py", "startLine": None, "endLine": 5}]},
-     "startLine must be an integer of at least 1"),
-    ({"regions": [{"path": "src/app.py", "startLine": 9, "endLine": 5}]},
-     "startLine must not exceed endLine"),
-])
-def test_import_refuses_further_legacy_shapes_the_migration_cannot_read(tmp_path, capsys, upstream,
-                                                                       fields, message):
-    pack = pack_with_snapshot(tmp_path, upstream)
-    legacy = tmp_path / "legacy.json"
-    legacy.write_text(json.dumps(legacy_record(**fields)) + "\n", encoding="utf-8")
-    capsys.readouterr()
-
-    code, _, err = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
-    assert code == 2 and message in err
-    assert err.startswith("scaneval: ") and "Traceback" not in err
-    assert str(legacy) in err
-    assert read_pack(pack)["cases"] == []
-
-
 UNPARSABLE_URL = "https://[::1/acme/widget.git"
 
 
@@ -1203,37 +1111,6 @@ def test_an_import_repository_url_that_cannot_be_parsed_is_refused_naming_the_fl
     assert code == 2 and "--repo is not a URL this tool can read" in err
     assert err.startswith("scaneval: ") and "Traceback" not in err
     assert pack.read_bytes() == before and read_pack(pack)["cases"] == []
-
-
-def test_a_legacy_repository_url_that_cannot_be_parsed_is_refused_naming_the_record(tmp_path, capsys,
-                                                                                    upstream):
-    pack = pack_with_snapshot(tmp_path, upstream)
-    legacy = tmp_path / "legacy.json"
-    legacy.write_text(json.dumps(legacy_record(
-        realWorld={"repo": UNPARSABLE_URL, "fixCommit": "c" * 40})) + "\n",
-        encoding="utf-8")
-    capsys.readouterr()
-
-    code, _, err = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
-    assert code == 2 and "realWorld.repo is not a URL this tool can read" in err
-    assert str(legacy) in err
-    assert err.startswith("scaneval: ") and "Traceback" not in err
-    assert read_pack(pack)["cases"] == []
-
-
-def test_import_never_stringifies_a_legacy_fix_commit_into_an_evidence_reference(tmp_path, capsys,
-                                                                                 upstream):
-    pack = pack_with_snapshot(tmp_path, upstream)
-    legacy = tmp_path / "legacy.json"
-    legacy.write_text(json.dumps(legacy_record(
-        realWorld={"repo": "ssh://git@example.invalid/acme/widget", "fixCommit": True})) + "\n",
-        encoding="utf-8")
-    capsys.readouterr()
-
-    code, _, err = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
-    assert code == 2 and "realWorld.fixCommit must be a string" in err
-    assert read_pack(pack)["cases"] == []
-    assert "@True" not in pack.read_text(encoding="utf-8")
 
 
 def test_a_document_that_is_not_utf_8_is_refused_naming_the_file(tmp_path, capsys, checked_pack):
@@ -1411,27 +1288,6 @@ def test_new_version_refuses_a_value_made_only_of_zero_width_characters(tmp_path
                            "--new-version", version)
         assert code == 2 and "non-blank version" in err
         assert pack.read_bytes() == before
-
-
-@pytest.mark.parametrize("fields, message", [
-    ({"regions": [{"path": "\u200b", "startLine": 5, "endLine": 5}]},
-     "regions[0] must carry a non-blank path string"),
-    ({"regions": [{"path": "\xad "}]}, "regions[0] must carry a non-blank path string"),
-    ({"realWorld": {"fixCommit": "c" * 40, "repo": "\u200b\ufeff"}},
-     "realWorld.fixCommit needs realWorld.repo"),
-], ids=["region-path", "region-path-format-characters", "fix-commit-repository"])
-def test_import_refuses_legacy_values_made_only_of_zero_width_characters(tmp_path, capsys, upstream,
-                                                                        fields, message):
-    """Stripping leaves these non-empty, so the blank rule is the character rule, not truthiness."""
-    pack = pack_with_snapshot(tmp_path, upstream)
-    legacy = tmp_path / "legacy.json"
-    legacy.write_text(json.dumps(legacy_record(**fields)) + "\n", encoding="utf-8")
-    capsys.readouterr()
-
-    code, _, err = cli(capsys, *import_argv(pack, "case-legacy", "--legacy-case", str(legacy)))
-    assert code == 2 and message in err
-    assert err.startswith("scaneval: ") and "Traceback" not in err
-    assert read_pack(pack)["cases"] == []
 
 
 def deep_json(depth: int = 200_000) -> str:

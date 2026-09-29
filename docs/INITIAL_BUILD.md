@@ -1,6 +1,6 @@
 # Initial evaluation core
 
-This alpha implements step 1 of [the design's build order](DESIGN_DECISIONS.md#10-packaging-deliverables-and-build-order) and the first vertical slice of step 2. It is not the completed benchmark and does not replace the legacy `scripts/` runner yet. Package version is `2.0.0a1`.
+This alpha implements step 1 of [the design's build order](DESIGN_DECISIONS.md#10-packaging-deliverables-and-build-order) and the first vertical slice of step 2. It is the supported execution and evaluation path, not the completed benchmark. Package version is `2.0.0a1`.
 
 No benchmark results are published. Every case in the pilot pack carries mechanical checks only, so every plan built from it has draft scope; no matching decision has been approved. The [pilot guide](PILOT.md) explains prerequisites, local execution, and review requirements. It contains no scanner results.
 
@@ -202,7 +202,7 @@ A run configuration is a frozen document naming the pack, the inputs, the system
 | `demo <new dir>` | Create the fabricated conformance bundle. | none |
 | `corpus init` | Create a new draft pack file. | none |
 | `corpus add-snapshot` | Pin one repository commit; license stays unverified. | none |
-| `corpus import` | Draft one case from a legacy record, fix commit, finding, or document. | none |
+| `corpus import` | Draft one case from a fix commit, finding, or document. | none |
 | `corpus validate <pack>` | Print a pack summary. | none |
 | `corpus validate <pack> --snapshot-id` | Fetch and export that snapshot, run the L1 checks, record them. | fetches the pinned commit |
 | `corpus approve` | Record one explicit human review of a case. | none |
@@ -307,7 +307,6 @@ npm test
 - **Nothing a collector or the DeepSec adapter reports was watched as it happened.** Both read records written after the fact, so their events are derived and say so; a record the CLI never wrote is a record nothing can recover.
 - **Single-invocation numbers only.** No corpus aggregation, pair aggregation, repeated-run uncertainty, precision sampling, promotion gate, trace viewer, exporter, or multi-model planner is implemented.
 - **Not implemented at all:** native PR mode through an adapter, metadata blinding, SARIF or saved vendor output import, and semantic duplicate review. The collectors import an agent CLI's own trace records; nothing imports a scanner's saved findings file produced outside a ScanEval invocation.
-- **The legacy `scripts/` runner and adapters are unchanged** and continue using old semantics. Their output does not conform to these contracts.
 
 ## Requirements for a reviewed comparison
 
@@ -320,4 +319,4 @@ The Python core supports request language tags for Python, TypeScript/JavaScript
 
 The organization-owned pack path is documented separately in [bring your own corpus](BRING_YOUR_OWN_CORPUS.md).
 
-Run the Python regression suite with `python -m pytest -q`. Legacy tests remain alongside the new contract, materialization, execution, runner, corpus, review, scoring, and CLI conformance tests. No real CVEs are silently imported and no paid model evaluations run during these tests.
+Run the Python regression suite with `python -m pytest -q`. It covers contracts, materialization, execution, the runner, corpus, review, scoring, observers, collectors, and CLI conformance. No real CVEs are silently imported and no paid model evaluations run during these tests.
