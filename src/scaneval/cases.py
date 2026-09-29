@@ -924,6 +924,20 @@ def planned_level(pack: dict, case: dict) -> str | None:
     return effective_level(pack, case)
 
 
+def target_canonical_id(case: dict) -> str:
+    """The canonical root cause *case*'s target belongs to: the pack's own id, or the target id.
+
+    Several target records on several snapshots can be one root cause, and the pack says so with
+    ``canonical_target.canonical_id``; a pack that names none makes every target its own root cause.
+    """
+    return case["canonical_target"].get("canonical_id") or case["target"]["target_id"]
+
+
+def control_canonical_id(control: dict) -> str:
+    """The property *control* states: the pack's own ``canonical_id``, or the control id."""
+    return control.get("canonical_id") or control["control_id"]
+
+
 def plan_scope(planned: list[tuple[dict, str, dict | None]]) -> str:
     """``reviewed`` only when every planned case is approved, reviewed-level, and admitted.
 
@@ -947,8 +961,24 @@ def plan_scope(planned: list[tuple[dict, str, dict | None]]) -> str:
     return "draft"
 
 
-def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "full") -> tuple[dict, list[str]]:
+def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "full",
+               input_id: str | None = None, input_hash: str | None = None,
+               profile: str | None = None, blinding: dict | None = None) -> tuple[dict, list[str]]:
     """Targets and controls for one materialized input, with every exclusion stated in the notes.
+
+    *tree_hash* is always the export of *snapshot_id* that the labels and the mechanical checks
+    refer to. The keyword-only identity arguments describe the input the plan is for when that
+    input is not the plain export of the snapshot: ``input_id`` (default: the snapshot id),
+    ``input_hash``, the identity the scan result binds to (default: *tree_hash*), ``profile``
+    (default ``standard``), and ``blinding``, the ``map_id``, ``map_version``, and ``map_sha256`` of
+    the reviewed map a ``metadata_blinded`` input was transformed with. A blinded input needs that
+    identity and nothing else carries one. With none of them given, or each given at its default,
+    the plan is the 2.0 plan this function has always built, byte for byte. Otherwise it is a 2.1
+    plan: its ``input_hash`` is the given one, its provenance also records the input id, the
+    profile, ``source_tree_hash`` (which is *tree_hash*), and the blinding identity, and its targets
+    and controls carry ``canonical_id`` (the pack's canonical id, or the target or control id when
+    the pack names none), so records of one root cause or one property on several inputs can be
+    grouped. Which cases are planned, and at which level and scope, does not depend on any of it.
 
     A case is planned only when its disposition is not ``exclude``, no check set failed after
     approval, the latest admission decision covering its content is not ``rejected``, the pack
@@ -1016,6 +1046,13 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
     This builds a plan. It does not approve, admit, re-check, or correct anything, and a case
     left out here is unplanned for this input, not judged wrong.
     """
+    blinded = (profile or "standard") == "metadata_blinded"
+    if blinded != (blinding is not None):
+        raise ContractError(
+            "a metadata_blinded input is planned with the identity of the map it was transformed "
+            "with, and no other input carries one")
+    identified = (input_id not in (None, snapshot_id) or input_hash not in (None, tree_hash)
+                  or profile not in (None, "standard") or blinding is not None)
     require_loadable(pack, "no plan can be built from it")
     snapshot = snapshot_by_id(pack, snapshot_id)
     if snapshot.get("tree_hash") and snapshot["tree_hash"] != tree_hash:
@@ -1063,12 +1100,16 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
         if target["snapshot_id"] == snapshot_id:
             targets.append({"target_id": target["target_id"], "description": target["description"],
                             "kind": target["kind"], "validation_level": level})
+            if identified:
+                targets[-1]["canonical_id"] = target_canonical_id(case)
         for control in case["controls"]:
             if control["snapshot_id"] == snapshot_id:
                 entry = {"control_id": control["control_id"], "description": control["description"],
                          "type": control["type"], "validation_level": level}
                 if control.get("target_id"):
                     entry["target_id"] = control["target_id"]
+                if identified:
+                    entry["canonical_id"] = control_canonical_id(control)
                 controls.append(entry)
     if scope == "reviewed" and not (targets or controls):
         scope = "draft"
@@ -1080,6 +1121,14 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
                        "pack_sha256": pack_sha256(pack), "snapshot_id": snapshot_id, "mode": mode,
                        "case_ids": [case["case_id"] for case, _, _ in included]},
     }
+    if identified:
+        plan["schema_version"] = "2.1"
+        plan["input_hash"] = input_hash or tree_hash
+        plan["provenance"].update({"input_id": input_id or snapshot_id, "profile": profile or "standard",
+                                   "source_tree_hash": tree_hash})
+        if blinding is not None:
+            plan["provenance"]["blinding"] = {key: blinding.get(key)
+                                              for key in ("map_id", "map_version", "map_sha256")}
     validate_document("evaluation-plan", plan)
     if not targets and not controls:
         notes.append("no planned targets or controls for this input; scores will be N/A")
