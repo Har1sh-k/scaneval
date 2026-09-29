@@ -20,14 +20,14 @@ from jsonschema import Draft202012Validator
 # a record written before 2.1 existed is never reread under rules it was not written against.
 SCHEMA_VERSIONS: dict[str, tuple[str, ...]] = {
     "scan-request": ("2.0",),
-    "scan-result": ("2.0",),
-    "evaluation-plan": ("2.0",),
+    "scan-result": ("2.0", "2.1"),
+    "evaluation-plan": ("2.0", "2.1"),
     "review-decisions": ("2.0",),
-    "execution-record": ("2.0",),
-    "case-pack": ("2.0",),
+    "execution-record": ("2.0", "2.1"),
+    "case-pack": ("2.0", "2.1"),
     "review-record": ("2.0",),
-    "run-config": ("2.0",),
-    "run-manifest": ("2.0",),
+    "run-config": ("2.0", "2.1"),
+    "run-manifest": ("2.0", "2.1"),
 }
 CONTRACT_KINDS = frozenset(SCHEMA_VERSIONS)
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
@@ -749,7 +749,49 @@ def _label_projection(pack: dict[str, Any], case: dict[str, Any]) -> dict[str, A
     split between them is stated once, in :data:`CASE_LABEL_FIELDS` and :data:`CASE_UNREAD_FIELDS`,
     and a test holds every field of a case to it.
     """
-    return {**case_label_projection(case), "snapshots": _snapshot_identity(pack, case)}
+    projected = {**case_label_projection(case), "snapshots": _snapshot_identity(pack, case)}
+    change_sets = _change_set_identity(pack, case)
+    if change_sets:
+        # Only a case that names a change set carries this key, so every digest recorded before
+        # change sets existed still hashes the same content it always did.
+        projected["change_sets"] = change_sets
+    return projected
+
+
+def _change_set_identity(pack: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
+    """The identity of every change set *case*'s PR eligibility names, keyed by change set id.
+
+    A PR eligibility entry says an item is scored in the review of one base/head boundary, so what
+    a reviewer approved includes that boundary: which snapshots it runs between, what kind of
+    boundary it is, and which scope it declares, with each snapshot's identity projected the way a
+    label's own snapshot is (:func:`snapshot_identity_projection`). Free text about the change set
+    is left to the anchor. A change set the pack does not declare is projected as ``None``, which is
+    itself a change from one that named a declared change set. Empty when the case names none.
+    """
+    records = [case.get("target")] + list(case.get("controls") or [])
+    named = sorted({entry.get("change_set_id") for record in records if isinstance(record, dict)
+                    for entry in record.get("pr_eligibility") or [] if isinstance(entry, dict)
+                    and isinstance(entry.get("change_set_id"), str)})
+    if not named:
+        return {}
+    declared = {entry.get("change_set_id"): entry for entry in pack.get("change_sets") or []
+                if isinstance(entry, dict)}
+    snapshots = {snapshot.get("snapshot_id"): snapshot for snapshot in pack.get("snapshots") or []
+                 if isinstance(snapshot, dict)}
+    identity: dict[str, Any] = {}
+    for change_set_id in named:
+        change_set = declared.get(change_set_id)
+        if change_set is None:
+            identity[change_set_id] = None
+            continue
+        projected = {key: value for key, value in change_set.items()
+                     if key not in ("description", "reference")}
+        for side in ("base", "head"):
+            snapshot = snapshots.get(change_set.get(f"{side}_snapshot_id"))
+            projected[f"{side}_snapshot"] = (None if snapshot is None
+                                             else snapshot_identity_projection(snapshot))
+        identity[change_set_id] = projected
+    return identity
 
 
 def label_digest(pack: dict[str, Any], case: dict[str, Any]) -> str:
@@ -1015,6 +1057,21 @@ def _validate_evaluation_plan(document: dict[str, Any]) -> None:
     """
     _unique([target["target_id"] for target in document["targets"]], "target_id")
     _unique([control["control_id"] for control in document["controls"]], "control_id")
+    provenance = document.get("provenance")
+    if document["schema_version"] != "2.0" and provenance is not None:
+        # A PR plan names the boundary it scores and the scope of every item in it; a full plan
+        # names neither. A blinded plan names the map its input was transformed with.
+        is_pr = provenance["mode"] == "pr"
+        if is_pr != ("pr" in provenance):
+            raise ContractError("provenance.pr is required exactly when the plan mode is pr")
+        scoped = [item for item in document["targets"] + document["controls"] if "pr_scope" in item]
+        if is_pr and len(scoped) != len(document["targets"]) + len(document["controls"]):
+            raise ContractError("every item of a pr plan states its pr_scope")
+        if not is_pr and scoped:
+            raise ContractError("only a pr plan carries pr_scope")
+        blinded = provenance.get("profile") == "metadata_blinded"
+        if blinded != ("blinding" in provenance):
+            raise ContractError("provenance.blinding is required exactly when the profile is metadata_blinded")
     levels = [item["validation_level"] for item in document["targets"]]
     levels += [item["validation_level"] for item in document["controls"]]
     allowed = {"reviewed": {"L3", "L4"}, "draft": {"L1", "L2", "L3", "L4"},
@@ -1050,6 +1107,16 @@ def _validate_execution_record(document: dict[str, Any]) -> None:
         _require_relative_path(trace["path"], "trace.path")
     if document["status"] == "timeout" and not document["timed_out"]:
         raise ContractError("status 'timeout' requires timed_out to be true")
+    if document["schema_version"] == "2.0":
+        return
+    provenance = document["provenance"]
+    if (provenance["mode"] == "pr") != (provenance.get("pr") is not None):
+        raise ContractError("provenance.pr is recorded exactly for a pr invocation")
+    isolation = document["isolation"]
+    if isolation["enforced"] and isolation["backend"] == "local":
+        raise ContractError("the local backend enforces nothing, so it cannot be recorded as enforced")
+    if document["network_policy"]["enforced"] and not isolation["enforced"]:
+        raise ContractError("a network policy is enforced only inside an enforced isolation backend")
 
 
 def _validate_case_pack(document: dict[str, Any]) -> None:
@@ -1145,6 +1212,8 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
     snapshots = [snapshot["snapshot_id"] for snapshot in document["snapshots"]]
     _unique(snapshots, "snapshot_id")
     known = set(snapshots)
+    if document["schema_version"] != "2.0":
+        _validate_change_sets(document, known)
     snapshot_hashes = {snapshot["snapshot_id"]: snapshot.get("tree_hash") for snapshot in document["snapshots"]}
     _unique([case["case_id"] for case in document["cases"]], "case_id")
     target_ids: list[str] = []
@@ -1308,6 +1377,51 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
         raise ContractError(anchor)
 
 
+def _validate_change_sets(document: dict[str, Any], known: set[str]) -> None:
+    """A change set runs between two declared snapshots of one repository, and PR eligibility names one.
+
+    Base and head must be declared, distinct, and fetched from the same repository URL, since a
+    diff between two unrelated repositories is not a change anybody reviewed. An item may be
+    eligible only under a change set whose head is its own snapshot: a PR review reads the head
+    tree, so a label on any other snapshot is not something that review can observe. Relations are
+    checked against the kind of item: a target is introduced or affected by a change, and only a
+    control can be repaired by one. Whether the eligibility is right is a reviewed judgment, never
+    a line-overlap computation here.
+    """
+    by_id = {snapshot["snapshot_id"]: snapshot for snapshot in document["snapshots"]}
+    change_sets = document.get("change_sets", [])
+    _unique([entry["change_set_id"] for entry in change_sets], "change_set_id")
+    heads: dict[str, str] = {}
+    for entry in change_sets:
+        label = f"change set {entry['change_set_id']}"
+        for side in ("base", "head"):
+            if entry[f"{side}_snapshot_id"] not in known:
+                raise ContractError(f"{label}: {side} snapshot {entry[f'{side}_snapshot_id']} is not declared")
+        if entry["base_snapshot_id"] == entry["head_snapshot_id"]:
+            raise ContractError(f"{label}: base and head must be different snapshots")
+        base = by_id[entry["base_snapshot_id"]]["repository"]["url"]
+        head = by_id[entry["head_snapshot_id"]]["repository"]["url"]
+        if base != head:
+            raise ContractError(f"{label}: base and head come from different repositories ({base}, {head})")
+        heads[entry["change_set_id"]] = entry["head_snapshot_id"]
+    for case in document["cases"]:
+        records = [("target", case["target"])] + [("control", control) for control in case["controls"]]
+        for kind, record in records:
+            owner = record.get("target_id") if kind == "target" else record["control_id"]
+            entries = record.get("pr_eligibility", [])
+            _unique([entry["change_set_id"] for entry in entries], f"{owner} pr_eligibility change_set_id")
+            for entry in entries:
+                label = f"case {case['case_id']}: {kind} {owner} pr_eligibility {entry['change_set_id']}"
+                if entry["change_set_id"] not in heads:
+                    raise ContractError(f"{label} names a change set the pack does not declare")
+                if heads[entry["change_set_id"]] != record["snapshot_id"]:
+                    raise ContractError(
+                        f"{label}: the item is on snapshot {record['snapshot_id']}, but a PR review "
+                        f"reads the change set's head, {heads[entry['change_set_id']]}")
+                if kind == "target" and entry["relation"] == "repaired":
+                    raise ContractError(f"{label}: a target is introduced or affected, never repaired")
+
+
 def _validate_review_record(document: dict[str, Any]) -> None:
     """Check what the record asserts about itself; it says nothing about the decisions' quality.
 
@@ -1327,9 +1441,74 @@ def _validate_review_record(document: dict[str, Any]) -> None:
             raise ContractError("the latest review must bind to the current decisions hash")
 
 
+_PINNED_IMAGE = re.compile(r"^(?:[^@\s]+@sha256:[0-9a-f]{64}|sha256:[0-9a-f]{64})$")
+BLINDED_INPUT_SUFFIX = ".blinded"
+
+
+def input_identity(entry: dict[str, Any]) -> str:
+    """The evaluator-side id of one configured input: its ``input_id``, or the default for its shape.
+
+    A full input defaults to its snapshot id and a PR input to its change set id, each with
+    :data:`BLINDED_INPUT_SUFFIX` when the input is metadata-blinded, so a standard and a blinded
+    input of one snapshot can sit in one run. A 2.0 configuration has only snapshot ids, and this
+    returns exactly that for it. The id names directories and invocations on the evaluator side
+    and is never shown to a scanner.
+    """
+    if entry.get("input_id"):
+        return entry["input_id"]
+    base = entry.get("change_set_id") if entry.get("mode", "full") == "pr" else entry.get("snapshot_id")
+    return f"{base}{BLINDED_INPUT_SUFFIX}" if entry.get("profile") == "metadata_blinded" else base
+
+
 def _validate_run_config(document: dict[str, Any]) -> None:
+    """Unique ids, and for 2.1 an input shape that says exactly one thing and a backend that can hold.
+
+    A full input names a snapshot and a PR input names a change set, never both; a blinded input
+    names its reviewed map and nothing else carries one. An ``oci`` backend must name an image
+    pinned by digest, and ``model_provider_only`` under it must declare the egress it allows and
+    the proxy image that enforces it, because a policy with no enforcement behind it would be
+    recorded as enforced. A ``local`` backend carries none of those settings, so a configuration
+    cannot look sandboxed while nothing is. These are shape rules: whether an image exists or a
+    map is reviewed is checked when the run prepares it.
+    """
     _unique([system["system_id"] for system in document["systems"]], "system_id")
-    _unique([item["snapshot_id"] for item in document["inputs"]], "inputs.snapshot_id")
+    if document["schema_version"] == "2.0":
+        _unique([item["snapshot_id"] for item in document["inputs"]], "inputs.snapshot_id")
+        return
+    for index, item in enumerate(document["inputs"]):
+        label = f"inputs[{index}]"
+        mode = item.get("mode", "full")
+        if mode == "full" and ("snapshot_id" not in item or "change_set_id" in item):
+            raise ContractError(f"{label}: a full input names a snapshot_id and no change_set_id")
+        if mode == "pr" and ("change_set_id" not in item or "snapshot_id" in item):
+            raise ContractError(f"{label}: a pr input names a change_set_id and no snapshot_id")
+        blinded = item.get("profile", "standard") == "metadata_blinded"
+        if blinded != ("blinding_map" in item):
+            raise ContractError(
+                f"{label}: blinding_map is required exactly when profile is metadata_blinded")
+    _unique([input_identity(item) for item in document["inputs"]], "input id")
+    for index, system in enumerate(document["systems"]):
+        execution = system.get("execution") or {"backend": "local"}
+        label = f"systems[{index}].execution"
+        policy = system.get("network_policy", document["network_policy"])
+        if execution["backend"] == "local":
+            extra = sorted(set(execution) - {"backend"})
+            if extra:
+                raise ContractError(
+                    f"{label}: the local backend enforces nothing, so it takes no {', '.join(extra)}")
+            continue
+        image = execution.get("image")
+        if not isinstance(image, str) or not _PINNED_IMAGE.match(image):
+            raise ContractError(f"{label}: an oci backend needs an image pinned by digest, not {image!r}")
+        if policy == "model_provider_only":
+            if not execution.get("egress"):
+                raise ContractError(f"{label}: model_provider_only needs the egress it allows declared")
+            proxy = execution.get("proxy_image")
+            if not isinstance(proxy, str) or not _PINNED_IMAGE.match(proxy):
+                raise ContractError(
+                    f"{label}: model_provider_only needs a proxy_image pinned by digest, not {proxy!r}")
+        elif execution.get("egress") or execution.get("proxy_image"):
+            raise ContractError(f"{label}: egress and proxy_image apply only to model_provider_only")
 
 
 def _validate_run_manifest(document: dict[str, Any]) -> None:
@@ -1344,11 +1523,22 @@ def _validate_run_manifest(document: dict[str, Any]) -> None:
         raise ContractError("a failed run manifest must record its failure")
     if not failed and "failure" in document:
         raise ContractError("only a failed run manifest may record a failure")
-    _unique([item["snapshot_id"] for item in document["inputs"]], "inputs.snapshot_id")
+    version = document["schema_version"]
+    key = "snapshot_id" if version == "2.0" else "input_id"
+    _unique([item[key] for item in document["inputs"]], f"inputs.{key}")
     _unique([system["system_id"] for system in document["systems"]], "systems.system_id")
     _unique([row["invocation_id"] for row in document["invocations"]], "invocation_id")
     for index, item in enumerate(document["inputs"]):
-        _require_relative_path(item["provenance_path"], f"inputs[{index}].provenance_path")
+        if item["provenance_path"] is not None:
+            _require_relative_path(item["provenance_path"], f"inputs[{index}].provenance_path")
+    if version != "2.0":
+        _require_relative_path(document["schedule_path"], "schedule_path")
+        unprepared = {item["input_id"] for item in document["inputs"] if item["preparation_failure"]}
+        for index, row in enumerate(document["invocations"]):
+            if row["input_id"] in unprepared and row["status"] != "skipped":
+                raise ContractError(
+                    f"invocations[{index}]: input {row['input_id']} was never prepared, so no "
+                    "invocation of it can have run")
     for index, row in enumerate(document["invocations"]):
         label = f"invocations[{index}]"
         if row["status"] == "skipped":

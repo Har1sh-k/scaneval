@@ -1,0 +1,252 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/run-config-2.1.schema.json",
+  "title": "ScanEval run configuration (2.1)",
+  "description": "Frozen description of one evaluation run. 2.1 adds input ids, native PR inputs named by a pack change set, metadata-blinded inputs bound to a reviewed replacement map, and a per-system execution backend. Contains no labels and no credentials: a credential is named by its environment variable and never carried here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "pack",
+    "inputs",
+    "systems",
+    "repetitions",
+    "timeout_seconds",
+    "trace_mode",
+    "network_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.1"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "pack": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to the case pack, relative to this file."
+    },
+    "cache_root": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Immutable source cache directory, relative to this file. Default .repos"
+    },
+    "inputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "input_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "description": "Evaluator-side input identity; defaults to the snapshot id for a full input and to the change set id for a PR input, with a '~blinded' suffix for a metadata-blinded one. Never shown to a scanner."
+          },
+          "snapshot_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The pack snapshot a full input exports. Required when mode is full, absent when mode is pr."
+          },
+          "change_set_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The pack change set a PR input reviews. Required when mode is pr, absent when mode is full."
+          },
+          "mode": {
+            "enum": [
+              "full",
+              "pr"
+            ],
+            "default": "full"
+          },
+          "profile": {
+            "enum": [
+              "standard",
+              "metadata_blinded"
+            ],
+            "default": "standard"
+          },
+          "blinding_map": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Path to the reviewed blinding map, relative to this file. Required exactly when profile is metadata_blinded."
+          }
+        }
+      }
+    },
+    "systems": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "system_id",
+          "adapter",
+          "config"
+        ],
+        "properties": {
+          "system_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+          },
+          "adapter": {
+            "type": "string",
+            "minLength": 1
+          },
+          "config": {
+            "type": "object"
+          },
+          "model_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model_revision": {
+            "type": "string",
+            "minLength": 1
+          },
+          "network_policy": {
+            "enum": [
+              "none",
+              "model_provider_only",
+              "unrestricted"
+            ]
+          },
+          "execution": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "backend"
+            ],
+            "description": "How this system's scanner process is run. 'local' runs it as the operator with no enforced boundary; 'oci' runs every scanner process in a fresh container with enforced filesystem, process, and network policy.",
+            "properties": {
+              "backend": {
+                "enum": [
+                  "local",
+                  "oci"
+                ]
+              },
+              "image": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The scanner runtime image, pinned by digest (name@sha256:... or a local image id sha256:...). Required for oci."
+              },
+              "proxy_image": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The egress proxy image, pinned by digest. Required for oci with network_policy model_provider_only."
+              },
+              "egress": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "host",
+                    "port"
+                  ],
+                  "properties": {
+                    "host": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "port": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 65535
+                    }
+                  }
+                }
+              },
+              "credentials": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "env",
+                    "provider"
+                  ],
+                  "properties": {
+                    "env": {
+                      "type": "string",
+                      "pattern": "^[A-Z_][A-Z0-9_]*$"
+                    },
+                    "provider": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              },
+              "limits": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "memory_mb": {
+                    "type": "integer",
+                    "minimum": 64
+                  },
+                  "cpus": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "pids": {
+                    "type": "integer",
+                    "minimum": 16
+                  },
+                  "tmpfs_mb": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "nofile": {
+                    "type": "integer",
+                    "minimum": 64
+                  }
+                }
+              },
+              "user": {
+                "type": "string",
+                "pattern": "^[0-9]+:[0-9]+$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "repetitions": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "timeout_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "trace_mode": {
+      "enum": [
+        "off",
+        "metadata",
+        "content"
+      ]
+    },
+    "network_policy": {
+      "enum": [
+        "none",
+        "model_provider_only",
+        "unrestricted"
+      ]
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}
