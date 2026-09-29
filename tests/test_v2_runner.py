@@ -156,7 +156,7 @@ def test_run_writes_a_complete_run_directory_and_leaves_the_source_pack_untouche
     assert pilot["adapter"].prepared == 1 and pilot["adapter"].calls == 1
     bundle = out / "invocations" / "snap-a__fake-a__r1"
     written = {path.relative_to(out).as_posix() for path in out.rglob("*") if path.is_file()}
-    assert {"run-config.json", "run-manifest.json", "evaluator/pack.json",
+    assert {"run-config.json", "run-manifest.json", "evaluator/pack.json", "evaluator/schedule.json",
             "inputs/snap-a/provenance.json", "inputs/snap-a/source/src/app.py",
             "invocations/snap-a__fake-a__r1/request.json",
             "invocations/snap-a__fake-a__r1/result.json",
@@ -173,7 +173,10 @@ def test_run_writes_a_complete_run_directory_and_leaves_the_source_pack_untouche
 
     assert json.loads((out / "run-config.json").read_text(encoding="utf-8"))["run_id"] == "run-pilot"
     assert manifest == json.loads((out / "run-manifest.json").read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == "2.0" and manifest["run_id"] == "run-pilot"
+    # Every run writes a 2.1 manifest now, whatever version its configuration is: the manifest
+    # names the schedule the run froze and records each input's preparation outcome.
+    assert manifest["schema_version"] == "2.1" and manifest["run_id"] == "run-pilot"
+    assert manifest["schedule_path"] == "evaluator/schedule.json"
     assert manifest["created_at"] == "2026-09-20T15:00:00+00:00"
     assert manifest["config_sha256"] == canonical_sha256(
         load_document(pilot["config_path"], "run-config"))
@@ -184,6 +187,10 @@ def test_run_writes_a_complete_run_directory_and_leaves_the_source_pack_untouche
     [recorded_input] = manifest["inputs"]
     assert recorded_input["provenance_path"] == "inputs/snap-a/provenance.json"
     assert recorded_input["tree_hash"].startswith("sha256:")
+    assert (recorded_input["input_id"], recorded_input["snapshot_id"], recorded_input["mode"],
+            recorded_input["profile"]) == ("snap-a", "snap-a", "full", "standard")
+    assert recorded_input["input_hash"] == recorded_input["tree_hash"]
+    assert recorded_input["preparation_failure"] is None
     assert [outcome["case_id"] for outcome in recorded_input["mechanical_checks"]] == ["case-a"]
     assert recorded_input["mechanical_checks"][0]["passed"] is True
     [invocation] = manifest["invocations"]
@@ -264,13 +271,30 @@ def test_existing_output_directory_and_unknown_filters_are_refused(tmp_path, pil
 
 
 def test_a_declared_tree_hash_that_does_not_match_the_export_is_refused(tmp_path, upstream):
+    """The input is refused, and the refusal is recorded against it rather than failing the run.
+
+    This used to raise out of the run. An input whose preparation fails is now a recorded
+    preparation failure (its provenance, written before the hash was compared, stays named) and
+    its assignment is a skipped invocation, so no scanner is ever handed the export.
+    """
     repo, commit = upstream
     write_pack(tmp_path / "pack.json", repo, commit, tree_hash="sha256:" + "0" * 64)
     config_path = tmp_path / "run-config.json"
     write_config(config_path, systems=[system_entry("fake-a", "fake")])
+    adapter = FakeAdapter()
 
-    with pytest.raises(ContractError, match="tree hash"):
-        run_from_config(config_path, tmp_path / "out", clock=CLOCK, adapters={"fake": FakeAdapter()})
+    manifest = run_from_config(config_path, tmp_path / "out", clock=CLOCK, adapters={"fake": adapter})
+
+    assert manifest["status"] == "completed" and adapter.calls == 0
+    [recorded] = manifest["inputs"]
+    assert recorded["preparation_failure"]["type"] == "ContractError"
+    assert "declares tree hash" in recorded["preparation_failure"]["message"]
+    assert recorded["tree_hash"] is None and recorded["input_hash"] is None
+    assert recorded["provenance_path"] == "inputs/snap-a/provenance.json"
+    assert recorded["mechanical_checks"] == []
+    [row] = manifest["invocations"]
+    assert row["status"] == "skipped" and row["bundle_path"] is None
+    assert row["skipped_reason"].startswith("input snap-a could not be prepared: ContractError: ")
 
 
 def test_an_adapter_that_cannot_prepare_is_skipped_while_the_other_system_still_runs(tmp_path, upstream):
@@ -412,26 +436,36 @@ def test_an_adapter_exception_is_an_error_invocation_and_the_run_still_completes
                                "message": "RuntimeError: the harness died mid scan"}
 
 
-def test_a_failing_export_leaves_a_failed_manifest_and_never_invokes_a_system(tmp_path, upstream):
-    """Metadata blinding is unavailable in this build, so preparing that input fails the run."""
-    repo, commit = upstream
-    write_pack(tmp_path / "pack.json", repo, commit)
+def test_a_failing_export_is_recorded_against_its_input_and_never_invokes_a_system(tmp_path, upstream):
+    """A pinned commit the repository cannot supply fails that input, not the run.
+
+    This used to leave a failed manifest with nothing in it. The failure is now the input's own
+    record: the run completes, the input's row carries the error, its assignment is a skipped
+    invocation naming it, and the adapter is never called for it.
+    """
+    repo, _commit = upstream
+    write_pack(tmp_path / "pack.json", repo, "f" * 40)
     config_path = tmp_path / "run-config.json"
-    write_config(config_path, systems=[system_entry("fake-a", "fake")],
-                 inputs=[{"snapshot_id": "snap-a", "profile": "metadata_blinded"}])
+    write_config(config_path, systems=[system_entry("fake-a", "fake")])
     adapter = FakeAdapter()
     out = tmp_path / "out"
 
-    with pytest.raises(MaterializationError, match="metadata blinding unavailable"):
-        run_from_config(config_path, out, clock=CLOCK, adapters={"fake": adapter})
+    manifest = run_from_config(config_path, out, clock=CLOCK, adapters={"fake": adapter})
 
-    manifest = load_document(out / MANIFEST_NAME, "run-manifest")
-    assert manifest["status"] == "failed"
-    assert manifest["failure"]["type"] == "MaterializationError"
-    assert "metadata blinding unavailable" in manifest["failure"]["message"]
-    assert manifest["inputs"] == [] and manifest["invocations"] == [] and manifest["systems"] == []
-    assert adapter.prepared == 0 and adapter.calls == 0
-    assert not (out / "evaluator" / "pack.json").exists()
+    assert load_document(out / MANIFEST_NAME, "run-manifest") == manifest
+    assert manifest["status"] == "completed" and "failure" not in manifest
+    [recorded] = manifest["inputs"]
+    assert recorded["preparation_failure"]["type"] == "MaterializationError"
+    assert "git" in recorded["preparation_failure"]["message"]
+    assert (recorded["tree_hash"], recorded["provenance_path"], recorded["mechanical_checks"]) == (None, None, [])
+    [row] = manifest["invocations"]
+    assert row["status"] == "skipped" and row["bundle_path"] is None
+    assert row["skipped_reason"] == ("input snap-a could not be prepared: MaterializationError: "
+                                     + recorded["preparation_failure"]["message"])
+    assert adapter.calls == 0
+    assert not (out / "invocations").exists()
+    # The run still froze its pack and its schedule; nothing about the input was invented.
+    assert (out / "evaluator" / "pack.json").is_file() and (out / "evaluator" / "schedule.json").is_file()
 
 
 def test_an_input_snapshot_the_pack_does_not_declare_is_refused_before_the_output_exists(tmp_path, pilot):
@@ -813,26 +847,34 @@ def test_a_two_input_run_records_the_state_and_notes_of_the_plan_it_actually_bui
 
 
 def test_a_second_input_that_fails_to_export_still_leaves_the_first_one_recorded(tmp_path, upstream):
-    """The partial manifest needs a label state for what finished, so the failure path fills it."""
+    """The first input is recorded and now also runs; the second is recorded as unprepared.
+
+    This used to end the run with a failed manifest listing only the first input. A preparation
+    failure is the input's own record now, so the run continues without it, and the label state
+    recorded for the first input is still the one the incomplete check set supports.
+    """
     repo, commit = upstream
-    repaired = repaired_commit(repo)
-    write_two_snapshot_pack(tmp_path / "pack.json", repo, commit, repaired)
+    repaired_commit(repo)
+    write_two_snapshot_pack(tmp_path / "pack.json", repo, commit, "f" * 40)
     config_path = tmp_path / "run-config.json"
     write_config(config_path, systems=[system_entry("fake-a", "fake")],
-                 inputs=[{"snapshot_id": "snap-a"},
-                         {"snapshot_id": "snap-fixed", "profile": "metadata_blinded"}])
+                 inputs=[{"snapshot_id": "snap-a"}, {"snapshot_id": "snap-fixed"}])
     adapter = FakeAdapter()
     out = tmp_path / "out"
 
-    with pytest.raises(MaterializationError, match="metadata blinding unavailable"):
-        run_from_config(config_path, out, clock=CLOCK, adapters={"fake": adapter})
+    manifest = run_from_config(config_path, out, clock=CLOCK, adapters={"fake": adapter})
 
-    manifest = load_document(out / MANIFEST_NAME, "run-manifest")
-    assert manifest["status"] == "failed"
-    assert manifest["failure"]["type"] == "MaterializationError"
-    assert [recorded["snapshot_id"] for recorded in manifest["inputs"]] == ["snap-a"]
+    assert load_document(out / MANIFEST_NAME, "run-manifest") == manifest
+    assert manifest["status"] == "completed"
+    assert [recorded["snapshot_id"] for recorded in manifest["inputs"]] == ["snap-a", "snap-fixed"]
     # snap-fixed was never checked, so the case is still short of a complete check set.
     assert [(o["case_id"], o["passed"], o["review_state"], o["level"])
             for o in manifest["inputs"][0]["mechanical_checks"]] == [("case-a", True, "draft", None)]
-    assert manifest["invocations"] == [] and manifest["warnings"] == []
-    assert adapter.prepared == 0 and adapter.calls == 0
+    assert manifest["inputs"][0]["preparation_failure"] is None
+    assert manifest["inputs"][1]["preparation_failure"]["type"] == "MaterializationError"
+    assert manifest["inputs"][1]["mechanical_checks"] == []
+    assert [(row["invocation_id"], row["status"]) for row in manifest["invocations"]] == [
+        ("snap-a__fake-a__r1", "success"), ("snap-fixed__fake-a__r1", "skipped")]
+    assert adapter.prepared == 1 and adapter.calls == 1
+    assert any(warning.startswith("snap-fixed: not prepared (MaterializationError: ")
+               for warning in manifest["warnings"])

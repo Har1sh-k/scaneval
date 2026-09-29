@@ -3,11 +3,16 @@
 Layout, all evaluator-side; a scanner only ever sees a private workspace copy of one export:
 
     <out>/
-      run-config.json        canonical copy of the configuration that was executed
-      run-manifest.json      what ran, what was skipped, and where every artifact landed
-      evaluator/pack.json    the pack copy this run froze, with its mechanical check results
-      inputs/<snapshot>/     exported source tree plus preparation provenance beside it
-      invocations/<id>/      one invocation bundle per input, system, and repetition
+      run-config.json          canonical copy of the configuration that was executed
+      run-manifest.json        what ran, what was skipped, and where every artifact landed
+      evaluator/schedule.json  every assignment, frozen plan, and pair, written before any input
+      evaluator/pack.json      the pack copy this run froze, with its mechanical check results
+      inputs/<input id>/       exported source tree plus preparation provenance beside it
+      invocations/<id>/        one invocation bundle per input, system, and repetition
+
+Inputs are named by their input id (:func:`scaneval.contracts.input_identity`): a 2.0
+configuration's snapshot id, or a 2.1 configuration's ``input_id`` or its default. Invocation
+ids join that id, the system id, and the repetition.
 
 A scanner is handed a private workspace copy of one export and writes its raw output and any
 trace into staging directories inside that workspace; :mod:`scaneval.execution` moves them
@@ -17,32 +22,42 @@ resolves inside this run directory.
 Boundaries this module keeps. It never edits the source pack on disk: mechanical check
 results land only in the frozen copy, and that copy is written exactly once, after every
 input is prepared and checked and before the first invocation, so no file here is ever
-rewritten. It never writes labels, plans, decisions, or pack data inside an exported source
-tree. It never approves anything, so every decisions file it writes is a machine draft; a
-plan's scope follows the label state already recorded in the pack, which means a pack
-carrying independent reviews yields a reviewed plan and a freshly checked one yields a draft
-plan. Once the output directory exists, every later failure is recorded: a manifest with
-status ``failed`` is written before the exception leaves this module. It records the declared
-network policy without enforcing it, and it produces single-invocation numbers only: no corpus
-weighting, repeated-run uncertainty, promotion gate, or cross-system comparison is computed
-here. A failed invocation stays a failed invocation and is never rewritten as an empty
-successful scan.
+rewritten. The schedule is written once too, before the first input is fetched, so nothing the
+run observes changes what it was assigned. It never writes labels, plans, decisions, or pack
+data inside an exported source tree. It never approves anything, so every decisions file it
+writes is a machine draft; a plan's scope follows the label state already recorded in the pack,
+which means a pack carrying independent reviews yields a reviewed plan and a freshly checked one
+yields a draft plan.
+
+What fails where. A configuration this run cannot honour (an input the pack does not declare,
+colliding invocation ids, a cache or workspace inside evaluator storage, a native PR input) is
+refused before the output directory exists, so nothing is written. An input that cannot be
+prepared (a failed fetch or export, a declared tree hash the export contradicts) is recorded
+against that input: its manifest row carries the failure, every one of its assignments is a
+skipped invocation carrying the reason, and the other inputs still run. Once the output
+directory exists, any other failure is recorded as well: a manifest with status ``failed`` is
+written before the exception leaves this module. It records the declared network policy without
+enforcing it, and it produces single-invocation numbers only: no corpus weighting,
+repeated-run uncertainty, promotion gate, or cross-system comparison is computed here. A failed
+invocation stays a failed invocation and is never rewritten as an empty successful scan, and an
+input that was never prepared is never rewritten as one that had nothing in it.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import cases, execution, materialize, report, review, scoring
+from . import cases, execution, materialize, report, review, schedule, scoring
 from .adapters import get_adapter
 from .adapters.base import Adapter, AdapterError, SystemSpec
 from .contracts import (
     ContractError,
     canonical_json,
     canonical_sha256,
+    input_identity,
     load_document,
     reject_nonfinite,
     validate_document,
@@ -52,8 +67,25 @@ from .contracts import (
 MANIFEST_NAME = "run-manifest.json"
 MANIFEST_KIND = "run-manifest"
 DEFAULT_CACHE_ROOT = ".repos"
-SCHEMA_VERSION = "2.0"
+SCHEMA_VERSION = "2.1"
 PLAN_MODE = "full"
+
+
+@dataclass(frozen=True)
+class _InputSpec:
+    """One configured input as this run resolved it before anything was written.
+
+    ``input_id`` names the input's directory, its invocations, and its manifest row; ``entry`` is
+    the configuration entry it was resolved from. A native PR input never becomes one of these: it
+    is refused at load, because this build cannot prepare it and a PR input is never replaced by a
+    full scan of its head.
+    """
+
+    input_id: str
+    snapshot_id: str
+    mode: str
+    profile: str
+    entry: dict = field(compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -162,7 +194,44 @@ def _selected(items: list[dict], key: str, only: set[str] | None, label: str) ->
     return [item for item in items if item[key] in only]
 
 
-def _check_invocation_ids(inputs: list[dict], systems: list[dict], repetitions: int) -> None:
+def _input_specs(config: dict, only: set[str] | None) -> tuple[list[_InputSpec], list[str]]:
+    """The configured inputs this run covers, resolved, and the ids of those narrowed away.
+
+    Inputs are selected by input id, which for a 2.0 configuration is the snapshot id. Naming an
+    id the configuration does not contain is refused rather than read as an empty selection.
+
+    A covered native PR input is refused here, before anything is written, rather than prepared
+    as a full scan of its head: a synthesized full scan is never a silent PR fallback. A covered
+    metadata-blinded input is refused the same way, because this build has no reviewed-map
+    transformation to apply and substituting the standard export would publish standard results
+    under a blinded label. An input narrowed away is not prepared, so it is not refused.
+    """
+    identified = [(index, input_identity(entry), entry) for index, entry in enumerate(config["inputs"])]
+    if only is not None:
+        unknown = sorted(set(only) - {input_id for _, input_id, _ in identified})
+        if unknown:
+            raise ContractError(f"inputs not present in the run configuration: {', '.join(unknown)}")
+    specs: list[_InputSpec] = []
+    excluded: list[str] = []
+    for index, input_id, entry in identified:
+        if only is not None and input_id not in only:
+            excluded.append(input_id)
+            continue
+        mode = entry.get("mode", "full")
+        profile = entry.get("profile", "standard")
+        if mode != "full":
+            raise ContractError(
+                f"inputs[{index}] ({input_id}) is a native PR input, which this build cannot prepare; "
+                "the run is refused rather than run as a full scan of the head")
+        if profile != "standard":
+            raise ContractError(
+                f"inputs[{index}] ({input_id}) asks for {profile}, which this build cannot prepare; "
+                "the run is refused rather than run on the standard export")
+        specs.append(_InputSpec(input_id, entry["snapshot_id"], mode, profile, entry))
+    return specs, excluded
+
+
+def _check_invocation_ids(inputs: list[_InputSpec], systems: list[dict], repetitions: int) -> None:
     """Refuse a configuration whose triples collide into one invocation id.
 
     An invocation id joins the input id, the system id, and the repetition, so two distinct
@@ -171,15 +240,15 @@ def _check_invocation_ids(inputs: list[dict], systems: list[dict], repetitions: 
     output directory is created and nothing is written.
     """
     seen: dict[str, tuple[str, str, int]] = {}
-    for entry in inputs:
+    for spec in inputs:
         for system in systems:
             for repetition in range(1, repetitions + 1):
-                triple = (entry["snapshot_id"], system["system_id"], repetition)
+                triple = (spec.input_id, system["system_id"], repetition)
                 identifier = execution.invocation_id(*triple)
                 if identifier in seen:
                     raise ContractError(
                         f"invocation id {identifier!r} is produced by both {seen[identifier]} and "
-                        f"{triple}; rename the snapshot or the system")
+                        f"{triple}; rename the input or the system")
                 seen[identifier] = triple
 
 
@@ -226,44 +295,56 @@ def _check_cache_root(cache_root: Path, out_dir: Path) -> None:
             "somewhere outside the immutable source cache")
 
 
-def _check_input_snapshots(pack: dict, inputs: list[dict]) -> None:
+def _check_input_snapshots(pack: dict, inputs: list[_InputSpec]) -> None:
     """Refuse a configured input the pack does not declare, before anything is written."""
-    for entry in inputs:
-        cases.snapshot_by_id(pack, entry["snapshot_id"])
+    for spec in inputs:
+        cases.snapshot_by_id(pack, spec.snapshot_id)
 
 
-def _prepare_input(entry: dict, pack: dict, out_dir: Path, cache_root: Path,
-                   clock: Callable[[], datetime] | None) -> tuple[execution.PreparedInput, dict]:
-    """Fetch, export, verify, and mechanically check one configured input.
+def _input_row(spec: _InputSpec) -> dict:
+    """The manifest row of *spec* before anything about its preparation is known."""
+    return {"input_id": spec.input_id, "mode": spec.mode, "profile": spec.profile,
+            "snapshot_id": spec.snapshot_id, "tree_hash": None, "input_hash": None,
+            "provenance_path": None, "mechanical_checks": [], "preparation_failure": None}
 
-    The summary records this input's raw check outcomes and nothing that depends on the other
+
+def _prepare_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: Path,
+                   clock: Callable[[], datetime] | None,
+                   row: dict) -> execution.PreparedInput:
+    """Fetch, export, verify, and mechanically check one configured input, filling in *row*.
+
+    *row* is this input's manifest row, filled in as each step completes, so a preparation that
+    fails part way still records what it had written: a provenance record that exists is named
+    even when the export it describes was then refused. The tree hash and the checks are recorded
+    only once they stand.
+
+    The row records this input's raw check outcomes and nothing that depends on the other
     inputs. A case spanning two snapshots is only fully checked once every configured input has
     been prepared, so its label state and its planning notes are derived later, by
     :func:`_planning_records`, rather than read here from an incomplete check set.
     """
-    snapshot_id = entry["snapshot_id"]
-    profile = entry.get("profile", "standard")
-    snapshot = cases.snapshot_by_id(pack, snapshot_id)
+    snapshot = cases.snapshot_by_id(pack, spec.snapshot_id)
     languages = tuple(snapshot["languages"])
     cached = materialize.fetch_snapshot(snapshot["repository"]["url"], snapshot["commit"], cache_root)
-    trial = out_dir / "inputs" / snapshot_id
-    record = materialize.export_snapshot(cached, trial, profile=profile, clock=clock)
+    trial = out_dir / "inputs" / spec.input_id
+    record = materialize.export_snapshot(cached, trial, profile=spec.profile, clock=clock)
     provenance_path = materialize.write_provenance(trial, record)
+    row["provenance_path"] = _relative(provenance_path, out_dir)
     tree_hash = record["trial"]["tree_hash"]
     declared = snapshot.get("tree_hash")
     if declared and declared != tree_hash:
         raise ContractError(
-            f"snapshot {snapshot_id} declares tree hash {declared} but the export produced {tree_hash}"
+            f"snapshot {spec.snapshot_id} declares tree hash {declared} but the export produced {tree_hash}"
         )
-    outcomes = cases.mechanical_checks(pack, snapshot_id, trial / "source", tree_hash, clock=clock)
+    outcomes = cases.mechanical_checks(pack, spec.snapshot_id, trial / "source", tree_hash, clock=clock)
     prepared = execution.PreparedInput(
-        snapshot_id, trial / "source", tree_hash, languages, record, profile,
+        spec.input_id, trial / "source", tree_hash, languages, record, spec.profile, spec.mode,
+        input_hash=tree_hash, source_tree_hash=tree_hash,
     )
-    summary = {"snapshot_id": snapshot_id, "tree_hash": tree_hash,
-               "provenance_path": _relative(provenance_path, out_dir),
-               "mechanical_checks": [{"case_id": outcome["case_id"], "passed": outcome["passed"],
-                                      "checks": outcome["checks"]} for outcome in outcomes]}
-    return prepared, summary
+    row.update({"tree_hash": tree_hash, "input_hash": prepared.binding_hash,
+                "mechanical_checks": [{"case_id": outcome["case_id"], "passed": outcome["passed"],
+                                       "checks": outcome["checks"]} for outcome in outcomes]})
+    return prepared
 
 
 def _vet_adapter_identity(spec: SystemSpec, adapter: Adapter) -> None:
@@ -327,6 +408,14 @@ def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
     preparation: dict = {}
     skipped: str | None = None
     warnings: list[str] = []
+    backend = (entry.get("execution") or {"backend": "local"})["backend"]
+    if backend != "local":
+        # A system configured for an enforcing backend is not run without one: running it here
+        # would record an unenforced local scan for a configuration that asked for enforcement.
+        skipped = (f"execution backend {backend} is not available in this build; the system is not "
+                   "run rather than run without the enforcement its configuration declares")
+        warnings.append(f"{spec.system_id}: not invoked ({skipped})")
+        return _PreparedSystem(spec, None, {}, entry.get("network_policy", default_policy), skipped), warnings
     try:
         if adapters is not None and spec.adapter in adapters:
             adapter = adapters[spec.adapter]
@@ -367,24 +456,36 @@ def _record_label_states(pack: dict, manifest_inputs: list[dict]) -> None:
             outcome["level"] = validation["level"]
 
 
-def _planning_records(pack: dict, prepared_inputs: list[execution.PreparedInput],
+def _plan(pack: dict, spec: _InputSpec, prepared: execution.PreparedInput) -> tuple[dict, list[str]]:
+    """The plan one prepared input is scored against, and the notes on what it left out.
+
+    The labels refer to the snapshot's original export, so that is the tree the plan is built
+    against; the plan binds to what the result binds to. For a standard input named as its own
+    snapshot the two are one tree and the plan is the 2.0 plan it always was.
+    """
+    return cases.build_plan(pack, spec.snapshot_id, prepared.source_tree_hash or prepared.tree_hash,
+                            mode=PLAN_MODE, input_id=prepared.input_id, input_hash=prepared.binding_hash,
+                            profile=prepared.profile, blinding=prepared.blinding)
+
+
+def _planning_records(pack: dict, prepared_inputs: list[tuple[_InputSpec, execution.PreparedInput]],
                       manifest_inputs: list[dict]) -> list[str]:
     """Fill in each input's label state from the frozen pack and return the planning warnings.
 
     This runs once the pack is frozen, so it reads the same state every invocation plans
     against. The notes come from :func:`cases.build_plan`, so they state what was actually
     planned and why a case was left out rather than restating a check outcome that may not
-    decide the question.
+    decide the question. An input that was never prepared has no plan and contributes no note.
     """
     _record_label_states(pack, manifest_inputs)
     warnings: list[str] = []
-    for prepared in prepared_inputs:
-        _, notes = cases.build_plan(pack, prepared.input_id, prepared.tree_hash, mode=PLAN_MODE)
+    for spec, prepared in prepared_inputs:
+        _, notes = _plan(pack, spec, prepared)
         warnings.extend(f"{prepared.input_id}: {note}" for note in notes)
     return warnings
 
 
-def _evaluate_bundle(bundle: Path, pack: dict, prepared: execution.PreparedInput,
+def _evaluate_bundle(bundle: Path, pack: dict, spec: _InputSpec, prepared: execution.PreparedInput,
                      clock: Callable[[], datetime] | None) -> tuple[dict, dict, dict, list[str]]:
     """Plan, draft review decisions, score, and report one finished invocation bundle.
 
@@ -393,7 +494,7 @@ def _evaluate_bundle(bundle: Path, pack: dict, prepared: execution.PreparedInput
     is what that record claims rather than a verification of it. The plan's scope is whatever the
     pack's recorded label state supports; nothing here changes that state.
     """
-    plan, notes = cases.build_plan(pack, prepared.input_id, prepared.tree_hash, mode=PLAN_MODE)
+    plan, notes = _plan(pack, spec, prepared)
     result = load_document(bundle / "result.json", "scan-result")
     decisions = review.draft_decisions(plan, result, pack, clock=clock)
     record = review.review_record(plan, decisions, clock=clock, notes=notes)
@@ -403,6 +504,13 @@ def _evaluate_bundle(bundle: Path, pack: dict, prepared: execution.PreparedInput
     _write_new_text(bundle / "report.html",
                     report.render_report(evaluation, result, plan, review_state=record["state"]))
     return plan, record, evaluation, notes
+
+
+def _skipped_invocation(row: dict, reason: str) -> dict:
+    """A manifest row for an assignment that was never invoked, and why. No scan happened."""
+    return {**row, "status": "skipped", "claim_records": None, "plan_scope": None,
+            "targets_assigned": None, "targets_detected": None, "pending_matching_count": None,
+            "bundle_path": None, "review_state": None, "skipped_reason": reason}
 
 
 def _manifest(*, config: dict, pack: dict, selection: dict, manifest_inputs: list[dict],
@@ -421,6 +529,7 @@ def _manifest(*, config: dict, pack: dict, selection: dict, manifest_inputs: lis
         "systems": [system.summary() for system in systems],
         "invocations": invocations,
         "warnings": warnings,
+        "schedule_path": schedule.SCHEDULE_PATH,
         **({"failure": failure} if failure is not None else {}),
     }
     return validate_document(MANIFEST_KIND, manifest)
@@ -438,24 +547,37 @@ def run_from_config(
 ) -> dict:
     """Run every configured (input, system, repetition) and return the run manifest.
 
+    A run configuration at 2.0 or 2.1 is accepted; the manifest is always written at 2.1.
     ``adapters`` maps adapter names to instances and replaces the registry lookup, so a test
-    can supply a fake without touching the registry. ``only_inputs`` and ``only_systems``
-    narrow the run; naming something the configuration does not contain is an error rather
-    than a silently empty run, and what was narrowed away is recorded in the manifest.
-    ``out_dir`` must not exist, and ``workspace_root`` must be outside it.
+    can supply a fake without touching the registry. ``only_inputs`` (input ids) and
+    ``only_systems`` narrow the run; naming something the configuration does not contain is an
+    error rather than a silently empty run, and what was narrowed away is recorded in the
+    manifest and the schedule. ``out_dir`` must not exist, and ``workspace_root`` must be outside
+    it.
 
     ``out_dir`` is resolved once before anything is written, so every recorded path is relative
-    to the same real directory. The manifest's planning notes and per-input label states are
+    to the same real directory. The schedule is built from the configuration and the pack as
+    supplied before the output directory exists, and written to ``evaluator/schedule.json`` before
+    the first input is fetched. The manifest's planning notes and per-input label states are
     derived after every input has been checked and the pack has been frozen, which is what the
     invocations then plan against.
 
-    An input snapshot the pack does not declare, colliding invocation ids, a cache root that
-    overlaps the output directory, and a workspace inside evaluator storage are all refused
-    before the output directory is created, so a refused run writes nothing at all. Once that
-    directory exists, any failure (preparing an input, preparing an adapter, or running an
-    invocation) writes a manifest with status ``failed`` recording what had finished, and the
-    exception is re-raised; if writing that partial manifest itself fails, that error propagates
-    with the original as its context.
+    Refused before the output directory is created, so a refused run writes nothing at all: an
+    input the pack does not declare, a native PR input or an input profile this build cannot
+    prepare, colliding invocation ids, a cache root that overlaps the output directory, and a
+    workspace inside evaluator storage.
+
+    An input whose preparation raises (a failed fetch or export, a declared tree hash the export
+    contradicts) is recorded, not raised: its manifest row carries the failure's type and
+    message, every one of its assignments becomes a skipped invocation naming it, no adapter is
+    ever called for it, and the remaining inputs still run. A run in which every input failed is
+    still a completed run, because the loop finished; its invocations are all skipped. A system
+    whose adapter cannot be resolved or prepared is recorded as a skipped system the same way.
+    Any other failure once the output directory exists (writing the schedule or the frozen pack,
+    recording an invocation, or an interrupt such as ``KeyboardInterrupt`` at any point,
+    preparation included) writes a manifest with status ``failed`` recording what had finished,
+    and the exception is re-raised; if writing that partial manifest itself fails, that error
+    propagates with the original as its context.
 
     This does not approve any label, does not retry or rerun a failed invocation, does not
     aggregate across inputs or systems, and does not enforce the declared network policy.
@@ -470,44 +592,58 @@ def run_from_config(
     cache_root = base / config.get("cache_root", DEFAULT_CACHE_ROOT)
     pack = cases.load_pack(pack_path)
 
-    inputs = _selected(config["inputs"], "snapshot_id", only_inputs, "inputs")
+    inputs, excluded_inputs = _input_specs(config, only_inputs)
     systems = _selected(config["systems"], "system_id", only_systems, "systems")
     _check_invocation_ids(inputs, systems, config["repetitions"])
     _check_input_snapshots(pack, inputs)
     _check_cache_root(cache_root, out_dir)
     _check_workspace_root(workspace_root, out_dir, cache_root,
-                          [out_dir / "inputs" / entry["snapshot_id"] for entry in inputs])
+                          [out_dir / "inputs" / spec.input_id for spec in inputs])
 
-    selected_inputs = {entry["snapshot_id"] for entry in inputs}
     selected_systems = {entry["system_id"] for entry in systems}
     selection = {
         "only_inputs": sorted(only_inputs) if only_inputs is not None else None,
         "only_systems": sorted(only_systems) if only_systems is not None else None,
-        "excluded_inputs": [entry["snapshot_id"] for entry in config["inputs"]
-                            if entry["snapshot_id"] not in selected_inputs],
+        "excluded_inputs": excluded_inputs,
         "excluded_systems": [entry["system_id"] for entry in config["systems"]
                              if entry["system_id"] not in selected_systems],
     }
+    # Built from the pack as it was supplied, before any check has run against an export, and
+    # before anything is written: a schedule that cannot be built refuses the run here.
+    frozen_schedule = schedule.build_schedule(config, pack, created_at=_now(clock),
+                                              inputs=[spec.entry for spec in inputs], systems=systems)
 
     out_dir.mkdir(parents=True, exist_ok=False)
 
     warnings: list[str] = []
-    prepared_inputs: list[execution.PreparedInput] = []
+    prepared_inputs: list[tuple[_InputSpec, execution.PreparedInput]] = []
     manifest_inputs: list[dict] = []
     prepared_systems: list[_PreparedSystem] = []
     invocations: list[dict] = []
     # Everything from here on is inside the run directory, so every failure is recorded there.
     try:
         _write_new(out_dir / "run-config.json", config)
-
-        for entry in inputs:
-            prepared, summary = _prepare_input(entry, pack, out_dir, cache_root, clock)
-            prepared_inputs.append(prepared)
-            manifest_inputs.append(summary)
-
-        # The pack is frozen once, here: every input has been checked and nothing is invoked yet.
         evaluator_dir = out_dir / "evaluator"
         evaluator_dir.mkdir()
+        # On disk before the first input is fetched, so what the run was assigned is recorded
+        # before anything about how the run went is known.
+        _write_new(out_dir / schedule.SCHEDULE_PATH, frozen_schedule)
+
+        for spec in inputs:
+            row = _input_row(spec)
+            try:
+                prepared = _prepare_input(spec, pack, out_dir, cache_root, clock, row)
+            except Exception as exc:
+                # This input is recorded as unprepared and its assignments as skipped below; an
+                # interrupt is not an Exception and still stops the whole run.
+                row["preparation_failure"] = {"type": type(exc).__name__, "message": _message(exc)}
+                warnings.append(f"{spec.input_id}: not prepared ({type(exc).__name__}: {_message(exc)})")
+                manifest_inputs.append(row)
+                continue
+            manifest_inputs.append(row)
+            prepared_inputs.append((spec, prepared))
+
+        # The pack is frozen once, here: every input has been checked and nothing is invoked yet.
         _write_new(evaluator_dir / "pack.json", pack)
         # Only now does the pack say what each case's check set amounts to, so the manifest's
         # planning notes and per-input label states are derived from the frozen copy.
@@ -518,28 +654,35 @@ def run_from_config(
             prepared_systems.append(system)
             warnings.extend(system_warnings)
 
-        for prepared in prepared_inputs:
+        prepared_by_id = {spec.input_id: prepared for spec, prepared in prepared_inputs}
+        failures = {row["input_id"]: row["preparation_failure"] for row in manifest_inputs
+                    if row["preparation_failure"] is not None}
+        for spec in inputs:
+            prepared = prepared_by_id.get(spec.input_id)
             for system in prepared_systems:
-                spec = system.spec
+                system_spec = system.spec
                 for repetition in range(1, config["repetitions"] + 1):
                     row: dict[str, Any] = {
-                        "invocation_id": execution.invocation_id(prepared.input_id, spec.system_id, repetition),
-                        "input_id": prepared.input_id, "system_id": spec.system_id, "repetition": repetition,
+                        "invocation_id": execution.invocation_id(spec.input_id, system_spec.system_id, repetition),
+                        "input_id": spec.input_id, "system_id": system_spec.system_id, "repetition": repetition,
                     }
+                    if prepared is None:
+                        failure = failures[spec.input_id]
+                        invocations.append(_skipped_invocation(
+                            row, f"input {spec.input_id} could not be prepared: "
+                                 f"{failure['type']}: {failure['message']}"))
+                        continue
                     if system.skipped is not None:
-                        invocations.append({**row, "status": "skipped", "claim_records": None, "plan_scope": None,
-                                            "targets_assigned": None, "targets_detected": None,
-                                            "pending_matching_count": None, "bundle_path": None,
-                                            "review_state": None, "skipped_reason": system.skipped})
+                        invocations.append(_skipped_invocation(row, system.skipped))
                         continue
                     bundle = execution.run_invocation(
-                        prepared=prepared, adapter=system.adapter, spec=spec,
+                        prepared=prepared, adapter=system.adapter, spec=system_spec,
                         preparation=system.preparation, out_dir=out_dir / "invocations",
                         run_id=config["run_id"], repetition=repetition,
                         timeout_seconds=config["timeout_seconds"], trace_mode=config["trace_mode"],
                         network_policy=system.network_policy, workspace_root=workspace_root, clock=clock,
                     )
-                    plan, record, evaluation, _notes = _evaluate_bundle(bundle, pack, prepared, clock)
+                    plan, record, evaluation, _notes = _evaluate_bundle(bundle, pack, spec, prepared, clock)
                     metrics = evaluation["metrics"]
                     invocations.append({**row, "status": evaluation["status"],
                                         "claim_records": metrics["claim_records"], "plan_scope": plan["scope"],
