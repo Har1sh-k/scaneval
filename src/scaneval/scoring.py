@@ -44,7 +44,16 @@ def _ratio(numerator: int, denominator: int) -> float | None:
     return numerator / denominator if denominator else None
 
 
-def _controls(plan: dict, result: dict, decisions: dict, claim_ids: set) -> dict:
+def _control_observations(plan: dict, result: dict, decisions: dict, claim_ids: set) -> dict:
+    """Per control, what this one saved scan establishes about it, in plan order.
+
+    ``completed`` is the scan's own claim to a valid complete observation, which only ``success``
+    makes. ``resolved`` needs that completion and a resolved assessment: a confirmed false
+    allegation, or a quiet assessment over output whose bundles are resolved, because silence
+    about a claim nobody has split is not silence. ``false_allegation`` is the completed-only
+    numerator, and ``observed_false_allegation`` keeps a reviewed failure from incomplete output
+    visible without letting that output into the rate.
+    """
     controls = {x["control_id"]: x for x in plan["controls"]}
     assessments = {}
     for assessment in decisions["control_assessments"]:
@@ -54,50 +63,51 @@ def _controls(plan: dict, result: dict, decisions: dict, claim_ids: set) -> dict
         if not set(assessment["claim_ids"]).issubset(claim_ids):
             raise ContractError(f"Unknown claim in control assessment: {control_id}")
         assessments[control_id] = assessment
-
-    output = {}
-    for kind in ("capability_safe", "fixed_target"):
-        eligible = [x for x in controls.values() if x["type"] in (kind, "both")]
-        assigned = len(eligible)
-        completed = assigned if result["status"] == "success" else 0
-        observed_false = sum(
-            assessments.get(control["control_id"], {}).get("decision") == "false_allegation"
-            for control in eligible
-        )
-        resolved = false = 0
-        if completed:
-            for control in eligible:
-                assessment = assessments.get(control["control_id"])
-                decision = assessment["decision"] if assessment else "unresolved"
-                # A confirmed allegation is enough for failure, but quietness
-                # requires assessable full output, including unresolved bundles.
-                if decision == "false_allegation":
-                    resolved += 1
-                    false += 1
-                elif decision == "quiet" and result["bundles_resolved"]:
-                    resolved += 1
-        output[kind] = {
-            "assigned": assigned,
+    completed = result["status"] == "success"
+    observations = {}
+    for control_id, control in controls.items():
+        assessment = assessments.get(control_id)
+        decision = assessment["decision"] if assessment else "unresolved"
+        # A confirmed allegation is enough for failure, but quietness
+        # requires assessable full output, including unresolved bundles.
+        confirmed_false = decision == "false_allegation"
+        quiet = decision == "quiet" and result["bundles_resolved"]
+        observations[control_id] = {
+            "type": control["type"],
+            "decision": decision,
             "completed": completed,
-            "resolved": resolved,
-            "false_allegations": false,
-            # Keep explicit failures visible outside the completed-only rate.
-            "observed_false_allegations": observed_false,
-            "resolved_false_alarm_rate": _ratio(false, resolved),
-            "sensitivity_lower": _ratio(false, completed),
-            "sensitivity_upper": _ratio(false + completed - resolved, completed),
-            "completion_mass": _ratio(completed, assigned),
-            "assessable_mass": _ratio(resolved, assigned),
+            "resolved": completed and (confirmed_false or quiet),
+            "false_allegation": completed and confirmed_false,
+            "observed_false_allegation": confirmed_false,
         }
-    return output
+    return observations
 
 
-def score(plan: dict, result: dict, decisions: dict) -> dict:
-    """Replay a single scan, using equal target/control weights within it.
+def _random_order_probability(delivered: int, hits: int, budget: int) -> float:
+    """Chance that a uniform random order of *delivered* claims puts one of *hits* in the first *budget*.
 
-Inputs are immutable. Every reference and decision-to-result binding is
-checked before scoring. Only packaged local schemas are read. No network,
-clock, randomness or LLM calls are used.
+    The complement of drawing no accepted claim in the first ``min(budget, delivered)`` positions,
+    with duplicates delivered as the separate positions they occupy. Zero for empty output and for
+    a target no claim hit.
+    """
+    b = min(budget, delivered)
+    if not (delivered and hits):
+        return 0.0
+    return 1 - (comb(delivered - hits, b) / comb(delivered, b) if delivered - hits >= b else 0)
+
+
+def observe(plan: dict, result: dict, decisions: dict) -> dict:
+    """What one saved scan establishes about each planned target and control, one record each.
+
+    This is the per-observation layer :func:`score` summarizes and corpus aggregation weights, so
+    both read the same decisions the same way: bindings are checked first, one claim or exact
+    duplicate group can hit at most one target, a duplicate earns no second hit, an unresolved
+    match earns nothing and is counted as pending, and only ``success`` output can make a control
+    observation complete. A target's ``first_hit_rank`` is measured only for native order over
+    resolved bundles; ``budget_measurable`` says whether a finite budget can be read off this scan
+    at all, which is a different fact from a measured miss.
+
+    Inputs are immutable, and nothing here reads a clock, the network, or a random source.
     """
     validate_document("evaluation-plan", plan)
     validate_document("scan-result", result)
@@ -139,7 +149,7 @@ clock, randomness or LLM calls are used.
         elif state == "unresolved":
             pending.add(key)
 
-    controls = _controls(plan, result, decisions, set(claims))
+    control_observations = _control_observations(plan, result, decisions, set(claims))
     false_control_groups = {
         fingerprints[claim_id]
         for assessment in decisions["control_assessments"]
@@ -153,39 +163,116 @@ clock, randomness or LLM calls are used.
     if valid_positive_output:
         for fingerprint, target_id in accepted.items():
             hits[target_id].extend(groups[fingerprint])
+    pending_targets = {target_id for _fingerprint, target_id in pending}
 
+    budget_ready = result["ranking"] == "native" and result["bundles_resolved"]
     target_results = []
     for target_id in sorted(targets):
         first = None
-        if hits[target_id] and result["ranking"] == "native" and result["bundles_resolved"]:
+        if hits[target_id] and budget_ready:
             first = min(claims[claim_id]["rank"] for claim_id in hits[target_id])
         target_results.append({
             "target_id": target_id,
             "detected": bool(hits[target_id]),
             "first_hit_rank": first,
+            "hit_claims": len(hits[target_id]),
+            "unresolved_match": target_id in pending_targets,
         })
-    target_count = len(targets)
-    hit_count = sum(x["detected"] for x in target_results)
     budgets = sorted(plan["review_budgets"])
-    budget_ready = result["ranking"] == "native" and result["bundles_resolved"]
+    random_order = None
+    if result["ranking"] == "unranked" and result["bundles_resolved"]:
+        delivered = len(claims)
+        # Plan order, which is the order the per-input expectation has always been summed in.
+        random_order = {
+            str(budget): {target_id: _random_order_probability(delivered, len(hits[target_id]), budget)
+                          for target_id in targets}
+            for budget in budgets
+        }
+    return {
+        "result_sha256": digest,
+        "plan_sha256": canonical_sha256(plan),
+        "decisions_sha256": canonical_sha256(decisions),
+        "status": result["status"],
+        "ranking": result["ranking"],
+        "bundles_resolved": result["bundles_resolved"],
+        "completed": result["status"] == "success",
+        "valid_positive_output": valid_positive_output,
+        "budget_measurable": budget_ready,
+        "review_budgets": budgets,
+        "targets": target_results,
+        "controls": [{"control_id": control_id, **observation}
+                     for control_id, observation in control_observations.items()],
+        "random_order": random_order,
+        "claims": {
+            "records": len(claims),
+            "unique": len(groups),
+            "duplicate_copies": len(claims) - len(groups),
+            "delivered": len(claims) if result["bundles_resolved"] else None,
+            "unmatched_unique": len(set(groups) - set(accepted) - false_control_groups),
+            "pending_matching": len(pending),
+        },
+        "duplicate_groups": [
+            {"canonical_claim_id": ids[0], "claim_ids": list(ids)}
+            for ids in groups.values() if len(ids) > 1
+        ],
+        "usage": dict(result["usage"]),
+    }
+
+
+def _control_summary(observations: list[dict]) -> dict:
+    """The per-input control view :func:`score` reports, one entry per control class."""
+    output = {}
+    for kind in ("capability_safe", "fixed_target"):
+        eligible = [x for x in observations if x["type"] in (kind, "both")]
+        assigned = len(eligible)
+        completed = sum(x["completed"] for x in eligible)
+        observed_false = sum(x["observed_false_allegation"] for x in eligible)
+        resolved = sum(x["resolved"] for x in eligible)
+        false = sum(x["false_allegation"] for x in eligible)
+        output[kind] = {
+            "assigned": assigned,
+            "completed": completed,
+            "resolved": resolved,
+            "false_allegations": false,
+            # Keep explicit failures visible outside the completed-only rate.
+            "observed_false_allegations": observed_false,
+            "resolved_false_alarm_rate": _ratio(false, resolved),
+            "sensitivity_lower": _ratio(false, completed),
+            "sensitivity_upper": _ratio(false + completed - resolved, completed),
+            "completion_mass": _ratio(completed, assigned),
+            "assessable_mass": _ratio(resolved, assigned),
+        }
+    return output
+
+
+def score(plan: dict, result: dict, decisions: dict) -> dict:
+    """Replay a single scan, using equal target/control weights within it.
+
+Inputs are immutable. Every reference and decision-to-result binding is
+checked before scoring. Only packaged local schemas are read. No network,
+clock, randomness or LLM calls are used.
+    """
+    observation = observe(plan, result, decisions)
+    target_results = [{"target_id": x["target_id"], "detected": x["detected"],
+                       "first_hit_rank": x["first_hit_rank"]} for x in observation["targets"]]
+    target_count = len(target_results)
+    hit_count = sum(x["detected"] for x in target_results)
+    budgets = observation["review_budgets"]
+    budget_ready = observation["budget_measurable"]
     recall = {
         str(b): _ratio(sum(x["first_hit_rank"] is not None and x["first_hit_rank"] <= b
                            for x in target_results), target_count) if budget_ready else None
         for b in budgets
     }
     expected = None
-    if result["ranking"] == "unranked" and result["bundles_resolved"]:
-        delivered = len(claims)
+    if observation["random_order"] is not None:
         expected = {}
         for budget in budgets:
-            b = min(budget, delivered)
             probability_sum = 0.0
-            for target_id in targets:
-                h = len(hits[target_id])
-                if delivered and h:
-                    probability_sum += 1 - (comb(delivered - h, b) / comb(delivered, b)
-                                            if delivered - h >= b else 0)
+            for probability in observation["random_order"][str(budget)].values():
+                probability_sum += probability
             expected[str(budget)] = probability_sum / target_count if target_count else None
+    claims = observation["claims"]
 
     warnings = []
     if plan["scope"] == "diagnostic":
@@ -194,7 +281,7 @@ clock, randomness or LLM calls are used.
         warnings.append("Draft labels (not independently reviewed): pipeline diagnostics, not benchmark evidence.")
     if not result["bundles_resolved"]:
         warnings.append("Unresolved bundles: claim budgets and total atomic-claim burden are pending.")
-    if pending:
+    if claims["pending_matching"]:
         warnings.append("Unresolved target matches earn no confirmed detection credit.")
     if result["ranking"] == "unranked":
         warnings.append("Random-order expectation is not native prioritization or a promotion metric.")
@@ -208,9 +295,9 @@ clock, randomness or LLM calls are used.
         "run_id": result["run_id"],
         "system_id": result["system_id"],
         "input_hash": result["input_hash"],
-        "result_sha256": digest,
-        "plan_sha256": canonical_sha256(plan),
-        "decisions_sha256": canonical_sha256(decisions),
+        "result_sha256": observation["result_sha256"],
+        "plan_sha256": observation["plan_sha256"],
+        "decisions_sha256": observation["decisions_sha256"],
         "status": result["status"],
         "metrics": {
             "known_target_recall": _ratio(hit_count, target_count),
@@ -218,20 +305,17 @@ clock, randomness or LLM calls are used.
             "random_order_expected_recall": expected,
             "targets_assigned": target_count,
             "targets_detected": hit_count,
-            "completed": result["status"] == "success",
-            "claims_delivered": len(claims) if result["bundles_resolved"] else None,
-            "claim_records": len(claims),
-            "unique_claims": len(groups),
-            "duplicate_copies": len(claims) - len(groups),
-            "unmatched_unique_claims": len(set(groups) - set(accepted) - false_control_groups),
-            "pending_matching_count": len(pending),
-            "controls": controls,
-            "usage": dict(result["usage"]),
+            "completed": observation["completed"],
+            "claims_delivered": claims["delivered"],
+            "claim_records": claims["records"],
+            "unique_claims": claims["unique"],
+            "duplicate_copies": claims["duplicate_copies"],
+            "unmatched_unique_claims": claims["unmatched_unique"],
+            "pending_matching_count": claims["pending_matching"],
+            "controls": _control_summary(observation["controls"]),
+            "usage": observation["usage"],
         },
         "targets": target_results,
-        "duplicate_groups": [
-            {"canonical_claim_id": ids[0], "claim_ids": list(ids)}
-            for ids in groups.values() if len(ids) > 1
-        ],
+        "duplicate_groups": observation["duplicate_groups"],
         "warnings": warnings,
     }

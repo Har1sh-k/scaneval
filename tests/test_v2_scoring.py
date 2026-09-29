@@ -342,3 +342,55 @@ def test_unranked_output_never_fabricates_native_ranks():
     assert out["targets"][0]["first_hit_rank"] is None
     assert out["metrics"]["recall_at_budget"] == {"3": None, "5": None}
     assert out["metrics"]["random_order_expected_recall"] is not None
+
+
+def test_observe_is_the_per_observation_layer_score_summarizes():
+    """observe() keeps one record per planned target and control, and score() is built on it."""
+    from scaneval.scoring import observe
+
+    claims = [
+        claim("c1", "T1 specific root cause", rank=1),
+        claim("c2", "T1 specific root cause", rank=2),
+        claim("c3", "unrelated concern", rank=3, kind="authz_bypass"),
+    ]
+    result = make_result(claims)
+    decisions = make_decisions(
+        result,
+        matches=[("c1", "T1", "accepted", "specific root cause"),
+                 ("c3", "T2", "unresolved", "pending review")],
+        controls=[("C1", "quiet", [], "reviewed full output")],
+    )
+    observed = observe(make_plan(), result, decisions)
+    assert observed["budget_measurable"] is True and observed["completed"] is True
+    assert observed["targets"] == [
+        {"target_id": "T1", "detected": True, "first_hit_rank": 1, "hit_claims": 2,
+         "unresolved_match": False},
+        {"target_id": "T2", "detected": False, "first_hit_rank": None, "hit_claims": 0,
+         "unresolved_match": True},
+    ]
+    assert observed["controls"] == [
+        {"control_id": "C1", "type": "capability_safe", "decision": "quiet", "completed": True,
+         "resolved": True, "false_allegation": False, "observed_false_allegation": False},
+    ]
+    assert observed["claims"] == {"records": 3, "unique": 2, "duplicate_copies": 1, "delivered": 3,
+                                  "unmatched_unique": 1, "pending_matching": 1}
+    scored = score(make_plan(), result, decisions)
+    assert [t["detected"] for t in scored["targets"]] == [t["detected"] for t in observed["targets"]]
+    assert scored["metrics"]["pending_matching_count"] == 1
+
+
+def test_observe_marks_a_budget_unmeasurable_rather_than_missed():
+    """Unranked output and unresolved bundles cannot answer a finite budget; that is not a miss."""
+    from scaneval.scoring import observe
+
+    unranked = make_result([claim("c1", "T1 specific root cause")], ranking="unranked")
+    observed = observe(make_plan(), unranked, make_decisions(
+        unranked, matches=[("c1", "T1", "accepted", "specific root cause")]))
+    assert observed["budget_measurable"] is False
+    assert observed["targets"][0]["detected"] is True and observed["targets"][0]["first_hit_rank"] is None
+    assert observed["random_order"]["3"]["T1"] == 1.0 and observed["random_order"]["3"]["T2"] == 0.0
+    bundled = make_result([claim("c1", "T1 specific root cause", rank=1)], bundles_resolved=False)
+    observed = observe(make_plan(), bundled, make_decisions(
+        bundled, matches=[("c1", "T1", "accepted", "specific root cause")]))
+    assert observed["budget_measurable"] is False and observed["random_order"] is None
+    assert observed["claims"]["delivered"] is None
