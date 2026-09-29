@@ -28,6 +28,9 @@ SCHEMA_VERSIONS: dict[str, tuple[str, ...]] = {
     "review-record": ("2.0",),
     "run-config": ("2.0", "2.1"),
     "run-manifest": ("2.0", "2.1"),
+    # The frozen evaluation schedule a run writes before it prepares any input. A kind first
+    # published at 2.1 has 2.1 as its only version, so its schema keeps the plain file name.
+    "evaluation-schedule": ("2.1",),
 }
 CONTRACT_KINDS = frozenset(SCHEMA_VERSIONS)
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
@@ -1554,6 +1557,79 @@ def _validate_run_manifest(document: dict[str, Any]) -> None:
             _require_relative_path(row["bundle_path"], f"{label}.bundle_path")
 
 
+# --- evaluation schedule ------------------------------------------------------------------------
+
+
+def _validate_evaluation_schedule(document: dict[str, Any]) -> None:
+    """Check that a schedule is complete and consistent with itself; it says nothing about outcomes.
+
+    Every input, system, and assignment id is unique, and the assignments are exactly every input
+    under every system for every repetition, each named by the invocation id its bundle carries
+    (``<input>__<system>__r<n>``, the one format :func:`scaneval.execution.invocation_id` writes), so
+    a schedule cannot leave out the assignment that later failed. A full input names its snapshot
+    and no change set; a PR input names its change set. A blinded input names the map it is
+    transformed with, and no other input names one. A pair joins a target planned on one input with
+    a fixed-target control of that target planned on a different input of the same profile and mode,
+    and pairs repetitions this schedule declares. Nothing here reads a pack, an export, or a result.
+    """
+    inputs = {item["input_id"]: item for item in document["inputs"]}
+    _unique([item["input_id"] for item in document["inputs"]], "inputs.input_id")
+    _unique([system["system_id"] for system in document["systems"]], "systems.system_id")
+    _unique([row["assignment_id"] for row in document["assignments"]], "assignment_id")
+    for item in document["inputs"]:
+        label = f"input {item['input_id']}"
+        if item["mode"] == "full" and (item["snapshot_id"] is None or item["change_set_id"] is not None
+                                       or item["change_set"] is not None):
+            raise ContractError(f"{label}: a full input names a snapshot_id and no change set")
+        if item["mode"] == "pr" and item["change_set_id"] is None:
+            raise ContractError(f"{label}: a pr input names its change_set_id")
+        if (item["profile"] == "metadata_blinded") != (item["blinding"] is not None):
+            raise ContractError(f"{label}: a blinding map is named exactly when the profile is metadata_blinded")
+    repetitions = document["repetitions"]
+    expected = {f"{input_id}__{system['system_id']}__r{repetition}": (input_id, system["system_id"], repetition)
+                for input_id in inputs for system in document["systems"]
+                for repetition in range(1, repetitions + 1)}
+    recorded = {row["assignment_id"]: (row["input_id"], row["system_id"], row["repetition"])
+                for row in document["assignments"]}
+    if recorded != expected:
+        missing = sorted(set(expected) - set(recorded))
+        extra = sorted(set(recorded) - set(expected))
+        mismatched = sorted(key for key in set(recorded) & set(expected) if recorded[key] != expected[key])
+        raise ContractError(
+            "assignments must be every input under every system for every repetition, each named by "
+            f"its invocation id; missing {missing[:3]}, unexpected {extra[:3]}, misnamed {mismatched[:3]}")
+    for index, pair in enumerate(document["pairs"]):
+        label = f"pairs[{index}]"
+        vulnerable = inputs.get(pair["vulnerable_input_id"])
+        fixed = inputs.get(pair["fixed_input_id"])
+        if vulnerable is None or fixed is None:
+            raise ContractError(f"{label} names an input this schedule does not declare")
+        if pair["vulnerable_input_id"] == pair["fixed_input_id"]:
+            raise ContractError(f"{label}: the vulnerable and fixed observations are on one input")
+        if (vulnerable["profile"], vulnerable["mode"]) != (fixed["profile"], fixed["mode"]):
+            raise ContractError(f"{label}: a pair joins inputs of one profile and one mode")
+        if vulnerable["plan"]["state"] != "frozen" or fixed["plan"]["state"] != "frozen":
+            raise ContractError(f"{label}: a pair is matched only between plans frozen before execution")
+        targets = {target["target_id"]: target for target in vulnerable["plan"]["targets"]}
+        controls = {control["control_id"]: control for control in fixed["plan"]["controls"]}
+        target = targets.get(pair["target_id"])
+        control = controls.get(pair["control_id"])
+        if target is None or control is None:
+            raise ContractError(f"{label}: the target must be planned on the vulnerable input and the "
+                                "control on the fixed input")
+        if control["type"] not in ("fixed_target", "both") or control["target_id"] != pair["target_id"]:
+            raise ContractError(f"{label}: control {pair['control_id']} is not a fixed-target control of "
+                                f"{pair['target_id']}")
+        if pair["canonical_id"] != target["canonical_id"]:
+            raise ContractError(f"{label}: canonical_id is not the planned target's canonical id")
+        seen: set[tuple[int, int]] = set()
+        for left, right in pair["repetition_pairs"]:
+            if not (1 <= left <= repetitions and 1 <= right <= repetitions) or (left, right) in seen:
+                raise ContractError(f"{label}: repetition pairs name repetitions this schedule declares, "
+                                    "each pair once")
+            seen.add((left, right))
+
+
 _RUNTIME_VALIDATORS = {
     "case-pack": _validate_case_pack,
     "review-record": _validate_review_record,
@@ -1564,6 +1640,8 @@ _RUNTIME_VALIDATORS = {
     "evaluation-plan": _validate_evaluation_plan,
     "review-decisions": _validate_review_decisions,
     "run-manifest": _validate_run_manifest,
+    # Kinds first published at 2.1, one per feature.
+    "evaluation-schedule": _validate_evaluation_schedule,
 }
 
 
