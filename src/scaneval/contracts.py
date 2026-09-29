@@ -28,6 +28,9 @@ SCHEMA_VERSIONS: dict[str, tuple[str, ...]] = {
     "review-record": ("2.0",),
     "run-config": ("2.0", "2.1"),
     "run-manifest": ("2.0", "2.1"),
+    # SARIF import (profile sarif-import-1): the record scaneval.sarif writes beside the scan
+    # result it produced from a saved log. A kind first published at 2.1 keeps the plain file name.
+    "import-record": ("2.1",),
 }
 CONTRACT_KINDS = frozenset(SCHEMA_VERSIONS)
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
@@ -1554,6 +1557,58 @@ def _validate_run_manifest(document: dict[str, Any]) -> None:
             _require_relative_path(row["bundle_path"], f"{label}.bundle_path")
 
 
+# SARIF import (profile sarif-import-1).
+def _validate_import_record(document: dict[str, Any]) -> None:
+    """Check what an import record asserts about its own accounting; it says nothing about the log.
+
+    Every result of the imported run is accounted for exactly once: as a claim, an exclusion the
+    profile states, or a loss, so a result cannot disappear between the three lists and the
+    counts are the lengths of the lists they summarize. A run whose result list was absent
+    accounts for nothing. The record binds the tree hash and system it names in two places each,
+    and they must agree. A recorded normalization decision names a result this import flagged
+    for bundle review, at most once, and names its reviewer by the same :func:`is_stated` rule
+    every other recorded review follows. Whether the reviewer read anything, and whether the log
+    told the truth about its own execution, is outside what this can see.
+    """
+    _require_relative_path(document["artifact"]["path"], "artifact.path")
+    if document["source_binding"]["tree_hash"] != document["input_hash"]:
+        raise ContractError("source_binding.tree_hash must equal input_hash")
+    if document["system"]["system_id"] != document["system_id"]:
+        raise ContractError("system.system_id must equal system_id")
+    if document["sarif"]["run_index"] >= document["sarif"]["run_count"]:
+        raise ContractError("sarif.run_index must name one of the log's runs")
+    claims, excluded, losses = document["claims"], document["excluded"], document["losses"]
+    _unique([entry["claim_id"] for entry in claims], "claims.claim_id")
+    _unique([entry["pointer"] for entry in claims + excluded + losses],
+            "result pointer across claims, excluded, and losses")
+    counts = document["counts"]
+    for key, entries in (("claims", claims), ("excluded", excluded), ("losses", losses)):
+        if counts[key] != len(entries):
+            raise ContractError(f"counts.{key} is {counts[key]}, but {len(entries)} are recorded")
+    accounted = len(claims) + len(excluded) + len(losses)
+    if document["execution"]["results"] == "absent" and accounted:
+        raise ContractError("a run whose results are absent has no result to account for")
+    if counts["results"] != accounted:
+        raise ContractError(f"counts.results is {counts['results']}, but {accounted} results are "
+                            "accounted for as claims, exclusions, and losses")
+    if counts["evidence_losses"] != sum(len(entry["evidence_losses"]) for entry in claims):
+        raise ContractError("counts.evidence_losses must equal the evidence losses recorded per claim")
+    flagged = {entry["pointer"] for entry in claims if entry["bundle_review"]}
+    if counts["bundle_review_flagged"] != len(flagged):
+        raise ContractError("counts.bundle_review_flagged must equal the claims flagged for bundle review")
+    normalization = document["normalization"]
+    decided = [decision["pointer"] for decision in normalization["decisions"]] if normalization else []
+    _unique(decided, "normalization.decisions.pointer")
+    for index, pointer in enumerate(decided):
+        if pointer not in flagged:
+            raise ContractError(f"normalization.decisions[{index}] names {pointer}, which this import "
+                                "did not flag for bundle review")
+        if not is_stated(normalization["decisions"][index]["reviewer"]):
+            raise ContractError(f"normalization.decisions[{index}].reviewer is blank")
+    if counts["bundle_review_resolved"] != len(decided):
+        raise ContractError("counts.bundle_review_resolved must equal the recorded normalization decisions")
+
+
 _RUNTIME_VALIDATORS = {
     "case-pack": _validate_case_pack,
     "review-record": _validate_review_record,
@@ -1564,6 +1619,8 @@ _RUNTIME_VALIDATORS = {
     "evaluation-plan": _validate_evaluation_plan,
     "review-decisions": _validate_review_decisions,
     "run-manifest": _validate_run_manifest,
+    # SARIF import (profile sarif-import-1).
+    "import-record": _validate_import_record,
 }
 
 
