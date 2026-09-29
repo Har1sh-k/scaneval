@@ -9,20 +9,33 @@ into the test's own directory. Reviewers named here are fictional.
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 
 import pytest
 
-from scaneval import materialize
-from scaneval.contracts import CONTRACT_KINDS, ContractError, SCHEMA_VERSIONS, schema_file, validate_document
+from scaneval import cases, materialize, review, scoring
+from scaneval.contracts import (
+    CONTRACT_KINDS,
+    ContractError,
+    SCHEMA_VERSIONS,
+    canonical_json,
+    canonical_sha256,
+    load_document,
+    schema_file,
+    validate_document,
+)
 from scaneval.sarif import (
     FLOW_STEP_LIMIT,
     SarifImportError,
     SourceTree,
     UriSettings,
     convert_run,
+    default_run_id,
+    import_sarif,
     parse_log,
     read_artifact,
     select_run,
@@ -34,6 +47,11 @@ OTHER = "sha256:" + "b" * 64
 FICTIONAL_REVIEWER = "Fixture Reviewer (fictional)"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "sarif"
 SHELL_RULE = "rules.python.probe.subprocess-shell"
+CLOCK = lambda: datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)  # noqa: E731
+REPRESENTS = ("This case tests request data interpolated into a SQL query under a default deployment, "
+              "and adds a Python SQL sink for the SARIF import tests.")
+BUNDLE_FILES = {"raw/codeql.sarif", "result.json", "import.json", "evaluator/plan.json",
+                "evaluator/decisions.json", "evaluator/review-record.json", "evaluation.json", "report.html"}
 
 
 def numbered(count: int) -> str:
@@ -109,6 +127,66 @@ def only_loss(conversion) -> str:
 
 def encoded(document: dict) -> bytes:
     return json.dumps(document).encode("utf-8")
+
+
+def make_pack(source: Path, tree_hash: str, *, control: bool = False, target: tuple[str, int] = ("app/web.py", 16),
+              kind: str = "sql_injection") -> dict:
+    """A draft pack with one mechanically checked case on snapshot ``snap-a``, built without git.
+
+    With *control*, the case carries a capability-safe control on the same snapshot. The checks
+    run against *source*, the exported tree, so the plan built from the pack is a draft plan
+    holding the case's target (and control).
+    """
+    pack = cases.new_pack("org.example", "sarif-fixture", "Fabricated pack for the SARIF import tests.")
+    cases.add_snapshot(pack, {
+        "snapshot_id": "snap-a", "repository": {"url": "https://example.invalid/acme/app.git", "name": "acme/app"},
+        "commit": "c" * 40, "reference": "Fixture commit; no advisory is claimed.", "languages": ["python"],
+        "workload": "conventional_application", "component_role": "application",
+        "license": {"spdx": None, "verified": False, "note": "Fabricated fixture."}})
+    path, line = target
+    case = cases.draft_case(
+        "case-a", snapshot_id="snap-a", kind=kind, description="Request data reaches the sink unescaped.",
+        represents=REPRESENTS, workload="conventional_application", component_role="application", aliases=[],
+        evidence=[cases.evidence("source", origin="research_note", kind="source_inspection", reference=path,
+                                 note="Fixture inspection, not an advisory.")],
+        accepted_locations=[{"path": path, "start_line": line, "end_line": line, "role": "sink", "note": ""}])
+    if control:
+        case["controls"] = [{
+            "control_id": "C-case-a-safe", "snapshot_id": "snap-a", "type": "capability_safe",
+            "description": "The file helper joins a fixed directory with a constant name.",
+            "property": "No request value reaches the path at this call.",
+            "allowed_actors_inputs": "Operators on the host.", "assumptions": ["Default deployment."],
+            "ruled_out_allegation": "Request-controlled path traversal in the file helper.",
+            "locations": [{"path": "app/files.py", "start_line": 1, "end_line": 1, "role": "operation"}],
+            "evidence_ids": ["source"]}]
+    cases.add_case(pack, case)
+    cases.mechanical_checks(pack, "snap-a", source, tree_hash, clock=CLOCK)
+    return pack
+
+
+@pytest.fixture
+def workspace(tmp_path) -> dict:
+    """An exported tree, its hash, a pack checked against it, and a directory for new bundles."""
+    source = tmp_path / "export" / "source"
+    tree_hash = write_tree(source)
+    return {"source": source, "tree_hash": tree_hash, "pack": make_pack(source, tree_hash),
+            "out": tmp_path / "bundles", "tmp": tmp_path}
+
+
+def imported(workspace: dict, log: str | Path = "codeql.sarif", name: str = "bundle", **options):
+    path = log if isinstance(log, Path) else FIXTURES / log
+    return import_sarif(path, pack=workspace["pack"], snapshot_id="snap-a", tree_hash=workspace["tree_hash"],
+                        system_id="codeql-fixture", output=workspace["out"] / name, clock=CLOCK, **options)
+
+
+def write_log(workspace: dict, log: dict, name: str = "built.sarif") -> Path:
+    path = workspace["tmp"] / name
+    path.write_bytes(encoded(log))
+    return path
+
+
+def bundle_files(bundle: Path) -> set[str]:
+    return {path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if path.is_file()}
 
 
 def claim_entry(index: int, **changes) -> dict:
@@ -998,3 +1076,189 @@ def test_import_loss_makes_an_otherwise_clean_run_partial():
     assert status == "partial" and error == {
         "code": "import_loss", "message": "1 result(s) the log reports could not be imported as claims"}
     assert converted([result_at("src/app.py")]).outcome() == ("success", None)
+
+
+# --- one import: the bundle ------------------------------------------------------------------
+
+
+def test_an_import_writes_a_bundle_the_review_score_and_replay_paths_read(workspace):
+    outcome = imported(workspace, source_dir=workspace["source"])
+    bundle = outcome.bundle
+    data = (FIXTURES / "codeql.sarif").read_bytes()
+    digest = "sha256:" + hashlib.sha256(data).hexdigest()
+
+    assert bundle_files(bundle) == BUNDLE_FILES
+    assert (bundle / "raw" / "codeql.sarif").read_bytes() == data
+    result = load_document(bundle / "result.json", "scan-result")
+    assert result == outcome.result and result["schema_version"] == "2.1"
+    assert result["run_id"] == default_run_id(digest, 0) == f"import-{digest[7:19]}-r0"
+    assert result["usage"] == {"wall_seconds": None}
+    assert (result["ranking"], result["status"], result["input_hash"]) == ("unranked", "success", workspace["tree_hash"])
+    assert result["raw_artifacts"] == [{"id": "sarif", "path": "raw/codeql.sarif", "sha256": digest}]
+    assert {claim["raw_artifact_id"] for claim in result["claims"]} == {"sarif"}
+    # r0-2 is flagged for bundle review and nobody recorded a decision on it.
+    assert result["bundles_resolved"] is False
+
+    record = load_document(bundle / "import.json", "import-record")
+    assert record == outcome.record and record["result_sha256"] == canonical_sha256(result)
+    assert record["artifact"] == {"path": "raw/codeql.sarif", "sha256": digest, "bytes": len(data)}
+    assert record["sarif"] == {"version": "2.1.0", "run_index": 0, "run_count": 1}
+    assert record["source_binding"] == {"pack_sha256": cases.pack_sha256(workspace["pack"]), "snapshot_id": "snap-a",
+                                        "tree_hash": workspace["tree_hash"], "source_dir_verified": True}
+    assert record["system"] == {"system_id": "codeql-fixture", "config_sha256": None}
+    assert record["counts"] == {"results": 3, "claims": 3, "excluded": 0, "losses": 0, "evidence_losses": 0,
+                                "bundle_review_flagged": 1, "bundle_review_resolved": 0}
+    assert record["execution"]["evidence"] == "reported_success" and record["execution"]["verified"] is False
+    assert record["normalization"] is None
+    assert record["options"] == {"run_index": None, "include_suppressed": False, "uri_bases": {},
+                                 "source_root_uri": None, "max_bytes": 67108864}
+
+    plan, decisions, review_record = review.load_evaluator(bundle)
+    assert plan == cases.build_plan(workspace["pack"], "snap-a", workspace["tree_hash"])[0]
+    assert [(match["claim_id"], match["target_id"], match["decision"]) for match in decisions["claim_matches"]] == [
+        ("r0-0", "T-case-a", "unresolved")]
+    assert review_record["state"] == "draft" and review_record["reviews"] == []
+    assert review.review_status(bundle) == "draft"
+    evaluation = scoring.score(plan, result, decisions)
+    assert (bundle / "evaluation.json").read_bytes() == (canonical_json(evaluation) + "\n").encode("utf-8")
+    assert evaluation["metrics"]["pending_matching_count"] == 1 and evaluation["metrics"]["targets_detected"] == 0
+    assert "Decisions: machine-drafted, all unresolved" in (bundle / "report.html").read_text(encoding="utf-8")
+
+
+def test_the_same_log_imports_to_the_same_documents_and_run_id(workspace):
+    first = imported(workspace, name="first")
+    second = imported(workspace, name="second")
+    for name in ("result.json", "import.json", "evaluator/plan.json", "evaluator/decisions.json", "evaluation.json"):
+        assert (first.bundle / name).read_bytes() == (second.bundle / name).read_bytes()
+    assert first.record["source_binding"]["source_dir_verified"] is False
+    assert "No --source-dir was supplied" in " ".join(first.record["notes"])
+    named = imported(workspace, name="named", run_id="codeql-nightly-42")
+    assert named.result["run_id"] == named.record["run_id"] == "codeql-nightly-42"
+
+
+def test_a_system_configuration_is_recorded_by_digest_only(workspace):
+    config = {"queries": "security-extended", "threads": 4}
+    outcome = imported(workspace, system_config=config)
+    assert outcome.record["system"] == {"system_id": "codeql-fixture", "config_sha256": canonical_sha256(config)}
+    assert "security-extended" not in (outcome.bundle / "import.json").read_text(encoding="utf-8")
+
+
+def test_an_import_without_invocations_is_partial_and_says_so_in_the_score(workspace):
+    log = fixture("codeql.sarif")
+    del log["runs"][0]["invocations"]
+    outcome = imported(workspace, write_log(workspace, log))
+    assert outcome.result["status"] == "partial"
+    assert outcome.result["error"]["code"] == "execution_unreported"
+    assert outcome.record["execution"]["evidence"] == "unreported"
+    assert "Incomplete or failed execution cannot establish a successful negative control." in \
+        outcome.evaluation["warnings"]
+
+
+def test_absent_results_are_an_error_result_with_no_claims_and_unresolved_bundles(workspace):
+    log = fixture("codeql.sarif")
+    log["runs"][0]["results"] = None
+    outcome = imported(workspace, write_log(workspace, log))
+    assert (outcome.result["status"], outcome.result["claims"], outcome.result["bundles_resolved"]) == ("error", [], False)
+    assert outcome.result["error"]["code"] == "results_absent"
+    assert outcome.record["execution"]["results"] == "absent" and outcome.record["counts"]["results"] == 0
+
+
+def normalization(outcome_or_digest, *decisions) -> dict:
+    return {"artifact_sha256": outcome_or_digest, "decisions": list(decisions)}
+
+
+def atomic(pointer: str = "/runs/0/results/2", **changes) -> dict:
+    decision = {"pointer": pointer, "decision": "atomic", "reviewer": FICTIONAL_REVIEWER,
+                "note": "Both flows reach one os.system call through one missing check.",
+                "at": "2026-09-29T12:00:00+00:00"}
+    decision.update(changes)
+    return decision
+
+
+def codeql_digest() -> str:
+    return "sha256:" + hashlib.sha256((FIXTURES / "codeql.sarif").read_bytes()).hexdigest()
+
+
+def test_a_recorded_atomic_decision_for_every_flagged_result_resolves_the_bundles(workspace):
+    document = normalization(codeql_digest(), atomic())
+    outcome = imported(workspace, normalization=document)
+    assert outcome.result["bundles_resolved"] is True
+    assert outcome.record["normalization"] == {"sha256": canonical_sha256(document), "decisions": [atomic()]}
+    assert outcome.record["counts"]["bundle_review_resolved"] == 1
+    # The claim stays one claim: resolving a bundle never splits or drops it.
+    assert [claim["claim_id"] for claim in outcome.result["claims"]] == ["r0-0", "r0-1", "r0-2"]
+    # Import loss keeps the bundles unresolved whatever was decided.
+    log = fixture("codeql.sarif")
+    log["runs"][0]["results"].append(result_at("/etc/passwd"))
+    path = write_log(workspace, log)
+    digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    lost = imported(workspace, path, name="lost", normalization=normalization(digest, atomic()))
+    assert lost.result["bundles_resolved"] is False and lost.result["error"]["code"] == "import_loss"
+
+
+@pytest.mark.parametrize("document,message", [
+    (lambda digest: normalization(OTHER, atomic()), "recorded for artifact 'sha256:b"),
+    (lambda digest: normalization(digest, atomic("/runs/0/results/0")), "did not flag for bundle review"),
+    (lambda digest: normalization(digest, atomic("/runs/1/results/2")), "did not flag for bundle review"),
+    (lambda digest: normalization(digest, atomic(), atomic()), "decides /runs/0/results/2 a second time"),
+    (lambda digest: normalization(digest, atomic(decision="split")), "only 'atomic' can be recorded"),
+    (lambda digest: normalization(digest, atomic(reviewer=chr(0x200B))), "names no reviewer"),
+    (lambda digest: normalization(digest, atomic(note=" ")), "states no note"),
+    (lambda digest: normalization(digest, atomic(approved=True)), "unknown keys"),
+    (lambda digest: {"decisions": []}, "missing: artifact_sha256"),
+    (lambda digest: [], "is not a JSON object"),
+])
+def test_a_normalization_file_that_does_not_fit_this_import_is_refused(workspace, document, message):
+    with pytest.raises(SarifImportError, match=message):
+        imported(workspace, normalization=document(codeql_digest()))
+    assert not (workspace["out"] / "bundle").exists()
+
+
+@pytest.mark.parametrize("change,error,message", [
+    (lambda ws: {"tree_hash": "sha256:short"}, SarifImportError, "tree hash must be a sha256"),
+    (lambda ws: {"tree_hash": HASH}, ContractError, "tree hash does not match the materialized input"),
+    (lambda ws: {"snapshot_id": "snap-z"}, ContractError, "unknown snapshot 'snap-z'"),
+    (lambda ws: {"system_id": " "}, SarifImportError, "a system id is required"),
+    (lambda ws: {"run_id": ""}, SarifImportError, "run id, when given, must not be blank"),
+    (lambda ws: {"system_config": ["x"]}, SarifImportError, "must be a JSON object"),
+    (lambda ws: {"uri_bases": {"A": "../x/"}}, SarifImportError, "'..' segment"),
+    (lambda ws: {"source_dir": ws["tmp"] / "export"}, SarifImportError, "not the declared tree hash"),
+    (lambda ws: {"output": ws["source"] / "bundle", "source_dir": ws["source"]}, SarifImportError,
+     "is inside --source-dir"),
+    (lambda ws: {"sarif_path": FIXTURES / "missing.sarif"}, SarifImportError, "could not open the SARIF file"),
+    (lambda ws: {"max_bytes": 100}, SarifImportError, "more than the 100-byte bound"),
+    (lambda ws: {"run_index": 3}, SarifImportError, "run index 3 is out of range"),
+])
+def test_a_refused_import_writes_nothing(workspace, change, error, message):
+    arguments = {"sarif_path": FIXTURES / "codeql.sarif", "pack": workspace["pack"], "snapshot_id": "snap-a",
+                 "tree_hash": workspace["tree_hash"], "system_id": "codeql-fixture",
+                 "output": workspace["out"] / "bundle", "clock": CLOCK}
+    arguments.update(change(workspace))
+    with pytest.raises(error, match=message):
+        import_sarif(arguments.pop("sarif_path"), **arguments)
+    assert not arguments["output"].exists()
+    assert not workspace["out"].exists()
+
+
+def test_an_existing_or_symlinked_output_is_refused_and_left_alone(workspace):
+    workspace["out"].mkdir()
+    existing = workspace["out"] / "bundle"
+    existing.mkdir()
+    with pytest.raises(SarifImportError, match="already exists; an import writes a new bundle directory"):
+        imported(workspace)
+    assert list(existing.iterdir()) == []
+    link = workspace["out"] / "link"
+    link.symlink_to(workspace["tmp"] / "elsewhere")
+    with pytest.raises(SarifImportError, match="refusing to write through the symbolic link"):
+        imported(workspace, name="link")
+    assert not (workspace["tmp"] / "elsewhere").exists()
+
+
+def test_a_write_that_fails_part_way_removes_what_the_import_created(workspace, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(review, "write_evaluator_records", refuse)
+    with pytest.raises(OSError, match="No space left on device"):
+        imported(workspace)
+    assert not (workspace["out"] / "bundle").exists()

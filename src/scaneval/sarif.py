@@ -46,29 +46,57 @@ different places) is flagged for bundle review rather than split or guessed at.
 
 What it never invents. A line range is read from a region's ``startLine`` and ``endLine`` or not
 at all: an offset-only region stays file-only. Execution success is the log's own report and is
-never verified; a log that reports no execution outcome is not a clean scan. Nothing here reads
-source semantics, applies a fix, renders Markdown, or decides whether an allegation is true.
+never verified; a log that reports no execution outcome is not a clean scan. Timing, cost, and
+model identity are not in a SARIF log, so the scan result says ``usage.wall_seconds`` is ``null``
+and claims nothing else. Nothing here reads source semantics, applies a fix, renders Markdown,
+or decides whether an allegation is true.
+
+What an import writes. :func:`import_sarif` binds the result to the pack snapshot, tree hash,
+and system the operator declares, never to anything the log says about itself, and writes one
+new bundle: the artifact's bytes under ``raw/``, ``result.json`` (scan-result 2.1),
+``import.json`` (the import record), the plan, a machine draft of review decisions in which
+every decision is ``unresolved``, a draft review record, ``evaluation.json`` and
+``report.html``, so ``review``, ``score``, ``replay`` and ``report`` read it exactly as they
+read a bundle ``scaneval run`` wrote. Every document is built and checked before the bundle
+directory exists, the directory must not exist, and every file in it is created exclusively; a
+write that fails part way removes what this call created. Nothing here approves anything: a
+bundle review decision is only ever read from the operator's normalization file, where a
+named person recorded it.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import re
 import stat
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib.parse import unquote
 
-from . import materialize
+from . import __version__, cases, materialize, report, review, scoring
 # _require_relative_path is imported rather than re-implemented so a location this importer records
 # is judged by the one rule the scan-result contract applies to every claim path.
-from .contracts import ContractError, _require_relative_path
-from .kinds import cwe_ids, kind_for_cwes
+from .contracts import (
+    ContractError,
+    _require_relative_path,
+    canonical_json,
+    canonical_sha256,
+    is_stated,
+    validate_document,
+)
+from .kinds import cwe_ids, kind_for_cwes, mapping_version
 
 
+PROFILE = "sarif-import-1"
+RECORD_KIND = "import-record"
+RECORD_FILE = "import.json"
+RESULT_FILE = "result.json"
+RAW_DIR = "raw"
 SARIF_VERSION = "2.1.0"
 # The largest artifact read by default: 64 MiB, the same bound the transcript readers keep. A
 # larger log is refused rather than read part way; --max-bytes raises the bound deliberately.
@@ -1578,3 +1606,266 @@ def convert_run(log: dict, run_index: int | None = None, *, settings: UriSetting
         else:
             conversion.losses.append(record)
     return conversion
+
+
+# --- one import: from a SARIF file to a bundle -----------------------------------------------
+
+
+_NORMALIZATION_KEYS = frozenset({"artifact_sha256", "decisions"})
+_DECISION_KEYS = frozenset({"pointer", "decision", "reviewer", "note", "at"})
+_TREE_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def normalization_decisions(document: Any, artifact_sha256: str,
+                            flagged: Mapping[str, list[str]]) -> dict:
+    """The recorded bundle-review decisions in *document*, checked, as ``import.json`` embeds them.
+
+    A normalization file is what a person recorded after reading the results this profile flags
+    for bundle review: ``{"artifact_sha256": ..., "decisions": [{"pointer", "decision", "reviewer",
+    "note", "at"?}]}``. It must name the artifact being imported, by its SHA-256, and each decision
+    must name a result this import flagged, once. The one decision this profile accepts is
+    ``atomic``: the result is one allegation and stays one claim. A result that bundles separate
+    allegations is not something this importer splits, so no other decision can be recorded here.
+    The reviewer is taken as written and never supplied by the tool; recording a name proves
+    nothing about who read what. Anything else is refused with :class:`SarifImportError`.
+    """
+    if not isinstance(document, dict):
+        raise SarifImportError("the normalization file is not a JSON object")
+    unknown = sorted(set(document) - _NORMALIZATION_KEYS)
+    missing = sorted(_NORMALIZATION_KEYS - set(document))
+    if unknown or missing:
+        raise SarifImportError(f"the normalization file must hold exactly artifact_sha256 and decisions "
+                               f"(unknown: {', '.join(unknown) or 'none'}; missing: {', '.join(missing) or 'none'})")
+    if document["artifact_sha256"] != artifact_sha256:
+        raise SarifImportError(f"the normalization decisions were recorded for artifact "
+                               f"{document['artifact_sha256']!r}, not this one ({artifact_sha256})")
+    decisions = document["decisions"]
+    if not isinstance(decisions, list):
+        raise SarifImportError("the normalization file's decisions is not an array")
+    recorded: list[dict] = []
+    for index, decision in enumerate(decisions):
+        label = f"normalization decisions[{index}]"
+        if not isinstance(decision, dict):
+            raise SarifImportError(f"{label} is not an object")
+        unknown = sorted(set(decision) - _DECISION_KEYS)
+        missing = sorted({"pointer", "decision", "reviewer", "note"} - set(decision))
+        if unknown or missing:
+            raise SarifImportError(f"{label} has unknown keys {unknown} or lacks {missing}")
+        pointer = decision["pointer"]
+        if not isinstance(pointer, str) or pointer not in flagged:
+            raise SarifImportError(f"{label} names {pointer!r}, which this import did not flag for bundle "
+                                   "review")
+        if any(item["pointer"] == pointer for item in recorded):
+            raise SarifImportError(f"{label} decides {pointer} a second time")
+        if decision["decision"] != "atomic":
+            raise SarifImportError(
+                f"{label} records {decision['decision']!r}; only 'atomic' can be recorded, because a "
+                "result that bundles separate allegations is not split by this importer")
+        if not is_stated(decision["reviewer"]):
+            raise SarifImportError(f"{label} names no reviewer; the tool never supplies one")
+        if not is_stated(decision["note"]):
+            raise SarifImportError(f"{label} states no note saying what the reviewer read")
+        if "at" in decision and not is_stated(decision["at"]):
+            raise SarifImportError(f"{label}.at is blank")
+        recorded.append({key: decision[key] for key in sorted(decision)})
+    return {"sha256": canonical_sha256(document), "decisions": recorded}
+
+
+def default_run_id(artifact_sha256: str, run_index: int) -> str:
+    """``import-<first 12 hex of the artifact digest>-r<run index>``: the same log, the same id."""
+    return f"import-{artifact_sha256.split(':', 1)[1][:12]}-r{run_index}"
+
+
+def _raw_name(path: Path) -> str:
+    """The name the artifact is kept under in ``raw/``: its own name, made portable, ending ``.sarif``."""
+    name = re.sub(r"[^A-Za-z0-9._-]", "-", Path(path).name).lstrip(".-") or "log"
+    return name if name.endswith(".sarif") else f"{name}.sarif"
+
+
+def _document(value: dict) -> bytes:
+    return (canonical_json(value) + "\n").encode("utf-8")
+
+
+def _encoded(text: str, label: str) -> bytes:
+    """*text* as UTF-8, refused before any file exists when it cannot be encoded."""
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ContractError(f"{label} is not UTF-8 text: {exc}") from exc
+
+
+def _write_new(path: Path, payload: bytes) -> None:
+    with path.open("xb") as handle:
+        handle.write(payload)
+
+
+@dataclass(frozen=True)
+class ImportOutcome:
+    """What :func:`import_sarif` wrote: the bundle and every document in it."""
+
+    bundle: Path
+    result: dict
+    record: dict
+    plan: dict
+    decisions: dict
+    review_record: dict
+    evaluation: dict
+
+
+def import_sarif(sarif_path: Path, *, pack: dict, snapshot_id: str, tree_hash: str, system_id: str,
+                 output: Path, run_index: int | None = None, run_id: str | None = None,
+                 system_config: dict | None = None, source_dir: Path | None = None,
+                 uri_bases: Mapping[str, str] | None = None, source_root_uri: str | None = None,
+                 normalization: dict | None = None, include_suppressed: bool = False,
+                 max_bytes: int = DEFAULT_MAX_BYTES,
+                 clock: Callable[[], datetime] | None = None) -> ImportOutcome:
+    """Import one run of the SARIF log at *sarif_path* into a new bundle at *output*.
+
+    The result binds to *tree_hash*, and the plan is :func:`scaneval.cases.build_plan` for
+    *snapshot_id* at that hash, which refuses a snapshot whose recorded tree hash is another one.
+    *system_id* and the optional *system_config* (recorded by digest only) are the operator's
+    statement of what produced the log. With *source_dir*, an exported tree that must hash to
+    *tree_hash*, every mapped location is checked against it; without it the mapping is recorded
+    as unverified. *normalization* is a parsed normalization file (see
+    :func:`normalization_decisions`); only when it resolves every result flagged for bundle review,
+    and no result was lost, are the bundles resolved.
+
+    Everything is built and validated in memory first: a refused import, whatever refused it,
+    leaves no directory behind. *output* must not exist; it is resolved once, so every path written
+    is inside the same real directory. The run id defaults to :func:`default_run_id`. The review
+    is a machine draft: every decision is ``unresolved`` and the record's state is ``draft``.
+    """
+    if not isinstance(tree_hash, str) or not _TREE_HASH.match(tree_hash):
+        raise SarifImportError(f"the tree hash must be a sha256:<64 hex digits> digest, not {tree_hash!r}")
+    if not is_stated(system_id):
+        raise SarifImportError("a system id is required: say which system produced the log")
+    if run_id is not None and not is_stated(run_id):
+        raise SarifImportError("a run id, when given, must not be blank")
+    if system_config is not None and not isinstance(system_config, dict):
+        raise SarifImportError("the system configuration must be a JSON object")
+    if Path(output).is_symlink():
+        raise SarifImportError(f"refusing to write through the symbolic link {output}")
+    bundle = Path(output).expanduser().resolve()
+    if bundle.exists():
+        raise SarifImportError(f"{bundle} already exists; an import writes a new bundle directory")
+    settings = UriSettings(uri_bases, source_root_uri)
+    plan, plan_notes = cases.build_plan(pack, snapshot_id, tree_hash)
+    tree = None
+    if source_dir is not None:
+        source = Path(source_dir).expanduser().resolve()
+        if bundle == source or bundle.is_relative_to(source):
+            raise SarifImportError(f"{bundle} is inside --source-dir {source}; evaluator records stay "
+                                   "outside the exported tree")
+        tree = SourceTree.load(source, tree_hash)
+
+    data = read_artifact(Path(sarif_path), max_bytes)
+    digest = "sha256:" + hashlib.sha256(data).hexdigest()
+    log, parse_notes = parse_log(data)
+    conversion = convert_run(log, run_index, settings=settings, tree=tree,
+                             include_suppressed=include_suppressed)
+    embedded = (None if normalization is None
+                else normalization_decisions(normalization, digest, conversion.flagged))
+    decided = {decision["pointer"] for decision in embedded["decisions"]} if embedded else set()
+    status, error = conversion.outcome()
+    bundles_resolved = (conversion.results_present and not conversion.losses
+                        and set(conversion.flagged) <= decided)
+
+    raw_path = f"{RAW_DIR}/{_raw_name(Path(sarif_path))}"
+    run_id = run_id if run_id is not None else default_run_id(digest, conversion.run_index)
+    result: dict[str, Any] = {
+        "schema_version": "2.1", "run_id": run_id, "system_id": system_id, "input_hash": tree_hash,
+        "status": status, "ranking": "unranked", "claims": conversion.claims,
+        "bundles_resolved": bundles_resolved, "usage": {"wall_seconds": None},
+        "raw_artifacts": [{"id": ARTIFACT_ID, "path": raw_path, "sha256": digest}],
+    }
+    if error is not None:
+        result["error"] = error
+    validate_document("scan-result", result)
+
+    snapshot = cases.snapshot_by_id(pack, snapshot_id)
+    notes = list(parse_notes) + list(conversion.notes)
+    notes.append(f"Execution evidence is the log's own report ({conversion.execution['evidence']}); "
+                 "nothing here observed the scan, so it is recorded as unverified.")
+    if tree is None:
+        notes.append("No --source-dir was supplied, so no mapped path or line was checked against the "
+                     "exported tree.")
+    if not snapshot.get("tree_hash"):
+        notes.append(f"The pack records no tree hash for snapshot {snapshot_id}; the tree hash this "
+                     "import binds to is the operator's declaration alone.")
+    record = {
+        "schema_version": "2.1", "profile": PROFILE, "run_id": run_id, "system_id": system_id,
+        "input_hash": tree_hash, "result_sha256": canonical_sha256(result),
+        "artifact": {"path": raw_path, "sha256": digest, "bytes": len(data)},
+        "sarif": {"version": SARIF_VERSION, "run_index": conversion.run_index,
+                  "run_count": conversion.run_count},
+        "tool": conversion.tool,
+        "source_binding": {"pack_sha256": cases.pack_sha256(pack), "snapshot_id": snapshot_id,
+                           "tree_hash": tree_hash, "source_dir_verified": tree is not None},
+        "system": {"system_id": system_id,
+                   "config_sha256": None if system_config is None else canonical_sha256(system_config)},
+        "versions": {"scaneval": __version__, "kind_mapping": mapping_version()},
+        "execution": conversion.execution,
+        "options": {"run_index": run_index, "include_suppressed": include_suppressed,
+                    "uri_bases": settings.configured, "source_root_uri": source_root_uri,
+                    "max_bytes": max_bytes},
+        "counts": {"results": conversion.result_count, "claims": len(conversion.claims),
+                   "excluded": len(conversion.excluded), "losses": len(conversion.losses),
+                   "evidence_losses": sum(len(entry["evidence_losses"]) for entry in conversion.entries),
+                   "bundle_review_flagged": len(conversion.flagged), "bundle_review_resolved": len(decided)},
+        "claims": conversion.entries, "excluded": conversion.excluded, "losses": conversion.losses,
+        "normalization": embedded, "notes": notes,
+    }
+    validate_document(RECORD_KIND, record)
+
+    decisions = review.draft_decisions(plan, result, pack, clock=clock)
+    review_notes = list(plan_notes) + [
+        f"Imported from a saved SARIF log (profile {PROFILE}); execution evidence is the log's own "
+        "and unverified."]
+    record_draft = review.review_record(plan, decisions, clock=clock, notes=review_notes)
+    evaluation = scoring.score(plan, result, decisions)
+    report_html = report.render_report(evaluation, result, plan, review_state=record_draft["state"])
+    _write_bundle(bundle, raw_path, data, result=result, record=record, plan=plan, decisions=decisions,
+                  review_record=record_draft, evaluation=evaluation, report_html=report_html)
+    return ImportOutcome(bundle, result, record, plan, decisions, record_draft, evaluation)
+
+
+def _write_bundle(bundle: Path, raw_path: str, data: bytes, *, result: dict, record: dict, plan: dict,
+                  decisions: dict, review_record: dict, evaluation: dict, report_html: str) -> None:
+    """Create *bundle* and write every file into it exclusively, or leave nothing this call made.
+
+    Every payload is encoded before the directory is created, so text UTF-8 cannot encode is a
+    refusal rather than a half-written bundle. The evaluator files go through
+    :func:`scaneval.review.write_evaluator_records`, the one writer every bundle's review files
+    use. A failure part way removes the files and directories this call created and re-raises.
+    """
+    early = [(bundle / raw_path, data), (bundle / RESULT_FILE, _document(result)),
+             (bundle / RECORD_FILE, _document(record))]
+    late = [(bundle / "evaluation.json", _document(evaluation)),
+            (bundle / "report.html", _encoded(report_html, "the report"))]
+    for value, label in ((plan, "the plan"), (decisions, "the decisions"), (review_record, "the review record")):
+        _encoded(canonical_json(value), label)
+    bundle.parent.mkdir(parents=True, exist_ok=True)
+    bundle.mkdir()
+    directories = [bundle, bundle / RAW_DIR, bundle / review.EVALUATOR_DIR]
+    files: list[Path] = []
+    try:
+        (bundle / RAW_DIR).mkdir()
+        for path, payload in early:
+            _write_new(path, payload)
+            files.append(path)
+        files.extend(review.write_evaluator_records(bundle, plan, decisions, review_record).values())
+        for path, payload in late:
+            _write_new(path, payload)
+            files.append(path)
+    except BaseException:
+        for path in reversed(files):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        for directory in reversed(directories):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        raise
