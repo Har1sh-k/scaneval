@@ -1633,3 +1633,24 @@ def test_the_operative_review_rule_is_one_rule_every_gate_reads():
         record_history(case, [approval, {**review(decision=decision), "labels_sha256": approval["labels_sha256"]}])
         assert reason in operative_review_gap(case)
         assert covering_review(pack, case) is None, "the gate every plan reads asks this one rule"
+
+
+def test_a_schema_version_this_build_does_not_read_is_refused_by_name():
+    """The version is read before a schema is chosen, and the refusal names what is supported."""
+    from scaneval.contracts import CONTRACT_KINDS, SCHEMA_VERSIONS, schema_file
+
+    document = scan_result()
+    document["schema_version"] = "9.9"
+    with pytest.raises(ContractError, match=r"schema_version: '9.9' is not a scan-result version"):
+        validate_document("scan-result", document)
+    document["schema_version"] = 2.0
+    with pytest.raises(ContractError, match="supported: 2.0"):
+        validate_document("scan-result", document)
+    assert set(SCHEMA_VERSIONS) == CONTRACT_KINDS
+    # The first published version keeps the plain file name every 2.0 schema has always had.
+    for kind, versions in SCHEMA_VERSIONS.items():
+        assert schema_file(kind, versions[0]) == f"{kind}.schema.json"
+        for later in versions[1:]:
+            assert schema_file(kind, later) == f"{kind}-{later}.schema.json"
+    with pytest.raises(ContractError, match="not one this build reads"):
+        schema_file("scan-result", "0.1")

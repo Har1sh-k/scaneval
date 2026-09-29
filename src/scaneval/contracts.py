@@ -14,10 +14,22 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 
-CONTRACT_KINDS = frozenset(
-    {"scan-request", "scan-result", "evaluation-plan", "review-decisions", "execution-record",
-     "case-pack", "review-record", "run-config", "run-manifest"}
-)
+# Every contract kind and the protocol versions this build reads, oldest first. A 2.0 document is
+# validated against its 2.0 schema exactly as it always was: 2.1 adds optional fields to some kinds
+# and adds new kinds, and a writer uses 2.1 only for a document that carries one of those fields, so
+# a record written before 2.1 existed is never reread under rules it was not written against.
+SCHEMA_VERSIONS: dict[str, tuple[str, ...]] = {
+    "scan-request": ("2.0",),
+    "scan-result": ("2.0",),
+    "evaluation-plan": ("2.0",),
+    "review-decisions": ("2.0",),
+    "execution-record": ("2.0",),
+    "case-pack": ("2.0",),
+    "review-record": ("2.0",),
+    "run-config": ("2.0",),
+    "run-manifest": ("2.0",),
+}
+CONTRACT_KINDS = frozenset(SCHEMA_VERSIONS)
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
 # Validation levels are ordered, so an approval at a higher level carries a lower claimed one.
 _LEVEL_RANK = {"L1": 1, "L2": 2, "L3": 3, "L4": 4}
@@ -75,11 +87,31 @@ def is_stated(value: Any) -> bool:
     return any(unicodedata.category(ch) not in _BLANK_CATEGORIES for ch in value)
 
 
-def _schema(kind: str) -> dict[str, Any]:
-    if kind not in CONTRACT_KINDS:
+def schema_file(kind: str, version: str) -> str:
+    """The packaged schema file for *kind* at *version*.
+
+    The first version a kind was published at keeps the plain ``<kind>.schema.json`` name, which is
+    every 2.0 schema this package has ever shipped, and a later version of the same kind is
+    ``<kind>-<version>.schema.json`` beside it, so publishing 2.1 never edits a 2.0 file.
+    """
+    if kind not in SCHEMA_VERSIONS:
         expected = ", ".join(sorted(CONTRACT_KINDS))
         raise ContractError(f"unknown contract kind {kind!r}; expected one of: {expected}")
-    resource = files("scaneval").joinpath("schemas", f"{kind}.schema.json")
+    versions = SCHEMA_VERSIONS[kind]
+    if version not in versions:
+        raise ContractError(
+            f"{kind} schema_version {version!r} is not one this build reads; supported: "
+            f"{', '.join(versions)}")
+    return f"{kind}.schema.json" if version == versions[0] else f"{kind}-{version}.schema.json"
+
+
+def _schema(kind: str, version: str | None = None) -> dict[str, Any]:
+    """The packaged schema for *kind* at *version*, the oldest supported version when omitted."""
+    if kind not in SCHEMA_VERSIONS:
+        expected = ", ".join(sorted(CONTRACT_KINDS))
+        raise ContractError(f"unknown contract kind {kind!r}; expected one of: {expected}")
+    name = schema_file(kind, SCHEMA_VERSIONS[kind][0] if version is None else version)
+    resource = files("scaneval").joinpath("schemas", name)
     return json.loads(resource.read_text(encoding="utf-8"))
 
 
@@ -1355,7 +1387,16 @@ def validate_document(kind: str, document: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(document, dict):
         raise ContractError("contract document must be a JSON object")
     reject_nonfinite(document)
-    validator = Draft202012Validator(_schema(kind))
+    # The version is read before a schema is chosen, and a version this build does not read is
+    # refused rather than validated against another version's rules: a record is only ever checked
+    # against the contract it says it was written to.
+    version = document.get("schema_version")
+    versions = SCHEMA_VERSIONS.get(kind)
+    if versions is not None and (not isinstance(version, str) or version not in versions):
+        raise ContractError(
+            f"schema_version: {version!r} is not a {kind} version this build reads; supported: "
+            f"{', '.join(versions)}")
+    validator = Draft202012Validator(_schema(kind, version))
     errors = sorted(
         validator.iter_errors(document),
         key=lambda error: tuple(str(part) for part in error.absolute_path),
