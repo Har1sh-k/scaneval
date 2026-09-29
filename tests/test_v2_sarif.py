@@ -9,15 +9,43 @@ into the test's own directory. Reviewers named here are fictional.
 from __future__ import annotations
 
 from copy import deepcopy
+import json
+import os
+from pathlib import Path
 
 import pytest
 
 from scaneval.contracts import CONTRACT_KINDS, ContractError, SCHEMA_VERSIONS, schema_file, validate_document
+from scaneval.sarif import SarifImportError, parse_log, read_artifact, select_run
 
 
 HASH = "sha256:" + "a" * 64
 OTHER = "sha256:" + "b" * 64
 FICTIONAL_REVIEWER = "Fixture Reviewer (fictional)"
+
+
+def minimal_log(**run_changes) -> dict:
+    """One Semgrep-shaped run with one finding, the smallest log every import path accepts."""
+    run = {
+        "tool": {"driver": {"name": "Semgrep OSS", "semanticVersion": "1.177.0", "rules": [{
+            "id": "rules.python.probe.subprocess-shell", "name": "rules.python.probe.subprocess-shell",
+            "defaultConfiguration": {"level": "warning"},
+            "properties": {"precision": "very-high", "tags": ["CWE-78: OS Command Injection", "security"]}}]}},
+        "invocations": [{"executionSuccessful": True, "toolExecutionNotifications": []}],
+        "results": [{
+            "ruleId": "rules.python.probe.subprocess-shell",
+            "message": {"text": "subprocess call with shell=True"},
+            "locations": [{"physicalLocation": {
+                "artifactLocation": {"uri": "src/app.py", "uriBaseId": "%SRCROOT%"},
+                "region": {"startLine": 5, "startColumn": 12, "endLine": 5, "endColumn": 43}}}],
+            "fingerprints": {"matchBasedId/v1": "requires login"}, "properties": {}}],
+    }
+    run.update(run_changes)
+    return {"version": "2.1.0", "runs": [run]}
+
+
+def encoded(document: dict) -> bytes:
+    return json.dumps(document).encode("utf-8")
 
 
 def claim_entry(index: int, **changes) -> dict:
@@ -133,3 +161,92 @@ def test_a_normalization_decision_names_a_flagged_result_and_a_stated_reviewer()
         validate_document("import-record", import_record(
             claims=[flagged], counts=counts,
             normalization={"sha256": HASH, "decisions": [{**decision, "decision": "split"}]}))
+
+
+# --- reading a log: whole-log refusals ---------------------------------------------------
+
+
+def test_a_log_is_read_only_as_a_regular_file_within_the_size_bound(tmp_path):
+    log = tmp_path / "scan.sarif"
+    log.write_bytes(encoded(minimal_log()))
+    assert read_artifact(log) == log.read_bytes()
+    assert read_artifact(log, max_bytes=log.stat().st_size) == log.read_bytes()
+    with pytest.raises(SarifImportError, match="more than the .*-byte bound"):
+        read_artifact(log, max_bytes=log.stat().st_size - 1)
+    with pytest.raises(SarifImportError, match="could not open the SARIF file"):
+        read_artifact(tmp_path / "missing.sarif")
+    with pytest.raises(SarifImportError, match="not a regular file"):
+        read_artifact(tmp_path)
+    with pytest.raises(SarifImportError, match="positive number of bytes"):
+        read_artifact(log, max_bytes=0)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+def test_a_fifo_named_as_the_log_is_refused_without_blocking(tmp_path):
+    fifo = tmp_path / "scan.sarif"
+    os.mkfifo(fifo)
+    with pytest.raises(SarifImportError, match="not a regular file"):
+        read_artifact(fifo)
+
+
+@pytest.mark.parametrize("data,message", [
+    (b"\xff\xfe{}", "not UTF-8 text"),
+    (b'{"version": "2.1.0", "runs": [', "not valid JSON"),
+    (b'{"version": "2.1.0", "version": "2.1.0", "runs": []}', "repeats the object key 'version'"),
+    (b'{"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "x", "rank": NaN}}}]}',
+     "non-finite JSON number NaN"),
+    (b'{"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "x", "rank": -Infinity}}}]}',
+     "non-finite JSON number -Infinity"),
+    (b'{"version": "2.1.0", "runs": [{"rank": 1e999}]}', "overflows to infinity"),
+    (b'{"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "\\udc80"}}}]}', "lone UTF-16 surrogate"),
+    (b'{"version": "2.1.0", "\\ud800": 1}', "lone UTF-16 surrogate"),
+    (b'["2.1.0"]', "not a SARIF log object"),
+    (b'{"a":' * 200000 + b"1" + b"}" * 200000, "recursion limit"),
+])
+def test_bytes_that_are_not_a_strict_json_object_are_refused_whole(data, message):
+    with pytest.raises(SarifImportError, match=message):
+        parse_log(data)
+
+
+def test_a_leading_byte_order_mark_is_the_one_thing_tolerated_and_it_is_noted():
+    log, notes = parse_log(b"\xef\xbb\xbf" + encoded(minimal_log()))
+    assert log == minimal_log()
+    assert notes == ["A leading UTF-8 byte order mark was ignored (RFC 8259 section 8.1); the artifact "
+                     "hash covers the bytes as supplied."]
+    assert parse_log(encoded(minimal_log())) == (minimal_log(), [])
+
+
+@pytest.mark.parametrize("log,message", [
+    ({"version": "2.0.0", "runs": []}, "declares version '2.0.0'; this importer reads SARIF 2.1.0 only"),
+    ({"runs": []}, "declares version None"),
+    ({"version": "2.1.0"}, "no runs property"),
+    ({"version": "2.1.0", "runs": None}, "runs is null: the producer failed to populate it"),
+    ({"version": "2.1.0", "runs": []}, "runs is empty"),
+    ({"version": "2.1.0", "runs": {}}, "runs is a dict, not an array"),
+    ({"version": "2.1.0", "runs": ["run"]}, r"runs\[0\] is a str, not a run object"),
+])
+def test_a_log_that_is_not_one_readable_sarif_2_1_0_run_is_refused(log, message):
+    with pytest.raises(SarifImportError, match=message):
+        select_run(log)
+
+
+def test_several_runs_need_a_named_index_and_the_index_must_exist():
+    log = minimal_log()
+    log["runs"].append(deepcopy(log["runs"][0]))
+    with pytest.raises(SarifImportError, match="holds 2 runs; name the one to import with --run-index"):
+        select_run(log)
+    index, run, count = select_run(log, 1)
+    assert (index, count) == (1, 2) and run is log["runs"][1]
+    for bad in (2, -1, True):
+        with pytest.raises(SarifImportError, match="out of range: the log holds 2 run"):
+            select_run(log, bad)
+    assert select_run(minimal_log())[::2] == (0, 1)
+
+
+def test_external_property_files_anywhere_in_the_log_refuse_it_whole():
+    log = minimal_log()
+    external = {"results": [{"location": {"uri": "results.sarif-external-properties"}}]}
+    log["runs"].append({**deepcopy(log["runs"][0]), "externalPropertyFileReferences": external})
+    # The run that points outside the log is not the one selected, and the log is still refused.
+    with pytest.raises(SarifImportError, match=r"runs\[1\] declares externalPropertyFileReferences"):
+        select_run(log, 0)
