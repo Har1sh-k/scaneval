@@ -2783,3 +2783,92 @@ def test_a_capture_gap_and_an_unbacked_capture_claim_are_reported_together(tmp_p
     assert "observed capture of context_selection, finding_submitted, model_requests" in message
     assert execution["capture"]["finding_submitted"] == "unavailable"
     assert execution["trace"]["capture_gap"] is True and execution["trace"]["events"] is None
+
+
+def test_a_standard_full_local_invocation_keeps_writing_2_0_records(tmp_path):
+    """The record version moves only when a 2.1 field is needed; the standard local path is unchanged."""
+    bundle = run(tmp_path, FakeAdapter())
+    result = json.loads((bundle / "result.json").read_text(encoding="utf-8"))
+    execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))
+    assert result["schema_version"] == "2.0" and execution["schema_version"] == "2.0"
+    assert "isolation" not in execution and "input_hash" not in execution["provenance"]
+    assert execution["network_policy"]["enforced"] is False
+
+
+def test_a_blinded_input_writes_a_2_1_record_naming_its_identities_and_the_local_backend(tmp_path):
+    import dataclasses
+
+    base = prepared_input(tmp_path)
+    blinding = {"map_id": "m", "map_version": "1", "map_sha256": "sha256:" + "e" * 64,
+                "original_tree_hash": "sha256:" + "f" * 64, "transformed_tree_hash": base.tree_hash}
+    prepared = dataclasses.replace(base, profile="metadata_blinded", blinding=blinding,
+                                   source_tree_hash="sha256:" + "f" * 64)
+    bundle = run(tmp_path, FakeAdapter(), prepared)
+    result = json.loads((bundle / "result.json").read_text(encoding="utf-8"))
+    execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))
+    validate_document("execution-record", execution)
+    assert result["schema_version"] == "2.0" and result["input_hash"] == base.tree_hash
+    assert execution["schema_version"] == "2.1"
+    assert execution["provenance"]["input_hash"] == base.tree_hash
+    assert execution["provenance"]["blinding"] == blinding and execution["provenance"]["pr"] is None
+    assert execution["isolation"]["backend"] == "local" and execution["isolation"]["enforced"] is False
+
+
+def test_a_pr_input_binds_its_result_to_the_change_set_identity_and_locates_against_head(tmp_path):
+    import dataclasses
+
+    base = prepared_input(tmp_path)
+    identity = "sha256:" + "1" * 64
+    pr = {"change_set_id": "cs-1", "base_tree_hash": "sha256:" + "2" * 64, "head_tree_hash": base.tree_hash,
+          "base_commit": "a" * 40, "head_commit": "b" * 40}
+    prepared = dataclasses.replace(base, mode="pr", input_hash=identity, pr=pr)
+    bundle = run(tmp_path, FakeAdapter(), prepared)
+    request = json.loads((bundle / "request.json").read_text(encoding="utf-8"))
+    assert request["input"]["mode"] == "pr" and request["input"]["pr"] == {"base": "a" * 40, "head": "b" * 40}
+    # Nothing evaluator-side about the change reaches the scanner's request.
+    assert "cs-1" not in json.dumps(request) and identity not in json.dumps(request)
+    result = json.loads((bundle / "result.json").read_text(encoding="utf-8"))
+    execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))
+    validate_document("scan-result", result)
+    validate_document("execution-record", execution)
+    assert result["schema_version"] == "2.1" and result["location_basis"] == "pr_head"
+    assert result["input_hash"] == identity and execution["provenance"]["tree_hash"] == base.tree_hash
+    assert execution["provenance"]["mode"] == "pr" and execution["provenance"]["pr"] == pr
+
+
+def test_a_backend_is_active_around_the_scan_and_its_isolation_record_is_written(tmp_path):
+    from contextlib import contextmanager
+
+    seen = []
+
+    class RecordingBackend:
+        network_enforced = True
+
+        @contextmanager
+        def activate(self):
+            seen.append("enter")
+            yield
+            seen.append("exit")
+
+        def isolation_record(self):
+            return {"backend": "oci", "enforced": True, "note": "fixture backend"}
+
+    class ObservingAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            seen.append("scan")
+            return super().scan(**kwargs)
+
+    bundle = run(tmp_path, ObservingAdapter(), backend=RecordingBackend())
+    execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))
+    assert seen == ["enter", "scan", "exit"]
+    assert execution["schema_version"] == "2.1" and execution["isolation"]["backend"] == "oci"
+    assert execution["network_policy"]["enforced"] is True
+
+
+def test_a_pr_input_without_its_synthetic_commits_is_refused_before_a_bundle_exists(tmp_path):
+    import dataclasses
+
+    prepared = dataclasses.replace(prepared_input(tmp_path), mode="pr", pr={"change_set_id": "cs-1"})
+    with pytest.raises(ExecutionError, match="base_commit and head_commit"):
+        run(tmp_path, FakeAdapter(), prepared)
+    assert not (tmp_path / "out").exists()

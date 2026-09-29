@@ -88,6 +88,7 @@ filesystem policy are declared here and must be enforced outside this process.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import errno
@@ -97,7 +98,7 @@ import shutil
 import stat
 import tempfile
 import time
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator
 import uuid
 
 from . import __version__
@@ -133,6 +134,17 @@ class _BundleRefused(Exception):
 
 @dataclass(frozen=True)
 class PreparedInput:
+    """One prepared input as a scanner receives it, and the identities the evaluator binds to it.
+
+    ``tree_hash`` is the tree the workspace holds and the pre-scan check compares against: the
+    exported snapshot, the transformed tree of a blinded input, or the head of a PR input.
+    ``input_hash`` is what the result, the plan, and the decisions bind to; it defaults to
+    ``tree_hash`` and differs only for a PR input, whose identity is its base, its head, and the
+    diff between them. ``source_tree_hash`` is the original export the labels refer to, which
+    differs from ``tree_hash`` for a blinded input. ``blinding`` and ``pr`` carry the evaluator-side
+    identities recorded in a 2.1 execution record; neither is ever handed to a scanner.
+    """
+
     input_id: str
     source_dir: Path
     tree_hash: str
@@ -140,6 +152,32 @@ class PreparedInput:
     provenance: dict
     profile: str = "standard"
     mode: str = "full"
+    input_hash: str | None = None
+    source_tree_hash: str | None = None
+    blinding: dict | None = None
+    pr: dict | None = None
+
+    @property
+    def binding_hash(self) -> str:
+        """The identity the result and every evaluator record of this input bind to."""
+        return self.input_hash or self.tree_hash
+
+    @property
+    def needs_2_1(self) -> bool:
+        """Whether a record of this input needs a 2.1 field: a PR or blinded input does."""
+        return self.mode != "full" or self.profile != "standard" or self.binding_hash != self.tree_hash
+
+
+# The isolation record of every invocation run without an OS-level backend. It is written into 2.1
+# execution records only; a 2.0 record written for a standard local run says the same thing through
+# its network note, and nothing about it changes.
+LOCAL_ISOLATION = {
+    "backend": "local",
+    "enforced": False,
+    "note": ("The scanner ran as the operator with no OS-level boundary. Workspace separation, path "
+             "containment, and the before/after source hash are checks, not enforcement; see "
+             "docs/THREAT_MODEL.md."),
+}
 
 
 def invocation_id(input_id: str, system_id: str, repetition: int) -> str:
@@ -909,8 +947,15 @@ def run_invocation(
     network_policy: str = "none",
     workspace_root: Path | None = None,
     clock: Callable[[], datetime] | None = None,
+    backend: Any = None,
 ) -> Path:
     """Execute one invocation and return its bundle directory. Never overwrites.
+
+    *backend* is the execution backend the scanner's processes run under; ``None`` is the local,
+    unenforced one. A backend exposes ``activate()``, a context manager in force while the adapter
+    runs, ``isolation_record()``, the 2.1 isolation block describing what actually bounded the
+    run, and ``network_enforced``. The execution record is written at 2.1 when the input is PR or
+    blinded or the backend is not local, and at 2.0 exactly as before otherwise.
 
     ``result.json`` and ``execution.json`` are written only once both documents validate and
     encode, and they are renamed into place together, so a bundle never holds a successful
@@ -1021,12 +1066,24 @@ def run_invocation(
     except ContractError as exc:
         raise ExecutionError(f"the prepared input's provenance cannot be hashed, so no execution "
                              f"record can bind to it: {exc}") from exc
+    request_pr = None
+    if prepared.mode == "pr":
+        # The request names the neutral synthetic commits the workspace history holds, and nothing
+        # else about the change: no change set id, no snapshot, no tree hash. Checked before the
+        # bundle exists, so a malformed PR input leaves no empty directory behind.
+        commits = prepared.pr if isinstance(prepared.pr, dict) else {}
+        base_commit, head_commit = commits.get("base_commit"), commits.get("head_commit")
+        if not (isinstance(base_commit, str) and base_commit and isinstance(head_commit, str) and head_commit):
+            raise ExecutionError("a PR input must carry the synthetic base_commit and head_commit its "
+                                 "request names")
+        request_pr = {"base": base_commit, "head": head_commit}
     bundle = out_dir / invocation_id(prepared.input_id, spec.system_id, repetition)
     bundle.mkdir(parents=True, exist_ok=False)
     raw_dir = bundle / "raw"
     trace_dir = bundle / "trace" if trace_mode != "off" else None
     bundle_area = _enclose(bundle)
-    request = build_request(run_id, prepared, spec, timeout_seconds=timeout_seconds, trace_mode=trace_mode)
+    request = build_request(run_id, prepared, spec, timeout_seconds=timeout_seconds, trace_mode=trace_mode,
+                            pr=request_pr)
     _write_new(bundle / "request.json", request)
 
     state_dirs = frozenset(getattr(adapter, "state_dirs", ()))
@@ -1103,9 +1160,10 @@ def run_invocation(
                                     notes=["Unsupported work stays in the denominator; nothing was executed."])
         else:
             try:
-                outcome = adapter.scan(request=request, source_dir=source, raw_dir=staging_raw, spec=spec,
-                                       preparation=preparation, timeout_seconds=timeout_seconds,
-                                       trace_mode=trace_mode, trace_dir=staging_trace)
+                with (backend.activate() if backend is not None else nullcontext()):
+                    outcome = adapter.scan(request=request, source_dir=source, raw_dir=staging_raw, spec=spec,
+                                           preparation=preparation, timeout_seconds=timeout_seconds,
+                                           trace_mode=trace_mode, trace_dir=staging_trace)
             except Exception as exc:
                 # Any failure inside the adapter is a recorded error with its own type name,
                 # never an empty successful scan and never a crash of the whole run.
@@ -1238,6 +1296,10 @@ def run_invocation(
     modified = sorted(set(before) ^ set(after) | {p for p in before if p in after and before[p] != after[p]})
     trace_record: dict | None = None
 
+    isolation = dict(LOCAL_ISOLATION) if backend is None else backend.isolation_record()
+    network_enforced = backend is not None and bool(backend.network_enforced)
+    record_2_1 = prepared.needs_2_1 or isolation.get("backend") != "local"
+
     def build_documents() -> tuple[dict, dict]:
         """The result and execution documents for the outcome as it currently stands.
 
@@ -1289,11 +1351,16 @@ def run_invocation(
             usage["cost_usd"] = None
         result = {
             "schema_version": "2.0", "run_id": run_id, "system_id": spec.system_id,
-            "input_hash": prepared.tree_hash, "status": outcome.status, "ranking": outcome.ranking,
+            "input_hash": prepared.binding_hash, "status": outcome.status, "ranking": outcome.ranking,
             "claims": outcome.claims, "bundles_resolved": outcome.bundles_resolved, "usage": usage,
             **({"error": outcome.error} if outcome.error else {}),
             **({"raw_artifacts": raw_artifacts} if raw_artifacts else {}),
         }
+        if prepared.mode == "pr":
+            # A PR review reads the head tree, so its claims locate against head. Said in the
+            # result itself, where the locations are, rather than left for a reader to infer.
+            result["schema_version"] = "2.1"
+            result["location_basis"] = "pr_head"
         result, rendered_in_result = _recordable_document(result)
         import_error = None
         try:
@@ -1306,8 +1373,11 @@ def run_invocation(
             # refused document would carry its usage or artifacts, and their violation with
             # them, straight into the record that reports the refusal.
             import_error = _recordable_text(str(exc))
-            result = _error_result(run_id, spec.system_id, prepared.tree_hash, wall,
+            result = _error_result(run_id, spec.system_id, prepared.binding_hash, wall,
                                    {"code": "import_contract_violation", "message": import_error[:2000]})
+            if prepared.mode == "pr":
+                result["schema_version"] = "2.1"
+                result["location_basis"] = "pr_head"
             try:
                 validate_document("scan-result", result)
             except ContractError as refusal:
@@ -1325,8 +1395,11 @@ def run_invocation(
             "timeout_seconds": timeout_seconds,
             "tool_versions": dict(outcome.tool_versions), "model_identity": outcome.model_identity,
             "system_config": dict(spec.config),
-            "network_policy": {"declared": network_policy, "enforced": False,
-                               "note": "Policy is recorded, not enforced by this runner; enforce it in the execution environment."},
+            "network_policy": ({"declared": network_policy, "enforced": True,
+                                "note": "Enforced by the execution backend; see isolation.network."}
+                               if network_enforced else
+                               {"declared": network_policy, "enforced": False,
+                                "note": "Policy is recorded, not enforced by this runner; enforce it in the execution environment."}),
             "environment": {"passthrough": sorted(set(("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "USER", "SHELL")
                                                       + tuple(adapter.env_passthrough)))},
             # One derivation for both: the capture mapping and the trace record cannot claim
@@ -1345,6 +1418,11 @@ def run_invocation(
             "notes": list(outcome.notes) + alias_notes + capture_notes + cleanup_notes,
             "raw_artifacts": raw_artifacts,
         }
+        if record_2_1:
+            execution["schema_version"] = "2.1"
+            execution["provenance"].update({"input_hash": prepared.binding_hash, "mode": prepared.mode,
+                                            "pr": prepared.pr, "blinding": prepared.blinding})
+            execution["isolation"] = isolation
         execution, rendered_in_execution = _recordable_document(execution)
         if rendered_in_result + rendered_in_execution:
             # Appended after the rendering, so this sentence is itself plain ASCII and needs no
