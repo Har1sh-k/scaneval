@@ -39,9 +39,9 @@ read-only commands read whatever path they are given.
 
 Exit codes. 2 means the command could not be carried out: a usage or contract error, a refused
 overwrite, a failed fetch or export. 1 means the command ran and reports a negative result: a
-mechanical check set failed, a run produced no usable scan from some system, or ``diagnose`` was
-given something that is not a bundle it can read. 0 means it ran and reports nothing wrong, which
-is not a statement that any label or decision is correct.
+mechanical check set failed, a run could not prepare some input or produced no usable scan from
+some system, or ``diagnose`` was given something that is not a bundle it can read. 0 means it ran
+and reports nothing wrong, which is not a statement that any label or decision is correct.
 
 ``diagnose`` reads a saved invocation bundle and writes a diagnostic document. It scores nothing,
 changes nothing in the bundle, and its answer never reaches a metric: a target whose code was
@@ -555,6 +555,12 @@ def _review(args: argparse.Namespace) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    """Execute one run configuration and report each invocation, each unprepared input, and the result.
+
+    An input the run could not prepare is named on stderr with the failure recorded in the
+    manifest; its assignments are skipped invocations, never scans that found nothing, so the
+    command reports a negative result (1) whenever any input or invocation delivered no usable scan.
+    """
     _refuse_trial_path(args.output)
     manifest = runner.run_from_config(
         args.config, args.output, workspace_root=args.workspace_root,
@@ -566,6 +572,12 @@ def _run(args: argparse.Namespace) -> int:
               f"claims={invocation['claim_records']} plan={invocation['plan_scope']} "
               f"review={invocation['review_state']}")
     print(f"Manifest: {args.output / runner.MANIFEST_NAME}")
+    print(f"Schedule: {args.output / manifest['schedule_path']}")
+    unprepared = [row for row in manifest["inputs"] if row["preparation_failure"] is not None]
+    for row in unprepared:
+        failure = row["preparation_failure"]
+        print(f"scaneval: input {row['input_id']} could not be prepared: {failure['type']}: "
+              f"{failure['message']}", file=sys.stderr)
     incomplete = [invocation["invocation_id"] for invocation in manifest["invocations"]
                   if invocation["status"] in INCOMPLETE_INVOCATION_STATUSES]
     if incomplete:
@@ -573,7 +585,7 @@ def _run(args: argparse.Namespace) -> int:
               f"{', '.join(incomplete)}", file=sys.stderr)
     if manifest["status"] != "completed":
         print(f"scaneval: the run manifest status is {manifest['status']}", file=sys.stderr)
-    return 1 if incomplete or manifest["status"] != "completed" else 0
+    return 1 if unprepared or incomplete or manifest["status"] != "completed" else 0
 
 
 def _diagnose_context_coverage(args: argparse.Namespace) -> int:
@@ -768,8 +780,9 @@ def build_parser() -> argparse.ArgumentParser:
     running = sub.add_parser("run", help="execute one frozen run configuration into a new directory")
     running.add_argument("config", type=Path)
     running.add_argument("--output", required=True, type=Path, help="new directory, must not exist")
-    running.add_argument("--only-system", action="append")
-    running.add_argument("--only-input", action="append")
+    running.add_argument("--only-system", action="append", help="system id to run; repeatable")
+    running.add_argument("--only-input", action="append",
+                         help="input id to run (a 2.0 configuration's snapshot id); repeatable")
     running.add_argument("--workspace-root", type=Path)
     return parser
 

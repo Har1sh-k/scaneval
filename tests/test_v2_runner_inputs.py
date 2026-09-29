@@ -449,3 +449,27 @@ def test_a_metadata_blinded_input_is_refused_before_the_output_exists(tmp_path, 
     with pytest.raises(ContractError, match=r"\(snap-a.blinded\) asks for metadata_blinded"):
         run_from_config(tmp_path / "run.json", out, clock=RUN_CLOCK, adapters={"fake": adapter})
     assert not out.exists() and adapter.prepared == 0
+
+
+def test_the_cli_names_an_unprepared_input_and_exits_one(tmp_path, upstream, monkeypatch, capsys):
+    """An input that could not be prepared is a negative result, never a quiet empty scan."""
+    repo, commit = upstream
+    write_pack(tmp_path / "pack.json", repo, {"snap-a": commit, "snap-gone": "f" * 40})
+    write_config(tmp_path / "run.json", inputs=[{"snapshot_id": "snap-a"}, {"snapshot_id": "snap-gone"}])
+    adapter = FakeAdapter()
+    monkeypatch.setattr("scaneval.runner.get_adapter", lambda name: adapter)
+    out = tmp_path / "out"
+
+    code = main(["run", str(tmp_path / "run.json"), "--output", str(out)])
+    captured = capsys.readouterr()
+
+    assert code == 1
+    assert "snap-a__fake-a__r1 status=success claims=1" in captured.out
+    assert "snap-gone__fake-a__r1 status=skipped claims=None plan=None review=None" in captured.out
+    assert f"Schedule: {out / 'evaluator' / 'schedule.json'}" in captured.out
+    assert "scaneval: input snap-gone could not be prepared: MaterializationError: " in captured.err
+    assert "no usable scan from 1 invocation(s): snap-gone__fake-a__r1" in captured.err
+    manifest = load_document(out / MANIFEST_NAME, "run-manifest")
+    assert manifest["status"] == "completed"
+    assert [row["input_id"] for row in manifest["inputs"] if row["preparation_failure"]] == ["snap-gone"]
+    assert adapter.calls == 1
