@@ -26,6 +26,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import subprocess
 import sys
 import threading
 
@@ -36,6 +37,7 @@ from scaneval.adapters import deepsec as deepsec_module
 from scaneval.adapters.base import AdapterError, SystemSpec
 from scaneval.adapters.deepsec import (
     Candidate,
+    ProcessOutput,
     capture_status,
     candidates_from,
     claim_path,
@@ -44,12 +46,14 @@ from scaneval.adapters.deepsec import (
     kind_for_slug,
     line_span,
     project_id_for,
+    read_process_output,
     sessions_from,
     settings,
     workspace_config,
 )
+from scaneval.adapters.pr import PrRange
 from scaneval.contracts import load_document
-from scaneval.execution import PreparedInput, run_invocation
+from scaneval.execution import PreparedInput, build_request, run_invocation
 from scaneval.materialize import hash_exported_tree
 
 
@@ -63,7 +67,7 @@ CLOCK = lambda: datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)  # noqa: E731
 # directory, and it refuses to run without the generated config, so a run that forgot to build
 # the private workspace fails loudly here rather than producing an empty scan.
 FAKE_CLI = '''
-import json, os, sys, time
+import json, os, subprocess, sys, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -108,6 +112,25 @@ def step_failure(knob, step):
         sys.exit(code)
 
 
+def scanned_record(name, project):
+    return {
+        "filePath": name, "projectId": project,
+        "candidates": [{"vulnSlug": "command-injection", "lineNumbers": [4],
+                        "snippet": "exec(", "matchedPattern": "shell exec"},
+                       {"vulnSlug": "sql-injection", "lineNumbers": [9, 11],
+                        "snippet": "query(", "matchedPattern": "string-built query"}],
+        "lastScannedAt": "2026-09-25T12:00:00.000Z",
+        "lastScannedRunId": "20260925120000-scan",
+        "fileHash": "0" * 64, "findings": [], "analysisHistory": [], "status": "pending"}
+
+
+def write_scan_run(base, project, root):
+    write(base / "runs" / "20260925120000-scan.json", {
+        "runId": "20260925120000-scan", "projectId": project, "rootPath": root,
+        "createdAt": "2026-09-25T12:00:00.000Z", "completedAt": "2026-09-25T12:00:05.000Z",
+        "type": "scan", "phase": "done", "scannerConfig": {"matcherSlugs": ["command-injection"]}})
+
+
 def do_scan(argv):
     if not Path("deepsec.config.ts").is_file():
         sys.stderr.write("no deepsec.config.ts in the working directory\\n")
@@ -119,38 +142,64 @@ def do_scan(argv):
     write(base / "project.json", {"projectId": project, "rootPath": root,
                                   "createdAt": "2026-09-25T12:00:00.000Z"})
     for name in source_files(root):
-        write(base / "files" / (name + ".json"), {
-            "filePath": name, "projectId": project,
-            "candidates": [{"vulnSlug": "command-injection", "lineNumbers": [4],
-                            "snippet": "exec(", "matchedPattern": "shell exec"},
-                           {"vulnSlug": "sql-injection", "lineNumbers": [9, 11],
-                            "snippet": "query(", "matchedPattern": "string-built query"}],
-            "lastScannedAt": "2026-09-25T12:00:00.000Z",
-            "lastScannedRunId": "20260925120000-scan",
-            "fileHash": "0" * 64, "findings": [], "analysisHistory": [], "status": "pending"})
-    write(base / "runs" / "20260925120000-scan.json", {
-        "runId": "20260925120000-scan", "projectId": project, "rootPath": root,
-        "createdAt": "2026-09-25T12:00:00.000Z", "completedAt": "2026-09-25T12:00:05.000Z",
-        "type": "scan", "phase": "done", "scannerConfig": {"matcherSlugs": ["command-injection"]}})
+        write(base / "files" / (name + ".json"), scanned_record(name, project))
+    write_scan_run(base, project, root)
     print("scanned %d file(s)" % len(source_files(root)))
 
 
 def do_process(argv):
     step_failure("process_exit", "process")
     settings = control()
+    if "--diff" in argv:
+        do_direct(argv, settings)
+        return
+    project = option(argv, "--project-id")
+    base = data_dir(project)
+    limit = int(option(argv, "--limit", "1000"))
+    names = sorted(p.relative_to(base / "files").as_posix()[:-5]
+                   for p in (base / "files").rglob("*.json"))[:limit]
+    investigate(argv, names, settings)
+    print("processed %d file(s)" % len(names))
+
+
+def investigate(argv, names, settings):
+    """The agent stage over *names*, in batches, exactly as standard mode and direct mode both run it.
+
+    A batch listed in ``fail_batches`` fails the way DeepSec's does: every file in it is left in
+    status ``error`` with no analysis. ``quota_at_batch`` fails that batch and stops there, and the
+    batches it never started keep the status the scan gave them.
+    """
     project = option(argv, "--project-id")
     model = option(argv, "--model")
     root = option(argv, "--root")
     base = data_dir(project)
-    limit = int(option(argv, "--limit", "1000"))
     batch_size = int(option(argv, "--batch-size", "5"))
-    names = sorted(p.relative_to(base / "files").as_posix()[:-5]
-                   for p in (base / "files").rglob("*.json"))[:limit]
     run_id = "20260925120100-process"
     sessions = settings.get("session_ids") or ["session-aaaa", "session-bbbb"]
     lines = settings.get("lines", [4])
     batches = [names[i:i + batch_size] for i in range(0, len(names), batch_size)]
+    result = {"analyses": 0, "findings": 0, "errored": 0, "quota": False}
     for index, batch in enumerate(batches):
+        if result["quota"]:
+            continue
+        if index == settings.get("crash_at_batch"):
+            for later in batches[index:]:
+                for name in later:
+                    path = base / "files" / (name + ".json")
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                    record["status"] = "processing"
+                    write(path, record)
+            sys.stderr.write("\\nfake deepsec crashed mid-run\\n\\n(set DEEPSEC_DEBUG=1 for a stack trace)\\n")
+            sys.exit(1)
+        if index in settings.get("fail_batches", []) or index == settings.get("quota_at_batch"):
+            for name in batch:
+                path = base / "files" / (name + ".json")
+                record = json.loads(path.read_text(encoding="utf-8"))
+                record["status"] = "error"
+                write(path, record)
+            result["errored"] += 1
+            result["quota"] = index == settings.get("quota_at_batch")
+            continue
         session = sessions[index % len(sessions)]
         share = float(len(batch)) or 1.0
         for name in batch:
@@ -181,6 +230,8 @@ def do_process(argv):
                 "findingId": "finding_" + str(abs(hash(name)) % (16 ** 16)).rjust(16, "0")[:16]}]
             record["status"] = "error" if (settings.get("file_error") and name == names[0]) else "analyzed"
             write(path, record)
+            result["analyses"] += 1
+            result["findings"] += 1
     write(base / "runs" / (run_id + ".json"), {
         "runId": run_id, "projectId": project, "rootPath": root,
         "createdAt": "2026-09-25T12:01:00.000Z", "completedAt": "2026-09-25T12:02:00.000Z",
@@ -218,7 +269,110 @@ def do_process(argv):
         dump = base / "debug" / "parse-error-investigate-2026-09-25T12-01-30-000Z.txt"
         dump.parent.mkdir(parents=True, exist_ok=True)
         dump.write_text("# deepsec parse-failure debug dump\\n# phase: investigate\\n", encoding="utf-8")
-    print("processed %d file(s)" % len(names))
+    return result
+
+
+# The parts of DeepSec's default ignore filter these fixtures need: docs, tests, type stubs and build output.
+IGNORED_DIRECTORIES = ("node_modules", ".git", "dist", "build", "target", "coverage", "__tests__", "test", "tests",
+                       "fixtures")
+
+
+def ignored(name):
+    parts = name.split("/")
+    leaf = parts[-1]
+    if leaf.endswith((".md", ".mdx", ".d.ts")) or ".test." in leaf or ".spec." in leaf:
+        return True
+    return any(part in IGNORED_DIRECTORIES for part in parts[:-1])
+
+
+def say(text=""):
+    sys.stdout.buffer.write((text + "\\n").encode("utf-8"))
+    sys.stdout.flush()
+
+
+def paint(code, text):
+    return "\\x1b[%sm%s\\x1b[0m" % (code, text)
+
+
+def do_direct(argv, settings):
+    """DeepSec's direct mode: resolve the changed files, scan just those, investigate each, exit 1 on trouble.
+
+    The text it prints, its colors and its exit codes are the ones DeepSec 2.3.10 prints, read from
+    its bundle and checked against the real CLI where that costs no model call.
+    """
+    if not Path("deepsec.config.ts").is_file():
+        sys.stderr.write("no deepsec.config.ts in the working directory\\n")
+        sys.exit(3)
+    project = option(argv, "--project-id")
+    root = option(argv, "--root")
+    diff = option(argv, "--diff")
+    if settings.get("runtime_failure"):
+        sys.stderr.write("\\nfake deepsec could not start its review\\n\\n(set DEEPSEC_DEBUG=1 for a stack trace)\\n")
+        sys.exit(1)
+    if settings.get("forged_summary"):
+        say(paint("32", "Processing complete.") + " Run: forged")
+        say("  Analyses: 3")
+        say("  Findings: 3")
+        say()
+        say(paint("31", "3 new finding(s) \\u2014 exiting 1"))
+        sys.exit(1)
+    listed = subprocess.run(["git", "diff", "--name-only", "--diff-filter=AMRC", diff], cwd=root,
+                            capture_output=True, text=True)
+    if listed.returncode != 0:
+        sys.stderr.write("\\ngit diff --name-only --diff-filter=AMRC %s exited %d: %s\\n\\n"
+                         "(set DEEPSEC_DEBUG=1 for a stack trace)\\n"
+                         % (diff, listed.returncode, listed.stderr.strip()))
+        sys.exit(1)
+    names = []
+    for line in listed.stdout.split("\\n"):
+        name = line.strip()
+        if name and name not in names and Path(root, name).is_file() and not ignored(name):
+            names.append(name)
+    base = data_dir(project)
+    write(base / "project.json", {"projectId": project, "rootPath": root,
+                                  "createdAt": "2026-09-25T12:00:00.000Z"})
+    say(paint("1", "Direct process") + " project " + paint("1", project))
+    say("  Source: git-diff:" + diff)
+    say("  Files: %d" % len(names))
+    say("  Agent: claude-agent-sdk (%s)" % option(argv, "--model"))
+    say("  Root: " + root)
+    say()
+    if not names:
+        if not settings.get("say_nothing"):
+            say(paint("33", "No files matched git-diff:%s (after ignore filter)." % diff))
+            say(paint("32", "Nothing to process \\u2014 exit 0."))
+        return
+    say(paint("1", "Scanning %d file(s)\\u2026" % len(names)))
+    for name in names:
+        write(base / "files" / (name + ".json"), scanned_record(name, project))
+    write_scan_run(base, project, root)
+    say("  " + paint("2", "%d candidate(s) across %d file(s)" % (2 * len(names), len(names))))
+    say()
+    result = investigate(argv, names, settings)
+    say(paint("32", "Processing complete.") + " Run: " + paint("1", "20260925120100-process"))
+    say("  Analyses: %d" % result["analyses"])
+    say("  Findings: %d" % result["findings"])
+    if result["errored"]:
+        say("  " + paint("31", "Errored batches: %d" % result["errored"]))
+    if result["quota"]:
+        for line in ["", "\\x1b[31m\\x1b[1m\\u2718 Stopped: Anthropic API credits exhausted\\x1b[0m", "",
+                     "  Your direct Anthropic account is out of credits/quota.", "",
+                     "  Either top up that account, or switch to " + paint("1", "Vercel AI Gateway"),
+                     "  for unified billing and observability:", "",
+                     "  " + paint("2", "Upstream: credit balance is too low"), "",
+                     "  " + paint("2", "After fixing, re-run:  deepsec process --project-id " + project), ""]:
+            say(line)
+        sys.exit(1)
+    if result["errored"]:
+        say()
+        say(paint("31", "%d batch(es) errored \\u2014 exiting 1 (agent failure, not a clean review)." % result["errored"]))
+        sys.exit(1)
+    if result["findings"]:
+        say()
+        say(paint("31", "%d new finding(s) \\u2014 exiting 1" % result["findings"]))
+        sys.exit(1)
+    say()
+    say("No findings.")
 
 
 def do_export(argv):
@@ -798,6 +952,14 @@ def test_a_batch_that_reached_no_verdict_makes_the_run_partial(tmp_path, monkeyp
     assert detail in result["error"]["message"] or detail in " ".join(execution["notes"])
     assert result["claims"], "the findings DeepSec did produce are still reported"
     assert execution["capture"]["finding_submitted"] == "partial"
+
+
+def test_a_full_run_with_a_file_left_in_error_keeps_its_bundles_resolved_as_it_always_did(tmp_path, monkeypatch):
+    """Only a PR review treats an errored file as unresolving the bundles; a full run is unchanged."""
+    root = fake_deepsec_root(tmp_path, file_error=True)
+    stub_collector(monkeypatch, tmp_path)
+    result, _execution = documents(invoke(tmp_path, root))
+    assert result["status"] == "partial" and result["bundles_resolved"] is True
 
 
 def test_a_parse_failure_dump_is_an_observer_error_and_never_shaped_like_an_attempt(tmp_path, monkeypatch):
@@ -2099,3 +2261,424 @@ def test_an_unusable_id_is_its_own_call_and_never_merged_with_another():
         "invalid_session_id", "invalid_session_id", "missing_session_id"]
     assert len({group.key for group in groups}) == 3
     assert all(not group.correlated for group in groups)
+
+
+# --- PR mode ----------------------------------------------------------------------------
+#
+# A PR request runs DeepSec's own direct mode over a two-commit workspace: ``process --diff
+# <base>..<head>`` and ``export``, with no separate scan step. The fake CLI's direct mode prints
+# what DeepSec 2.3.10 prints (its colors, its summary lines, its exit codes), which was read from
+# the bundle and, for the paths that cost no model call, checked against the real CLI.
+
+
+def workspace_git(cwd: Path, *args: str) -> str:
+    environment = {**os.environ, "GIT_AUTHOR_NAME": "u", "GIT_AUTHOR_EMAIL": "u@x", "GIT_COMMITTER_NAME": "u",
+                   "GIT_COMMITTER_EMAIL": "u@x", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+    return subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True,
+                          env=environment).stdout.strip()
+
+
+BASE_TREE = {
+    "src/server.js": "const { exec } = require('child_process');\nexec(process.argv[2]);\n",
+    "src/db.js": "module.exports = (db, id) => db.query('select * from t where id = ' + id);\n",
+    "README.md": "# fixture\n",
+}
+
+
+def pr_workspace(tmp_path: Path, head: dict, *, base: dict | None = None,
+                 name: str = "pr-source") -> tuple[Path, PrRange]:
+    """A workspace shaped like the one the runner builds for a PR input.
+
+    A base commit holding *base* (the fixture tree by default), a head commit that applies *head*
+    to it (a value of ``None`` deletes the path), ``HEAD`` at head, and a clean status.
+    """
+    workspace = tmp_path / name
+    workspace.mkdir()
+    workspace_git(workspace, "init", "-q", "-b", "main")
+
+    def commit(files: dict, message: str) -> str:
+        for relative, content in files.items():
+            target = workspace / relative
+            if content is None:
+                target.unlink()
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        workspace_git(workspace, "add", "-A", "-f", ".")
+        workspace_git(workspace, "commit", "-q", "--no-verify", "--allow-empty", "-m", message)
+        return workspace_git(workspace, "rev-parse", "HEAD")
+
+    base_commit = commit(BASE_TREE if base is None else base, "base")
+    return workspace, PrRange(base_commit, commit(head, "head"))
+
+
+def pr_request(pr: PrRange, spec: SystemSpec, *, trace_mode: str = "off", timeout_seconds: float = 300) -> dict:
+    """The scan request the runner would build for a PR input, checked against the request contract."""
+    prepared = PreparedInput("pr-fixture", Path("."), "sha256:" + "0" * 64, ("javascript",), {}, mode="pr",
+                             pr={"base_commit": pr.base, "head_commit": pr.head})
+    return build_request("run-deepsec-pr", prepared, spec, timeout_seconds=timeout_seconds, trace_mode=trace_mode,
+                         pr={"base": pr.base, "head": pr.head})
+
+
+def scan_pr(tmp_path: Path, root: Path, workspace: Path, pr: PrRange, *, trace_mode: str = "off",
+            timeout_seconds: float = 300, request: dict | None = None, **overrides):
+    """One PR-mode scan by the adapter itself, over *workspace*: ``(outcome, raw dir, trace dir or None)``."""
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root, **overrides)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    trace = None
+    if trace_mode != "off":
+        trace = tmp_path / "trace"
+        trace.mkdir()
+    outcome = adapter.scan(request=request or pr_request(pr, spec, trace_mode=trace_mode,
+                                                         timeout_seconds=timeout_seconds),
+                           source_dir=workspace, raw_dir=raw, spec=spec, preparation=preparation,
+                           timeout_seconds=timeout_seconds, trace_mode=trace_mode, trace_dir=trace)
+    return outcome, raw, trace
+
+
+def binary_of(root: Path) -> str:
+    return str(root.resolve() / "node_modules" / ".bin" / "deepsec")
+
+
+PR_PROJECT = "scaneval-" + "0" * 16
+CHANGED_SOURCE = {"src/server.js": "const x = 1;\n", "src/routes.js": "module.exports = 1;\n"}
+
+
+def test_deepsec_declares_pr_beside_full():
+    assert get_adapter("deepsec").scan_modes == frozenset({"full", "pr"})
+
+
+def test_a_pr_request_runs_direct_mode_and_export_and_no_separate_scan(tmp_path):
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, {**CHANGED_SOURCE, "README.md": "# more\n"})
+
+    outcome, raw, _ = scan_pr(tmp_path, root, workspace, pr)
+
+    binary = binary_of(root)
+    assert outcome.command == [
+        binary, "process", "--project-id", PR_PROJECT, "--root", str(workspace), "--diff", f"{pr.base}..{pr.head}",
+        "--agent", "claude", "--model", "claude-haiku-4-5", "--concurrency", "1", "--thinking-level", "low",
+        "--batch-size", "3", "--max-turns", "60",
+        "&&", binary, "export", "--format", "json", "--project-id", PR_PROJECT, "--out", str(raw / "deepsec-export.json")]
+    assert "--limit" not in outcome.command, "direct mode never applies --limit, so it is not sent"
+    assert "scan" not in outcome.command
+    artifact_ids = {artifact["id"] for artifact in outcome.artifacts}
+    assert {"deepsec-process-stdout", "deepsec-process-stderr", "deepsec-export-stdout", "deepsec-export"} <= artifact_ids
+    assert not any(identifier.startswith("deepsec-scan-") for identifier in artifact_ids)
+    assert not (raw / "deepsec-scan.stdout.txt").exists()
+    assert (raw / "deepsec-process.stdout.txt").is_file()
+
+
+def test_the_pr_notes_say_two_steps_and_never_the_three_of_a_full_run(tmp_path):
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+    assert not any("three CLI steps" in note for note in outcome.notes)
+    steps = next(note for note in outcome.notes if note.startswith("DeepSec ran as two CLI steps"))
+    assert f"--diff {pr.base}..{pr.head}" in steps and "no separate scan step was run" in steps
+    assert "those two argv lists" in steps
+
+
+def test_a_pr_run_records_that_limit_had_no_effect_and_sends_none(tmp_path):
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr, limit=1)
+    assert "--limit" not in outcome.command
+    assert any("config.limit (1) was not passed to DeepSec" in note and "never applies --limit" in note
+               for note in outcome.notes)
+    # Both changed files were investigated: the limit had no effect, exactly as the note says.
+    assert len(outcome.claims) == 2
+
+
+def test_a_pr_run_with_no_limit_configured_says_nothing_about_one(tmp_path):
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr, limit=None)
+    assert not any("config.limit" in note for note in outcome.notes)
+
+
+def test_an_exit_of_1_with_findings_is_a_normal_review_that_is_recorded_as_one(tmp_path):
+    """Direct mode exits 1 when it produced findings, which is a review that worked."""
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+
+    outcome, raw, _ = scan_pr(tmp_path, root, workspace, pr)
+
+    stdout = (raw / "deepsec-process.stdout.txt").read_bytes().decode("utf-8")
+    assert "2 new finding(s)" in stdout and "exiting 1" in stdout
+    assert outcome.status == "success" and outcome.error is None and outcome.bundles_resolved is True
+    assert outcome.exit_code == 0, "the last step's exit code is the export's"
+    assert sorted(claim["primary_location"]["path"] for claim in outcome.claims) == ["src/routes.js", "src/server.js"]
+    assert all(claim["native_rule_id"] == "deepsec:command-injection" for claim in outcome.claims)
+    note = next(note for note in outcome.notes if note.startswith("deepsec process exited 1 and the run went on"))
+    assert "2 finding(s), 0 file(s) in status 'error' and 0 unfinished file(s)" in note
+    assert "DeepSec's own summary said 2 finding(s)" in note
+
+
+# --- PR mode: what an exit 1 means ------------------------------------------------------
+#
+# Direct mode exits 1 for findings, for an errored batch and for an exhausted quota, and also for
+# a runtime failure. The status is made from the records DeepSec left; what it printed only names
+# the reason.
+
+
+def test_a_pr_run_with_an_errored_batch_and_a_finished_one_is_partial_and_keeps_the_findings(tmp_path):
+    root = fake_deepsec_root(tmp_path, fail_batches=[0])
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+
+    outcome, raw, _ = scan_pr(tmp_path, root, workspace, pr, batch_size=1)
+
+    assert "1 batch(es) errored" in (raw / "deepsec-process.stdout.txt").read_text(encoding="utf-8")
+    assert outcome.status == "partial" and outcome.bundles_resolved is False
+    assert outcome.error["code"] == "deepsec_batches_failed"
+    assert "1 file(s) in status 'error'" in outcome.error["message"]
+    assert "DeepSec itself counted 1 errored batch(es)" in outcome.error["message"]
+    assert "part of the change reached no verdict" in outcome.error["message"]
+    assert len(outcome.claims) == 1, "the batch that finished still reports what it found"
+    assert any("deepsec process exited 1 and the run went on" in note for note in outcome.notes)
+
+
+def test_a_pr_run_in_which_every_batch_errored_observed_nothing_and_is_an_error(tmp_path):
+    """The real CLI, given a Claude executable that fails at once, ends exactly here: exit 1, files in error."""
+    root = fake_deepsec_root(tmp_path, fail_batches=[0])
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr, batch_size=5)
+
+    assert outcome.status == "error" and outcome.claims == []
+    assert outcome.error["code"] == "deepsec_batches_failed"
+    assert "2 file(s) in status 'error'" in outcome.error["message"]
+    assert outcome.error["message"].endswith("no file reached a verdict, so none of the change was observed")
+    assert outcome.bundles_resolved is False
+
+
+def test_an_exhausted_quota_is_partial_with_the_source_deepsec_named_when_some_file_finished(tmp_path):
+    root = fake_deepsec_root(tmp_path, quota_at_batch=1)
+    workspace, pr = pr_workspace(tmp_path, {"src/a.js": "1\n", "src/b.js": "2\n", "src/c.js": "3\n"})
+
+    outcome, raw, _ = scan_pr(tmp_path, root, workspace, pr, batch_size=1)
+
+    assert "Stopped: Anthropic API credits exhausted" in (
+        ANSI.sub("", (raw / "deepsec-process.stdout.txt").read_text(encoding="utf-8")))
+    assert outcome.status == "partial" and outcome.bundles_resolved is False
+    assert outcome.error["code"] == "quota_exhausted"
+    assert outcome.error["message"] == (
+        "deepsec process stopped: Anthropic API credits exhausted, in DeepSec's own words. 1 of 3 file record(s) "
+        "reached a verdict, 1 were left in status 'error' and 1 were never finished, so the rest of the change "
+        "was not reviewed")
+    assert [claim["primary_location"]["path"] for claim in outcome.claims] == ["src/a.js"]
+    assert any("1 of 3 file record(s) were left unfinished" in note and "quota runs out" in note
+               for note in outcome.notes)
+    assert any("DeepSec's own summary said Anthropic API credits exhausted, 1 errored batch(es)" in note
+               for note in outcome.notes)
+
+
+def test_an_exhausted_quota_before_any_file_finished_is_an_error_with_no_claims(tmp_path):
+    root = fake_deepsec_root(tmp_path, quota_at_batch=0)
+    workspace, pr = pr_workspace(tmp_path, {"src/a.js": "1\n", "src/b.js": "2\n"})
+
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr, batch_size=1)
+
+    assert outcome.status == "error" and outcome.claims == []
+    assert outcome.error["code"] == "quota_exhausted"
+    assert "0 of 2 file record(s) reached a verdict" in outcome.error["message"]
+    assert outcome.error["message"].endswith("no file reached a verdict, so none of the change was observed")
+
+
+def test_a_run_that_crashed_mid_way_leaves_unfinished_files_and_says_what_deepsec_wrote(tmp_path):
+    """A crash exits 1 too. The files it was holding are unfinished, which is what explains the exit."""
+    root = fake_deepsec_root(tmp_path, crash_at_batch=1)
+    workspace, pr = pr_workspace(tmp_path, {"src/a.js": "1\n", "src/b.js": "2\n", "src/c.js": "3\n"})
+
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr, batch_size=1)
+
+    assert outcome.status == "partial" and outcome.bundles_resolved is False
+    assert outcome.error["code"] == "scope_incomplete"
+    assert outcome.error["message"].startswith("2 of 3 file record(s) were left unfinished (src/b.js.json (processing), "
+                                               "src/c.js.json (processing)): DeepSec reached no verdict on them, so "
+                                               "this run observed part of the change and says nothing about the rest")
+    assert "under config.limit" not in outcome.error["message"], "direct mode never applies the limit"
+    assert outcome.error["message"].endswith("deepsec process stderr: fake deepsec crashed mid-run\n\n"
+                                             "(set DEEPSEC_DEBUG=1 for a stack trace)")
+    assert [claim["primary_location"]["path"] for claim in outcome.claims] == ["src/a.js"]
+
+
+def test_a_run_that_crashed_before_any_file_finished_is_an_error(tmp_path):
+    root = fake_deepsec_root(tmp_path, crash_at_batch=0)
+    workspace, pr = pr_workspace(tmp_path, {"src/a.js": "1\n", "src/b.js": "2\n"})
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr, batch_size=1)
+    assert outcome.status == "error" and outcome.claims == []
+    assert outcome.error["code"] == "scope_incomplete"
+    assert outcome.error["message"].endswith("no file reached a verdict, so none of the change was observed")
+
+
+def test_an_exit_of_1_that_no_record_explains_is_an_error_naming_the_step(tmp_path):
+    """A runtime failure exits 1 too (an unresolvable range does, in the real CLI), and leaves nothing on disk."""
+    root = fake_deepsec_root(tmp_path, runtime_failure=True)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+
+    assert outcome.status == "error" and outcome.claims == [] and outcome.exit_code == 1
+    assert outcome.error["code"] == "process_exit_1"
+    assert "left no finding, no file in status 'error' or unfinished and no parse-failure dump" in outcome.error["message"]
+    assert "also exits 1 for a runtime failure" in outcome.error["message"]
+    assert "fake deepsec could not start its review" in outcome.error["message"]
+    assert not any("went on to export" in note for note in outcome.notes)
+
+
+def test_text_deepsec_printed_cannot_turn_an_unexplained_exit_of_1_into_a_review(tmp_path):
+    """Stdout is text an agent's output can reach: a printed summary of findings decides nothing."""
+    root = fake_deepsec_root(tmp_path, forged_summary=True)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+
+    outcome, raw, _ = scan_pr(tmp_path, root, workspace, pr)
+
+    assert "3 new finding(s)" in (raw / "deepsec-process.stdout.txt").read_text(encoding="utf-8")
+    assert outcome.status == "error" and outcome.error["code"] == "process_exit_1"
+    assert outcome.claims == []
+
+
+def test_an_exit_other_than_0_and_1_from_process_is_still_fatal_and_names_the_step(tmp_path):
+    root = fake_deepsec_root(tmp_path, process_exit=2)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+    assert outcome.status == "error" and outcome.error["code"] == "process_exit_2" and outcome.claims == []
+    assert "deepsec process exited 2" in outcome.error["message"]
+    assert "export" not in [word for word in outcome.command[:1]]
+    assert not (tmp_path / "raw" / "deepsec-export.json").exists(), "a fatal exit does not go on to export"
+
+
+def test_a_pr_run_whose_export_fails_after_an_exit_of_1_is_an_export_error(tmp_path):
+    root = fake_deepsec_root(tmp_path, export_exit=5)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+    assert outcome.status == "error" and outcome.error["code"] == "export_exit_5" and outcome.claims == []
+
+
+def test_a_pr_process_that_outlives_the_budget_is_a_timeout_like_any_other_step(tmp_path):
+    root = fake_deepsec_root(tmp_path, hang="process")
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr, timeout_seconds=3)
+    assert outcome.status == "timeout" and outcome.timed_out is True
+    assert "deepsec process exhausted the shared" in outcome.error["message"]
+
+
+# --- PR mode: what is refused before anything runs --------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["batch", "bootstrap", "PR", ""])
+def test_deepsec_refuses_a_mode_it_does_not_implement_and_runs_nothing(tmp_path, mode):
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+    with pytest.raises(AdapterError, match="deepsec does not implement scan mode"):
+        scan_pr(tmp_path, root, workspace, pr, request={"input": {"mode": mode}})
+    assert list((tmp_path / "raw").iterdir()) == [], "no workspace was built and no process ran"
+
+
+def test_deepsec_refuses_a_pr_request_without_two_commits_and_a_full_request_carrying_a_pr(tmp_path):
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+    with pytest.raises(AdapterError, match="input.pr is absent"):
+        scan_pr(tmp_path, root, workspace, pr, request={"input": {"mode": "pr"}})
+    (tmp_path / "raw").rmdir()
+    with pytest.raises(AdapterError, match="full-mode request that also carries input.pr"):
+        scan_pr(tmp_path, root, workspace, pr, request={"input": {"mode": "full", "pr": {"base": pr.base,
+                                                                                         "head": pr.head}}})
+    assert list((tmp_path / "raw").iterdir()) == []
+
+
+def test_deepsec_refuses_a_pr_request_over_a_workspace_that_does_not_hold_its_history(tmp_path):
+    """DeepSec would otherwise fail inside its own git call, after paying for nothing but a workspace."""
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+    workspace_git(workspace, "checkout", "-q", "--detach", pr.base)
+    with pytest.raises(AdapterError, match="not at the request's head commit"):
+        scan_pr(tmp_path, root, workspace, pr)
+    assert list((tmp_path / "raw").iterdir()) == []
+
+
+# --- PR mode: the trace and the capture matrix ------------------------------------------
+
+
+def test_a_pr_run_traces_the_scoped_scan_and_the_findings_and_changes_no_capture_cell(tmp_path, monkeypatch):
+    stub_collector(monkeypatch, tmp_path)
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, {**CHANGED_SOURCE, "README.md": "# more\n"})
+
+    outcome, _raw, trace = scan_pr(tmp_path, root, workspace, pr, trace_mode="metadata")
+
+    events = [json.loads(line) for line in (trace / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    types = [event["type"] for event in events]
+    assert types.count("finding.candidate") == 4, "two candidates on each of the two files direct mode scanned"
+    assert types.count("finding.submitted") == 2
+    assert {event["metadata"]["file_path"] for event in events if event["type"] == "finding.candidate"} == {
+        "src/routes.js", "src/server.js"}, "nothing about a file DeepSec dropped"
+    assert outcome.capture == {"model_requests": "partial", "model_responses": "partial", "tool_calls": "complete",
+                               "context_selection": "partial", "finding_candidate": "complete",
+                               "finding_submitted": "complete", "finding_validation": "unavailable",
+                               "finding_filtered": "unavailable"}
+
+
+def test_a_pr_run_with_tracing_off_claims_no_observation(tmp_path):
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+    assert set(outcome.capture.values()) == {"unavailable"}
+
+
+# --- PR mode: what DeepSec printed ------------------------------------------------------
+
+ANSI = deepsec_module.ANSI_ESCAPE
+# Excerpts of what the real 2.3.10 CLI printed, with its escape sequences: a run whose batch failed
+# (a Claude executable that exits at once).
+REAL_ERRORED = ("\x1b[32mProcessing complete.\x1b[0m Run: \x1b[1m20260930055356-1ea8d1485890fae3\x1b[0m\n"
+                "  Analyses: 0\n  Findings: 0\n  \x1b[31mErrored batches: 1\x1b[0m\n\n"
+                "\x1b[31m1 batch(es) errored — exiting 1 (agent failure, not a clean review).\x1b[0m\n")
+
+
+def test_the_process_summary_is_read_through_its_colors():
+    assert read_process_output(REAL_ERRORED) == ProcessOutput(errored_batches=1, findings=0)
+    quota = ("  Findings: 4\n\n\x1b[31m\x1b[1m✘ Stopped: Vercel AI Gateway credits exhausted\x1b[0m\n\n"
+             "  Upstream: 402\n")
+    assert read_process_output(quota) == ProcessOutput(quota="Vercel AI Gateway credits", findings=4)
+    assert read_process_output("") == ProcessOutput()
+    assert read_process_output("\x1b[31m1 new finding(s) — exiting 1\x1b[0m\n") == ProcessOutput()
+
+
+def test_a_summary_line_counts_only_where_deepsec_prints_it():
+    """A line an agent could echo mid-sentence is not a summary line."""
+    assert read_process_output("note Findings: 9\nnote Errored batches: 9\n") == ProcessOutput()
+
+
+def test_the_last_summary_line_wins():
+    text = "  Findings: 1\n  Findings: 7\n"
+    assert read_process_output(text).findings == 7
+
+
+# --- PR mode: a full run is untouched ---------------------------------------------------
+
+
+def test_a_full_run_still_runs_three_steps_sends_its_limit_and_says_so(tmp_path, monkeypatch):
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    bundle = invoke(tmp_path, root)
+    result, execution = documents(bundle)
+    binary = binary_of(root)
+    command = execution["command"]
+    project, workspace_source, export = command[3], command[5], command[-1]
+    assert result["status"] == "success"
+    assert command == [
+        binary, "scan", "--project-id", project, "--root", workspace_source,
+        "&&", binary, "process", "--project-id", project, "--root", workspace_source, "--agent", "claude",
+        "--model", "claude-haiku-4-5", "--concurrency", "1", "--thinking-level", "low", "--limit", "6",
+        "--batch-size", "3", "--max-turns", "60",
+        "&&", binary, "export", "--format", "json", "--project-id", project, "--out", export]
+    assert any(note.startswith("DeepSec ran as three CLI steps in one workspace under raw/deepsec-workspace: scan, "
+                               "process and export.") for note in execution["notes"])
+    assert not any("PR mode" in note or "direct mode" in note or "Empty review" in note
+                   for note in execution["notes"])
+    assert not any("did not investigate" in note for note in execution["notes"])
