@@ -39,20 +39,21 @@ No command writes inside a materialized trial directory: the output path of ``pl
 ``import sarif``, ``demo``, ``score``, ``replay``, ``report``, ``aggregate`` and ``compare``, the
 pack path of ``corpus init`` and of every corpus command that rewrites a pack, the map ``blinding
 review`` rewrites, the bundle argument of all four ``review`` subcommands, the output of
-``precision sample``, ``queue`` and ``estimate`` and the reviews file of ``precision record``, the
-output of ``gate``, and the directory ``corpus validate`` exports a snapshot into, are each refused
-when a trial's ``provenance.json`` and ``source`` sit in them or above them. That keeps evaluator
-material out of the tree a scanner is handed; it is a check on the path, not an isolation boundary.
-``review status`` is checked although it only reads, so the ``review`` group is uniform; the other
-read-only commands read whatever path they are given.
+``precision sample``, ``queue`` and ``estimate`` and the reviews file of ``precision record``, and
+the directory ``corpus validate`` exports a snapshot into, are each refused when a trial's
+``provenance.json`` and ``source`` sit in them or above them. That keeps evaluator material out of
+the tree a scanner is handed; it is a check on the path, not an isolation boundary. ``review
+status`` is checked although it only reads, so the ``review`` group is uniform; the other read-only
+commands read whatever path they are given. The output of ``gate`` is refused in the same places
+and inside a run directory too.
 
 Exit codes. 2 means the command could not be carried out: a usage or contract error, a refused
 overwrite, a failed fetch or export, a SARIF log refused whole. 1 means the command ran and
 reports a negative result: a mechanical check set failed, a run could not prepare some input or
 produced no usable scan from some system, an imported log holds no usable scan, a blinding map is
-not approved or a variant refused it, ``diagnose`` was given something that is not a bundle it can
-read, or ``gate`` reached a decision that is not a pass. 0 means it ran and reports nothing wrong,
-which is not a statement that any label or decision is correct.
+not approved or a variant refused it, or ``diagnose`` was given something that is not a bundle it
+can read. 0 means it ran and reports nothing wrong, which is not a statement that any label or
+decision is correct. ``gate`` also exits 1 for a decision that is not a pass.
 
 ``diagnose`` reads a saved invocation bundle and writes a diagnostic document. It scores nothing,
 changes nothing in the bundle, and its answer never reaches a metric: a target whose code was
@@ -324,18 +325,19 @@ def _refuse_trial_path(output: Path) -> None:
     is given (``add-snapshot``, ``import``, ``validate --snapshot-id``, ``approve``, ``admit``,
     ``disposition``, all through :func:`_pack_for_change`), the map ``blinding review`` rewrites,
     the bundle ``review init``, ``review record`` and ``review approve`` write into, the output of
-    every ``precision`` command and the reviews file ``precision record`` appends to, the decision
-    ``gate`` writes, and the trial ``corpus validate`` is about to export into. ``review status``
-    checks the bundle it reads as well, so every ``review`` subcommand refuses the same paths.
-    Commands that only read are otherwise not checked: a bundle handed to ``replay`` or ``report``,
-    a run directory handed to ``aggregate`` or ``compare``, a pack that is only summarized by
-    ``corpus validate`` or read by ``plan`` and ``review init``, a map ``blinding check`` reads, and
-    a supplied artifact are read wherever they sit. A trial is recognized by a ``provenance.json``
-    file beside a ``source`` directory; any other directory is left alone. *output* itself is
-    examined along with its parents, so a bundle that is itself a trial root is refused as well as
-    one sitting under one; a path that does not exist yet carries no marker and is judged by its
-    parents alone. The comparison resolves symlinks in the path but follows no bind mount or hard
-    link, so it catches the obvious mistake and is not an isolation boundary.
+    every ``precision`` command and the reviews file ``precision record`` appends to, and the trial
+    ``corpus validate`` is about to export into. ``review status`` checks the bundle it reads as
+    well, so every ``review`` subcommand refuses the same paths. Commands that only read are
+    otherwise not checked: a bundle handed to ``replay`` or ``report``, a run directory handed to
+    ``aggregate`` or ``compare``, a pack that is only summarized by ``corpus validate`` or read by
+    ``plan`` and ``review init``, a map ``blinding check`` reads, and a supplied artifact are read
+    wherever they sit. A trial is recognized by a ``provenance.json`` file beside a ``source``
+    directory; any other directory is left alone. *output* itself is examined along with its
+    parents, so a bundle that is itself a trial root is refused as well as one sitting under one; a
+    path that does not exist yet carries no marker and is judged by its parents alone. The
+    comparison resolves symlinks in the path but follows no bind mount or hard link, so it catches
+    the obvious mistake and is not an isolation boundary. The decision ``gate`` writes is checked
+    here too, and by :func:`_refuse_gate_path` against run directories.
     """
     resolved = output.expanduser().resolve()
     for directory in (resolved, *resolved.parents):
