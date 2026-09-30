@@ -1,0 +1,658 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/precision-sample.schema.json",
+  "title": "ScanEval precision sample",
+  "description": "A seeded probability sample of delivered claims for human review, with the frame it was drawn from. The frame lists every unit of the declared population from saved run directories, bound by the digests of their manifests, schedules, and results; the design records the method, allocation, seed, and algorithm, so the selection can be drawn again and compared. It holds no review outcome and changes no decision, score, or detection credit.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "frame",
+    "frame_sha256",
+    "design",
+    "strata",
+    "uncovered_strata",
+    "selected",
+    "blinding",
+    "notes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.1"
+    },
+    "frame": {
+      "$ref": "#/$defs/frame"
+    },
+    "frame_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "canonical_sha256 of frame."
+    },
+    "design": {
+      "$ref": "#/$defs/design"
+    },
+    "strata": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/stratum"
+      },
+      "description": "Every stratum that holds a unit, sorted by name."
+    },
+    "uncovered_strata": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Strata that drew no unit. No estimate from this sample represents them."
+    },
+    "selected": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/selection"
+      },
+      "description": "The drawn units, sorted by unit_id."
+    },
+    "blinding": {
+      "$ref": "#/$defs/blinding"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allegation",
+        "kind",
+        "primary_location"
+      ],
+      "description": "The first delivered copy as the saved result carried it: exactly the fields its duplicate identity is computed from.",
+      "properties": {
+        "allegation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "native_rule_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "primary_location": {
+          "$ref": "#/$defs/location"
+        },
+        "related_locations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/location"
+          }
+        },
+        "evidence_text": {
+          "type": "string"
+        }
+      }
+    },
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unit_id",
+        "run_id",
+        "invocation_id",
+        "system_id",
+        "input_id",
+        "fingerprint",
+        "claim_ids",
+        "delivered_copies",
+        "population_copies",
+        "first_rank",
+        "claim"
+      ],
+      "description": "One exact-duplicate group of claims within one invocation: what a reviewer judges once.",
+      "properties": {
+        "unit_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "<run_id>/<invocation_id>/<first delivered claim id>."
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "invocation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "system_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "input_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "scaneval.scoring.claim_fingerprint of every copy."
+        },
+        "claim_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Every delivered copy, in delivery order."
+        },
+        "delivered_copies": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "population_copies": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Copies inside the population: every copy for full, the copies at native rank at most B for first_b."
+        },
+        "first_rank": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "Native rank of the first delivered copy; null for unranked output."
+        },
+        "claim": {
+          "$ref": "#/$defs/claim"
+        }
+      }
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "invocation_id",
+        "input_id",
+        "system_id",
+        "snapshot_id",
+        "repetition",
+        "status",
+        "ranking",
+        "bundles_resolved",
+        "input_hash",
+        "result_sha256",
+        "claim_records",
+        "units",
+        "population_units",
+        "population_copies",
+        "state"
+      ],
+      "description": "One scheduled assignment in the frame's view, whether or not it delivered claims.",
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "invocation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "input_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "system_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "snapshot_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "repetition": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "success",
+            "partial",
+            "unsupported",
+            "error",
+            "timeout",
+            "skipped",
+            "not_recorded"
+          ],
+          "description": "The saved result's status; skipped when the manifest records no bundle, not_recorded when it records no row."
+        },
+        "ranking": {
+          "enum": [
+            "native",
+            "unranked",
+            null
+          ]
+        },
+        "bundles_resolved": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "input_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "result_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Canonical digest of the saved result the units were read from."
+        },
+        "claim_records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "units": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Exact-duplicate groups in the whole output."
+        },
+        "population_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "population_copies": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "state": {
+          "enum": [
+            "included",
+            "no_output",
+            "unranked",
+            "bundle_unresolved"
+          ],
+          "description": "Whether this assignment's claims are in the population, and if not, why."
+        }
+      }
+    },
+    "excluded": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "invocations",
+        "claim_records",
+        "units"
+      ],
+      "properties": {
+        "invocations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "claim_records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "units": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "exclusions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "no_output",
+        "unranked",
+        "bundle_unresolved",
+        "beyond_budget"
+      ],
+      "description": "What the population leaves out, summed from the invocation rows.",
+      "properties": {
+        "no_output": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "invocations"
+          ],
+          "properties": {
+            "invocations": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "unranked": {
+          "$ref": "#/$defs/excluded"
+        },
+        "bundle_unresolved": {
+          "$ref": "#/$defs/excluded"
+        },
+        "beyond_budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "units",
+            "copies"
+          ],
+          "properties": {
+            "units": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "copies": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "population": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "budget",
+        "mode",
+        "profile",
+        "systems"
+      ],
+      "description": "Which claims the frame lists: the population, the view (mode and profile), and the systems.",
+      "properties": {
+        "name": {
+          "enum": [
+            "first_b",
+            "full"
+          ],
+          "description": "first_b: units with a copy at native rank at most budget, from invocations with native order and resolved bundles. full: every unit a saved result delivered."
+        },
+        "budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "B for first_b; null for full."
+        },
+        "mode": {
+          "enum": [
+            "full",
+            "pr"
+          ]
+        },
+        "profile": {
+          "enum": [
+            "standard",
+            "metadata_blinded"
+          ]
+        },
+        "systems": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "The systems whose claims the population holds, sorted."
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "status",
+        "manifest_sha256",
+        "schedule_sha256"
+      ],
+      "description": "One run directory the frame read, bound by the canonical digests of its manifest and frozen schedule.",
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "failed"
+          ]
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "schedule_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "population",
+        "runs",
+        "invocations",
+        "units",
+        "exclusions"
+      ],
+      "description": "The sampling frame: every unit of the population, and the runs and assignments it was read from.",
+      "properties": {
+        "population": {
+          "$ref": "#/$defs/population"
+        },
+        "runs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/run"
+          }
+        },
+        "invocations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/invocation"
+          }
+        },
+        "units": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/unit"
+          },
+          "description": "The population, sorted by unit_id."
+        },
+        "exclusions": {
+          "$ref": "#/$defs/exclusions"
+        }
+      }
+    },
+    "design": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "stratify_by",
+        "allocation",
+        "size",
+        "seed",
+        "algorithm",
+        "stream_label"
+      ],
+      "description": "How the sample was drawn: simple random sampling without replacement within each stratum.",
+      "properties": {
+        "method": {
+          "enum": [
+            "srswor",
+            "stratified_srswor"
+          ]
+        },
+        "stratify_by": {
+          "enum": [
+            null,
+            "system",
+            "input",
+            "kind"
+          ]
+        },
+        "allocation": {
+          "enum": [
+            null,
+            "proportional",
+            "equal"
+          ],
+          "description": "proportional: largest remainder, ties by stratum name. equal: equal shares with the remainder to the first strata by name, a stratum smaller than its share taken whole and the rest shared again."
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "algorithm": {
+          "type": "string",
+          "minLength": 1,
+          "description": "scaneval.resampling.ALGORITHM at draw time."
+        },
+        "stream_label": {
+          "const": "precision/{frame_sha256}/{stratum}",
+          "description": "The label of the stream each stratum draws from; the stratum of an unstratified sample is 'all'."
+        }
+      }
+    },
+    "stratum": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stratum",
+        "population_units",
+        "sampled_units",
+        "inclusion_probability"
+      ],
+      "properties": {
+        "stratum": {
+          "type": "string",
+          "minLength": 1
+        },
+        "population_units": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sampled_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inclusion_probability": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "sampled_units / population_units: every unit of the stratum had this chance of being drawn."
+        }
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unit_id",
+        "stratum",
+        "item_id"
+      ],
+      "properties": {
+        "unit_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stratum": {
+          "type": "string",
+          "minLength": 1
+        },
+        "item_id": {
+          "type": "string",
+          "pattern": "^item-[0-9]{4,}$",
+          "description": "The blinded name reviewers see in the review queue."
+        }
+      }
+    },
+    "blinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "system_aliases"
+      ],
+      "description": "The alias each system is shown under in the review queue. Evaluator-side: reviewers get the queue, not this.",
+      "properties": {
+        "system_aliases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "system_id",
+              "alias"
+            ],
+            "properties": {
+              "system_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "alias": {
+                "type": "string",
+                "pattern": "^system-[0-9]+$"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
