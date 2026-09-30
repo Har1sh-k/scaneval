@@ -559,8 +559,8 @@ def test_diff_trees_records_added_deleted_modified_renamed_and_mode_changed_file
     assert changes == {"added": ["src/new_only.py"], "deleted": ["src/old_only.py"],
                        "modified": ["src/app.py"], "renamed": [["lib/util.py", "lib/helpers.py"]],
                        "mode_changed": ["bin/run.sh"]}
-    assert changed_paths(changes) == ["bin/run.sh", "lib/helpers.py", "src/app.py", "src/new_only.py",
-                                      "src/old_only.py"], "a rename is named by its new path, as git names it"
+    assert changed_paths(changes) == ["bin/run.sh", "lib/helpers.py", "lib/util.py", "src/app.py", "src/new_only.py",
+                                      "src/old_only.py"], "a rename is named by both its paths, as git names it without rename detection"
     assert diff_trees(base, base) == {"added": [], "deleted": [], "modified": [], "renamed": [], "mode_changed": []}
 
 
@@ -703,19 +703,67 @@ def test_the_two_commit_history_is_neutral_deterministic_and_the_recorded_change
 
 
 def test_the_git_diff_between_the_synthetic_commits_is_the_recorded_diff(tmp_path, pull_request):
+    """The record and git agree without rename detection; with it, git's own pairing of an exact rename is R100."""
     head, base, record = prepared_pr(tmp_path, pull_request)
     history = prepare_pr_history(head, base)
-
-    lines = [line.split("\t") for line in
-             git("diff", "--name-status", history["base_commit"], history["head_commit"], cwd=head).splitlines()]
-
+    commits = (history["base_commit"], history["head_commit"])
     changes = record["diff"]["changes"]
-    assert sorted(lines) == sorted(
-        [["A", path] for path in changes["added"]] + [["D", path] for path in changes["deleted"]]
-        + [["M", path] for path in sorted(set(changes["modified"]) | set(changes["mode_changed"]))]
-        + [["R100", source, target] for source, target in changes["renamed"]])
-    assert git("diff", "--name-only", "-z", f"{history['base_commit']}..{history['head_commit']}",
+    renamed_from = [source for source, _ in changes["renamed"]]
+    renamed_to = [target for _, target in changes["renamed"]]
+
+    def name_status(*options: str) -> list[list[str]]:
+        return sorted(line.split("\t") for line in git("diff", "--name-status", *options, *commits, cwd=head).splitlines())
+
+    modified = [["M", path] for path in sorted(set(changes["modified"]) | set(changes["mode_changed"]))]
+    assert name_status("--no-renames") == sorted(
+        [["A", path] for path in changes["added"] + renamed_to] + [["D", path] for path in changes["deleted"] + renamed_from]
+        + modified), "a renamed pair is the deletion of its source and the addition of its target"
+    assert git("diff", "--name-only", "--no-renames", "-z", f"{commits[0]}..{commits[1]}",
                cwd=head).split("\0")[:-1] == changed_paths(changes)
+    # The workspace leaves rename detection on for a scanner's own plain ``git diff``, which pairs the exact rename.
+    assert name_status() == sorted(
+        [["A", path] for path in changes["added"]] + [["D", path] for path in changes["deleted"]] + modified
+        + [["R100", source, target] for source, target in changes["renamed"]])
+    assert git("diff", "--name-only", "-z", f"{commits[0]}..{commits[1]}", cwd=head).split("\0")[:-1] == \
+        [path for path in changed_paths(changes) if path not in renamed_from], \
+        "with rename detection a rename is named by its new path alone"
+
+
+EDITED = "def helper():\n    a = 1\n    b = 2\n    c = 3\n    d = 4\n    return a + b + c + d\n"
+
+
+@pytest.mark.parametrize(("base_files", "head_files", "recorded"), [
+    ({"lib/util.py": EDITED, "keep.py": "x\n"}, {"lib/helpers.py": EDITED.replace("d = 4", "d = 5"), "keep.py": "x\n"},
+     {"added": ["lib/helpers.py"], "deleted": ["lib/util.py"], "modified": [], "renamed": [], "mode_changed": []}),
+    ({"a.py": "same\n", "b.py": "same\n", "keep.py": "x\n"}, {"c.py": "same\n", "keep.py": "x\n"},
+     {"added": ["c.py"], "deleted": ["a.py", "b.py"], "modified": [], "renamed": [], "mode_changed": []}),
+], ids=["moved-and-edited", "one-of-several-identical-files"])
+def test_a_move_the_record_does_not_pair_is_an_addition_and_a_deletion_to_git_unless_it_detects_renames(
+        tmp_path, base_files, head_files, recorded):
+    """The record pairs a rename only when the bytes are identical and one path holds them on each side.
+
+    A moved file that was edited, and one of several identical files that moved, are an addition and a
+    deletion in the record. Git's own rename detection, which the workspace leaves on for a scanner's
+    plain ``git diff``, pairs both; compared without it, the record is exactly what git lists.
+    """
+    base = write_tree(tmp_path / "base", base_files)
+    head = write_tree(tmp_path / "head", head_files)
+    changes = diff_trees(base, head)
+    assert changes == recorded
+
+    compute_pr_history(head, base, changes)
+    history = prepare_pr_history(head, base)
+    commits = (history["base_commit"], history["head_commit"])
+
+    listed = sorted(line.split("\t") for line in
+                    git("diff", "--name-status", "--no-renames", *commits, cwd=head).splitlines())
+    assert listed == sorted([["A", path] for path in changes["added"]] + [["D", path] for path in changes["deleted"]])
+    assert git("diff", "--name-only", "--no-renames", "-z", *commits, cwd=head).split("\0")[:-1] == changed_paths(changes)
+    paired = [line.split("\t") for line in git("diff", "--name-status", *commits, cwd=head).splitlines()
+              if line.startswith("R")]
+    assert len(paired) == 1 and paired[0][1] in changes["deleted"] and paired[0][2] in changes["added"], \
+        "git's own rename detection pairs a deletion with an addition here, and the record does not"
+    assert set(git("diff", "--name-only", *commits, cwd=head).splitlines()) < set(changed_paths(changes))
 
 
 def test_the_history_does_not_read_the_operator_environment(tmp_path, pull_request, monkeypatch):

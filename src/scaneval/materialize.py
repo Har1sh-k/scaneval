@@ -765,9 +765,10 @@ def check_pr_history(source_dir: Path, history: dict, changes: dict, base_dir: P
     differently from the way the export did, and then a scanner's ``git diff`` would review a
     different change from the one the record scores against. Compared without rename detection, so a
     rename is the delete and the add the record's ``renamed`` pairs stand for, and mode changes are
-    the ``M`` git reports for a file whose bytes did not change. A disagreement in either comparison
-    names the paths and is a :class:`MaterializationError`. This reads git and the exported files; it
-    writes nothing.
+    the ``M`` git reports for a file whose bytes did not change. The record pairs only exact
+    renames and git's own detection pairs more (see :func:`diff_trees`), so this is the comparison
+    under which the two can agree. A disagreement in either comparison names the paths and is a
+    :class:`MaterializationError`. This reads git and the exported files; it writes nothing.
     """
     stored_differently = [
         f"{path} ({side})" for side, commit, root in (("base", history["base_commit"], base_dir),
@@ -832,6 +833,16 @@ def diff_trees(base_root: Path, head_root: Path) -> dict:
     ``mode_changed`` when its executable bit differs from its source's. Every list is sorted, so
     the record is canonical.
 
+    The record is what git says about the two synthetic commits when git is asked not to detect
+    renames (``git diff --no-renames``), and only then: a renamed pair stands for the deletion of its
+    source and the addition of its target, and every other path is listed as git lists it. Rename
+    detection is on in the workspace (``diff.renames`` is pinned true, so a scanner's plain
+    ``git diff`` runs it), and it pairs more than this does: a file that moved and was edited while
+    at least half of it stayed the same, which is git's similarity threshold, and one of several
+    identical files. A scanner is told those as renames, and the record lists each as an addition
+    and a deletion, which is why :func:`changed_paths` and :func:`check_pr_history` hold the record
+    to git without rename detection.
+
     The trees are read as they lie on disk, through :func:`walk_regular_files`, so this is the
     diff of the trees a scanner is handed, transformed ones included, and never of the originals.
     Symbolic links have no content and are in neither tree. It compares bytes and one mode bit; it
@@ -859,15 +870,18 @@ def diff_trees(base_root: Path, head_root: Path) -> dict:
 
 
 def changed_paths(changes: dict) -> list[str]:
-    """Every path ``git diff --name-only`` names between the two synthetic commits, sorted.
+    """Every path ``git diff --name-only --no-renames`` names between the two synthetic commits, sorted.
 
-    The added, modified, mode-changed, and deleted paths, and the new name of each rename, because
-    git names a detected rename by its new path alone. This is the list a scanner that asks git
-    which files changed is told, which is why a test can hold a scanner's own reading of the change
-    to the record.
+    The added, deleted, modified, and mode-changed paths, and both paths of every recorded rename,
+    because git, when it is not asked to pair anything, names a moved file twice: its old path as
+    deleted and its new one as added. This is the list the record can be held to. A scanner that
+    asks git which files changed with rename detection on, as a plain ``git diff`` in the workspace
+    does, is told a detected rename by its new path alone, and may be told of renames the record
+    does not pair (see :func:`diff_trees`), so what it lists is this list less the old path of every
+    rename git detected.
     """
     paths = (set(changes["added"]) | set(changes["deleted"]) | set(changes["modified"])
-             | set(changes["mode_changed"]) | {target for _, target in changes["renamed"]})
+             | set(changes["mode_changed"]) | {path for pair in changes["renamed"] for path in pair})
     return sorted(paths)
 
 
