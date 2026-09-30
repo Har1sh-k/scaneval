@@ -416,13 +416,25 @@ def test_several_runs_need_a_named_index_and_the_index_must_exist():
     assert select_run(minimal_log())[::2] == (0, 1)
 
 
-def test_external_property_files_anywhere_in_the_log_refuse_it_whole():
+@pytest.mark.parametrize("value", [
+    {"results": [{"location": {"uri": "results.sarif-external-properties"}}]},
+    {"rules": [{"guid": "00000000-0000-4000-8000-000000000001"}]},
+    {},
+    None,
+])
+def test_external_property_files_anywhere_in_the_log_refuse_it_whole(value):
     log = minimal_log()
-    external = {"results": [{"location": {"uri": "results.sarif-external-properties"}}]}
-    log["runs"].append({**deepcopy(log["runs"][0]), "externalPropertyFileReferences": external})
-    # The run that points outside the log is not the one selected, and the log is still refused.
-    with pytest.raises(SarifImportError, match=r"runs\[1\] declares externalPropertyFileReferences"):
+    log["runs"].append({**deepcopy(log["runs"][0]), "externalPropertyFileReferences": value})
+    # The run that points outside the log is not the one selected, and the log is still refused,
+    # whatever the property holds: even an empty or null one says nothing an import can check.
+    with pytest.raises(SarifImportError, match=r"runs\[1\] carries externalPropertyFileReferences"):
         select_run(log, 0)
+    on_the_log = {**minimal_log(), "externalPropertyFileReferences": value}
+    with pytest.raises(SarifImportError, match="the log object carries externalPropertyFileReferences"):
+        select_run(on_the_log)
+    # Inline external properties stay inside the file, and nothing refers to them without the
+    # property above, so their presence alone is not a refusal.
+    assert select_run({**minimal_log(), "inlineExternalProperties": [{"results": []}]})[0] == 0
 
 
 @pytest.mark.parametrize("run,message", [

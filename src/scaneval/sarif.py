@@ -11,9 +11,10 @@ not a rule's ``helpUri``, and not a path in a location, which is a string to map
 tree or to refuse, never a file to read. The one tree it may open files in is an exported source
 tree the operator supplies to check locations against, and only after that tree hashes to the
 declared tree hash; there it opens the regular files of its own listing, to count their lines. A
-log that declares ``externalPropertyFileReferences`` anywhere is refused whole, because its
-results, rules, or artifacts may live in files an offline import will not read, and importing the
-part that happens to be inline would present an incomplete run as the whole one.
+log that carries ``externalPropertyFileReferences`` anywhere (on any run, or on the log object) is
+refused whole, because its results, rules, or artifacts may live in files an offline import will
+not read, and importing the part that happens to be inline would present an incomplete run as the
+whole one.
 
 Refusal is for the log as a whole. A file that cannot be read, that is larger than the bound,
 whose bytes are not UTF-8, whose text is not JSON, or whose JSON repeats an object key, carries
@@ -100,6 +101,8 @@ RECORD_FILE = "import.json"
 RESULT_FILE = "result.json"
 RAW_DIR = "raw"
 SARIF_VERSION = "2.1.0"
+# SARIF 3.14.2: where a run says which of its properties live in external property files.
+_EXTERNAL = "externalPropertyFileReferences"
 # The largest artifact read by default: 64 MiB, the same bound the transcript readers keep. A
 # larger log is refused rather than read part way; --max-bytes raises the bound deliberately.
 DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -327,13 +330,18 @@ def select_run(log: dict, run_index: int | None = None) -> tuple[int, dict, int]
     array means it found no data, and neither is a run to import. A log with more than one run
     needs *run_index*, because which run is the scan being evaluated is the operator's statement,
     not something to infer. Every run is checked for ``externalPropertyFileReferences``, not only
-    the selected one, because the log is what is being imported and a log that points outside
-    itself is not complete offline.
+    the selected one, and so is the log object itself, because the log is what is being imported
+    and a log that points outside itself is not complete offline. The property is refused
+    whatever its value, ``null`` included: SARIF gives it no meaning there, and what a producer
+    that wrote it meant to leave outside the file cannot be told.
     """
     version = log.get("version")
     if version != SARIF_VERSION:
         raise SarifImportError(f"the log declares version {version!r}; this importer reads SARIF "
                                f"{SARIF_VERSION} only")
+    if _EXTERNAL in log:
+        raise SarifImportError(f"the log object carries {_EXTERNAL}, which points at files outside this "
+                               "log that an offline import never reads")
     if "runs" not in log:
         raise SarifImportError("the log has no runs property; SARIF requires one")
     runs = log["runs"]
@@ -345,10 +353,10 @@ def select_run(log: dict, run_index: int | None = None) -> tuple[int, dict, int]
     if not runs:
         raise SarifImportError("the log's runs is empty: the producer reported no run to import")
     for index, run in enumerate(runs):
-        if isinstance(run, dict) and run.get("externalPropertyFileReferences") is not None:
+        if isinstance(run, dict) and _EXTERNAL in run:
             raise SarifImportError(
-                f"runs[{index}] declares externalPropertyFileReferences: its results, rules, or "
-                "artifacts may live in files outside this log, which an offline import never reads")
+                f"runs[{index}] carries {_EXTERNAL}: its results, rules, or artifacts may live in "
+                "files outside this log, which an offline import never reads")
     if run_index is None:
         if len(runs) != 1:
             raise SarifImportError(f"the log holds {len(runs)} runs; name the one to import with "
