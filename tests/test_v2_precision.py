@@ -1,8 +1,9 @@
-"""Precision sampling: the frame a population is listed in and the seeded draw from it.
+"""Precision sampling and human review: the frame, the seeded draw, the chained reviews, the estimate.
 
 Every run directory here is built in ``tmp_path`` from fixture documents: a frozen schedule, a 2.1
 manifest, and a saved result per invocation that ran, which is everything a precision frame reads.
-No network, no model calls, and no clock reaches a derived document.
+Every reviewer is explicitly fictional. No network, no model calls, and no clock reaches a derived
+document.
 
 The hand-computed figures are in each test's docstring; the assertions compare against the same
 fractions, so a figure that is exact on paper is checked exactly.
@@ -12,9 +13,13 @@ from __future__ import annotations
 
 from collections import Counter
 from copy import deepcopy
+from datetime import datetime, timezone
+import inspect
 import json
+import math
 import os
 from pathlib import Path
+from statistics import NormalDist
 
 import pytest
 
@@ -31,10 +36,16 @@ from scaneval.contracts import (
 from scaneval.resampling import ALGORITHM
 
 
+CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
+LATER = lambda: datetime(2026, 9, 21, 9, 30, tzinfo=timezone.utc)  # noqa: E731
 CREATED_AT = "2026-09-20T15:00:00+00:00"
 CONFIG_HASH = "sha256:" + "c" * 64
 PACK_HASH = "sha256:" + "e" * 64
 MAP_IDENTITY = {"map_id": "widget-metadata", "map_version": "1", "map_sha256": "sha256:" + "d" * 64}
+REVIEWER_A = "Fixture Reviewer A (fictional)"
+REVIEWER_B = "Fixture Reviewer B (fictional)"
+ADJUDICATOR = "Fixture Adjudicator (fictional)"
+Z95 = NormalDist().inv_cdf(0.975)
 
 
 # --- fixture run directories -----------------------------------------------------------------------
@@ -551,3 +562,405 @@ def test_the_precision_sample_kind_is_published_at_2_1_and_holds_itself_to_its_f
     for change, message in refusals:
         with pytest.raises(ContractError, match=message):
             validate_document("precision-sample", edited(change))
+
+
+# --- review ----------------------------------------------------------------------------------------------
+
+
+def review_all(sample: dict, outcomes: dict[str, str], *, reviewers=(REVIEWER_A, REVIEWER_B)) -> dict:
+    """Every named unit reviewed by each of *reviewers* with the same outcome, in unit-id order."""
+    reviews = None
+    for unit_id in sorted(outcomes):
+        for reviewer in reviewers:
+            reviews = precision.record_review(sample, reviews, unit_id=unit_id, reviewer=reviewer,
+                                              role="independent", outcome=outcomes[unit_id], clock=CLOCK)
+    return reviews
+
+
+def test_the_review_queue_blinds_system_identity_and_keeps_the_mapping_in_the_sample(tmp_path):
+    """Nothing a reviewer receives names a system, a run, an invocation, a claim id, or a rule id."""
+    run_dir = write_run(tmp_path, "run-queue", {
+        ("snap-a", "tool-alpha"): output([claim(f"alpha-claim-{index}", f"unsafe shell call number {index}",
+                                                line=index, rule="vendor.alpha.rule",
+                                                evidence="the command string reaches the shell")
+                                          for index in range(1, 4)]),
+        ("snap-a", "tool-beta"): output([claim(f"beta-claim-{index}", f"unchecked input number {index}",
+                                               line=index, rule="vendor.beta.rule")
+                                         for index in range(1, 4)]),
+    })
+    sample = precision.draw_sample(precision.build_frame([run_dir], population="full"), size=6, seed=5)
+
+    queue = precision.review_queue(sample)
+
+    text = json.dumps(queue)
+    for secret in ("tool-alpha", "tool-beta", "run-queue", "__r1", "alpha-claim-", "beta-claim-", "vendor."):
+        assert secret not in text, secret
+    items = queue["items"]
+    assert [item["item_id"] for item in items] == sorted(item["item_id"] for item in items)
+    assert [item["item_id"] for item in items] == [f"item-000{index}" for index in range(1, 7)]
+    aliases = {row["system_id"]: row["alias"] for row in sample["blinding"]["system_aliases"]}
+    assert sorted(aliases.values()) == ["system-1", "system-2"]
+    units = {unit["unit_id"]: unit for unit in sample["frame"]["units"]}
+    for item in items:
+        unit = units[precision.unit_for_item(sample, item["item_id"])]
+        assert item["system"] == aliases[unit["system_id"]]
+        assert item["input"] == {"input_id": "snap-a", "snapshot_id": "snap-a", "input_hash": tree_hash("snap-a")}
+        assert item["claim"]["allegation"] == unit["claim"]["allegation"]
+        assert "native_rule_id" not in item["claim"]
+    assert queue["sample_sha256"] == canonical_sha256(sample)
+    assert set(queue["outcomes"]) == set(precision.OUTCOMES)
+    # The item order is a seeded permutation, not the frame order, and the same sample exports the same queue.
+    assert [precision.unit_for_item(sample, item["item_id"]) for item in items] != sorted(units)
+    assert precision.review_queue(deepcopy(sample)) == queue
+
+
+def test_reviews_disagreement_adjudication_and_revisions_are_chained_and_resolved_by_the_rule(tmp_path):
+    """Five units, all drawn (a census, so every weight is 1), reviewed step by step.
+
+    k1: A true, B true -> true (double review). k2: A true, B false -> unresolved (disagreement), then
+    the adjudicator says false -> false (adjudicated). k3: A false, B true, then B revises to false ->
+    false (double review; B's first entry stays in the history). k4: A true -> true (single review).
+    k5: nobody -> unresolved (nonresponse). T = 2, F = 2, U = 1: resolved precision 2/4 = 0.5, unresolved
+    share 1/5 = 0.2, sensitivity [2/5, 3/5] = [0.4, 0.6], grade incomplete. Once k5 is reviewed true by
+    both and B confirms k4: T = 3, F = 2, U = 0, precision 3/5 = 0.6, grade double_review_or_adjudicated.
+    """
+    sample = precision.draw_sample(precision.build_frame([one_system_run(tmp_path, 5)], population="full"),
+                                   size=5, seed=1)
+    unit = {f"k{index}": f"run-one/snap-a__sys-a__r1/k{index}" for index in range(1, 6)}
+    steps = [("k1", REVIEWER_A, "independent", "true"), ("k1", REVIEWER_B, "independent", "true"),
+             ("k2", REVIEWER_A, "independent", "true"), ("k2", REVIEWER_B, "independent", "false"),
+             ("k2", ADJUDICATOR, "adjudicator", "false"),
+             ("k3", REVIEWER_A, "independent", "false"), ("k3", REVIEWER_B, "independent", "true"),
+             ("k3", REVIEWER_B, "independent", "false"),
+             ("k4", REVIEWER_A, "independent", "true")]
+    reviews = None
+    for index, (key, reviewer, role, outcome) in enumerate(steps):
+        reviews = precision.record_review(sample, reviews, unit_id=unit[key], reviewer=reviewer, role=role,
+                                          outcome=outcome, note=f"step {index}", clock=CLOCK)
+        if index == 3:
+            midway = precision.estimate(sample, reviews)
+            assert {u["unit_id"]: u["basis"] for u in midway["units"]}[unit["k2"]] == "disagreement"
+
+    estimated = precision.estimate(sample, reviews)
+
+    resolved = {u["unit_id"]: (u["class"], u["basis"], u["entries"]) for u in estimated["units"]}
+    assert resolved == {unit["k1"]: ("true", "double_review", 2), unit["k2"]: ("false", "adjudicated", 3),
+                        unit["k3"]: ("false", "double_review", 3), unit["k4"]: ("true", "single_review", 1),
+                        unit["k5"]: ("unresolved", "nonresponse", 0)}
+    assert estimated["totals"] == {"true": 2.0, "false": 2.0, "unresolved": 1.0, "out_of_scope": 0.0}
+    assert estimated["precision_resolved"] == 0.5 and estimated["unresolved_share"] == 0.2
+    assert estimated["sensitivity"] == {"lower": 0.4, "upper": 0.6}
+    assert estimated["sample"]["bases"] == {"adjudicated": 1, "double_review": 2, "single_review": 1,
+                                            "disagreement": 0, "nonresponse": 1}
+    assert estimated["evidence_grade"] == "incomplete"
+    assert any("1 sampled unit(s) have no review" in note for note in estimated["notes"])
+    assert estimated["interval"]["state"] == "census" and estimated["interval"]["lower"] == 0.5
+
+    # The history keeps every entry, revisions and overruled reviews included, as a verified chain.
+    assert [(entry["unit_id"], entry["reviewer"], entry["outcome"]) for entry in reviews["reviews"]] == [
+        (unit[key], reviewer, outcome) for key, reviewer, _, outcome in steps]
+    assert reviews["reviews_sha256"] == reviews["reviews"][-1]["chain_sha256"]
+    assert reviews["sample_sha256"] == canonical_sha256(sample)
+
+    for key, reviewer, outcome in (("k5", REVIEWER_A, "true"), ("k5", REVIEWER_B, "true"),
+                                   ("k4", REVIEWER_B, "true")):
+        reviews = precision.record_review(sample, reviews, unit_id=unit[key], reviewer=reviewer,
+                                          role="independent", outcome=outcome, clock=LATER)
+    complete = precision.estimate(sample, reviews)
+    assert complete["totals"] == {"true": 3.0, "false": 2.0, "unresolved": 0.0, "out_of_scope": 0.0}
+    assert complete["precision_resolved"] == 3 / 5 and complete["unresolved_share"] == 0.0
+    assert complete["evidence_grade"] == "double_review_or_adjudicated" and complete["review_entries"] == 12
+
+
+def test_an_edited_reordered_or_truncated_review_history_is_refused(tmp_path):
+    sample = precision.draw_sample(precision.build_frame([one_system_run(tmp_path, 2)], population="full"),
+                                   size=2, seed=1)
+    reviews = review_all(sample, {"run-one/snap-a__sys-a__r1/k1": "true", "run-one/snap-a__sys-a__r1/k2": "false"})
+    validate_document("precision-reviews", reviews)
+
+    edited = deepcopy(reviews)
+    edited["reviews"][1]["outcome"] = "false"
+    with pytest.raises(ContractError, match=r"reviews\[1\] does not chain"):
+        validate_document("precision-reviews", edited)
+    reordered = deepcopy(reviews)
+    reordered["reviews"][0], reordered["reviews"][1] = reordered["reviews"][1], reordered["reviews"][0]
+    with pytest.raises(ContractError, match="does not chain"):
+        validate_document("precision-reviews", reordered)
+    truncated = deepcopy(reviews)
+    truncated["reviews"].pop()
+    with pytest.raises(ContractError, match="deleted from the end"):
+        validate_document("precision-reviews", truncated)
+    wiped = {**deepcopy(reviews), "reviews": []}
+    with pytest.raises(ContractError, match="deleted whole"):
+        validate_document("precision-reviews", wiped)
+    blank = deepcopy(reviews)
+    blank["reviews"][0]["reviewer"] = "​​"
+    with pytest.raises(ContractError, match="must name its reviewer"):
+        validate_document("precision-reviews", blank)
+
+
+def test_a_blank_reviewer_is_refused_and_the_tool_never_supplies_one(tmp_path):
+    sample = precision.draw_sample(precision.build_frame([one_system_run(tmp_path, 2)], population="full"),
+                                   size=2, seed=1)
+    unit_id = sample["selected"][0]["unit_id"]
+    assert inspect.signature(precision.record_review).parameters["reviewer"].default is inspect.Parameter.empty
+    for reviewer in ("", "   ", "​​", None):
+        with pytest.raises(ContractError, match="must name its reviewer; the tool never supplies one"):
+            precision.record_review(sample, None, unit_id=unit_id, reviewer=reviewer, role="independent",
+                                    outcome="true")
+    with pytest.raises(ContractError, match="review role must be one of"):
+        precision.record_review(sample, None, unit_id=unit_id, reviewer=REVIEWER_A, role="curator", outcome="true")
+    with pytest.raises(ContractError, match="review outcome must be one of"):
+        precision.record_review(sample, None, unit_id=unit_id, reviewer=REVIEWER_A, role="independent",
+                                outcome="probably")
+
+
+def test_only_a_sampled_unit_of_this_sample_can_be_reviewed(tmp_path):
+    frame = precision.build_frame([one_system_run(tmp_path, 5)], population="full")
+    sample = precision.draw_sample(frame, size=2, seed=4)
+    drawn = {entry["unit_id"] for entry in sample["selected"]}
+    undrawn = sorted(unit["unit_id"] for unit in frame["units"] if unit["unit_id"] not in drawn)[0]
+
+    with pytest.raises(ContractError, match="is not in this sample's frame"):
+        precision.record_review(sample, None, unit_id="run-x/nowhere/c1", reviewer=REVIEWER_A,
+                                role="independent", outcome="true")
+    with pytest.raises(ContractError, match="in the frame but was not drawn"):
+        precision.record_review(sample, None, unit_id=undrawn, reviewer=REVIEWER_A, role="independent",
+                                outcome="true")
+    with pytest.raises(ContractError, match="this sample has no item 'item-9999'"):
+        precision.unit_for_item(sample, "item-9999")
+
+    # Reviews are bound to the one sample they judge.
+    reviews = review_all(sample, {unit_id: "true" for unit_id in drawn})
+    other = precision.draw_sample(frame, size=2, seed=5)
+    with pytest.raises(ContractError, match="these reviews judge sample"):
+        precision.estimate(other, reviews)
+    with pytest.raises(ContractError, match="these reviews judge sample"):
+        precision.record_review(other, reviews, unit_id=other["selected"][0]["unit_id"], reviewer=REVIEWER_A,
+                                role="independent", outcome="true")
+
+
+# --- the estimate --------------------------------------------------------------------------------------
+
+
+def test_a_hand_computed_stratified_sample_reproduces_the_horvitz_thompson_estimate(tmp_path):
+    """sys-a holds 6 units and sys-b 4; equal allocation of 4 draws 2 from each: pi = 1/3 in sys-a
+    (weight 3) and 1/2 in sys-b (weight 2). Reviewed, two fictional reviewers agreeing each time:
+    sys-a's two draws true and unresolved, sys-b's true and false.
+
+    Totals: T = 3 + 2 = 5, F = 2, U = 3, O = 0 (and 3*2 + 2*2 = 10 units covered, all of them).
+    Resolved precision 5/7; unresolved share 3/10; sensitivity [5/10, 8/10].
+    Linearized variance, with X = T + F = 7 and z = (1[T] - (5/7) 1[T or F]) / 7:
+      sys-a: z = 2/49, 0; mean 1/49; s^2 = 2/2401; 6^2 (1 - 2/6) s^2 / 2 = 24/2401.
+      sys-b: z = 2/49, -5/49; mean -3/98; s^2 = 1/98; 4^2 (1 - 2/4) s^2 / 2 = 98/2401.
+      V = 122/2401 = 0.050812..., SE = sqrt(122)/49 = 0.225416..., 95% interval
+      [5/7 - 1.959964 * 0.225416, 1] = [0.272479..., 1.0] after clipping at 1.
+    Per stratum: sys-a T 3, U 3, precision 1, unresolved share 1/2; sys-b T 2, F 2, precision 1/2.
+    """
+    frame = precision.build_frame([two_strata_run(tmp_path)], population="full")
+    sample = precision.draw_sample(frame, size=4, seed=29, stratify_by="system", allocation="equal")
+    drawn = selected_by_stratum(sample)
+    reviews = review_all(sample, {drawn["sys-a"][0]: "true", drawn["sys-a"][1]: "unresolved",
+                                  drawn["sys-b"][0]: "true", drawn["sys-b"][1]: "false"})
+
+    estimated = precision.estimate(sample, reviews)
+
+    assert [(row["stratum"], row["population_units"], row["sampled_units"], row["inclusion_probability"])
+            for row in sample["strata"]] == [("sys-a", 6, 2, 1 / 3), ("sys-b", 4, 2, 1 / 2)]
+    assert estimated["totals"] == {"true": 5.0, "false": 2.0, "unresolved": 3.0, "out_of_scope": 0.0}
+    assert estimated["precision_resolved"] == 5 / 7
+    assert estimated["unresolved_share"] == 3 / 10
+    assert estimated["sensitivity"] == {"lower": 5 / 10, "upper": 8 / 10}
+    assert estimated["coverage"] == {"population_units": 10, "covered_units": 10, "share": 1.0,
+                                     "uncovered_strata": []}
+    interval = estimated["interval"]
+    standard_error = math.sqrt(122 / 2401)
+    assert interval == {"state": "ok", "method": "stratified_linearized_normal", "confidence": 0.95, "z": Z95,
+                        "variance": 122 / 2401, "standard_error": standard_error,
+                        "lower": 5 / 7 - Z95 * standard_error, "upper": 1.0, "insufficient_strata": []}
+    assert round(interval["lower"], 6) == 0.272479 and round(standard_error, 6) == 0.225416
+    by_stratum = {row["stratum"]: row for row in estimated["strata"]}
+    assert by_stratum["sys-a"]["totals"] == {"true": 3.0, "false": 0.0, "unresolved": 3.0, "out_of_scope": 0.0}
+    assert (by_stratum["sys-a"]["precision_resolved"], by_stratum["sys-a"]["unresolved_share"]) == (1.0, 0.5)
+    assert by_stratum["sys-b"]["totals"] == {"true": 2.0, "false": 2.0, "unresolved": 0.0, "out_of_scope": 0.0}
+    assert by_stratum["sys-b"]["precision_resolved"] == 0.5
+    assert estimated["evidence_grade"] == "double_review_or_adjudicated"
+    assert estimated["sample"]["classes"] == {"true": 2, "false": 1, "unresolved": 1, "out_of_scope": 0}
+    assert canonical_json(precision.estimate(deepcopy(sample), deepcopy(reviews))) == canonical_json(estimated)
+
+
+def test_an_oversampled_stratum_is_weighted_back_while_the_unweighted_share_is_biased(tmp_path):
+    """sys-a delivered 18 claims, all real; sys-b delivered 2, both false. The population's precision
+    is 18/20 = 0.9. Equal allocation of 4 oversamples sys-b: 2 of 18 from sys-a (weight 9) and both
+    of sys-b (weight 1). The reviewed sample is 2 true and 2 false, so its unweighted share is 0.5,
+    off by 0.4; the weighted totals T = 2*9 = 18 and F = 2*1 = 2 give back 18/20 = 0.9 exactly.
+
+    Every sampled sys-a unit scores the same z, and sys-b is taken whole, so the variance is 0
+    without being a census: the interval is degenerate and has no bounds, rather than claiming
+    certainty from four reviews.
+    """
+    frame = precision.build_frame([two_strata_run(tmp_path, sizes=(18, 2))], population="full")
+    truth = {unit["unit_id"]: ("true" if unit["system_id"] == "sys-a" else "false") for unit in frame["units"]}
+    population_precision = sum(value == "true" for value in truth.values()) / len(truth)
+    sample = precision.draw_sample(frame, size=4, seed=3, stratify_by="system", allocation="equal")
+    reviews = review_all(sample, {entry["unit_id"]: truth[entry["unit_id"]] for entry in sample["selected"]})
+
+    estimated = precision.estimate(sample, reviews)
+
+    classes = estimated["sample"]["classes"]
+    unweighted = classes["true"] / (classes["true"] + classes["false"])
+    assert population_precision == 0.9
+    assert unweighted == 0.5 and abs(unweighted - population_precision) == pytest.approx(0.4)
+    assert estimated["totals"]["true"] == 18.0 and estimated["totals"]["false"] == 2.0
+    assert estimated["precision_resolved"] == population_precision
+    assert [(row["stratum"], row["inclusion_probability"]) for row in sample["strata"]] == [
+        ("sys-a", 2 / 18), ("sys-b", 1.0)]
+    assert estimated["interval"]["state"] == "degenerate"
+    assert estimated["interval"]["lower"] is None and estimated["interval"]["upper"] is None
+
+
+def test_an_unsampled_stratum_is_never_represented_and_coverage_says_so(tmp_path):
+    """sys-a holds 9 units and sys-b 1. Proportional allocation of 5: shares 4.5 and 0.5 tie on their
+    fractions, the first name takes the unit, and sys-b draws nothing. All five sys-a draws reviewed
+    true: T = 5 * 9/5 = 9 and the estimate covers 9 of 10 units (0.9); sys-b gets no totals at all,
+    not zeros, and a review of its unit is refused because it was never drawn."""
+    frame = precision.build_frame([two_strata_run(tmp_path, sizes=(9, 1))], population="full")
+    sample = precision.draw_sample(frame, size=5, seed=8, stratify_by="system")
+    reviews = review_all(sample, {entry["unit_id"]: "true" for entry in sample["selected"]})
+
+    estimated = precision.estimate(sample, reviews)
+
+    assert sample["uncovered_strata"] == ["sys-b"]
+    assert estimated["coverage"] == {"population_units": 10, "covered_units": 9, "share": 0.9,
+                                     "uncovered_strata": [{"stratum": "sys-b", "population_units": 1}]}
+    assert estimated["totals"] == {"true": 9.0, "false": 0.0, "unresolved": 0.0, "out_of_scope": 0.0}
+    sys_b = {row["stratum"]: row for row in estimated["strata"]}["sys-b"]
+    assert sys_b == {"stratum": "sys-b", "population_units": 1, "sampled_units": 0, "inclusion_probability": 0.0,
+                     "covered": False, "classes": {"true": 0, "false": 0, "unresolved": 0, "out_of_scope": 0},
+                     "totals": None, "precision_resolved": None, "unresolved_share": None,
+                     "sensitivity": {"lower": None, "upper": None}}
+    assert any("covers 9 of 10 units" in note for note in estimated["notes"])
+    with pytest.raises(ContractError, match="in the frame but was not drawn"):
+        precision.record_review(sample, reviews, unit_id="run-strata/snap-a__sys-b__r1/b1",
+                                reviewer=REVIEWER_A, role="independent", outcome="false")
+
+
+def test_duplicate_delivery_burden_is_reported_apart_from_precision(tmp_path):
+    """snap-a: A three times, then B; snap-b: C. Full population: 3 units in 5 copies, burden 5/3.
+    Census review: A true, B false, C true -> resolved precision 2/3, however many times A was sent
+    (counting copies would say 4/5). first_b with B = 2: A (2 copies inside) and C, 3 copies over 2
+    units, burden 1.5; B and A's third copy lie past B (1 unit, 2 copies)."""
+    run_dir = write_run(tmp_path, "run-dup", {
+        ("snap-a", "sys-a"): output([claim("a1", "A"), claim("a2", "A"), claim("a3", "A"), claim("b1", "B")]),
+        ("snap-b", "sys-a"): output([claim("c1", "C")]),
+    })
+    sample = precision.draw_sample(precision.build_frame([run_dir], population="full"), size=3, seed=2)
+    reviews = review_all(sample, {"run-dup/snap-a__sys-a__r1/a1": "true", "run-dup/snap-a__sys-a__r1/b1": "false",
+                                  "run-dup/snap-b__sys-a__r1/c1": "true"})
+
+    estimated = precision.estimate(sample, reviews)
+
+    assert estimated["duplicate_burden"] == {"copies": 5, "units": 3, "duplicate_copies": 2,
+                                             "copies_per_unit": 5 / 3}
+    assert estimated["precision_resolved"] == 2 / 3
+    first_b = precision.build_frame([run_dir], population="first_b", budget=2)
+    bounded = precision.estimate(precision.draw_sample(first_b, size=2, seed=2))
+    assert bounded["duplicate_burden"] == {"copies": 3, "units": 2, "duplicate_copies": 1, "copies_per_unit": 1.5}
+    assert first_b["exclusions"]["beyond_budget"] == {"units": 1, "copies": 2}
+
+
+def test_without_reviews_every_sampled_unit_stays_visible_as_nonresponse(tmp_path):
+    """No reviews file: all 3 units are unresolved (nonresponse), U = 3 of 3, precision undefined."""
+    sample = precision.draw_sample(precision.build_frame([one_system_run(tmp_path, 3)], population="full"),
+                                   size=3, seed=0)
+
+    estimated = precision.estimate(sample)
+
+    assert [unit["basis"] for unit in estimated["units"]] == ["nonresponse"] * 3
+    assert estimated["totals"] == {"true": 0.0, "false": 0.0, "unresolved": 3.0, "out_of_scope": 0.0}
+    assert estimated["precision_resolved"] is None and estimated["unresolved_share"] == 1.0
+    assert estimated["sensitivity"] == {"lower": 0.0, "upper": 1.0}
+    assert estimated["interval"]["state"] == "unavailable" and estimated["interval"]["variance"] is None
+    assert estimated["evidence_grade"] == "incomplete"
+    assert estimated["reviews_sha256"] is None and estimated["review_entries"] == 0
+
+
+def test_out_of_scope_is_reported_apart_and_a_single_draw_stratum_leaves_the_interval_insufficient(tmp_path):
+    """sys-a 6 units, sys-b 4; proportional allocation of 3 draws 2 (shares 1.8 and 1.2) and 1. With
+    sys-a's draws true and out of scope and sys-b's single draw false: T = 3, F = 4, O = 3, so
+    precision 3/7 leaves the out-of-scope mass out; sys-b drew one unit of four, so its variance, and
+    the interval, cannot be estimated."""
+    sample = precision.draw_sample(precision.build_frame([two_strata_run(tmp_path)], population="full"),
+                                   size=3, seed=12, stratify_by="system")
+    drawn = selected_by_stratum(sample)
+    reviews = review_all(sample, {drawn["sys-a"][0]: "true", drawn["sys-a"][1]: "out_of_scope",
+                                  drawn["sys-b"][0]: "false"})
+
+    estimated = precision.estimate(sample, reviews)
+
+    assert estimated["totals"] == {"true": 3.0, "false": 4.0, "unresolved": 0.0, "out_of_scope": 3.0}
+    assert estimated["precision_resolved"] == 3 / 7 and estimated["unresolved_share"] == 0.0
+    assert estimated["interval"]["state"] == "insufficient"
+    assert estimated["interval"]["insufficient_strata"] == ["sys-b"]
+    assert estimated["interval"]["lower"] is None
+
+
+def test_the_confidence_is_refused_outside_zero_and_one(tmp_path):
+    sample = precision.draw_sample(precision.build_frame([one_system_run(tmp_path, 3)], population="full"),
+                                   size=3, seed=0)
+    for confidence in (0, 1, 1.5, True, "0.9"):
+        with pytest.raises(ContractError, match="confidence must be a number strictly between 0 and 1"):
+            precision.estimate(sample, confidence=confidence)
+    assert precision.estimate(sample, confidence=0.9)["interval"]["z"] == NormalDist().inv_cdf(0.95)
+
+
+def test_an_estimate_says_what_its_population_left_out_and_binds_what_it_read(tmp_path):
+    """The first_b exclusions of the frame travel into the estimate, beside the digests it rests on."""
+    run_dir = write_run(tmp_path, "run-left", {
+        ("snap-a", "sys-a"): output(distinct("n", 3)),
+        ("snap-a", "sys-b"): output(distinct("u", 2), ranking="unranked"),
+    })
+    frame = precision.build_frame([run_dir], population="first_b", budget=2)
+    sample = precision.draw_sample(frame, size=2, seed=6)
+    reviews = review_all(sample, {entry["unit_id"]: "true" for entry in sample["selected"]})
+
+    estimated = precision.estimate(sample, reviews)
+
+    assert estimated["exclusions"] == frame["exclusions"]
+    assert estimated["exclusions"]["unranked"] == {"invocations": 1, "claim_records": 2, "units": 2}
+    assert estimated["exclusions"]["beyond_budget"] == {"units": 1, "copies": 1}
+    assert estimated["population"] == {"name": "first_b", "budget": 2, "mode": "full", "profile": "standard",
+                                       "systems": ["sys-a", "sys-b"]}
+    assert (estimated["sample_sha256"], estimated["frame_sha256"], estimated["reviews_sha256"]) == (
+        canonical_sha256(sample), canonical_sha256(frame), canonical_sha256(reviews))
+    assert estimated["runs"] == frame["runs"] and estimated["design"] == sample["design"]
+
+
+def test_the_review_and_estimate_kinds_are_published_at_2_1_and_check_their_own_shape(tmp_path, capsys):
+    sample = precision.draw_sample(precision.build_frame([two_strata_run(tmp_path)], population="full"),
+                                   size=4, seed=1, stratify_by="system")
+    reviews = review_all(sample, {entry["unit_id"]: "true" for entry in sample["selected"]})
+    estimated = precision.estimate(sample, reviews)
+
+    for kind, document in (("precision-reviews", reviews), ("precision-estimate", estimated)):
+        assert SCHEMA_VERSIONS[kind] == ("2.1",)
+        assert validate_document(kind, document) is document
+        path = tmp_path / f"{kind}.json"
+        path.write_text(canonical_json(document) + "\n", encoding="utf-8")
+        code, out, _ = cli(capsys, "validate", kind, str(path))
+        assert code == 0 and f"Valid {kind}" in out
+        with pytest.raises(ContractError, match="schema_version"):
+            validate_document(kind, {**document, "schema_version": "2.0"})
+
+    for change, message in (
+            (lambda d: d.update(sensitivity={"lower": 0.9, "upper": 0.1}), "both present and ordered"),
+            (lambda d: d["interval"].update(state="ok", lower=None, upper=None),
+             "bounds are recorded exactly in the ok and census states, and this one is ok"),
+            (lambda d: d["interval"].update(state="insufficient", lower=None, upper=None),
+             "insufficient_strata is named exactly when"),
+            (lambda d: d["coverage"].update(covered_units=11), "covered_units cannot exceed"),
+            (lambda d: d["units"].pop(), "selected_units must equal the number of units resolved")):
+        document = deepcopy(estimated)
+        change(document)
+        with pytest.raises(ContractError, match=message):
+            validate_document("precision-estimate", document)

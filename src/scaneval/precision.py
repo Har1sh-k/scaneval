@@ -1,10 +1,11 @@
-"""Reproducible precision sampling of delivered claims: the frame and the seeded draw.
+"""Reproducible precision sampling of delivered claims, recorded human review, and the estimate.
 
 Recall is asked of labeled targets; precision is asked of what a system delivered, and no label set
 answers it, because nobody labels every line of a repository. It is answered the way
 ``docs/EVALUATION_MATH.md`` section 3 states: declare a population of claims, have people review a
 probability sample of it, and weight each reviewed claim by the inverse of the probability it had
-of being drawn (Horvitz and Thompson). This module builds the population and draws the sample:
+of being drawn (Horvitz and Thompson). This module does each step, and ``docs/PRECISION.md`` is the
+guide:
 
 - :func:`build_frame` lists the population from saved run directories. A unit is one exact-duplicate
   group of claims within one invocation, by :func:`scaneval.scoring.claim_fingerprint`, the identity
@@ -15,29 +16,44 @@ of being drawn (Horvitz and Thompson). This module builds the population and dra
 - :func:`draw_sample` draws a simple or stratified random sample without replacement, one seeded
   :class:`scaneval.resampling.Stream` per stratum, and records every inclusion probability. A
   stratum that draws no unit is listed as uncovered.
-- :func:`verify_sample` holds a sample to what its own frame, design, and seed draw.
+- :func:`review_queue` exports the sampled claims for reviewers under blinded item ids, with each
+  system shown only by an alias; the mapping stays in the sample.
+- :func:`record_review` appends one human review to a chained, append-only history bound to one
+  sample.
+- :func:`estimate` resolves each sampled unit by the documented rule and reports weighted totals,
+  resolved precision, the unresolved share, sensitivity bounds, an approximate interval, coverage,
+  an evidence grade, and duplicate delivery burden.
 
-What this never does. It calls no model and no judge. It never writes into a run directory, and it
-reads no decision, plan, or review record, so sampling changes no decision, score, or detection
-credit. Nothing here reads a clock or an unseeded random source: every draw comes from the seed the
-caller states and units are handled in sorted order, so identical inputs give byte-identical
-samples.
+What this never does. It calls no model and no judge and never supplies a reviewer: a review is only
+ever the name, role, and outcome a person states. It never writes into a run directory, and it
+reads no decision, plan, or review record, so sampling and review change no decision, score, or
+detection credit: a claim reviewed true here is not a target hit, and recall is untouched. Nothing
+here reads a clock except to timestamp a recorded review, and no timestamp reaches a sample or an
+estimate. Every draw comes from the seed the caller states, units are handled in sorted order, and
+the estimate's sums are exact rational arithmetic, so identical inputs give byte-identical
+documents. A stratum with no sampled unit is never estimated: the estimate says how much of the
+population the sample covers and nothing about the rest.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from copy import deepcopy
+from datetime import datetime, timezone
 from fractions import Fraction
 import math
 from os import PathLike
 from pathlib import Path
-from typing import Iterable, Sequence
+from statistics import NormalDist
+from typing import Callable, Iterable, Sequence
 
+from . import __version__
 from .contracts import (
     ContractError,
     canonical_json,
     canonical_sha256,
+    chain_digest,
+    is_stated,
     load_document,
     precision_exclusions,
     precision_stratum,
@@ -51,21 +67,50 @@ from .scoring import claim_fingerprint
 
 
 SAMPLE_KIND = "precision-sample"
+REVIEWS_KIND = "precision-reviews"
+ESTIMATE_KIND = "precision-estimate"
 SCHEMA_VERSION = "2.1"
+# The chain kind of a recorded precision review, so one can never be replayed as a case review or
+# a map review (see scaneval.contracts.chain_digest).
+REVIEW_CHAIN_KIND = "precision_review"
 
 POPULATIONS = ("first_b", "full")
 MODES = ("full", "pr")
 PROFILES = ("standard", "metadata_blinded")
 STRATIFICATIONS = ("system", "input", "kind")
 ALLOCATIONS = ("proportional", "equal")
+ROLES = ("independent", "adjudicator")
+OUTCOMES = ("true", "false", "unresolved", "out_of_scope")
+BASES = ("adjudicated", "double_review", "single_review", "disagreement", "nonresponse")
+# Evidence grades, strongest first: a requirement for one grade is met by any grade before it.
+GRADES = ("double_review_or_adjudicated", "single_review", "incomplete")
 # The label of the stream a stratum draws from. An unstratified sample has one stratum, "all".
 STREAM_LABEL = "precision/{frame_sha256}/{stratum}"
 # Blinding draws come from streams of their own, so they can never share one with a stratum.
 ITEM_LABEL = "precision-blinding/{frame_sha256}/items"
 ALIAS_LABEL = "precision-blinding/{frame_sha256}/systems"
+DEFAULT_CONFIDENCE = 0.95
+INTERVAL_METHOD = "stratified_linearized_normal"
 # What a unit keeps of its first copy: exactly the fields its duplicate identity is computed from.
 CLAIM_FIELDS = ("allegation", "kind", "native_rule_id", "primary_location", "related_locations",
                 "evidence_text")
+# What a reviewer is shown of a claim. A native rule id often names the tool that wrote it, so it
+# stays out, as do claim ids, ranks, and run and invocation names.
+QUEUE_CLAIM_FIELDS = ("allegation", "kind", "primary_location", "related_locations", "evidence_text")
+OUTCOME_MEANINGS = {
+    "true": "The allegation holds for this input: a real security issue as claimed, whether or not "
+            "it is one of the evaluation's labeled targets.",
+    "false": "The allegation does not hold for this input.",
+    "unresolved": "The review could not establish whether the allegation holds.",
+    "out_of_scope": "Not a security allegation this review judges, such as a style or reliability "
+                    "remark; it is reported apart from every ratio.",
+}
+_ZERO = Fraction(0)
+
+
+def _now(clock: Callable[[], datetime] | None) -> str:
+    moment = (clock or (lambda: datetime.now(timezone.utc)))()
+    return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def _count(value: object, label: str, *, minimum: int) -> int:
@@ -493,3 +538,353 @@ def verify_sample(sample: dict) -> dict:
         raise ContractError(f"this sample is not what seed {design['seed']} and its design draw from its "
                             f"frame ({', '.join(differing)} differ); it was edited after it was drawn")
     return sample
+
+
+# --- review ---------------------------------------------------------------------------------------
+
+
+def review_queue(sample: dict) -> dict:
+    """What reviewers are given: each sampled claim under its item id, with system identity blinded.
+
+    Items are listed in item-id order, a seeded permutation, so neither a unit's position in the
+    frame nor the system that delivered it shows in the order. Each item carries the claim's
+    allegation, kind, and locations and any evidence text, the input it is about (input id,
+    snapshot id, and the input hash that names the exact tree), and the system's alias. Run,
+    invocation, unit, and claim ids and native rule ids are left out because they can name the
+    tool. Blinding is only as good as the claim text: an allegation that names its tool still does.
+    This is an export for people, not a contract document: nothing reads it back, and a review is
+    recorded against the sample by item id.
+    """
+    verify_sample(sample)
+    frame = sample["frame"]
+    units = {unit["unit_id"]: unit for unit in frame["units"]}
+    rows = {(row["run_id"], row["invocation_id"]): row for row in frame["invocations"]}
+    alias_of = {row["system_id"]: row["alias"] for row in sample["blinding"]["system_aliases"]}
+    items = []
+    for entry in sorted(sample["selected"], key=lambda entry: entry["item_id"]):
+        unit = units[entry["unit_id"]]
+        row = rows[(unit["run_id"], unit["invocation_id"])]
+        items.append({
+            "item_id": entry["item_id"],
+            "system": alias_of[unit["system_id"]],
+            "input": {"input_id": unit["input_id"], "snapshot_id": row["snapshot_id"],
+                      "input_hash": row["input_hash"]},
+            "claim": {field: deepcopy(unit["claim"][field]) for field in QUEUE_CLAIM_FIELDS
+                      if field in unit["claim"]},
+        })
+    return {
+        "sample_sha256": canonical_sha256(sample),
+        "outcomes": dict(OUTCOME_MEANINGS),
+        "notes": [
+            "Judge each item on its own: the allegation, its kind and locations, and any evidence, "
+            "against the input it names. The system is shown only by an alias.",
+            "Record one outcome per item: scaneval precision record REVIEWS --sample SAMPLE --item ITEM "
+            "--reviewer 'Your Name' --role independent --outcome OUTCOME [--note TEXT]",
+            "Two independent reviewers per item, and an adjudicator where they disagree, is what the "
+            "double_review_or_adjudicated evidence grade needs.",
+        ],
+        "items": items,
+    }
+
+
+def unit_for_item(sample: dict, item_id: str) -> str:
+    """The unit a review-queue item id names in *sample*; an item the sample does not hold is refused."""
+    for entry in sample["selected"]:
+        if entry["item_id"] == item_id:
+            return entry["unit_id"]
+    raise ContractError(f"this sample has no item {item_id!r}")
+
+
+def _check_reviews(sample: dict, reviews: dict) -> None:
+    """Refuse a review history that is not a chain, not bound to *sample*, or names an unsampled unit."""
+    validate_document(REVIEWS_KIND, reviews)
+    digest = canonical_sha256(sample)
+    if reviews["sample_sha256"] != digest:
+        raise ContractError(f"these reviews judge sample {reviews['sample_sha256']}, not this sample ({digest})")
+    selected = {entry["unit_id"] for entry in sample["selected"]}
+    for index, entry in enumerate(reviews["reviews"]):
+        if entry["unit_id"] not in selected:
+            raise ContractError(f"reviews[{index}] judges unit {entry['unit_id']}, which this sample did not draw")
+
+
+def _require_sampled(sample: dict, unit_id: str) -> None:
+    if any(entry["unit_id"] == unit_id for entry in sample["selected"]):
+        return
+    if any(unit["unit_id"] == unit_id for unit in sample["frame"]["units"]):
+        raise ContractError(f"unit {unit_id} is in the frame but was not drawn; a review of a unit outside the "
+                            "sample has no inclusion probability, so no estimate could use it")
+    raise ContractError(f"unit {unit_id!r} is not in this sample's frame")
+
+
+def record_review(sample: dict, reviews: dict | None, *, unit_id: str, reviewer: str, role: str,
+                  outcome: str, note: str = "", clock: Callable[[], datetime] | None = None) -> dict:
+    """Return *reviews* with one more human review appended; *reviews* ``None`` starts the history.
+
+    The reviewer is the name the caller supplies, stored verbatim; a blank one is refused by the
+    same :func:`scaneval.contracts.is_stated` rule every recorded review follows, and none is ever
+    supplied here. *role* is ``independent`` or ``adjudicator`` and *outcome* one of ``true``,
+    ``false``, ``unresolved``, or ``out_of_scope``. The unit must be one the sample drew. The entry
+    is chained to the one before it and the history's head moves to it, so the history only grows:
+    a reviewer who changes their mind records a new entry, which becomes their latest, and the old
+    one stays. The sample and any existing history are verified first. The inputs are not modified
+    and nothing is written. This records a claim of review; it does not check who the reviewer is,
+    whether they are independent of each other, or that anyone read the claim.
+    """
+    verify_sample(sample)
+    if reviews is None:
+        reviews = {"schema_version": SCHEMA_VERSION, "sample_sha256": canonical_sha256(sample),
+                   "reviews": [], "reviews_sha256": None}
+    _check_reviews(sample, reviews)
+    if not is_stated(reviewer):
+        raise ContractError("a precision review must name its reviewer; the tool never supplies one")
+    if role not in ROLES:
+        raise ContractError(f"review role must be one of {', '.join(ROLES)}, not {role!r}")
+    if outcome not in OUTCOMES:
+        raise ContractError(f"review outcome must be one of {', '.join(OUTCOMES)}, not {outcome!r}")
+    if not isinstance(note, str):
+        raise ContractError(f"a review note must be text, not {note!r}")
+    _require_sampled(sample, unit_id)
+    entry = {"unit_id": unit_id, "reviewer": reviewer, "role": role, "outcome": outcome, "note": note,
+             "at": _now(clock)}
+    entry["chain_sha256"] = chain_digest(reviews["reviews_sha256"], entry, REVIEW_CHAIN_KIND)
+    updated = {**deepcopy(reviews), "reviews": [*deepcopy(reviews["reviews"]), entry],
+               "reviews_sha256": entry["chain_sha256"]}
+    return validate_document(REVIEWS_KIND, updated)
+
+
+def _resolve(sample: dict, reviews: dict | None) -> list[dict]:
+    """Every sampled unit's final class and its basis, by the documented rule, in unit-id order.
+
+    The latest adjudication of a unit wins. Otherwise each independent reviewer's latest entry
+    counts once: one reviewer gives ``single_review``; two or more who all agree give
+    ``double_review``; any disagreement leaves the unit ``unresolved`` (``disagreement``) until an
+    adjudicator records an outcome; no review leaves it ``unresolved`` (``nonresponse``). "Latest"
+    is chain order, never a timestamp, and reviewers are told apart by their stated names exactly as
+    written.
+    """
+    history: dict[str, list[dict]] = defaultdict(list)
+    for entry in reviews["reviews"] if reviews is not None else []:
+        history[entry["unit_id"]].append(entry)
+    resolved = []
+    for selection in sample["selected"]:
+        entries = history.get(selection["unit_id"], [])
+        adjudications = [entry for entry in entries if entry["role"] == "adjudicator"]
+        latest: dict[str, str] = {}
+        for entry in entries:
+            if entry["role"] == "independent":
+                latest[entry["reviewer"]] = entry["outcome"]
+        if adjudications:
+            outcome, basis = adjudications[-1]["outcome"], "adjudicated"
+        elif not latest:
+            outcome, basis = "unresolved", "nonresponse"
+        elif len(set(latest.values())) > 1:
+            outcome, basis = "unresolved", "disagreement"
+        else:
+            outcome = next(iter(latest.values()))
+            basis = "single_review" if len(latest) == 1 else "double_review"
+        resolved.append({"unit_id": selection["unit_id"], "item_id": selection["item_id"],
+                         "stratum": selection["stratum"], "class": outcome, "basis": basis,
+                         "entries": len(entries)})
+    return resolved
+
+
+# --- the estimate ---------------------------------------------------------------------------------
+
+
+def _share(numerator: Fraction, denominator: Fraction) -> Fraction | None:
+    return numerator / denominator if denominator else None
+
+
+def _number(value: Fraction | None) -> float | None:
+    return None if value is None else float(value)
+
+
+def _ratios(totals: dict[str, Fraction]) -> dict:
+    """Resolved precision, unresolved share, and sensitivity bounds from class totals, exactly."""
+    true, false, unresolved = totals["true"], totals["false"], totals["unresolved"]
+    judged = true + false + unresolved
+    return {"precision_resolved": _share(true, true + false),
+            "unresolved_share": _share(unresolved, judged),
+            "sensitivity": {"lower": _share(true, judged), "upper": _share(true + unresolved, judged)}}
+
+
+def _floats(ratios: dict) -> dict:
+    return {"precision_resolved": _number(ratios["precision_resolved"]),
+            "unresolved_share": _number(ratios["unresolved_share"]),
+            "sensitivity": {key: _number(value) for key, value in ratios["sensitivity"].items()}}
+
+
+def _interval(resolved: list[dict], strata: list[dict], precision: Fraction | None,
+              resolved_mass: Fraction, confidence: float) -> dict:
+    """An approximate normal interval for resolved precision from its stratified linearized variance.
+
+    With R = T/(T+F) and X = T+F over the weighted totals, each sampled unit contributes
+    ``z = (1[true] - R * 1[true or false]) / X``, and the variance of R is estimated as
+    ``sum_h N_h^2 (1 - n_h/N_h) s_h^2 / n_h``, where ``s_h^2`` is the sample variance of z within
+    stratum h. A stratum taken whole contributes nothing (no sampling variance), an uncovered one is
+    outside the estimate, and one that drew a single unit of several makes the interval
+    ``insufficient``. A zero variance from a sample that is not a census is ``degenerate`` and gets
+    no bounds, because it is the normal approximation failing, not certainty. The interval covers
+    sampling only; reviewer error, disagreement, and unresolved units are outside it.
+    """
+    z = NormalDist().inv_cdf(0.5 + confidence / 2)
+    base = {"method": INTERVAL_METHOD, "confidence": confidence, "z": z, "variance": None,
+            "standard_error": None, "lower": None, "upper": None, "insufficient_strata": []}
+    if precision is None:
+        return {**base, "state": "unavailable"}
+    by_stratum: dict[str, list[dict]] = defaultdict(list)
+    for unit in resolved:
+        by_stratum[unit["stratum"]].append(unit)
+    variance = _ZERO
+    census = True
+    insufficient = []
+    for row in strata:
+        size, drawn = row["population_units"], row["sampled_units"]
+        if drawn in (0, size):
+            continue
+        census = False
+        if drawn < 2:
+            insufficient.append(row["stratum"])
+            continue
+        scores = [(Fraction(unit["class"] == "true") - precision * (unit["class"] in ("true", "false")))
+                  / resolved_mass for unit in by_stratum[row["stratum"]]]
+        mean = sum(scores, _ZERO) / drawn
+        spread = sum(((score - mean) ** 2 for score in scores), _ZERO) / (drawn - 1)
+        variance += size * size * (1 - Fraction(drawn, size)) * spread / drawn
+    if insufficient:
+        return {**base, "state": "insufficient", "insufficient_strata": insufficient}
+    point = float(precision)
+    if census:
+        return {**base, "state": "census", "variance": 0.0, "standard_error": 0.0, "lower": point, "upper": point}
+    if variance == 0:
+        return {**base, "state": "degenerate", "variance": 0.0, "standard_error": 0.0}
+    error = math.sqrt(float(variance))
+    return {**base, "state": "ok", "variance": float(variance), "standard_error": error,
+            "lower": max(0.0, point - z * error), "upper": min(1.0, point + z * error)}
+
+
+def _grade(resolved: list[dict]) -> str:
+    """``incomplete`` while any sampled unit is unreviewed or in unadjudicated disagreement,
+    else ``single_review`` while any rests on one reviewer, else ``double_review_or_adjudicated``.
+
+    The grade says how the sampled units were reviewed, not what the reviews found: a unit two
+    reviewers agree is unresolved has double-review evidence, and it counts in the unresolved share.
+    """
+    bases = {unit["basis"] for unit in resolved}
+    if not resolved or bases & {"disagreement", "nonresponse"}:
+        return "incomplete"
+    if "single_review" in bases:
+        return "single_review"
+    return "double_review_or_adjudicated"
+
+
+def _estimate_notes(coverage: dict, sample_counts: dict, grade: str) -> list[str]:
+    notes = [
+        "Precision is estimated over unique claims (exact-duplicate groups within one invocation) of the "
+        "stated population only. It is not a false-positive rate for the repositories, and it says "
+        "nothing about claims outside the population.",
+        "Each reviewed unit is weighted by N_h/n_h. The sensitivity range counts every unresolved unit as "
+        "false (lower) and as true (upper); it is not a confidence interval.",
+        "The interval is an approximate normal interval from the stratified linearized variance of the "
+        "ratio. It covers sampling only, not reviewer error, disagreement, or unresolved units.",
+        "Out-of-scope units are reported apart and left out of every ratio.",
+        "Reviews change no decision, plan, score, or detection credit: a claim reviewed true here is not "
+        "a target hit.",
+    ]
+    if coverage["uncovered_strata"]:
+        names = ", ".join(row["stratum"] for row in coverage["uncovered_strata"])
+        notes.append(f"The sample covers {coverage['covered_units']} of {coverage['population_units']} "
+                     f"units. Strata that drew no unit ({names}) are not estimated at all.")
+    if grade == "incomplete":
+        notes.append(f"{sample_counts['nonresponse']} sampled unit(s) have no review and "
+                     f"{sample_counts['disagreement']} have disagreeing reviews with no adjudication; "
+                     "both count as unresolved, and the evidence grade is incomplete until they are resolved.")
+    return notes
+
+
+def estimate(sample: dict, reviews: dict | None = None, *,
+             confidence: float = DEFAULT_CONFIDENCE) -> dict:
+    """Reviewed precision of the sample's population, from its recorded reviews; a validated document.
+
+    The sample is verified (:func:`verify_sample`) and so is the review history against it. Each
+    sampled unit takes its final class by the rule in :func:`_resolve`; without *reviews* every unit
+    is nonresponse. With inclusion probability ``pi_h = n_h/N_h``, the Horvitz-Thompson totals are
+    ``N_c = sum over sampled units of 1[class = c] / pi_h`` for true (T), false (F), unresolved
+    (U: reviewed unresolved, disagreement, and nonresponse together), and out of scope (O, reported
+    apart). From them: resolved precision T/(T+F), the unresolved share U/(T+F+U), and the
+    sensitivity bounds [T/(T+F+U), (T+U)/(T+F+U)], each null when its denominator is zero, and the
+    approximate interval of :func:`_interval`. Per-stratum figures follow the same formulas within
+    the stratum; an uncovered stratum reports its counts and no totals. Coverage says how many
+    population units the sampled strata hold; duplicate delivery burden (copies per unit) comes from
+    the frame and is reported apart from precision, which counts each unit once.
+
+    Sums are exact fractions converted to floats once, at the end, so the document is the same on
+    every platform. It carries no timestamp. It binds the digests of the sample, the frame, and the
+    review history, and the frame's runs, so it names what it estimates.
+    """
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) \
+            or not 0 < confidence < 1:
+        raise ContractError(f"confidence must be a number strictly between 0 and 1, not {confidence!r}")
+    confidence = float(confidence)
+    verify_sample(sample)
+    if reviews is not None:
+        _check_reviews(sample, reviews)
+    frame = sample["frame"]
+    resolved = _resolve(sample, reviews)
+    weights = {row["stratum"]: Fraction(row["population_units"], row["sampled_units"])
+               for row in sample["strata"] if row["sampled_units"]}
+    totals = {name: sum((weights[unit["stratum"]] for unit in resolved if unit["class"] == name), _ZERO)
+              for name in OUTCOMES}
+    ratios = _ratios(totals)
+    strata = []
+    for row in sample["strata"]:
+        units = [unit for unit in resolved if unit["stratum"] == row["stratum"]]
+        classes = {name: sum(unit["class"] == name for unit in units) for name in OUTCOMES}
+        covered = row["stratum"] in weights
+        stratum_totals = ({name: weights[row["stratum"]] * classes[name] for name in OUTCOMES}
+                          if covered else None)
+        figures = (_floats(_ratios(stratum_totals)) if covered else
+                   {"precision_resolved": None, "unresolved_share": None,
+                    "sensitivity": {"lower": None, "upper": None}})
+        strata.append({**{key: row[key] for key in ("stratum", "population_units", "sampled_units",
+                                                    "inclusion_probability")},
+                       "covered": covered, "classes": classes,
+                       "totals": ({name: float(value) for name, value in stratum_totals.items()}
+                                  if covered else None),
+                       **figures})
+    population_units = len(frame["units"])
+    covered_units = sum(row["population_units"] for row in sample["strata"] if row["stratum"] in weights)
+    coverage = {"population_units": population_units, "covered_units": covered_units,
+                "share": covered_units / population_units,
+                "uncovered_strata": [{"stratum": row["stratum"], "population_units": row["population_units"]}
+                                     for row in sample["strata"] if row["stratum"] not in weights]}
+    classes = {name: sum(unit["class"] == name for unit in resolved) for name in OUTCOMES}
+    bases = {name: sum(unit["basis"] == name for unit in resolved) for name in BASES}
+    grade = _grade(resolved)
+    copies = sum(unit["population_copies"] for unit in frame["units"])
+    document = {
+        "schema_version": SCHEMA_VERSION,
+        "evaluator_version": __version__,
+        "sample_sha256": canonical_sha256(sample),
+        "frame_sha256": sample["frame_sha256"],
+        "reviews_sha256": canonical_sha256(reviews) if reviews is not None else None,
+        "review_entries": len(reviews["reviews"]) if reviews is not None else 0,
+        "population": deepcopy(frame["population"]),
+        "exclusions": deepcopy(frame["exclusions"]),
+        "runs": deepcopy(frame["runs"]),
+        "design": deepcopy(sample["design"]),
+        "coverage": coverage,
+        "sample": {"selected_units": len(resolved), "classes": classes, "bases": bases},
+        "totals": {name: float(value) for name, value in totals.items()},
+        **_floats(ratios),
+        "interval": _interval(resolved, sample["strata"], ratios["precision_resolved"],
+                              totals["true"] + totals["false"], confidence),
+        "evidence_grade": grade,
+        "duplicate_burden": {"copies": copies, "units": population_units,
+                             "duplicate_copies": copies - population_units,
+                             "copies_per_unit": copies / population_units if population_units else None},
+        "strata": strata,
+        "units": resolved,
+        "notes": _estimate_notes(coverage, bases, grade),
+    }
+    return validate_document(ESTIMATE_KIND, document)

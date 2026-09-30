@@ -31,9 +31,12 @@ SCHEMA_VERSIONS: dict[str, tuple[str, ...]] = {
     # The frozen evaluation schedule a run writes before it prepares any input. A kind first
     # published at 2.1 has 2.1 as its only version, so its schema keeps the plain file name.
     "evaluation-schedule": ("2.1",),
-    # Precision sampling (scaneval.precision, docs/PRECISION.md): the seeded sample of delivered
-    # claims with the frame it was drawn from, first published at 2.1.
+    # Precision sampling and review (scaneval.precision, docs/PRECISION.md): the seeded sample of
+    # delivered claims with the frame it was drawn from, the chained human reviews of that sample,
+    # and the estimate computed from both. Each is first published at 2.1.
     "precision-sample": ("2.1",),
+    "precision-reviews": ("2.1",),
+    "precision-estimate": ("2.1",),
 }
 CONTRACT_KINDS = frozenset(SCHEMA_VERSIONS)
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
@@ -1809,6 +1812,67 @@ def _validate_precision_sample(document: dict[str, Any]) -> None:
     _unique([row["alias"] for row in aliases], "blinding.system_aliases.alias")
 
 
+def _validate_precision_reviews(document: dict[str, Any]) -> None:
+    """Check that a precision review history is a chain that ends where it says it ends.
+
+    Every entry names its reviewer by the :func:`is_stated` rule and carries the chain value of its
+    own fields and of the entry before it (:func:`chain_link_gap`, kind ``precision_review``), and
+    ``reviews_sha256`` is the chain value of the last entry, present exactly when there is one, so an
+    entry edited, reordered, or deleted anywhere, the end included, is refused. A history wiped whole
+    and saved with no head reads as a fresh one; an estimate records the digest of the history it
+    used, which is where such a wipe shows. That the history belongs to a given sample and names
+    only units it drew is checked by :mod:`scaneval.precision` against that sample. Like every
+    recorded review here, this is not a signature: it says nothing about who typed an entry or
+    whether they read the claim.
+    """
+    reviews = document["reviews"]
+    for index, entry in enumerate(reviews):
+        if not is_stated(entry["reviewer"]):
+            raise ContractError(f"a precision review must name its reviewer; reviews[{index}].reviewer is blank")
+    gap, head = chain_link_gap(reviews, kind="precision_review", label="reviews")
+    if gap:
+        raise ContractError(gap)
+    recorded = document["reviews_sha256"]
+    if recorded == head:
+        return
+    if head is None:
+        raise ContractError(f"reviews_sha256 records {recorded}, but no review is recorded; the history "
+                            "it names was deleted whole")
+    if recorded is None:
+        raise ContractError("reviews_sha256 is missing, so nothing says where the recorded history ends "
+                            "and a review deleted from the end of it would leave no trace")
+    raise ContractError(f"reviews_sha256 records {recorded}, but the recorded history ends at {head}; a "
+                        "review was deleted from the end of it")
+
+
+def _validate_precision_estimate(document: dict[str, Any]) -> None:
+    """Check the estimate's shape rules; its numbers are recomputed by :mod:`scaneval.precision`, not here.
+
+    The sensitivity range is present or absent as a whole and ordered, the interval carries bounds
+    exactly in the states that have them and names its insufficient strata exactly when it is
+    insufficient, coverage cannot exceed the population, and every sampled unit appears once.
+    """
+    lower, upper = document["sensitivity"]["lower"], document["sensitivity"]["upper"]
+    if (lower is None) != (upper is None) or (lower is not None and lower > upper):
+        raise ContractError("sensitivity: lower and upper are both present and ordered, or both null")
+    interval = document["interval"]
+    bounded = interval["state"] in ("ok", "census")
+    if bounded != (interval["lower"] is not None and interval["upper"] is not None) \
+            or (not bounded and (interval["lower"] is not None or interval["upper"] is not None)):
+        raise ContractError(f"interval: bounds are recorded exactly in the ok and census states, and this "
+                            f"one is {interval['state']}")
+    if bounded and interval["lower"] > interval["upper"]:
+        raise ContractError("interval: lower must not exceed upper")
+    if (interval["state"] == "insufficient") != bool(interval["insufficient_strata"]):
+        raise ContractError("interval: insufficient_strata is named exactly when the interval is insufficient")
+    coverage = document["coverage"]
+    if coverage["covered_units"] > coverage["population_units"]:
+        raise ContractError("coverage: covered_units cannot exceed population_units")
+    _unique([unit["unit_id"] for unit in document["units"]], "units.unit_id")
+    if document["sample"]["selected_units"] != len(document["units"]):
+        raise ContractError("sample.selected_units must equal the number of units resolved")
+
+
 _RUNTIME_VALIDATORS = {
     "case-pack": _validate_case_pack,
     "review-record": _validate_review_record,
@@ -1821,8 +1885,10 @@ _RUNTIME_VALIDATORS = {
     "run-manifest": _validate_run_manifest,
     # Kinds first published at 2.1, one per feature.
     "evaluation-schedule": _validate_evaluation_schedule,
-    # Precision sampling.
+    # Precision sampling and review.
     "precision-sample": _validate_precision_sample,
+    "precision-reviews": _validate_precision_reviews,
+    "precision-estimate": _validate_precision_estimate,
 }
 
 
