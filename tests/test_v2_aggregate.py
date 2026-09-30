@@ -1267,8 +1267,8 @@ def alias_pair_run(root: Path, run_id: str, *, canonical=("K", "K"), **fixed) ->
     """Two frozen pairs whose fixed states are two records of one control; one system scans each input once.
 
     The vulnerable input freezes T-CVE and T-GHSA, two records of one root cause X, and the fixed input a fixed-target
-    control of each: C-CVE of T-CVE and C-GHSA of T-GHSA, records of the canonical controls *canonical* names (one
-    control K by default). The schedule freezes the pairs (T-CVE, C-CVE) and (T-GHSA, C-GHSA), and the vulnerable
+    control of each: C-CVE of T-CVE and C-GHSA of T-GHSA, whose canonical ids are the two in *canonical* (both K by
+    default, so one control). The schedule freezes the pairs (T-CVE, C-CVE) and (T-GHSA, C-GHSA), and the vulnerable
     scan accepts claim 1 for T-CVE, so the vulnerable side of both is a resolved hit whatever the fixed side says.
     *fixed* are the arguments of :func:`scan` for the fixed input, which succeeds with resolved bundles by default.
     """
