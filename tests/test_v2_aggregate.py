@@ -1368,6 +1368,37 @@ def test_a_pair_is_credited_when_every_alias_of_its_fixed_state_control_was_asse
     assert (fixed["canonical_controls"], fixed["observations"], fixed["resolved"], fixed["unresolved"]) == (2, 2, 1, 1)
 
 
+def test_a_pair_is_unresolved_only_in_the_repetition_whose_fixed_bundle_lacks_an_alias(tmp_path):
+    """The same two pairs run twice: repetition 1's fixed bundle plans C-CVE and C-GHSA, repetition 2's only C-CVE.
+
+    Every repetition pair reads the fixed bundle of its own repetition, so 2 pairs x 2 repetitions are 4 repetition
+    pairs, and the two of repetition 1 are resolved and correct (a hit on T-CVE, K quiet) while the two of repetition
+    2 are unresolved: K was never fully assessed there.
+    - Resolved pairs 2 of 4, so the assessable mass and Q are 2/4 = 1/2, and the correct outcome has mass 1/2.
+    - The fixed_target block has 2 observations of K, one per repetition: 1 resolved and 1 unresolved and unscored, so
+      A = 1/2, C = 1, and F+ = (0 + 1 - 1/2)/1 = 1/2.
+    Reading each pair's own record alone resolved (T-CVE, C-CVE) in repetition 2 as well: 3 of 4, and Q = 3/4.
+    """
+    vulnerable = planned("vulnerable", targets=[target("T-CVE", canonical="X"), target("T-GHSA", canonical="X")])
+    fixed_input = planned("fixed", controls=[
+        control("C-CVE", kind="fixed_target", target_id="T-CVE", canonical="K"),
+        control("C-GHSA", kind="fixed_target", target_id="T-GHSA", canonical="K")])
+    run = write_run(tmp_path, "run-pair-alias-repeated", [vulnerable, fixed_input], repetitions=2, outcomes={
+        ("vulnerable", "sys-a", 1): scan(hits={"T-CVE": 1}), ("vulnerable", "sys-a", 2): scan(hits={"T-CVE": 1}),
+        ("fixed", "sys-a", 2): scan(drop=("C-GHSA",))})
+
+    report = aggregate.aggregate([run], policy=policy())
+
+    pairs = pair_block(report)
+    assert (pairs["pairable_targets"], pairs["repetition_pairs"], pairs["resolved_pairs"]) == (1, 4, 2)
+    assert pairs["assessable_mass"] == 0.5 and pairs["value"] == 0.5
+    assert pairs["outcomes"]["correct"]["pairs"] == 2 and pairs["outcomes"]["correct"]["mass"] == 0.5
+    fixed = fixed_controls(report)
+    assert (fixed["observations"], fixed["completed"], fixed["resolved"], fixed["unresolved"]) == (2, 2, 1, 1)
+    assert fixed["unscored"] == 1 and fixed["assessable_mass"] == 0.5 and fixed["completed_mass"] == 1.0
+    assert fixed["completed_upper"]["value"] == 0.5
+
+
 def test_an_input_without_a_frozen_plan_is_listed_and_left_out_of_target_metrics(tmp_path):
     inputs = [planned("widget", targets=[target("T-w")]), planned("undeclared", frozen=False)]
     run = write_run(tmp_path, "run-unplanned", inputs, outcomes={("widget", "sys-a", 1): scan(hits={"T-w": 1})})
