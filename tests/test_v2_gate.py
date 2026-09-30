@@ -392,19 +392,19 @@ def planned(input_id: str, *, targets=(), controls=(), project: str, workload: s
 
 def scan(*, hits=None, claims: int | None = None, ranking: str = "native", status: str = "success",
          resolved: bool = True, controls=None, pending=None, usage=None, review_state: str = "approved",
-         duplicate: bool = False, scope: str | None = None) -> dict:
+         duplicate: bool = False, scope: str | None = None, drop=()) -> dict:
     """What one bundle holds.
 
     ``hits`` maps a target id to the 1-based position of the claim a reviewer accepted for it, and
     ``pending`` does the same for a match the reviewer left unresolved; ``controls`` maps a control id
     to ``"quiet"``, ``"unresolved"``, or ``("false_allegation", position)``. ``duplicate`` makes every
     delivered claim an exact copy of the first, which is how a system spams the reviewer without adding
-    an allegation.
+    an allegation. ``drop`` leaves frozen controls out of the bundle's plan.
     """
     return {"hits": hits or {}, "claims": claims, "ranking": ranking, "status": status, "resolved": resolved,
             "controls": controls or {}, "pending": pending or {},
             "usage": usage if usage is not None else {"wall_seconds": 1.0},
-            "review_state": review_state, "duplicate": duplicate, "scope": scope}
+            "review_state": review_state, "duplicate": duplicate, "scope": scope, "drop": set(drop)}
 
 
 def _plan_item(item: dict, kind: str) -> dict:
@@ -422,7 +422,8 @@ def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: d
     bound = input_hash(row["input_id"])
     plan = {"schema_version": "2.0", "input_hash": bound, "scope": spec["scope"] or frozen["scope"],
             "targets": [_plan_item(item, "targets") for item in frozen["targets"]],
-            "controls": [_plan_item(item, "controls") for item in frozen["controls"]],
+            "controls": [_plan_item(item, "controls") for item in frozen["controls"]
+                         if item["control_id"] not in spec["drop"]],
             "review_budgets": frozen["review_budgets"]}
     positions = list(spec["hits"].values()) + list(spec["pending"].values())
     positions += [value[1] for value in spec["controls"].values() if isinstance(value, tuple)]
@@ -1947,6 +1948,37 @@ def test_a_failed_scan_is_not_a_quiet_control(corpus):
     assert upper["explanation"] == ("no capability_safe control observation completed, so the completed false-alarm "
                                     "bound is undefined; a failed scan is not a quiet one")
     assert requirement(malformed, "controls.capability_safe.assessable_mass")["status"] == "inconclusive"
+
+
+def test_a_frozen_control_missing_from_a_completed_scans_plan_still_counts_toward_the_false_alarm_bound(tmp_path):
+    """Ten scans of each system succeed; three of the candidate's bundle plans lack the input's control.
+
+    The three completed in the frozen scope but hold no assessment of the control, so C = 1, A = 7/10 and
+    E = 0, and F+ = (0 + 1 - 7/10)/1 = 0.3. Counting the three as not completed would have given C = A = 7/10
+    and F+ = 0, and a tolerance of 0.1 would have passed.
+    """
+    inputs = [planned(f"p{index}", project=f"acme/p{index}", controls=[control(f"C-p{index}")],
+                      targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}")])
+              for index in range(1, 11)]
+    outcomes = {}
+    for index in range(1, 11):
+        outcomes[(f"p{index}", "baseline", 1)] = scan(claims=1)
+        outcomes[(f"p{index}", "candidate", 1)] = scan(hits={f"T-p{index}": 1}, claims=1,
+                                                        drop=(f"C-p{index}",) if index > 7 else ())
+    run = write_run(tmp_path, "run-unscored-controls", inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                    configs={"candidate": {"config": {"knob": 2}}})
+    comparison = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=aggregation_policy())
+
+    decision = gate.evaluate_gate(gate_policy(controls={"capability_safe": bounds(
+        max_false_alarm_upper=0.1, min_completed_mass=0.7, min_assessable_mass=0.7)}), comparison)
+
+    assert statuses(decision)["controls.capability_safe.false_alarm_upper"] == "fail"
+    assert decision["outcome"] == "fail" and decision["failed"] == ["controls.capability_safe.false_alarm_upper"]
+    upper = requirement(decision, "controls.capability_safe.false_alarm_upper")
+    assert upper["observed"]["false_alarm_upper"] == pytest.approx(0.3)
+    assert (upper["observed"]["completed"], upper["observed"]["resolved"], upper["observed"]["unresolved"]) == (10, 7, 3)
+    assert statuses(decision)["controls.capability_safe.completed_mass"] == "pass"
+    assert statuses(decision)["controls.capability_safe.assessable_mass"] == "pass"
 
 
 def test_a_control_of_both_types_is_read_in_each_class(tmp_path):

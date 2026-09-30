@@ -84,8 +84,8 @@ def scan(*, hits=None, claims: int | None = None, ranking: str = "native", statu
 
     ``hits`` maps a target id to the 1-based position of the claim a reviewer accepted for it;
     ``pending`` does the same for an unresolved match; ``controls`` maps a control id to ``"quiet"``,
-    ``"unresolved"``, or ``("false_allegation", position)``. ``drop`` leaves frozen targets out of the
-    bundle's plan and ``extra`` adds targets to it.
+    ``"unresolved"``, or ``("false_allegation", position)``. ``drop`` leaves frozen targets or controls out
+    of the bundle's plan and ``extra`` adds targets to it.
     """
     return {"hits": hits or {}, "claims": claims, "ranking": ranking, "status": status, "resolved": resolved,
             "controls": controls or {}, "pending": pending or {}, "usage": usage or {"wall_seconds": 1.0},
@@ -112,7 +112,8 @@ def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: d
             "targets": [_plan_item(item, "targets") for item in items["targets"]
                         if item["target_id"] not in spec["drop"]] + [_plan_item(item, "targets")
                                                                      for item in spec["extra"]],
-            "controls": [_plan_item(item, "controls") for item in items["controls"]],
+            "controls": [_plan_item(item, "controls") for item in items["controls"]
+                         if item["control_id"] not in spec["drop"]],
             "review_budgets": items["review_budgets"]}
     positions = list(spec["hits"].values()) + list(spec["pending"].values())
     positions += [value[1] for value in spec["controls"].values() if isinstance(value, tuple)]
@@ -737,6 +738,31 @@ def test_a_replicate_that_draws_no_resolved_control_makes_the_rate_interval_unst
     assert empty[0] == 0.0, "some replicate draws neither resolved cluster"
     assert rate == {"value": 0.0, "interval": {"state": "unstable", "lower": None, "upper": None, "clusters": 2}}
     assert block["controls"]["capability_safe"]["completed_upper"]["interval"]["state"] == "ok"
+
+
+def test_a_frozen_control_missing_from_a_completed_scans_plan_is_completed_and_unresolved_not_dropped(tmp_path):
+    """Ten scans succeed; seven bundle plans hold the input's control (quiet) and three lack it.
+
+    A control is frozen before the run, and each scan completed in the frozen scope, so c = 1 for all ten
+    (math section 2), while b = 0 for the three with no assessment of it.
+    - C = 10/10 = 1 and A = 7/10; nothing is confirmed false, so E = 0 and the resolved rate E/A is 0.
+    - The completed bounds [E/C, (E + C - A)/C] are [0, 3/10]: the three count as unresolved, and as false in F+.
+    - Counts: 10 observations, 10 completed, 7 resolved, 3 unresolved, and 3 unscored.
+    Taking the three out of C would have made C = 7/10 and F+ = 0, a lower bound bought with bundles that
+    lack the assessment.
+    """
+    inputs = [planned(f"safe-{index}", project=f"acme/safe{index % 5}", controls=[control(f"C-{index}")])
+              for index in range(10)]
+    run = write_run(tmp_path, "run-unscored-controls", inputs, outcomes={
+        (f"safe-{index}", "sys-a", 1): scan(drop=(f"C-{index}",)) for index in range(7, 10)})
+
+    block = slice_of(system(view(aggregate.aggregate([run], policy=policy()))))["controls"]["capability_safe"]
+
+    assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (10, 10, 7, 3)
+    assert block["unscored"] == 3
+    assert block["completed_mass"] == 1.0 and block["assessable_mass"] == 0.7
+    assert block["resolved_rate"]["value"] == 0.0
+    assert block["completed_lower"] == 0.0 and block["completed_upper"]["value"] == 0.3
 
 
 def test_a_control_on_a_failed_scan_is_neither_completed_nor_resolved(tmp_path):
