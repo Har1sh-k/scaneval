@@ -215,10 +215,14 @@ A run configuration is a frozen document naming the pack, the inputs, the system
 | `review status <bundle>` | Report missing, stale, draft, or human_approved. | none |
 | `run <config> --output <new dir>` | Execute one frozen run configuration. | depends on the configured systems |
 | `diagnose context-coverage <bundle>` | Report whether each labeled target's code was supplied to the model. Writes nothing into the bundle. | none |
+| `precision sample <run dir>... --population --size --seed --output` | List a claim population from saved runs and draw a seeded probability sample. | none |
+| `precision queue <sample> --output` | Export the sampled claims for reviewers, each system shown only by an alias. | none |
+| `precision record <reviews> --sample --item --reviewer --role --outcome` | Append one stated human review to a chained reviews file. | none |
+| `precision estimate <sample> --reviews --output` | Estimate reviewed precision with its coverage, sensitivity range, and evidence grade. | none |
 
 Exit codes: `2` means the command could not be carried out (a usage or contract error, a refused overwrite, a failed fetch or export). `1` means it ran and reports a negative result (a mechanical check set failed, or a run produced no usable scan from some system). `0` means it ran and reports nothing wrong, which is not a statement that any label or decision is correct.
 
-No command writes inside a materialized trial directory, and every output path except a pack file and a review record is create-only.
+No command writes inside a materialized trial directory, and every output path except a pack file, a review record, and a precision reviews file (which only grows) is create-only.
 
 ## Bundle and replay
 
@@ -274,7 +278,7 @@ Strict parsing rejects duplicate JSON keys, nonfinite numbers, escaping file pat
 - **Bundles:** unresolved bundles leave atomic-claim burden and finite-budget metrics pending. Confirmed full-output hits can still count.
 - **Execution:** `success`, `partial`, `unsupported`, `error`, and `timeout` remain distinct. Confirmed partial-output hits can count. Failed assignments remain in the denominator. Only successful, resolved, in-scope output can establish a quiet control.
 - **Controls:** all claims are eligible for control review, including those below the review budget. Missing assessments remain unresolved. The completed-observation upper bound counts unresolved assessments as false allegations; it is not a confidence interval. `false_allegations` is its completed-only numerator. `observed_false_allegations` also retains explicit reviewed failures from incomplete output, without using incomplete scans in that rate.
-- **Unknowns:** unmatched claims are not automatically false positives. This build does not estimate overall precision.
+- **Unknowns:** unmatched claims are not automatically false positives. Precision is estimated only from recorded human reviews of a seeded probability sample of delivered claims (`scaneval precision`, see [PRECISION.md](PRECISION.md)). Nothing infers it from matching, and reviewing a claim changes no score.
 - **Labels:** `diagnostic` plans allow only fixture labels; `reviewed` plans require declared L3/L4 labels; `draft` plans keep each item's real level and say in their scope that the plan as a whole is not reviewed evidence. Checking the field does not verify independent review.
 - **Packs:** a pack's self-consistency is checked, never its correctness. A pack that validates is consistent with itself: no check here reads source, a reviewer, or a scanner.
 
@@ -305,7 +309,7 @@ npm test
 - **Capture gaps are not absence.** An `unavailable` category establishes nothing about whether the underlying activity happened.
 - **Visibility depends on the build that was run, not only on this package.** The own-harness driver sees attempts, token usage, supplied-context spans and the candidate lifecycle only against a harness build that exports the hooks, and falls back for each surface it does not find. Tool dispatch on the claude route is unobserved either way. What a given run could see is recorded per run, not promised here.
 - **Nothing a collector or the DeepSec adapter reports was watched as it happened.** Both read records written after the fact, so their events are derived and say so; a record the CLI never wrote is a record nothing can recover.
-- **Single-invocation numbers only.** No corpus aggregation, pair aggregation, repeated-run uncertainty, precision sampling, promotion gate, trace viewer, exporter, or multi-model planner is implemented.
+- **Single-invocation numbers only, apart from sampled precision.** No corpus aggregation, pair aggregation, repeated-run uncertainty, promotion gate, trace viewer, exporter, or multi-model planner is implemented. `scaneval precision` estimates the reviewed precision of a declared claim population across runs from a human-reviewed sample; it covers only the strata it sampled and is not a repository false-positive rate ([PRECISION.md](PRECISION.md)).
 - **Not implemented at all:** native PR mode through an adapter, metadata blinding, SARIF or saved vendor output import, and semantic duplicate review. The collectors import an agent CLI's own trace records; nothing imports a scanner's saved findings file produced outside a ScanEval invocation.
 
 ## Requirements for a reviewed comparison

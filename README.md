@@ -23,7 +23,7 @@ For a live run, use the [pilot guide](docs/PILOT.md) to configure a scanner, pre
 
 One scan can cover several targets on the same input. A finding needs an accepted security allegation, not just a matching line and vulnerability category. Unreviewed findings remain unresolved; they are not automatically false positives.
 
-The scorer reports known-target detection, recall within review budgets, reviewed precision, and false allegations against assigned fixed/safe controls. Unavailable controls do not become a zero false-alarm rate. Errors and incomplete scans remain distinct from successful scans with no findings. Recorded decisions can be replayed offline.
+The scorer reports known-target detection, recall within review budgets, and false allegations against assigned fixed/safe controls. Reviewed precision is estimated separately, from a seeded, human-reviewed sample of delivered claims. Unavailable controls do not become a zero false-alarm rate. Errors and incomplete scans remain distinct from successful scans with no findings. Recorded decisions can be replayed offline.
 
 | Command | Purpose |
 |---|---|
@@ -37,6 +37,7 @@ The scorer reports known-target detection, recall within review budgets, reviewe
 | `scaneval run <config> --output <new dir>` | Run a frozen configuration and save its artifacts. |
 | `scaneval review init\|record\|approve\|status` | Prepare and record the review of an invocation bundle. |
 | `scaneval diagnose context-coverage <bundle>` | Compare captured context spans with labeled targets. Does not change scores. |
+| `scaneval precision sample\|queue\|record\|estimate` | Sample delivered claims from saved runs, record human reviews, and estimate reviewed precision. Does not change scores. |
 
 Run `scaneval <command> --help` for required arguments. Only `corpus validate --snapshot-id` and `run` reach the network; contacts depend on the configured sources and scanners. Exit code `2` means the command could not be carried out, `1` means it ran and reports a negative result, and `0` means it ran and reports nothing wrong. None certifies that a security label is correct.
 
@@ -61,7 +62,8 @@ Guides: [Observer SDK](docs/OBSERVER_SDK.md), [native CLI collectors](docs/COLLE
 
 - Full-scan execution, case packs, source export, review, scoring, replay, and reports are implemented.
 - Only the `standard` input profile is supported. `metadata_blinded` is refused.
-- Native PR mode, SARIF import, corpus-level aggregation, precision sampling, promotion gates, and enforced isolation are not implemented.
+- Native PR mode, SARIF import, corpus-level aggregation, promotion gates, and enforced isolation are not implemented.
+- Reviewed precision comes only from people reviewing a seeded probability sample of delivered claims ([precision guide](docs/PRECISION.md)). It is not a repository false-positive rate.
 - The initial public workload is not selected. The pilot is an integration exercise, not a representative benchmark or scanner comparison.
 
 [Current capabilities](docs/INITIAL_BUILD.md) describes the implementation. [Design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) describe the broader contract and planned work.
