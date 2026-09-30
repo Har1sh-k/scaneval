@@ -19,7 +19,7 @@ root, and the session's own ``call_id``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import json
 import os
@@ -318,8 +318,11 @@ def do_direct(argv, settings):
         say()
         say(paint("31", "3 new finding(s) \\u2014 exiting 1"))
         sys.exit(1)
-    listed = subprocess.run(["git", "-c", "core.quotePath=true", "diff", "--name-only", "--diff-filter=AMRC", diff],
-                            cwd=root, capture_output=True, text=True)
+    # git's default quotes a name that holds a non-ASCII byte, which names no file once DeepSec reads it back;
+    # the ``raw_listing`` knob is an operator whose git prints such a name as it is.
+    quote_path = "false" if settings.get("raw_listing") else "true"
+    listed = subprocess.run(["git", "-c", "core.quotePath=" + quote_path, "diff", "--name-only",
+                             "--diff-filter=AMRC", diff], cwd=root, capture_output=True, text=True)
     if listed.returncode != 0:
         sys.stderr.write("\\ngit diff --name-only --diff-filter=AMRC %s exited %d: %s\\n\\n"
                          "(set DEEPSEC_DEBUG=1 for a stack trace)\\n"
@@ -2633,6 +2636,8 @@ def test_a_pr_run_names_the_changed_paths_deepsecs_own_filter_dropped(tmp_path):
     assert "DeepSec's own scope and not a failure of the run" in note
     assert "silence about these paths is not a negative result" in note
     assert "The change also removed 1 path(s) (src/db.js)" in note
+    assert "prints quoted" not in note and "except for" not in note, "no name here is one git quotes"
+    assert outcome.error is None and outcome.bundles_resolved is True
 
 
 def test_a_record_the_run_could_not_read_is_said_to_possibly_belong_to_a_path_it_lists(tmp_path):
@@ -2646,31 +2651,102 @@ def test_a_record_the_run_could_not_read_is_said_to_possibly_belong_to_a_path_it
     assert note.endswith("1 DeepSec record(s) could not be read, so a path listed here may have had one.")
 
 
-def test_a_changed_path_git_prints_quoted_is_dropped_by_deepsec_and_named_as_a_limit_of_its_listing(tmp_path):
-    """Checked against the real 2.3.10 CLI: a changed src/café.js never reaches it, and nothing says why."""
+def test_a_changed_path_git_prints_quoted_makes_the_review_partial_and_is_named_in_the_error_and_the_note(tmp_path):
+    """Checked against the real 2.3.10 CLI: a changed src/café.js never reaches it, and nothing says why.
+
+    DeepSec did review src/routes.js, so what it found stays. The change it was handed is not the change it read.
+    """
     root = fake_deepsec_root(tmp_path)
     workspace, pr = pr_workspace(tmp_path, {"src/routes.js": "module.exports = 1;\n",
                                             "src/caf\u00e9.js": "module.exports = 2;\n", "README.md": "# more\n"})
 
     outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
 
-    assert outcome.status == "success"
+    assert outcome.status == "partial" and outcome.error["code"] == "scope_incomplete"
+    message = outcome.error["message"]
+    assert message.startswith("1 changed path(s) (src/caf\u00e9.js) have a name git prints quoted (a non-ASCII name")
+    assert ("cannot resolve a quoted name to a file, so it never investigated them, whatever its ignore filter says"
+            in message)
+    assert message.endswith("This run therefore observed only part of the change (or none of it) and says nothing "
+                            "about them")
+    assert "README.md" not in message, "a path that only the ignore filter dropped is DeepSec's scope, and stays a note"
     assert [claim["primary_location"]["path"] for claim in outcome.claims] == ["src/routes.js"]
     note = next(note for note in outcome.notes if note.startswith("DeepSec did not investigate"))
     assert "2 of the 3 path(s) this change leaves at head" in note and "(README.md, src/caf\u00e9.js)" in note
+    assert "not a failure of the run, except for the 1 named next;" in note
     assert ("1 of them (src/caf\u00e9.js) have a name git prints quoted by default" in note
             and "for these the omission is a limit of DeepSec's own listing, not a choice of scope" in note)
+    assert note.endswith("so this run observed nothing about them and does not stand as a complete or quiet "
+                         "observation of the change.")
 
 
-def test_a_change_that_touches_only_a_quoted_name_is_an_empty_review_that_still_names_the_path(tmp_path):
-    """Recorded as DeepSec's scope, with the caveat that says it was not the ignore filter."""
+def test_a_change_that_touches_only_a_quoted_name_is_an_error_and_never_an_empty_review(tmp_path):
+    """The reviewer's case: DeepSec says "Nothing to process" and exits 0, and the run is still not a review.
+
+    Recorded as an empty review it was a ``success`` with resolved bundles, and a quiet assessment of the control on
+    that file earned credit for a file no model opened.
+    """
     root = fake_deepsec_root(tmp_path)
     workspace, pr = pr_workspace(tmp_path, {"src/caf\u00e9.js": "module.exports = 2;\n"})
-    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
-    assert outcome.status == "success" and outcome.claims == []
-    assert any(note.startswith("Empty review:") for note in outcome.notes)
+
+    outcome, raw, _ = scan_pr(tmp_path, root, workspace, pr)
+
+    assert "Nothing to process" in ANSI.sub("", (raw / "deepsec-process.stdout.txt").read_text(encoding="utf-8"))
+    assert outcome.exit_code == 0, "DeepSec itself ran to the end; it is the change it read that was short"
+    assert outcome.status == "error" and outcome.claims == []
+    assert outcome.error["code"] == "scope_incomplete"
+    assert outcome.error["message"].startswith("1 changed path(s) (src/caf\u00e9.js) have a name git prints quoted")
+    assert outcome.error["message"].endswith("no file reached a verdict, so none of the change was observed")
+    assert not any(note.startswith("Empty review:") for note in outcome.notes)
     assert any("1 of them (src/caf\u00e9.js) have a name git prints quoted by default" in note
                for note in outcome.notes)
+
+
+def test_the_error_and_the_note_name_the_same_quoted_paths_and_only_those(tmp_path):
+    """Each spelling git quotes, a non-ASCII byte and a double quote, beside a docs path the filter dropped."""
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, {"src/routes.js": "1\n", "src/na\u00efve.js": "2\n",
+                                            'src/we"ird.js': "3\n", "docs/guide.md": "g\n"})
+
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+
+    assert outcome.status == "partial" and outcome.error["code"] == "scope_incomplete"
+    assert outcome.error["message"].startswith(
+        '2 changed path(s) (src/na\u00efve.js, src/we"ird.js) have a name git prints quoted')
+    assert "docs/guide.md" not in outcome.error["message"]
+    note = next(note for note in outcome.notes if note.startswith("DeepSec did not investigate"))
+    assert "3 of the 4 path(s) this change leaves at head" in note
+    assert '(docs/guide.md, src/na\u00efve.js, src/we"ird.js)' in note
+    assert '2 of them (src/na\u00efve.js, src/we"ird.js) have a name git prints quoted by default' in note
+
+
+def test_a_quoted_omission_beside_an_unfinished_record_is_still_scope_incomplete(tmp_path):
+    """The unfinished file is reported first, with the same code; the omission stays in the note."""
+    root = fake_deepsec_root(tmp_path, crash_at_batch=1)
+    workspace, pr = pr_workspace(tmp_path, {"src/a.js": "1\n", "src/b.js": "2\n", "src/caf\u00e9.js": "3\n"})
+
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr, batch_size=1)
+
+    assert outcome.status == "partial" and outcome.error["code"] == "scope_incomplete"
+    assert outcome.bundles_resolved is False
+    assert outcome.error["message"].startswith("1 of 2 file record(s) were left unfinished (src/b.js.json "
+                                               "(processing)): DeepSec reached no verdict on them")
+    assert [claim["primary_location"]["path"] for claim in outcome.claims] == ["src/a.js"]
+    note = next(note for note in outcome.notes if note.startswith("DeepSec did not investigate"))
+    assert "1 of them (src/caf\u00e9.js) have a name git prints quoted by default" in note
+
+
+def test_a_quoted_name_deepsec_did_investigate_is_not_an_omission(tmp_path):
+    """Where git is set to print such a name as it is, DeepSec lists the file and records it: nothing is missing."""
+    root = fake_deepsec_root(tmp_path, raw_listing=True)
+    workspace, pr = pr_workspace(tmp_path, {"src/routes.js": "1\n", "src/caf\u00e9.js": "2\n"})
+
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+
+    assert outcome.status == "success" and outcome.error is None and outcome.bundles_resolved is True
+    assert sorted(claim["primary_location"]["path"] for claim in outcome.claims) == ["src/caf\u00e9.js",
+                                                                                  "src/routes.js"]
+    assert not any("did not investigate" in note for note in outcome.notes)
 
 
 @pytest.mark.parametrize("path, quoted", [
@@ -2719,6 +2795,42 @@ def test_the_unreviewed_note_is_none_when_every_present_path_has_a_record_and_no
 def test_a_record_that_names_no_path_in_the_tree_cannot_hide_a_dropped_one():
     changes = (Change("A", "src/a.js"),)
     assert unreviewed_note(changes, (("/etc/passwd.json", {}), ("../escape.js.json", {}))) is not None
+
+
+def test_the_quoted_omissions_are_the_paths_left_at_head_with_no_record_whose_name_git_prints_quoted():
+    changes = (Change("M", "src/a.js"), Change("A", "src/caf\u00e9.js"), Change("A", "docs/r\u00e9sum\u00e9.md"),
+               Change("A", "docs/readme.md"), Change("A", "src/recorded-\u00e9.js"), Change("D", "src/na\u00efve.js"),
+               Change("R", "src/renamed-\u00e9.js", "src/renamed.js"), Change("R", "src/plain.js", "src/old-\u00e9.js"))
+    files = (("src/a.js.json", {}), ("src/recorded-\u00e9.js.json", {}), ("src/plain.js.json", {}))
+
+    paths = deepsec_module.dropped_paths(changes, files)
+
+    assert paths.present == ("docs/readme.md", "docs/r\u00e9sum\u00e9.md", "src/a.js", "src/caf\u00e9.js",
+                             "src/plain.js", "src/recorded-\u00e9.js", "src/renamed-\u00e9.js"), \
+        "a deletion and the old name of a rename are not at head"
+    assert paths.dropped == ("docs/readme.md", "docs/r\u00e9sum\u00e9.md", "src/caf\u00e9.js",
+                             "src/renamed-\u00e9.js")
+    assert paths.quoted == ("docs/r\u00e9sum\u00e9.md", "src/caf\u00e9.js", "src/renamed-\u00e9.js"), \
+        "a quoted name DeepSec did record is not one, and neither is a plain name it dropped"
+    note = unreviewed_note(changes, files)
+    assert ("3 of them (docs/r\u00e9sum\u00e9.md, src/caf\u00e9.js, src/renamed-\u00e9.js) "
+            "have a name git prints quoted") in note
+    assert note.count("prints quoted") == 1
+
+
+def test_a_change_with_no_dropped_path_has_no_quoted_omission_and_no_quoted_sentence():
+    changes = (Change("M", "src/a.js"), Change("D", "src/caf\u00e9.js"))
+    paths = deepsec_module.dropped_paths(changes, (("src/a.js.json", {}),))
+    assert paths.dropped == () and paths.quoted == ()
+    note = unreviewed_note(changes, (("src/a.js.json", {}),))
+    assert "prints quoted" not in note and "did not investigate" not in note, \
+        "a deletion is never read, so it is no omission"
+
+
+def test_a_record_that_names_no_path_in_the_tree_cannot_hide_a_quoted_omission():
+    changes = (Change("A", "src/caf\u00e9.js"),)
+    files = (("/etc/passwd.json", {}), ("../escape.js.json", {}))
+    assert deepsec_module.dropped_paths(changes, files).quoted == ("src/caf\u00e9.js",)
 
 
 # --- PR mode: what is refused before anything runs --------------------------------------
@@ -2840,3 +2952,24 @@ def test_a_full_run_still_runs_three_steps_sends_its_limit_and_says_so(tmp_path,
     assert not any("PR mode" in note or "direct mode" in note or "Empty review" in note
                    for note in execution["notes"])
     assert not any("did not investigate" in note for note in execution["notes"])
+
+
+def test_a_full_run_over_a_tree_holding_a_name_git_would_quote_is_unaffected(tmp_path, monkeypatch):
+    """Full mode walks the tree and reads no git listing, so such a name costs it nothing and it names no omission."""
+    stub_collector(monkeypatch, tmp_path)
+    root = fake_deepsec_root(tmp_path)
+    prepared = prepared_input(tmp_path)
+    (prepared.source_dir / "src" / "caf\u00e9.js").write_text("module.exports = 2;\n", encoding="utf-8")
+    prepared = replace(prepared, tree_hash=hash_exported_tree(prepared.source_dir)["tree_hash"])
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+
+    bundle = run_invocation(prepared=prepared, adapter=adapter, spec=spec,
+                            preparation=adapter.prepare(spec, tmp_path / "cache"), out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=300, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+
+    result, execution = documents(bundle)
+    assert result["status"] == "success" and "error" not in result
+    assert "src/caf\u00e9.js" in {claim["primary_location"]["path"] for claim in result["claims"]}
+    assert not any("did not investigate" in note or "prints quoted" in note for note in execution["notes"])
