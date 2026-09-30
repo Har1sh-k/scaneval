@@ -104,8 +104,8 @@ PAIR_OUTCOMES = ("correct", "both_flagged", "both_silent", "reversed")
 LOPO_PROJECT_LIMIT = 10
 
 RANDOM_ORDER_LABEL = ("diagnostic: expected recall under a uniform random order of the delivered claims, "
-                      "over unranked observations with resolved bundles only; not native recall@B and not "
-                      "a promotion metric")
+                      "over unranked observations whose bundles and matches are resolved; not native recall@B "
+                      "and not a promotion metric")
 RUN_VARIABILITY_LABEL = ("conditional run noise of repeated runs of one input, treating targets as "
                          "independent; not corpus uncertainty")
 
@@ -716,7 +716,9 @@ def _target_outcome(observation: _Observation, target_ids: tuple[str, ...], budg
     output that is not valid cannot hit within any budget, so it stays measurable. ``assessable`` is a
     completed scan with a resolved outcome for the target: a confirmed hit, or no hit with no pending
     match and resolved bundles. ``random`` is the random-order expectation per budget for an unranked
-    valid output with resolved bundles, and ``random_pending`` marks one whose bundles are unresolved.
+    valid output with resolved bundles and no pending match on the target, and ``random_pending`` marks
+    one whose bundles are unresolved or whose match on the target is pending: the accepted claims are
+    then only a lower bound, so its expectation is not measured.
     """
     observed = observation.observed
     failure = {"detected": False, "rank": None, "measurable": True, "completed": False, "assessable": False,
@@ -732,7 +734,7 @@ def _target_outcome(observation: _Observation, target_ids: tuple[str, ...], budg
     valid = observed["valid_positive_output"]
     pending = any(row["unresolved_match"] for row in scored)
     random = None
-    if valid and observed["random_order"] is not None:
+    if valid and observed["random_order"] is not None and not pending:
         delivered = observed["claims"]["records"]
         hits = sum(row["hit_claims"] for row in scored)
         random = {budget: _random_order_expectation(delivered, hits, budget) for budget in budgets}
@@ -741,7 +743,7 @@ def _target_outcome(observation: _Observation, target_ids: tuple[str, ...], budg
             "measurable": not valid or observed["budget_measurable"], "completed": completed,
             "assessable": completed and (detected or (not pending and resolved)),
             "unscored": False, "random": random,
-            "random_pending": valid and observed["ranking"] == "unranked" and not resolved}
+            "random_pending": valid and observed["ranking"] == "unranked" and (not resolved or pending)}
 
 
 def _control_outcome(observation: _Observation, control_ids: tuple[str, ...]) -> dict:

@@ -889,6 +889,34 @@ def test_unranked_output_leaves_native_recall_at_budget_null_and_reports_a_label
     assert system(view(report))["first_hit_ranks"]["detected_without_rank"] == 1
 
 
+def test_a_pending_match_leaves_the_random_order_diagnostic_unmeasured_and_counts_as_pending(tmp_path):
+    """Three unranked scans with resolved bundles, one target each, equal weights 1/3.
+
+    u1 delivers 3 claims and its match on T1 is pending. u2 delivers 4, of which the reviewer accepted the
+    second for T2. u3 delivers 4, accepted the first for T3, and left a match on its third pending. While a match
+    is unresolved the accepted count is only a lower bound, so the expectation for that target is not measured:
+    u1 and u3 leave the observation mass and count in the pending mass, and are not read as an expectation of 0
+    or of the accepted claims alone.
+    - Measured: u2 only. At B = 1, 1 - C(3,1)/C(4,1) = 1/4; at B = 5, b = min(5, 4) = 4 and the expectation is 1.
+    - observation_mass = 1/3 and pending_mass = 2/3; the expected recall is the measured mass's: 1/4 and 1.
+    Full-output recall is untouched by the diagnostic: u2 and u3 hit, so 2/3, and u1's pending match is not
+    assessable.
+    """
+    inputs = [planned(f"u{index}", targets=[target(f"T{index}")]) for index in (1, 2, 3)]
+    run = write_run(tmp_path, "run-pending-random", inputs, outcomes={
+        ("u1", "sys-a", 1): scan(ranking="unranked", claims=3, pending={"T1": 2}),
+        ("u2", "sys-a", 1): scan(ranking="unranked", claims=4, hits={"T2": 2}),
+        ("u3", "sys-a", 1): scan(ranking="unranked", claims=4, hits={"T3": 1}, pending={"T3": 3})})
+
+    block = detection(slice_of(system(view(aggregate.aggregate([run], policy=policy())))))
+
+    diagnostic = block["random_order_diagnostic"]
+    assert diagnostic["observation_mass"] == 1 / 3 and diagnostic["pending_mass"] == 2 / 3
+    assert diagnostic["expected_recall"] == [{"budget": 1, "value": 0.25}, {"budget": 5, "value": 1.0}]
+    assert block["full_output_recall"]["value"] == 2 / 3
+    assert block["coverage"]["assessable_mass"] == 2 / 3
+
+
 def test_run_variability_is_separate_and_unavailable_with_one_repetition(tmp_path):
     """One repetition estimates no run noise; two repetitions give p(1-p)k/(k-1)/k per input.
 

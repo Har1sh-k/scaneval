@@ -545,7 +545,7 @@
         "pending_mass",
         "expected_recall"
       ],
-      "description": "Expected recall under a uniform random order of the delivered claims, over unranked observations with resolved bundles only. A diagnostic: not native recall@B and not a promotion metric.",
+      "description": "Expected recall under a uniform random order of the delivered claims, over the unranked observations whose bundles are resolved and whose match on the target is not pending. An observation left out for either reason counts in pending_mass. A diagnostic: not native recall@B and not a promotion metric.",
       "properties": {
         "label": {
           "type": "string",
