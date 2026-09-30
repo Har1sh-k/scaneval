@@ -44,7 +44,7 @@ Run `scaneval <command> --help` for required arguments. Only `corpus validate --
 
 ## Scanners and visibility
 
-The current adapters are `semgrep` with pinned local rules, `llm-harness` for an own-harness integration, and `deepsec` for the third-party scanner. Scanner CLIs are installed separately. The optional `official-adapters` extra installs Semgrep; a reproducible comparison must also pin its version and rules.
+The current adapters are `semgrep` with pinned local rules, `llm-harness` for an own-harness integration, and `deepsec` for the third-party scanner. `semgrep` (`--baseline-commit`) and `deepsec` (`process --diff`) also review a native PR request that names a base and a head commit in the scanner's workspace; [Current capabilities](docs/INITIAL_BUILD.md) says what each does with it. Scanner CLIs are installed separately. The optional `official-adapters` extra installs Semgrep; a reproducible comparison must also pin its version and rules.
 
 The **ScanEval Observer SDK**, available in Python and TypeScript, records model calls, tool use, supplied context, and finding lifecycle events at instrumented boundaries. It is opt-in. Native collectors can import Claude Code and Codex records without claiming to see decisions the harness never exposed. Capture gaps remain explicit; traces cannot prove hidden reasoning or absence of memorization.
 
