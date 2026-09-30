@@ -1582,6 +1582,16 @@ def test_a_saved_log_is_imported_reviewed_scored_and_replayed_fully_offline(work
     assert attempts == []
 
 
+def test_markup_in_a_log_reaches_the_report_as_text(workspace):
+    markup = "<script>alert(1)</script> reaches <b>os.system</b> & more"
+    log = minimal_log(results=[result_at("src/app.py", message={"text": markup})])
+    outcome = imported(workspace, write_log(workspace, log, "markup.sarif"))
+    assert outcome.result["claims"][0]["allegation"] == markup
+    html = (outcome.bundle / "report.html").read_text(encoding="utf-8")
+    assert "&lt;script&gt;alert(1)&lt;/script&gt; reaches &lt;b&gt;os.system&lt;/b&gt; &amp; more" in html
+    assert "<script" not in html and "<b>os.system" not in html
+
+
 def test_a_quiet_control_on_an_import_without_invocations_earns_no_quiet_credit(tmp_path):
     source = tmp_path / "export" / "source"
     tree_hash = write_tree(source)
