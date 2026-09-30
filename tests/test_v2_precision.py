@@ -1169,7 +1169,9 @@ def test_sampling_and_review_never_change_decisions_scores_or_detection_credit(t
         "snap-a__fake-a__r1": 0, "snap-a__fake-b__r1": 0}
 
 
-def test_precision_commands_are_create_only_and_refuse_trial_directories(tmp_path, scripted_run, capsys):
+def test_precision_commands_are_create_only_and_refuse_trial_and_run_directories(tmp_path, scripted_run, capsys):
+    """No precision document lands in a trial or anywhere in a run it reads, so the run stays as recorded."""
+    before = run_state(scripted_run)[0]
     sample_path = tmp_path / "sample.json"
     code, _, _ = cli(capsys, "precision", "sample", str(scripted_run), "--population", "full", "--size", "2",
                      "--seed", "1", "--output", str(sample_path))
@@ -1187,6 +1189,16 @@ def test_precision_commands_are_create_only_and_refuse_trial_directories(tmp_pat
                  ["precision", "estimate", str(sample_path), "--output", str(trial / "estimate.json")]):
         code, _, err = cli(capsys, *argv)
         assert code == 2 and "trial directory" in err, argv
+    for place in (scripted_run, scripted_run / "evaluator", scripted_run / "invocations" / "snap-a__fake-a__r1"):
+        for argv in (["precision", "sample", str(scripted_run), "--population", "full", "--size", "2",
+                      "--seed", "1", "--output", str(place / "sample.json")],
+                     ["precision", "queue", str(sample_path), "--output", str(place / "queue.json")],
+                     ["precision", "record", str(place / "reviews.json"), "--sample", str(sample_path),
+                      "--item", "item-0001", "--reviewer", REVIEWER_A, "--role", "independent", "--outcome", "true"],
+                     ["precision", "estimate", str(sample_path), "--output", str(place / "estimate.json")]):
+            code, _, err = cli(capsys, *argv)
+            assert code == 2 and f"inside the run directory {scripted_run}" in err, argv
+    assert run_state(scripted_run)[0] == before
     code, _, err = cli(capsys, "precision", "sample", str(scripted_run), "--population", "first_b", "--size", "2",
                        "--seed", "1", "--output", str(tmp_path / "other.json"))
     assert code == 2 and "first_b population needs a budget" in err

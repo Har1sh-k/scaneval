@@ -2,7 +2,7 @@
 
 Recall asks about labeled targets. Precision asks about what a system delivered, and no label set answers that, because nobody labels every line of a repository. ScanEval answers it as [evaluation math section 3](EVALUATION_MATH.md#3-reviewed-precision-and-review-burden) states. You declare a population of claims, people review a seeded probability sample of it, and each reviewed claim is weighted by the inverse of its inclusion probability. No model or judge takes part.
 
-Sampling and review never change a decision, plan, score, or detection credit. A claim reviewed true here is not a target hit, and recall is untouched. The commands read run directories and never write into one.
+Sampling and review never change a decision, plan, score, or detection credit. A claim reviewed true here is not a target hit, and recall is untouched. The commands read run directories and never write into one: an output path inside a run directory, or inside a trial, is refused.
 
 The implementation is `src/scaneval/precision.py`. The documents are three contract kinds, all at protocol 2.1: `precision-sample`, `precision-reviews`, and `precision-estimate`.
 

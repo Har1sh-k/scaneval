@@ -54,8 +54,9 @@ never supplied to the model is still a target the scan did not detect.
 ``precision`` draws a seeded probability sample of delivered claims from saved run directories,
 exports it for human review with system identity blinded, records the reviews people state, and
 estimates reviewed precision from them (:mod:`scaneval.precision`, ``docs/PRECISION.md``). It reads
-runs and never writes into one, supplies no reviewer, and changes no decision, score, or detection
-credit. It exits 0 once its document is written, whatever the document reports, and 2 when refused.
+runs and never writes into one: each of its outputs is refused inside a run directory as well as
+inside a trial. It supplies no reviewer and changes no decision, score, or detection credit. It
+exits 0 once its document is written, whatever the document reports, and 2 when refused.
 """
 
 import argparse
@@ -634,13 +635,30 @@ def _figure(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.4g}"
 
 
+def _refuse_precision_path(output: Path) -> None:
+    """Refuse a precision output inside a trial directory or inside a run directory.
+
+    A run directory is what a precision frame is read from and bound to by digest, so a sample,
+    queue, reviews file, or estimate written into one would change the run it describes. A run is
+    recognized by a ``run-manifest.json`` in *output* or in any of its parents. Like the trial
+    check, this compares resolved paths only: it is a check on the path, not an isolation boundary.
+    """
+    _refuse_trial_path(output)
+    resolved = output.expanduser().resolve()
+    for directory in (resolved, *resolved.parents):
+        if (directory / runner.MANIFEST_NAME).is_file():
+            raise ContractError(
+                f"refusing to write {output} inside the run directory {directory}; precision documents "
+                "stay outside the runs they are drawn from")
+
+
 def _precision_sample(args: argparse.Namespace) -> int:
     """Build the frame from the run directories, draw the sample, and write it create-only.
 
     Strata that drew no unit are named on stderr, because no estimate from this sample will say
     anything about them; the sample is still written, and the command still exits 0.
     """
-    _refuse_trial_path(args.output)
+    _refuse_precision_path(args.output)
     frame = precision.build_frame(args.runs, population=args.population, budget=args.budget,
                                   systems=args.system, mode=args.mode, profile=args.profile)
     sample = precision.draw_sample(frame, size=args.size, seed=args.seed, stratify_by=args.stratify_by,
@@ -675,7 +693,7 @@ def _precision_sample(args: argparse.Namespace) -> int:
 
 def _precision_queue(args: argparse.Namespace) -> int:
     """Write the blinded review queue for reviewers; the sample itself stays with the evaluator."""
-    _refuse_trial_path(args.output)
+    _refuse_precision_path(args.output)
     sample = load_document(args.sample, precision.SAMPLE_KIND)
     queue = precision.review_queue(sample)
     _write_new(args.output, _readable_json(queue))
@@ -691,7 +709,7 @@ def _precision_record(args: argparse.Namespace) -> int:
     whole through the one replace function review records use; a new file is created exclusively.
     Appends are not locked, so record one review at a time.
     """
-    _refuse_trial_path(args.reviews)
+    _refuse_precision_path(args.reviews)
     sample = load_document(args.sample, precision.SAMPLE_KIND)
     unit_id = precision.unit_for_item(sample, args.item) if args.item is not None else args.unit
     existing = None
@@ -715,7 +733,7 @@ def _precision_estimate(args: argparse.Namespace) -> int:
     An incomplete review or a partly covered population is reported, not refused: the document
     says so, and so does stderr. Without ``--reviews`` every sampled unit is nonresponse.
     """
-    _refuse_trial_path(args.output)
+    _refuse_precision_path(args.output)
     sample = load_document(args.sample, precision.SAMPLE_KIND)
     reviews = load_document(args.reviews, precision.REVIEWS_KIND) if args.reviews is not None else None
     document = precision.estimate(sample, reviews, confidence=args.confidence)
