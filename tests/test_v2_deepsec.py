@@ -42,6 +42,7 @@ from scaneval.adapters.deepsec import (
     candidates_from,
     claim_path,
     finding_ids,
+    git_prints_quoted,
     import_export,
     kind_for_slug,
     line_span,
@@ -317,8 +318,8 @@ def do_direct(argv, settings):
         say()
         say(paint("31", "3 new finding(s) \\u2014 exiting 1"))
         sys.exit(1)
-    listed = subprocess.run(["git", "diff", "--name-only", "--diff-filter=AMRC", diff], cwd=root,
-                            capture_output=True, text=True)
+    listed = subprocess.run(["git", "-c", "core.quotePath=true", "diff", "--name-only", "--diff-filter=AMRC", diff],
+                            cwd=root, capture_output=True, text=True)
     if listed.returncode != 0:
         sys.stderr.write("\\ngit diff --name-only --diff-filter=AMRC %s exited %d: %s\\n\\n"
                          "(set DEEPSEC_DEBUG=1 for a stack trace)\\n"
@@ -2643,6 +2644,42 @@ def test_a_record_the_run_could_not_read_is_said_to_possibly_belong_to_a_path_it
     note = next(note for note in outcome.notes if note.startswith("DeepSec did not investigate"))
     assert "(README.md)" in note
     assert note.endswith("1 DeepSec record(s) could not be read, so a path listed here may have had one.")
+
+
+def test_a_changed_path_git_prints_quoted_is_dropped_by_deepsec_and_named_as_a_limit_of_its_listing(tmp_path):
+    """Checked against the real 2.3.10 CLI: a changed src/café.js never reaches it, and nothing says why."""
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, {"src/routes.js": "module.exports = 1;\n",
+                                            "src/caf\u00e9.js": "module.exports = 2;\n", "README.md": "# more\n"})
+
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+
+    assert outcome.status == "success"
+    assert [claim["primary_location"]["path"] for claim in outcome.claims] == ["src/routes.js"]
+    note = next(note for note in outcome.notes if note.startswith("DeepSec did not investigate"))
+    assert "2 of the 3 path(s) this change leaves at head" in note and "(README.md, src/caf\u00e9.js)" in note
+    assert ("1 of them (src/caf\u00e9.js) have a name git prints quoted by default" in note
+            and "for these the omission is a limit of DeepSec's own listing, not a choice of scope" in note)
+
+
+def test_a_change_that_touches_only_a_quoted_name_is_an_empty_review_that_still_names_the_path(tmp_path):
+    """Recorded as DeepSec's scope, with the caveat that says it was not the ignore filter."""
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, {"src/caf\u00e9.js": "module.exports = 2;\n"})
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+    assert outcome.status == "success" and outcome.claims == []
+    assert any(note.startswith("Empty review:") for note in outcome.notes)
+    assert any("1 of them (src/caf\u00e9.js) have a name git prints quoted by default" in note
+               for note in outcome.notes)
+
+
+@pytest.mark.parametrize("path, quoted", [
+    ("src/app.js", False), ("docs/read me.md", False), ("a-b_c.d/e~f.js", False),
+    ("src/caf\u00e9.js", True), ('we"ird.js', True), ("back\\slash.js", True), ("tab\tname.js", True),
+    ("new\nline.js", True), ("del\x7f.js", True), ("escaped\\xe9.js", True),
+])
+def test_git_quotes_a_name_exactly_when_it_holds_a_non_ascii_byte_a_quote_a_backslash_or_a_control(path, quoted):
+    assert git_prints_quoted(path) is quoted
 
 
 def test_a_pr_run_that_investigated_every_changed_path_has_no_such_note(tmp_path):

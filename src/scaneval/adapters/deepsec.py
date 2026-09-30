@@ -1543,6 +1543,18 @@ def _listed(names: list[str], limit: int = 8) -> str:
     return ", ".join(names[:limit]) + (f" and {len(names) - limit} more" if len(names) > limit else "")
 
 
+def git_prints_quoted(path: str) -> bool:
+    """Whether git, by default (``core.quotePath``), prints *path* as a quoted, escaped string.
+
+    A name with a byte outside printable ASCII, a double quote, a backslash or a control character
+    is. DeepSec 2.3.10 reads git's plain-text listing (``git diff --name-only``, no ``-z``) and
+    keeps only entries that name an existing file, so it never selects such a path: the entry it
+    holds is the quoted spelling, which names nothing. Checked against the real CLI with a
+    non-ASCII name; the other characters are quoted by the same git rule and are not checked.
+    """
+    return any(ord(char) < 0x20 or ord(char) >= 0x7F or char in '"\\' for char in path)
+
+
 def unreviewed_note(changes: tuple[Change, ...], files: tuple[tuple[str, dict], ...]) -> str | None:
     """The changed paths DeepSec created no file record for, as a note, or ``None`` when there are none.
 
@@ -1556,6 +1568,12 @@ def unreviewed_note(changes: tuple[Change, ...], files: tuple[tuple[str, dict], 
     negative result. A file DeepSec did select but left in ``error`` or unfinished has a record and
     is reported by the status logic, not here. The comparison is by path, so a path git spells
     with escapes because it is not UTF-8 can never match a record and is listed.
+
+    Not every path listed was dropped by the ignore filter. One whose name git prints quoted
+    (:func:`git_prints_quoted`) is dropped by DeepSec whatever the filter says, because it cannot
+    resolve the quoted spelling to a file; the note names those separately, since for them the
+    omission is a limit of DeepSec's own listing and not a scoping choice. This adapter cannot
+    tell the other paths apart by reason and does not try to.
     """
     recorded = {path for path, external in (record_path(name, record) for name, record in files) if not external}
     present = sorted({change.path for change in changes if change.present})
@@ -1570,6 +1588,13 @@ def unreviewed_note(changes: tuple[Change, ...], files: tuple[tuple[str, dict], 
             "added, modified, renamed and copied paths and drops those matching its default ignore filter "
             "(tests, docs, build output and similar), so this is DeepSec's own scope and not a failure of the "
             "run; silence about these paths is not a negative result.")
+        quoted = [path for path in dropped if git_prints_quoted(path)]
+        if quoted:
+            sentences.append(
+                f"{len(quoted)} of them ({_listed(quoted)}) have a name git prints quoted by default (a non-ASCII "
+                "name, or one holding a quote, a backslash or a control character). DeepSec reads git's plain "
+                "listing and cannot resolve a quoted name to a file, so it drops such a path whatever its ignore "
+                "filter says; for these the omission is a limit of DeepSec's own listing, not a choice of scope.")
     if removed:
         sentences.append(f"The change also removed {len(removed)} path(s) ({_listed(removed)}); DeepSec never reads "
                          "a path that no longer exists at head.")
