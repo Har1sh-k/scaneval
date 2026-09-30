@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from scaneval import cases, materialize, review, scoring
+from scaneval.cli import main
 from scaneval.contracts import (
     CONTRACT_KINDS,
     ContractError,
@@ -1309,3 +1310,177 @@ def test_a_write_that_fails_part_way_removes_what_the_import_created(workspace, 
     with pytest.raises(OSError, match="No space left on device"):
         imported(workspace)
     assert not (workspace["out"] / "bundle").exists()
+
+
+# --- the command line ------------------------------------------------------------------------
+
+
+def cli(capsys, *argv) -> tuple[int, str, str]:
+    code = main([str(arg) for arg in argv])
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def import_argv(workspace: dict, log: Path = FIXTURES / "codeql.sarif", name: str = "bundle") -> list:
+    """``import sarif`` arguments for *log* against the workspace pack, which is written to a file once."""
+    pack = workspace["tmp"] / "pack.json"
+    if not pack.exists():
+        cases.save_pack(pack, workspace["pack"])
+    return ["import", "sarif", log, "--pack", pack, "--snapshot-id", "snap-a", "--tree-hash", workspace["tree_hash"],
+            "--system-id", "codeql-fixture", "--output", workspace["out"] / name]
+
+
+def test_import_sarif_writes_the_bundle_the_library_writes_and_says_what_it_made_of_the_log(workspace, capsys):
+    code, out, err = cli(capsys, *import_argv(workspace), "--source-dir", workspace["source"])
+    assert (code, err) == (0, "")
+    bundle = workspace["out"] / "bundle"
+    assert bundle_files(bundle) == BUNDLE_FILES
+    result = load_document(bundle / "result.json", "scan-result")
+    assert out.splitlines() == [
+        f"Imported run 0 of 1 from {FIXTURES / 'codeql.sarif'} as {result['run_id']}: status=success claims=3 "
+        "excluded=0 losses=0 evidence_losses=0",
+        "Bundle review: 1 flagged, 0 decided in the normalization file; bundles_resolved=false",
+        "Execution evidence: reported_success, as the log reports it; not verified",
+        "Locations checked against an exported tree: yes",
+        "Review state: draft; every decision stays unresolved until a person records one",
+        f"Bundle: {bundle}"]
+    # The command adds nothing of its own: every document but the timestamped review record is
+    # byte-for-byte what the library writes for the same arguments.
+    library = import_sarif(FIXTURES / "codeql.sarif", pack=cases.load_pack(workspace["tmp"] / "pack.json"),
+                           snapshot_id="snap-a", tree_hash=workspace["tree_hash"], system_id="codeql-fixture",
+                           output=workspace["out"] / "library", source_dir=workspace["source"], clock=CLOCK)
+    for name in ("result.json", "import.json", "raw/codeql.sarif", "evaluator/plan.json", "evaluator/decisions.json",
+                 "evaluation.json"):
+        assert (bundle / name).read_bytes() == (library.bundle / name).read_bytes(), name
+    assert review.review_status(bundle) == "draft"
+
+
+def test_import_sarif_help_names_every_option(capsys):
+    with pytest.raises(SystemExit) as stopped:
+        main(["import", "sarif", "--help"])
+    assert stopped.value.code == 0
+    text = " ".join(capsys.readouterr().out.split())
+    for option in ("SARIF_FILE", "--pack", "--snapshot-id", "--tree-hash", "--system-id", "--output", "--run-index",
+                   "--run-id", "--system-config", "--source-dir", "--uri-base NAME=URI", "--source-root-uri",
+                   "--normalization", "--include-suppressed", "--max-bytes", "default 67108864"):
+        assert option in text, option
+    assert "Nothing the log names is fetched or opened" in text
+
+
+def two_runs() -> dict:
+    return {"version": "2.1.0", "runs": [minimal_log()["runs"][0], fixture("codeql.sarif")["runs"][0]]}
+
+
+REFUSED_LOGS = [
+    ("missing", None, [], "could not open the SARIF file"),
+    ("a directory", "directory", [], "is not a regular file, so it is not read"),
+    ("above the bound", encoded(minimal_log()), ["--max-bytes", "64"], "more than the 64-byte bound; raise --max-bytes"),
+    ("not UTF-8", b"\xff\xfe{}", [], "is not UTF-8 text"),
+    ("not JSON", b'{"version": "2.1.0", "runs": [', [], "is not valid JSON"),
+    ("a repeated key", b'{"version": "2.1.0", "runs": [], "runs": []}', [], "repeats the object key 'runs'"),
+    ("NaN", b'{"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "x"}}, "properties": {"n": NaN}}]}', [],
+     "non-finite JSON number NaN"),
+    ("Infinity", b'{"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "x"}}, "properties": {"n": Infinity}}]}',
+     [], "non-finite JSON number Infinity"),
+    ("too deep", b'{"a":' * 200000 + b"1" + b"}" * 200000, [], "nests deeper than the JSON parser's recursion limit"),
+    ("SARIF 2.0.0", encoded({**minimal_log(), "version": "2.0.0"}), [], "declares version '2.0.0'"),
+    ("runs null", encoded({"version": "2.1.0", "runs": None}), [], "runs is null"),
+    ("runs empty", encoded({"version": "2.1.0", "runs": []}), [], "runs is empty"),
+    ("two runs, no index", encoded(two_runs()), [], "holds 2 runs; name the one to import with --run-index"),
+    ("index out of range", encoded(two_runs()), ["--run-index", "2"], "run index 2 is out of range"),
+    ("a negative index", encoded(two_runs()), ["--run-index", "-1"], "run index -1 is out of range"),
+    ("external property files", encoded({**minimal_log(), "runs": [
+        {**minimal_log()["runs"][0], "externalPropertyFileReferences": {"results": [{"location": {"uri": "r.json"}}]}}]}),
+     [], "runs[0] carries externalPropertyFileReferences"),
+]
+
+
+@pytest.mark.parametrize("data,extra,message", [case[1:] for case in REFUSED_LOGS],
+                         ids=[case[0] for case in REFUSED_LOGS])
+def test_import_sarif_refuses_a_log_it_cannot_trust_whole_with_exit_2_and_writes_nothing(
+        workspace, capsys, data, extra, message):
+    log = workspace["tmp"] / "scan.sarif"
+    if data == "directory":
+        log.mkdir()
+    elif data is not None:
+        log.write_bytes(data)
+    code, out, err = cli(capsys, *import_argv(workspace, log), *extra)
+    assert (code, out) == (2, "")
+    assert err.startswith("scaneval: ") and message in err
+    assert not workspace["out"].exists()
+
+
+@pytest.mark.parametrize("extra,message", [
+    (["--uri-base", "APPROOT"], "--uri-base 'APPROOT' must be NAME=URI"),
+    (["--uri-base", "=app/"], "--uri-base '=app/' must be NAME=URI"),
+    (["--uri-base", "A=app/", "--uri-base", "A=src/"], "--uri-base names 'A' twice"),
+    (["--uri-base", "A=../app/"], "'..' segment"),
+    (["--uri-base", "A=file:///build/checkout/app/"], "no --source-root-uri says which directory is the scanned tree"),
+    (["--source-root-uri", "https://example.invalid/checkout/"], "is not an absolute file URI"),
+    (["--run-id", " "], "a run id, when given, must not be blank"),
+    (["--max-bytes", "0"], "the size bound must be a positive number of bytes"),
+    (["--source-dir", "/nonexistent-scaneval-export/source"], "is not a directory"),
+])
+def test_import_sarif_refuses_option_values_it_cannot_use(workspace, capsys, extra, message):
+    code, out, err = cli(capsys, *import_argv(workspace), *extra)
+    assert (code, out) == (2, "") and message in err
+    assert not workspace["out"].exists()
+
+
+def test_import_sarif_reads_the_operator_files_strictly_and_records_the_configuration_by_digest(workspace, capsys):
+    config = workspace["tmp"] / "system.json"
+    config.write_bytes(b'{"queries": "security-extended", "queries": "default"}')
+    code, _, err = cli(capsys, *import_argv(workspace), "--system-config", config)
+    assert code == 2 and f"the --system-config file {config} repeats the object key 'queries'" in err
+    normalization_file = workspace["tmp"] / "normalization.json"
+    normalization_file.write_text("[]", encoding="utf-8")
+    code, _, err = cli(capsys, *import_argv(workspace), "--normalization", normalization_file)
+    assert code == 2 and f"the --normalization file {normalization_file} is not a JSON object" in err
+    assert not workspace["out"].exists()
+
+    config.write_text('{"queries": "security-extended", "threads": 4}', encoding="utf-8")
+    code, _, _ = cli(capsys, *import_argv(workspace), "--system-config", config)
+    record = load_document(workspace["out"] / "bundle" / "import.json", "import-record")
+    assert code == 0 and record["system"] == {
+        "system_id": "codeql-fixture", "config_sha256": canonical_sha256({"queries": "security-extended", "threads": 4})}
+
+
+def test_import_sarif_refuses_a_bundle_inside_a_trial_directory(workspace, capsys):
+    trial = workspace["tmp"] / "trial"
+    (trial / "source").mkdir(parents=True)
+    (trial / "provenance.json").write_text("{}", encoding="utf-8")
+    argv = import_argv(workspace)
+    argv[argv.index("--output") + 1] = trial / "bundle"
+    code, _, err = cli(capsys, *argv)
+    assert code == 2 and "refusing to write" in err and "inside the trial directory" in err
+    assert not (trial / "bundle").exists()
+
+
+def test_import_sarif_exits_1_for_a_log_that_holds_no_usable_scan_and_still_writes_its_bundle(workspace, capsys):
+    log = fixture("codeql.sarif")
+    log["runs"][0]["results"] = None
+    code, out, err = cli(capsys, *import_argv(workspace, write_log(workspace, log)))
+    assert code == 1 and "status=error claims=0" in out
+    assert "scaneval: status error (results_absent): run.results is null or absent" in err
+    assert err.splitlines()[-1] == "scaneval: the imported log holds no usable scan"
+    result = load_document(workspace["out"] / "bundle" / "result.json", "scan-result")
+    assert (result["status"], result["claims"], result["bundles_resolved"]) == ("error", [], False)
+
+    # A partial scan still carries claims, so it is reported and exits 0, as it does for run.
+    log = fixture("codeql.sarif")
+    del log["runs"][0]["invocations"]
+    code, out, err = cli(capsys, *import_argv(workspace, write_log(workspace, log, "partial.sarif"), "partial"))
+    assert code == 0 and "status=partial claims=3" in out
+    assert "scaneval: status partial (execution_unreported)" in err and "no usable scan" not in err
+
+
+def test_import_sarif_imports_the_named_run_of_a_multi_run_log(workspace, capsys):
+    log = write_log(workspace, two_runs(), "two-runs.sarif")
+    code, out, _ = cli(capsys, *import_argv(workspace, log), "--run-index", "1")
+    assert code == 0 and out.startswith(f"Imported run 1 of 2 from {log} as import-")
+    bundle = workspace["out"] / "bundle"
+    result = load_document(bundle / "result.json", "scan-result")
+    record = load_document(bundle / "import.json", "import-record")
+    assert [claim["claim_id"] for claim in result["claims"]] == ["r1-0", "r1-1", "r1-2"]
+    assert result["run_id"].endswith("-r1") and record["sarif"] == {"version": "2.1.0", "run_index": 1, "run_count": 2}
+    assert record["options"]["run_index"] == 1 and "raw/two-runs.sarif" in bundle_files(bundle)
