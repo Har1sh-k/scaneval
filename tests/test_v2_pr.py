@@ -618,3 +618,26 @@ def test_the_cli_runs_a_pr_input_and_names_an_unsupported_one_without_calling_it
 
     assert code == 0 and "cs-1__fake-a__r1 status=unsupported claims=0" in captured.out
     assert adapter.calls == 0
+
+
+@pytest.mark.parametrize(("modes", "fragment"), [
+    (None, "scan_modes must be a non-empty set of scan modes, not None"),
+    (frozenset(), "scan_modes must be a non-empty set of scan modes, not frozenset()"),
+    ("pr", "scan_modes must be a non-empty set of scan modes, not 'pr'"),
+    (frozenset({"full", "batch"}), "scan_modes names batch, which this build does not know; the scan modes are full, pr"),
+    (frozenset({"full", 3}), "scan_modes names 3, which this build does not know"),
+], ids=["none", "empty", "string", "unknown-mode", "not-a-string"])
+def test_an_adapter_declaration_the_run_cannot_read_is_a_skipped_system(tmp_path, pull_request, modes, fragment):
+    write_pack(tmp_path / "pack.json", pull_request)
+    write_config(tmp_path / "run.json", systems=[system("fake-a"), system("odd-b", "odd")])
+    odd = type("OddModes", (PrAdapter,), {"scan_modes": modes})()
+    out = tmp_path / "out"
+
+    manifest = run_from_config(tmp_path / "run.json", out, clock=CLOCK, adapters={"fake": PrAdapter(), "odd": odd})
+
+    assert manifest["status"] == "completed" and odd.prepared == 0 and odd.calls == 0
+    reason = manifest["systems"][1]["skipped_reason"]
+    assert reason.startswith("AdapterError: odd.") and fragment in reason
+    assert [(row["system_id"], row["status"]) for row in manifest["invocations"]] == [
+        ("fake-a", "success"), ("odd-b", "skipped")]
+    assert load_document(out / MANIFEST_NAME, "run-manifest") == manifest

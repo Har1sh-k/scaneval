@@ -83,6 +83,8 @@ MANIFEST_KIND = "run-manifest"
 DEFAULT_CACHE_ROOT = ".repos"
 SCHEMA_VERSION = "2.1"
 PLAN_MODE = "full"
+# The scan modes an input can have and an adapter can declare (:attr:`Adapter.scan_modes`).
+SCAN_MODES = ("full", "pr")
 
 
 @dataclass(frozen=True)
@@ -550,6 +552,12 @@ def _vet_adapter_identity(spec: SystemSpec, adapter: Adapter) -> None:
     attributes here turns each of those into one skipped system with a reason instead of a failed
     run. This checks the attributes the records are built from; it says nothing about whether the
     adapter scans correctly or reports its real version.
+
+    ``scan_modes`` is read the same way, because it decides whether an invocation runs at all: it
+    must be a non-empty set drawn from the modes this build knows, ``full`` and ``pr``, since
+    anything else could never match an input and would leave every invocation of the system
+    quietly unsupported. An adapter naming none, or one this build does not know, is a skipped
+    system with that reason and not a system whose inputs all read as unsupported.
     """
     for attribute in ("name", "adapter_version"):
         value = getattr(adapter, attribute, None)
@@ -572,6 +580,16 @@ def _vet_adapter_identity(spec: SystemSpec, adapter: Adapter) -> None:
                     f"{spec.adapter}.{attribute} must hold non-empty strings, not {item!r}; "
                     f"{carried}")
             _utf8(item, f"{spec.adapter}.{attribute}")
+    modes = getattr(adapter, "scan_modes", None)
+    if not isinstance(modes, (tuple, list, set, frozenset)) or not modes:
+        raise AdapterError(
+            f"{spec.adapter}.scan_modes must be a non-empty set of scan modes, not {modes!r}; the run "
+            "decides from it whether an invocation is carried out or recorded as unsupported")
+    unknown = sorted(str(mode) for mode in modes if mode not in SCAN_MODES)
+    if unknown:
+        raise AdapterError(
+            f"{spec.adapter}.scan_modes names {', '.join(unknown)}, which this build does not know; the "
+            f"scan modes are {', '.join(SCAN_MODES)}")
 
 
 def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
