@@ -2814,15 +2814,28 @@ def test_a_blinded_input_writes_a_2_1_record_naming_its_identities_and_the_local
     assert execution["isolation"]["backend"] == "local" and execution["isolation"]["enforced"] is False
 
 
-def test_a_pr_input_binds_its_result_to_the_change_set_identity_and_locates_against_head(tmp_path):
+class PrAdapter(FakeAdapter):
+    """A fake adapter that declares it reviews a change as well as scanning a whole tree."""
+
+    scan_modes = frozenset({"full", "pr"})
+
+
+def pr_input(tmp_path: Path) -> PreparedInput:
+    """The tree :func:`prepared_input` writes as the head of a PR input, with the identities of one."""
     import dataclasses
 
     base = prepared_input(tmp_path)
-    identity = "sha256:" + "1" * 64
     pr = {"change_set_id": "cs-1", "base_tree_hash": "sha256:" + "2" * 64, "head_tree_hash": base.tree_hash,
           "base_commit": "a" * 40, "head_commit": "b" * 40}
-    prepared = dataclasses.replace(base, mode="pr", input_hash=identity, pr=pr)
-    bundle = run(tmp_path, FakeAdapter(), prepared)
+    return dataclasses.replace(base, mode="pr", input_hash="sha256:" + "1" * 64, pr=pr)
+
+
+def test_a_pr_input_binds_its_result_to_the_change_set_identity_and_locates_against_head(tmp_path):
+    """Changed deliberately: the default fake declares only full scans, so a PR input is run through
+    an adapter that declares it reviews a change (see the unsupported-mode tests below)."""
+    prepared = pr_input(tmp_path)
+    identity, pr = prepared.input_hash, prepared.pr
+    bundle = run(tmp_path, PrAdapter(), prepared)
     request = json.loads((bundle / "request.json").read_text(encoding="utf-8"))
     assert request["input"]["mode"] == "pr" and request["input"]["pr"] == {"base": "a" * 40, "head": "b" * 40}
     # Nothing evaluator-side about the change reaches the scanner's request.
@@ -2832,8 +2845,58 @@ def test_a_pr_input_binds_its_result_to_the_change_set_identity_and_locates_agai
     validate_document("scan-result", result)
     validate_document("execution-record", execution)
     assert result["schema_version"] == "2.1" and result["location_basis"] == "pr_head"
-    assert result["input_hash"] == identity and execution["provenance"]["tree_hash"] == base.tree_hash
+    assert result["input_hash"] == identity and execution["provenance"]["tree_hash"] == prepared.tree_hash
     assert execution["provenance"]["mode"] == "pr" and execution["provenance"]["pr"] == pr
+
+
+def test_an_adapter_that_does_not_declare_pr_yields_unsupported_and_is_never_called(tmp_path):
+    prepared = pr_input(tmp_path)
+    adapter = FakeAdapter()
+    assert adapter.scan_modes == frozenset({"full"}), "an adapter that declares nothing carries out full scans"
+
+    bundle = run(tmp_path, adapter, prepared)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert adapter.calls == 0, "scan() is never called for a mode the adapter does not declare"
+    assert result["status"] == execution["status"] == "unsupported" and result["claims"] == []
+    assert result["error"]["code"] == execution["error"]["code"] == "unsupported_mode"
+    assert "does not declare support for pr scans; it carries out: full" in result["error"]["message"]
+    assert any("stays in the denominator" in note for note in execution["notes"])
+    assert result["schema_version"] == "2.1" and result["location_basis"] == "pr_head"
+    assert result["input_hash"] == prepared.input_hash
+    assert execution["provenance"]["mode"] == "pr" and execution["provenance"]["source_modified"] is False
+    assert not (bundle / "raw" / "native.json").exists(), "no scan ran, so it produced nothing"
+
+
+def test_an_unsupported_mode_stays_in_the_denominator_and_earns_no_quiet_credit(tmp_path):
+    bundle = run(tmp_path, FakeAdapter(), pr_input(tmp_path))
+    result = load_document(bundle / "result.json", "scan-result")
+    plan, decisions = _quiet_plan(result)
+
+    evaluation = score(plan, result, decisions)
+
+    assert evaluation["status"] == "unsupported" and evaluation["metrics"]["completed"] is False
+    assert evaluation["metrics"]["targets_assigned"] == 1 and evaluation["metrics"]["targets_detected"] == 0
+    control = evaluation["metrics"]["controls"]["capability_safe"]
+    assert control["assigned"] == 1 and control["completed"] == 0 and control["resolved"] == 0, \
+        "an unsupported invocation completes no control, so silence earns nothing"
+    assert "Incomplete or failed execution cannot establish a successful negative control." in evaluation["warnings"]
+
+
+def test_an_adapter_that_declares_only_pr_is_not_run_on_a_full_input(tmp_path):
+    class PrOnlyAdapter(PrAdapter):
+        scan_modes = frozenset({"pr"})
+
+    adapter = PrOnlyAdapter()
+
+    bundle = run(tmp_path, adapter)
+
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert adapter.calls == 0 and execution["status"] == "unsupported"
+    assert execution["error"]["code"] == "unsupported_mode"
+    assert "does not declare support for full scans; it carries out: pr" in execution["error"]["message"]
+    assert execution["schema_version"] == "2.0", "a full local input still needs no 2.1 field"
 
 
 def test_a_backend_is_active_around_the_scan_and_its_isolation_record_is_written(tmp_path):

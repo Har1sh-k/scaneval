@@ -220,6 +220,13 @@ class Adapter(ABC):
     adapter_version: str = "0.0.0"
     requires_git: bool = False
     supported_languages: frozenset[str] = frozenset()
+    # The scan modes this adapter carries out: ``full`` scans the whole exported tree, ``pr`` reviews
+    # the change between the base and head commits its request names. The runner never calls scan()
+    # for an input whose mode is not listed: it records the invocation as unsupported, which stays in
+    # every denominator, and a full scan of the head is never run in place of a PR review. An adapter
+    # declaring ``pr`` promises to read ``request["input"]["pr"]`` and to review that change, and to
+    # refuse a request it cannot honour rather than scan something else.
+    scan_modes: frozenset[str] = frozenset({"full"})
     env_passthrough: tuple[str, ...] = ()
     # Whether this adapter may run under the ``oci`` execution backend. True is three promises:
     # every scanner process it starts goes through :func:`run_command` from the thread that called

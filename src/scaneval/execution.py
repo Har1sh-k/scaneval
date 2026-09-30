@@ -957,6 +957,12 @@ def run_invocation(
     run, and ``network_enforced``. The execution record is written at 2.1 when the input is PR or
     blinded or the backend is not local, and at 2.0 exactly as before otherwise.
 
+    An input whose mode the adapter does not declare in :attr:`~scaneval.adapters.base.Adapter.scan_modes`
+    is recorded as ``unsupported`` with error code ``unsupported_mode`` and the adapter's ``scan`` is
+    never called, whatever it would have done: an adapter that cannot review a change is never run
+    on the head instead, and the invocation stays in every denominator, as an unsupported language
+    does. A PR input that carries no synthetic commits is refused before the bundle exists.
+
     ``result.json`` and ``execution.json`` are written only once both documents validate and
     encode, and they are renamed into place together, so a bundle never holds a successful
     result beside a missing execution record: a write that fails part way leaves neither. An
@@ -1077,6 +1083,9 @@ def run_invocation(
             raise ExecutionError("a PR input must carry the synthetic base_commit and head_commit its "
                                  "request names")
         request_pr = {"base": base_commit, "head": head_commit}
+    # Decided from what the adapter declares and never from what its scan would do: an input whose
+    # mode the adapter does not carry out is recorded as unsupported and scan() is never called.
+    mode_unsupported = prepared.mode not in adapter.scan_modes
     bundle = out_dir / invocation_id(prepared.input_id, spec.system_id, repetition)
     bundle.mkdir(parents=True, exist_ok=False)
     raw_dir = bundle / "raw"
@@ -1153,7 +1162,15 @@ def run_invocation(
                                  f"{prepared.tree_hash}{detail}")
         if adapter.requires_git and not (source / ".git").exists():
             synthetic = prepare_synthetic_history(source)
-        if unsupported:
+        if mode_unsupported:
+            outcome = NativeOutcome(status="unsupported", exit_code=None, command=[],
+                                    error={"code": "unsupported_mode",
+                                           "message": f"{adapter.name} does not declare support for "
+                                                      f"{prepared.mode} scans; it carries out: "
+                                                      f"{', '.join(sorted(adapter.scan_modes))}"},
+                                    notes=["Not executed; stays in the denominator. A scan of any other "
+                                           "mode is never run in its place."])
+        elif unsupported:
             outcome = NativeOutcome(status="unsupported", exit_code=None, command=[],
                                     error={"code": "unsupported_language",
                                            "message": f"{adapter.name} does not declare support for: {', '.join(unsupported)}"},
