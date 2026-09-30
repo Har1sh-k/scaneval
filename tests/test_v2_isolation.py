@@ -1,9 +1,8 @@
-"""The execution backend seam in :mod:`scaneval.adapters.base`, and the reads made of what a scanner wrote.
+"""The execution backend seam, the selection of a backend, and the reads made of what a scanner wrote.
 
-``run_command`` hands every command to the backend active in its context and refuses one started
-from a thread that does not carry it; the stderr tail every failure message quotes, and an
-adapter's own read of its output, never follow a link or block on a pipe. No network, no model
-calls, no engine.
+These run the pieces of the isolation work that need no engine: the reads of files a scanner
+wrote, the routing of ``run_command``, and the settings and refusals that decide which backend a
+system runs under. No network, no model calls, no engine.
 """
 
 from __future__ import annotations
@@ -16,12 +15,17 @@ import threading
 
 import pytest
 
+from scaneval import isolation
+from scaneval.adapters import get_adapter
 from scaneval.adapters import base as base_module
 from scaneval.adapters.base import (Adapter, AdapterError, CommandResult, SystemSpec, build_env, run_command,
                                     tail_text)
 from scaneval.adapters.semgrep import SemgrepAdapter, semgrep_version
+from scaneval.isolation import IsolationError, refusal_for, resolve_execution
 
 
+IMAGE = "scanner:1@sha256:" + "a" * 64
+PROXY = "proxy:1@sha256:" + "b" * 64
 mkfifo_required = pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no named pipes on this platform")
 
 
@@ -210,3 +214,70 @@ def test_semgrep_probes_its_version_without_asking_the_network_for_a_newer_one(t
     raw.mkdir()
     assert semgrep_version(str(binary), raw) == "9.9.9"
     assert json.loads(recorded.read_text(encoding="utf-8")) == ["--version", "--disable-version-check"]
+
+
+# --- settings and selection ------------------------------------------------------------------
+
+
+def settings(policy: str = "none", **overrides) -> isolation.ExecutionSettings:
+    block = {"backend": "oci", "image": IMAGE, **overrides}
+    if policy == "model_provider_only":
+        block.setdefault("proxy_image", PROXY)
+        block.setdefault("egress", [{"host": "api.model.example", "port": 443}])
+    return resolve_execution(block, policy)
+
+
+def test_an_absent_or_local_execution_block_is_the_local_backend():
+    for block in (None, {}, {"backend": "local"}):
+        resolved = resolve_execution(block, "none")
+        assert resolved.backend == "local" and not resolved.enforcing
+    with pytest.raises(IsolationError, match="takes no image"):
+        resolve_execution({"backend": "local", "image": IMAGE}, "none")
+
+
+def test_oci_settings_carry_defaults_and_refuse_what_the_contract_cannot_express():
+    resolved = settings()
+    assert resolved.enforcing and resolved.user == "65534:65534" and resolved.limits.memory_mb == 2048
+    assert settings("model_provider_only", egress=[{"host": "API.Model.Example", "port": 443},
+                                                   {"host": "api.model.example", "port": 443}]).egress == (
+        ("api.model.example", 443),)
+    cases_refused = [
+        ({"image": "scanner:latest"}, "none", "pinned by digest"),
+        ({"limits": {"memory_mb": 128, "tmpfs_mb": 128}}, "none", "must be smaller than memory_mb"),
+        ({"limits": {"pids": 4}}, "none", "at least 16"),
+        ({"limits": {"swap": 1}}, "none", "unknown field"),
+        ({"user": "0:0"}, "none", "non-root"),
+        ({"user": "nobody"}, "none", "numeric uid:gid"),
+        ({"egress": [{"host": "a.example", "port": 443}]}, "none", "apply only to model_provider_only"),
+        ({"egress": [{"host": "http://a.example", "port": 443}], "proxy_image": PROXY}, "model_provider_only",
+         "host name or an IP literal"),
+        ({"egress": [{"host": "a.example", "port": 443}]}, "model_provider_only", "proxy_image pinned"),
+        ({"egress": [{"host": "a.example", "port": 443}], "proxy_image": PROXY,
+          "credentials": [{"env": "KEY", "provider": "p"}, {"env": "KEY", "provider": "q"}]},
+         "model_provider_only", "names KEY twice"),
+    ]
+    for overrides, policy, message in cases_refused:
+        with pytest.raises(IsolationError, match=message):
+            resolve_execution({"backend": "oci", "image": IMAGE, **overrides}, policy)
+    with pytest.raises(IsolationError, match="unknown network policy"):
+        resolve_execution(None, "open")
+
+
+def test_adapters_that_do_not_declare_oci_compatibility_are_refused_under_oci():
+    """llm-harness and DeepSec have no Linux image and no audit that every process goes through a backend."""
+    oci = settings()
+    for name in ("llm-harness", "deepsec"):
+        adapter = get_adapter(name)
+        assert adapter.oci_compatible is False
+        reason = refusal_for(adapter, oci)
+        assert reason is not None and f"refuses adapter {name!r}" in reason and "not invoked" in reason
+        assert refusal_for(adapter, resolve_execution(None, "none")) is None
+
+    class Claims(Adapter):
+        name = "claims"
+        oci_compatible = "yes"  # anything but True is not a declaration
+
+        def scan(self, **kwargs):
+            raise AssertionError("not called")
+
+    assert refusal_for(Claims(), oci) is not None
