@@ -53,15 +53,24 @@ does it by resetting the workspace tree to the base commit and back to head in p
 repository, which the request promises and this adapter checks first), so the source must be
 writable. Under the ``oci`` backend, which mounts it read-only, a PR request is answered
 ``unsupported`` with the reason recorded and nothing is run. A kill between the two resets leaves
-the tree at the base commit, which the invocation's own source check then reports. Import-loss
-accounting and every other outcome rule below are the full-scan ones, unchanged.
+the tree at the base commit, which the invocation's own source check then reports.
+
+A diff scan over a change that touches only deleted paths and files outside the supported
+languages scans nothing and reports nothing, which in a full scan is the ``nothing_scanned``
+error. In a PR review it is a success with a note (an empty baseline review), and only when
+Semgrep exited 0 with no diagnostic of any level, no result was lost in the import, and git, run
+by this adapter before Semgrep starts, shows that no path present at head has the extension of a
+supported language. Anything else stays the error, with the reason added. That extension test is
+this adapter's own approximation of what Semgrep would scan, not Semgrep's target selection, and
+it errs toward the error. Import-loss accounting and every other outcome rule below are the
+full-scan ones, unchanged.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import sys
@@ -72,7 +81,7 @@ from ..kinds import cwe_ids, kind_for_cwes, mapping_version
 from ..materialize import MaterializationError, fetch_snapshot, sha256_file, tree_hash
 from .base import (Adapter, AdapterError, NativeOutcome, SystemSpec, active_backend, build_env, run_command,
                    tail_text)
-from .pr import pr_range, workspace_changes
+from .pr import Change, pr_range, workspace_changes
 
 
 ARTIFACT_JSON = "semgrep-json"
@@ -85,6 +94,15 @@ _RULE_ID_DROPPED = re.compile(r"[^A-Za-z0-9._-]")
 _YAML_SUFFIXES = frozenset({".yaml", ".yml"})
 _RULE_TEST_SUFFIX = ".test"
 _RULE_FIXTEST_SUFFIX = ".fixed"
+# Semgrep 1.177's own extension table (semgrep_interfaces/lang.json) for the five languages this adapter
+# supports. It is only used to ask whether a change touches a file this adapter's languages could have
+# scanned; it is not Semgrep's target selection, which also applies ignore rules, size limits and rule
+# languages that are not known here. See _source_paths.
+_SOURCE_SUFFIXES = frozenset({".cjs", ".go", ".js", ".jsx", ".mjs", ".py", ".pyi", ".rs", ".ts", ".tsx"})
+# The diagnostics Semgrep 1.177 treats as a scan failure (semgrep.error.SemgrepCoreError.is_scan_failure): a
+# baseline scan that ends in one of them makes it drop the head findings of that file or rule.
+_SCAN_FAILURES = frozenset({"Timeout", "OutOfMemory", "StackOverflow", "FixpointTimeout", "TimeoutDuringInterfile",
+                            "OutOfMemoryDuringInterfile"})
 # Recorded on every PR-mode outcome, so a reader of the result knows what the claims are relative to.
 _PR_NOTE = (
     "PR mode: Semgrep ran with --baseline-commit set to the request's base commit over the workspace's two-commit "
@@ -547,6 +565,86 @@ def _path_list(payload: dict, key: str) -> tuple[list, bool]:
     return value, True
 
 
+def _listed(names: list[str], limit: int = 8) -> str:
+    """At most *limit* of *names* joined for a note, and how many more there were."""
+    shown = ", ".join(names[:limit])
+    return shown + (f" and {len(names) - limit} more" if len(names) > limit else "")
+
+
+def _source_paths(changes: tuple[Change, ...]) -> list[str]:
+    """The paths present at head whose extension names a language this adapter scans, sorted.
+
+    This is the adapter's own approximation of "a file Semgrep would scan", made from Semgrep's
+    extension table for the five supported languages and nothing else. It is deliberately the
+    cautious direction: a changed ``.py`` file that Semgrep skipped for its own reasons (a ``tests/``
+    directory, a size limit, a generated-file marker) still counts here, so a diff that touches one
+    is never reported as an empty review. What it does not see is a file in another language that a
+    ruleset could target (YAML, Dockerfiles), or a script with no extension whose shebang names one
+    of these languages; a change to only such files, from a scan that read nothing and reported no
+    diagnostic, is called an empty review.
+    """
+    return sorted(change.path for change in changes
+                  if change.present and PurePosixPath(change.path).suffix.lower() in _SOURCE_SUFFIXES)
+
+
+def _error_type(entry: dict) -> str:
+    """The name of a Semgrep diagnostic's type, which the JSON writes as a string or as ``[name, ...]``."""
+    kind = entry.get("type")
+    if isinstance(kind, list) and kind and isinstance(kind[0], str):
+        return kind[0]
+    return kind if isinstance(kind, str) else ""
+
+
+def _empty_baseline_review(payload: dict, changes: tuple[Change, ...]) -> tuple[bool, str]:
+    """Whether a baseline scan that read nothing is an empty review, and the sentence that says why or why not.
+
+    Called only for an exit-0 scan that reported no result and an explicit empty ``paths.scanned``.
+    It is an empty review only when Semgrep also reported no diagnostic of any level and git shows the
+    change touches no path this adapter's languages could have scanned (see :func:`_source_paths`):
+    deleted paths, and paths outside those languages. Either counter-example is a scan that looked
+    at nothing it should have looked at, which stays the ``nothing_scanned`` error.
+    """
+    reasons = []
+    diagnostics = payload.get("errors")
+    if isinstance(diagnostics, list) and diagnostics:
+        reasons.append(f"it also reported {len(diagnostics)} diagnostic(s)")
+    source = _source_paths(changes)
+    if source:
+        reasons.append(f"the change touches {len(source)} file(s) in a language this adapter scans "
+                       f"({_listed(source)}), which Semgrep did not scan; its own ignore rules, or no rule for the "
+                       "language, can cause that")
+    if reasons:
+        return False, "; ".join(reasons) + ", so this is not an empty baseline review"
+    deleted = [change.path for change in changes if change.status == "D"]
+    other = sorted(change.path for change in changes if change.present)
+    parts = ([f"{len(deleted)} deleted path(s)"] if deleted else []) + (
+        [f"{len(other)} path(s) outside those languages ({_listed(other)})"] if other else [])
+    return True, ("Empty baseline review: Semgrep exited 0 with no diagnostics, scanned no file and reported nothing, "
+                  "and git shows the change touches no file in a language this adapter scans, only "
+                  + " and ".join(parts) + ". Semgrep's diff scan had no changed source to read, so there was "
+                  "nothing for it to report; this is not a scan that read nothing.")
+
+
+def _pr_review_notes(payload: dict, changes: tuple[Change, ...], scanned: list) -> list[str]:
+    """What a reader of a PR-mode result needs beyond the claims: failed scans and unscanned source."""
+    notes = []
+    diagnostics = payload.get("errors")
+    failures = 0
+    if isinstance(diagnostics, list):
+        failures = sum(1 for entry in diagnostics if isinstance(entry, dict) and _error_type(entry) in _SCAN_FAILURES)
+    if failures:
+        notes.append(f"{failures} diagnostic(s) of a scan-failure type (timeout, out of memory, stack overflow) are in "
+                     "the raw errors list. In --baseline-commit mode Semgrep drops a head finding on a file whose "
+                     "baseline scan ended that way, so silence about those files is not a negative result.")
+    covered = {_claim_path(item)[0] for item in scanned if isinstance(item, str)}
+    unscanned = [path for path in _source_paths(changes) if path not in covered]
+    if scanned and unscanned:
+        notes.append(f"PR mode: {len(unscanned)} changed file(s) in a language this adapter scans were not among the "
+                     f"paths Semgrep reports as scanned ({_listed(unscanned)}); its own ignore rules, or no rule for "
+                     "the language, can cause that, and nothing was looked for in them.")
+    return notes
+
+
 class SemgrepAdapter(Adapter):
     name = "semgrep"
     adapter_version = "2.0.0"
@@ -698,13 +796,16 @@ class SemgrepAdapter(Adapter):
         runs, as an ``AdapterError``, when the request does not name two full commit ids or the
         workspace does not hold the clean two-commit history it names, and it is answered
         ``unsupported``, not run, under the ``oci`` backend. Any mode but ``full`` and ``pr`` is
-        refused too, so a request this adapter cannot serve is never run as a full scan.
+        refused too, so a request this adapter cannot serve is never run as a full scan. What a PR
+        review that scanned nothing is called, and when, is :func:`_empty_baseline_review`'s
+        rule, stated in the module docstring.
         """
         pr = pr_range(request, self)
         binary = _binary(spec)
         rule_timeout = _integer_config(spec, "rule_timeout_seconds", 30, minimum=0)
         jobs = _integer_config(spec, "jobs", 1, minimum=1)
         config_dirs, ruleset_commit, ruleset_tree_hash = _prepared_ruleset(preparation)
+        changes: tuple[Change, ...] = ()
         if pr is not None:
             if getattr(active_backend(), "name", None) == "oci":
                 return NativeOutcome(
@@ -715,7 +816,7 @@ class SemgrepAdapter(Adapter):
                                       "that backend mounts the source read-only, so the scan was not started"},
                     notes=["Unsupported work stays in the denominator; nothing was executed."])
             # Read before Semgrep starts, from a repository nothing but the runner has written to.
-            workspace_changes(Path(source_dir), pr)
+            changes = workspace_changes(Path(source_dir), pr)
         stdout = raw_dir / "semgrep.json"
         stderr = raw_dir / "semgrep.stderr.txt"
         _claim_output(stdout, f"semgrep output under {raw_dir}")
@@ -780,6 +881,8 @@ class SemgrepAdapter(Adapter):
             return NativeOutcome(status="error", exit_code=result.exit_code,
                                  error={"code": "unparseable_output", "message": message[:2000]}, **base)
         base["notes"] = base["notes"] + notes
+        if pr is not None:
+            base["notes"] += _pr_review_notes(payload, changes, scanned)
         base["tool_versions"]["semgrep_reported"] = reported_version
         # Import loss leaves the claim set incomplete, so the bundles it delivers are not
         # resolved: the scoring contract then refuses both completed-control and quiet credit.
@@ -842,10 +945,20 @@ class SemgrepAdapter(Adapter):
                                  "be distinguished from a run that looked at no files")
         elif not scanned and not claims:
             # An explicit empty scanned list means Semgrep opened no file. Silence from a scan
-            # that read nothing is missing evidence, not a clean negative control.
+            # that read nothing is missing evidence, not a clean negative control. A PR review
+            # is the one place it can also be the truth: a change that touched only deleted
+            # paths and files outside the scanned languages leaves a diff scan nothing to read,
+            # and git, asked by this adapter, is what says so. Anything else stays an error.
+            explanation = ""
+            if pr is not None:
+                empty, detail = _empty_baseline_review(payload, changes)
+                if empty and not imported.lost:
+                    base["notes"].append(detail)
+                    return NativeOutcome(status="success", exit_code=0, claims=[], **base)
+                explanation = f"; {detail}" if not empty else ""
             message = with_loss("semgrep exited 0 having scanned no files and reported no results: Semgrep "
                                 "looked at no source at all, which its ignore rules, an empty tree, or a "
-                                f"default-ignored directory layout can cause; stderr: {tail_text(stderr)}")
+                                f"default-ignored directory layout can cause{explanation}; stderr: {tail_text(stderr)}")
             return NativeOutcome(status="error", exit_code=0, claims=[],
                                  error={"code": "nothing_scanned", "message": message[:2000]}, **base)
         if loss_message:
