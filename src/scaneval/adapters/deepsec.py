@@ -68,13 +68,21 @@ one holding a quote, a backslash or a control character) is never investigated, 
 ignore filter says: the entry DeepSec holds is the quoted spelling, which names nothing. Nor is a
 path whose name begins or ends with a space, which git prints as it is and the trim then removes:
 the entry names another path, or none. Such a path with no file record is a known omission of part
-of the change, so the run is ``partial`` with code ``scope_incomplete``, or an ``error`` when no
-file reached a verdict, and never a ``success``, the only status that lets the scoring contract
+of the change, so the run is never a ``success``, the only status that lets the scoring contract
 complete a control and grant it quiet credit. Its bundles are unresolved, as when a file is left in
 ``error``: the claims about the rest are a part delivered, and no claim budget is read off a part.
-The error and the note name the path from one list (:class:`DroppedPaths`), and the run says
-nothing about it. A path that only the ignore filter dropped stays a note: that is DeepSec's own
-scope.
+The note names the path from one list (:class:`DroppedPaths`) in every such run, and the run says
+nothing about it.
+
+Whether the error names it too depends on whether another failure ends the run first: a timeout, a
+step that failed, an export that could not be read, a record or a finding that could not be
+imported, an exhausted quota, an errored batch, a record status DeepSec does not declare, or a file
+left unfinished. If none does, the run is ``partial`` with code ``scope_incomplete``, or an
+``error`` when no file reached a verdict, and the error names the path from the same list as the
+note. If one does, the run keeps that failure's own status, code and error, and only the note names
+the path. A file left unfinished also ends ``scope_incomplete``, so the code alone does not say
+which of the two errors the run carries. A path that only the ignore filter dropped stays a note:
+that is DeepSec's own scope.
 
 Direct mode exits 1 for three different reasons (a run that produced findings, a batch that
 errored, an exhausted quota) and also for a runtime failure such as an unresolvable range, so an
@@ -1653,7 +1661,9 @@ class DroppedPaths(NamedTuple):
         Each is a limit of the listing DeepSec reads and not a choice of scope, so a run over a change
         that leaves such a path is not a review of all of it. It is :attr:`quoted` and :attr:`trimmed`
         in one list, each path once, and the note that names these paths, the bundle flag and the
-        status of the run are all made from it, so they cannot disagree.
+        refusal to call the run a ``success`` are all made from it, so they cannot disagree. The error
+        that names them is made from it too, but a run carries that error only when no earlier failure
+        ends the run first (see the module docstring).
 
         It is deliberately not narrowed by the ignore filter, which this adapter cannot see: a name
         the filter would have dropped anyway is counted too. The cost is credit withheld from a run
@@ -1704,7 +1714,12 @@ def listing_limits(paths: DroppedPaths, subject: str) -> list[str]:
 
 
 def unlistable_error(paths: DroppedPaths) -> str:
-    """The ``scope_incomplete`` error for a change that leaves a path DeepSec's listing cannot resolve."""
+    """The ``scope_incomplete`` error of a run that ends on a path DeepSec's listing cannot resolve.
+
+    The status logic gives a run this error only when no failure it tests earlier ends the run first; a
+    run one of them ends keeps that failure's own code and error, and only the note names the paths (see
+    the module docstring).
+    """
     return ("; ".join(listing_limits(paths, "changed path(s)"))
             + ", so it never investigated them, whatever its ignore filter says. This run therefore observed only "
               "part of the change (or none of it) and says nothing about them")
@@ -1727,8 +1742,14 @@ def unreviewed_note(changes: tuple[Change, ...], files: tuple[tuple[str, dict], 
     (:attr:`DroppedPaths.trimmed`), because DeepSec trims each line of its listing and looks for another
     path. The note names those separately, each with the limit it met: the omission is a limit of
     DeepSec's own listing and not a scoping choice, so the run observed nothing about them and cannot
-    stand as a complete or quiet observation of the change. The status logic ends such a run
-    ``scope_incomplete`` from the same list, so the note and the status cannot disagree. This adapter
+    stand as a complete or quiet observation of the change. The status logic reads the same list, so
+    the note and the status cannot disagree: a run whose note names such a path is never a ``success``
+    and its bundles are unresolved. The note is written whatever ends the run. The error names these
+    paths, in the same words, only when none of the failures the status logic tests before the omission
+    ends the run first (a timeout, a step that failed, an export that could not be read, a record or a
+    finding that could not be imported, an exhausted quota, an errored batch, a record status DeepSec
+    does not declare, a file left unfinished), and the run then ends ``scope_incomplete``. A run one of
+    those ends keeps that failure's own code and error, and only this note names the paths. This adapter
     cannot tell the other paths apart by reason and does not try to.
     """
     paths = dropped_paths(changes, files)
