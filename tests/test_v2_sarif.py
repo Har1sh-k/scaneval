@@ -8,12 +8,16 @@ into the test's own directory. Reviewers named here are fictional.
 
 from __future__ import annotations
 
+import builtins
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import socket
+import sys
 
 import pytest
 
@@ -1484,3 +1488,164 @@ def test_import_sarif_imports_the_named_run_of_a_multi_run_log(workspace, capsys
     assert [claim["claim_id"] for claim in result["claims"]] == ["r1-0", "r1-1", "r1-2"]
     assert result["run_id"].endswith("-r1") and record["sarif"] == {"version": "2.1.0", "run_index": 1, "run_count": 2}
     assert record["options"]["run_index"] == 1 and "raw/two-runs.sarif" in bundle_files(bundle)
+
+
+# --- the workflow after an import: review, score, replay, and what it never touches ----------
+
+
+def refuse_network(monkeypatch) -> list:
+    """Make every way this process could open a connection raise, and return the attempts made."""
+    attempts: list = []
+
+    def refused(*args, **kwargs):
+        attempts.append(args)
+        raise OSError("network access attempted during an offline import")
+
+    for name in ("socket", "create_connection", "getaddrinfo"):
+        monkeypatch.setattr(socket, name, refused)
+    return attempts
+
+
+def test_a_saved_log_is_imported_reviewed_scored_and_replayed_fully_offline(workspace, capsys, monkeypatch):
+    attempts = refuse_network(monkeypatch)
+    bundle = workspace["out"] / "bundle"
+    decided = workspace["tmp"] / "normalization.json"
+    decided.write_text(canonical_json(normalization(codeql_digest(), atomic())) + "\n", encoding="utf-8")
+    code, out, err = cli(capsys, *import_argv(workspace), "--source-dir", workspace["source"],
+                         "--normalization", decided)
+    assert (code, err) == (0, "") and "1 flagged, 1 decided in the normalization file; bundles_resolved=true" in out
+
+    # Replaying the bundle as imported reproduces the evaluation the import wrote, byte for byte.
+    code, _, err = cli(capsys, "replay", bundle, "--output", workspace["tmp"] / "replay-draft.json")
+    assert code == 0 and "review state draft" in err
+    assert (workspace["tmp"] / "replay-draft.json").read_bytes() == (bundle / "evaluation.json").read_bytes()
+
+    # A reviewer edits the machine draft by hand: the one routed candidate is accepted.
+    path = bundle / "evaluator" / "decisions.json"
+    decisions = json.loads(path.read_text(encoding="utf-8"))
+    assert [(match["claim_id"], match["target_id"], match["decision"]) for match in decisions["claim_matches"]] == [
+        ("r0-0", "T-case-a", "unresolved")]
+    decisions["claim_matches"][0].update(decision="accepted", reason="the claim names the query this target is about")
+    path.write_text(canonical_json(decisions) + "\n", encoding="utf-8")
+    code, out, _ = cli(capsys, "review", "record", bundle, "--note", "accepted the SQL injection claim")
+    assert code == 0 and "Review record state: draft (0 recorded reviews)" in out
+    code, out, _ = cli(capsys, "review", "approve", bundle, "--reviewer", FICTIONAL_REVIEWER,
+                       "--note", "read the claim, its flow, and the target")
+    assert code == 0 and "Review record state: human_approved (1 recorded reviews)" in out
+    code, out, _ = cli(capsys, "review", "status", bundle)
+    assert (code, out.strip()) == (0, "human_approved")
+
+    scored = workspace["tmp"] / "scored.json"
+    code, _, _ = cli(capsys, "score", "--plan", bundle / "evaluator" / "plan.json", "--result", bundle / "result.json",
+                     "--decisions", path, "--output", scored)
+    evaluation = json.loads(scored.read_text(encoding="utf-8"))
+    assert code == 0 and evaluation["decisions_sha256"] == canonical_sha256(decisions)
+    metrics = evaluation["metrics"]
+    assert (metrics["targets_detected"], metrics["known_target_recall"], metrics["pending_matching_count"]) == (1, 1.0, 0)
+    # Unranked output has no native review order, so no budget recall is read off it.
+    assert set(metrics["recall_at_budget"].values()) == {None} and metrics["claim_records"] == 3
+    assert metrics["usage"] == {"wall_seconds": None}
+
+    # The replay of the reviewed bundle is the score of the reviewed documents, byte for byte.
+    replayed = workspace["tmp"] / "replayed.json"
+    code, _, err = cli(capsys, "replay", bundle, "--output", replayed)
+    assert (code, err) == (0, "") and replayed.read_bytes() == scored.read_bytes()
+    code, _, err = cli(capsys, "report", bundle, "--output", workspace["tmp"] / "report.html")
+    assert (code, err) == (0, "")
+    assert attempts == []
+
+
+def test_a_quiet_control_on_an_import_without_invocations_earns_no_quiet_credit(tmp_path):
+    source = tmp_path / "export" / "source"
+    tree_hash = write_tree(source)
+    pack = make_pack(source, tree_hash, control=True)
+
+    def quiet(name: str, log: dict) -> tuple[dict, dict]:
+        """Import *log*, record the control as quiet the way a reviewer would, and score it."""
+        path = tmp_path / f"{name}.sarif"
+        path.write_bytes(encoded(log))
+        outcome = import_sarif(path, pack=pack, snapshot_id="snap-a", tree_hash=tree_hash, system_id="semgrep-fixture",
+                               output=tmp_path / name, clock=CLOCK)
+        decisions = deepcopy(outcome.decisions)
+        assert [(item["control_id"], item["decision"]) for item in decisions["control_assessments"]] == [
+            ("C-case-a-safe", "unresolved")]
+        decisions["control_assessments"][0].update(decision="quiet", reason="no claim names the file helper")
+        return outcome.result, scoring.score(outcome.plan, outcome.result, decisions)
+
+    silent = minimal_log(results=[])
+    del silent["runs"][0]["invocations"]
+    result, evaluation = quiet("no-invocations", silent)
+    # Nothing was lost and nothing was flagged, so the bundles are resolved; the missing account
+    # of execution alone keeps the silence from counting.
+    assert (result["status"], result["error"]["code"], result["bundles_resolved"], result["claims"]) == (
+        "partial", "execution_unreported", True, [])
+    safe = evaluation["metrics"]["controls"]["capability_safe"]
+    assert (safe["assigned"], safe["completed"], safe["resolved"], safe["assessable_mass"]) == (1, 0, 0, 0.0)
+    assert safe["resolved_false_alarm_rate"] is None
+    assert "Incomplete or failed execution cannot establish a successful negative control." in evaluation["warnings"]
+
+    # The same silence from a run the log reports as finished is a quiet control.
+    result, evaluation = quiet("reported", minimal_log(results=[]))
+    safe = evaluation["metrics"]["controls"]["capability_safe"]
+    assert result["status"] == "success" and (safe["completed"], safe["resolved"], safe["assessable_mass"]) == (1, 1, 1.0)
+    assert safe["resolved_false_alarm_rate"] == 0.0
+
+
+def test_an_import_opens_nothing_the_log_names_and_reaches_no_network(workspace, monkeypatch):
+    source = workspace["source"]
+    outside = workspace["tmp"] / "outside.py"
+    outside.write_text(numbered(30), encoding="utf-8")
+    # A link inside the exported tree that leads out of it. The tree hash leaves links out, so the
+    # declared hash still holds.
+    os.symlink(outside, source / "app" / "linked.py")
+    log = fixture("codeql.sarif")
+    log["$schema"] = "https://example.invalid/sarif-schema.json"
+    run = log["runs"][0]
+    run["tool"]["driver"]["rules"][0]["helpUri"] = "https://example.invalid/help/py-sql-injection"
+    run["originalUriBaseIds"] = {"OUTSIDE": {"uri": workspace["tmp"].as_uri() + "/"}}
+    run["invocations"][0].update(workingDirectory={"uri": "file:///etc/"}, responseFiles=[{"uri": outside.as_uri()}])
+    named = [("../outside.py", "%SRCROOT%"), (outside.as_uri(), None), ("outside.py", "OUTSIDE"),
+             ("app/linked.py", "%SRCROOT%"), ("/etc/passwd", None), ("file:///etc/passwd", None),
+             ("https://example.invalid/app/web.py", None)]
+    run["results"] += [result_at(uri, base=base) for uri, base in named]
+    path = write_log(workspace, log, "hostile.sarif")
+
+    attempts = refuse_network(monkeypatch)
+    touched: list[str] = []
+    real = {"os.open": os.open, "io.open": io.open, "os.scandir": os.scandir, "os.stat": os.stat, "os.lstat": os.lstat}
+
+    def recording(name: str):
+        def call(target=".", *args, **kwargs):
+            if not isinstance(target, int):
+                touched.append((name, os.path.abspath(os.fspath(target))))
+            return real[name](target, *args, **kwargs)
+        return call
+
+    for module, attribute, name in ((os, "open", "os.open"), (io, "open", "io.open"), (builtins, "open", "io.open"),
+                                    (os, "scandir", "os.scandir"), (os, "stat", "os.stat"), (os, "lstat", "os.lstat")):
+        monkeypatch.setattr(module, attribute, recording(name))
+    outcome = imported(workspace, path, source_dir=source, source_root_uri=source.as_uri() + "/")
+    during = list(touched)
+    monkeypatch.undo()
+
+    assert [claim["claim_id"] for claim in outcome.result["claims"]] == ["r0-0", "r0-1", "r0-2"]
+    reasons = [loss["reason"] for loss in outcome.record["losses"]]
+    assert [loss["pointer"] for loss in outcome.record["losses"]] == [f"/runs/0/results/{n}" for n in range(3, 10)]
+    for reason, expected in zip(reasons, (
+            "'..' segment", "lies outside the declared source root", "lies outside the declared source root",
+            "maps to 'app/linked.py', which is not a regular file in the exported tree",
+            "is an absolute path, not a path relative to a base", "lies outside the declared source root",
+            "uses the https scheme")):
+        assert expected in reason, (expected, reason)
+    assert attempts == []
+    # Nothing named by the log was opened, listed, or even looked up: not the file outside the
+    # tree (directly, through the link, or through a base), not a host path, not a URL.
+    for _, target in during:
+        assert target != str(outside) and not target.startswith(("/etc", "/opt")), target
+    # Every file read or directory listed is the log, the exported tree, the new bundle, or the
+    # package's own schemas and mappings.
+    allowed = (str(source), str(outcome.bundle), str(Path(cases.__file__).parent), sys.prefix, sys.base_prefix)
+    for name, target in during:
+        if name in ("os.open", "io.open", "os.scandir"):
+            assert target == str(path) or target.startswith(allowed), (name, target)
+    assert ("os.open", str(path)) in during
