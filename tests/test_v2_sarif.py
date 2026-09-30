@@ -24,7 +24,7 @@ import sys
 
 import pytest
 
-from scaneval import cases, materialize, review, scoring
+from scaneval import cases, materialize, review, sarif as sarif_module, scoring
 from scaneval.adapters.semgrep import import_semgrep_results
 from scaneval.cli import main
 from scaneval.contracts import (
@@ -976,6 +976,69 @@ def test_a_message_that_does_not_resolve_is_a_loss(message, expected):
     assert expected in only_loss(converted([result_at("src/app.py", message=message)]))
 
 
+# More digits than int() will read (4300 by default): a log can put a string this long in a message
+# link, a placeholder, a taxon id, or a tag, and none of them can mean a number.
+LONG_DIGITS = "1" * 5000
+
+
+def test_a_message_link_to_a_location_id_of_more_than_nine_digits_is_an_evidence_loss():
+    result = result_at("src/app.py", message={"text": f"see [x]({LONG_DIGITS}) and [y](0000000001)"})
+    result["locations"][0]["id"] = 1
+    claim, entry = only_claim(converted([result]))
+    assert claim["allegation"] == f"see [x]({LONG_DIGITS}) and [y](0000000001)"
+    (loss,) = entry["evidence_losses"]
+    assert loss["pointer"] == "/runs/0/results/0/message" and len(loss["reason"]) < 200
+    assert "location id of more than 9 digits" in loss["reason"]
+
+
+def test_a_placeholder_index_of_more_than_nine_digits_is_a_loss_and_one_with_leading_zeros_is_read_by_value():
+    reason = only_loss(converted([result_at("src/app.py", message={"text": "{" + LONG_DIGITS + "}", "arguments": ["a"]})]))
+    assert "uses placeholder" in reason and "1 argument(s) are supplied" in reason and len(reason) < 200
+    reason = only_loss(converted([result_at("src/app.py", message={"text": "{1000000000}", "arguments": ["a"]})]))
+    assert "uses placeholder {1000000000}" in reason
+    padded = {"text": "{" + "0" * 5000 + "1}", "arguments": ["a", "b"]}
+    assert only_claim(converted([result_at("src/app.py", message=padded)]))[0]["allegation"] == "b"
+
+
+def test_a_taxon_id_or_a_tag_of_more_digits_than_any_cwe_has_is_not_a_cwe():
+    log = minimal_log(results=[
+        result_at("src/app.py", taxa=[{"id": LONG_DIGITS, "toolComponent": {"name": "CWE"}},
+                                      {"id": "CWE-" + LONG_DIGITS, "toolComponent": {"name": "CWE"}},
+                                      {"id": "0000000079", "toolComponent": {"name": "CWE"}}],
+                  properties={"tags": ["external/cwe/cwe-" + LONG_DIGITS, "CWE-89"]})])
+    log["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["tags"].append("CWE-" + LONG_DIGITS)
+    (claim,) = convert_run(log).claims
+    assert claim["native_cwe"] == ["CWE-79", "CWE-78", "CWE-89"]
+
+
+def test_a_result_that_raises_a_value_error_is_a_loss_and_the_rest_of_the_run_still_imports(monkeypatch):
+    kind_for_cwes = sarif_module.kind_for_cwes
+
+    def refuse_one(cwes):
+        if "CWE-79" in cwes:
+            raise ValueError("a value no reader anticipated")
+        return kind_for_cwes(cwes)
+
+    monkeypatch.setattr(sarif_module, "kind_for_cwes", refuse_one)
+    taxon = [{"id": "79", "toolComponent": {"name": "CWE"}}]
+    conversion = converted([result_at("src/app.py", taxa=taxon), result_at("src/app.py")])
+    assert [claim["claim_id"] for claim in conversion.claims] == ["r0-1"]
+    (loss,) = conversion.losses
+    assert loss["pointer"] == "/runs/0/results/0"
+    assert loss["reason"] == "/runs/0/results/0 could not be read: ValueError: a value no reader anticipated"
+    status, error = conversion.outcome()
+    assert (status, error["code"]) == ("partial", "import_loss")
+
+
+def test_a_refusal_of_the_whole_log_is_never_recorded_as_one_results_loss(monkeypatch):
+    def refuse(cwes):
+        raise SarifImportError("refused as a whole")
+
+    monkeypatch.setattr(sarif_module, "kind_for_cwes", refuse)
+    with pytest.raises(SarifImportError, match="refused as a whole"):
+        converted([result_at("src/app.py")])
+
+
 def test_the_guid_is_the_native_id_and_fingerprints_are_provenance_only():
     result = result_at("src/app.py", guid="c0ffee00-0000-4000-8000-000000000001",
                        fingerprints={"matchBasedId/v1": "abc_0", "withheld/v1": "requires login", "odd": 5},
@@ -1695,6 +1758,14 @@ def test_import_sarif_exits_1_for_a_log_that_holds_no_usable_scan_and_still_writ
     code, out, err = cli(capsys, *import_argv(workspace, write_log(workspace, log, "partial.sarif"), "partial"))
     assert code == 0 and "status=partial claims=3" in out
     assert "scaneval: status partial (execution_unreported)" in err and "no usable scan" not in err
+
+
+def test_import_sarif_imports_a_log_with_a_string_of_digits_no_number_can_be_read_from(workspace, capsys):
+    log = minimal_log(results=[result_at("src/app.py", message={"text": f"see [x]({LONG_DIGITS})"})])
+    code, out, err = cli(capsys, *import_argv(workspace, write_log(workspace, log, "digits.sarif")))
+    assert (code, err) == (0, "") and "status=success claims=1" in out
+    record = load_document(workspace["out"] / "bundle" / "import.json", "import-record")
+    assert [loss["pointer"] for loss in record["claims"][0]["evidence_losses"]] == ["/runs/0/results/0/message"]
 
 
 def test_import_sarif_imports_the_named_run_of_a_multi_run_log(workspace, capsys):

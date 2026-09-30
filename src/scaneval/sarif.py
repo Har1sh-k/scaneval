@@ -38,7 +38,8 @@ Every result of the selected run is accounted for exactly once, by :func:`conver
   listed, never dropped in silence.
 - **A loss**, when the result alleges something this importer cannot place: a rule reference
   that names no descriptor or conflicts with itself, a message that does not resolve, or a
-  primary location that is not a file in the scanned tree. A loss is import loss: it leaves the
+  primary location that is not a file in the scanned tree, or when reading it raised a
+  ``ValueError`` (no one result can end an import). A loss is import loss: it leaves the
   bundles unresolved and a clean run ``partial`` with error code ``import_loss``, so a scan whose
   finding ScanEval could not read can earn neither completeness nor quiet credit.
 
@@ -135,6 +136,11 @@ DIVERGENT_CODE_FLOWS = "divergent_code_flows"
 FLOW_STEP_LIMIT = 256
 FLOW_TEXT_LIMIT = 65536
 
+# The most digits a log's number can have where this module reads one out of a string: a placeholder
+# index or a location id. int() refuses a string of more than 4300 digits (a limit an environment can
+# lower), so a longer one is never handed to it, and no log holds a billion arguments or locations.
+_MAX_DIGITS = 9
+
 _SCHEME = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):")
 _DRIVE = re.compile(r"^[A-Za-z]:")
 _TOKEN = re.compile(r"\{\{|\}\}|\{([0-9]+)\}|[{}]")
@@ -155,9 +161,25 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _bounded_int(digits: str) -> int | None:
+    """The value of the ASCII digit string *digits*, or ``None`` when it needs more than :data:`_MAX_DIGITS`.
+
+    Leading zeros do not count: ``0007`` is 7. A longer number is not converted at all.
+    """
+    trimmed = digits.lstrip("0")
+    if len(trimmed) > _MAX_DIGITS:
+        return None
+    return int(trimmed) if trimmed else 0
+
+
 def _text(value: Any) -> str | None:
     """*value* when it is a non-empty string, else ``None``."""
     return value if isinstance(value, str) and value else None
+
+
+def _elided(text: str, limit: int = 80) -> str:
+    """*text* as a reason quotes it: whole when short, cut at *limit* characters with ``...`` when a log made it long."""
+    return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
 def _shown(value: Any, limit: int = 80) -> str:
@@ -169,8 +191,7 @@ def _shown(value: Any, limit: int = 80) -> str:
     """
     if isinstance(value, (dict, list)):
         return "an object" if isinstance(value, dict) else "an array"
-    text = repr(value)
-    return text if len(text) <= limit else text[:limit - 3] + "..."
+    return _elided(repr(value), limit)
 
 
 # --- reading the artifact ---------------------------------------------------------------
@@ -663,8 +684,9 @@ class _Place:
 def _formatted(template: str, arguments: list[str], label: str) -> str:
     """*template* with ``{n}`` replaced by ``arguments[n]`` and ``{{``/``}}`` undoubled (SARIF 3.11.5).
 
-    A placeholder past the end of *arguments*, or a single brace that is neither half of an
-    escape nor part of a placeholder, leaves the message unresolved rather than guessed at.
+    A placeholder past the end of *arguments*, one with more than :data:`_MAX_DIGITS` digits, or a
+    single brace that is neither half of an escape nor part of a placeholder, leaves the message
+    unresolved rather than guessed at.
     """
     pieces: list[str] = []
     position = 0
@@ -676,9 +698,9 @@ def _formatted(template: str, arguments: list[str], label: str) -> str:
         elif token == "}}":
             pieces.append("}")
         elif match.group(1) is not None:
-            index = int(match.group(1))
-            if index >= len(arguments):
-                raise _Unusable(f"{label} uses placeholder {token}, and {len(arguments)} argument(s) "
+            index = _bounded_int(match.group(1))
+            if index is None or index >= len(arguments):
+                raise _Unusable(f"{label} uses placeholder {_elided(token)}, and {len(arguments)} argument(s) "
                                 "are supplied (SARIF 3.11.11)")
             pieces.append(arguments[index])
         else:
@@ -744,12 +766,13 @@ class _Rule:
 
 
 def _cwe_token(value: Any) -> str | None:
-    """``CWE-<n>`` for a taxon id such as ``"327"`` or ``"CWE-327"``, else ``None``."""
+    """``CWE-<n>`` for a taxon id such as ``"327"`` or ``"CWE-327"``, else ``None``.
+
+    An id of more digits than :func:`scaneval.kinds.cwe_ids` reads is not a CWE.
+    """
     if not isinstance(value, str):
         return None
-    if _DIGITS.fullmatch(value):
-        return f"CWE-{int(value)}"
-    found = cwe_ids(value)
+    found = cwe_ids(f"CWE-{value}" if _DIGITS.fullmatch(value) else value)
     return found[0] if found else None
 
 
@@ -1398,15 +1421,23 @@ class _RunReader:
         return counts
 
     def _link_losses(self, allegation: str, result: dict, label: str) -> list[dict]:
-        """An evidence loss for each embedded link (``[text](n)``) that names no single location."""
-        links = sorted({int(match.group(1)) for match in _LINK.finditer(allegation)})
-        if not links:
-            return []
-        counts = self._location_ids(result)
-        return [{"pointer": f"{label}/message", "reason": f"the message links to location id {link}, and "
-                 f"the result holds {counts.get(link, 0)} location(s) with that id, not exactly one "
-                 "(SARIF 3.11.6)"}
-                for link in links if counts.get(link, 0) != 1]
+        """An evidence loss for each embedded link (``[text](n)``) that names no single location.
+
+        A link of more than :data:`_MAX_DIGITS` digits names no location this import looks for, and
+        is one loss however many there are.
+        """
+        digits = {match.group(1) for match in _LINK.finditer(allegation)}
+        numbers = {_bounded_int(item) for item in digits}
+        links = sorted(number for number in numbers if number is not None)
+        counts = self._location_ids(result) if links else {}
+        losses = [{"pointer": f"{label}/message", "reason": f"the message links to location id {link}, and "
+                   f"the result holds {counts.get(link, 0)} location(s) with that id, not exactly one "
+                   "(SARIF 3.11.6)"}
+                  for link in links if counts.get(link, 0) != 1]
+        if None in numbers:
+            losses.append({"pointer": f"{label}/message", "reason": "the message links to a location id of "
+                           f"more than {_MAX_DIGITS} digits, which this import does not look for (SARIF 3.11.6)"})
+        return losses
 
     def convert(self, index: int, result: Any) -> tuple[str, dict, dict | None]:
         """``("claim", claim, entry)``, ``("excluded", exclusion, None)`` or ``("loss", loss, None)``."""
@@ -1417,6 +1448,13 @@ class _RunReader:
             return "loss", {"pointer": pointer, "reason": str(exc)}, None
         except RecursionError:
             return "loss", {"pointer": pointer, "reason": f"{pointer} nests too deeply to read"}, None
+        except SarifImportError:
+            # A refusal of the whole log is not one result's loss, though it is a ValueError too.
+            raise
+        except ValueError as exc:
+            # Whatever else a hostile value turns into, one result never ends the import.
+            return "loss", {"pointer": pointer,
+                            "reason": f"{pointer} could not be read: {type(exc).__name__}: {exc}"[:300]}, None
 
     def _convert(self, index: int, pointer: str, result: Any) -> tuple[str, dict, dict | None]:
         if not isinstance(result, dict):

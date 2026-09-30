@@ -12,6 +12,10 @@ import json
 import re
 
 _CWE = re.compile(r"CWE-(\d+)", re.IGNORECASE)
+# CWE ids have four digits today. A tag can be any string, and int() refuses one of more than 4300
+# digits (a limit an environment can lower), so an id of more than this many digits is not read as a
+# CWE at all, whatever a rule or a result tags itself with.
+MAX_CWE_DIGITS = 9
 
 
 @lru_cache(maxsize=1)
@@ -25,7 +29,11 @@ def mapping_version() -> str:
 
 
 def cwe_ids(values) -> list[str]:
-    """Extract unique ``CWE-<n>`` identifiers from strings or lists of strings, in order."""
+    """Extract unique ``CWE-<n>`` identifiers from strings or lists of strings, in order.
+
+    ``CWE-089`` and ``CWE-89`` are one identifier. An id of more than :data:`MAX_CWE_DIGITS` digits,
+    leading zeros aside, is not a CWE and is left out.
+    """
     if values is None:
         return []
     if isinstance(values, str):
@@ -35,7 +43,10 @@ def cwe_ids(values) -> list[str]:
         if not isinstance(value, str):
             continue
         for match in _CWE.finditer(value):
-            token = f"CWE-{int(match.group(1))}"
+            digits = match.group(1).lstrip("0")
+            if len(digits) > MAX_CWE_DIGITS:
+                continue
+            token = f"CWE-{int(digits) if digits else 0}"
             if token not in seen:
                 seen.append(token)
     return seen

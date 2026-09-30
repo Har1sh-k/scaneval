@@ -92,8 +92,10 @@ property of the wrong JSON type, is refused too.
   a status; it counts as suppressed here, as the SARIF SDK reads it, and it is how Semgrep writes a
   `nosemgrep` match.
 - **Loss**, listed with its reason: a rule reference that conflicts with itself or names a
-  descriptor ambiguously, a message that does not resolve, a primary location that is not a file in
-  the scanned tree, malformed coordinates, or a value outside SARIF's enumerations. Any loss sets
+  descriptor ambiguously, a message that does not resolve (a placeholder index of more than nine
+  digits included), a primary location that is not a file in the scanned tree, malformed
+  coordinates, a value outside SARIF's enumerations, or anything else that raised a `ValueError`
+  while the result was read, so that no one result can end the import. Any loss sets
   `bundles_resolved` false and turns an otherwise clean run into `partial` with error code
   `import_loss`, so a scan whose finding could not be read earns neither completeness nor quiet
   credit.
@@ -103,7 +105,7 @@ property of the wrong JSON type, is refused too.
 | `allegation` | The full resolved message: its `text`, else the rule's `messageStrings[id]`, else the component's `globalMessageStrings[id]`, formatted with `arguments` (`{n}`, and `{{`/`}}` for literal braces). A `text` is formatted only when it carries `arguments`, because producers that use none write braces unescaped. Markdown is never read. |
 | `native_rule_id` | The resolved descriptor's `id`, else the result's `ruleId` or `rule.id`. |
 | `native_severity` | The effective level (`result.level`, else the rule's `defaultConfiguration.level`, else `warning`), followed by `; security-severity N` when the rule has that GitHub property. For `review` and `open`, the kind. |
-| `native_cwe`, `kind` | CWE ids from the rule's `superset`/`equal` relationships to the CWE taxonomy, the result's `taxa`, then rule and result tags (`CWE-89: ...`, `external/cwe/cwe-089`); `kind` maps them through the versioned kind mapping, else `unmapped`. |
+| `native_cwe`, `kind` | CWE ids from the rule's `superset`/`equal` relationships to the CWE taxonomy, the result's `taxa`, then rule and result tags (`CWE-89: ...`, `external/cwe/cwe-089`), leaving out an id of more than nine digits, which is not a CWE; `kind` maps them through the versioned kind mapping, else `unmapped`. |
 | `native_id` | `result.guid`, when present. |
 | `primary_location` | `locations[0]`. |
 | `related_locations` | `locations[1:]`, then `relatedLocations`. |
@@ -145,9 +147,9 @@ file, and one whose region gives only `charOffset` or `byteOffset` stays file-on
 lines are never computed from offsets. Malformed coordinates are a loss.
 
 A primary location that does not map is a loss. A related location or a flow step that does not
-map, a message link `[text](n)` that does not name exactly one location of the result, and flow
-steps past the rendering bound (256 steps or 64 KiB) are **evidence losses**, recorded against the
-claim, which stays.
+map, a message link `[text](n)` that does not name exactly one location of the result (one of more
+than nine digits names none), and flow steps past the rendering bound (256 steps or 64 KiB) are
+**evidence losses**, recorded against the claim, which stays.
 
 ## Bundle review and the normalization file
 
