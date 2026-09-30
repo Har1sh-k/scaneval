@@ -287,6 +287,10 @@ def test_a_frame_reads_only_the_declared_view_and_the_chosen_systems(tmp_path):
     assert only_b["population"]["systems"] == ["sys-b"] and len(only_b["units"]) == 1
     with pytest.raises(ContractError, match="not scheduled in any of these runs: sys-z"):
         precision.build_frame([run_dir], population="full", systems=["sys-z"])
+    with pytest.raises(ContractError, match="systems must be a list of system ids, not the string 'sys-b'"):
+        precision.build_frame([run_dir], population="full", systems="sys-b")
+    with pytest.raises(ContractError, match="name at least one system"):
+        precision.build_frame([run_dir], population="full", systems=[])
     with pytest.raises(ContractError, match="no assignment of sys-a, sys-b in these runs is a pr input"):
         precision.build_frame([run_dir], population="full", mode="pr")
 

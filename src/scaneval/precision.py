@@ -294,6 +294,10 @@ def build_frame(run_dirs: Sequence[str | PathLike[str]], *, population: str, bud
                                 "a frame names units by run id, so each run is read once")
         seen[manifest["run_id"]] = run_dir
     scheduled = {system["system_id"] for _, _, schedule in runs for system in schedule["systems"]}
+    if isinstance(systems, str):
+        # A string is an iterable of one-character "systems", so "ab" would quietly choose systems
+        # a and b; it is refused rather than read as that.
+        raise ContractError(f"systems must be a list of system ids, not the string {systems!r}")
     chosen = sorted(scheduled) if systems is None else sorted(set(systems))
     if not chosen:
         raise ContractError("name at least one system")
