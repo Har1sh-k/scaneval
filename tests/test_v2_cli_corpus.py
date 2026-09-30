@@ -1622,3 +1622,97 @@ def test_the_label_commands_advertise_their_flags(capsys):
         assert exc.value.code == 0
         help_text = capsys.readouterr().out
         assert all(flag in help_text for flag in flags), (command, help_text)
+
+
+# --- plan --mode pr: a full plan with the pr budgets, or the PR plan of a declared change set ------
+
+
+def plan_pr_argv(pack: Path, output: Path, tree_hash: str, *extra: str) -> list[str]:
+    return ["plan", "--pack", str(pack), "--snapshot-id", "snap-a", "--tree-hash", tree_hash,
+            "--output", str(output), "--mode", "pr", *extra]
+
+
+def identity_argv(tree_hash: str, *, base: str = "sha256:" + "5" * 64,
+                  diff: str = "sha256:" + "6" * 64) -> list[str]:
+    return ["--change-set-id", "cs-1", "--base-tree-hash", base, "--head-tree-hash", tree_hash,
+            "--diff-sha256", diff]
+
+
+def test_plan_mode_pr_without_a_change_set_says_it_is_a_full_plan_with_the_pr_budgets(tmp_path, capsys,
+                                                                                    checked_pack):
+    output = tmp_path / "plan.json"
+
+    code, out, err = cli(capsys, *plan_pr_argv(checked_pack["pack"], output, checked_pack["tree_hash"]))
+
+    assert code == 0 and "Wrote a draft plan with 1 targets and 0 controls" in out
+    assert err.startswith("note: --mode pr without --change-set-id only selects the pack's pr review budgets; "
+                          "this is a full plan of the snapshot, not the review of any change")
+    plan = load_document(output, "evaluation-plan")
+    assert plan["schema_version"] == "2.0" and plan["review_budgets"] == [5, 10, 20]
+    assert plan["provenance"]["mode"] == "pr" and "pr" not in plan["provenance"]
+
+
+def test_plan_writes_the_pr_plan_of_a_change_set_from_the_hashes_that_identify_its_input(tmp_path, capsys,
+                                                                                      boundary_pack):
+    pack, tree_hash = boundary_pack["pack"], boundary_pack["tree_hash"]
+    assert main(pr_scope_argv(pack, "--note", "the sink is a changed line")) == 0
+    capsys.readouterr()
+    output = tmp_path / "pr-plan.json"
+
+    code, out, err = cli(capsys, *plan_pr_argv(pack, output, tree_hash, *identity_argv(tree_hash)))
+
+    assert code == 0 and "Wrote a draft PR plan for change set cs-1 with 1 targets and 0 controls" in out
+    assert "--mode pr without" not in err
+    plan = load_document(output, "evaluation-plan")
+    from scaneval.contracts import pr_input_hash
+
+    assert plan["schema_version"] == "2.1" and plan["review_budgets"] == [5, 10, 20]
+    assert plan["input_hash"] == pr_input_hash("sha256:" + "5" * 64, tree_hash, "sha256:" + "6" * 64)
+    assert plan["targets"][0]["pr_scope"] == {"relation": "introduced", "code_scope": "changed"}
+    assert plan["provenance"]["input_id"] == "cs-1" and plan["provenance"]["mode"] == "pr"
+    assert plan["provenance"]["pr"] == {
+        "change_set_id": "cs-1", "base_snapshot_id": "snap-base", "head_snapshot_id": "snap-a",
+        "base_tree_hash": "sha256:" + "5" * 64, "head_tree_hash": tree_hash, "diff_sha256": "sha256:" + "6" * 64,
+        "boundary": "introducing", "review_scope": "changed_files", "location_basis": "pr_head"}
+
+    before = output.read_bytes()
+    code, _, err = cli(capsys, *plan_pr_argv(pack, output, tree_hash, *identity_argv(tree_hash)))
+    assert code == 2 and "File exists" in err and output.read_bytes() == before
+
+
+def test_plan_names_an_item_no_eligibility_reaches_and_plans_nothing_for_it(tmp_path, capsys, boundary_pack):
+    pack, tree_hash = boundary_pack["pack"], boundary_pack["tree_hash"]
+    output = tmp_path / "pr-plan.json"
+
+    code, out, err = cli(capsys, *plan_pr_argv(pack, output, tree_hash, *identity_argv(tree_hash)))
+
+    assert code == 0 and "Wrote a draft PR plan for change set cs-1 with 0 targets and 0 controls" in out
+    assert "outside change set cs-1, so not planned and earning nothing in this review: T-case-finding" in err
+    assert load_document(output, "evaluation-plan")["targets"] == []
+
+
+def test_plan_refuses_a_pr_plan_it_cannot_identify_and_writes_nothing(tmp_path, capsys, boundary_pack):
+    pack, tree_hash = boundary_pack["pack"], boundary_pack["tree_hash"]
+    output = tmp_path / "pr-plan.json"
+
+    complete = identity_argv(tree_hash)
+    cases_ = [
+        (plan_pr_argv(pack, output, tree_hash, "--change-set-id", "cs-1"),
+         "needs --base-tree-hash, --head-tree-hash, --diff-sha256"),
+        (plan_pr_argv(pack, output, tree_hash, *complete[:2], *complete[4:]),
+         "needs --base-tree-hash"),
+        (plan_pr_argv(pack, output, tree_hash, "--diff-sha256", "sha256:" + "6" * 64),
+         "belong with --change-set-id"),
+        (["plan", "--pack", str(pack), "--snapshot-id", "snap-a", "--tree-hash", tree_hash,
+          "--output", str(output), *complete], "add --mode pr"),
+        (plan_pr_argv(pack, output, tree_hash, "--change-set-id", "cs-missing", *complete[2:]),
+         "unknown change set 'cs-missing'"),
+        (plan_pr_argv(pack, output, tree_hash, *identity_argv("sha256:" + "7" * 64)),
+         "head tree hash must be the export's tree hash"),
+        (plan_pr_argv(pack, output, tree_hash, *identity_argv(tree_hash, diff="not-a-digest")),
+         "provenance.pr.diff_sha256"),
+    ]
+    for argv, message in cases_:
+        code, out, err = cli(capsys, *argv)
+        assert code == 2 and err.startswith("scaneval: ") and message in err, (argv, err)
+        assert out == "" and not output.exists()

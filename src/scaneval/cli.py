@@ -570,13 +570,44 @@ def _corpus(args: argparse.Namespace) -> int:
 
 
 def _plan(args: argparse.Namespace) -> int:
+    """Write one evaluation plan: a full plan of a snapshot, or the PR plan of a declared change set.
+
+    ``--mode pr`` alone keeps meaning what it always did, a full plan of the snapshot carrying the
+    pack's ``pr`` review budgets, and says so, because it names no change and reviews none. A PR plan
+    needs ``--change-set-id`` and the three hashes that identify the input: the tree a scanner is
+    handed as the base and as the head, and the digest of the recorded diff between them, all of which
+    a run prepares and records. ``--snapshot-id`` is then the change set's head snapshot and
+    ``--tree-hash`` its export, which the labels refer to. Nothing here exports a tree or computes a
+    diff: the hashes are taken as given, and the plan is refused when they contradict the pack.
+    """
     _refuse_trial_path(args.output)
     pack = cases.load_pack(args.pack)
-    plan, notes = cases.build_plan(pack, args.snapshot_id, args.tree_hash, mode=args.mode)
+    identity = {"--base-tree-hash": args.base_tree_hash, "--head-tree-hash": args.head_tree_hash,
+                "--diff-sha256": args.diff_sha256}
+    if args.change_set_id is None:
+        stray = [flag for flag, value in identity.items() if value is not None]
+        if stray:
+            raise ContractError(f"{', '.join(stray)} identify a PR input and belong with --change-set-id")
+        plan, notes = cases.build_plan(pack, args.snapshot_id, args.tree_hash, mode=args.mode)
+        if args.mode == "pr":
+            notes.insert(0, "--mode pr without --change-set-id only selects the pack's pr review budgets; "
+                            "this is a full plan of the snapshot, not the review of any change")
+    else:
+        if args.mode != "pr":
+            raise ContractError("--change-set-id plans the PR review of a change set; add --mode pr")
+        missing = [flag for flag, value in identity.items() if value is None]
+        if missing:
+            raise ContractError(f"a PR plan binds to the base tree, the head tree, and the diff between "
+                                f"them, so it needs {', '.join(missing)}")
+        plan, notes = cases.build_plan(
+            pack, args.snapshot_id, args.tree_hash, mode="pr", change_set_id=args.change_set_id,
+            base_tree_hash=args.base_tree_hash, head_tree_hash=args.head_tree_hash,
+            diff_sha256=args.diff_sha256)
     _write_new(args.output, _json(plan))
     for note in notes:
         print(f"note: {note}", file=sys.stderr)
-    print(f"Wrote a {plan['scope']} plan with {len(plan['targets'])} targets and "
+    kind = f"PR plan for change set {args.change_set_id}" if args.change_set_id else "plan"
+    print(f"Wrote a {plan['scope']} {kind} with {len(plan['targets'])} targets and "
           f"{len(plan['controls'])} controls: {args.output}")
     return 0
 
@@ -1130,10 +1161,21 @@ def build_parser() -> argparse.ArgumentParser:
     _add_corpus_commands(sub)
     planning = sub.add_parser("plan", help="build one evaluation plan from a pack and a materialized input")
     planning.add_argument("--pack", required=True, type=Path)
-    planning.add_argument("--snapshot-id", required=True)
-    planning.add_argument("--tree-hash", required=True)
+    planning.add_argument("--snapshot-id", required=True,
+                          help="the snapshot the labels refer to; for a PR plan, the change set's head snapshot")
+    planning.add_argument("--tree-hash", required=True,
+                          help="the export of --snapshot-id the labels and mechanical checks refer to")
     planning.add_argument("--output", required=True, type=Path, help="new JSON file, outside any trial directory")
-    planning.add_argument("--mode", choices=("full", "pr"), default="full")
+    planning.add_argument("--mode", choices=("full", "pr"), default="full",
+                          help="pr alone selects the pack's pr review budgets for a full plan; with "
+                               "--change-set-id it plans that change set's PR review")
+    planning.add_argument("--change-set-id", help="a change set the pack declares; plans its PR review, and "
+                                                  "needs --base-tree-hash, --head-tree-hash, and --diff-sha256")
+    planning.add_argument("--base-tree-hash", help="sha256:<64 hex> of the tree a scanner is handed as the base")
+    planning.add_argument("--head-tree-hash",
+                          help="sha256:<64 hex> of the tree a scanner is handed as the head; the export's own "
+                               "hash for a standard input")
+    planning.add_argument("--diff-sha256", help="sha256:<64 hex> of the recorded diff between the two trees")
     _add_review_commands(sub)
     _add_diagnose_commands(sub)
     _add_blinding_commands(sub)
