@@ -14,8 +14,8 @@ scans, and a strong figure on one requirement never turns another's failure into
 is inconclusive, never a pass, when what it needs is missing or cannot be trusted: an unavailable or
 unmeasurable metric, an interval that is not ``ok``, an aborted run, a difference the policy did not
 intend to measure, evidence below the scope the policy requires, a precision estimate that is missing
-or not bound to the comparison, no eligible control, or a completed, assessable, or covered mass below
-its minimum. No absent figure is read as a perfect one.
+or not bound to the comparison, no eligible control, a completed, assessable, or covered mass below
+its minimum, or a claim volume or cost nobody recorded. No absent figure is read as a perfect one.
 
 What is decided from what. Only the documents passed in: the policy, the comparison report, and the
 precision estimates. The decision is a function of them and of the evaluator version, so the same
@@ -828,6 +828,163 @@ def _target_coverage(ctx: _Context) -> Result:
                  threshold, observed)
 
 
+# --- review burden and cost ---------------------------------------------------------------------
+
+
+def _ratio_reading(candidate: float, baseline: float, noun: str) -> tuple[float | None, str]:
+    """The ratio of *candidate* to *baseline* (``None`` when unbounded) and how it reads.
+
+    A baseline of zero has no ratio: a candidate that is also zero has not increased, and any more is an
+    unbounded increase, which is over every limit.
+    """
+    if baseline == 0:
+        if candidate == 0:
+            return 1.0, f"the {noun} is zero for both systems, so there is no increase"
+        return None, f"the baseline's {noun} is zero, so any amount is an unbounded increase over it"
+    ratio = candidate / baseline
+    return ratio, (f"the candidate's {noun} is {_n(candidate)} against the baseline's {_n(baseline)}, a ratio "
+                   f"of {_n(ratio)}")
+
+
+def _volume(ctx: _Context, side: str) -> dict:
+    """One system's whole-view claim volume as the burden requirements read it."""
+    claims = ctx.whole(side)["claims"]
+    records, assignments = claims["records"], claims["assignments"]
+    return {"records": records, "unique": claims["unique"], "duplicate_copies": claims["duplicate_copies"],
+            "assignments": assignments, "bundles": claims["bundles"],
+            "claims_per_assignment": records / assignments if assignments else None,
+            "duplicate_share": claims["duplicate_copies"] / records if records else None}
+
+
+def _burden(ctx: _Context, check: str) -> Result:
+    """One review-burden requirement, from the claim records the candidate delivered.
+
+    Claims per assignment is the delivered claim records over every assignment of the whole view, and
+    the duplicate share is the exact-duplicate copies over the delivered records, so a candidate cannot
+    lower either by failing to deliver output the requirement can see, and duplicates add burden
+    without adding a claim. A system that delivered no result bundle at all has an unknown volume, not
+    a zero one.
+    """
+    burden = ctx.policy["burden"]
+    key = {"claims_per_assignment": "max_claims_per_assignment", "duplicate_share": "max_duplicate_share",
+           "increase_ratio": "max_increase_ratio"}[check]
+    threshold = {key: burden[key]}
+    problem = ctx.missing_view()
+    if problem is not None:
+        return _open(problem, threshold)
+    volumes = {side: _volume(ctx, side) for side in SIDES}
+    mine = volumes["candidate"]
+    sides = SIDES if check == "increase_ratio" else ("candidate",)
+    for side in sides:
+        if volumes[side]["bundles"] == 0 or volumes[side]["assignments"] == 0:
+            return _open(f"no result bundle was read for the {side}, so its delivered claim volume is unknown, not "
+                         "zero", threshold, volumes[side])
+    if check == "claims_per_assignment":
+        text = (f"the candidate delivered {mine['records']} claim record(s) over {mine['assignments']} "
+                f"assignment(s), {_n(mine['claims_per_assignment'])} per assignment")
+        if mine["claims_per_assignment"] <= burden[key]:
+            return PASS, mine, threshold, f"{text}, within the allowed {_n(burden[key])}"
+        return FAIL, mine, threshold, f"{text}, above the allowed {_n(burden[key])}"
+    if check == "duplicate_share":
+        if mine["records"] == 0:
+            return PASS, mine, threshold, "the candidate delivered no claim record, so it delivered no duplicate copy"
+        text = (f"{mine['duplicate_copies']} of the candidate's {mine['records']} delivered claim record(s) are exact "
+                f"duplicates of another record of the same scan, a share of {_n(mine['duplicate_share'])}")
+        if mine["duplicate_share"] <= burden[key]:
+            return PASS, mine, threshold, f"{text}, within the allowed {_n(burden[key])}"
+        return FAIL, mine, threshold, f"{text}, above the allowed {_n(burden[key])}"
+    ratio, reading = _ratio_reading(mine["claims_per_assignment"], volumes["baseline"]["claims_per_assignment"],
+                                    "claim volume per assignment")
+    observed = {side: volumes[side]["claims_per_assignment"] for side in SIDES}
+    observed["ratio"] = ratio
+    if ratio is not None and ratio <= burden[key]:
+        return PASS, observed, threshold, f"{reading}, within the allowed {_n(burden[key])}"
+    return FAIL, observed, threshold, f"{reading}, above the allowed {_n(burden[key])}"
+
+
+def _spend(ctx: _Context, side: str) -> dict:
+    """One system's whole-view cost as the cost requirements read it.
+
+    ``mean`` is the recorded cost of a scan, averaged over the scans whose cost is known, and ``None``
+    when none is. Usage is counted once per executed scan, however many targets it covers.
+    """
+    usage = ctx.whole(side)["usage"]
+    cost = usage["cost_usd"]
+    return {"coverage": cost["coverage"], "known": cost["known"], "unknown": cost["unknown"],
+            "scans": usage["bundles"], "known_sum": cost["known_sum"],
+            "mean": cost["known_sum"] / cost["known"] if cost["known"] else None}
+
+
+def _cost_gap(ctx: _Context, sides: tuple[str, ...]) -> tuple[dict, str | None]:
+    """The spend of each side, and why the cost cannot be relied on, if it cannot.
+
+    The policy's ``min_coverage`` is the share of executed scans whose cost must be known; without it
+    every cost must be. An unknown cost is unknown, never free, so a shortfall is unresolved.
+    """
+    required = ctx.policy["cost"].get("min_coverage", 1.0)
+    spends = {side: _spend(ctx, side) for side in sides}
+    for side in sides:
+        spend = spends[side]
+        if spend["coverage"] is None:
+            return spends, f"no scan of the {side} recorded a result, so its cost is unknown, not zero"
+        if spend["coverage"] < required:
+            return spends, (f"the {side}'s cost is known for {spend['known']} of {spend['scans']} executed scan(s), a "
+                            f"coverage of {_n(spend['coverage'])}, below the required {_n(required)}"
+                            + ("" if "min_coverage" in ctx.policy["cost"] else
+                               " (the policy states no lower minimum, so every cost must be known)"))
+    return spends, None
+
+
+def _cost_coverage(ctx: _Context) -> Result:
+    cost = ctx.policy["cost"]
+    required = cost.get("min_coverage", 1.0)
+    threshold = {"min_coverage": required, "stated_by_policy": "min_coverage" in cost}
+    problem = ctx.missing_view()
+    if problem is not None:
+        return _open(problem, threshold)
+    sides = SIDES if "max_increase_ratio" in cost else ("candidate",)
+    spends, gap = _cost_gap(ctx, sides)
+    observed = {side: {key: spends[side][key] for key in ("coverage", "known", "unknown", "scans")} for side in sides}
+    if gap is not None:
+        return _open(gap, threshold, observed)
+    known = "; ".join(f"the {side}'s cost is known for {spends[side]['known']} of {spends[side]['scans']} executed "
+                      f"scan(s)" for side in sides)
+    return PASS, observed, threshold, f"{known}, at least the required coverage of {_n(required)}"
+
+
+def _cost_per_assignment(ctx: _Context) -> Result:
+    limit = ctx.policy["cost"]["max_per_assignment_usd"]
+    threshold = {"max_per_assignment_usd": limit}
+    problem = ctx.missing_view()
+    if problem is not None:
+        return _open(problem, threshold)
+    spends, gap = _cost_gap(ctx, ("candidate",))
+    mine = spends["candidate"]
+    if gap is not None:
+        return _open(f"the candidate's cost per scan is not established: {gap}", threshold, mine)
+    text = f"the candidate's recorded cost is {_n(mine['mean'])} USD per executed scan, over {mine['known']} scan(s)"
+    if mine["mean"] <= limit:
+        return PASS, mine, threshold, f"{text}, within the allowed {_n(limit)}"
+    return FAIL, mine, threshold, f"{text}, above the allowed {_n(limit)}"
+
+
+def _cost_increase(ctx: _Context) -> Result:
+    limit = ctx.policy["cost"]["max_increase_ratio"]
+    threshold = {"max_increase_ratio": limit}
+    problem = ctx.missing_view()
+    if problem is not None:
+        return _open(problem, threshold)
+    spends, gap = _cost_gap(ctx, SIDES)
+    if gap is not None:
+        return _open(f"the change in cost is not established: {gap}", threshold, spends)
+    ratio, reading = _ratio_reading(spends["candidate"]["mean"], spends["baseline"]["mean"],
+                                    "recorded cost per executed scan")
+    observed = {"baseline": spends["baseline"]["mean"], "candidate": spends["candidate"]["mean"], "ratio": ratio}
+    if ratio is not None and ratio <= limit:
+        return PASS, observed, threshold, f"{reading}, within the allowed {_n(limit)}"
+    return FAIL, observed, threshold, f"{reading}, above the allowed {_n(limit)}"
+
+
 # --- evaluation ---------------------------------------------------------------------------------
 
 
@@ -848,6 +1005,9 @@ _FIXED: dict[str, Callable[[_Context], Result]] = {
     "completion.min": _completion_minimum,
     "completion.max_decrease": _completion_decrease,
     "target_coverage.min_assessable_mass": _target_coverage,
+    "cost.coverage": _cost_coverage,
+    "cost.per_assignment": _cost_per_assignment,
+    "cost.increase_ratio": _cost_increase,
 }
 
 
@@ -862,6 +1022,8 @@ def _requirement(requirement_id: str, ctx: _Context) -> Result:
     if family == "controls":
         name, _, check = rest.partition(".")
         return _control(ctx, name, check)
+    if family == "burden":
+        return _burden(ctx, rest)
     raise ContractError(f"this build has no evaluator for the requirement {requirement_id}")
 
 

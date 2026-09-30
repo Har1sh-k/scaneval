@@ -578,7 +578,19 @@ def corpus_inputs() -> list[dict]:
             for index in range(1, PROJECTS + 1)]
 
 
+# What each priced system reports a successful scan cost, in USD; every other system reports no cost at all.
+COST = {"baseline": 0.10, "improved": 0.15, "flaky": 0.15}
+
+
 def behave(system: str, index: int) -> dict:
+    """What one system does on project *index*, with the cost its successful scans report."""
+    spec = behavior(system, index)
+    if system in COST and spec["status"] == "success":
+        spec["usage"] = {"wall_seconds": 1.0, "cost_usd": COST[system]}
+    return spec
+
+
+def behavior(system: str, index: int) -> dict:
     """What one system does on project *index*; every scan delivers native-ranked claims.
 
     - baseline detects T-p1 and T-p2 with one claim per scan (recall 2/10).
@@ -1931,3 +1943,319 @@ def test_target_coverage_holds_both_systems_and_passes_when_both_are_assessable(
     flaky = decide(corpus, gate_policy(target_coverage={"min_assessable_mass": 0.9}), "flaky")
     assert requirement(flaky, "target_coverage.min_assessable_mass")["explanation"].startswith(
         "the candidate has 8 of 10 target observations assessable, a mass of 0.8, below the required 0.9")
+
+
+# --- review burden and cost -------------------------------------------------------------------------
+
+
+def test_a_genuine_improvement_passes_every_burden_requirement(corpus):
+    """Both systems deliver one claim per scan: 1 per assignment each, no duplicate, a ratio of 1."""
+    policy = gate_policy(burden={"max_claims_per_assignment": 5, "max_duplicate_share": 0.2,
+                                 "max_increase_ratio": 3.0})
+
+    decision = decide(corpus, policy)
+
+    assert decision["outcome"] == "pass"
+    assert requirement(decision, "burden.claims_per_assignment")["explanation"] == (
+        "the candidate delivered 10 claim record(s) over 10 assignment(s), 1 per assignment, within the allowed 5")
+    assert requirement(decision, "burden.duplicate_share")["explanation"] == (
+        "0 of the candidate's 10 delivered claim record(s) are exact duplicates of another record of the same "
+        "scan, a share of 0, within the allowed 0.2")
+    assert requirement(decision, "burden.increase_ratio")["explanation"] == (
+        "the candidate's claim volume per assignment is 1 against the baseline's 1, a ratio of 1, within the "
+        "allowed 3")
+    assert requirement(decision, "burden.increase_ratio")["observed"] == {"baseline": 1.0, "candidate": 1.0, "ratio": 1.0}
+
+
+def test_a_flag_everything_candidate_fails_the_burden_requirements_whatever_its_recall(corpus):
+    """The flagging system delivers 12 claims per scan against the baseline's 1: 120 records over 10 assignments."""
+    policy = gate_policy(burden={"max_claims_per_assignment": 5, "max_duplicate_share": 0.2,
+                                 "max_increase_ratio": 3.0})
+
+    decision = decide(corpus, policy, "flagging")
+
+    assert requirement(decision, "primary.improvement")["observed"]["candidate"] == 1.0
+    assert decision["outcome"] == "fail"
+    assert decision["failed"] == ["burden.claims_per_assignment", "burden.increase_ratio"]
+    assert requirement(decision, "burden.claims_per_assignment")["explanation"] == (
+        "the candidate delivered 120 claim record(s) over 10 assignment(s), 12 per assignment, above the allowed 5")
+    assert requirement(decision, "burden.increase_ratio")["explanation"] == (
+        "the candidate's claim volume per assignment is 12 against the baseline's 1, a ratio of 12, above the "
+        "allowed 3")
+
+
+def test_a_duplicate_spamming_candidate_fails_the_burden_requirements_without_gaining_detection(corpus):
+    """The duplicating system sends one claim 20 times per scan: 200 records, 10 unique, 190 duplicate copies.
+
+    It detects exactly what the baseline does, so the primary improvement fails too. Its duplicate share is
+    190/200 = 0.95 and its volume 20 claims per assignment against 1: a ratio of 20.
+    """
+    policy = gate_policy(burden={"max_claims_per_assignment": 5, "max_duplicate_share": 0.2,
+                                 "max_increase_ratio": 3.0})
+
+    decision = decide(corpus, policy, "duplicating")
+
+    assert decision["failed"] == ["primary.improvement", "burden.claims_per_assignment", "burden.duplicate_share",
+                                  "burden.increase_ratio"]
+    assert requirement(decision, "primary.improvement")["observed"]["difference"] == 0.0
+    share = requirement(decision, "burden.duplicate_share")
+    assert share["observed"]["duplicate_copies"] == 190 and share["observed"]["unique"] == 10
+    assert share["explanation"] == (
+        "190 of the candidate's 200 delivered claim record(s) are exact duplicates of another record of the same "
+        "scan, a share of 0.95, above the allowed 0.2")
+
+
+def test_silent_and_malformed_candidates_add_no_burden_and_are_failed_elsewhere(corpus):
+    """Delivering nothing is no burden; the silent system fails on detection, the malformed one on completion."""
+    policy = gate_policy(burden={"max_claims_per_assignment": 5, "max_duplicate_share": 0.2,
+                                 "max_increase_ratio": 3.0}, completion={"min": 0.9})
+
+    silent = decide(corpus, policy, "silent")
+    assert [statuses(silent)[f"burden.{name}"] for name in ("claims_per_assignment", "duplicate_share",
+                                                            "increase_ratio")] == ["pass"] * 3
+    assert requirement(silent, "burden.duplicate_share")["explanation"] == (
+        "the candidate delivered no claim record, so it delivered no duplicate copy")
+    assert silent["failed"] == ["primary.improvement"]
+    assert decide(corpus, policy, "malformed")["failed"] == ["primary.improvement", "completion.min"]
+
+
+def test_a_burden_the_comparison_cannot_supply_is_inconclusive_and_an_increase_from_nothing_fails(corpus):
+    """No bundle read means an unknown volume, not zero; a baseline that delivered nothing has no finite ratio."""
+    policy = gate_policy(burden={"max_claims_per_assignment": 5, "max_duplicate_share": 0.2,
+                                 "max_increase_ratio": 3.0})
+
+    def with_volumes(candidate: dict, baseline: dict) -> dict:
+        comparison = deepcopy(corpus["comparisons"]["improved"])
+        comparison["views"][0]["systems"]["candidate"]["slices"][0]["claims"].update(candidate)
+        comparison["views"][0]["systems"]["baseline"]["slices"][0]["claims"].update(baseline)
+        return comparison
+
+    unread = gate.evaluate_gate(policy, with_volumes({"bundles": 0, "records": 0, "unique": 0,
+                                                      "duplicate_copies": 0, "delivered": 0}, {}))
+    assert statuses(unread)["burden.claims_per_assignment"] == "inconclusive"
+    assert requirement(unread, "burden.claims_per_assignment")["explanation"] == (
+        "no result bundle was read for the candidate, so its delivered claim volume is unknown, not zero")
+    assert unread["outcome"] == "inconclusive"
+
+    nothing_before = gate.evaluate_gate(policy, with_volumes({}, {"records": 0, "unique": 0, "duplicate_copies": 0,
+                                                                  "delivered": 0}))
+    assert requirement(nothing_before, "burden.increase_ratio")["status"] == "fail"
+    assert requirement(nothing_before, "burden.increase_ratio")["explanation"] == (
+        "the baseline's claim volume per assignment is zero, so any amount is an unbounded increase over it, above "
+        "the allowed 3")
+    neither = gate.evaluate_gate(policy, with_volumes({"records": 0, "unique": 0, "duplicate_copies": 0, "delivered": 0},
+                                                      {"records": 0, "unique": 0, "duplicate_copies": 0,
+                                                       "delivered": 0}))
+    assert requirement(neither, "burden.increase_ratio")["status"] == "pass"
+
+
+def cost_policy(**changes) -> dict:
+    block = {"min_coverage": 1.0, "max_per_assignment_usd": 0.2, "max_increase_ratio": 2.0}
+    block.update(changes)
+    return gate_policy(cost=block)
+
+
+def test_a_genuine_improvement_passes_every_cost_requirement(corpus):
+    """Every scan of both systems reports its cost: the baseline 0.10 and the improved system 0.15, a ratio of 1.5."""
+    decision = decide(corpus, cost_policy())
+
+    assert decision["outcome"] == "pass"
+    assert [item["id"] for item in decision["requirements"] if item["id"].startswith("cost.")] == [
+        "cost.coverage", "cost.per_assignment", "cost.increase_ratio"]
+    assert requirement(decision, "cost.coverage")["explanation"] == (
+        "the baseline's cost is known for 10 of 10 executed scan(s); the candidate's cost is known for 10 of 10 "
+        "executed scan(s), at least the required coverage of 1")
+    assert requirement(decision, "cost.per_assignment")["explanation"] == (
+        "the candidate's recorded cost is 0.15 USD per executed scan, over 10 scan(s), within the allowed 0.2")
+    assert requirement(decision, "cost.increase_ratio")["explanation"] == (
+        "the candidate's recorded cost per executed scan is 0.15 against the baseline's 0.1, a ratio of 1.5, "
+        "within the allowed 2")
+
+
+def test_a_candidate_that_costs_more_than_allowed_fails(corpus):
+    decision = decide(corpus, cost_policy(max_per_assignment_usd=0.12, max_increase_ratio=1.2))
+
+    assert decision["failed"] == ["cost.per_assignment", "cost.increase_ratio"]
+    assert requirement(decision, "cost.per_assignment")["explanation"].endswith("above the allowed 0.12")
+    assert requirement(decision, "cost.increase_ratio")["explanation"] == (
+        "the candidate's recorded cost per executed scan is 0.15 against the baseline's 0.1, a ratio of 1.5, "
+        "above the allowed 1.2")
+
+
+def test_an_unknown_cost_under_a_cost_constraint_is_inconclusive_never_free(corpus):
+    """The late system reports no cost at all: not zero, unknown, so every cost requirement waits."""
+    decision = decide(corpus, cost_policy(), "late")
+
+    assert decision["outcome"] == "inconclusive" and decision["failed"] == []
+    assert decision["unresolved"] == ["cost.coverage", "cost.per_assignment", "cost.increase_ratio"]
+    assert requirement(decision, "cost.coverage")["explanation"] == (
+        "the candidate's cost is known for 0 of 10 executed scan(s), a coverage of 0, below the required 1")
+    assert requirement(decision, "cost.per_assignment")["explanation"] == (
+        "the candidate's cost per scan is not established: the candidate's cost is known for 0 of 10 executed "
+        "scan(s), a coverage of 0, below the required 1")
+    assert requirement(decision, "cost.per_assignment")["observed"]["mean"] is None
+    quiet = decide(corpus, gate_policy(cost={"max_per_assignment_usd": 1000.0}), "late")
+    assert requirement(quiet, "cost.per_assignment")["status"] == "inconclusive", "a generous cap does not make it free"
+    assert requirement(quiet, "cost.coverage")["explanation"].endswith(
+        "(the policy states no lower minimum, so every cost must be known)")
+
+
+def test_a_cost_coverage_the_policy_accepts_lets_the_known_scans_stand_for_the_rest(corpus):
+    """The flaky system reports the cost of 8 of its 10 scans (the two errors report none): coverage 0.8.
+
+    With the default every cost must be known, so it is unresolved; a policy that accepts 0.8 reads the mean of
+    the eight known scans, 0.15, against its cap.
+    """
+    strict = decide(corpus, cost_policy(min_coverage=0.9), "flaky")
+    assert strict["unresolved"] == ["cost.coverage", "cost.per_assignment", "cost.increase_ratio"]
+    assert requirement(strict, "cost.coverage")["explanation"] == (
+        "the candidate's cost is known for 8 of 10 executed scan(s), a coverage of 0.8, below the required 0.9")
+
+    accepting = decide(corpus, cost_policy(min_coverage=0.8), "flaky")
+    assert statuses(accepting)["cost.coverage"] == statuses(accepting)["cost.per_assignment"] == "pass"
+    assert requirement(accepting, "cost.per_assignment")["observed"]["known"] == 8
+    only_coverage = decide(corpus, gate_policy(cost={"min_coverage": 0.8}), "flaky")
+    assert [item["id"] for item in only_coverage["requirements"] if item["id"].startswith("cost.")] == ["cost.coverage"]
+
+
+def test_a_cost_increase_from_a_free_baseline_is_unbounded(corpus):
+    comparison = deepcopy(corpus["comparisons"]["improved"])
+    comparison["views"][0]["systems"]["baseline"]["slices"][0]["usage"]["cost_usd"] = {
+        "known_sum": 0.0, "known": 10, "unknown": 0, "coverage": 1.0}
+
+    decision = gate.evaluate_gate(cost_policy(), comparison)
+
+    assert requirement(decision, "cost.increase_ratio")["status"] == "fail"
+    assert requirement(decision, "cost.increase_ratio")["explanation"] == (
+        "the baseline's recorded cost per executed scan is zero, so any amount is an unbounded increase over it, "
+        "above the allowed 2")
+
+
+# --- acceptance: the scenario fixtures under one complete policy ------------------------------------
+
+
+def complete_policy(**changes) -> dict:
+    """Every block declared, with fixture tolerances chosen so the improved system meets each of them."""
+    blocks = dict(
+        primary=primary(minimum=0.1, uncertainty={"lower_bound_above": 0.0, "min_confidence": 0.9, "min_clusters": 5}),
+        regressions=[regression("whole-view"), regression("each-project", slice={"dimension": "project"}),
+                     regression("first-position", kind="recall_at_budget", budget=1)],
+        precision=precision_block(min_coverage=0.9, min_interval_lower_bound=0.7, max_decrease_vs_baseline=0.05),
+        controls={"capability_safe": bounds()},
+        completion={"min": 0.9, "max_decrease": 0.02},
+        target_coverage={"min_assessable_mass": 0.9},
+        burden={"max_claims_per_assignment": 5, "max_duplicate_share": 0.2, "max_increase_ratio": 3.0},
+        cost={"min_coverage": 1.0, "max_per_assignment_usd": 0.2, "max_increase_ratio": 2.0})
+    blocks.update(changes)
+    return gate_policy(**blocks)
+
+
+def complete_decision(corpus, estimates, system: str, policy: dict | None = None) -> dict:
+    return decide(corpus, policy or complete_policy(), system, precision_baseline=estimates["baseline"],
+                  precision_candidate=estimates.get(system))
+
+
+def test_a_genuine_improvement_passes_only_when_every_configured_constraint_holds(corpus, estimates):
+    """All 28 requirements of the complete policy hold for the improved system, and none is vacuous."""
+    decision = complete_decision(corpus, estimates, "improved")
+
+    assert decision["outcome"] == "pass" and decision["recommendation_scope"] == "reviewed"
+    assert decision["summary"] == {"requirements": 28, "passed": 28, "failed": 0, "inconclusive": 0}
+    assert decision["blocks"]["not_declared"] == []
+    assert all(item["explanation"] for item in decision["requirements"])
+
+
+@pytest.mark.parametrize("change, requirement_id, status", [
+    (lambda p: p["primary"].update(min_improvement=0.7), "primary.improvement", "fail"),
+    (lambda p: p["primary"]["uncertainty"].update(lower_bound_above=0.55), "primary.uncertainty", "inconclusive"),
+    (lambda p: p["primary"]["uncertainty"].update(min_clusters=11), "primary.uncertainty", "inconclusive"),
+    (lambda p: p["precision"].update(min_value=0.9), "precision.min_value", "fail"),
+    (lambda p: p["precision"].update(min_interval_lower_bound=0.9), "precision.interval", "fail"),
+    (lambda p: p["burden"].update(max_claims_per_assignment=0.5), "burden.claims_per_assignment", "fail"),
+    (lambda p: p["burden"].update(max_increase_ratio=0.5), "burden.increase_ratio", "fail"),
+    (lambda p: p["cost"].update(max_per_assignment_usd=0.1), "cost.per_assignment", "fail"),
+    (lambda p: p["cost"].update(max_increase_ratio=1.2), "cost.increase_ratio", "fail"),
+    (lambda p: p.update(configuration={"allowed_differences": []}), "configuration.allowed_differences",
+     "inconclusive"),
+])
+def test_tightening_any_one_threshold_of_a_passing_policy_flips_the_decision(corpus, estimates, change,
+                                                                             requirement_id, status):
+    """The improved system passes; each tightened tolerance makes exactly its own requirement fail or wait."""
+    policy = complete_policy()
+    change(policy)
+
+    decision = complete_decision(corpus, estimates, "improved", policy)
+
+    assert requirement(decision, requirement_id)["status"] == status
+    assert decision["outcome"] == ("fail" if status == "fail" else "inconclusive")
+    assert (decision["failed"] if status == "fail" else decision["unresolved"]) == [requirement_id]
+
+
+def test_the_always_silent_candidate_fails_on_detection_and_leaves_precision_unestablished(corpus, estimates):
+    """Delivering nothing is quiet and cheap of review, but it detects nothing; no claim exists to estimate."""
+    decision = complete_decision(corpus, estimates, "silent")
+
+    assert decision["outcome"] == "fail"
+    assert decision["failed"] == ["primary.improvement", "primary.uncertainty", "regression.whole-view",
+                                  "regression.each-project", "regression.first-position"]
+    assert statuses(decision)["controls.capability_safe.false_alarm_upper"] == "pass"
+    assert requirement(decision, "precision.binding")["status"] == "inconclusive"
+
+
+def test_the_flag_everything_candidate_fails_precision_controls_and_burden_despite_perfect_recall(corpus, estimates):
+    decision = complete_decision(corpus, estimates, "flagging")
+
+    assert requirement(decision, "primary.improvement")["observed"]["candidate"] == 1.0
+    assert decision["outcome"] == "fail"
+    assert decision["failed"] == ["precision.min_value", "precision.interval",
+                                  "controls.capability_safe.false_alarm_upper", "burden.claims_per_assignment",
+                                  "burden.increase_ratio"]
+    assert decision["unresolved"] == ["cost.coverage", "cost.per_assignment", "cost.increase_ratio"]
+    assert decision["recommendation_scope"] == "reviewed"
+
+
+def test_the_duplicate_spam_candidate_fails_burden_and_gains_no_detection(corpus, estimates):
+    decision = complete_decision(corpus, estimates, "duplicating")
+
+    assert decision["failed"] == ["primary.improvement", "precision.min_value", "precision.interval",
+                                  "burden.claims_per_assignment", "burden.duplicate_share", "burden.increase_ratio"]
+    assert decision["unresolved"] == ["primary.uncertainty", "cost.coverage", "cost.per_assignment",
+                                      "cost.increase_ratio"]
+    assert requirement(decision, "primary.uncertainty")["explanation"].startswith(
+        "the paired interval is degenerate (every replicate agreed, which is not certainty)")
+
+
+def test_the_malformed_output_candidate_fails_completion_and_its_controls_stay_unresolved(corpus, estimates):
+    decision = complete_decision(corpus, estimates, "malformed")
+
+    assert decision["outcome"] == "fail"
+    assert decision["failed"] == ["primary.improvement", "primary.uncertainty", "regression.whole-view",
+                                  "regression.each-project", "regression.first-position", "completion.min",
+                                  "completion.max_decrease"]
+    for check in ("false_alarm_upper", "completed_mass", "assessable_mass"):
+        assert statuses(decision)[f"controls.capability_safe.{check}"] == "inconclusive"
+    assert statuses(decision)["target_coverage.min_assessable_mass"] == "inconclusive"
+
+
+def test_a_flaky_candidate_fails_completion_and_its_failed_scans_are_not_counted_as_quiet(corpus, estimates):
+    decision = complete_decision(corpus, estimates, "flaky")
+
+    assert decision["failed"] == ["completion.min", "completion.max_decrease"]
+    assert "controls.capability_safe.completed_mass" in decision["unresolved"]
+    assert "target_coverage.min_assessable_mass" in decision["unresolved"]
+    assert requirement(decision, "primary.improvement")["status"] == "pass", "detection alone would have passed it"
+
+
+def test_high_recall_cannot_compensate_for_noise_and_no_recall_can_rescue_a_failed_requirement(corpus, estimates):
+    """The flagging system's recall is perfect, and each noise requirement fails on its own.
+
+    Declare only one noise block at a time: precision, control false alarms, or burden each fail the decision
+    although the primary improvement passes by +0.8 in every case.
+    """
+    for block, expected in (
+            ({"precision": precision_block()}, ["precision.min_value"]),
+            ({"controls": {"capability_safe": bounds()}}, ["controls.capability_safe.false_alarm_upper"]),
+            ({"burden": {"max_claims_per_assignment": 5}}, ["burden.claims_per_assignment"])):
+        decision = decide(corpus, gate_policy(**block), "flagging", precision_candidate=estimates["flagging"])
+        assert requirement(decision, "primary.improvement")["observed"]["difference"] == 0.8
+        assert decision["outcome"] == "fail" and decision["failed"] == expected
