@@ -618,7 +618,7 @@ def test_projects_carrying_only_controls_take_no_draw_from_target_intervals(tmp_
 
     whole = slice_of(system(view(aggregate.aggregate([run], policy=policy(seed=11)))))
 
-    assert whole["clusters"] == {"targets": 5, "controls": 5}
+    assert whole["clusters"] == {"targets": 5, "pairs": 0, "controls": 5}
     targets = share_of_draws(11, "targets", [f"acme/p{index}" for index in range(1, 6)], {"acme/p1", "acme/p2"})
     assert detection(whole)["full_output_recall"]["interval"] == {
         "state": "ok", "lower": targets[4], "upper": targets[194], "clusters": 5}
@@ -729,6 +729,8 @@ def test_pair_correctness_counts_confirmed_success_only_and_reports_the_four_out
     Six targets, equal weights 1/6; the five paired ones renormalize to 1/5 each.
     - Q = 1/5; assessable pair mass = 4/5; each resolved outcome has mass 1/5.
     - Availability = 5 * 1/6 = 5/6: T-lonely has no fixed state and is outside P, not a failed pair.
+    - Q's interval resamples the five projects that carry a frozen pair, from the stream labelled
+      .../all/pairs, never acme/lonely: a replicate's Q is the share of its five draws on pair1.
     """
     outcomes = {("v1", "sys-a", 1): scan(hits={"T1": 1}), ("v2", "sys-a", 1): scan(hits={"T2": 1}),
                 ("v5", "sys-a", 1): scan(hits={"T5": 1}),
@@ -748,7 +750,10 @@ def test_pair_correctness_counts_confirmed_success_only_and_reports_the_four_out
     for name in ("correct", "both_flagged", "both_silent", "reversed"):
         assert pairs["outcomes"][name]["pairs"] == 1
         assert pairs["outcomes"][name]["mass"] == 1 / 5
-    assert pairs["interval"]["state"] == "ok"
+    whole = slice_of(system(view(report)))
+    assert whole["clusters"] == {"targets": 6, "pairs": 5, "controls": 5}
+    replicates = share_of_draws(0, "pairs", [f"acme/pair{index}" for index in range(1, 6)], {"acme/pair1"})
+    assert pairs["interval"] == {"state": "ok", "lower": replicates[4], "upper": replicates[194], "clusters": 5}
 
 
 def test_unranked_output_leaves_native_recall_at_budget_null_and_reports_a_labelled_diagnostic(tmp_path):
@@ -963,7 +968,7 @@ def test_resampling_clusters_can_be_families(tmp_path):
     report = aggregate.aggregate([two_project_run(tmp_path)], policy=policy(cluster_by="family"))
 
     assert detection(slice_of(system(view(report))))["full_output_recall"]["interval"]["clusters"] == 3
-    assert slice_of(system(view(report)))["clusters"] == {"targets": 3, "controls": 0}
+    assert slice_of(system(view(report)))["clusters"] == {"targets": 3, "pairs": 0, "controls": 0}
 
 
 # --- refusals -----------------------------------------------------------------------------------

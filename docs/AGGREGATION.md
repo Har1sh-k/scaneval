@@ -67,9 +67,15 @@ Each value is `null` when its denominator is empty, never `0`.
 
 ## Uncertainty
 
-Intervals come from a cluster bootstrap. Clusters are projects or variant families, per the policy. Each replicate draws clusters with replacement and recomputes every metric exactly, with the frozen weights and cluster multiplicities. Target metrics (recall, recall@B, pair correctness) resample the clusters that carry the slice's targets. Control metrics resample the clusters that carry its controls. A project with controls and no target therefore never takes a draw from recall. The slice's `clusters` field counts both.
+Intervals come from a cluster bootstrap. Clusters are projects or variant families, per the policy. Each replicate draws clusters with replacement and recomputes every metric exactly, with the frozen weights and cluster multiplicities. Each metric resamples the clusters that carry its frozen items:
 
-- **Seeding.** Draws come from `resampling.Stream(seed, label="bootstrap/<mode>/<profile>/<slice>/<targets|controls>")`. Every metric of a family, and both systems of a comparison, read the same replicates.
+- recall and recall@B resample the clusters with targets;
+- pair correctness resamples the clusters with a target that has a frozen pair;
+- control metrics resample the clusters with controls.
+
+The schedules fix these sets before any outcome, so a project with controls and no target never takes a draw from recall. The slice's `clusters` field counts all three.
+
+- **Seeding.** Draws come from `resampling.Stream(seed, label="bootstrap/<mode>/<profile>/<slice>/<family>")`, where the family is `targets`, `pairs`, or `controls`. Every metric of a family, and both systems of a comparison, read the same replicates.
 - **Bounds.** The bounds are the sorted replicate values at ranks `max(1, ceil((alpha/2)R))` and `ceil((1 - alpha/2)R)`. The confidence is read as the decimal it is written as: 25 and 975 of 1000 at 0.95.
 - **States.** An interval is `ok`, `degenerate`, `insufficient_clusters`, `unstable`, or `unavailable`:
   - `degenerate`: the two bounding replicate values are equal, a zero-width interval, which is not certainty.

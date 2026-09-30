@@ -35,11 +35,11 @@ as a decimal is read as that decimal), each rounded once to the nearest float wh
 written, so a hand-calculated 2/3 is reported as the float nearest 2/3 and a degenerate interval
 cannot pass for a narrow one through rounding. Usage figures the scanners reported are floats and are
 summed with :func:`math.fsum`. Bootstrap draws come from :class:`scaneval.resampling.Stream` under the
-policy's seed and a label naming the view, the slice, and the family resampled (the clusters carrying
-targets, or those carrying controls). The same run directories and policy therefore
-give byte-identical documents under :func:`scaneval.contracts.canonical_json`, whatever order the
-directories are named in. Nothing here reads a clock, the network, or an unseeded random source, and
-no model or judge is consulted. A report carries no filesystem path.
+policy's seed and a label naming the view, the slice, and the family resampled: the clusters carrying
+targets, those carrying a frozen pair, or those carrying controls. The same run directories and policy
+therefore give byte-identical documents under :func:`scaneval.contracts.canonical_json`, whatever
+order the directories are named in. Nothing here reads a clock, the network, or an unseeded random
+source, and no model or judge is consulted. A report carries no filesystem path.
 
 What this is not. It scores no claim and approves nothing, and it reads no label content beyond the
 schedule's ids, kinds, levels, and groupings. It does not estimate reviewed precision or review time
@@ -917,13 +917,14 @@ def _leave_one_project_out(corpus: _Corpus, units: Units, weighting: str, policy
 
 
 def _detection(corpus: _Corpus, units: Units, pair_units: dict, slice_: tuple[str, str | None],
-               weighting: str, policy: dict, budgets: list[int],
-               resampler: _Resampler | None) -> tuple[dict, dict[str, _Ratio], dict[str, Fraction]]:
+               weighting: str, policy: dict, budgets: list[int], resampler: _Resampler | None,
+               pair_resampler: _Resampler | None) -> tuple[dict, dict[str, _Ratio], dict[str, Fraction]]:
     """Every target metric of one slice under one weighting, the ratios a comparison pairs, and masses.
 
     Full-output recall counts a confirmed hit from valid output whether or not the output is ranked.
     Native recall@B needs a measured first-hit rank; it is null whenever any weighted observation's
     budget position is unmeasurable, and its lower bound then counts those observations as misses.
+    Recall intervals draw from *resampler*; pair correctness draws from *pair_resampler*.
     """
     uncertainty = policy["uncertainty"]
     block: dict[str, Any] = {
@@ -977,7 +978,8 @@ def _detection(corpus: _Corpus, units: Units, pair_units: dict, slice_: tuple[st
                          "value": _float(_ratio(weights, numerators, observed_mass, cluster_of).value)})
 
     outcomes = [outcome for instances in units.values() for _key, _k, found in instances for outcome in found]
-    pair_block, correctness, availability = _pairs(weights, pair_units, cluster_of, resampler, uncertainty)
+    pair_block, correctness, availability = _pairs(weights, pair_units, cluster_of, pair_resampler,
+                                                   uncertainty)
     if correctness is not None:
         parts["pair_correctness"] = correctness
     completed = mass(lambda outcome: outcome["completed"])
@@ -1129,8 +1131,8 @@ class _SliceResult:
 
     ``parts`` are the ratios paired intervals are drawn for, and ``exact`` the masses whose differences
     a comparison reports without an interval, both kept exact until the difference is taken; each is
-    keyed first by its family, ``detection`` or ``controls``. ``resamplers`` holds the draws of each
-    family.
+    keyed first by its block, ``detection`` or ``controls``. ``resamplers`` holds the draws of each
+    resampling family, ``targets``, ``pairs``, and ``controls`` (:func:`_family`).
     """
 
     slice_: tuple[str, str | None]
@@ -1162,12 +1164,14 @@ class _Context:
                   universe: list[str]) -> _Resampler | None:
         """The draws of one family of one slice, labelled ``bootstrap/<mode>/<profile>/<slice>/<family>``.
 
-        ``targets`` draws the clusters that carry the slice's targets and serves every target metric,
-        pair correctness included; ``controls`` draws the clusters that carry its controls and serves
-        every control metric. Resampling each family over its own clusters keeps every replicate a
-        full cluster bootstrap of that family: a project with controls and no target never takes a
-        draw from recall. Two systems whose slices resample the same clusters read the same draws,
-        which is what makes a comparison's intervals paired. ``None`` when there is no cluster.
+        ``targets`` draws the clusters that carry the slice's targets and serves recall and recall@B;
+        ``pairs`` draws the clusters that carry a target with a frozen pair and serves pair
+        correctness; ``controls`` draws the clusters that carry its controls and serves every control
+        metric. Each family's clusters are fixed by the schedules, never by an outcome, and resampling
+        each over its own keeps every replicate a full cluster bootstrap of that family: a project with
+        controls and no target never takes a draw from recall. Two systems whose slices resample the
+        same clusters read the same draws, which is what makes a comparison's intervals paired.
+        ``None`` when there is no cluster.
         """
         if not universe:
             return None
@@ -1238,24 +1242,26 @@ def _evaluate_slice(context: _Context, frame: _Frame, slice_: tuple[str, str | N
                       for name, found in control_units.items()}
     slice_pairs = {canonical: rows for canonical, rows in pair_units.items() if canonical in slice_units}
     keys = [key for key in frame.inputs if _in_slice(corpus.inputs[key], slice_)]
-    target_clusters = sorted({corpus.targets[canonical][cluster_by] for canonical in slice_units})
-    control_clusters = sorted({corpus.controls[canonical][cluster_by]
-                               for found in slice_controls.values() for canonical in found})
-    resamplers = {
-        "detection": context.resampler(frame.mode, frame.profile, slice_, "targets", target_clusters),
-        "controls": context.resampler(frame.mode, frame.profile, slice_, "controls", control_clusters)}
+    clusters = {
+        "targets": sorted({corpus.targets[canonical][cluster_by] for canonical in slice_units}),
+        "pairs": sorted({corpus.targets[canonical][cluster_by] for canonical in slice_pairs}),
+        "controls": sorted({corpus.controls[canonical][cluster_by]
+                            for found in slice_controls.values() for canonical in found})}
+    resamplers = {family: context.resampler(frame.mode, frame.profile, slice_, family, universe)
+                  for family, universe in clusters.items()}
     parts: dict[tuple[str, ...], _Ratio] = {}
     exact: dict[tuple[str, ...], Fraction | None] = {}
     detection = []
     for weighting in policy["views"]:
         block, found, masses = _detection(corpus, slice_units, slice_pairs, slice_, weighting, policy,
-                                          budgets, resamplers["detection"])
+                                          budgets, resamplers["targets"], resamplers["pairs"])
         detection.append(block)
         parts.update({("detection", weighting, name): ratio for name, ratio in found.items()})
         exact.update({("detection", weighting, name): value for name, value in masses.items()})
     controls = {}
     for name in CONTROL_CLASSES:
-        block, found, masses = _controls(corpus, slice_controls[name], slice_, policy, resamplers["controls"])
+        block, found, masses = _controls(corpus, slice_controls[name], slice_, policy,
+                                         resamplers["controls"])
         controls[name] = block
         parts.update({("controls", name, metric): ratio for metric, ratio in found.items()})
         exact.update({("controls", name, metric): value for metric, value in masses.items()})
@@ -1265,7 +1271,7 @@ def _evaluate_slice(context: _Context, frame: _Frame, slice_: tuple[str, str | N
     block = {"slice": {"dimension": slice_[0], "value": slice_[1]},
              "canonical_targets": len(slice_units), "canonical_controls": len(canonical_controls),
              "inputs": len(keys),
-             "clusters": {"targets": len(target_clusters), "controls": len(control_clusters)},
+             "clusters": {family: len(universe) for family, universe in clusters.items()},
              "detection": detection, "controls": controls,
              "completion": completion, "claims": _claims(observations), "usage": _usage(observations)}
     return _SliceResult(slice_, block, parts, exact, resamplers)
@@ -1633,6 +1639,13 @@ def configuration_differences(baseline: dict, candidate: dict) -> list[dict]:
     return rows
 
 
+def _family(key: tuple[str, ...]) -> str:
+    """The resampling family a paired part draws from: ``controls``, ``pairs``, or ``targets``."""
+    if key[0] == "controls":
+        return "controls"
+    return "pairs" if key[-1] == "pair_correctness" else "targets"
+
+
 def _difference(context: _Context, baseline: _SliceResult, candidate: _SliceResult) -> dict:
     """Candidate minus baseline for one slice, each interval from the same replicates of both systems.
 
@@ -1640,8 +1653,8 @@ def _difference(context: _Context, baseline: _SliceResult, candidate: _SliceResu
     side is undefined, and so is its interval.
     """
     uncertainty = context.policy["uncertainty"]
-    for family in ("detection", "controls"):
-        mine, theirs = baseline.resamplers[family], candidate.resamplers[family]
+    for family, mine in baseline.resamplers.items():
+        theirs = candidate.resamplers[family]
         if (mine is None) != (theirs is None) or (mine is not None and mine.universe != theirs.universe):
             raise ContractError(f"slice {_slice_key(baseline.slice_)} resamples different {family} clusters "
                                 "for the two systems")
@@ -1655,7 +1668,7 @@ def _difference(context: _Context, baseline: _SliceResult, candidate: _SliceResu
         if left is None or right is None or left.value is None or right.value is None:
             return {"value": None, "interval": _unavailable_interval()}
         return {"value": float(right.value - left.value),
-                "interval": _bootstrap([left, right], _minus, baseline.resamplers[key[0]], uncertainty)}
+                "interval": _bootstrap([left, right], _minus, baseline.resamplers[_family(key)], uncertainty)}
 
     detection = []
     for left, right in zip(baseline.block["detection"], candidate.block["detection"]):

@@ -1395,11 +1395,16 @@
           "additionalProperties": false,
           "required": [
             "targets",
+            "pairs",
             "controls"
           ],
-          "description": "The resampling clusters carrying the slice's targets, which every target metric resamples, and those carrying its controls, which every control metric resamples.",
+          "description": "The resampling clusters of each family: those carrying the slice's targets (recall and recall@B), those carrying a target with a frozen pair (pair correctness), and those carrying its controls (control metrics).",
           "properties": {
             "targets": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "pairs": {
               "type": "integer",
               "minimum": 0
             },
