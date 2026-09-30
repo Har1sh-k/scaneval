@@ -3,10 +3,11 @@
 Every test here that concerns the oci backend talks to a scripted engine (:class:`FakeDocker`)
 that records the exact docker argument lists the backend sends and answers them the way Docker 29
 does, so what is checked is what the backend asks for and what it records, never what a real
-engine did. The rest run the pieces that need no engine at all: the reads of files a scanner
-wrote, the routing of ``run_command``, the selection of a backend, the egress proxy script on the
-loopback interface, and the docker client against a stand-in CLI. No network, no model calls, no
-engine.
+engine did; the tests that run a real engine are in ``test_v2_isolation_docker.py``. The rest run
+the pieces that need no engine at all: the reads of files a scanner wrote, the routing of
+``run_command``, the selection of a backend, the egress proxy script on the loopback interface,
+the docker client against a stand-in CLI, and the runner with the engine scripted. No network, no
+model calls, no engine.
 """
 
 from __future__ import annotations
@@ -25,19 +26,21 @@ import time
 
 import pytest
 
-from scaneval import isolation
+from scaneval import cases, isolation
 from scaneval.adapters import get_adapter
 from scaneval.adapters import base as base_module
 from scaneval.adapters.base import (Adapter, AdapterError, CommandResult, NativeOutcome, SystemSpec, build_env,
                                     run_command, tail_text)
 from scaneval.adapters.semgrep import SemgrepAdapter, _binary, semgrep_version
-from scaneval.contracts import validate_document
+from scaneval.cli import main
+from scaneval.contracts import canonical_json, validate_document
 from scaneval.execution import PreparedInput, run_invocation
 from scaneval.isolation import IsolationError, backend_for, refusal_for, resolve_execution
 from scaneval.isolation import egress_proxy
 from scaneval.isolation import oci as oci_module
 from scaneval.isolation.oci import DockerClient, DockerResult, OciBackend
 from scaneval.materialize import hash_exported_tree
+from scaneval.runner import run_from_config
 
 
 CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
@@ -45,6 +48,8 @@ IMAGE = "scanner:1@sha256:" + "a" * 64
 PROXY = "proxy:1@sha256:" + "b" * 64
 NEVER_STARTED = "0001-01-01T00:00:00Z"
 VULNERABLE = "import subprocess\n\n\ndef run(cmd):\n    return subprocess.run(cmd, shell=True)\n"
+REPRESENTS = ("This case tests caller-controlled shell command construction under a trusted-argument "
+              "assumption, and adds a single-file Python sink for the isolation tests.")
 mkfifo_required = pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no named pipes on this platform")
 
 
@@ -1134,3 +1139,134 @@ def test_semgrep_takes_the_images_own_binary_under_oci_and_mounts_its_pinned_che
     assert SemgrepAdapter().runtime_mounts(spec, legacy) == (str(root / "go"), str(root / "python"))
     with pytest.raises(AdapterError, match="run prepare"):
         SemgrepAdapter().runtime_mounts(spec, {})
+
+
+# --- the runner ------------------------------------------------------------------------------
+
+
+def git(*args: str, cwd: Path) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True,
+        env={**os.environ, "GIT_AUTHOR_NAME": "u", "GIT_AUTHOR_EMAIL": "u@x", "GIT_COMMITTER_NAME": "u",
+             "GIT_COMMITTER_EMAIL": "u@x", "GIT_CONFIG_GLOBAL": "/dev/null"},
+    ).stdout.strip()
+
+
+@pytest.fixture
+def pilot(tmp_path: Path) -> dict:
+    repo = tmp_path / "upstream"
+    (repo / "src").mkdir(parents=True)
+    git("init", "-q", "-b", "main", cwd=repo)
+    git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=repo)
+    (repo / "src" / "app.py").write_text(VULNERABLE, encoding="utf-8")
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "first", cwd=repo)
+    pack = cases.new_pack("test", "isolation-pilot", "Local fixture pack for the isolation tests.")
+    cases.add_snapshot(pack, {
+        "snapshot_id": "snap-a", "repository": {"url": str(repo), "name": "widget"},
+        "commit": git("rev-parse", "HEAD", cwd=repo), "reference": "Fixture commit; no advisory is claimed.",
+        "languages": ["python"], "workload": "conventional_application", "component_role": "application",
+        "license": {"spdx": None, "verified": False, "note": "Local fixture repository."}})
+    cases.add_case(pack, cases.draft_case(
+        "case-a", snapshot_id="snap-a", kind="command_injection",
+        description="Caller-controlled command string reaches subprocess with shell=True.",
+        represents=REPRESENTS, workload="conventional_application", component_role="application", aliases=[],
+        evidence=[cases.evidence("source", origin="research_note", kind="source_inspection",
+                                 reference="src/app.py", note="Fixture inspection, not an advisory.")],
+        accepted_locations=[{"path": "src/app.py", "start_line": 5, "end_line": 5, "role": "sink", "note": ""}]))
+    cases.save_pack(tmp_path / "pack.json", pack)
+    (tmp_path / "work").mkdir()
+    return {"root": tmp_path, "work": tmp_path / "work"}
+
+
+def write_config(root: Path, systems: list[dict], *, policy: str = "none") -> Path:
+    config = {"schema_version": "2.1", "run_id": "run-oci", "pack": "pack.json", "cache_root": "cache",
+              "inputs": [{"snapshot_id": "snap-a"}], "systems": systems, "repetitions": 1,
+              "timeout_seconds": 60, "trace_mode": "off", "network_policy": policy}
+    path = root / "run-config.json"
+    path.write_text(canonical_json(config) + "\n", encoding="utf-8")
+    return path
+
+
+def test_the_runner_skips_llm_harness_and_deepsec_under_oci_before_they_prepare(pilot, monkeypatch):
+    prepared = []
+    for name in ("llm-harness", "deepsec"):
+        adapter_class = type(get_adapter(name))
+        monkeypatch.setattr(adapter_class, "prepare", lambda self, spec, cache_root: prepared.append(spec.system_id))
+    oci = {"backend": "oci", "image": IMAGE}
+    config = write_config(pilot["root"], [
+        {"system_id": "harness-oci", "adapter": "llm-harness", "config": {}, "execution": oci},
+        {"system_id": "deepsec-oci", "adapter": "deepsec", "config": {}, "execution": oci}])
+    manifest = run_from_config(config, pilot["root"] / "out", clock=CLOCK, workspace_root=pilot["work"])
+    assert prepared == []
+    for system in manifest["systems"]:
+        assert system["skipped_reason"].startswith("IsolationError: the oci execution backend refuses adapter")
+        assert system["preparation"] == {}
+    assert {row["status"] for row in manifest["invocations"]} == {"skipped"}
+    assert all("refuses adapter" in row["skipped_reason"] for row in manifest["invocations"])
+    assert list(pilot["work"].iterdir()) == []
+
+
+def test_a_system_whose_execution_block_cannot_be_held_is_skipped_never_run_locally(pilot):
+    """The contract accepts these limits; the backend cannot hold them, so the system is not run at all."""
+    adapter = ScannerAdapter()
+    config = write_config(pilot["root"], [{
+        "system_id": "fixture-oci", "adapter": "container-fixture", "config": {},
+        "execution": {"backend": "oci", "image": IMAGE, "limits": {"memory_mb": 128, "tmpfs_mb": 128}}}])
+    manifest = run_from_config(config, pilot["root"] / "out", clock=CLOCK, workspace_root=pilot["work"],
+                               adapters={"container-fixture": adapter})
+    [system] = manifest["systems"]
+    assert system["skipped_reason"].startswith("IsolationError: execution.limits.tmpfs_mb (128) must be smaller")
+    [row] = manifest["invocations"]
+    assert row["status"] == "skipped" and adapter.prepared == 0 and adapter.results == []
+
+
+def test_the_runner_runs_an_oci_compatible_adapter_in_containers_and_leaves_nothing_behind(pilot, monkeypatch, tmp_path):
+    fake = FakeDocker(behavior=finds_one)
+    monkeypatch.setattr(oci_module, "DockerClient", lambda: fake)
+    adapter = ScannerAdapter()
+    config = write_config(pilot["root"], [{"system_id": "fixture-oci", "adapter": "container-fixture", "config": {},
+                                           "execution": {"backend": "oci", "image": IMAGE}}])
+    out = pilot["root"] / "out"
+    manifest = run_from_config(config, out, clock=CLOCK, workspace_root=pilot["work"],
+                               adapters={"container-fixture": adapter})
+    [row] = manifest["invocations"]
+    assert manifest["status"] == "completed" and row["status"] == "success" and row["claim_records"] == 1
+    assert adapter.prepared == 1
+    assert not [warning for warning in manifest["warnings"] if "oci" in warning or "scratch" in warning]
+    bundle = out / row["bundle_path"]
+    execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))
+    assert execution["schema_version"] == "2.1" and execution["isolation"]["enforced"] is True
+    assert execution["network_policy"] == {"declared": "none", "enforced": True,
+                                           "note": "Enforced by the execution backend; see isolation.network."}
+    assert list(pilot["work"].iterdir()) == [] and fake.containers == {} and fake.networks == {}
+    # No mount reaches the run directory, where the frozen pack and the labels live.
+    for source in _mount_sources(fake.creates()[0]):
+        assert not source.startswith(str(out)) and not str(out).startswith(source + "/")
+
+    # Replay needs neither an engine nor a network: sockets and child processes are both refused.
+    def refused(*args, **kwargs):
+        raise AssertionError("replay tried to open a socket or start a process")
+
+    monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent/docker.sock")
+    monkeypatch.setattr(socket, "socket", refused)
+    monkeypatch.setattr(subprocess, "Popen", refused)
+    replayed = tmp_path / "replayed.json"
+    assert main(["replay", str(bundle), "--output", str(replayed)]) == 0
+    assert replayed.read_bytes() == (bundle / "evaluation.json").read_bytes()
+
+
+def test_an_engine_refusal_is_a_recorded_failed_invocation_and_the_run_goes_on(pilot, monkeypatch):
+    """Nothing is skipped and nothing runs locally instead: the invocation records the refusal."""
+    monkeypatch.setattr(oci_module, "DockerClient", lambda: FakeDocker(reachable=False))
+    adapter = ScannerAdapter()
+    config = write_config(pilot["root"], [{"system_id": "fixture-oci", "adapter": "container-fixture", "config": {},
+                                           "execution": {"backend": "oci", "image": IMAGE}}])
+    out = pilot["root"] / "out"
+    manifest = run_from_config(config, out, clock=CLOCK, workspace_root=pilot["work"],
+                               adapters={"container-fixture": adapter})
+    [row] = manifest["invocations"]
+    assert manifest["status"] == "completed" and row["status"] == "error" and adapter.results == []
+    result = json.loads((out / row["bundle_path"] / "result.json").read_text(encoding="utf-8"))
+    assert "engine is not reachable" in result["error"]["message"]
+    assert list(pilot["work"].iterdir()) == []
