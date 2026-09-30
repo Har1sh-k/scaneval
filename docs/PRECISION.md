@@ -74,7 +74,7 @@ scaneval precision estimate sample.json --reviews reviews.json --output estimate
   - A reviewer who changes their mind records a new entry, and their earlier one stays in the history.
   - Appends are not locked, so record one at a time.
 - **Resolution** of each sampled unit. "Latest" means latest in chain order, never by timestamp. Reviewers are distinguished by their names exactly as written.
-  - The latest adjudication wins (`adjudicated`).
+  - The latest adjudication decides the unit's class. It is `adjudicated` evidence only when at least one independent reviewer other than the adjudicator also reviewed the unit. An adjudication with no independent review by another name rests on one person: the class is the adjudicator's and the basis is `single_review`, whatever role the entry states.
   - Otherwise each independent reviewer's latest entry counts once. One reviewer gives `single_review`; two or more who agree give `double_review`.
   - Any disagreement leaves the unit unresolved (`disagreement`) until an adjudicator records an outcome.
   - A unit with no review is unresolved (`nonresponse`).
@@ -100,8 +100,8 @@ With π_h = n_h/N_h, the Horvitz-Thompson total of class c is N̂_c = Σ over sa
 The interval uses the stratified linearized variance of the ratio R = T/X, where X = T+F. Each sampled unit scores z = (1[true] − R·1[true or false])/X, and V̂ = Σ_h N_h² (1 − n_h/N_h) s²_h / n_h, where s²_h is the sample variance of z in stratum h. The interval is R ± z_{(1+c)/2}·√V̂, clipped to [0, 1], with confidence `--confidence` (default 0.95). Its states:
 
 - `ok`;
-- `census`: every sampled stratum was taken whole, so there is no sampling variance;
-- `degenerate`: zero variance from a sample that is not a census. The normal approximation has failed, so no bounds are given;
+- `census`: every stratum was taken whole, none left uncovered, so there is no sampling variance;
+- `degenerate`: zero variance from a sample that is not a census. The normal approximation has failed, so no bounds are given. A sample with an uncovered stratum is never a census, whatever its covered strata show: nothing was observed of the rest, and a zero-width interval would state certainty about it;
 - `insufficient`: a stratum not taken whole drew one unit, so its variance cannot be estimated;
 - `unavailable`: nothing resolved true or false.
 

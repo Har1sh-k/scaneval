@@ -12,10 +12,12 @@ fails, else ``inconclusive`` when any is inconclusive, else ``pass``. Requiremen
 against one another: detection cannot compensate for noise, false alarms, burden, cost, or failed
 scans, and a strong figure on one requirement never turns another's failure into a pass. A requirement
 is inconclusive, never a pass, when what it needs is missing or cannot be trusted: an unavailable or
-unmeasurable metric, an interval that is not ``ok``, an aborted run, a difference the policy did not
-intend to measure, evidence below the scope the policy requires, a precision estimate that is missing
-or not bound to the comparison, no eligible control, a completed, assessable, or covered mass below
-its minimum, or a claim volume or cost nobody recorded. No absent figure is read as a perfect one.
+unmeasurable metric, an interval that is not ``ok``, an aborted run, a run narrowed below the inputs its
+configuration names, a difference the policy did not intend to measure, evidence below the scope the
+policy requires, a precision estimate that is missing or not bound to the comparison, no eligible
+control, a completed, assessable, or covered mass below its minimum, or a claim volume or cost nobody
+recorded, which includes those of a scan that ran and left no usable bundle. No absent figure is read
+as a perfect one.
 
 What is decided from what. Only the documents passed in: the policy, the comparison report, and the
 precision estimates. The decision is a function of them and of the evaluator version, so the same
@@ -332,17 +334,50 @@ def _contract_violations(comparison: dict) -> list[str]:
     return found
 
 
+def _narrowed_runs(comparison: dict) -> list[dict]:
+    """Every compared run whose schedule leaves out inputs its configuration names, as its row records.
+
+    ``scaneval run --only-input`` keeps the run's configuration whole and shortens its schedule. What a
+    narrowing drops it drops for both systems, so two systems assigned that one schedule agree however
+    the inputs were chosen, and nothing else in the comparison can show that some were left out. The
+    row states how many inputs the configuration names and what the manifest recorded as excluded;
+    either showing that inputs were left out is a narrowing. A run narrowed only by system schedules
+    every configured input and is not one.
+    """
+    found = []
+    for run in comparison["runs"]:
+        excluded = run["selection"]["excluded_inputs"]
+        if run["configured_inputs"] > run["inputs"] or excluded:
+            found.append({"run_id": run["run_id"], "configured_inputs": run["configured_inputs"],
+                          "inputs": run["inputs"], "excluded_inputs": list(excluded)})
+    return found
+
+
+def _narrowing_text(run: dict) -> str:
+    count = max(run["configured_inputs"] - run["inputs"], len(run["excluded_inputs"]))
+    named = f" ({_names(run['excluded_inputs'])})" if run["excluded_inputs"] else ""
+    return f"run {run['run_id']} was narrowed and does not schedule {count} input(s) its configuration names{named}"
+
+
 def _contract_shared(ctx: _Context) -> Result:
     comparison = ctx.comparison
-    threshold = "one frozen contract for both systems, every recorded count agreeing, every binding named"
+    threshold = ("one frozen contract for both systems, every recorded count agreeing, every binding named, and "
+                 "no compared run narrowed below the inputs its configuration names")
     violations = _contract_violations(comparison)
     if violations:
         return (FAIL, {"violations": violations}, threshold,
                 "the comparison's own records show the two systems were not assigned the same frozen work, "
                 f"or do not bind to the runs they name: {_names(violations)}")
     contract = comparison["contract"]
-    return (PASS, {"contract_sha256": contract["structure_sha256"], "inputs": contract["inputs"],
-                   "pairs": contract["pairs"], "views": len(comparison["views"])}, threshold,
+    observed = {"contract_sha256": contract["structure_sha256"], "inputs": contract["inputs"],
+                "pairs": contract["pairs"], "views": len(comparison["views"])}
+    narrowed = _narrowed_runs(comparison)
+    if narrowed:
+        return _open("the two systems share one frozen contract, but "
+                     f"{_names([_narrowing_text(run) for run in narrowed])}: an input left out of a run's schedule is "
+                     "left out for both systems, so nothing in the comparison shows that it was not dropped after "
+                     "its results were seen", threshold, {**observed, "narrowed_runs": narrowed})
+    return (PASS, observed, threshold,
             f"{ctx.names['baseline']} and {ctx.names['candidate']} share one frozen contract of "
             f"{contract['inputs']} input(s) and {contract['pairs']} pair(s), and every count the comparison "
             f"records for them agrees in each of its {len(comparison['views'])} view(s)")
@@ -458,6 +493,20 @@ def _primary_uncertainty(ctx: _Context) -> Result:
             "comparison's confidence")
 
 
+def _slice_values(ctx: _Context, dimension: str, value: str | None) -> list[str | None]:
+    """The slices of one dimension a policy entry covers, in name order.
+
+    An entry that names a value covers that slice, and so does one on the whole view. One that names a
+    project or workload dimension and no value covers every slice of it the comparison holds that
+    carries targets, so it is empty when none does. Read from the baseline: both systems share one
+    frozen contract.
+    """
+    if value is None and dimension != "all":
+        return sorted(name for (kind, name) in ctx.differences if kind == dimension and name is not None
+                      and ctx.slices["baseline"][(kind, name)]["canonical_targets"] > 0)
+    return [value]
+
+
 def _regression(ctx: _Context, entry: dict) -> Result:
     """One protected detection metric: it may not fall by more than the entry allows in any slice it covers.
 
@@ -475,13 +524,9 @@ def _regression(ctx: _Context, entry: dict) -> Result:
     problem = ctx.missing_view()
     if problem is not None:
         return _open(problem, threshold)
-    if value is None and dimension != "all":
-        values = sorted(name for (kind, name) in ctx.differences if kind == dimension and name is not None
-                        and ctx.slices["baseline"][(kind, name)]["canonical_targets"] > 0)
-        if not values:
-            return _open(f"the comparison has no {dimension} slice carrying targets in {ctx.view_name}", threshold)
-    else:
-        values = [value]
+    values = _slice_values(ctx, dimension, value)
+    if not values:
+        return _open(f"the comparison has no {dimension} slice carrying targets in {ctx.view_name}", threshold)
     rows, failures, unresolved = [], [], []
     for name in values:
         label = _slice_text(dimension, name)
@@ -834,33 +879,84 @@ def _completion_decrease(ctx: _Context) -> Result:
     return FAIL, observed, threshold, f"{text}, a decrease of more than the allowed {_n(limit)}"
 
 
+def _coverage_readings(ctx: _Context) -> list[tuple[str, str | None, str]]:
+    """Every (dimension, value, weighting) the policy's detection metrics read, without repeats.
+
+    The whole view under the primary weighting comes first, then the slice the primary metric reads, then
+    every slice each regression covers, under that regression's own weighting: a weighting changes how
+    much of a slice's frozen weight a target carries, so a slice is held to the mass it is read under.
+    """
+    primary = ctx.policy["primary"]
+    slice_ = primary.get("slice", WHOLE_VIEW)
+    readings = [("all", None, primary["weighting"]), (slice_["dimension"], slice_.get("value"), primary["weighting"])]
+    for entry in ctx.regressions.values():
+        covered = entry.get("slice", WHOLE_VIEW)
+        readings += [(covered["dimension"], name, entry["weighting"])
+                     for name in _slice_values(ctx, covered["dimension"], covered.get("value"))]
+    return list(dict.fromkeys(readings))
+
+
+def _reading_text(dimension: str, value: str | None, weighting: str, primary: str) -> str:
+    """One coverage reading as the explanations name it; the weighting only when it is not the primary's."""
+    return _slice_text(dimension, value) + ("" if weighting == primary else f" ({weighting})")
+
+
 def _target_coverage(ctx: _Context) -> Result:
-    """The assessable target mass of BOTH systems: an unresolved baseline flatters any candidate."""
+    """The assessable target mass of BOTH systems, in the whole view and in every slice the policy's metrics read.
+
+    An unresolved baseline flatters any candidate, and the recall a requirement reads may be a slice's:
+    the primary metric's own, or one a regression protects. A whole-view mass alone would let a slice whose
+    baseline was never resolved pass on the strength of the rest of the view, so each slice is held to the
+    minimum too, under the weighting its metric reads. A slice the comparison lacks, or cannot weight, is
+    unresolved rather than skipped.
+    """
     minimum = ctx.policy["target_coverage"]["min_assessable_mass"]
     weighting = ctx.policy["primary"]["weighting"]
     threshold = {"weighting": weighting, "min_assessable_mass": minimum}
     problem = ctx.missing_view()
     if problem is not None:
         return _open(problem, threshold)
-    covered = {}
-    for side in SIDES:
-        block = next((item for item in ctx.whole(side)["detection"] if item["weighting"] == weighting), None)
-        if block is None or block["state"] != "ok":
-            return _open(f"{weighting} target coverage is unavailable for the {side}: "
-                         f"{'no such weighting' if block is None else block['reason']}", threshold)
-        covered[side] = block["coverage"]
-    observed = {side: {key: covered[side][key] for key in ("assessable_mass", "completed_mass", "assessable",
+    readings = []
+    for dimension, value, name in _coverage_readings(ctx):
+        covered = {}
+        for side in SIDES:
+            block = ctx.slices[side].get((dimension, value))
+            if block is None:
+                return _open(f"the comparison has no {_slice_text(dimension, value)} of {ctx.view_name}", threshold)
+            found = next((item for item in block["detection"] if item["weighting"] == name), None)
+            if found is None or found["state"] != "ok":
+                where = "" if dimension == "all" else f" in {_slice_text(dimension, value)}"
+                return _open(f"{name} target coverage is unavailable for the {side}{where}: "
+                             f"{'no such weighting' if found is None else found['reason']}", threshold)
+            covered[side] = found["coverage"]
+        readings.append(((dimension, value, name), covered))
+
+    def figures(covered: dict) -> dict:
+        return {side: {key: covered[side][key] for key in ("assessable_mass", "completed_mass", "assessable",
                                                            "target_observations")} for side in SIDES}
-    short = [side for side in SIDES if covered[side]["assessable_mass"] < minimum]
-    if not short:
-        return (PASS, observed, threshold,
-                f"the assessable target mass is {_n(covered['baseline']['assessable_mass'])} for the baseline and "
-                f"{_n(covered['candidate']['assessable_mass'])} for the candidate, at least the required {_n(minimum)}")
-    parts = [f"the {side} has {covered[side]['assessable']} of {covered[side]['target_observations']} target "
-             f"observations assessable, a mass of {_n(covered[side]['assessable_mass'])}" for side in short]
-    return _open(f"{'; '.join(parts)}, below the required {_n(minimum)}: unresolved or failed observations count "
-                 "as misses, so recall over them is a lower bound and the improvement is not established",
-                 threshold, observed)
+
+    (_, whole), *others = readings
+    observed = {**figures(whole), "slices": [
+        {"slice": {"dimension": dimension, "value": value}, "weighting": name, **figures(covered)}
+        for (dimension, value, name), covered in others]}
+    parts = []
+    for (dimension, value, name), covered in readings:
+        where = ("" if (dimension, name) == ("all", weighting) else
+                 f"in {_reading_text(dimension, value, name, weighting)} ")
+        parts += [f"{where}the {side} has {covered[side]['assessable']} of {covered[side]['target_observations']} "
+                  f"target observations assessable, a mass of {_n(covered[side]['assessable_mass'])}"
+                  for side in SIDES if covered[side]["assessable_mass"] < minimum]
+    if not parts:
+        text = (f"the assessable target mass is {_n(whole['baseline']['assessable_mass'])} for the baseline and "
+                f"{_n(whole['candidate']['assessable_mass'])} for the candidate, at least the required {_n(minimum)}")
+        if others:
+            names = _names([_reading_text(dimension, value, name, weighting) for (dimension, value, name), _ in others])
+            text += (f", and at least that in each of the {len(others)} slice(s) the policy's detection metrics "
+                     f"also read ({names})")
+        return PASS, observed, threshold, text
+    shown = "; ".join(parts[:3]) + (f"; and {len(parts) - 3} more" if len(parts) > 3 else "")
+    return _open(f"{shown}, below the required {_n(minimum)}: unresolved or failed observations count as misses, so "
+                 "recall over them is a lower bound and the improvement is not established", threshold, observed)
 
 
 # --- review burden and cost ---------------------------------------------------------------------
@@ -892,7 +988,8 @@ def _volume(ctx: _Context, side: str) -> tuple[dict, dict[str, Fraction | None]]
     exact = {"claims_per_assignment": Fraction(records, assignments) if assignments else None,
              "duplicate_share": Fraction(claims["duplicate_copies"], records) if records else None}
     seen = {"records": records, "unique": claims["unique"], "duplicate_copies": claims["duplicate_copies"],
-            "assignments": assignments, "bundles": claims["bundles"],
+            "assignments": assignments, "bundles": claims["bundles"], "executed": claims["executed"],
+            "unread": claims["executed"] - claims["bundles"],
             **{name: None if value is None else float(value) for name, value in exact.items()}}
     return seen, exact
 
@@ -904,7 +1001,9 @@ def _burden(ctx: _Context, check: str) -> Result:
     the duplicate share is the exact-duplicate copies over the delivered records, so a candidate cannot
     lower either by failing to deliver output the requirement can see, and duplicates add burden
     without adding a claim. A system that delivered no result bundle at all has an unknown volume, not
-    a zero one.
+    a zero one, and so has one with an executed scan whose bundle is missing or unusable: what that scan
+    delivered is in no count, so the records read are only part of the volume and the requirement is
+    unresolved, never passed on the part that reads.
     """
     burden = ctx.policy["burden"]
     key = {"claims_per_assignment": "max_claims_per_assignment", "duplicate_share": "max_duplicate_share",
@@ -923,6 +1022,10 @@ def _burden(ctx: _Context, check: str) -> Result:
         if volumes[side]["bundles"] == 0 or volumes[side]["assignments"] == 0:
             return _open(f"no result bundle was read for the {side}, so its delivered claim volume is unknown, not "
                          "zero", threshold, volumes[side])
+        if volumes[side]["unread"] > 0:
+            return _open(f"{volumes[side]['unread']} of the {side}'s {volumes[side]['executed']} executed scan(s) have "
+                         "no usable bundle, so their delivered claim volume is unknown, not zero, and what was read "
+                         f"is only part of what the {side} delivered", threshold, volumes[side])
     if check == "claims_per_assignment":
         text = (f"the candidate delivered {mine['records']} claim record(s) over {mine['assignments']} "
                 f"assignment(s), {_n(mine['claims_per_assignment'])} per assignment")
@@ -950,12 +1053,14 @@ def _spend(ctx: _Context, side: str) -> dict:
     """One system's whole-view cost as the cost requirements read it.
 
     ``mean`` is the recorded cost of a scan, averaged over the scans whose cost is known, and ``None``
-    when none is. Usage is counted once per executed scan, however many targets it covers.
+    when none is. Usage is counted once per executed scan, however many targets it covers, and an
+    executed scan whose bundle is missing or unusable (``unread``) is a scan whose cost is unknown.
     """
     usage = ctx.whole(side)["usage"]
     cost = usage["cost_usd"]
     spend = {"coverage": cost["coverage"], "known": cost["known"], "unknown": cost["unknown"],
-             "scans": usage["bundles"], "known_sum": cost["known_sum"], "mean": None}
+             "scans": usage["executed"], "unread": usage["executed"] - usage["bundles"],
+             "known_sum": cost["known_sum"], "mean": None}
     mean = _mean(spend)
     spend["mean"] = None if mean is None else float(mean)
     return spend
@@ -982,7 +1087,9 @@ def _cost_gap(ctx: _Context, sides: tuple[str, ...]) -> tuple[dict, str | None]:
             return spends, (f"the {side}'s cost is known for {spend['known']} of {spend['scans']} executed scan(s), a "
                             f"coverage of {_n(spend['coverage'])}, below the required {_n(required)}"
                             + ("" if "min_coverage" in ctx.policy["cost"] else
-                               " (the policy states no lower minimum, so every cost must be known)"))
+                               " (the policy states no lower minimum, so every cost must be known)")
+                            + ("" if not spend["unread"] else
+                               f"; {spend['unread']} of the {spend['scans']} executed scan(s) have no usable bundle"))
     return spends, None
 
 

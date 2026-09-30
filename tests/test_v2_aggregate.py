@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -84,8 +85,8 @@ def scan(*, hits=None, claims: int | None = None, ranking: str = "native", statu
 
     ``hits`` maps a target id to the 1-based position of the claim a reviewer accepted for it;
     ``pending`` does the same for an unresolved match; ``controls`` maps a control id to ``"quiet"``,
-    ``"unresolved"``, or ``("false_allegation", position)``. ``drop`` leaves frozen targets out of the
-    bundle's plan and ``extra`` adds targets to it.
+    ``"unresolved"``, or ``("false_allegation", position)``. ``drop`` leaves frozen targets or controls out
+    of the bundle's plan and ``extra`` adds targets to it.
     """
     return {"hits": hits or {}, "claims": claims, "ranking": ranking, "status": status, "resolved": resolved,
             "controls": controls or {}, "pending": pending or {}, "usage": usage or {"wall_seconds": 1.0},
@@ -112,7 +113,8 @@ def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: d
             "targets": [_plan_item(item, "targets") for item in items["targets"]
                         if item["target_id"] not in spec["drop"]] + [_plan_item(item, "targets")
                                                                      for item in spec["extra"]],
-            "controls": [_plan_item(item, "controls") for item in items["controls"]],
+            "controls": [_plan_item(item, "controls") for item in items["controls"]
+                         if item["control_id"] not in spec["drop"]],
             "review_budgets": items["review_budgets"]}
     positions = list(spec["hits"].values()) + list(spec["pending"].values())
     positions += [value[1] for value in spec["controls"].values() if isinstance(value, tuple)]
@@ -171,13 +173,15 @@ def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: d
 
 
 def write_run(root: Path, run_id: str, inputs: list[dict], *, systems=("sys-a",), repetitions: int = 1,
-              outcomes=None, configs=None, failed_inputs=(), skipped_systems=(), pack=PACK) -> Path:
+              outcomes=None, configs=None, failed_inputs=(), skipped_systems=(), pack=PACK, left_out=()) -> Path:
     """Write one run directory the way ``scaneval run`` lays it out, with hand-chosen outcomes.
 
     *outcomes* maps ``(input_id, system_id, repetition)`` to a :func:`scan` spec, or to
     ``"missing_row"`` (the manifest has no row) or ``"missing_bundle"`` (the row names a bundle that
     is not there); unlisted assignments are successful scans that detect nothing. An input in
-    *failed_inputs* was never prepared, and a system in *skipped_systems* was never invoked.
+    *failed_inputs* was never prepared, and a system in *skipped_systems* was never invoked. *left_out*
+    names configured inputs the run was narrowed away from, as ``--only-input`` does: the configuration
+    keeps them, and the schedule, the manifest, and the manifest's selection say they were left out.
     """
     outcomes = outcomes or {}
     configs = configs or {}
@@ -188,10 +192,14 @@ def write_run(root: Path, run_id: str, inputs: list[dict], *, systems=("sys-a",)
     config = {"schema_version": "2.1", "run_id": run_id, "pack": "pack.json",
               "inputs": [{"input_id": row["input_id"], "snapshot_id": row["snapshot_id"],
                           **({"profile": "metadata_blinded", "blinding_map": "fixture-map.json"}
-                             if row["profile"] == "metadata_blinded" else {})} for row in inputs],
+                             if row["profile"] == "metadata_blinded" else {})} for row in inputs]
+              + [{"input_id": name, "snapshot_id": name} for name in left_out],
               "systems": entries, "repetitions": repetitions, "timeout_seconds": 60, "trace_mode": "off",
               "network_policy": "none"}
     validate_document("run-config", config)
+    selection = NO_SELECTION if not left_out else {
+        "only_inputs": sorted(row["input_id"] for row in inputs), "only_systems": None,
+        "excluded_inputs": list(left_out), "excluded_systems": []}
     assignments = sorted(({"assignment_id": f"{row['input_id']}__{system_id}__r{repetition}",
                            "input_id": row["input_id"], "system_id": system_id, "repetition": repetition}
                           for row in inputs for system_id in systems for repetition in range(1, repetitions + 1)),
@@ -205,7 +213,9 @@ def write_run(root: Path, run_id: str, inputs: list[dict], *, systems=("sys-a",)
                      "execution": {"backend": "local", "enforced_expected": False, "image": None}}
                     for entry in entries],
         "assignments": assignments, "pairs": schedule._pairs(inputs, repetitions),
-        "notes": ["Hand-built fixture schedule."]}
+        "notes": ["Hand-built fixture schedule."] + ([
+            f"This run was narrowed: {len(left_out)} configured input(s) and 0 configured system(s) are not "
+            "scheduled here."] if left_out else [])}
     validate_document("evaluation-schedule", frozen_schedule)
     rows = {row["input_id"]: row for row in inputs}
     invocations = []
@@ -246,7 +256,7 @@ def write_run(root: Path, run_id: str, inputs: list[dict], *, systems=("sys-a",)
                  "review_states": {"draft": 0, "mechanically_checked": 0, "human_approved": 0},
                  "dispositions": {"validate": 0, "needs_evidence": 0, "extended_regression": 0, "exclude": 0},
                  "sha256": digest("frozen pack")},
-        "selection": NO_SELECTION,
+        "selection": selection,
         "inputs": [{"input_id": row["input_id"], "mode": "full", "profile": row["profile"],
                     "snapshot_id": row["snapshot_id"],
                     "tree_hash": None if row["input_id"] in failed_inputs else input_hash(row["input_id"]),
@@ -352,6 +362,24 @@ def test_equal_target_and_equal_project_recall_differ_when_scans_carry_different
         "ranks": [{"rank": 1, "target_observations": 1}, {"rank": 2, "target_observations": 1}],
         "detected_without_rank": 0, "not_detected": 2}
     assert validate_document("aggregate-report", report) is report
+
+
+def test_targets_per_input_counts_canonical_targets_and_not_the_alias_records_of_one(tmp_path):
+    """One input plans a CVE record and a GHSA record of a single root cause, X, beside a target Y.
+
+    a1 has three records and two canonical targets (X and Y); a2 has one. Counting records would report inputs
+    with 3 and 1 targets, and a canonical target multiplied by its aliases; the count is 2 and 1, and the view
+    holds 3 canonical targets in all (X, Y, and a2's).
+    """
+    inputs = [planned("a1", targets=[target("CVE-1", canonical="X"), target("GHSA-1", canonical="X"),
+                                     target("T-2", canonical="Y")]),
+              planned("a2", targets=[target("T-3")])]
+    run = write_run(tmp_path, "run-aliases", inputs)
+
+    report = aggregate.aggregate([run], policy=policy())
+
+    assert view(report)["canonical_targets"] == 3
+    assert view(report)["targets_per_input"] == [{"targets": 1, "inputs": 1}, {"targets": 2, "inputs": 1}]
 
 
 def test_one_canonical_target_on_several_snapshots_is_one_target_with_rho_weighted_observations(tmp_path):
@@ -487,6 +515,75 @@ def test_a_shared_scan_counts_its_cost_once_and_unknown_cost_stays_unknown(tmp_p
     assert alpha["cost_usd"]["known_sum"] == 0.5
     assert report["runs"][0]["timing"] == {"execution_records": 3, "records_without_timestamps": 0,
                                            "elapsed_wall_seconds": 25.0, "summed_wall_seconds": 19.0}
+
+
+def test_a_scan_the_manifest_records_as_run_stays_in_usage_and_claim_volume_when_its_bundle_is_gone(tmp_path):
+    """An executed scan with a missing or unusable bundle spent something and delivered something: unknown, not zero.
+
+    Five inputs, one system. ok ran and reads (4 s, $0.50, 2 claims). gone's manifest row names a bundle that is not
+    there. edited delivered 40 claims, and its result was re-saved with another cost after review, so it no longer
+    binds to its decisions and the bundle is unusable. norow has no manifest row and prep was never prepared, so
+    neither of those ran.
+    - Executed scans: ok, gone, and edited, 3 of the 5 assignments, of which 1 bundle reads.
+    - Wall time is known for 1 and unknown for 2. Cost is known for 1 of 3, a coverage of 1/3, not 1 of 1.
+    - Claim volume: 3 executed, 1 bundle read, 2 records over 5 assignments; the volume of gone and edited is
+      in no sum, because it is unknown.
+    - Slices count the same way: gone alone is 1 executed scan with no known cost, coverage 0, and norow alone
+      has no executed scan, so its coverage is undefined.
+    """
+    inputs = [planned(f"i-{name}", project=f"acme/{name}", targets=[target(f"T-{name}", project=f"acme/{name}")])
+              for name in ("ok", "gone", "edited", "norow", "prep")]
+    run = write_run(tmp_path, "run-executed", inputs, failed_inputs=("i-prep",), outcomes={
+        ("i-ok", "sys-a", 1): scan(hits={"T-ok": 1}, claims=2, usage={"wall_seconds": 4.0, "cost_usd": 0.5}),
+        ("i-gone", "sys-a", 1): "missing_bundle",
+        ("i-edited", "sys-a", 1): scan(hits={"T-edited": 1}, claims=40, usage={"wall_seconds": 3.0, "cost_usd": 0.25}),
+        ("i-norow", "sys-a", 1): "missing_row"})
+    result_path = run / "invocations" / "i-edited__sys-a__r1" / "result.json"
+    edited = json.loads(result_path.read_text())
+    edited["usage"]["cost_usd"] = 5.01
+    result_path.write_text(canonical_json(edited) + "\n", encoding="utf-8")
+
+    report = aggregate.aggregate([run], policy=policy())
+
+    block = system(view(report))
+    whole = slice_of(block)
+    assert block["observations"]["failures"] == {"failed_preparation": 1, "skipped_system": 0, "skipped": 0,
+                                                 "missing_row": 1, "missing_bundle": 1, "unusable_bundle": 1}
+    assert whole["usage"]["cost_usd"] == {"known_sum": 0.5, "known": 1, "unknown": 2, "coverage": 1 / 3}
+    assert whole["usage"]["wall_seconds"] == {"known_sum": 4.0, "known": 1, "unknown": 2}
+    assert (whole["usage"]["bundles"], whole["usage"]["executed"]) == (1, 3)
+    claims = whole["claims"]
+    assert (claims["bundles"], claims["executed"], claims["assignments"], claims["records"]) == (1, 3, 5, 2)
+    gone = slice_of(block, "project", "acme/gone")
+    assert (gone["usage"]["bundles"], gone["usage"]["executed"]) == (0, 1)
+    assert gone["usage"]["cost_usd"] == {"known_sum": None, "known": 0, "unknown": 1, "coverage": 0.0}
+    assert (gone["claims"]["bundles"], gone["claims"]["executed"]) == (0, 1)
+    norow = slice_of(block, "project", "acme/norow")
+    assert norow["usage"]["executed"] == 0 and norow["usage"]["cost_usd"]["coverage"] is None
+    assert any("2 of them ran, so their claim volume, wall time, and cost are unknown, not zero" in warning
+               for warning in view(report)["warnings"])
+
+
+def test_cost_is_summed_exactly_from_the_decimals_the_scanners_wrote(tmp_path):
+    """sys-a's two scans report $0.10 and $0.20 and sys-b's $0.70 and $0.10: exactly 3/10 and 4/5 as written.
+
+    As binary floats 0.1 + 0.2 and math.fsum([0.1, 0.2]) are both 0.30000000000000004, and fsum([0.7, 0.1]) is
+    0.7999999999999999, because the doubles nearest the decimals do not add to the double nearest their sum. The
+    cost a gate holds to a limit is read as the decimals the scanners wrote, summed exactly, and rounded once, so
+    the sums are 0.3 and 0.8.
+    """
+    assert 0.1 + 0.2 != 0.3 and math.fsum([0.1, 0.2]) != 0.3 and math.fsum([0.7, 0.1]) != 0.8, "the float sums"
+    run = write_run(tmp_path, "run-exact-cost", five_project_inputs()[:2], systems=("sys-a", "sys-b"), outcomes={
+        ("p1", "sys-a", 1): scan(usage={"wall_seconds": 1.0, "cost_usd": 0.1}),
+        ("p2", "sys-a", 1): scan(usage={"wall_seconds": 1.0, "cost_usd": 0.2}),
+        ("p1", "sys-b", 1): scan(usage={"wall_seconds": 1.0, "cost_usd": 0.7}),
+        ("p2", "sys-b", 1): scan(usage={"wall_seconds": 1.0, "cost_usd": 0.1})})
+
+    report = aggregate.aggregate([run], policy=policy())
+
+    cost = {name: slice_of(system(view(report), name))["usage"]["cost_usd"] for name in ("sys-a", "sys-b")}
+    assert cost["sys-a"] == {"known_sum": 0.3, "known": 2, "unknown": 0, "coverage": 1.0}
+    assert cost["sys-b"] == {"known_sum": 0.8, "known": 2, "unknown": 0, "coverage": 1.0}
 
 
 def blinded_and_standard_run(tmp_path: Path) -> Path:
@@ -692,6 +789,31 @@ def test_a_replicate_that_draws_no_resolved_control_makes_the_rate_interval_unst
     assert block["controls"]["capability_safe"]["completed_upper"]["interval"]["state"] == "ok"
 
 
+def test_a_frozen_control_missing_from_a_completed_scans_plan_is_completed_and_unresolved_not_dropped(tmp_path):
+    """Ten scans succeed; seven bundle plans hold the input's control (quiet) and three lack it.
+
+    A control is frozen before the run, and each scan completed in the frozen scope, so c = 1 for all ten
+    (math section 2), while b = 0 for the three with no assessment of it.
+    - C = 10/10 = 1 and A = 7/10; nothing is confirmed false, so E = 0 and the resolved rate E/A is 0.
+    - The completed bounds [E/C, (E + C - A)/C] are [0, 3/10]: the three count as unresolved, and as false in F+.
+    - Counts: 10 observations, 10 completed, 7 resolved, 3 unresolved, and 3 unscored.
+    Taking the three out of C would have made C = 7/10 and F+ = 0, a lower bound bought with bundles that
+    lack the assessment.
+    """
+    inputs = [planned(f"safe-{index}", project=f"acme/safe{index % 5}", controls=[control(f"C-{index}")])
+              for index in range(10)]
+    run = write_run(tmp_path, "run-unscored-controls", inputs, outcomes={
+        (f"safe-{index}", "sys-a", 1): scan(drop=(f"C-{index}",)) for index in range(7, 10)})
+
+    block = slice_of(system(view(aggregate.aggregate([run], policy=policy()))))["controls"]["capability_safe"]
+
+    assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (10, 10, 7, 3)
+    assert block["unscored"] == 3
+    assert block["completed_mass"] == 1.0 and block["assessable_mass"] == 0.7
+    assert block["resolved_rate"]["value"] == 0.0
+    assert block["completed_lower"] == 0.0 and block["completed_upper"]["value"] == 0.3
+
+
 def test_a_control_on_a_failed_scan_is_neither_completed_nor_resolved(tmp_path):
     """One control observed once, by a scan that timed out: C = A = 0, so every rate is null.
 
@@ -783,6 +905,34 @@ def test_unranked_output_leaves_native_recall_at_budget_null_and_reports_a_label
     assert diagnostic["observation_mass"] == 0.5 and diagnostic["pending_mass"] == 0.0
     assert diagnostic["expected_recall"] == [{"budget": 1, "value": 0.25}, {"budget": 5, "value": 1.0}]
     assert system(view(report))["first_hit_ranks"]["detected_without_rank"] == 1
+
+
+def test_a_pending_match_leaves_the_random_order_diagnostic_unmeasured_and_counts_as_pending(tmp_path):
+    """Three unranked scans with resolved bundles, one target each, equal weights 1/3.
+
+    u1 delivers 3 claims and its match on T1 is pending. u2 delivers 4, of which the reviewer accepted the
+    second for T2. u3 delivers 4, accepted the first for T3, and left a match on its third pending. While a match
+    is unresolved the accepted count is only a lower bound, so the expectation for that target is not measured:
+    u1 and u3 leave the observation mass and count in the pending mass, and are not read as an expectation of 0
+    or of the accepted claims alone.
+    - Measured: u2 only. At B = 1, 1 - C(3,1)/C(4,1) = 1/4; at B = 5, b = min(5, 4) = 4 and the expectation is 1.
+    - observation_mass = 1/3 and pending_mass = 2/3; the expected recall is the measured mass's: 1/4 and 1.
+    Full-output recall is untouched by the diagnostic: u2 and u3 hit, so 2/3, and u1's pending match is not
+    assessable.
+    """
+    inputs = [planned(f"u{index}", targets=[target(f"T{index}")]) for index in (1, 2, 3)]
+    run = write_run(tmp_path, "run-pending-random", inputs, outcomes={
+        ("u1", "sys-a", 1): scan(ranking="unranked", claims=3, pending={"T1": 2}),
+        ("u2", "sys-a", 1): scan(ranking="unranked", claims=4, hits={"T2": 2}),
+        ("u3", "sys-a", 1): scan(ranking="unranked", claims=4, hits={"T3": 1}, pending={"T3": 3})})
+
+    block = detection(slice_of(system(view(aggregate.aggregate([run], policy=policy())))))
+
+    diagnostic = block["random_order_diagnostic"]
+    assert diagnostic["observation_mass"] == 1 / 3 and diagnostic["pending_mass"] == 2 / 3
+    assert diagnostic["expected_recall"] == [{"budget": 1, "value": 0.25}, {"budget": 5, "value": 1.0}]
+    assert block["full_output_recall"]["value"] == 2 / 3
+    assert block["coverage"]["assessable_mass"] == 2 / 3
 
 
 def test_run_variability_is_separate_and_unavailable_with_one_repetition(tmp_path):
@@ -1136,6 +1286,32 @@ def test_a_candidate_whose_schedule_drops_an_input_is_refused(tmp_path):
         aggregate.compare([base, cand], baseline="baseline", candidate="candidate")
 
 
+def test_a_run_narrowed_after_its_configuration_was_written_records_its_selection_in_its_row(tmp_path):
+    """``--only-input`` leaves the configuration whole and shortens the schedule; the run row says both.
+
+    run-narrow's configuration names p1 to p5 and its schedule covers p1 to p4, so its selection lists p5 as
+    excluded and its row counts 5 configured inputs against 4 scheduled. run-whole was scheduled in full and
+    records no narrowing: an empty selection and equal counts. Both systems of run-narrow were assigned the
+    same four inputs, so a comparison accepts it (its schedules agree), and its run row says the same.
+    """
+    outcomes = {(f"p{index}", system, 1): scan(hits={f"T-p{index}": 1})
+                for index in range(1, 5) for system in ("baseline", "candidate")}
+    narrowed = write_run(tmp_path / "a", "run-narrow", five_project_inputs()[:4], systems=("baseline", "candidate"),
+                         outcomes=outcomes, left_out=("p5",))
+    whole = write_run(tmp_path / "b", "run-whole", five_project_inputs(), systems=("baseline", "candidate"))
+
+    report = aggregate.aggregate([narrowed, whole], policy=policy())
+    comparison = aggregate.compare([narrowed], baseline="baseline", candidate="candidate", policy=policy())
+
+    rows = {row["run_id"]: row for row in report["runs"]}
+    assert rows["run-narrow"]["selection"] == {"only_inputs": ["p1", "p2", "p3", "p4"], "only_systems": None,
+                                               "excluded_inputs": ["p5"], "excluded_systems": []}
+    assert (rows["run-narrow"]["configured_inputs"], rows["run-narrow"]["inputs"]) == (5, 4)
+    assert rows["run-whole"]["selection"] == NO_SELECTION
+    assert (rows["run-whole"]["configured_inputs"], rows["run-whole"]["inputs"]) == (5, 5)
+    assert comparison["runs"] == [rows["run-narrow"]]
+
+
 def test_a_candidate_whose_frozen_plan_items_differ_is_refused(tmp_path):
     changed = five_project_inputs()
     changed[0]["plan"]["targets"][0]["validation_level"] = "L4"
@@ -1259,6 +1435,36 @@ def test_a_run_directory_written_by_the_runner_aggregates_as_draft_evidence(tmp_
     assert whole["claims"]["records"] == 1 and whole["claims"]["pending_matching"] == 1
     assert block["observations"]["review_states"]["draft"] == 1
     assert report["runs"][0]["timing"]["execution_records"] == 1
+
+
+def test_a_run_the_runner_narrowed_with_only_inputs_records_its_selection_in_the_report(tmp_path, upstream):
+    """The real runner keeps the configuration whole, and the run row reports what it left out.
+
+    One snapshot is configured as two inputs, in-1 and in-2, and the run is narrowed to in-1. Its schedule and
+    manifest cover one input, its configuration still names two, and its manifest's selection excludes in-2.
+    """
+    repo, commit = upstream
+    pack = cases.new_pack("test", "aggregate-narrowed", "Local fixture pack for the narrowing test.")
+    cases.add_snapshot(pack, {
+        "snapshot_id": "snap-a", "repository": {"url": str(repo), "name": "widget"}, "commit": commit,
+        "reference": "Commit chosen by the test fixture; no advisory is claimed.", "languages": ["python"],
+        "workload": "conventional_application", "component_role": "application",
+        "license": {"spdx": None, "verified": False, "note": "Local fixture repository."}})
+    cases.save_pack(tmp_path / "pack.json", pack)
+    config = {"schema_version": "2.1", "run_id": "run-narrowed", "pack": "pack.json", "cache_root": "cache",
+              "inputs": [{"input_id": "in-1", "snapshot_id": "snap-a"}, {"input_id": "in-2", "snapshot_id": "snap-a"}],
+              "systems": [{"system_id": "fake-a", "adapter": "fake", "config": {"knob": 1}}],
+              "repetitions": 1, "timeout_seconds": 60, "trace_mode": "off", "network_policy": "none"}
+    (tmp_path / "run.json").write_text(canonical_json(config) + "\n", encoding="utf-8")
+    run = tmp_path / "narrowed"
+    run_from_config(tmp_path / "run.json", run, clock=CLOCK, adapters={"fake": FakeAdapter()}, only_inputs={"in-1"})
+
+    report = aggregate.aggregate([run], policy=policy())
+
+    row = report["runs"][0]
+    assert row["selection"] == {"only_inputs": ["in-1"], "only_systems": None, "excluded_inputs": ["in-2"],
+                                "excluded_systems": []}
+    assert (row["configured_inputs"], row["inputs"], row["assignments"]) == (2, 1, 1)
 
 
 # --- command line -------------------------------------------------------------------------------

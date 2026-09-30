@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 
 import pytest
@@ -391,19 +392,19 @@ def planned(input_id: str, *, targets=(), controls=(), project: str, workload: s
 
 def scan(*, hits=None, claims: int | None = None, ranking: str = "native", status: str = "success",
          resolved: bool = True, controls=None, pending=None, usage=None, review_state: str = "approved",
-         duplicate: bool = False, scope: str | None = None) -> dict:
+         duplicate: bool = False, scope: str | None = None, drop=()) -> dict:
     """What one bundle holds.
 
     ``hits`` maps a target id to the 1-based position of the claim a reviewer accepted for it, and
     ``pending`` does the same for a match the reviewer left unresolved; ``controls`` maps a control id
     to ``"quiet"``, ``"unresolved"``, or ``("false_allegation", position)``. ``duplicate`` makes every
     delivered claim an exact copy of the first, which is how a system spams the reviewer without adding
-    an allegation.
+    an allegation. ``drop`` leaves frozen controls out of the bundle's plan.
     """
     return {"hits": hits or {}, "claims": claims, "ranking": ranking, "status": status, "resolved": resolved,
             "controls": controls or {}, "pending": pending or {},
             "usage": usage if usage is not None else {"wall_seconds": 1.0},
-            "review_state": review_state, "duplicate": duplicate, "scope": scope}
+            "review_state": review_state, "duplicate": duplicate, "scope": scope, "drop": set(drop)}
 
 
 def _plan_item(item: dict, kind: str) -> dict:
@@ -421,7 +422,8 @@ def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: d
     bound = input_hash(row["input_id"])
     plan = {"schema_version": "2.0", "input_hash": bound, "scope": spec["scope"] or frozen["scope"],
             "targets": [_plan_item(item, "targets") for item in frozen["targets"]],
-            "controls": [_plan_item(item, "controls") for item in frozen["controls"]],
+            "controls": [_plan_item(item, "controls") for item in frozen["controls"]
+                         if item["control_id"] not in spec["drop"]],
             "review_budgets": frozen["review_budgets"]}
     positions = list(spec["hits"].values()) + list(spec["pending"].values())
     positions += [value[1] for value in spec["controls"].values() if isinstance(value, tuple)]
@@ -480,12 +482,15 @@ def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: d
 
 
 def write_run(root: Path, run_id: str, inputs: list[dict], *, systems, repetitions: int = 1, outcomes=None,
-              configs=None, failed_inputs=(), skipped_systems=(), run_status: str = "completed") -> Path:
+              configs=None, failed_inputs=(), skipped_systems=(), run_status: str = "completed",
+              left_out=()) -> Path:
     """Write one run directory the way ``scaneval run`` lays it out, with hand-chosen outcomes.
 
     *outcomes* maps ``(input_id, system_id, repetition)`` to a :func:`scan` spec; unlisted
     assignments are successful scans that detect nothing. An input in *failed_inputs* was never
-    prepared, and a system in *skipped_systems* was never invoked.
+    prepared, and a system in *skipped_systems* was never invoked. *left_out* names configured inputs
+    the run was narrowed away from, as ``--only-input`` does: the configuration keeps them, and the
+    schedule, the manifest, and the manifest's selection say they were left out.
     """
     outcomes = outcomes or {}
     configs = configs or {}
@@ -494,10 +499,14 @@ def write_run(root: Path, run_id: str, inputs: list[dict], *, systems, repetitio
     entries = [{"system_id": system_id, "adapter": "fake", "config": {"knob": 1}, **configs.get(system_id, {})}
                for system_id in systems]
     config = {"schema_version": "2.1", "run_id": run_id, "pack": "pack.json",
-              "inputs": [{"input_id": row["input_id"], "snapshot_id": row["snapshot_id"]} for row in inputs],
+              "inputs": [{"input_id": row["input_id"], "snapshot_id": row["snapshot_id"]} for row in inputs]
+              + [{"input_id": name, "snapshot_id": name} for name in left_out],
               "systems": entries, "repetitions": repetitions, "timeout_seconds": 60, "trace_mode": "off",
               "network_policy": "none"}
     validate_document("run-config", config)
+    selection = NO_SELECTION if not left_out else {
+        "only_inputs": sorted(row["input_id"] for row in inputs), "only_systems": None,
+        "excluded_inputs": list(left_out), "excluded_systems": []}
     assignments = sorted(({"assignment_id": f"{row['input_id']}__{system_id}__r{repetition}",
                            "input_id": row["input_id"], "system_id": system_id, "repetition": repetition}
                           for row in inputs for system_id in systems for repetition in range(1, repetitions + 1)),
@@ -511,7 +520,9 @@ def write_run(root: Path, run_id: str, inputs: list[dict], *, systems, repetitio
                      "execution": {"backend": "local", "enforced_expected": False, "image": None}}
                     for entry in entries],
         "assignments": assignments, "pairs": schedule._pairs(inputs, repetitions),
-        "notes": ["Hand-built fixture schedule."]}
+        "notes": ["Hand-built fixture schedule."] + ([
+            f"This run was narrowed: {len(left_out)} configured input(s) and 0 configured system(s) are not "
+            "scheduled here."] if left_out else [])}
     validate_document("evaluation-schedule", frozen_schedule)
     rows = {row["input_id"]: row for row in inputs}
     invocations = []
@@ -544,7 +555,7 @@ def write_run(root: Path, run_id: str, inputs: list[dict], *, systems, repetitio
                  "review_states": {"draft": 0, "mechanically_checked": 0, "human_approved": 0},
                  "dispositions": {"validate": 0, "needs_evidence": 0, "extended_regression": 0, "exclude": 0},
                  "sha256": digest("frozen pack")},
-        "selection": NO_SELECTION,
+        "selection": selection,
         "inputs": [{"input_id": row["input_id"], "mode": "full", "profile": row["profile"],
                     "snapshot_id": row["snapshot_id"],
                     "tree_hash": None if row["input_id"] in failed_inputs else input_hash(row["input_id"]),
@@ -1276,6 +1287,82 @@ def test_a_comparison_whose_records_contradict_a_shared_contract_fails_whatever_
                                           "the same frozen work, or do not bind to the runs they name: ")
 
 
+def narrowed_run(root: Path, run_id: str = "run-narrowed") -> Path:
+    """Both systems over p1 to p4 of a configuration that names p1 to p5; p5 was left out with --only-input.
+
+    The baseline misses p1 and detects the rest, and the candidate detects all four.
+    """
+    inputs = [planned(f"p{index}", project=f"acme/p{index}",
+                      targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}")])
+              for index in range(1, 5)]
+    outcomes = {}
+    for index in range(1, 5):
+        outcomes[(f"p{index}", "baseline", 1)] = scan(hits={f"T-p{index}": 1} if index > 1 else {}, claims=1)
+        outcomes[(f"p{index}", "candidate", 1)] = scan(hits={f"T-p{index}": 1}, claims=1)
+    return write_run(root, run_id, inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                     configs={"candidate": {"config": {"knob": 2}}}, left_out=("p5",))
+
+
+def test_a_run_narrowed_below_its_configured_inputs_leaves_the_shared_contract_inconclusive(tmp_path):
+    """The configuration names five projects; the run was narrowed to four, so p5 is out of both schedules.
+
+    The two systems were assigned the same four inputs, so the comparison is accepted, and recall reads 3/4 to
+    4/4, +0.25, without p5, where the candidate would have failed. Nothing in the schedules shows when that choice
+    was made, so the contract is unresolved and the decision is not a pass; no other requirement is disturbed.
+    """
+    comparison = aggregate.compare([narrowed_run(tmp_path)], baseline="baseline", candidate="candidate",
+                                   policy=aggregation_policy())
+    assert difference_of(comparison)["full_output_recall"]["value"] == 0.25
+
+    decision = gate.evaluate_gate(gate_policy(), comparison)
+
+    assert statuses(decision) == {
+        "contract.shared": "inconclusive", "contract.runs_completed": "pass",
+        "configuration.allowed_differences": "pass", "evidence.scope": "pass", "primary.improvement": "pass"}
+    assert decision["outcome"] == "inconclusive" and decision["failed"] == []
+    item = requirement(decision, "contract.shared")
+    assert item["observed"]["narrowed_runs"] == [
+        {"run_id": "run-narrowed", "configured_inputs": 5, "inputs": 4, "excluded_inputs": ["p5"]}]
+    assert item["observed"]["inputs"] == 4
+    assert item["explanation"] == (
+        "the two systems share one frozen contract, but run run-narrowed was narrowed and does not schedule 1 "
+        "input(s) its configuration names (p5): an input left out of a run's schedule is left out for both systems, "
+        "so nothing in the comparison shows that it was not dropped after its results were seen")
+
+
+def test_a_narrowing_shows_in_either_of_the_two_records_and_only_an_input_narrowing_counts(corpus):
+    """A comparison edited to carry the selection or the count alone is read the same; a system narrowing is not one.
+
+    The run row states how many inputs its configuration names and the manifest's selection. Either one showing
+    that inputs were left out leaves the contract unresolved. A run narrowed only by system, where every
+    configured input is scheduled, leaves both systems the same inputs and is no narrowing of the contract.
+    """
+    def status(change) -> str:
+        return requirement(gate.evaluate_gate(gate_policy(), edited(corpus, change)), "contract.shared")["status"]
+
+    assert status(lambda c: c["runs"][0]["selection"].update(excluded_inputs=["p9"])) == "inconclusive"
+    assert status(lambda c: c["runs"][0].update(configured_inputs=12)) == "inconclusive"
+    assert status(lambda c: c["runs"][0]["selection"].update(only_systems=["baseline", "improved"],
+                                                             excluded_systems=["silent"])) == "pass"
+    assert status(lambda c: None) == "pass"
+    count_only = edited(corpus, lambda c: c["runs"][0].update(configured_inputs=12))
+    assert requirement(gate.evaluate_gate(gate_policy(), count_only), "contract.shared")["explanation"].startswith(
+        "the two systems share one frozen contract, but run run-gate was narrowed and does not schedule 2 input(s) "
+        "its configuration names:")
+
+
+def test_a_contradiction_in_the_comparison_fails_the_contract_even_when_a_run_was_narrowed(corpus):
+    """Failing outranks waiting: a comparison whose own records disagree is not resolved by a narrowing note."""
+    def both(comparison: dict) -> None:
+        comparison["runs"][0]["selection"].update(excluded_inputs=["p9"])
+        comparison["views"][0]["systems"]["candidate"]["observations"].update(assignments=8)
+
+    decision = gate.evaluate_gate(gate_policy(), edited(corpus, both))
+
+    assert requirement(decision, "contract.shared")["status"] == "fail"
+    assert decision["outcome"] == "fail" and decision["failed"] == ["contract.shared"]
+
+
 def test_runs_that_froze_different_packs_fail_the_shared_contract(corpus):
     def second_pack(comparison: dict) -> None:
         other = deepcopy(comparison["runs"][0])
@@ -1717,6 +1804,32 @@ def test_a_review_by_one_person_meets_a_single_review_grade_and_not_a_double_one
     assert strict["outcome"] == "inconclusive" and relaxed["outcome"] == "pass"
 
 
+def test_one_person_using_the_adjudicator_role_does_not_meet_the_double_review_grade(corpus):
+    """Every sampled claim is judged by one fictional person as an adjudicator, and no one else reviewed any.
+
+    Nothing independent stands behind a single verdict, so the review is a single review whatever role its author
+    took, and a requirement for the double-review grade is unresolved.
+    """
+    frame = precision.build_frame([corpus["run"]], population="first_b", budget=5, systems=["improved"])
+    sample = precision.draw_sample(frame, size=len(frame["units"]), seed=11)
+    verdict = verdict_for("improved")
+    reviews = None
+    for entry in sample["selected"]:
+        reviews = precision.record_review(sample, reviews, unit_id=entry["unit_id"], reviewer=REVIEWER,
+                                          role="adjudicator", outcome=verdict(entry["unit_id"]),
+                                          note="fixture review by a fictional person", clock=CLOCK)
+    alone = precision.estimate(sample, reviews)
+    assert alone["precision_resolved"] == 0.8 and alone["evidence_grade"] == "single_review"
+
+    decision = decide(corpus, gate_policy(precision=precision_block()), precision_candidate=alone)
+
+    item = requirement(decision, "precision.min_evidence_grade")
+    assert item["status"] == "inconclusive"
+    assert item["explanation"] == (
+        "the review's evidence grade is single_review, below the required double_review_or_adjudicated: 10 "
+        "sampled claim(s) rest on a single reviewer")
+
+
 def test_an_estimate_whose_sample_leaves_strata_unsampled_does_not_meet_a_coverage_requirement(corpus):
     """Ten one-claim inputs stratified by input with a sample of 5: five strata draw a unit, five draw none.
 
@@ -1733,6 +1846,25 @@ def test_an_estimate_whose_sample_leaves_strata_unsampled_does_not_meet_a_covera
     assert item["explanation"] == (
         "the sampled strata hold 5 of the population's 10 unit(s), a share of 0.5, below the required 0.9; a "
         "stratum that drew no unit is not estimated at all")
+
+
+def test_a_sample_with_unsampled_strata_gives_the_interval_bound_nothing_to_pass_on(corpus):
+    """The same half sample: p1, p10, p2, p3, and p4 drew their one unit, so the covered strata have no variance.
+
+    Four true and one false give resolved precision 0.8, and the interval bound of 0.4 would have been met by a
+    "census" of [0.8, 0.8] over five units nothing was observed of. The sample is no census, so its interval is
+    degenerate and carries no bounds, and the requirement waits, as it does for any other zero variance.
+    """
+    half = estimate_for(corpus["run"], "improved", size=5, stratify_by="input")
+    assert half["precision_resolved"] == 0.8 and half["coverage"]["share"] == 0.5
+
+    decision = decide(corpus, gate_policy(precision=precision_block(min_interval_lower_bound=0.4)),
+                      precision_candidate=half)
+
+    item = requirement(decision, "precision.interval")
+    assert item["status"] == "inconclusive"
+    assert item["observed"]["interval"]["state"] == "degenerate"
+    assert item["explanation"] == "the estimate's interval is degenerate, so it carries no bounds"
 
 
 def test_the_precision_interval_bound_passes_fails_or_waits_on_what_the_interval_shows(corpus, estimates):
@@ -1948,6 +2080,38 @@ def test_a_failed_scan_is_not_a_quiet_control(corpus):
     assert requirement(malformed, "controls.capability_safe.assessable_mass")["status"] == "inconclusive"
 
 
+def test_a_frozen_control_missing_from_a_completed_scans_plan_still_counts_toward_the_false_alarm_bound(tmp_path):
+    """Ten scans of each system succeed; three of the candidate's bundle plans lack the input's control.
+
+    The three completed in the frozen scope but hold no assessment of the control, so C = 1, A = 7/10 and
+    E = 0, and F+ = (0 + 1 - 7/10)/1 = 0.3. Counting the three as not completed would have given C = A = 7/10
+    and F+ = 0, and a tolerance of 0.1 would have passed.
+    """
+    inputs = [planned(f"p{index}", project=f"acme/p{index}", controls=[control(f"C-p{index}")],
+                      targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}")])
+              for index in range(1, 11)]
+    outcomes = {}
+    for index in range(1, 11):
+        outcomes[(f"p{index}", "baseline", 1)] = scan(claims=1)
+        outcomes[(f"p{index}", "candidate", 1)] = scan(hits={f"T-p{index}": 1}, claims=1,
+                                                        drop=(f"C-p{index}",) if index > 7 else ())
+    run = write_run(tmp_path, "run-unscored-controls", inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                    configs={"candidate": {"config": {"knob": 2}}})
+    comparison = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=aggregation_policy())
+
+    decision = gate.evaluate_gate(gate_policy(controls={"capability_safe": bounds(
+        max_false_alarm_upper=0.1, min_completed_mass=0.7, min_assessable_mass=0.7)}), comparison)
+
+    assert statuses(decision)["controls.capability_safe.false_alarm_upper"] == "fail"
+    assert decision["outcome"] == "fail" and decision["failed"] == ["controls.capability_safe.false_alarm_upper"]
+    upper = requirement(decision, "controls.capability_safe.false_alarm_upper")
+    assert upper["observed"]["false_alarm_upper"] == pytest.approx(0.3)
+    counts = upper["observed"]
+    assert (counts["completed"], counts["resolved"], counts["unresolved"]) == (10, 7, 3)
+    assert statuses(decision)["controls.capability_safe.completed_mass"] == "pass"
+    assert statuses(decision)["controls.capability_safe.assessable_mass"] == "pass"
+
+
 def test_a_control_of_both_types_is_read_in_each_class(tmp_path):
     """A 'both' control appears in the capability-safe and the fixed-target view, with the same figures."""
     comparison = control_comparison(tmp_path, "run-both", kind="both", candidate_controls={5: ("false_allegation", 1)})
@@ -2050,6 +2214,136 @@ def test_target_coverage_holds_both_systems_and_passes_when_both_are_assessable(
     flaky = decide(corpus, gate_policy(target_coverage={"min_assessable_mass": 0.9}), "flaky")
     assert requirement(flaky, "target_coverage.min_assessable_mass")["explanation"].startswith(
         "the candidate has 8 of 10 target observations assessable, a mass of 0.8, below the required 0.9")
+
+
+def coverage_run(root: Path, run_id: str, *, baseline_pending=()) -> Path:
+    """Ten projects, one target each. Both systems detect every target, except that the baseline's match in each
+    project number of *baseline_pending* was left unresolved: its scan detects nothing there and is not assessable.
+    """
+    inputs = [planned(f"p{index}", project=f"acme/p{index}",
+                      targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}")])
+              for index in range(1, 11)]
+    outcomes = {}
+    for index in range(1, 11):
+        pending = index in baseline_pending
+        outcomes[(f"p{index}", "baseline", 1)] = scan(hits={} if pending else {f"T-p{index}": 1},
+                                                      pending={f"T-p{index}": 1} if pending else {}, claims=1)
+        outcomes[(f"p{index}", "candidate", 1)] = scan(hits={f"T-p{index}": 1}, claims=1)
+    return write_run(root, run_id, inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                     configs={"candidate": {"config": {"knob": 2}}})
+
+
+def coverage_comparison(root: Path, run_id: str, **choices) -> dict:
+    return aggregate.compare([coverage_run(root, run_id, **choices)], baseline="baseline", candidate="candidate",
+                             policy=aggregation_policy())
+
+
+def test_target_coverage_holds_the_slice_the_primary_metric_reads_and_not_only_the_whole_view(tmp_path):
+    """The primary metric is project acme/p1, where the baseline's only match was never resolved.
+
+    The baseline detects 9 of 10 targets and its match on p1 is pending, so its whole-view assessable mass is
+    9/10, exactly the required minimum, and in p1 it is 0: recall there goes from 0 to 1, +1, over a baseline
+    nobody finished reviewing. A whole-view figure alone would let that improvement pass.
+    """
+    comparison = coverage_comparison(tmp_path, "run-slice", baseline_pending=(1,))
+    policy = gate_policy(primary=primary(minimum=0.5, slice={"dimension": "project", "value": "acme/p1"}),
+                         target_coverage={"min_assessable_mass": 0.9})
+
+    decision = gate.evaluate_gate(policy, comparison)
+
+    assert requirement(decision, "primary.improvement")["observed"] == {"baseline": 0.0, "candidate": 1.0,
+                                                                        "difference": 1.0}
+    item = requirement(decision, "target_coverage.min_assessable_mass")
+    assert item["status"] == "inconclusive" and decision["outcome"] == "inconclusive"
+    assert item["explanation"] == (
+        "in project acme/p1 the baseline has 0 of 1 target observations assessable, a mass of 0, below the "
+        "required 0.9: unresolved or failed observations count as misses, so recall over them is a lower bound "
+        "and the improvement is not established")
+    assert item["observed"]["baseline"]["assessable_mass"] == 0.9
+    assert item["observed"]["slices"] == [{
+        "slice": {"dimension": "project", "value": "acme/p1"}, "weighting": "equal_target",
+        "baseline": {"assessable_mass": 0.0, "completed_mass": 1.0, "assessable": 0, "target_observations": 1},
+        "candidate": {"assessable_mass": 1.0, "completed_mass": 1.0, "assessable": 1, "target_observations": 1}}]
+    assert statuses(gate.evaluate_gate(gate_policy(primary=primary(minimum=0.5, slice={
+        "dimension": "project", "value": "acme/p2"}), target_coverage={"min_assessable_mass": 0.9}), comparison))[
+        "target_coverage.min_assessable_mass"] == "pass", "another project's slice is fully assessable"
+
+
+def test_target_coverage_holds_every_slice_a_regression_reads(tmp_path):
+    """A regression on each project protects p1 and p2 as much as the whole view, so it needs their coverage too.
+
+    The candidate matches the baseline everywhere it was resolved, so no project regresses. The baseline's
+    matches on p1 and p2 are pending: it detects 8 of 10 (0.2 short in the whole view) and 0 of 1 in each of
+    those projects. With a required 0.7 the whole view passes, and each of the two projects is named.
+    """
+    comparison = coverage_comparison(tmp_path, "run-regressions", baseline_pending=(1, 2))
+    policy = gate_policy(regressions=[regression("each-project", slice={"dimension": "project"})],
+                         target_coverage={"min_assessable_mass": 0.7})
+
+    decision = gate.evaluate_gate(policy, comparison)
+
+    assert statuses(decision)["regression.each-project"] == "pass"
+    item = requirement(decision, "target_coverage.min_assessable_mass")
+    assert item["status"] == "inconclusive"
+    assert item["explanation"] == (
+        "in project acme/p1 the baseline has 0 of 1 target observations assessable, a mass of 0; in project "
+        "acme/p2 the baseline has 0 of 1 target observations assessable, a mass of 0, below the required 0.7: "
+        "unresolved or failed observations count as misses, so recall over them is a lower bound and the "
+        "improvement is not established")
+    assert [row["slice"]["value"] for row in item["observed"]["slices"]] == sorted(
+        f"acme/p{index}" for index in range(1, 11))
+    assert item["observed"]["baseline"]["assessable_mass"] == 0.8
+
+
+def test_target_coverage_passes_when_the_whole_view_and_every_slice_read_are_assessable(tmp_path):
+    """Nothing is pending: every slice the policy reads is assessable for both systems, and the explanation says so."""
+    comparison = coverage_comparison(tmp_path, "run-resolved")
+    policy = gate_policy(primary=primary(slice={"dimension": "project", "value": "acme/p1"}),
+                         regressions=[regression("each-project", slice={"dimension": "project"})],
+                         target_coverage={"min_assessable_mass": 0.9})
+
+    item = requirement(gate.evaluate_gate(policy, comparison), "target_coverage.min_assessable_mass")
+
+    assert item["status"] == "pass"
+    assert item["explanation"] == (
+        "the assessable target mass is 1 for the baseline and 1 for the candidate, at least the required 0.9, and "
+        "at least that in each of the 10 slice(s) the policy's detection metrics also read (project acme/p1, "
+        "project acme/p10, project acme/p2 and 7 more)")
+    assert item["threshold"] == {"weighting": "equal_target", "min_assessable_mass": 0.9}
+
+
+def test_target_coverage_reads_a_regression_in_its_own_weighting(tmp_path):
+    """A regression under equal_project weights the two projects alike, so a small project's pending match counts more.
+
+    acme/big holds four targets the baseline resolved; acme/small holds one whose match is pending. Under
+    equal_target the baseline's assessable mass is 4/5 = 0.8, which meets a required 0.6; under equal_project each
+    project weighs 1/2, so it is (1 + 0)/2 = 0.5. A regression that reads equal_project rests on that 0.5.
+    """
+    inputs = [planned("big", project="acme/big", targets=[target(f"T-big{index}", project="acme/big",
+                                                                 family=f"family-{index}") for index in range(4)]),
+              planned("small", project="acme/small", targets=[target("T-small", project="acme/small",
+                                                                     family="family-small")])]
+    outcomes = {("big", "baseline", 1): scan(hits={f"T-big{index}": index + 1 for index in range(4)}, claims=4),
+                ("small", "baseline", 1): scan(pending={"T-small": 1}, claims=1),
+                ("big", "candidate", 1): scan(hits={f"T-big{index}": index + 1 for index in range(4)}, claims=4),
+                ("small", "candidate", 1): scan(hits={"T-small": 1}, claims=1)}
+    run = write_run(tmp_path, "run-weighted", inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                    configs={"candidate": {"config": {"knob": 2}}})
+    comparison = aggregate.compare([run], baseline="baseline", candidate="candidate",
+                                   policy=aggregation_policy(min_clusters=2))
+
+    plain = gate.evaluate_gate(gate_policy(target_coverage={"min_assessable_mass": 0.6}), comparison)
+    assert statuses(plain)["target_coverage.min_assessable_mass"] == "pass"
+    protected = gate.evaluate_gate(gate_policy(
+        regressions=[regression("small-projects", weighting="equal_project")],
+        target_coverage={"min_assessable_mass": 0.6}), comparison)
+
+    item = requirement(protected, "target_coverage.min_assessable_mass")
+    assert item["status"] == "inconclusive"
+    assert item["explanation"] == (
+        "in the whole view (equal_project) the baseline has 4 of 5 target observations assessable, a mass of 0.5, "
+        "below the required 0.6: unresolved or failed observations count as misses, so recall over them is a "
+        "lower bound and the improvement is not established")
 
 
 # --- review burden and cost -------------------------------------------------------------------------
@@ -2237,6 +2531,122 @@ def test_a_system_that_recorded_no_result_has_an_unknown_cost_not_a_zero_one(cor
     assert requirement(decision, "cost.coverage")["explanation"] == (
         "no scan of the candidate recorded a result, so its cost is unknown, not zero")
     assert requirement(decision, "cost.per_assignment")["observed"]["mean"] is None
+
+
+def hidden_heavy_run(root: Path, run_id: str, *, hidden: str) -> Path:
+    """Five projects. One system delivers 2 claims a scan at $0.10; the other 100 at $5.00, except on p1.
+
+    The candidate detects every target and the baseline none. Every scan of the *hidden* system after p1 is then
+    re-saved with another cost, so its result no longer binds to the decisions a reviewer filed against it and
+    its bundle is unusable: the scans ran, delivered their claims, and spent their money, and none of it reads.
+    """
+    inputs = [planned(f"p{index}", project=f"acme/p{index}",
+                      targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}")])
+              for index in range(1, 6)]
+    outcomes = {}
+    for index in range(1, 6):
+        for system in ("baseline", "candidate"):
+            heavy = system == hidden and index > 1
+            outcomes[(f"p{index}", system, 1)] = scan(
+                hits={f"T-p{index}": 1} if system == "candidate" else {}, claims=100 if heavy else 2,
+                usage={"wall_seconds": 1.0, "cost_usd": 5.0 if heavy else 0.1})
+    run = write_run(root, run_id, inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                    configs={"candidate": {"config": {"knob": 2}}})
+    for index in range(2, 6):
+        path = run / "invocations" / f"p{index}__{hidden}__r1" / "result.json"
+        result = load_document(path, "scan-result")
+        result["usage"]["cost_usd"] = 5.01
+        path.write_text(canonical_json(result) + "\n", encoding="utf-8")
+    return run
+
+
+def burden_and_cost_policy() -> dict:
+    return gate_policy(burden={"max_claims_per_assignment": 10, "max_increase_ratio": 2.0},
+                       cost={"max_per_assignment_usd": 1.0, "max_increase_ratio": 2.0})
+
+
+def test_a_candidate_whose_heavy_scans_left_no_usable_bundle_cannot_pass_burden_or_cost(tmp_path):
+    """The candidate delivered 402 claims for about $20, but only its p1 scan (2 claims, $0.10) reads.
+
+    Read alone, the comparison shows 2 claims over 5 assignments and $0.10 a scan, far inside every limit:
+    0.4 a claim per assignment against a maximum of 10, and a cost ratio of 1 against a baseline that also
+    costs $0.10. The other four scans are executed scans with no usable bundle, so their claim volume and cost
+    are unknown, not zero, and nothing that reads them can pass.
+    """
+    run = hidden_heavy_run(tmp_path, "run-hidden-candidate", hidden="candidate")
+    comparison = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=aggregation_policy())
+    whole = comparison["views"][0]["systems"]["candidate"]["slices"][0]
+    assert whole["claims"]["records"] == 2 and whole["usage"]["cost_usd"]["known"] == 1
+
+    decision = gate.evaluate_gate(burden_and_cost_policy(), comparison)
+
+    assert statuses(decision) == {
+        "contract.shared": "pass", "contract.runs_completed": "pass", "configuration.allowed_differences": "pass",
+        "evidence.scope": "pass", "primary.improvement": "pass",
+        "burden.claims_per_assignment": "inconclusive", "burden.increase_ratio": "inconclusive",
+        "cost.coverage": "inconclusive", "cost.per_assignment": "inconclusive", "cost.increase_ratio": "inconclusive"}
+    assert decision["outcome"] == "inconclusive" and decision["failed"] == []
+    assert requirement(decision, "burden.claims_per_assignment")["explanation"] == (
+        "4 of the candidate's 5 executed scan(s) have no usable bundle, so their delivered claim volume is unknown, "
+        "not zero, and what was read is only part of what the candidate delivered")
+    assert requirement(decision, "burden.claims_per_assignment")["observed"]["executed"] == 5
+    assert requirement(decision, "cost.coverage")["explanation"] == (
+        "the candidate's cost is known for 1 of 5 executed scan(s), a coverage of 0.2, below the required 1 (the "
+        "policy states no lower minimum, so every cost must be known); 4 of the 5 executed scan(s) have no usable "
+        "bundle")
+
+
+def test_a_baseline_whose_heavy_scans_left_no_usable_bundle_leaves_only_the_ratios_unresolved(tmp_path):
+    """The baseline delivered 402 claims for about $20 and only its p1 scan reads; the candidate is light.
+
+    The candidate's own limits read the candidate alone and pass. A ratio to the baseline's volume or cost would
+    compare the candidate with a baseline that looks cheap only because its scans cannot be read, so both ratios
+    and the cost coverage of the pair wait.
+    """
+    run = hidden_heavy_run(tmp_path, "run-hidden-baseline", hidden="baseline")
+    comparison = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=aggregation_policy())
+
+    decision = gate.evaluate_gate(burden_and_cost_policy(), comparison)
+
+    assert statuses(decision) == {
+        "contract.shared": "pass", "contract.runs_completed": "pass", "configuration.allowed_differences": "pass",
+        "evidence.scope": "pass", "primary.improvement": "pass",
+        "burden.claims_per_assignment": "pass", "burden.increase_ratio": "inconclusive",
+        "cost.coverage": "inconclusive", "cost.per_assignment": "pass", "cost.increase_ratio": "inconclusive"}
+    assert requirement(decision, "burden.increase_ratio")["explanation"] == (
+        "4 of the baseline's 5 executed scan(s) have no usable bundle, so their delivered claim volume is unknown, "
+        "not zero, and what was read is only part of what the baseline delivered")
+    assert requirement(decision, "cost.coverage")["explanation"].startswith(
+        "the baseline's cost is known for 1 of 5 executed scan(s), a coverage of 0.2, below the required 1")
+
+
+def test_a_missing_bundle_is_an_unknown_cost_and_only_the_policys_stated_coverage_tolerates_it(tmp_path):
+    """Three of the candidate's four executed scans left no bundle, and the baseline's cost is fully known.
+
+    The candidate's one bundle reads $0.01, so the cost known is a mean of $0.01 over 1 of 4 executed scans, a
+    coverage of 0.25, not 1 of 1. Without a stated minimum every cost must be known, so cost waits; a policy
+    that accepts a coverage of 0.25 reads the one known scan, which is the policy's own tolerance of unknown cost.
+    """
+    inputs = [planned(f"p{index}", project=f"acme/p{index}",
+                      targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}")])
+              for index in range(1, 5)]
+    outcomes = {(f"p{index}", "baseline", 1): scan(claims=1, usage={"wall_seconds": 1.0, "cost_usd": 1.0})
+                for index in range(1, 5)}
+    outcomes[("p1", "candidate", 1)] = scan(hits={"T-p1": 1}, claims=1, usage={"wall_seconds": 1.0, "cost_usd": 0.01})
+    run = write_run(tmp_path, "run-cost-gone", inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                    configs={"candidate": {"config": {"knob": 2}}})
+    for index in range(2, 5):
+        shutil.rmtree(run / "invocations" / f"p{index}__candidate__r1")
+    comparison = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=aggregation_policy())
+    usage = comparison["views"][0]["systems"]["candidate"]["slices"][0]["usage"]
+    assert usage["cost_usd"]["coverage"] == 0.25 and (usage["bundles"], usage["executed"]) == (1, 4)
+
+    strict = gate.evaluate_gate(gate_policy(cost={"max_per_assignment_usd": 0.5}), comparison)
+
+    assert statuses(strict)["cost.coverage"] == statuses(strict)["cost.per_assignment"] == "inconclusive"
+    assert strict["outcome"] == "inconclusive"
+    accepting = gate.evaluate_gate(gate_policy(cost={"min_coverage": 0.25, "max_per_assignment_usd": 0.5}), comparison)
+    assert statuses(accepting)["cost.coverage"] == statuses(accepting)["cost.per_assignment"] == "pass"
 
 
 def test_a_cost_increase_from_a_free_baseline_is_unbounded(corpus):
@@ -2975,6 +3385,39 @@ def test_a_figure_the_gate_derives_is_exact_so_binary_floats_never_move_it_acros
     assert item["observed"] == {"baseline": 0.05, "candidate": 0.07, "ratio": 1.4}
     assert item["explanation"] == ("the candidate's recorded cost per executed scan is 0.07 against the baseline's "
                                    "0.05, a ratio of 1.4, within the allowed 1.4")
+
+
+def test_a_mean_cost_equal_to_its_cap_on_paper_meets_it_however_the_scans_are_summed(tmp_path):
+    """The candidate's two scans cost $0.10 and $0.20 and the baseline's two cost $0.10 each.
+
+    The candidate's mean is exactly $0.15 and its ratio to the baseline's $0.10 exactly 1.5, so a cap of 0.15 and
+    a ratio of 1.5 are met. Summed as binary floats the candidate's cost is 0.30000000000000004, a mean of
+    0.15000000000000002, over both limits by a unit in the last place; the comparison records the exact sum, 0.3.
+    A step past either limit still fails.
+    """
+    inputs = [planned(f"p{index}", project=f"acme/p{index}",
+                      targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}")])
+              for index in (1, 2)]
+    cost = {("baseline", "p1"): 0.1, ("baseline", "p2"): 0.1, ("candidate", "p1"): 0.1, ("candidate", "p2"): 0.2}
+    outcomes = {(project, system, 1): scan(hits={f"T-{project}": 1} if system == "candidate" else {}, claims=1,
+                                           usage={"wall_seconds": 1.0, "cost_usd": spent})
+                for (system, project), spent in cost.items()}
+    run = write_run(tmp_path, "run-exact-cost", inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                    configs={"candidate": {"config": {"knob": 2}}})
+    comparison = aggregate.compare([run], baseline="baseline", candidate="candidate",
+                                   policy=aggregation_policy(min_clusters=2))
+    assert comparison["views"][0]["systems"]["candidate"]["slices"][0]["usage"]["cost_usd"]["known_sum"] == 0.3
+
+    def decide_cost(**limits) -> dict:
+        return gate.evaluate_gate(gate_policy(cost=limits), comparison)
+
+    met = decide_cost(max_per_assignment_usd=0.15, max_increase_ratio=1.5)
+    assert statuses(met)["cost.per_assignment"] == statuses(met)["cost.increase_ratio"] == "pass"
+    assert requirement(met, "cost.per_assignment")["explanation"] == (
+        "the candidate's recorded cost is 0.15 USD per executed scan, over 2 scan(s), within the allowed 0.15")
+    assert requirement(met, "cost.increase_ratio")["observed"] == {"baseline": 0.1, "candidate": 0.15, "ratio": 1.5}
+    past = decide_cost(max_per_assignment_usd=0.15 - NEAR, max_increase_ratio=1.5 - NEAR)
+    assert statuses(past)["cost.per_assignment"] == statuses(past)["cost.increase_ratio"] == "fail"
 
 
 # --- a view that spans workloads --------------------------------------------------------------------

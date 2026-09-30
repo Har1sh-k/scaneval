@@ -13,16 +13,21 @@ and the configuration the run copied, each bound to the others by hash; a 2.0 ma
 schedule and is refused. Every assignment in the schedule is one observation, whatever became of it:
 an input that could not be prepared, a skipped system, an assignment the manifest has no row for, and
 a bundle that is missing or cannot be read are failures that detect nothing and complete nothing, and
-they stay in every denominator with their reason. A bundle is read through
-:func:`scaneval.scoring.observe`, which refuses a plan, result, and decisions that do not bind to one
-another, and :func:`scaneval.review.review_status`; a refused bundle is a failure too.
+they stay in every denominator with their reason. A failure whose manifest row names a bundle ran: the
+scan spent time and money and delivered claims that nothing here can read, so it counts among the
+executed scans of the usage and claim blocks with unknown wall time, cost, and claim volume, never zero.
+A bundle is read through :func:`scaneval.scoring.observe`, which refuses a plan, result, and decisions
+that do not bind to one another, and :func:`scaneval.review.review_status`; a refused bundle is a failure
+too.
 
 What is scored against what. An input is scored on the targets and controls its schedule froze before
-the run. An item frozen there but absent from the bundle's plan is a miss (``unscored``), and an item
-a bundle's plan adds is ignored. An input whose schedule froze no plan takes no part in any target or
-control metric and is listed as such; its assignments still count toward completion, claims, and
-usage. Observations are keyed by run and input, so one input scanned by two runs is two positive
-inputs of its targets, each averaged over its own repetitions.
+the run. An item frozen there but absent from the bundle's plan is a miss (``unscored``): a target is
+not detected, and a control on a scan that completed is a completed observation with no resolved
+assessment, which the false-alarm bound counts as unresolved. An item a bundle's plan adds is ignored.
+An input whose schedule froze no plan takes no part in any target or control metric and is listed as
+such; its assignments still count toward completion, claims, and usage. Observations are keyed by run
+and input, so one input scanned by two runs is two positive inputs of its targets, each averaged over
+its own repetitions.
 
 Evidence scope. An observation is reviewed evidence only when its bundle's plan is reviewed and its
 review record is human-approved; a failure takes the scope of the plan its schedule froze. A view that
@@ -33,13 +38,15 @@ Determinism and exactness. Runs are ordered by run id and every other collection
 means, masses, and ratios are exact rationals (:class:`fractions.Fraction`; a weight a policy states
 as a decimal is read as that decimal), each rounded once to the nearest float when a report is
 written, so a hand-calculated 2/3 is reported as the float nearest 2/3 and a degenerate interval
-cannot pass for a narrow one through rounding. Usage figures the scanners reported are floats and are
-summed with :func:`math.fsum`. Bootstrap draws come from :class:`scaneval.resampling.Stream` under the
-policy's seed and a label naming the view, the slice, and the family resampled: the clusters carrying
-targets, those carrying a frozen pair, or those carrying controls. The same run directories and policy
-therefore give byte-identical documents under :func:`scaneval.contracts.canonical_json`, whatever
-order the directories are named in. Nothing here reads a clock, the network, or an unseeded random
-source, and no model or judge is consulted. A report carries no filesystem path.
+cannot pass for a narrow one through rounding. Usage figures the scanners reported are floats: seconds
+are summed with :func:`math.fsum`, and cost, which a gate holds to a limit, is read as the decimals
+the scanners wrote, summed exactly, and rounded once, so costs of 0.1 and 0.2 sum to 0.3. Bootstrap
+draws come from :class:`scaneval.resampling.Stream` under the policy's seed and a label naming the
+view, the slice, and the family resampled: the clusters carrying targets, those carrying a frozen
+pair, or those carrying controls. The same run directories and policy therefore give byte-identical
+documents under :func:`scaneval.contracts.canonical_json`, whatever order the directories are named
+in. Nothing here reads a clock, the network, or an unseeded random source, and no model or judge is
+consulted. A report carries no filesystem path.
 
 What this is not. It scores no claim and approves nothing, and it reads no label content beyond the
 schedule's ids, kinds, levels, and groupings. It does not estimate reviewed precision or review time
@@ -88,14 +95,17 @@ CONTROL_CLASSES = {"capability_safe": ("capability_safe", "both"), "fixed_target
 STATUSES = ("success", "partial", "unsupported", "error", "timeout", "skipped", "missing")
 FAILURE_REASONS = ("failed_preparation", "skipped_system", "skipped", "missing_row", "missing_bundle",
                    "unusable_bundle")
+# The failures of an assignment the manifest records as run: its row names a bundle, and the bundle is gone
+# or cannot be read. Every other failure never ran, or left no record of running.
+EXECUTED_FAILURES = ("missing_bundle", "unusable_bundle")
 REVIEW_STATES = ("human_approved", "draft", "stale", "missing")
 PAIR_OUTCOMES = ("correct", "both_flagged", "both_silent", "reversed")
 # Leave-one-project-out sensitivity is shown while projects are few (docs/EVALUATION_MATH.md, section 5).
 LOPO_PROJECT_LIMIT = 10
 
 RANDOM_ORDER_LABEL = ("diagnostic: expected recall under a uniform random order of the delivered claims, "
-                      "over unranked observations with resolved bundles only; not native recall@B and not "
-                      "a promotion metric")
+                      "over unranked observations whose bundles and matches are resolved; not native recall@B "
+                      "and not a promotion metric")
 RUN_VARIABILITY_LABEL = ("conditional run noise of repeated runs of one input, treating targets as "
                          "independent; not corpus uncertainty")
 
@@ -181,6 +191,16 @@ class _Observation:
     unscored: int = 0
     unregistered: int = 0
     timing: tuple[datetime | None, datetime | None, float] | None = None
+
+    @property
+    def executed(self) -> bool:
+        """Whether the manifest records this assignment as run: its row names a bundle, however that bundle reads.
+
+        A scan that ran spent time and money and delivered claims whether or not its bundle can still be
+        read, so its usage and claim volume are unknown, never zero. An assignment with no manifest row, a
+        skipped one, and one whose input was never prepared did not run as far as the record shows.
+        """
+        return self.observed is not None or self.reason in EXECUTED_FAILURES
 
 
 def _inside(root: Path, relative: str, label: str) -> Path:
@@ -474,6 +494,17 @@ def _float(value: Fraction | None) -> float | None:
     return None if value is None else float(value)
 
 
+def _decimal_sum(values: list[float | int]) -> float | None:
+    """The exact sum of figures read as the decimals they are written as, rounded once; ``None`` over none.
+
+    The doubles nearest 0.1 and 0.2 add to more than the double nearest 0.3, so a float sum, however
+    carefully rounded, can sit a unit in the last place from the sum on paper, and a gate holding it to
+    a limit that equals the sum on paper would fail it. The decimals sum exactly, and one rounding
+    then reports the float nearest that sum.
+    """
+    return _float(sum((_decimal(value) for value in values), Fraction(0))) if values else None
+
+
 def _within(attributes: dict[str, dict], weighting: str) -> dict[str, Fraction]:
     """Equal weight per item, or per group of items and then per item within it: 1/(G n_g)."""
     field_name = _GROUP_FIELD[weighting]
@@ -685,7 +716,9 @@ def _target_outcome(observation: _Observation, target_ids: tuple[str, ...], budg
     output that is not valid cannot hit within any budget, so it stays measurable. ``assessable`` is a
     completed scan with a resolved outcome for the target: a confirmed hit, or no hit with no pending
     match and resolved bundles. ``random`` is the random-order expectation per budget for an unranked
-    valid output with resolved bundles, and ``random_pending`` marks one whose bundles are unresolved.
+    valid output with resolved bundles and no pending match on the target, and ``random_pending`` marks
+    one whose bundles are unresolved or whose match on the target is pending: the accepted claims are
+    then only a lower bound, so its expectation is not measured.
     """
     observed = observation.observed
     failure = {"detected": False, "rank": None, "measurable": True, "completed": False, "assessable": False,
@@ -701,7 +734,7 @@ def _target_outcome(observation: _Observation, target_ids: tuple[str, ...], budg
     valid = observed["valid_positive_output"]
     pending = any(row["unresolved_match"] for row in scored)
     random = None
-    if valid and observed["random_order"] is not None:
+    if valid and observed["random_order"] is not None and not pending:
         delivered = observed["claims"]["records"]
         hits = sum(row["hit_claims"] for row in scored)
         random = {budget: _random_order_expectation(delivered, hits, budget) for budget in budgets}
@@ -710,7 +743,7 @@ def _target_outcome(observation: _Observation, target_ids: tuple[str, ...], budg
             "measurable": not valid or observed["budget_measurable"], "completed": completed,
             "assessable": completed and (detected or (not pending and resolved)),
             "unscored": False, "random": random,
-            "random_pending": valid and observed["ranking"] == "unranked" and not resolved}
+            "random_pending": valid and observed["ranking"] == "unranked" and (not resolved or pending)}
 
 
 def _control_outcome(observation: _Observation, control_ids: tuple[str, ...]) -> dict:
@@ -719,6 +752,10 @@ def _control_outcome(observation: _Observation, control_ids: tuple[str, ...]) ->
     A confirmed false allegation about any of the input's records of the control is one; the control
     is resolved quiet only when every record of it is. Completion and resolution follow
     :func:`scaneval.scoring.observe`: only a successful scan completes, and a failure resolves nothing.
+    A control frozen in the schedule that the bundle's plan lacks was never assessed, but the scan still
+    completed in the frozen scope: on a successful scan it is a completed, unresolved observation
+    (``unscored``), which the false-alarm bound counts as a false allegation rather than dropping from
+    the completed mass.
     """
     observed = observation.observed
     empty = {"completed": False, "resolved": False, "false_allegation": False,
@@ -728,7 +765,7 @@ def _control_outcome(observation: _Observation, control_ids: tuple[str, ...]) ->
     rows = {row["control_id"]: row for row in observed["controls"]}
     scored = [rows[control_id] for control_id in control_ids if control_id in rows]
     if not scored:
-        return {**empty, "unscored": True}
+        return {**empty, "completed": observed["completed"], "unscored": True}
     false = any(row["false_allegation"] for row in scored)
     return {"completed": observed["completed"], "resolved": false or all(row["resolved"] for row in scored),
             "false_allegation": false,
@@ -1085,10 +1122,16 @@ def _completion(corpus: _Corpus, keys: list[Key],
 
 
 def _claims(observations: list[_Observation]) -> dict:
-    """Claim volume summed over the bundles read, each bundle once."""
+    """Claim volume summed over the bundles read, each bundle once.
+
+    ``executed`` counts the scans the manifest records as run, and ``bundles`` those of them whose bundle
+    could be read. What an executed scan delivered when its bundle is missing or unusable is unknown, not
+    zero: it is in no sum below, and ``executed`` above ``bundles`` says the sums are short by it.
+    """
     bundles = [observation.observed for observation in observations if observation.observed is not None]
     volume = [bundle["claims"] for bundle in bundles]
-    return {"bundles": len(bundles), "assignments": len(observations),
+    return {"bundles": len(bundles), "executed": sum(observation.executed for observation in observations),
+            "assignments": len(observations),
             "records": sum(item["records"] for item in volume),
             "unique": sum(item["unique"] for item in volume),
             "duplicate_copies": sum(item["duplicate_copies"] for item in volume),
@@ -1099,20 +1142,27 @@ def _claims(observations: list[_Observation]) -> dict:
 
 
 def _usage(observations: list[_Observation]) -> dict:
-    """Reported usage summed over bundles, each executed scan once however many targets it covers.
+    """Reported usage summed over the executed scans, each once however many targets it covers.
 
-    An unknown value (a null or absent wall time or cost) is counted as unknown and never summed as 0,
-    and a sum over no known value is null. These are the scanners' own figures, summed as floats.
+    Every scan the manifest records as run counts in ``executed``, whether or not its bundle could be
+    read (``bundles`` counts those that could). An executed scan with no usable bundle has an unknown
+    wall time and cost, like one whose result reports none: an unknown value is counted as unknown and
+    never summed as 0, and a sum over no known value is null. These are the scanners' own figures.
+    Seconds are summed as floats (:func:`math.fsum`). Cost is what a gate holds to a limit, so it is read
+    as the decimals the scanners wrote and summed exactly (:func:`_decimal_sum`): costs of 0.1 and 0.2
+    sum to 0.3, not to 0.30000000000000004.
     """
-    usages = [observation.observed["usage"] for observation in observations
-              if observation.observed is not None]
+    executed = [observation for observation in observations if observation.executed]
+    usages = [observation.observed["usage"] if observation.observed is not None else {}
+              for observation in executed]
 
     def known(key: str) -> list:
         return [usage[key] for usage in usages if usage.get(key) is not None]
 
     wall, setup, cost = known("wall_seconds"), known("setup_seconds"), known("cost_usd")
     input_tokens, output_tokens = known("input_tokens"), known("output_tokens")
-    return {"bundles": len(usages),
+    return {"bundles": sum(observation.observed is not None for observation in executed),
+            "executed": len(usages),
             "wall_seconds": {"known_sum": math.fsum(wall) if wall else None, "known": len(wall),
                              "unknown": len(usages) - len(wall)},
             "setup_seconds": {"sum": math.fsum(setup) if setup else None, "reported": len(setup)},
@@ -1120,7 +1170,7 @@ def _usage(observations: list[_Observation]) -> dict:
                              "reported": len(input_tokens)},
             "output_tokens": {"sum": sum(output_tokens) if output_tokens else None,
                               "reported": len(output_tokens)},
-            "cost_usd": {"known_sum": math.fsum(cost) if cost else None, "known": len(cost),
+            "cost_usd": {"known_sum": _decimal_sum(cost), "known": len(cost),
                          "unknown": len(usages) - len(cost),
                          "coverage": _float(Fraction(len(cost), len(usages))) if usages else None}}
 
@@ -1382,14 +1432,18 @@ def _systems_in_view(corpus: _Corpus, mode: str, profile: str) -> list[str]:
 
 
 def _view_facts(corpus: _Corpus, mode: str, profile: str, system_ids: Iterable[str]) -> dict:
-    """What the schedules of the runs assigning *system_ids* froze for one view; no outcome is read."""
+    """What the schedules of the runs assigning *system_ids* froze for one view; no outcome is read.
+
+    ``targets_per_input`` counts the distinct canonical targets each frozen plan holds, so the alias
+    records of one root cause (a CVE and a GHSA record of it, say) are one target, never several.
+    """
     wanted = set(system_ids)
     rows = [(run, row) for run in corpus.runs if wanted & set(run.system_ids)
             for row in run.schedule["inputs"] if (row["mode"], row["profile"]) == (mode, profile)]
     frozen = [row for _run, row in rows if row["plan"]["state"] == "frozen"]
     targets = {target["canonical_id"] for row in frozen for target in row["plan"]["targets"]}
     controls = {control["canonical_id"] for row in frozen for control in row["plan"]["controls"]}
-    per_input = Counter(len(row["plan"]["targets"]) for row in frozen)
+    per_input = Counter(len({target["canonical_id"] for target in row["plan"]["targets"]}) for row in frozen)
     projects = {row["project"] for _run, row in rows} | {corpus.targets[key]["project"] for key in targets}
     workloads = {row["workload"] for _run, row in rows} | {corpus.targets[key]["workload"] for key in targets}
     return {
@@ -1422,8 +1476,11 @@ def _view_warnings(facts: dict, results: Sequence[_SystemResult]) -> list[str]:
                             "adds beyond the frozen schedule are ignored")
         failed = sum(observations["failures"].values())
         if failed:
+            ran = sum(observations["failures"][reason] for reason in EXECUTED_FAILURES)
+            unknown = (f"; {ran} of them ran, so their claim volume, wall time, and cost are unknown, not zero"
+                       if ran else "")
             warnings.append(f"{system_id}: {failed} assignment(s) produced no usable bundle and stay in "
-                            "every denominator as failures")
+                            f"every denominator as failures{unknown}")
         if result.block["evidence_scope"] != "reviewed":
             warnings.append(f"{system_id}: evidence scope is {result.block['evidence_scope']}, not "
                             "reviewed benchmark evidence")
@@ -1431,10 +1488,14 @@ def _view_warnings(facts: dict, results: Sequence[_SystemResult]) -> list[str]:
 
 
 def _run_row(corpus: _Corpus, run: _Run) -> dict:
-    """One run as read: its hashes, its evidence digest, its failures, and its execution timing.
+    """One run as read: its hashes, its evidence digest, its failures, its execution timing, and what it covers.
 
     The evidence digest hashes, per assignment in id order, its status, failure reason, review state,
     and the result, plan, and decisions digests of its bundle, so a report binds to exact evidence.
+    ``selection`` is the manifest's record of what the run was narrowed to, and ``configured_inputs``
+    counts the inputs its configuration names beside ``inputs``, those its schedule covers: a run
+    narrowed with ``--only-input`` keeps its configuration whole and shortens its schedule, which no
+    comparison of two systems assigned that same schedule could otherwise show.
     """
     observations = [item for key, item in sorted(corpus.observations.items()) if key[0] == run.run_id]
     timings = [item.timing for item in observations if item.timing is not None]
@@ -1456,7 +1517,9 @@ def _run_row(corpus: _Corpus, run: _Run) -> dict:
         "run_id": run.run_id, "status": run.manifest["status"], "created_at": run.schedule["created_at"],
         "manifest_sha256": canonical_sha256(run.manifest), "schedule_sha256": canonical_sha256(run.schedule),
         "config_sha256": run.schedule["config_sha256"], "evidence_sha256": canonical_sha256(evidence),
-        "pack": run.schedule["pack"], "repetitions": run.repetitions, "inputs": len(run.schedule["inputs"]),
+        "pack": run.schedule["pack"], "repetitions": run.repetitions,
+        "configured_inputs": len(run.config["inputs"]), "inputs": len(run.schedule["inputs"]),
+        "selection": deepcopy(run.manifest["selection"]),
         "systems": list(run.system_ids), "assignments": len(observations),
         "bundles": sum(item.observed is not None for item in observations),
         "failures": {reason: failures[reason] for reason in FAILURE_REASONS},
@@ -1711,9 +1774,12 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
     mode, profile, snapshot or change set, blinding map, declared tree hash, frozen plan items, levels,
     scope and budgets, the same repetitions, the same pairs, and the same pack. Anything else is refused
     before a metric is computed ("the systems do not share the frozen evaluation contract"), so a
-    system cannot improve its numbers by being assigned less. Everything :func:`aggregate` refuses is
-    refused here too. Differences are candidate minus baseline; each interval resamples the same
-    clusters for both systems in every replicate.
+    system cannot improve its numbers by being assigned less. A run narrowed for both systems at once
+    (``--only-input``) assigns them the same shorter schedule and is not refused; its row records the
+    manifest's selection and the inputs its configuration names, which is what the gate reads to leave
+    such a comparison unresolved. Everything :func:`aggregate` refuses is refused here too. Differences
+    are candidate minus baseline; each interval resamples the same clusters for both systems in every
+    replicate.
     """
     if baseline == candidate:
         raise ContractError("the baseline and the candidate are one system; name two systems to compare")

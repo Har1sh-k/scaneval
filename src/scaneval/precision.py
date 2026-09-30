@@ -659,12 +659,14 @@ def record_review(sample: dict, reviews: dict | None, *, unit_id: str, reviewer:
 def _resolve(sample: dict, reviews: dict | None) -> list[dict]:
     """Every sampled unit's final class and its basis, by the documented rule, in unit-id order.
 
-    The latest adjudication of a unit wins. Otherwise each independent reviewer's latest entry
-    counts once: one reviewer gives ``single_review``; two or more who all agree give
-    ``double_review``; any disagreement leaves the unit ``unresolved`` (``disagreement``) until an
-    adjudicator records an outcome; no review leaves it ``unresolved`` (``nonresponse``). "Latest"
-    is chain order, never a timestamp, and reviewers are told apart by their stated names exactly as
-    written.
+    The latest adjudication of a unit decides its class, and is ``adjudicated`` evidence only when an
+    independent reviewer other than that adjudicator also reviewed the unit: an adjudication with no
+    independent review by another name rests on one person, so the unit is ``single_review`` whatever
+    role the entry states. Without an adjudication each independent reviewer's latest entry counts
+    once: one reviewer gives ``single_review``; two or more who all agree give ``double_review``; any
+    disagreement leaves the unit ``unresolved`` (``disagreement``) until an adjudicator records an
+    outcome; no review leaves it ``unresolved`` (``nonresponse``). "Latest" is chain order, never a
+    timestamp, and reviewers are told apart by their stated names exactly as written.
     """
     history: dict[str, list[dict]] = defaultdict(list)
     for entry in reviews["reviews"] if reviews is not None else []:
@@ -678,7 +680,9 @@ def _resolve(sample: dict, reviews: dict | None) -> list[dict]:
             if entry["role"] == "independent":
                 latest[entry["reviewer"]] = entry["outcome"]
         if adjudications:
-            outcome, basis = adjudications[-1]["outcome"], "adjudicated"
+            judge = adjudications[-1]
+            outcome = judge["outcome"]
+            basis = "adjudicated" if any(name != judge["reviewer"] for name in latest) else "single_review"
         elif not latest:
             outcome, basis = "unresolved", "nonresponse"
         elif len(set(latest.values())) > 1:
@@ -727,9 +731,11 @@ def _interval(resolved: list[dict], strata: list[dict], precision: Fraction | No
     ``sum_h N_h^2 (1 - n_h/N_h) s_h^2 / n_h``, where ``s_h^2`` is the sample variance of z within
     stratum h. A stratum taken whole contributes nothing (no sampling variance), an uncovered one is
     outside the estimate, and one that drew a single unit of several makes the interval
-    ``insufficient``. A zero variance from a sample that is not a census is ``degenerate`` and gets
-    no bounds, because it is the normal approximation failing, not certainty. The interval covers
-    sampling only; reviewer error, disagreement, and unresolved units are outside it.
+    ``insufficient``. A census is a sample that took every stratum whole: a stratum that drew nothing
+    was never observed, so a sample with one is no census, however little variance the strata it covers
+    show. A zero variance from a sample that is not a census is ``degenerate`` and gets no bounds,
+    because it is the normal approximation failing, not certainty. The interval covers sampling only;
+    reviewer error, disagreement, and unresolved units are outside it.
     """
     z = NormalDist().inv_cdf(0.5 + confidence / 2)
     base = {"method": INTERVAL_METHOD, "confidence": confidence, "z": z, "variance": None,
@@ -740,13 +746,12 @@ def _interval(resolved: list[dict], strata: list[dict], precision: Fraction | No
     for unit in resolved:
         by_stratum[unit["stratum"]].append(unit)
     variance = _ZERO
-    census = True
+    census = all(row["sampled_units"] == row["population_units"] for row in strata)
     insufficient = []
     for row in strata:
         size, drawn = row["population_units"], row["sampled_units"]
         if drawn in (0, size):
             continue
-        census = False
         if drawn < 2:
             insufficient.append(row["stratum"])
             continue

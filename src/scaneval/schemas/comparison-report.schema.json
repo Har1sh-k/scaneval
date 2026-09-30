@@ -472,7 +472,7 @@
         "pending_mass",
         "expected_recall"
       ],
-      "description": "Expected recall under a uniform random order of the delivered claims, over unranked observations with resolved bundles only. A diagnostic: not native recall@B and not a promotion metric.",
+      "description": "Expected recall under a uniform random order of the delivered claims, over the unranked observations whose bundles are resolved and whose match on the target is not pending. An observation left out for either reason counts in pending_mass. A diagnostic: not native recall@B and not a promotion metric.",
       "properties": {
         "label": {
           "type": "string",
@@ -1095,6 +1095,7 @@
       "additionalProperties": false,
       "required": [
         "bundles",
+        "executed",
         "assignments",
         "records",
         "unique",
@@ -1104,9 +1105,13 @@
         "unmatched_unique",
         "pending_matching"
       ],
-      "description": "Claim volume summed over bundles, each bundle once. delivered sums bundles whose bundles are resolved only.",
+      "description": "Claim volume summed over bundles, each bundle once. delivered sums bundles whose bundles are resolved only. executed counts the scans the manifest records as run and bundles those whose bundle could be read; an executed scan whose bundle is missing or unusable delivered an unknown volume, which no sum includes.",
       "properties": {
         "bundles": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "executed": {
           "type": "integer",
           "minimum": 0
         },
@@ -1149,15 +1154,20 @@
       "additionalProperties": false,
       "required": [
         "bundles",
+        "executed",
         "wall_seconds",
         "setup_seconds",
         "input_tokens",
         "output_tokens",
         "cost_usd"
       ],
-      "description": "Reported usage summed over bundles, each executed scan once however many targets it covers. Unknown values stay unknown and are counted, never summed as 0.",
+      "description": "Reported usage summed over the executed scans, each once however many targets it covers. bundles counts the executed scans whose bundle could be read; one whose bundle is missing or unusable has unknown wall time and cost. Unknown values stay unknown and are counted, never summed as 0. Cost is read as the decimals the scanners wrote, summed exactly, and rounded once.",
       "properties": {
         "bundles": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "executed": {
           "type": "integer",
           "minimum": 0
         },
@@ -1546,6 +1556,53 @@
         }
       }
     },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "only_inputs",
+        "only_systems",
+        "excluded_inputs",
+        "excluded_systems"
+      ],
+      "description": "Which configured inputs and systems this run actually covered. A null filter means no filter was supplied, not that nothing was excluded.",
+      "properties": {
+        "only_inputs": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "only_systems": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "excluded_inputs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "excluded_systems": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
     "run": {
       "type": "object",
       "additionalProperties": false,
@@ -1559,14 +1616,16 @@
         "evidence_sha256",
         "pack",
         "repetitions",
+        "configured_inputs",
         "inputs",
+        "selection",
         "systems",
         "assignments",
         "bundles",
         "failures",
         "timing"
       ],
-      "description": "One run directory as read, bound by canonical hashes of its manifest, its schedule, its configuration, and every assignment's evidence digests.",
+      "description": "One run directory as read, bound by canonical hashes of its manifest, its schedule, its configuration, and every assignment's evidence digests. configured_inputs counts the inputs its configuration names and inputs those its schedule covers; selection is the manifest's record of what the run was narrowed to, so a run narrowed with --only-input shows it.",
       "properties": {
         "run_id": {
           "type": "string",
@@ -1605,9 +1664,16 @@
           "type": "integer",
           "minimum": 1
         },
+        "configured_inputs": {
+          "type": "integer",
+          "minimum": 0
+        },
         "inputs": {
           "type": "integer",
           "minimum": 0
+        },
+        "selection": {
+          "$ref": "#/$defs/selection"
         },
         "systems": {
           "type": "array",
