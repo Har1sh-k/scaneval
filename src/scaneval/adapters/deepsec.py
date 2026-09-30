@@ -70,8 +70,8 @@ DeepSec prints is used to name the reason, never to decide the status, because t
 output can reach must not be able to turn a failure into a success. A run stopped by an exhausted
 quota, or with an errored batch, is ``partial`` when some file still reached a verdict and an
 ``error`` when none did. "Nothing to process" is a completed empty review only with exit 0, no
-record of any kind, and DeepSec's own statement that it found nothing to do; the same silence
-without that statement is an error.
+file record, and DeepSec's own statement that it found nothing to do; the same silence without
+that statement is an error.
 """
 
 from __future__ import annotations
