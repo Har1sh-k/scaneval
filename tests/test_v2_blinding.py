@@ -22,7 +22,7 @@ import pytest
 
 from scaneval import blinding, cases, materialize
 from scaneval.adapters.base import Adapter, NativeOutcome
-from scaneval.cli import main
+from scaneval.cli import _retained_in, main
 from scaneval.contracts import ContractError, canonical_json, chain_digest, load_document, validate_document
 from scaneval.execution import LOCAL_ISOLATION
 from scaneval.materialize import MaterializationError
@@ -928,11 +928,24 @@ def test_blinding_check_dry_runs_every_variant_and_writes_nothing_to_the_map(tmp
     assert "snap-a: pass" in printed and "snap-fixed: pass" in printed
     assert "readme-brand README.md: AcmeCorp=1, Widget=2; changed line(s): 1, 3" in printed
     assert "retained identity cues: 2 token(s), 6 occurrence(s) in 6 file(s); instruction files: CLAUDE.md" in printed
+    assert ("retained in: .github/workflows/ci.yml (1), CLAUDE.md (1), LICENSE (1), README.md (1), "
+            "package.json (1), src/app.py (1)\n") in printed
 
     code, printed, _ = cli(capsys, *argv, "--snapshot-id", "snap-fixed")
     assert code == 0 and "snap-a:" not in printed and "snap-fixed: pass" in printed
     code, _, err = cli(capsys, *argv, "--snapshot-id", "snap-zzz")
     assert code == 2 and "has no variant for snapshot snap-zzz" in err
+
+
+def test_blinding_check_names_at_most_ten_files_that_keep_a_cue_and_counts_the_rest():
+    cues = {"path_count": 12, "paths": [{"path": f"docs/page-{index:02d}.md", "count": 12 - index}
+                                        for index in range(12)]}
+
+    line = _retained_in(cues)
+
+    assert line.startswith("retained in: docs/page-00.md (12), docs/page-01.md (11), ")
+    assert line.endswith("docs/page-09.md (3), and 2 more file(s)") and "page-10" not in line
+    assert _retained_in({"path_count": 1, "paths": [{"path": "LICENSE", "count": 1}]}) == "retained in: LICENSE (1)"
 
 
 def test_blinding_check_exits_one_for_a_refused_or_unapproved_map(tmp_path, widget, capsys):

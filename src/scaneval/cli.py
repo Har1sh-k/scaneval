@@ -607,8 +607,21 @@ def _run(args: argparse.Namespace) -> int:
     return 1 if unprepared or incomplete or manifest["status"] != "completed" else 0
 
 
+# How many of the files that still carry an original token ``blinding check`` names, most first;
+# the preparation record lists up to :data:`scaneval.blinding.CUE_PATH_LIMIT` of them.
+RETAINED_CUE_PATHS_SHOWN = 10
+
+
 def _occurrences(counts: dict) -> str:
     return ", ".join(f"{token}={count}" for token, count in sorted(counts.items())) or "none"
+
+
+def _retained_in(cues: dict) -> str:
+    """The files of a blinded record's ``retained_identity_cues`` that still carry an original, most first."""
+    shown = cues["paths"][:RETAINED_CUE_PATHS_SHOWN]
+    more = cues["path_count"] - len(shown)
+    return ("retained in: " + ", ".join(f"{entry['path']} ({entry['count']})" for entry in shown)
+            + (f", and {more} more file(s)" if more > 0 else ""))
 
 
 def _blinding_check(args: argparse.Namespace) -> int:
@@ -616,6 +629,8 @@ def _blinding_check(args: argparse.Namespace) -> int:
 
     Each variant is fetched into the source cache (default: ``.repos`` beside the pack) and
     exported into a temporary directory that is removed afterwards; the map file is never written.
+    The report names the files that still carry an original token, most occurrences first, so a
+    curator can decide whether each is a cue to leave or an edit the map is missing.
     A fetch that fails means the check could not be carried out (2). A map that is not approved,
     or that any checked variant refuses, is a negative result (1): a run would refuse it.
     """
@@ -661,6 +676,8 @@ def _blinding_check(args: argparse.Namespace) -> int:
                   f"{cues['token_count']} token(s), {cues['total_occurrences']} occurrence(s) in "
                   f"{cues['path_count']} file(s); instruction files: "
                   f"{', '.join(cues['instruction_files']) or 'none'}")
+            if cues["paths"]:
+                print(f"  {_retained_in(cues)}")
     if refused:
         print(f"scaneval: blinding map refused for {len(refused)} variant(s): {', '.join(refused)}",
               file=sys.stderr)
