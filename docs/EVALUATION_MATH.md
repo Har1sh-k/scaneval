@@ -1,6 +1,6 @@
 # ScanEval evaluation math
 
-Companion to [the design decisions](DESIGN_DECISIONS.md). Updated 2026-09-18. Metric specification; implementation pending.
+Companion to [the design decisions](DESIGN_DECISIONS.md). Updated 2026-09-18. Metric specification. `scaneval aggregate` and `scaneval compare` compute sections 1, 2, 4, and 5 over saved runs ([aggregation](AGGREGATION.md)), except mixed-intent correctness, review-time and cost-provenance reporting, and the planning approximations. Sections 3 and 6 to 8 are not implemented.
 
 Sections 1 through 6 define core reporting and planning. Sections 7 and 8 cover annotation-dependent diagnostics and optional research. These formulas use reviewed labels and recorded outcomes, not an LLM judge. Zero denominators mean N/A unless a convention explicitly states otherwise.
 

@@ -6,6 +6,7 @@ and budgeted known-target recall, control false-alarm rates with their missing-a
 vulnerable/fixed pair correctness, completion, claim volume, usage and cost, run variability, and
 cluster bootstrap intervals. :func:`compare` does the same for two systems that were assigned exactly
 the same frozen work and reports candidate minus baseline with paired intervals.
+``docs/AGGREGATION.md`` states what every metric means and what its denominator is.
 
 What is read. A run directory is read through its 2.1 run manifest, the schedule that manifest names,
 and the configuration the run copied, each bound to the others by hash; a 2.0 manifest names no

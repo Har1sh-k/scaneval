@@ -37,6 +37,8 @@ The scorer reports known-target detection, recall within review budgets, reviewe
 | `scaneval run <config> --output <new dir>` | Run a frozen configuration and save its artifacts. |
 | `scaneval review init\|record\|approve\|status` | Prepare and record the review of an invocation bundle. |
 | `scaneval diagnose context-coverage <bundle>` | Compare captured context spans with labeled targets. Does not change scores. |
+| `scaneval aggregate <run dir>... --output` | Weight every scheduled assignment of saved runs into corpus metrics with cluster-bootstrap intervals. |
+| `scaneval compare <run dir>... --baseline --candidate --output` | Compare two systems assigned the same frozen work, with paired intervals. Decides no promotion. |
 
 Run `scaneval <command> --help` for required arguments. Only `corpus validate --snapshot-id` and `run` reach the network; contacts depend on the configured sources and scanners. Exit code `2` means the command could not be carried out, `1` means it ran and reports a negative result, and `0` means it ran and reports nothing wrong. None certifies that a security label is correct.
 
@@ -61,7 +63,8 @@ Guides: [Observer SDK](docs/OBSERVER_SDK.md), [native CLI collectors](docs/COLLE
 
 - Full-scan execution, case packs, source export, review, scoring, replay, and reports are implemented.
 - Only the `standard` input profile is supported. `metadata_blinded` is refused.
-- Native PR mode, SARIF import, corpus-level aggregation, precision sampling, promotion gates, and enforced isolation are not implemented.
+- Native PR mode, SARIF import, precision sampling, promotion gates, and enforced isolation are not implemented.
+- Corpus aggregation and paired comparison read saved, frozen run directories ([aggregation](docs/AGGREGATION.md)). They compute no reviewed precision and decide no promotion.
 - The initial public workload is not selected. The pilot is an integration exercise, not a representative benchmark or scanner comparison.
 
 [Current capabilities](docs/INITIAL_BUILD.md) describes the implementation. [Design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) describe the broader contract and planned work.
