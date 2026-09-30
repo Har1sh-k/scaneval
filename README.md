@@ -33,7 +33,8 @@ The scorer reports known-target detection, recall within review budgets, reviewe
 | `scaneval replay <bundle>` | Recompute a saved bundle offline. |
 | `scaneval report <bundle> --output` | Render a standalone HTML report. |
 | `scaneval corpus init\|add-snapshot\|import\|validate\|approve\|admit\|disposition` | Prepare case packs, run mechanical checks, and record explicit reviews and admissions. |
-| `scaneval plan --pack --snapshot-id --tree-hash --output` | Build an evaluation plan for one materialized input. |
+| `scaneval corpus add-change-set\|pr-scope\|canonical` | Declare a base/head change set, state which targets and controls are scored in its PR review, and group records by canonical root cause. |
+| `scaneval plan --pack --snapshot-id --tree-hash --output` | Build an evaluation plan for one materialized input, or with `--mode pr --change-set-id` and the hashes that identify it, the PR plan of a change set. |
 | `scaneval run <config> --output <new dir>` | Run a frozen configuration and save its artifacts. |
 | `scaneval blinding check\|review` | Dry-run a metadata blinding map against its snapshots, and record a named review of it. |
 | `scaneval import sarif <log> --pack --snapshot-id --tree-hash --system-id --output` | Import one run of a saved SARIF 2.1.0 log into a new bundle for review, offline. |
@@ -61,12 +62,13 @@ Guides: [Observer SDK](docs/OBSERVER_SDK.md), [native CLI collectors](docs/COLLE
 
 ## Current limits
 
-- Full-scan execution, case packs, source export, review, scoring, replay, and reports are implemented.
+- Full-scan execution, native PR execution (a case pack declares a change set and states which targets and controls each PR review scores), case packs, source export, review, scoring, replay, and reports are implemented.
 - Each run freezes its evaluation schedule (every assignment, pre-registered plan, and vulnerable/fixed pair) before it prepares an input. An input it cannot prepare is recorded with its skipped assignments, and the other inputs still run.
 - The `metadata_blinded` profile applies a reviewed per-repository map to documentation and display metadata only. It is partial blinding, not anonymization: package names, source, and paths are unchanged.
 - A saved SARIF 2.1.0 log imports offline into a bundle that review, score, and replay read; its execution report is recorded unverified ([SARIF import](docs/SARIF_IMPORT.md)). Other saved vendor formats have no importer.
 - Enforced isolation exists for Semgrep only: a system whose 2.1 run configuration selects the `oci` execution backend runs each scanner process in a locked-down Docker container from a digest-pinned image, with its network policy enforced. `llm-harness` and `deepsec` are refused under it. Every other system runs as the operator, unenforced. See [the threat model](docs/THREAT_MODEL.md).
-- Native PR mode, corpus-level aggregation, precision sampling, and promotion gates are not implemented.
+- Native PR review is implemented for `llm-harness`, which runs the harness's own pr mode over a neutral two-commit history of a declared change set. Semgrep's and DeepSec's PR modes are added separately: until then a PR input given to either is recorded as unsupported and stays in every denominator, and a full scan of the head never stands in for a PR review ([native PR review](docs/INITIAL_BUILD.md#native-pr-review)).
+- Corpus-level aggregation, precision sampling, and promotion gates are not implemented.
 - The initial public workload is not selected. The pilot is an integration exercise, not a representative benchmark or scanner comparison.
 
 [Current capabilities](docs/INITIAL_BUILD.md) describes the implementation. [Design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) describe the broader contract and planned work.

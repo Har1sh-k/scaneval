@@ -83,6 +83,7 @@ approval, then versioned pack, then evaluation. The commands map onto it directl
 | Supplied artifact | `corpus import` | One draft case, one evidence record per artifact, disposition `needs_evidence`, review state `draft`. |
 | Candidate and evidence draft | `corpus validate --snapshot-id` | An export of the pinned snapshot plus one L1 check set per case, recorded in the pack. |
 | Human approval | `corpus disposition`, `corpus approve`, `corpus admit` | A screening decision, one named review per case, one named admission decision. |
+| PR scope, when a change is reviewed | `corpus add-change-set`, `corpus pr-scope`, `corpus canonical` | A declared base/head boundary, and per item whether the PR review scores it. Labels: an approval recorded before does not cover them. |
 | Versioned pack | the pack file, `--new-version` | The version and status the plans and manifests then cite by hash. |
 | Evaluation | `plan`, `run`, `review`, `replay`, `report` | A plan, a run directory, drafted decisions, recorded review, scores. |
 
@@ -432,9 +433,10 @@ admission before evaluation, enforce it by checking the pack, not by relying on 
 | `run_id` | yes | Matches `^[A-Za-z0-9][A-Za-z0-9._-]*$`. |
 | `pack` | yes | Path to the case pack, relative to the configuration file. |
 | `cache_root` | no | Immutable source cache, relative to the configuration file. Default `.repos`. |
-| `inputs[].snapshot_id` | yes | A snapshot the pack declares. Refused before anything is written otherwise. |
+| `inputs[].snapshot_id` | yes for a full input | A snapshot the pack declares. Refused before anything is written otherwise. A PR input names no snapshot; see [a native PR input](#a-native-pr-input). |
 | `inputs[].input_id` | no, 2.1 | Names the input's directory and invocations; never shown to a scanner. Defaults to the snapshot id, with `.blinded` appended for a blinded input. |
-| `inputs[].mode` | no, 2.1 | `full` (default). `pr` is refused when the configuration is read: this build cannot prepare a native PR input, and a full scan of the head never stands in for one. |
+| `inputs[].mode` | no, 2.1 | `full` (default) or `pr`. A `pr` input reviews a change and names its `change_set_id`; a full scan of the head never stands in for one. |
+| `inputs[].change_set_id` | 2.1, PR input | A change set the pack declares. Required when `mode` is `pr`, and refused for a full input. Refused before anything is written when the pack does not declare it. The input's default `input_id` is this id. |
 | `inputs[].profile` | no | `standard` (default) or `metadata_blinded`, which needs a 2.1 configuration; see [a metadata-blinded input](#a-metadata-blinded-input). |
 | `inputs[].blinding_map` | 2.1 | Path to the reviewed blinding map, relative to the configuration file. Required exactly when `profile` is `metadata_blinded`. |
 | `systems[].system_id` | yes | Matches `^[A-Za-z0-9][A-Za-z0-9._-]*$`. |
@@ -609,8 +611,11 @@ $SB plan --pack "$BYOC/pack.json" --snapshot-id reporting-main --tree-hash "$TRE
   --output "$BYOC/plan-reviewed.json" --mode full
 ```
 
-`--mode pr` changes exactly one thing today: the plan carries the pack's `pr` review budgets
-instead of its `full` budgets, and records `"mode": "pr"` in its provenance. See section 9.
+`--mode pr` on its own changes exactly one thing: the plan carries the pack's `pr` review budgets
+instead of its `full` budgets, and records `"mode": "pr"` in its provenance. It is still a full plan
+of the snapshot, and says so on stderr, because it names no change. With `--change-set-id` and the
+hashes that identify the input it is the plan of that change set's PR review; see
+[a native PR input](#a-native-pr-input).
 
 ### A metadata-blinded input
 
@@ -814,6 +819,208 @@ Report standard and blinded results separately: the schedule pairs vulnerable an
 within one profile. A blinded result says the listed cues were absent from the scanned text, not
 that the scanner could not recognize the repository.
 
+### A native PR input
+
+A PR input reviews one change: a base and a head snapshot of one repository, declared in the pack as
+a change set, run once per system and repetition, against a history of exactly two commits. A full
+scan of the head is a different measurement and never stands in for it. The example is one pull
+request against the reporting service: `app/report.py` now concatenates a customer id into a SQL
+string, `app/export.py` is added, `app/legacy.py` is deleted, `lib/fmt.py` is renamed to
+`lib/format.py`, and `scripts/export.sh` becomes executable.
+
+Pin both commits, import the finding on the head, and check both exports. `corpus validate`
+records each export's tree hash in the pack, and the run's schedule can freeze a PR input's plan
+only when both snapshots declare theirs; a run checks both exports again itself, and a snapshot no
+case references says so:
+
+```sh
+BASE=$(git -C "$BYOC/source" rev-parse HEAD~1); HEAD=$(git -C "$BYOC/source" rev-parse HEAD)
+
+$SB corpus add-snapshot "$BYOC/pr-pack.json" --snapshot-id reporting-base --url "$BYOC/source" \
+  --name acme/reporting-service --commit "$BASE" --language python --workload conventional_application \
+  --component-role application --reference "the commit the pull request branched from" --role ordinary
+$SB corpus add-snapshot "$BYOC/pr-pack.json" --snapshot-id reporting-head --url "$BYOC/source" \
+  --name acme/reporting-service --commit "$HEAD" --language python --workload conventional_application \
+  --component-role application --reference "the head of the pull request"
+$SB corpus import "$BYOC/pr-pack.json" --case-id report-sqli --snapshot-id reporting-head \
+  --represents "This case tests SQL built by string concatenation under a default deployment, and adds a Python query sink." \
+  --workload conventional_application --component-role application --finding "$BYOC/finding.json"
+```
+
+Controls are written into the pack by hand (section 3), and a hand edit of a record a plan reads must
+be followed by rebuilding the pack's anchor, which no command does: a pack whose anchor no longer
+verifies does not load. Here two capability-safe controls were added to the case, one on the
+neighbouring query and one on a token comparison in a file the pull request never touched:
+
+```sh
+python - <<'PY'
+import json, pathlib
+from scaneval.contracts import pack_anchor_digest
+path = pathlib.Path("/private/tmp/byoc/pr-pack.json")
+pack = json.loads(path.read_text())
+pack["cases"][0]["controls"] = controls   # your control records: C-count-parameterized (app/report.py:12), C-token-compare (app/auth.py:5)
+pack["anchor_sha256"] = pack_anchor_digest(pack)
+path.write_text(json.dumps(pack, indent=2) + "\n")
+PY
+```
+
+```
+$ $SB corpus validate "$BYOC/pr-pack.json" --snapshot-id reporting-base --cache-root "$BYOC/cache" --trial-root "$BYOC/trials"
+Exported reporting-base to /private/tmp/byoc/trials/reporting-base (sha256:7dae9be43bbe78748c42a532f5c89a49bbeb196e931b3fce0f4531a0c38fafa2)
+No case references snapshot reporting-base; nothing was checked.
+exit=0
+$ $SB corpus validate "$BYOC/pr-pack.json" --snapshot-id reporting-head --cache-root "$BYOC/cache" --trial-root "$BYOC/trials"
+Exported reporting-head to /private/tmp/byoc/trials/reporting-head (sha256:507c6e68fc74d42e97378b8ee220d4525701adeac45a91947d1e4453a3356f36)
+report-sqli: pass (mechanically_checked, level L1)
+exit=0
+```
+
+Declare the change set, and state which items the review scores. `--boundary` says what kind of
+change it is (`introducing`, `repair`, or `ordinary`) and `--review-scope` the scope declared before
+any run (`changed_files` or `change_affected_flow`); both are claims a curator makes. The first
+change set upgrades the pack from 2.0 to 2.1:
+
+```
+$ $SB corpus add-change-set "$BYOC/pr-pack.json" --change-set-id pr-4821 \
+      --base-snapshot-id reporting-base --head-snapshot-id reporting-head \
+      --boundary introducing --review-scope changed_files \
+      --description "The pull request that builds the report query from the customer id." \
+      --reference "acme/reporting-service#4821"
+{"base_snapshot_id":"reporting-base","boundary":"introducing","change_set_id":"pr-4821",
+ "description":"The pull request that builds the report query from the customer id.",
+ "head_snapshot_id":"reporting-head","reference":"acme/reporting-service#4821",
+ "review_scope":"changed_files"}
+exit=0
+
+$ $SB corpus pr-scope "$BYOC/pr-pack.json" --case-id report-sqli --change-set-id pr-4821 \
+      --relation introduced --code-scope changed --note "the concatenation is on a changed line"
+{"change_set_id":"pr-4821","code_scope":"changed","note":"the concatenation is on a changed line","relation":"introduced"}
+exit=0
+
+$ $SB corpus pr-scope "$BYOC/pr-pack.json" --case-id report-sqli --control-id C-count-parameterized \
+      --change-set-id pr-4821 --relation affected --code-scope context \
+      --note "the neighbouring query the change sits beside"
+{"change_set_id":"pr-4821","code_scope":"context","note":"the neighbouring query the change sits beside","relation":"affected"}
+exit=0
+```
+
+An item with no entry for a change set is outside that review. The token control names none, so it
+is not in the plan, earns nothing there, and a quiet scan earns it no credit; an eligible control
+still needs a completed run and a resolved assessment like any other. A target is `introduced` or
+`affected`, never `repaired`, and every item named must be on the change set's head snapshot, since
+a PR review reads the head. Eligibility is a label: if the case had already been approved, the
+approval would no longer cover it, `pr-scope` would say so on stderr, and nothing would carry the
+approval across. `corpus canonical` is the same kind of write for a canonical root cause or property.
+
+A PR input is configured by its change set and needs a 2.1 configuration. The first system below
+runs the own harness's pr mode with its mock runner, which calls no model; the second is Semgrep,
+which does not declare `pr` in this build:
+
+```json
+{
+  "schema_version": "2.1",
+  "run_id": "acme-pr-4821",
+  "pack": "pr-pack.json",
+  "cache_root": "cache",
+  "inputs": [{"mode": "pr", "change_set_id": "pr-4821"}],
+  "systems": [
+    {"system_id": "harness-mock", "adapter": "llm-harness",
+     "config": {"harness": "securevibes-agent", "root": "~/src/securevibes-agent", "model": "test/mock-llm",
+                "runner": "mock", "qmd_profile": "lite", "llm_max_files": 5, "llm_timeout_ms": 20000}},
+    {"system_id": "semgrep-local-rules", "adapter": "semgrep",
+     "config": {"ruleset": {"url": "/private/tmp/byoc/rules", "commit": "<rules commit>", "paths": ["python"]}}}
+  ],
+  "repetitions": 1, "timeout_seconds": 600, "trace_mode": "metadata", "network_policy": "none"
+}
+```
+
+```
+$ $SB run "$BYOC/run-pr.json" --output "$BYOC/runs/pr-4821" --workspace-root "$BYOC/workspaces"
+pr-4821__harness-mock__r1 status=success claims=0 plan=draft review=draft
+pr-4821__semgrep-local-rules__r1 status=unsupported claims=0 plan=draft review=draft
+Manifest: /private/tmp/byoc/runs/pr-4821/run-manifest.json
+Schedule: /private/tmp/byoc/runs/pr-4821/evaluator/schedule.json
+exit=0
+```
+
+There is one invocation per change set, system, and repetition, named `<change set id>__<system>__r<n>`.
+The input's directory holds the head in `source` and the base in `base/source`, beside the
+preparation record. The manifest row is about the head snapshot and names the change set, and its
+input hash is the identity of the change, not of the head alone:
+
+```
+$ jq -c '.inputs[] | {input_id, mode, snapshot_id, change_set_id, tree_hash, input_hash}' "$BYOC/runs/pr-4821/run-manifest.json"
+{"input_id":"pr-4821","mode":"pr","snapshot_id":"reporting-head","change_set_id":"pr-4821",
+ "tree_hash":"sha256:507c6e68fc74d42e97378b8ee220d4525701adeac45a91947d1e4453a3356f36",
+ "input_hash":"sha256:79db80dde3fb3c4970698f1ada4c567d3b76c90962cc7b12de34b519593c4815"}
+```
+
+Because both snapshots declared their tree hashes before the run, the schedule froze the eligibility
+first. Its input row carries the change set as declared and the plan the pack gave it, each item with
+its scope, and the item the change set does not name is said to be outside it:
+
+```
+$ jq -c '.inputs[0].plan | {state, targets: [.targets[] | {target_id, pr_scope}], controls: [.controls[] | {control_id, pr_scope}], notes}' "$BYOC/runs/pr-4821/evaluator/schedule.json"
+{"state":"frozen","targets":[{"target_id":"T-report-sqli","pr_scope":{"code_scope":"changed","relation":"introduced"}}],
+ "controls":[{"control_id":"C-count-parameterized","pr_scope":{"code_scope":"context","relation":"affected"}}],
+ "notes":["outside change set pr-4821, so not planned and earning nothing in this review: C-token-compare"]}
+```
+
+The scanner is handed the head as its working tree and a history of two neutral commits, and its
+request names those commits and nothing else about the change. The change itself, kind by kind, is
+in the execution record, evaluator-side and with no path in it:
+
+```
+$ jq -c '.input' "$BYOC/runs/pr-4821/invocations/pr-4821__harness-mock__r1/request.json"
+{"languages":["python"],"mode":"pr","pr":{"base":"ca358dadc0c9138daa2797a713d466f3c6a9d7bb","head":"2319dd24544596bc40a322291e2d593659065ee6"},
+ "profile":"standard","root":".","tree_hash":"sha256:507c6e68fc74d42e97378b8ee220d4525701adeac45a91947d1e4453a3356f36"}
+
+$ jq -c '.provenance.pr | {change_set_id, boundary, review_scope, diff_sha256, changes, prepared_state}' "$BYOC/runs/pr-4821/invocations/pr-4821__harness-mock__r1/execution.json"
+{"change_set_id":"pr-4821","boundary":"introducing","review_scope":"changed_files",
+ "diff_sha256":"sha256:59a6136b2ca5dced34b30540e981cd11285ec618eb56b9ffd1c3d3a38b48bbd7",
+ "changes":{"added":["app/export.py"],"deleted":["app/legacy.py"],"mode_changed":["scripts/export.sh"],
+            "modified":["app/report.py"],"renamed":[["lib/fmt.py","lib/format.py"]]},
+ "prepared_state":"fresh"}
+```
+
+Inside the scanner's workspace `git diff --name-status` between those two commits lists the same
+files: `A app/export.py`, `D app/legacy.py`, `M app/report.py`, `R100 lib/fmt.py lib/format.py`, and
+`M scripts/export.sh`. A rename is recorded only when the bytes are identical, and only when exactly
+one deleted path and one added path hold them. The commit ids are computed once in preparation and
+every workspace must reproduce them, or the invocation is refused before the scanner runs. Neither
+commit is a commit of your repository: the history holds the two trees, the identity
+`ScanEval <scaneval@localhost>`, and one fixed date.
+
+The plan the invocation is scored against carries the eligible items only, each with its scope, the
+pack's `pr` budgets, and the boundary; a claim's location is a location in the head:
+
+```
+$ jq -c '{scope, review_budgets, controls: [.controls[].control_id], pr: (.provenance.pr | {change_set_id, boundary, location_basis})}' "$BYOC/runs/pr-4821/invocations/pr-4821__harness-mock__r1/evaluator/plan.json"
+{"scope":"draft","review_budgets":[5,10,20],"controls":["C-count-parameterized"],
+ "pr":{"change_set_id":"pr-4821","boundary":"introducing","location_basis":"pr_head"}}
+```
+
+Semgrep is recorded `unsupported`, not run and not scanned as a whole tree in its place. Its
+invocation stays in every denominator, and completes no control, so a quiet result earns nothing:
+
+```
+$ jq -c '{status, error}' "$BYOC/runs/pr-4821/invocations/pr-4821__semgrep-local-rules__r1/result.json"
+{"status":"unsupported","error":{"code":"unsupported_mode","message":"semgrep does not declare support for pr scans; it carries out: full"}}
+
+$ jq -c '.metrics.controls.capability_safe | {assigned, completed, resolved}' "$BYOC/runs/pr-4821/invocations/pr-4821__semgrep-local-rules__r1/evaluation.json"
+{"assigned":1,"completed":0,"resolved":0}
+```
+
+A PR input fails on its own, like any other input: a change with nothing in it (`no change to
+review`), a declared tree hash the export contradicts, a history git reads differently from the
+export, or a blinding map that does not fit either snapshot is recorded against that input, its
+assignments are skipped invocations, and the other inputs still run. A `metadata_blinded` PR input
+is transformed with one map for both snapshots, whose variants must cover both, and the originals
+stay evaluator-side; the plan names the map and the labels still refer to the original head.
+
+This is a native review of a change, not an evaluation of a hidden-intent change and not a vulnerable
+and fixed pair: no pair of PR inputs is defined, so a PR result carries no pair correctness.
+
 ## 7. The human review loop on a bundle
 
 A bundle is a directory holding `result.json` and an `evaluator/` directory. The loop is four
@@ -920,9 +1127,11 @@ These are limits of the current implementation, not guarantees about your enviro
 
 - **No Jev intake assistance.** There is no Jev code in `src/`. No command suggests
   classifications, evidence gaps, duplicates, or fix candidates. Drafting and review are manual.
-- **No native PR mode through this path.** `plan --mode pr` only selects the pack's `pr` review
-  budgets and records `"mode": "pr"`. A 2.1 run configuration can name a PR input, and the run
-  refuses it when the configuration is read, so no PR invocation can be produced here.
+- **Native PR review runs one adapter so far.** A PR input is prepared, scheduled, planned, and
+  invoked, but only `llm-harness` declares `pr`. Semgrep's baseline mode and DeepSec's diff mode are
+  added separately; until then a PR input given to either is recorded `unsupported`, and a full scan
+  of the head never stands in for it. Every PR run starts from a fresh state: a prepared-state run is
+  not implemented, and no vulnerable/fixed pair of PR inputs is defined.
 - **No corpus aggregation or cross-pack weighting.** The runner produces single-invocation numbers
   only. Nothing combines inputs, systems, repetitions, or packs, and nothing weights families or
   computes repeated-run uncertainty. Private and public results are separate because nothing
@@ -949,6 +1158,8 @@ against a throwaway pack under `/private/tmp/byoc` whose snapshot source and who
 were both local `git init` repositories. Nothing in the transcript reached the network. The
 schedule, preparation-failure, and blinding transcripts in section 6 were produced on 2026-09-29
 the same way, against a pack of the same shape in another temporary directory, with paths shown under
-`/private/tmp/byoc`; the `Schedule:` line in the first run transcript is the line `run` has printed
+`/private/tmp/byoc`; the native PR transcript there was produced on 2026-09-30 against a local
+repository of one pull request, with the own harness's mock runner (no model call) and a local Semgrep
+ruleset, and the hand-added controls it describes; the `Schedule:` line in the first run transcript is the line `run` has printed
 since then. Re-check these behaviors against the current checkout rather than treating this guide
 as a guarantee.
