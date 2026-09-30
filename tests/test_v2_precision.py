@@ -1,9 +1,10 @@
 """Precision sampling and human review: the frame, the seeded draw, the chained reviews, the estimate.
 
-Every run directory here is built in ``tmp_path`` from fixture documents: a frozen schedule, a 2.1
+Most run directories here are built in ``tmp_path`` from fixture documents: a frozen schedule, a 2.1
 manifest, and a saved result per invocation that ran, which is everything a precision frame reads.
-Every reviewer is explicitly fictional. No network, no model calls, and no clock reaches a derived
-document.
+The end-to-end tests run the real runner with a scripted fake adapter over a local ``git init``
+fixture instead. Every reviewer is explicitly fictional. No network, no model calls, and no clock
+reaches a derived document.
 
 The hand-computed figures are in each test's docstring; the assertions compare against the same
 fractions, so a figure that is exact on paper is checked exactly.
@@ -14,16 +15,19 @@ from __future__ import annotations
 from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timezone
+import hashlib
 import inspect
 import json
 import math
 import os
 from pathlib import Path
 from statistics import NormalDist
+import subprocess
 
 import pytest
 
-from scaneval import precision, scoring
+from scaneval import cases, precision, review, scoring
+from scaneval.adapters.base import Adapter, NativeOutcome
 from scaneval.cli import main
 from scaneval.contracts import (
     SCHEMA_VERSIONS,
@@ -34,6 +38,7 @@ from scaneval.contracts import (
     validate_document,
 )
 from scaneval.resampling import ALGORITHM
+from scaneval.runner import run_from_config
 
 
 CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
@@ -964,3 +969,225 @@ def test_the_review_and_estimate_kinds_are_published_at_2_1_and_check_their_own_
         change(document)
         with pytest.raises(ContractError, match=message):
             validate_document("precision-estimate", document)
+
+
+# --- the command line, end to end ------------------------------------------------------------------------------
+
+
+def test_the_cli_writes_the_sample_it_draws_byte_for_byte(tmp_path, capsys):
+    """Two invocations with one seed write identical bytes: the canonical sample plus a newline."""
+    run_dir = two_strata_run(tmp_path)
+    for name in ("one.json", "two.json"):
+        code, out, _ = cli(capsys, "precision", "sample", str(run_dir), "--population", "full", "--size", "4",
+                           "--seed", "20260929", "--stratify-by", "system", "--output", str(tmp_path / name))
+        assert code == 0
+    assert "Design: stratified_srswor by system, proportional allocation, size 4, seed 20260929" in out
+    assert "Stratum sys-a: 2 of 6 unit(s), inclusion probability 0.3333" in out
+    drawn = precision.draw_sample(precision.build_frame([run_dir], population="full"), size=4, seed=20260929,
+                                  stratify_by="system")
+    assert (tmp_path / "one.json").read_bytes() == (tmp_path / "two.json").read_bytes()
+    assert (tmp_path / "one.json").read_text(encoding="utf-8") == canonical_json(drawn) + "\n"
+
+
+def test_the_cli_names_uncovered_strata_on_stderr(tmp_path, capsys):
+    """sys-a 9 units, sys-b 1: proportional allocation of 5 leaves sys-b with nothing, and says so."""
+    run_dir = two_strata_run(tmp_path, sizes=(9, 1))
+    code, out, err = cli(capsys, "precision", "sample", str(run_dir), "--population", "full", "--size", "5",
+                         "--seed", "8", "--stratify-by", "system", "--output", str(tmp_path / "sample.json"))
+    assert code == 0 and "Stratum sys-b: 0 of 1 unit(s)" in out
+    assert "scaneval: warning: 1 stratum/strata drew no unit (sys-b)" in err
+    code, _, err = cli(capsys, "precision", "estimate", str(tmp_path / "sample.json"),
+                       "--output", str(tmp_path / "estimate.json"))
+    assert code == 0 and "the sample covers 9 of 10 units" in err
+
+
+def test_the_cli_refuses_a_blank_reviewer_and_writes_nothing(tmp_path, capsys):
+    run_dir = one_system_run(tmp_path, 2)
+    sample_path, reviews_path = tmp_path / "sample.json", tmp_path / "reviews.json"
+    assert cli(capsys, "precision", "sample", str(run_dir), "--population", "full", "--size", "2", "--seed", "1",
+               "--output", str(sample_path))[0] == 0
+    with pytest.raises(SystemExit):
+        main(["precision", "record", str(reviews_path), "--sample", str(sample_path), "--item", "item-0001",
+              "--role", "independent", "--outcome", "true"])
+    code, _, err = cli(capsys, "precision", "record", str(reviews_path), "--sample", str(sample_path),
+                       "--item", "item-0001", "--reviewer", " ", "--role", "independent", "--outcome", "true")
+    assert code == 2 and "scaneval: a precision review must name its reviewer" in err
+    code, _, err = cli(capsys, "precision", "record", str(reviews_path), "--sample", str(sample_path),
+                       "--item", "item-0042", "--reviewer", REVIEWER_A, "--role", "independent", "--outcome", "true")
+    assert code == 2 and "this sample has no item 'item-0042'" in err
+    assert not reviews_path.exists()
+    code, out, _ = cli(capsys, "precision", "record", str(reviews_path), "--sample", str(sample_path),
+                       "--unit", "run-one/snap-a__sys-a__r1/k1", "--reviewer", REVIEWER_A, "--role", "adjudicator",
+                       "--outcome", "out_of_scope")
+    assert code == 0 and "Recorded an adjudicator review of unit run-one/snap-a__sys-a__r1/k1: out_of_scope" in out
+    assert load_document(reviews_path, "precision-reviews")["reviews"][0]["reviewer"] == REVIEWER_A
+
+
+VULNERABLE = "import subprocess\n\n\ndef run(cmd):\n    return subprocess.run(cmd, shell=True)\n"
+REPRESENTS = ("This case tests caller-controlled shell command construction under a trusted-argument "
+              "assumption, and adds a single-file Python sink for the precision tests.")
+
+
+def git(*args: str, cwd: Path) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True,
+        env={**os.environ, "GIT_AUTHOR_NAME": "u", "GIT_AUTHOR_EMAIL": "u@x", "GIT_COMMITTER_NAME": "u",
+             "GIT_COMMITTER_EMAIL": "u@x", "GIT_CONFIG_GLOBAL": "/dev/null"},
+    ).stdout.strip()
+
+
+class ScriptedAdapter(Adapter):
+    """Returns a fixed native-ordered claim list per system. Never touches the network."""
+
+    name = "fake"
+    adapter_version = "1.0.0"
+    supported_languages = frozenset({"python"})
+    CLAIMS = {
+        "fake-a": [("c1", "shell=True with a caller-controlled command", "src/app.py", 5),
+                   ("c2", "shell=True with a caller-controlled command", "src/app.py", 5),
+                   ("c3", "the README documents a default password", "README.md", 1)],
+        "fake-b": [("c1", "shell=True with a caller-controlled command", "src/app.py", 5),
+                   ("c2", "subprocess output is logged unescaped", "src/app.py", 5)],
+    }
+
+    def prepare(self, spec, cache_root):
+        return {"system": spec.system_id}
+
+    def scan(self, *, request, source_dir, raw_dir, spec, preparation, timeout_seconds, trace_mode, trace_dir):
+        claims = [{"claim_id": claim_id, "allegation": allegation, "kind": "command_injection", "rank": rank,
+                   "primary_location": {"path": path, "start_line": line, "end_line": line}}
+                  for rank, (claim_id, allegation, path, line) in enumerate(self.CLAIMS[spec.system_id], start=1)]
+        return NativeOutcome(status="success", exit_code=0, command=["fake", "scan"], claims=claims,
+                             ranking="native", tool_versions={"fake": "1.0.0"},
+                             capture={"model_requests": "not_applicable"})
+
+
+@pytest.fixture
+def scripted_run(tmp_path: Path) -> Path:
+    """A real run directory: one input, two scripted systems, draft decisions from the runner."""
+    repo = tmp_path / "upstream"
+    (repo / "src").mkdir(parents=True)
+    git("init", "-q", "-b", "main", cwd=repo)
+    git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=repo)
+    (repo / "src" / "app.py").write_text(VULNERABLE, encoding="utf-8")
+    (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "first", cwd=repo)
+    commit = git("rev-parse", "HEAD", cwd=repo)
+    pack = cases.new_pack("test", "precision-pilot", "Local fixture pack for the precision tests.")
+    cases.add_snapshot(pack, {
+        "snapshot_id": "snap-a", "repository": {"url": str(repo), "name": "widget"}, "commit": commit,
+        "reference": "Commit chosen by the test fixture; no advisory is claimed.", "languages": ["python"],
+        "workload": "conventional_application", "component_role": "application",
+        "license": {"spdx": None, "verified": False, "note": "Local fixture repository."}})
+    cases.add_case(pack, cases.draft_case(
+        "case-a", snapshot_id="snap-a", kind="command_injection",
+        description="Caller-controlled command string reaches subprocess with shell=True.",
+        represents=REPRESENTS, workload="conventional_application", component_role="application", aliases=[],
+        evidence=[cases.evidence("source", origin="research_note", kind="source_inspection",
+                                 reference="src/app.py", note="Fixture inspection, not an advisory.")],
+        accepted_locations=[{"path": "src/app.py", "start_line": 5, "end_line": 5, "role": "sink", "note": ""}]))
+    cases.save_pack(tmp_path / "pack.json", pack)
+    config = {"schema_version": "2.0", "run_id": "run-precision", "pack": "pack.json", "cache_root": "cache",
+              "inputs": [{"snapshot_id": "snap-a"}],
+              "systems": [{"system_id": "fake-a", "adapter": "fake", "config": {}},
+                          {"system_id": "fake-b", "adapter": "fake", "config": {}}],
+              "repetitions": 1, "timeout_seconds": 60, "trace_mode": "off", "network_policy": "none"}
+    (tmp_path / "run-config.json").write_text(canonical_json(config) + "\n", encoding="utf-8")
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    run_dir = tmp_path / "out"
+    run_from_config(tmp_path / "run-config.json", run_dir, clock=CLOCK, workspace_root=workspace,
+                    adapters={"fake": ScriptedAdapter()})
+    return run_dir
+
+
+def run_state(run_dir: Path) -> tuple[dict, dict]:
+    """Every file's digest under *run_dir*, and each bundle's observe, score, and review status."""
+    files = {path.relative_to(run_dir).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+             for path in sorted(run_dir.rglob("*")) if path.is_file()}
+    bundles = {}
+    for bundle in sorted((run_dir / "invocations").iterdir()):
+        plan, decisions, _record = review.load_evaluator(bundle.resolve(), guard_symlinks=False)
+        result = load_document(bundle / "result.json", "scan-result")
+        bundles[bundle.name] = {"observe": scoring.observe(plan, result, decisions),
+                                "score": scoring.score(plan, result, decisions),
+                                "review": review.review_status(bundle.resolve(), guard_symlinks=False)}
+    return files, bundles
+
+
+def test_sampling_and_review_never_change_decisions_scores_or_detection_credit(tmp_path, scripted_run, capsys):
+    """The whole workflow through the CLI against a real run: sample, queue, record, estimate.
+
+    The run's files are byte-identical afterwards, and so is what observe() and score() say about
+    every bundle, detection credit and review state included: a claim reviewed true for precision is
+    not a target hit. fake-a delivered c1, a duplicate c2, and c3; fake-b c1 and c2: 4 units in all.
+    """
+    before = run_state(scripted_run)
+    work = tmp_path / "precision"
+    work.mkdir()
+    sample_path, queue_path = work / "sample.json", work / "queue.json"
+    reviews_path, estimate_path = work / "reviews.json", work / "estimate.json"
+
+    code, out, _ = cli(capsys, "precision", "sample", str(scripted_run), "--population", "first_b", "--budget", "2",
+                       "--size", "3", "--seed", "42", "--stratify-by", "system", "--allocation", "equal",
+                       "--output", str(sample_path))
+    assert code == 0
+    assert "Frame: first_b (B=2) over 1 run(s), systems fake-a, fake-b: 3 unit(s), 4 copies inside it" in out
+    assert "Left out: 0 unranked invocation(s) (0 unit(s)), 0 bundle-unresolved invocation(s) (0 unit(s)), " \
+           "1 unit(s) past B" in out
+    code, out, _ = cli(capsys, "precision", "queue", str(sample_path), "--output", str(queue_path))
+    assert code == 0 and "Wrote 3 blinded review item(s)" in out
+    queue = json.loads(queue_path.read_text(encoding="utf-8"))
+    assert queue == precision.review_queue(load_document(sample_path, "precision-sample"))
+    assert "fake-a" not in queue_path.read_text(encoding="utf-8")
+    items = [item["item_id"] for item in queue["items"]]
+    assert len(items) == 3
+    for item in items:
+        for reviewer in (REVIEWER_A, REVIEWER_B):
+            code, out, _ = cli(capsys, "precision", "record", str(reviews_path), "--sample", str(sample_path),
+                               "--item", item, "--reviewer", reviewer, "--role", "independent",
+                               "--outcome", "true", "--note", "fixture review")
+            assert code == 0 and f"Recorded an independent review of {item}: true" in out
+    code, out, err = cli(capsys, "precision", "estimate", str(sample_path), "--reviews", str(reviews_path),
+                         "--output", str(estimate_path))
+    assert code == 0 and err == ""
+    assert "Resolved precision 1; unresolved share 0" in out and "Evidence grade: double_review_or_adjudicated" in out
+    estimated = load_document(estimate_path, "precision-estimate")
+    assert estimated["review_entries"] == 6 and estimated["totals"]["true"] == 3.0
+    assert estimated["runs"][0]["manifest_sha256"] == canonical_sha256(
+        load_document(scripted_run / "run-manifest.json", "run-manifest"))
+
+    after = run_state(scripted_run)
+    assert after[0] == before[0], "a precision command wrote into the run directory"
+    assert after[1] == before[1], "observe, score, or review status changed"
+    assert {name: state["score"]["metrics"]["targets_detected"] for name, state in after[1].items()} == {
+        "snap-a__fake-a__r1": 0, "snap-a__fake-b__r1": 0}
+
+
+def test_precision_commands_are_create_only_and_refuse_trial_directories(tmp_path, scripted_run, capsys):
+    sample_path = tmp_path / "sample.json"
+    code, _, _ = cli(capsys, "precision", "sample", str(scripted_run), "--population", "full", "--size", "2",
+                     "--seed", "1", "--output", str(sample_path))
+    assert code == 0
+    code, _, err = cli(capsys, "precision", "sample", str(scripted_run), "--population", "full", "--size", "2",
+                       "--seed", "1", "--output", str(sample_path))
+    assert code == 2 and "scaneval:" in err
+    trial = scripted_run / "inputs" / "snap-a"
+    assert (trial / "provenance.json").is_file()
+    for argv in (["precision", "sample", str(scripted_run), "--population", "full", "--size", "2", "--seed", "1",
+                  "--output", str(trial / "sample.json")],
+                 ["precision", "queue", str(sample_path), "--output", str(trial / "queue.json")],
+                 ["precision", "record", str(trial / "reviews.json"), "--sample", str(sample_path),
+                  "--item", "item-0001", "--reviewer", REVIEWER_A, "--role", "independent", "--outcome", "true"],
+                 ["precision", "estimate", str(sample_path), "--output", str(trial / "estimate.json")]):
+        code, _, err = cli(capsys, *argv)
+        assert code == 2 and "trial directory" in err, argv
+    code, _, err = cli(capsys, "precision", "sample", str(scripted_run), "--population", "first_b", "--size", "2",
+                       "--seed", "1", "--output", str(tmp_path / "other.json"))
+    assert code == 2 and "first_b population needs a budget" in err
+    code, _, err = cli(capsys, "precision", "estimate", str(sample_path), "--output", str(tmp_path / "e.json"))
+    assert code == 0 and "the review is incomplete: 2 unit(s) unreviewed" in err
+    with pytest.raises(SystemExit):
+        main(["precision", "record", str(tmp_path / "r.json"), "--sample", str(sample_path), "--item", "item-0001",
+              "--unit", "x", "--reviewer", REVIEWER_A, "--role", "independent", "--outcome", "true"])
