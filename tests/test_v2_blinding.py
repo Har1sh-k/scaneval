@@ -62,16 +62,15 @@ def git(*args: str, cwd: Path) -> str:
     ).stdout.strip()
 
 
-@pytest.fixture
-def widget(tmp_path: Path) -> dict:
-    """A repository with a vulnerable and a fixed commit, and a probe export of each.
+def build_widget(root: Path, files: dict[str, str]) -> dict:
+    """A repository holding *files* with a vulnerable and a fixed commit, and a probe export of each.
 
     The fixed commit repairs the shell call, adds a README line naming the project again, and
     deletes the guide, so one map has to expect different bytes and counts per variant and one
     file present in one variant and absent in the other.
     """
-    repo = tmp_path / "upstream"
-    for relative, text in FILES.items():
+    repo = root / "upstream"
+    for relative, text in files.items():
         path = repo / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
@@ -89,10 +88,16 @@ def widget(tmp_path: Path) -> dict:
     commits = {"snap-a": vulnerable, "snap-fixed": fixed}
     exports, probes = {}, {}
     for snapshot_id, commit in commits.items():
-        cached = materialize.fetch_snapshot(str(repo), commit, tmp_path / "cache")
-        probes[snapshot_id] = tmp_path / "probe" / snapshot_id / "source"
+        cached = materialize.fetch_snapshot(str(repo), commit, root / "cache")
+        probes[snapshot_id] = root / "probe" / snapshot_id / "source"
         exports[snapshot_id] = materialize.export_tree(cached, probes[snapshot_id])
-    return {"repo": repo, "commits": commits, "exports": exports, "probes": probes, "cache": tmp_path / "cache"}
+    return {"repo": repo, "commits": commits, "exports": exports, "probes": probes, "cache": root / "cache"}
+
+
+@pytest.fixture
+def widget(tmp_path: Path) -> dict:
+    """The widget repository: :data:`FILES` at a vulnerable commit and at a fixed one."""
+    return build_widget(tmp_path, FILES)
 
 
 def cached(widget: dict, snapshot_id: str) -> materialize.CachedSnapshot:
@@ -674,6 +679,278 @@ def test_a_scanner_reads_an_instruction_file_by_any_case_and_a_blinded_export_li
     assert blinding._instruction_files(["src/app.py"], []) == []
 
 
+# --- a display file keeps its structure: JSON, TOML, and INI ------------------------------------
+#
+# A replacement is written into a file as text, so the hash, occurrence, and line checks pass for one
+# that turns valid JSON into invalid JSON. The first tests are that reproduction; the rest ask each
+# format's check of a scratch file, where one edit needs no repository.
+
+
+DISPLAY_JSON = '{"Widget": {"title": "Widget Docs", "tags": ["Widget", "docs"]}, "count": 3}\n'
+
+
+@pytest.fixture
+def display(tmp_path: Path) -> Callable[[str, str], dict]:
+    """The widget repository with one more file, a display file: ``display("display.json", text)``."""
+    return lambda path, text: build_widget(tmp_path / "display", {**FILES, path: text})
+
+
+def display_map(widget: dict, path: str, replacement: str, *, tokens: tuple[str, ...] = ("Widget",)) -> dict:
+    """An approved map whose one edit replaces *tokens* in the display file *path*; Widget becomes *replacement*."""
+    document = widget_map(widget, approved=False)
+    document["pseudonyms"][0]["replacement"] = replacement
+    document["edits"] = [edit_entry(widget, "display", path, "display_metadata", list(tokens), role_check=ROLE_CHECK)]
+    validate_document("blinding-map", document)
+    return reapproved(document)
+
+
+def test_a_replacement_that_breaks_a_json_display_file_is_refused_before_a_transformed_tree_exists(tmp_path, display):
+    """The reviewer's reproduction: a quotation mark in an approved replacement made valid JSON invalid, and the
+    hash, occurrence, and line checks all still passed."""
+    widget = display("display.json", DISPLAY_JSON)
+    trial = tmp_path / "trial"
+
+    with pytest.raises(MaterializationError, match=r"blinding map refused: edit display: display\.json: the "
+                                                    r"transformed file is not valid JSON \(Expecting"):
+        export_blinded(widget, display_map(widget, "display.json", 'Sprock"et'), trial)
+
+    assert not (trial / "source").exists(), "nothing is transformed unless every check passes"
+
+
+def test_a_json_display_file_with_a_plain_replacement_is_verified_by_parsing_and_the_check_is_recorded(tmp_path,
+                                                                                                       display):
+    widget = display("display.json", DISPLAY_JSON)
+
+    record = export_blinded(widget, display_map(widget, "display.json", "Sprocket"), tmp_path / "trial")
+
+    transformed = (tmp_path / "trial" / "source" / "display.json").read_text(encoding="utf-8")
+    assert transformed == DISPLAY_JSON.replace("Widget", "Sprocket")
+    assert json.loads(transformed) == {"Sprocket": {"title": "Sprocket Docs", "tags": ["Sprocket", "docs"]},
+                                       "count": 3}
+    validation = record["blinding"]["validation"]
+    assert all(check["result"] == "pass" for check in validation)
+    assert [check["detail"] for check in validation if check["check"] == "edit_structure"] == [
+        "display: parsed as strict JSON before and after; the result is the original with only the reviewed "
+        "replacements applied to its keys and strings"]
+    assert record["blinding"]["edits"][0]["occurrences"] == {"Widget": 3}
+
+
+@pytest.mark.parametrize(("path", "text", "verified"), [
+    ("display.toml", "title = \"Widget Docs\"\n[tool.Widget]\nname = 'Widget'\n", "parsed as TOML"),
+    ("display.ini", "[site]\nname = Widget Docs\n; a Widget comment\n", "parsed as INI"),
+    ("display.cfg", "[Widget]\nname = Widget Docs\n", "parsed as INI"),
+], ids=["toml", "ini", "cfg"])
+def test_toml_and_ini_display_files_are_verified_by_parsing_too(tmp_path, display, path, text, verified):
+    widget = display(path, text)
+
+    record = export_blinded(widget, display_map(widget, path, "Sprocket"), tmp_path / "trial")
+
+    assert (tmp_path / "trial" / "source" / path).read_text(encoding="utf-8") == text.replace("Widget", "Sprocket")
+    [structure] = [check for check in record["blinding"]["validation"] if check["check"] == "edit_structure"]
+    assert structure["result"] == "pass" and structure["detail"].startswith(f"display: {verified} before and after")
+
+
+def test_documentation_is_not_asked_for_structure_and_takes_any_reviewed_replacement(tmp_path, widget):
+    document = widget_map(widget, approved=False)
+    document["pseudonyms"][0]["replacement"] = 'Sprock"et: {a, [b]} #c'
+    document["edits"] = [edit_entry(widget, "readme-brand", "README.md", "non_runtime_branding", ["Widget"])]
+    reapproved(document)
+
+    record = export_blinded(widget, document, tmp_path / "trial")
+
+    assert 'Sprock"et: {a, [b]} #c runs shell commands' in (tmp_path / "trial" / "source" / "README.md").read_text(
+        encoding="utf-8")
+    assert "edit_structure" not in {check["check"] for check in record["blinding"]["validation"]}
+
+
+def display_edit(tmp_path: Path, path: str, content: str, pseudonyms: dict[str, str] | None = None) -> blinding._Edit:
+    """One edit of *path*, holding *content*, as ``_edit_for`` computes it on a scratch file: no export needed.
+
+    The edit lists every pseudonym (by default Widget becomes Sprocket) and expects the counts *content* holds.
+    """
+    pseudonyms = pseudonyms or {"Widget": "Sprocket"}
+    source = tmp_path / "scratch"
+    (source / path).parent.mkdir(parents=True, exist_ok=True)
+    (source / path).write_bytes(content.encode("utf-8"))
+    digest = materialize.sha256_file(source / path)[0]
+    document = {"pseudonyms": [{"original": original, "replacement": new} for original, new in pseudonyms.items()]}
+    edit = {"edit_id": "display", "path": path, "role": "display_metadata", "replacements": list(pseudonyms),
+            "expected": [{"snapshot_id": "snap-a", "state": "present", "file_sha256": digest,
+                          "occurrences": {token: content.count(token) for token in pseudonyms}}]}
+    return blinding._edit_for(document, edit, "snap-a", source, {path: digest})
+
+
+def refusal(tmp_path: Path, path: str, content: str, pseudonyms: dict[str, str] | None = None) -> str:
+    """The reason ``_edit_for`` refuses this edit of *path*, after the words every such refusal starts with."""
+    prefix = f"blinding map refused: edit display: {path}"
+    with pytest.raises(MaterializationError) as refused:
+        display_edit(tmp_path, path, content, pseudonyms)
+    assert str(refused.value).startswith(prefix)
+    return str(refused.value)[len(prefix):]
+
+
+# What each text becomes when Widget is replaced by the string beside it, for the edits that keep the structure.
+JSON_ACCEPTED = {
+    "nested": ('{"Widget": {"title": "Widget Docs", "tags": ["Widget", 3, 1.5, true, null]}, "n": -0.0}\n',
+               "Sprocket"),
+    "escapes-kept": ('{"title": "Widget \\"quoted\\" \\u00e9 \\\\ \\/"}\n', "Sprocket"),
+    "byte-order-mark": ('\ufeff{"title": "Widget"}\n', "Sprocket"),
+    "duplicate-keys-are-kept": ('{"a": "Widget", "a": "x", "b": [{}, []]}\n', "Sprocket"),
+    "non-ascii-and-slash": ('{"title": "Widget"}\n', "Spr\u00f6cket/2"),
+    "top-level-string": ('"Widget"\n', "Sprocket"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(JSON_ACCEPTED))
+def test_a_json_edit_that_keeps_the_structure_is_accepted(tmp_path, name):
+    content, replacement = JSON_ACCEPTED[name]
+
+    edit = display_edit(tmp_path, "display.json", content, {"Widget": replacement})
+
+    assert edit.structure_check == "json" and edit.data.decode("utf-8") == content.replace("Widget", replacement)
+
+
+JSON_REFUSED = {
+    "quotation-mark": ('{"title": "Widget Docs"}\n', {"Widget": 'Sprock"et'},
+                       " the transformed file is not valid JSON (Expecting ',' delimiter"),
+    "invalid-escape": ('{"title": "Widget Docs"}\n', {"Widget": "Sprocket\\"},
+                       " the transformed file is not valid JSON (Invalid \\escape"),
+    "injected-key": ('{"title": "Widget Docs"}\n', {"Widget": 'Wid", "x": "y'},
+                     " the transformed file is not the original with the reviewed replacements applied to its keys "
+                     "and strings: $ holds the keys ['title', 'x'], expected ['title']"),
+    "decoded-escape": ('{"title": "Widget Docs"}\n', {"Widget": "Sprocket\\u0021"},
+                       " the transformed file is not the original with the reviewed replacements applied to its keys "
+                       "and strings: $['title'] is 'Sprocket! Docs', expected 'Sprocket\\\\u0021 Docs'"),
+    "merged-keys": ('{"Widget": 1, "Sprocket": 2}\n', {"Widget": "Sprocket"},
+                    ": the replacements make the keys 'Widget' and 'Sprocket' of the mapping at $ the same key "
+                    "'Sprocket', so two entries would merge"),
+    "merged-keys-below": ('{"a": [{"Widget": 1, "Sprocket": 2}]}\n', {"Widget": "Sprocket"},
+                          ": the replacements make the keys 'Widget' and 'Sprocket' of the mapping at $['a'][0] the "
+                          "same key 'Sprocket'"),
+    "changed-number": ('{"n": 12, "s": "12"}\n', {"12": "13"}, "$['n'] is 13, expected 12"),
+    "changed-type": ('{"on": true, "s": "true"}\n', {"true": "1"},
+                     "$['on'] is an integer 1, expected a boolean True"),
+    "changed-literal": ('{"a": null, "b": "null"}\n', {"null": "none"}, " the transformed file is not valid JSON ("),
+    "token-spelled-with-an-escape": ('{"title": "Wid\\u0067et Docs"}\n', {"Widget": "Sprocket"},
+                                     "$['title'] is 'Widget Docs', expected 'Sprocket Docs'"),
+    "trailing-comma": ('{"title": "Widget",}\n', {"Widget": "Sprocket"},
+                       " is not strict JSON, so an edit of it cannot be verified to keep its structure "
+                       "(Illegal trailing comma"),
+    "not-a-number": ('{"n": NaN, "s": "Widget"}\n', {"Widget": "Sprocket"},
+                     " is not strict JSON, so an edit of it cannot be verified to keep its structure "
+                     "(NaN is not JSON"),
+    "comment": ('{"s": "Widget"} // note\n', {"Widget": "Sprocket"},
+                " is not strict JSON, so an edit of it cannot be verified to keep its structure (Extra data"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(JSON_REFUSED))
+def test_a_json_edit_that_would_change_the_structure_or_cannot_be_verified_is_refused(tmp_path, name):
+    content, pseudonyms, reason = JSON_REFUSED[name]
+
+    assert reason in refusal(tmp_path, "display.json", content, pseudonyms)
+
+
+def test_a_json_file_nested_too_deeply_to_read_is_refused_and_does_not_crash(tmp_path):
+    content = "[" * 100_000 + '"Widget"' + "]" * 100_000
+
+    reason = refusal(tmp_path, "display.json", content)
+
+    assert " is not strict JSON, so an edit of it cannot be verified to keep its structure (nested too deeply" in reason
+
+
+TOML_ACCEPTED = {
+    "tables-and-strings": ('title = "Widget Docs"\n[tool.Widget]\nname = \'Widget\'\nn = 2\n'
+                           'when = 1979-05-27T07:32:00Z\n[[items]]\nlabel = """Widget\ntwo"""\n', "Sprocket"),
+    "literal-string-backslash": ("title = 'Widget Docs'\n", "Spr\\ocket"),
+    "comment-and-spacing-not-compared": ('title   =   "Widget"   # the Widget\n', "Sprocket"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(TOML_ACCEPTED))
+def test_a_toml_edit_that_keeps_the_structure_is_accepted(tmp_path, name):
+    content, replacement = TOML_ACCEPTED[name]
+
+    edit = display_edit(tmp_path, "display.toml", content, {"Widget": replacement})
+
+    assert edit.structure_check == "toml" and edit.data.decode("utf-8") == content.replace("Widget", replacement)
+
+
+TOML_REFUSED = {
+    "quotation-mark": ('title = "Widget Docs"\n', {"Widget": 'Sprock"et'},
+                       " the transformed file is not valid TOML ("),
+    "escape-in-a-basic-string": ('title = "Widget Docs"\n', {"Widget": "Sprocket\\n"},
+                                 "$['title'] is 'Sprocket\\n Docs', expected 'Sprocket\\\\n Docs'"),
+    "dotted-key": ("Widget = 1\n", {"Widget": "a.b"}, "$ holds the keys ['a'], expected ['a.b']"),
+    "merged-tables": ("[Widget]\na = 1\n[Sprocket]\nb = 2\n", {"Widget": "Sprocket"},
+                      ": the replacements make the keys 'Widget' and 'Sprocket' of the mapping at $ the same key "
+                      "'Sprocket'"),
+    "changed-integer": ("year = 2019\ntitle = \"2019\"\n", {"2019": "2020"}, "$['year'] is 2020, expected 2019"),
+    "not-toml": ("title = \n", {"Widget": "Sprocket"},
+                 " is not valid TOML, so an edit of it cannot be verified to keep its structure ("),
+}
+
+
+@pytest.mark.parametrize("name", sorted(TOML_REFUSED))
+def test_a_toml_edit_that_would_change_the_structure_or_cannot_be_verified_is_refused(tmp_path, name):
+    content, pseudonyms, reason = TOML_REFUSED[name]
+
+    assert reason in refusal(tmp_path, "display.toml", content, pseudonyms)
+
+
+INI_ACCEPTED = {
+    "sections-and-options": ("[site]\nname = Widget Docs\nlong = one\n  Widget two\n; a Widget comment\n"
+                             "[Widget]\nWidget name: x\n", "Sprocket"),
+    "defaults": ("[DEFAULT]\nbrand = Widget\n[site]\nname = Widget\n", "Sprocket"),
+    "percent-signs-are-not-interpolated": ("[site]\nname = 100%% Widget %(x)s ${y}\n", "Sprocket"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(INI_ACCEPTED))
+@pytest.mark.parametrize("path", ["display.ini", "display.cfg"])
+def test_an_ini_edit_that_keeps_the_structure_is_accepted(tmp_path, name, path):
+    content, replacement = INI_ACCEPTED[name]
+
+    edit = display_edit(tmp_path, path, content, {"Widget": replacement})
+
+    assert edit.structure_check == "ini" and edit.data.decode("utf-8") == content.replace("Widget", replacement)
+
+
+INI_REFUSED = {
+    "another-option-value-split": ("[site]\nWidget name = x\n", {"Widget": "Sprocket=Inc"},
+                                   "$['site'] holds the keys ['Sprocket'], expected ['Sprocket=Inc name']"),
+    "a-comment-not-an-option": ("[site]\nWidget = 1\nother = 2\n", {"Widget": "#x"},
+                                "$['site'] holds the keys ['other'], expected ['#x', 'other']"),
+    "a-continuation-not-an-option": ("[site]\na = 1\nWidget = 2\n", {"Widget": " x"},
+                                     "$['site'] holds the keys ['a'], expected ['a', ' x']"),
+    "a-section-that-becomes-the-defaults": ("[Widget]\na = 1\n", {"Widget": "DEFAULT"},
+                                            "$['DEFAULT'] is the defaults section"),
+    "merged-sections": ("[Widget]\na = 1\n[Sprocket]\nb = 2\n", {"Widget": "Sprocket"},
+                        ": the replacements make the keys 'Widget' and 'Sprocket' of the mapping at $ the same key "
+                        "'Sprocket'"),
+    "merged-options": ("[site]\nWidget = 1\nSprocket = 2\n", {"Widget": "Sprocket"},
+                       "of the mapping at $['site'] the same key 'Sprocket'"),
+    "no-section-header": ("name = Widget\n", {"Widget": "Sprocket"},
+                          " is not a valid INI file, so an edit of it cannot be verified to keep its structure ("),
+    "duplicate-option": ("[site]\na = Widget\na = 2\n", {"Widget": "Sprocket"},
+                         " is not a valid INI file, so an edit of it cannot be verified to keep its structure ("),
+}
+
+
+@pytest.mark.parametrize("name", sorted(INI_REFUSED))
+def test_an_ini_edit_that_would_change_the_structure_or_cannot_be_verified_is_refused(tmp_path, name):
+    content, pseudonyms, reason = INI_REFUSED[name]
+
+    assert reason in refusal(tmp_path, "display.ini", content, pseudonyms)
+
+
+def test_a_display_suffix_is_read_without_regard_to_case():
+    paths = ("a/b.json", "c.TOML", "d.Ini", "e.CFG")
+    assert [blinding._structure_check_for(path) for path in paths] == ["json", "toml", "ini", "ini"]
+    assert [blinding._structure_check_for(path) for path in ("README.md", "docs/guide.rst", "CHANGES", "a.json.bak")
+            ] == [None, None, None, None]
+
+
 # --- the runner: refusals are preparation failures; nothing reaches a scanner ------------------
 
 
@@ -810,6 +1087,29 @@ def test_a_refused_map_is_a_preparation_failure_and_no_scanner_ever_sees_that_in
     frozen = load_document(out / manifest["schedule_path"], "evaluation-schedule")
     assert [row["assignment_id"] for row in frozen["assignments"]] == [
         "snap-a__fake-a__r1", "snap-a.blinded__fake-a__r1"], "the refused input's assignment stays scheduled"
+
+
+def test_a_replacement_that_breaks_a_display_file_is_a_preparation_failure_and_no_scanner_ever_sees_that_input(
+        tmp_path, display):
+    """The reviewer's reproduction, through a run: the input is not prepared, and the other input still runs."""
+    widget = display("display.json", DISPLAY_JSON)
+    adapter = FakeAdapter()
+
+    manifest, out = blinded_run(tmp_path, widget, display_map(widget, "display.json", 'Sprock"et'),
+                                [{"snapshot_id": "snap-a"}, BLINDED], adapter)
+
+    assert manifest["status"] == "completed"
+    standard, blinded = manifest["inputs"]
+    failure = blinded["preparation_failure"]
+    assert blinded["input_id"] == "snap-a.blinded" and failure["type"] == "MaterializationError"
+    assert failure["message"].startswith("blinding map refused: edit display: display.json: the transformed file is "
+                                         "not valid JSON (")
+    assert (blinded["tree_hash"], blinded["input_hash"], blinded["mechanical_checks"]) == (None, None, [])
+    rows = {row["input_id"]: row for row in manifest["invocations"]}
+    assert rows["snap-a.blinded"]["status"] == "skipped"
+    assert rows["snap-a"]["status"] == "success", "the other input still ran"
+    assert adapter.calls == 1 and adapter.scanned == [standard["tree_hash"]], "the refused input reached no scanner"
+    assert not (out / "inputs" / "snap-a.blinded" / "source").exists()
 
 
 def test_a_scanner_handed_a_blinded_input_finds_no_map_no_provenance_and_no_original_token(tmp_path, widget):

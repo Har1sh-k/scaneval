@@ -30,21 +30,32 @@ another commit or export tree (a stale map); an edit names a path outside docume
 display configuration, or a forbidden one; an expected file is missing, present when it should be
 absent, or holds other bytes (stale); a file is not strict UTF-8; an original overlaps itself or
 another original (ambiguous or overlapping matches); an occurrence count differs from the one
-reviewed; a replacement would form an original again with the text beside it; or a line would move.
-Only then is the original export copied and the reviewed occurrences replaced, and the result is
-verified: every file the map does not edit is byte-identical to the original export, every file
-keeps its mode, every edited file keeps its line structure, and line ``n`` of an edited file is
-line ``n`` of the original with the reviewed tokens replaced. Claim locations therefore map back
-to the original export as the identity, which is what lets labels written against the original
-score a blinded run.
+reviewed; a replacement would form an original again with the text beside it; a line would move;
+or a display file would not keep its structure. Only then is the original export copied and the
+reviewed occurrences replaced, and the result is verified: every file the map does not edit is
+byte-identical to the original export, every file keeps its mode, every edited file keeps its line
+structure, and line ``n`` of an edited file is line ``n`` of the original with the reviewed tokens
+replaced. Claim locations therefore map back to the original export as the identity, which is what
+lets labels written against the original score a blinded run.
+
+Structure. A replacement is written into a file as text, without quoting, so an edit of a JSON,
+TOML, or INI display file (``.json``, ``.toml``, ``.ini``, ``.cfg``) is verified against the file's
+own syntax before it is accepted: the file is parsed before and after, and the result must parse to
+the original's value with the reviewed replacements applied to its keys and strings and nothing
+else, the same keys in the same order, of the same types, nested the same way
+(:func:`_check_parsed`). JSON must be strict, an original that does not parse cannot be verified,
+and a replacement that makes two distinct keys equal is refused. Documentation is not asked for
+structure, and no other display file is verified.
 
 What this does not do: parse source, discover identity cues on its own, decide whether a field is
 read at runtime (a ``display_metadata`` edit carries the reviewer's stated ``role_check`` for that),
-or establish that a scanner cannot recognize the repository.
+verify a structure it does not read (a comment, the whitespace between values), or establish that a
+scanner cannot recognize the repository.
 """
 
 from __future__ import annotations
 
+import configparser
 import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -55,6 +66,7 @@ import os
 from pathlib import Path, PurePosixPath
 import shutil
 import stat
+import tomllib
 from typing import Any, Callable
 
 from .contracts import (
@@ -410,7 +422,11 @@ def _replaced(text: str, spans: list[tuple[int, int, str]], replacement_of: dict
 
 @dataclass(frozen=True)
 class _Edit:
-    """One edit as it applies to one variant, computed and verified before anything is written."""
+    """One edit as it applies to one variant, computed and verified before anything is written.
+
+    *structure_check* names how a display file's structure was verified (``json``, ``toml``, or
+    ``ini``), and is ``None`` for a file that is not verified by parsing.
+    """
 
     edit_id: str
     path: str
@@ -421,6 +437,7 @@ class _Edit:
     occurrences: dict | None = None
     changed_lines: tuple[int, ...] = ()
     line_count: int = 0
+    structure_check: str | None = None
 
 
 def _variant(document: dict, snapshot_id: str, commit: str) -> dict:
@@ -435,6 +452,220 @@ def _variant(document: dict, snapshot_id: str, commit: str) -> dict:
     known = ", ".join(variant["snapshot_id"] for variant in document["variants"])
     raise MaterializationError(
         f"stale map: {_named(document)} has no variant for snapshot {snapshot_id}; it covers {known}")
+
+
+# --- a display file keeps its structure ---------------------------------------------------------
+#
+# A replacement is written into a file as text, with no quoting and no escaping, so one that holds a
+# quotation mark, a backslash, a colon, or a bracket can turn valid configuration into invalid or
+# different configuration, and the hash, occurrence, and line checks cannot see it. Every edit of a
+# JSON, TOML, or INI file is therefore verified by parsing the file before and after.
+
+
+# The check an edit of each suffix gets, as the preparation record names it. Suffixes are read without
+# regard to case, as :func:`path_class_gap` reads them.
+_STRUCTURE_CHECKS = {".json": "json", ".toml": "toml", ".ini": "ini", ".cfg": "ini"}
+# What the preparation record says each check verified, on one line.
+_STRUCTURE_DETAILS = {
+    "json": "parsed as strict JSON before and after; the result is the original with only the reviewed "
+            "replacements applied to its keys and strings",
+    "toml": "parsed as TOML before and after; the result is the original with only the reviewed "
+            "replacements applied to its keys and strings",
+    "ini": "parsed as INI before and after; the result is the original with only the reviewed replacements "
+           "applied to its section names, option names, and values",
+}
+
+
+def _structure_check_for(path: str) -> str | None:
+    """The check an edit of *path* gets, or ``None`` for a file this module does not verify by parsing."""
+    return _STRUCTURE_CHECKS.get(PurePosixPath(path).suffix.casefold())
+
+
+class _Pairs(tuple):
+    """An object, table, or section as its ordered ``(key, value)`` pairs.
+
+    A tuple, so it is never the same type as a list, and pairs rather than a dict, so the order of
+    the keys, and a key that occurs twice, are part of what :func:`_difference` compares.
+    """
+
+    __slots__ = ()
+
+
+class _Defaults(_Pairs):
+    """An INI file's ``[DEFAULT]`` section, which a reader merges into every other section.
+
+    A type of its own, so a replacement that renames a section to or from ``DEFAULT``, which changes
+    what the file means, is a difference like any other.
+    """
+
+    __slots__ = ()
+
+
+def _refuse_constant(name: str) -> None:
+    raise ValueError(f"{name} is not JSON")
+
+
+def _parse_json(text: str) -> Any:
+    """Strict JSON after one leading byte-order mark: objects are :class:`_Pairs`, NaN and Infinity are refused."""
+    return json.loads(text[1:] if text.startswith("\ufeff") else text, object_pairs_hook=_Pairs,
+                      parse_constant=_refuse_constant)
+
+
+def _tomlish(value: Any) -> Any:
+    """A parsed TOML value with each table, in the order the file wrote it, as :class:`_Pairs`."""
+    if isinstance(value, dict):
+        return _Pairs((key, _tomlish(item)) for key, item in value.items())
+    if isinstance(value, list):
+        return [_tomlish(item) for item in value]
+    return value
+
+
+def _parse_toml(text: str) -> Any:
+    return _tomlish(tomllib.loads(text))
+
+
+# A default section no header line can spell, so configparser reads ``[DEFAULT]`` as the ordinary
+# section it is written as and never merges one section's options into another's: what it returns is
+# the file's own sections, and :class:`_Defaults` marks the one a reader treats differently.
+_NO_DEFAULT_SECTION = "\n"
+
+
+def _parse_ini(text: str) -> Any:
+    """Each section in order, with its own options in order; no interpolation, and any duplicate is refused."""
+    parser = configparser.ConfigParser(interpolation=None, strict=True, default_section=_NO_DEFAULT_SECTION)
+    parser.optionxform = str
+    parser.read_string(text)
+    return _Pairs((name, (_Defaults if name == configparser.DEFAULTSECT else _Pairs)(parser.items(name, raw=True)))
+                  for name in parser.sections())
+
+
+# For each parsed check: what the refusal calls the format, what the original must be, and how to read it.
+_PARSERS = {"json": ("JSON", "strict JSON", _parse_json),
+            "toml": ("TOML", "valid TOML", _parse_toml),
+            "ini": ("INI", "a valid INI file", _parse_ini)}
+# What a parser raises for text it cannot read: its own error, or a nesting deeper than Python recurses.
+_PARSE_ERRORS = (ValueError, configparser.Error, RecursionError)
+
+
+def _reason(exc: BaseException) -> str:
+    """A parser's own words on one line, at most 200 characters; a runaway nesting is named as such."""
+    if isinstance(exc, RecursionError):
+        return "nested too deeply to read"
+    text = " ".join(str(exc).split())
+    return text if len(text) <= 200 else text[:197] + "..."
+
+
+def _shown(value: Any, limit: int = 80) -> str:
+    text = repr(value)
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def _kind(value: Any) -> str:
+    named = {_Defaults: "the defaults section", _Pairs: "a mapping", list: "a list", str: "a string",
+             bool: "a boolean", int: "an integer", float: "a float", type(None): "null"}
+    return named.get(type(value)) or f"a {type(value).__name__} value"
+
+
+def _at(path: tuple) -> str:
+    """Where in a parsed file: ``$`` is the whole, ``$['a'][0]`` the first item of the value at the key ``a``."""
+    return "$" + "".join(f"[{part!r}]" for part in path)
+
+
+def _rewritten(value: Any, rewrite: Callable[[str], str], where: str, path: tuple = ()) -> Any:
+    """*value* with *rewrite* applied to every string it holds, keys included, as the raw edit did to the text.
+
+    Refused where two keys of one mapping that differ become the same key: a reader would keep one
+    of the two entries or merge them, which no reviewed replacement said.
+    """
+    if isinstance(value, str):
+        return rewrite(value)
+    if isinstance(value, list):
+        return [_rewritten(item, rewrite, where, path + (index,)) for index, item in enumerate(value)]
+    if not isinstance(value, _Pairs):
+        return value
+    kept: dict[str, str] = {}
+    pairs = []
+    for key, item in value:
+        new = rewrite(key)
+        if kept.setdefault(new, key) != key:
+            raise _refused(f"{where}: the replacements make the keys {kept[new]!r} and {key!r} of the mapping at "
+                           f"{_at(path)} the same key {new!r}, so two entries would merge")
+        pairs.append((new, _rewritten(item, rewrite, where, path + (key,))))
+    return type(value)(pairs)
+
+
+def _difference(expected: Any, found: Any, path: tuple = ()) -> str | None:
+    """Where *found* is not *expected*, in words, or ``None`` when they are the same.
+
+    Strict: a value of another type differs (``1``, ``1.0``, and ``true`` are three values), the keys
+    of a mapping are compared in order and with any duplicate, and NaN is the same as NaN, so no key,
+    type, nesting, or non-string value can change unseen.
+    """
+    if type(expected) is not type(found):
+        return f"{_at(path)} is {_kind(found)} {_shown(found)}, expected {_kind(expected)} {_shown(expected)}"
+    if isinstance(expected, _Pairs):
+        expected_keys, found_keys = [key for key, _ in expected], [key for key, _ in found]
+        if expected_keys != found_keys:
+            return f"{_at(path)} holds the keys {_shown(found_keys)}, expected {_shown(expected_keys)}"
+        for (key, want), (_, got) in zip(expected, found):
+            inner = _difference(want, got, path + (key,))
+            if inner:
+                return inner
+        return None
+    if isinstance(expected, list):
+        if len(expected) != len(found):
+            return f"{_at(path)} holds {len(found)} item(s), expected {len(expected)}"
+        for index, (want, got) in enumerate(zip(expected, found)):
+            inner = _difference(want, got, path + (index,))
+            if inner:
+                return inner
+        return None
+    # Floats and dates compare by what they print, which keeps NaN, the sign of a zero, and an offset.
+    if isinstance(expected, (str, int)) or expected is None:
+        same = expected == found
+    else:
+        same = repr(expected) == repr(found)
+    return None if same else f"{_at(path)} is {_shown(found)}, expected {_shown(expected)}"
+
+
+def _check_parsed(kind: str, where: str, text: str, new_text: str, originals: list[str], listed: set[str],
+                  replacement_of: dict[str, str]) -> None:
+    """Refuse unless the transformed *kind* file is the original with the reviewed replacements applied.
+
+    Both files are parsed. The value expected of the result is the original's, with every string in
+    it, keys and section and option names included, rewritten by the same reviewed replacements the
+    raw edit applied to the text, and the result must equal it under :func:`_difference`: the same
+    keys in the same order, of the same types, nested the same way, so a replacement that breaks the
+    syntax, injects or merges a key, or changes what a value means is refused. An original that does
+    not parse cannot be verified and is refused too. Only what the parser reads is compared: a
+    comment, or the whitespace between values, is not.
+    """
+    name, phrase, parse = _PARSERS[kind]
+    label = f"{where} (a parsed string)"
+
+    def rewrite(string: str) -> str:
+        return _replaced(string, [span for span in _spans(string, originals, label) if span[2] in listed],
+                         replacement_of)
+
+    try:
+        before = parse(text)
+    except _PARSE_ERRORS as exc:
+        raise _refused(f"{where} is not {phrase}, so an edit of it cannot be verified to keep its structure "
+                       f"({_reason(exc)})") from exc
+    try:
+        expected = _rewritten(before, rewrite, where)
+        try:
+            after = parse(new_text)
+        except _PARSE_ERRORS as exc:
+            raise _refused(f"{where}: the transformed file is not valid {name} ({_reason(exc)}); replacements are "
+                           "written into the file as they are, without quoting or escaping, so one holding a "
+                           "quotation mark, a backslash, or another delimiter can break it") from exc
+        difference = _difference(expected, after)
+    except RecursionError:
+        raise _refused(f"{where} is nested too deeply for its structure to be compared") from None
+    if difference:
+        raise _refused(f"{where}: the transformed file is not the original with the reviewed replacements applied "
+                       f"to its keys and strings: {difference}")
 
 
 def _edit_for(document: dict, edit: dict, snapshot_id: str, source: Path, hashes: dict[str, str]) -> _Edit:
@@ -489,10 +720,15 @@ def _edit_for(document: dict, edit: dict, snapshot_id: str, source: Path, hashes
             or len(text.splitlines()) != len(new_text.splitlines())):
         raise _refused(f"{where}: the replacement would move a line, so claim locations could not be "
                        "mapped back to the original export")
+    # A JSON, TOML, or INI display file must also keep its structure, as a parser reads it. Anything
+    # else is not asked.
+    check = _structure_check_for(path)
+    if check is not None:
+        _check_parsed(check, where, text, new_text, originals, listed, replacement_of)
     data = new_text.encode("utf-8")
     changed = tuple(index + 1 for index, (old, new) in enumerate(zip(old_lines, new_lines)) if old != new)
     return _Edit(edit["edit_id"], path, True, hashes[path], data,
-                 f"sha256:{hashlib.sha256(data).hexdigest()}", counts, changed, _line_count(text))
+                 f"sha256:{hashlib.sha256(data).hexdigest()}", counts, changed, _line_count(text), check)
 
 
 # --- the blinded export --------------------------------------------------------------------------
@@ -507,6 +743,8 @@ BLINDED_LIMITS = [
     "and may still reveal the repository. It is not anonymization.",
     "Instruction files are never edited by blinding and are recorded as retained identity cues.",
     "The original export under original/source is evaluator-side and is never handed to a scanner.",
+    "JSON, TOML, and INI display files are verified by parsing them before and after the edit; nothing else a "
+    "scanner may read is re-validated.",
 ]
 
 
@@ -659,6 +897,9 @@ def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapsho
             _passed("edit_line_structure", f"{edit.edit_id}: {edit.line_count} line(s) before and after; "
                                            "each line maps to the same line"),
         ]
+        if edit.structure_check is not None:
+            detail = _STRUCTURE_DETAILS[edit.structure_check]
+            validation.append(_passed("edit_structure", f"{edit.edit_id}: {detail}"))
     transformed = _write_transformed(original_source, source, original, edits)
     unedited = len(original.hashes) - sum(1 for edit in edits if edit.present)
     validation.append(_passed("unedited_files_unchanged",
