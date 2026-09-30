@@ -14,11 +14,14 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
-from scaneval import aggregate, gate, precision, review, schedule
+from scaneval import aggregate, cases, gate, precision, review, schedule
+from scaneval.adapters.base import Adapter, NativeOutcome
 from scaneval.cli import main
 from scaneval.contracts import (
     CONTRACT_KINDS,
@@ -32,6 +35,7 @@ from scaneval.contracts import (
     schema_file,
     validate_document,
 )
+from scaneval.runner import run_from_config
 
 
 CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
@@ -306,7 +310,8 @@ def test_a_decision_is_derived_from_the_requirements_it_records():
             (lambda d: d["requirements"].pop(0), "the requirements must be exactly the ones the embedded policy"),
             (lambda d: d["requirements"].reverse(), "the requirements must be exactly the ones the embedded policy"),
             (lambda d: d["blocks"].update(declared=["primary"]), "blocks must list the policy's declared"),
-            (lambda d: d.update(view={"mode": "full", "profile": "metadata_blinded"}), "view must be the policy's view"),
+            (lambda d: d.update(view={"mode": "full", "profile": "metadata_blinded"}),
+             "view must be the policy's view"),
             (lambda d: d["comparison"]["candidate"].update(system_id="baseline"), "two different systems"),
             (lambda d: d.update(recommendation_scope="development"), "recommendation_scope is development")):
         broken = hand_decision(policy, {"completion.min": "fail", "cost.coverage": "inconclusive"})
@@ -647,7 +652,7 @@ def corpus(tmp_path_factory) -> dict:
 
 
 def gate_policy(**blocks) -> dict:
-    """A policy over the corpus: the improvement the change is meant to make and the one configuration key it changes."""
+    """A policy over the corpus: the improvement a change must make and the one configuration key it changes."""
     document = {
         "schema_version": "2.1", "policy_id": "fixture-gate", "policy_version": "1",
         "view": {"mode": "full", "profile": "standard"},
@@ -788,7 +793,7 @@ def test_the_primary_metric_may_be_recall_at_a_budget(corpus):
         "baseline": 0.2, "candidate": 0.0, "difference": -0.2}
 
 
-def test_recall_at_a_budget_is_inconclusive_for_unranked_output_and_a_random_order_expectation_never_replaces_it(corpus):
+def test_recall_at_a_budget_is_inconclusive_for_unranked_output_and_no_random_order_expectation_replaces_it(corpus):
     """Unranked output has no native position, so recall@5 is null and the gate does not pass.
 
     The comparison does hold the random-order diagnostic for the unranked system, but a position nobody
@@ -1029,7 +1034,8 @@ def test_a_regression_can_also_hold_the_paired_interval_within_the_allowed_decre
     assert status == "fail" and "lies below -0.05" in explanation
     status, explanation = verdict(None, None, "degenerate")
     assert status == "inconclusive" and "the paired interval is degenerate" in explanation
-    assert requirement(decide(corpus, policy), "regression.guard")["status"] == "pass", "the real interval sits above -0.05"
+    real = requirement(decide(corpus, policy), "regression.guard")
+    assert real["status"] == "pass", "the real interval sits above -0.05"
 
 
 # --- configuration differences and evidence scope ---------------------------------------------------
@@ -1309,7 +1315,8 @@ def test_the_decision_is_bound_to_its_policy_comparison_runs_and_evaluator_versi
 
 def test_replaying_the_same_inputs_gives_the_same_decision_bytes_and_leaves_them_untouched(corpus):
     """No clock, path, or randomness: two evaluations, and one from a round-tripped copy, agree byte for byte."""
-    policy = gate_policy(regressions=[regression("whole-view")], primary=primary(uncertainty={"lower_bound_above": 0.0}))
+    policy = gate_policy(regressions=[regression("whole-view")],
+                         primary=primary(uncertainty={"lower_bound_above": 0.0}))
     comparison = corpus["comparisons"]["improved"]
     policy_before, comparison_before = deepcopy(policy), deepcopy(comparison)
 
@@ -1335,7 +1342,7 @@ def test_resolving_a_policy_fills_the_required_scope_and_the_notes_and_no_thresh
 
 
 @pytest.mark.parametrize("kind", ["random_order_expected_recall", "random_order_diagnostic", "run_variability"])
-def test_a_policy_whose_primary_metric_is_a_diagnostic_is_refused_when_loaded_and_when_evaluated(corpus, tmp_path, kind):
+def test_a_diagnostic_primary_metric_is_refused_when_loaded_and_when_evaluated(corpus, tmp_path, kind):
     """Refused at load, by name: the decision cannot be handed a policy that rests on an expectation."""
     document = gate_policy(primary=primary(kind))
     path = tmp_path / f"{kind}.json"
@@ -1451,7 +1458,8 @@ def test_the_fixture_estimates_are_the_hand_computed_figures(estimates):
     """
     assert (estimates["improved"]["precision_resolved"], estimates["improved"]["totals"]["true"]) == (0.8, 8.0)
     assert estimates["baseline"]["precision_resolved"] == 0.2
-    assert (estimates["flagging"]["precision_resolved"], estimates["flagging"]["coverage"]["population_units"]) == (0.2, 50)
+    flagging = estimates["flagging"]
+    assert (flagging["precision_resolved"], flagging["coverage"]["population_units"]) == (0.2, 50)
     assert estimates["duplicating"]["precision_resolved"] == 0.2
     assert estimates["duplicating"]["duplicate_burden"]["copies_per_unit"] == 5.0
     for estimate in estimates.values():
@@ -1647,7 +1655,8 @@ def test_the_precision_interval_bound_passes_fails_or_waits_on_what_the_interval
     assert verdict()[0] == "pass", "the census interval is [0.8, 0.8]"
     assert verdict(state="ok", lower=0.6, upper=0.95)[0] == "pass"
     status, explanation = verdict(state="ok", lower=0.5, upper=0.95)
-    assert status == "inconclusive" and "reaches below 0.6, so precision at that level is not established" in explanation
+    assert status == "inconclusive"
+    assert "reaches below 0.6, so precision at that level is not established" in explanation
     status, explanation = verdict(state="ok", lower=0.2, upper=0.5)
     assert status == "fail" and "lies wholly below 0.6" in explanation
     status, explanation = verdict(state="degenerate", lower=None, upper=None)
@@ -1926,7 +1935,8 @@ def test_an_unresolved_baseline_cannot_make_a_candidate_look_better(tmp_path):
     assert requirement(decision, "primary.improvement")["status"] == "pass"
     item = requirement(decision, "target_coverage.min_assessable_mass")
     assert item["status"] == "inconclusive" and decision["outcome"] == "inconclusive"
-    assert item["observed"]["baseline"]["assessable_mass"] == 0.8 and item["observed"]["candidate"]["assessable_mass"] == 1.0
+    assert item["observed"]["baseline"]["assessable_mass"] == 0.8
+    assert item["observed"]["candidate"]["assessable_mass"] == 1.0
     assert item["explanation"] == (
         "the baseline has 4 of 5 target observations assessable, a mass of 0.8, below the required 0.9: unresolved "
         "or failed observations count as misses, so recall over them is a lower bound and the improvement is not "
@@ -1966,7 +1976,8 @@ def test_a_genuine_improvement_passes_every_burden_requirement(corpus):
     assert requirement(decision, "burden.increase_ratio")["explanation"] == (
         "the candidate's claim volume per assignment is 1 against the baseline's 1, a ratio of 1, within the "
         "allowed 3")
-    assert requirement(decision, "burden.increase_ratio")["observed"] == {"baseline": 1.0, "candidate": 1.0, "ratio": 1.0}
+    assert requirement(decision, "burden.increase_ratio")["observed"] == {
+        "baseline": 1.0, "candidate": 1.0, "ratio": 1.0}
 
 
 def test_a_flag_everything_candidate_fails_the_burden_requirements_whatever_its_recall(corpus):
@@ -2045,9 +2056,8 @@ def test_a_burden_the_comparison_cannot_supply_is_inconclusive_and_an_increase_f
     assert requirement(nothing_before, "burden.increase_ratio")["explanation"] == (
         "the baseline's claim volume per assignment is zero, so any amount is an unbounded increase over it, above "
         "the allowed 3")
-    neither = gate.evaluate_gate(policy, with_volumes({"records": 0, "unique": 0, "duplicate_copies": 0, "delivered": 0},
-                                                      {"records": 0, "unique": 0, "duplicate_copies": 0,
-                                                       "delivered": 0}))
+    silence = {"records": 0, "unique": 0, "duplicate_copies": 0, "delivered": 0}
+    neither = gate.evaluate_gate(policy, with_volumes(silence, silence))
     assert requirement(neither, "burden.increase_ratio")["status"] == "pass"
 
 
@@ -2300,7 +2310,8 @@ def test_cli_gate_writes_a_decision_and_exits_0_for_a_pass(corpus, tmp_path, cap
     output = tmp_path / "decision.json"
     decision = load_document(output, "gate-decision")
     assert output.read_text(encoding="utf-8") == canonical_json(decision) + "\n"
-    assert canonical_json(decision) == canonical_json(gate.evaluate_gate(gate_policy(), corpus["comparisons"]["improved"]))
+    expected = gate.evaluate_gate(gate_policy(), corpus["comparisons"]["improved"])
+    assert canonical_json(decision) == canonical_json(expected)
     lines = out.splitlines()
     assert lines[0] == ("Gate pass: baseline=baseline candidate=improved view=full/standard "
                         "recommendation_scope=reviewed")
@@ -2316,7 +2327,7 @@ def test_cli_gate_writes_a_decision_and_exits_0_for_a_pass(corpus, tmp_path, cap
 
 
 def test_cli_gate_exits_1_and_names_every_failed_and_unresolved_requirement(corpus, estimates, tmp_path, capsys):
-    """The flagging system fails five requirements and leaves three cost requirements unresolved: all eight are named."""
+    """The flagging system fails five requirements and leaves three unresolved: all eight are named."""
     policy = complete_policy()
     argv = gate_command(tmp_path, corpus, policy, "flagging", baseline=estimates["baseline"],
                         candidate=estimates["flagging"])
@@ -2468,3 +2479,205 @@ def test_the_example_policy_evaluates_a_real_comparison_and_promises_nothing(cor
     assert decision["outcome"] != "pass" and decision["blocks"]["not_declared"] == []
     assert requirement(decision, "configuration.allowed_differences")["status"] == "inconclusive"
     assert requirement(decision, "precision.binding")["status"] == "inconclusive"
+
+
+# --- the real pipeline: scripted adapters run by the runner, reviewed through the review commands -----
+
+REAL_SOURCE = "import subprocess\n\n\ndef run(cmd):\n    return subprocess.run(cmd, shell=True)\n"
+REAL_REPRESENTS = ("This case tests caller-controlled shell command construction under a trusted-argument "
+                   "assumption, and adds a single-file Python sink for the gate tests.")
+
+
+def git(*args: str, cwd: Path) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True,
+        env={**os.environ, "GIT_AUTHOR_NAME": "u", "GIT_AUTHOR_EMAIL": "u@x", "GIT_COMMITTER_NAME": "u",
+             "GIT_COMMITTER_EMAIL": "u@x", "GIT_CONFIG_GLOBAL": "/dev/null"},
+    ).stdout.strip()
+
+
+class ScriptedAdapter(Adapter):
+    """Delivers as many claims on the accepted location as its system's configuration says. No network."""
+
+    name = "fake"
+    adapter_version = "1.0.0"
+    supported_languages = frozenset({"python"})
+
+    def prepare(self, spec, cache_root):
+        return {"system": spec.system_id}
+
+    def scan(self, *, request, source_dir, raw_dir, spec, preparation, timeout_seconds, trace_mode, trace_dir):
+        native = raw_dir / "native.json"
+        native.write_text('{"findings": []}\n', encoding="utf-8")
+        claims = [{"claim_id": f"c{index}", "allegation": f"shell=True with a caller-controlled command ({index})",
+                   "kind": "command_injection", "native_rule_id": "fake.shell", "raw_artifact_id": "native",
+                   "primary_location": {"path": "src/app.py", "start_line": 5, "end_line": 5}}
+                  for index in range(1, spec.config.get("claims", 0) + 1)]
+        return NativeOutcome(status="success", exit_code=0, command=["fake", "scan"], claims=claims,
+                             artifacts=[{"id": "native", "path": native}], tool_versions={"fake": "1.0.0"},
+                             capture={"model_requests": "not_applicable"}, notes=["scripted run"])
+
+
+def real_runs(root: Path) -> dict:
+    """A real local repository and pack, and two runs of two scripted systems through ``run_from_config``.
+
+    The first run has no declared tree hash, so it freezes no plan, but it exports the snapshot and records
+    its mechanical checks in the pack it freezes. A fictional reviewer then approves that case at L3 and a
+    fictional curator admits it, and the second run, from that pack, freezes a plan whose scope is reviewed.
+    The 'silent' system delivers nothing and the 'finder' one claim on the labeled sink. Every bundle the
+    second run wrote is still a machine draft.
+    """
+    repo = root / "upstream"
+    (repo / "src").mkdir(parents=True)
+    git("init", "-q", "-b", "main", cwd=repo)
+    git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=repo)
+    (repo / "src" / "app.py").write_text(REAL_SOURCE, encoding="utf-8")
+    (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "first", cwd=repo)
+    pack = cases.new_pack("test", "gate-runner", "Local fixture pack for the gate tests.")
+    cases.add_snapshot(pack, {
+        "snapshot_id": "snap-a", "repository": {"url": str(repo), "name": "widget"},
+        "commit": git("rev-parse", "HEAD", cwd=repo),
+        "reference": "Commit chosen by the test fixture; no advisory is claimed.", "languages": ["python"],
+        "workload": "conventional_application", "component_role": "application",
+        "license": {"spdx": None, "verified": False, "note": "Local fixture repository."}})
+    case = cases.draft_case(
+        "case-a", snapshot_id="snap-a", kind="command_injection",
+        description="Caller-controlled command string reaches subprocess with shell=True.",
+        represents=REAL_REPRESENTS, workload="conventional_application", component_role="application", aliases=[],
+        evidence=[cases.evidence("source", origin="research_note", kind="source_inspection",
+                                 reference="src/app.py", note="Fixture inspection, not an advisory.")],
+        accepted_locations=[{"path": "src/app.py", "start_line": 5, "end_line": 5, "role": "sink", "note": ""}])
+    case["controls"].append({
+        "control_id": "C-case-a-safe", "snapshot_id": "snap-a", "type": "capability_safe",
+        "description": "The import line is not an allegation.",
+        "property": "No caller-supplied string reaches a shell at the import line.",
+        "allowed_actors_inputs": "Operators on the host.", "assumptions": ["Default deployment."],
+        "ruled_out_allegation": "Command injection through the import line.",
+        "locations": [{"path": "src/app.py", "start_line": 1, "end_line": 1, "role": "operation"}],
+        "evidence_ids": ["source"]})
+    cases.add_case(pack, case)
+    cases.save_pack(root / "pack.json", pack)
+    config = {"schema_version": "2.1", "run_id": "run-first", "pack": "pack.json", "cache_root": "cache",
+              "inputs": [{"snapshot_id": "snap-a"}],
+              "systems": [{"system_id": "silent", "adapter": "fake", "config": {"claims": 0}},
+                          {"system_id": "finder", "adapter": "fake", "config": {"claims": 1}}],
+              "repetitions": 1, "timeout_seconds": 60, "trace_mode": "off", "network_policy": "none"}
+    (root / "run.json").write_text(canonical_json(config) + "\n", encoding="utf-8")
+    first = root / "first"
+    run_from_config(root / "run.json", first, clock=CLOCK, adapters={"fake": ScriptedAdapter()})
+    frozen = cases.load_pack(first / "evaluator" / "pack.json")
+    cases.set_disposition(frozen, "case-a", "validate", "evidence reviewed by a fictional reviewer")
+    cases.approve_case(frozen, "case-a", reviewer=REVIEWER, role="independent_reviewer", level="L3",
+                       note="fixture label established by a fictional reviewer", clock=CLOCK)
+    cases.admit_case(frozen, "case-a", decision="admitted", by="Fixture Curator (fictional)",
+                     reason="fixture admission by a fictional curator", clock=CLOCK)
+    cases.save_pack(root / "pack.json", frozen)
+    (root / "run.json").write_text(canonical_json({**config, "run_id": "run-second"}) + "\n", encoding="utf-8")
+    second = root / "second"
+    run_from_config(root / "run.json", second, clock=CLOCK, adapters={"fake": ScriptedAdapter()})
+    return {"first": first, "second": second}
+
+
+def approve_like_a_reviewer(bundle: Path, capsys) -> None:
+    """A fictional reviewer's decisions for one bundle, filed through the real ``review`` commands.
+
+    Every routed match is accepted (the claim is the labeled sink) and the control is assessed quiet; the
+    decisions file is edited by hand, re-drafted with ``review record``, and approved with ``review approve``.
+    """
+    path = bundle / "evaluator" / "decisions.json"
+    decisions = json.loads(path.read_text(encoding="utf-8"))
+    for match in decisions["claim_matches"]:
+        match.update(decision="accepted", reason="fixture: the labeled sink, accepted by a fictional reviewer")
+    for assessment in decisions["control_assessments"]:
+        assessment.update(decision="quiet", reason="fixture: no allegation about the control's property")
+    path.write_text(canonical_json(decisions) + "\n", encoding="utf-8")
+    assert cli(capsys, "review", "record", str(bundle))[0] == 0
+    code, _out, err = cli(capsys, "review", "approve", str(bundle), "--reviewer", REVIEWER, "--note",
+                          "fixture approval by a fictional reviewer")
+    assert code == 0, err
+
+
+def test_evidence_from_a_real_run_is_draft_until_a_reviewer_approves_it_and_only_then_passes(tmp_path, capsys):
+    """Scripted adapters run by the runner, a pack a fictional reviewer approved, then the real review commands.
+
+    Before any bundle is approved the plan is reviewed but every review record is a machine draft, so the
+    evidence is draft: the evidence requirement is inconclusive and the decision supports no recommendation.
+    A draft match earns no detection credit and a draft control assessment is unresolved, which F+ counts as a
+    false allegation, so the decision fails too; a draft policy yields a development decision. After the
+    reviewer approves both bundles the same policy passes as a reviewed recommendation: the finder detects the
+    one labeled target (recall 1 against 0), is quiet on the control, completes every scan, delivers one claim
+    per assignment, and its one delivered claim is reviewed true by two fictional reviewers.
+    """
+    runs = real_runs(tmp_path)
+    second = runs["second"]
+    schedule_row = load_document(runs["first"] / "evaluator" / "schedule.json", "evaluation-schedule")["inputs"][0]
+    assert schedule_row["plan"]["state"] == "unavailable", "the first run declared no tree hash, so it froze no plan"
+    frozen = load_document(second / "evaluator" / "schedule.json", "evaluation-schedule")["inputs"][0]["plan"]
+    assert frozen["state"] == "frozen" and frozen["scope"] == "reviewed"
+    policy = gate_policy(
+        configuration={"allowed_differences": ["config.claims"]}, primary=primary(minimum=0.5),
+        controls={"capability_safe": bounds()}, completion={"min": 1.0}, target_coverage={"min_assessable_mass": 1.0},
+        burden={"max_claims_per_assignment": 5, "max_duplicate_share": 0.0})
+    settings = aggregation_policy(min_clusters=2)
+
+    draft = aggregate.compare([second], baseline="silent", candidate="finder", policy=settings)
+    assert draft["views"][0]["evidence_scope"] == {"baseline": "draft", "candidate": "draft"}
+    unapproved = gate.evaluate_gate(policy, draft)
+    assert unapproved["recommendation_scope"] == "none" and unapproved["outcome"] == "fail"
+    assert unapproved["failed"] == ["primary.improvement", "controls.capability_safe.false_alarm_upper"], (
+        "a draft match earns no credit, and an unresolved draft control assessment counts as false in F+")
+    assert requirement(unapproved, "evidence.scope")["status"] == "inconclusive"
+    assert requirement(unapproved, "evidence.scope")["explanation"].startswith(
+        "the baseline evidence is draft, not reviewed")
+    development = gate.evaluate_gate({**policy, "required_scope": "draft"}, draft)
+    assert development["recommendation_scope"] == "development"
+    earned = requirement(development, "primary.improvement")["observed"]["candidate"]
+    assert earned == 0.0, "a draft match earns no credit"
+
+    for name in ("silent", "finder"):
+        approve_like_a_reviewer(second / "invocations" / f"snap-a__{name}__r1", capsys)
+    approved = aggregate.compare([second], baseline="silent", candidate="finder", policy=settings)
+    assert approved["views"][0]["evidence_scope"] == {"baseline": "reviewed", "candidate": "reviewed"}
+    frame = precision.build_frame([second], population="full", systems=["finder"])
+    sample = precision.draw_sample(frame, size=1, seed=5)
+    estimate = precision.estimate(sample, review_units(sample, lambda unit_id: "true"))
+    assert estimate["precision_resolved"] == 1.0 and estimate["evidence_grade"] == "double_review_or_adjudicated"
+    reviewed_policy = {**policy, "precision": precision_block(population={"name": "full"}, min_value=0.5)}
+
+    decision = gate.evaluate_gate(reviewed_policy, approved, precision_candidate=estimate)
+
+    assert decision["outcome"] == "pass" and decision["recommendation_scope"] == "reviewed", (
+        decision["failed"], decision["unresolved"])
+    assert requirement(decision, "primary.improvement")["observed"] == {
+        "baseline": 0.0, "candidate": 1.0, "difference": 1.0}
+    assert requirement(decision, "controls.capability_safe.false_alarm_upper")["observed"]["false_alarm_upper"] == 0.0
+    assert requirement(decision, "precision.binding")["status"] == "pass"
+    replay = gate.evaluate_gate(reviewed_policy, approved, precision_candidate=estimate)
+    assert canonical_json(replay) == canonical_json(decision)
+
+
+def test_a_policy_reads_only_its_own_view_and_the_decision_says_which_others_it_left_alone(corpus):
+    """Views are never pooled: the standard and metadata-blinded views of one comparison are read separately."""
+    comparison = deepcopy(corpus["comparisons"]["improved"])
+    blinded = deepcopy(comparison["views"][0])
+    blinded["profile"] = "metadata_blinded"
+    for block in blinded["systems"]["candidate"]["slices"][0]["detection"]:
+        if block["weighting"] == "equal_target":
+            block["full_output_recall"]["value"] = 0.5
+    for block in blinded["differences"][0]["detection"]:
+        if block["weighting"] == "equal_target":
+            block["full_output_recall"]["value"] = 0.3
+    comparison["views"].append(blinded)
+
+    standard = gate.evaluate_gate(gate_policy(), comparison)
+    other = gate.evaluate_gate(gate_policy(view={"mode": "full", "profile": "metadata_blinded"}), comparison)
+
+    assert requirement(standard, "primary.improvement")["observed"]["difference"] == 0.6
+    assert requirement(other, "primary.improvement")["observed"]["difference"] == 0.3
+    assert ("The comparison also holds view(s) full/metadata_blinded; this policy reads only full/standard."
+            in standard["notes"])
+    assert ("The comparison also holds view(s) full/standard; this policy reads only full/metadata_blinded."
+            in other["notes"])
+    assert other["view"] == {"mode": "full", "profile": "metadata_blinded"}
