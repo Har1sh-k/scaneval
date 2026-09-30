@@ -764,8 +764,10 @@ configuration file. It can sit beside the standard input of the same snapshot:
 A scanner is told its run id, system id, model, and configuration, and it runs in a workspace, beside
 a source cache, whose absolute paths it can read. A run in which any of them names an original
 token, ignoring case, is refused before anything is written, and that includes the workspace root,
-the cache root, and the directory the configuration sits in (each as named and as resolved). A run
-id like the one this guide used earlier, `acme-internal-pilot-2026-09-20`, names the company:
+the cache root, and the directory the configuration sits in (each as named and as resolved).
+Without `--workspace-root` a workspace is made in the system's temporary directory, which this
+check does not read. A run id like the one this guide used earlier,
+`acme-internal-pilot-2026-09-20`, names the company:
 
 ```
 $ $SB run "$BYOC/run-leaky.json" --output "$BYOC/runs/leaky" --workspace-root "$BYOC/workspaces"

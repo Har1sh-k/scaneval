@@ -121,7 +121,7 @@ In a run, a blinded input needs a 2.1 configuration naming its map. Refused befo
 
 `scaneval blinding check MAP --pack PACK` fetches and exports each variant into a temporary directory and applies the map exactly as a run would, reporting approval instead of requiring it, so a curator can check a draft before anyone reviews it. It prints each edit's counts and changed lines, the checks that passed, and the files that still carry an original, and it exits 1 when the map is not approved or any variant refuses it. It never writes the map. `scaneval blinding review MAP --reviewer --role --decision --note` appends one chained review and replaces the map through a temporary file, as a pack is replaced.
 
-It does not discover identity cues, parse source, or decide whether a field is read at runtime. The leak check is a substring test of the declared originals, so a spelling the map does not declare, such as a hyphenated product name, is not caught. Replacement is exact and case-sensitive, so each spelling to replace is its own pseudonym. The map itself is not copied into the run directory; the run records its identity and digest.
+It does not discover identity cues, parse source, or decide whether a field is read at runtime. The leak check is a substring test of the declared originals, so a spelling the map does not declare, such as a hyphenated product name, is not caught, and it reads the paths a run names, not the temporary directory a workspace is made in when no workspace root is given. Replacement is exact and case-sensitive, so each spelling to replace is its own pseudonym. The map itself is not copied into the run directory; the run records its identity and digest.
 
 ## The invocation runner and the bundle layout
 
