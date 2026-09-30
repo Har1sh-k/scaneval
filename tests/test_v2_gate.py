@@ -2061,7 +2061,8 @@ def test_a_frozen_control_missing_from_a_completed_scans_plan_still_counts_towar
     assert decision["outcome"] == "fail" and decision["failed"] == ["controls.capability_safe.false_alarm_upper"]
     upper = requirement(decision, "controls.capability_safe.false_alarm_upper")
     assert upper["observed"]["false_alarm_upper"] == pytest.approx(0.3)
-    assert (upper["observed"]["completed"], upper["observed"]["resolved"], upper["observed"]["unresolved"]) == (10, 7, 3)
+    counts = upper["observed"]
+    assert (counts["completed"], counts["resolved"], counts["unresolved"]) == (10, 7, 3)
     assert statuses(decision)["controls.capability_safe.completed_mass"] == "pass"
     assert statuses(decision)["controls.capability_safe.assessable_mass"] == "pass"
 
@@ -2168,6 +2169,136 @@ def test_target_coverage_holds_both_systems_and_passes_when_both_are_assessable(
     flaky = decide(corpus, gate_policy(target_coverage={"min_assessable_mass": 0.9}), "flaky")
     assert requirement(flaky, "target_coverage.min_assessable_mass")["explanation"].startswith(
         "the candidate has 8 of 10 target observations assessable, a mass of 0.8, below the required 0.9")
+
+
+def coverage_run(root: Path, run_id: str, *, baseline_pending=()) -> Path:
+    """Ten projects, one target each. Both systems detect every target, except that the baseline's match in each
+    project number of *baseline_pending* was left unresolved: its scan detects nothing there and is not assessable.
+    """
+    inputs = [planned(f"p{index}", project=f"acme/p{index}",
+                      targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}")])
+              for index in range(1, 11)]
+    outcomes = {}
+    for index in range(1, 11):
+        pending = index in baseline_pending
+        outcomes[(f"p{index}", "baseline", 1)] = scan(hits={} if pending else {f"T-p{index}": 1},
+                                                      pending={f"T-p{index}": 1} if pending else {}, claims=1)
+        outcomes[(f"p{index}", "candidate", 1)] = scan(hits={f"T-p{index}": 1}, claims=1)
+    return write_run(root, run_id, inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                     configs={"candidate": {"config": {"knob": 2}}})
+
+
+def coverage_comparison(root: Path, run_id: str, **choices) -> dict:
+    return aggregate.compare([coverage_run(root, run_id, **choices)], baseline="baseline", candidate="candidate",
+                             policy=aggregation_policy())
+
+
+def test_target_coverage_holds_the_slice_the_primary_metric_reads_and_not_only_the_whole_view(tmp_path):
+    """The primary metric is project acme/p1, where the baseline's only match was never resolved.
+
+    The baseline detects 9 of 10 targets and its match on p1 is pending, so its whole-view assessable mass is
+    9/10, exactly the required minimum, and in p1 it is 0: recall there goes from 0 to 1, +1, over a baseline
+    nobody finished reviewing. A whole-view figure alone would let that improvement pass.
+    """
+    comparison = coverage_comparison(tmp_path, "run-slice", baseline_pending=(1,))
+    policy = gate_policy(primary=primary(minimum=0.5, slice={"dimension": "project", "value": "acme/p1"}),
+                         target_coverage={"min_assessable_mass": 0.9})
+
+    decision = gate.evaluate_gate(policy, comparison)
+
+    assert requirement(decision, "primary.improvement")["observed"] == {"baseline": 0.0, "candidate": 1.0,
+                                                                        "difference": 1.0}
+    item = requirement(decision, "target_coverage.min_assessable_mass")
+    assert item["status"] == "inconclusive" and decision["outcome"] == "inconclusive"
+    assert item["explanation"] == (
+        "in project acme/p1 the baseline has 0 of 1 target observations assessable, a mass of 0, below the "
+        "required 0.9: unresolved or failed observations count as misses, so recall over them is a lower bound "
+        "and the improvement is not established")
+    assert item["observed"]["baseline"]["assessable_mass"] == 0.9
+    assert item["observed"]["slices"] == [{
+        "slice": {"dimension": "project", "value": "acme/p1"}, "weighting": "equal_target",
+        "baseline": {"assessable_mass": 0.0, "completed_mass": 1.0, "assessable": 0, "target_observations": 1},
+        "candidate": {"assessable_mass": 1.0, "completed_mass": 1.0, "assessable": 1, "target_observations": 1}}]
+    assert statuses(gate.evaluate_gate(gate_policy(primary=primary(minimum=0.5, slice={
+        "dimension": "project", "value": "acme/p2"}), target_coverage={"min_assessable_mass": 0.9}), comparison))[
+        "target_coverage.min_assessable_mass"] == "pass", "another project's slice is fully assessable"
+
+
+def test_target_coverage_holds_every_slice_a_regression_reads(tmp_path):
+    """A regression on each project protects p1 and p2 as much as the whole view, so it needs their coverage too.
+
+    The candidate matches the baseline everywhere it was resolved, so no project regresses. The baseline's
+    matches on p1 and p2 are pending: it detects 8 of 10 (0.2 short in the whole view) and 0 of 1 in each of
+    those projects. With a required 0.7 the whole view passes, and each of the two projects is named.
+    """
+    comparison = coverage_comparison(tmp_path, "run-regressions", baseline_pending=(1, 2))
+    policy = gate_policy(regressions=[regression("each-project", slice={"dimension": "project"})],
+                         target_coverage={"min_assessable_mass": 0.7})
+
+    decision = gate.evaluate_gate(policy, comparison)
+
+    assert statuses(decision)["regression.each-project"] == "pass"
+    item = requirement(decision, "target_coverage.min_assessable_mass")
+    assert item["status"] == "inconclusive"
+    assert item["explanation"] == (
+        "in project acme/p1 the baseline has 0 of 1 target observations assessable, a mass of 0; in project "
+        "acme/p2 the baseline has 0 of 1 target observations assessable, a mass of 0, below the required 0.7: "
+        "unresolved or failed observations count as misses, so recall over them is a lower bound and the "
+        "improvement is not established")
+    assert [row["slice"]["value"] for row in item["observed"]["slices"]] == sorted(
+        f"acme/p{index}" for index in range(1, 11))
+    assert item["observed"]["baseline"]["assessable_mass"] == 0.8
+
+
+def test_target_coverage_passes_when_the_whole_view_and_every_slice_read_are_assessable(tmp_path):
+    """Nothing is pending: every slice the policy reads is assessable for both systems, and the explanation says so."""
+    comparison = coverage_comparison(tmp_path, "run-resolved")
+    policy = gate_policy(primary=primary(slice={"dimension": "project", "value": "acme/p1"}),
+                         regressions=[regression("each-project", slice={"dimension": "project"})],
+                         target_coverage={"min_assessable_mass": 0.9})
+
+    item = requirement(gate.evaluate_gate(policy, comparison), "target_coverage.min_assessable_mass")
+
+    assert item["status"] == "pass"
+    assert item["explanation"] == (
+        "the assessable target mass is 1 for the baseline and 1 for the candidate, at least the required 0.9, and "
+        "at least that in each of the 10 slice(s) the policy's detection metrics also read (project acme/p1, "
+        "project acme/p10, project acme/p2 and 7 more)")
+    assert item["threshold"] == {"weighting": "equal_target", "min_assessable_mass": 0.9}
+
+
+def test_target_coverage_reads_a_regression_in_its_own_weighting(tmp_path):
+    """A regression under equal_project weights the two projects alike, so a small project's pending match counts more.
+
+    acme/big holds four targets the baseline resolved; acme/small holds one whose match is pending. Under
+    equal_target the baseline's assessable mass is 4/5 = 0.8, which meets a required 0.6; under equal_project each
+    project weighs 1/2, so it is (1 + 0)/2 = 0.5. A regression that reads equal_project rests on that 0.5.
+    """
+    inputs = [planned("big", project="acme/big", targets=[target(f"T-big{index}", project="acme/big",
+                                                                 family=f"family-{index}") for index in range(4)]),
+              planned("small", project="acme/small", targets=[target("T-small", project="acme/small",
+                                                                     family="family-small")])]
+    outcomes = {("big", "baseline", 1): scan(hits={f"T-big{index}": index + 1 for index in range(4)}, claims=4),
+                ("small", "baseline", 1): scan(pending={"T-small": 1}, claims=1),
+                ("big", "candidate", 1): scan(hits={f"T-big{index}": index + 1 for index in range(4)}, claims=4),
+                ("small", "candidate", 1): scan(hits={"T-small": 1}, claims=1)}
+    run = write_run(tmp_path, "run-weighted", inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                    configs={"candidate": {"config": {"knob": 2}}})
+    comparison = aggregate.compare([run], baseline="baseline", candidate="candidate",
+                                   policy=aggregation_policy(min_clusters=2))
+
+    plain = gate.evaluate_gate(gate_policy(target_coverage={"min_assessable_mass": 0.6}), comparison)
+    assert statuses(plain)["target_coverage.min_assessable_mass"] == "pass"
+    protected = gate.evaluate_gate(gate_policy(
+        regressions=[regression("small-projects", weighting="equal_project")],
+        target_coverage={"min_assessable_mass": 0.6}), comparison)
+
+    item = requirement(protected, "target_coverage.min_assessable_mass")
+    assert item["status"] == "inconclusive"
+    assert item["explanation"] == (
+        "in the whole view (equal_project) the baseline has 4 of 5 target observations assessable, a mass of 0.5, "
+        "below the required 0.6: unresolved or failed observations count as misses, so recall over them is a "
+        "lower bound and the improvement is not established")
 
 
 # --- review burden and cost -------------------------------------------------------------------------

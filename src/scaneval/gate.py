@@ -13,10 +13,11 @@ against one another: detection cannot compensate for noise, false alarms, burden
 scans, and a strong figure on one requirement never turns another's failure into a pass. A requirement
 is inconclusive, never a pass, when what it needs is missing or cannot be trusted: an unavailable or
 unmeasurable metric, an interval that is not ``ok``, an aborted run, a run narrowed below the inputs its
-configuration names, a difference the policy did not intend to measure, evidence below the scope the policy requires, a precision estimate that is missing
-or not bound to the comparison, no eligible control, a completed, assessable, or covered mass below
-its minimum, or a claim volume or cost nobody recorded, which includes those of a scan that ran and left
-no usable bundle. No absent figure is read as a perfect one.
+configuration names, a difference the policy did not intend to measure, evidence below the scope the
+policy requires, a precision estimate that is missing or not bound to the comparison, no eligible
+control, a completed, assessable, or covered mass below its minimum, or a claim volume or cost nobody
+recorded, which includes those of a scan that ran and left no usable bundle. No absent figure is read
+as a perfect one.
 
 What is decided from what. Only the documents passed in: the policy, the comparison report, and the
 precision estimates. The decision is a function of them and of the evaluator version, so the same
@@ -492,6 +493,20 @@ def _primary_uncertainty(ctx: _Context) -> Result:
             "comparison's confidence")
 
 
+def _slice_values(ctx: _Context, dimension: str, value: str | None) -> list[str | None]:
+    """The slices of one dimension a policy entry covers, in name order.
+
+    An entry that names a value covers that slice, and so does one on the whole view. One that names a
+    project or workload dimension and no value covers every slice of it the comparison holds that
+    carries targets, so it is empty when none does. Read from the baseline: both systems share one
+    frozen contract.
+    """
+    if value is None and dimension != "all":
+        return sorted(name for (kind, name) in ctx.differences if kind == dimension and name is not None
+                      and ctx.slices["baseline"][(kind, name)]["canonical_targets"] > 0)
+    return [value]
+
+
 def _regression(ctx: _Context, entry: dict) -> Result:
     """One protected detection metric: it may not fall by more than the entry allows in any slice it covers.
 
@@ -509,13 +524,9 @@ def _regression(ctx: _Context, entry: dict) -> Result:
     problem = ctx.missing_view()
     if problem is not None:
         return _open(problem, threshold)
-    if value is None and dimension != "all":
-        values = sorted(name for (kind, name) in ctx.differences if kind == dimension and name is not None
-                        and ctx.slices["baseline"][(kind, name)]["canonical_targets"] > 0)
-        if not values:
-            return _open(f"the comparison has no {dimension} slice carrying targets in {ctx.view_name}", threshold)
-    else:
-        values = [value]
+    values = _slice_values(ctx, dimension, value)
+    if not values:
+        return _open(f"the comparison has no {dimension} slice carrying targets in {ctx.view_name}", threshold)
     rows, failures, unresolved = [], [], []
     for name in values:
         label = _slice_text(dimension, name)
@@ -868,33 +879,84 @@ def _completion_decrease(ctx: _Context) -> Result:
     return FAIL, observed, threshold, f"{text}, a decrease of more than the allowed {_n(limit)}"
 
 
+def _coverage_readings(ctx: _Context) -> list[tuple[str, str | None, str]]:
+    """Every (dimension, value, weighting) the policy's detection metrics read, without repeats.
+
+    The whole view under the primary weighting comes first, then the slice the primary metric reads, then
+    every slice each regression covers, under that regression's own weighting: a weighting changes how
+    much of a slice's frozen weight a target carries, so a slice is held to the mass it is read under.
+    """
+    primary = ctx.policy["primary"]
+    slice_ = primary.get("slice", WHOLE_VIEW)
+    readings = [("all", None, primary["weighting"]), (slice_["dimension"], slice_.get("value"), primary["weighting"])]
+    for entry in ctx.regressions.values():
+        covered = entry.get("slice", WHOLE_VIEW)
+        readings += [(covered["dimension"], name, entry["weighting"])
+                     for name in _slice_values(ctx, covered["dimension"], covered.get("value"))]
+    return list(dict.fromkeys(readings))
+
+
+def _reading_text(dimension: str, value: str | None, weighting: str, primary: str) -> str:
+    """One coverage reading as the explanations name it; the weighting only when it is not the primary's."""
+    return _slice_text(dimension, value) + ("" if weighting == primary else f" ({weighting})")
+
+
 def _target_coverage(ctx: _Context) -> Result:
-    """The assessable target mass of BOTH systems: an unresolved baseline flatters any candidate."""
+    """The assessable target mass of BOTH systems, in the whole view and in every slice the policy's metrics read.
+
+    An unresolved baseline flatters any candidate, and the recall a requirement reads may be a slice's:
+    the primary metric's own, or one a regression protects. A whole-view mass alone would let a slice whose
+    baseline was never resolved pass on the strength of the rest of the view, so each slice is held to the
+    minimum too, under the weighting its metric reads. A slice the comparison lacks, or cannot weight, is
+    unresolved rather than skipped.
+    """
     minimum = ctx.policy["target_coverage"]["min_assessable_mass"]
     weighting = ctx.policy["primary"]["weighting"]
     threshold = {"weighting": weighting, "min_assessable_mass": minimum}
     problem = ctx.missing_view()
     if problem is not None:
         return _open(problem, threshold)
-    covered = {}
-    for side in SIDES:
-        block = next((item for item in ctx.whole(side)["detection"] if item["weighting"] == weighting), None)
-        if block is None or block["state"] != "ok":
-            return _open(f"{weighting} target coverage is unavailable for the {side}: "
-                         f"{'no such weighting' if block is None else block['reason']}", threshold)
-        covered[side] = block["coverage"]
-    observed = {side: {key: covered[side][key] for key in ("assessable_mass", "completed_mass", "assessable",
+    readings = []
+    for dimension, value, name in _coverage_readings(ctx):
+        covered = {}
+        for side in SIDES:
+            block = ctx.slices[side].get((dimension, value))
+            if block is None:
+                return _open(f"the comparison has no {_slice_text(dimension, value)} of {ctx.view_name}", threshold)
+            found = next((item for item in block["detection"] if item["weighting"] == name), None)
+            if found is None or found["state"] != "ok":
+                where = "" if dimension == "all" else f" in {_slice_text(dimension, value)}"
+                return _open(f"{name} target coverage is unavailable for the {side}{where}: "
+                             f"{'no such weighting' if found is None else found['reason']}", threshold)
+            covered[side] = found["coverage"]
+        readings.append(((dimension, value, name), covered))
+
+    def figures(covered: dict) -> dict:
+        return {side: {key: covered[side][key] for key in ("assessable_mass", "completed_mass", "assessable",
                                                            "target_observations")} for side in SIDES}
-    short = [side for side in SIDES if covered[side]["assessable_mass"] < minimum]
-    if not short:
-        return (PASS, observed, threshold,
-                f"the assessable target mass is {_n(covered['baseline']['assessable_mass'])} for the baseline and "
-                f"{_n(covered['candidate']['assessable_mass'])} for the candidate, at least the required {_n(minimum)}")
-    parts = [f"the {side} has {covered[side]['assessable']} of {covered[side]['target_observations']} target "
-             f"observations assessable, a mass of {_n(covered[side]['assessable_mass'])}" for side in short]
-    return _open(f"{'; '.join(parts)}, below the required {_n(minimum)}: unresolved or failed observations count "
-                 "as misses, so recall over them is a lower bound and the improvement is not established",
-                 threshold, observed)
+
+    (_, whole), *others = readings
+    observed = {**figures(whole), "slices": [
+        {"slice": {"dimension": dimension, "value": value}, "weighting": name, **figures(covered)}
+        for (dimension, value, name), covered in others]}
+    parts = []
+    for (dimension, value, name), covered in readings:
+        where = ("" if (dimension, name) == ("all", weighting) else
+                 f"in {_reading_text(dimension, value, name, weighting)} ")
+        parts += [f"{where}the {side} has {covered[side]['assessable']} of {covered[side]['target_observations']} "
+                  f"target observations assessable, a mass of {_n(covered[side]['assessable_mass'])}"
+                  for side in SIDES if covered[side]["assessable_mass"] < minimum]
+    if not parts:
+        text = (f"the assessable target mass is {_n(whole['baseline']['assessable_mass'])} for the baseline and "
+                f"{_n(whole['candidate']['assessable_mass'])} for the candidate, at least the required {_n(minimum)}")
+        if others:
+            names = _names([_reading_text(dimension, value, name, weighting) for (dimension, value, name), _ in others])
+            text += (f", and at least that in each of the {len(others)} slice(s) the policy's detection metrics "
+                     f"also read ({names})")
+        return PASS, observed, threshold, text
+    shown = "; ".join(parts[:3]) + (f"; and {len(parts) - 3} more" if len(parts) > 3 else "")
+    return _open(f"{shown}, below the required {_n(minimum)}: unresolved or failed observations count as misses, so "
+                 "recall over them is a lower bound and the improvement is not established", threshold, observed)
 
 
 # --- review burden and cost ---------------------------------------------------------------------
