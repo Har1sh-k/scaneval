@@ -1121,7 +1121,8 @@ def test_a_target_hit_through_one_alias_is_detected_and_assessable_while_another
 
     A hit on any record detects the canonical target, and the record the plan lacks cannot undo it: recall is 1, the
     first hit is at rank 1, and the observation is completed and assessable (a confirmed hit is a resolved outcome).
-    It is still unscored, for the record the plan lacks: the coverage counts 1 of 1 in each, and both masses are 1.
+    It is still unscored, for the record the plan lacks: the one target observation is completed, assessable,
+    detected, and unscored, so the assessable mass and the unscored mass are both 1.
     """
     run = alias_target_run(tmp_path, "run-alias-hit", hits={"CVE-1": 1}, drop=("GHSA-1",))
 
@@ -1141,7 +1142,7 @@ def test_a_miss_on_one_alias_of_a_target_is_not_assessable_while_another_alias_i
 
     The scan completed with resolved bundles, yet GHSA-1 was never scored and may have been hit, so the miss on CVE-1
     is no resolved outcome for the root cause. The observation stays in the denominators as a miss, and it is unscored.
-    - Recall is 0, and the coverage counts 1 observation, completed, unscored, detected 0, assessable 0.
+    - Recall is 0, and the one target observation is completed and unscored, neither detected nor assessable.
     - The completed mass is 1 and the unscored mass 1, but the assessable mass is 0: crediting the miss as resolved
       made it 1.
     With both records in the plan the same scan is a resolved miss: assessable, nothing unscored.
@@ -1191,10 +1192,10 @@ def test_an_unplanned_alias_leaves_the_random_order_diagnostic_unmeasured_like_a
 def test_a_pair_is_resolved_through_an_alias_only_by_a_hit_while_another_alias_is_unplanned(tmp_path):
     """The vulnerable input freezes CVE-1 and GHSA-1 (one root cause, X); the fixed input a control of CVE-1, quiet.
 
-    Both vulnerable bundles' plans hold CVE-1 only.
+    In both runs the vulnerable bundle's plan holds CVE-1 only.
     - No claim hit CVE-1: GHSA-1 was never scored, so the vulnerable side is not assessable and the pair is
-      unresolved: it has no outcome, the resolved pairs and the assessable mass are 0, and Q = 0. Resolving it read
-      a quiet fixed state beside a miss as 'both silent'.
+      unresolved: it has no outcome, the resolved pairs and the assessable mass are 0, and Q = 0. Crediting the miss
+      as resolved made the pair 'both silent'.
     - Claim 1 hit CVE-1: the hit is a resolved outcome whatever GHSA-1 would have said, so the pair is resolved and
       correct: Q = 1, with one resolved pair.
     """

@@ -2131,7 +2131,7 @@ def test_a_frozen_control_missing_from_a_completed_scans_plan_still_counts_towar
 
 
 def test_a_partly_planned_control_cannot_pass_the_false_alarm_bound_on_a_quiet_assessment_of_the_rest(tmp_path):
-    """Each of five safe controls is frozen as two records of one canonical control; the candidate is quiet on both.
+    """Five safe controls, each frozen as two records of one canonical control; the candidate is quiet on those planned.
 
     Every scan completed, so C = 1. When the candidate's bundle plans hold both records of each control, all five are
     resolved quiet: A = 1, E = 0 and F+ = 0, and the decision passes. When they hold the first record only, nothing
