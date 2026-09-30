@@ -1,4 +1,4 @@
-"""Metadata blinding maps: the contract, the review chain, and what approves a map.
+"""Metadata blinding: a reviewed map, applied only to documentation and display text, all or nothing.
 
 The fixture is one local repository with a vulnerable and a fixed commit and one map covering both.
 Every approval here is recorded by "Fixture Reviewer (fictional)": no test records, implies, or
@@ -11,13 +11,16 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import re
+import stat
 import subprocess
 from typing import Callable
 
 import pytest
 
 from scaneval import blinding, materialize
-from scaneval.contracts import ContractError, chain_digest, validate_document
+from scaneval.contracts import ContractError, canonical_json, chain_digest, validate_document
+from scaneval.materialize import MaterializationError
 
 
 CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
@@ -37,6 +40,7 @@ FILES = {"README.md": README_VULNERABLE, "docs/guide.md": GUIDE, "mkdocs.yml": M
          "package.json": '{"name": "widget-cli"}\n', ".github/workflows/ci.yml": "name: Widget CI\n",
          "CLAUDE.md": "Widget project notes for assistants.\n"}
 PSEUDONYMS = {"Widget": "Sprocket", "AcmeCorp": "ExampleCo"}
+EDITED = ("README.md", "docs/guide.md", "mkdocs.yml")
 ROLE_CHECK = "mkdocs reads site_name only to title rendered pages; the application never reads mkdocs.yml."
 
 
@@ -79,6 +83,10 @@ def widget(tmp_path: Path) -> dict:
         probes[snapshot_id] = tmp_path / "probe" / snapshot_id / "source"
         exports[snapshot_id] = materialize.export_tree(cached, probes[snapshot_id])
     return {"repo": repo, "commits": commits, "exports": exports, "probes": probes, "cache": tmp_path / "cache"}
+
+
+def cached(widget: dict, snapshot_id: str) -> materialize.CachedSnapshot:
+    return materialize.fetch_snapshot(str(widget["repo"]), widget["commits"][snapshot_id], widget["cache"])
 
 
 def edit_entry(widget: dict, edit_id: str, path: str, role: str, replacements: list[str], *,
@@ -258,3 +266,343 @@ def test_a_review_names_its_reviewer_role_and_decision_or_changes_nothing(widget
         with pytest.raises(ContractError, match=match):
             blinding.record_review(document, clock=CLOCK, **arguments)
     assert document == before
+
+
+# --- the export ---------------------------------------------------------------------------------
+
+
+def export_blinded(widget: dict, document: dict, trial: Path, snapshot_id: str = "snap-a") -> dict:
+    return materialize.export_snapshot(cached(widget, snapshot_id), trial, profile="metadata_blinded",
+                                       blinding_map=document, snapshot_id=snapshot_id, clock=CLOCK)
+
+
+def blinded_text(text: str) -> str:
+    for original, replacement in PSEUDONYMS.items():
+        text = text.replace(original, replacement)
+    return text
+
+
+def file_map(root: Path) -> dict[str, str]:
+    return {relative: materialize.sha256_file(path)[0]
+            for relative, path in materialize.walk_regular_files(root).items()}
+
+
+def test_the_standard_export_record_is_the_record_it_always_was(tmp_path, widget):
+    """No new key, no changed value: blinding arguments play no part in a standard export."""
+    snapshot = cached(widget, "snap-a")
+    record = materialize.export_snapshot(snapshot, tmp_path / "trial", clock=CLOCK)
+    named = materialize.export_snapshot(snapshot, tmp_path / "named", clock=CLOCK, snapshot_id="snap-a",
+                                        blinding_map=None)
+
+    assert canonical_json(named) == canonical_json(record)
+    exported = widget["exports"]["snap-a"]
+    assert record == {
+        "schema_version": "2.0",
+        "source": {"url": str(widget["repo"]), "commit": widget["commits"]["snap-a"],
+                   "git_tree": snapshot.git_tree, "fetch_method": "cached"},
+        "profile": "standard",
+        "trial": {"root": "source", "tree_hash": materialize.tree_hash(exported.hashes), "file_count": 8,
+                  "byte_count": sum(len(text.encode("utf-8")) for text in FILES.values())},
+        "stripped": [], "skipped": [], "instruction_files": ["CLAUDE.md"], "synthetic_history": None,
+        "exported_at": AT, "tool_versions": {"git": materialize.git_version()},
+        "limits": ["Export removes original git history and controller state; it is not a sandbox.",
+                   "Tracked regular files only: submodules and symbolic links are recorded as skipped.",
+                   "Instruction files stay in the standard profile and are recorded as identity cues."],
+    }
+    assert not (tmp_path / "trial" / "original").exists()
+
+
+def test_a_blinded_export_replaces_exactly_the_reviewed_occurrences_and_records_them(tmp_path, widget):
+    document = widget_map(widget)
+    trial = tmp_path / "trial"
+
+    record = export_blinded(widget, document, trial)
+
+    source, original = trial / "source", trial / "original" / "source"
+    assert (source / "README.md").read_text(encoding="utf-8") == blinded_text(README_VULNERABLE)
+    assert (source / "docs" / "guide.md").read_text(encoding="utf-8") == "Sprocket guide\nRating: ***\n"
+    assert (source / "mkdocs.yml").read_text(encoding="utf-8") == "site_name: Sprocket Docs\n"
+    for relative, text in FILES.items():
+        assert (original / relative).read_text(encoding="utf-8") == text, "the original export is kept whole"
+    applied = record["blinding"]
+    assert record["schema_version"] == "2.1" and record["profile"] == "metadata_blinded"
+    assert record["trial"]["tree_hash"] == applied["transformed_tree_hash"] == \
+        materialize.hash_exported_tree(source)["tree_hash"]
+    assert applied["original_tree_hash"] == materialize.hash_exported_tree(original)["tree_hash"] == \
+        document["variants"][0]["tree_hash"]
+    assert record["original"] == {"root": "original/source", "tree_hash": applied["original_tree_hash"],
+                                  "file_count": 8, "byte_count": widget["exports"]["snap-a"].byte_count}
+    assert {key: applied[key] for key in ("map_id", "map_version", "map_sha256")} == blinding.map_identity(document)
+    assert applied["content_sha256"] == blinding.content_digest(document)
+    assert applied["reviewers"] == [{"reviewer": REVIEWER, "role": "independent_reviewer", "at": AT}]
+    assert [(edit["edit_id"], edit["path"], edit["changed_lines"], edit["occurrences"]) for edit in applied["edits"]] == [
+        ("readme-brand", "README.md", [1, 3], {"Widget": 2, "AcmeCorp": 1}),
+        ("guide-title", "docs/guide.md", [1], {"Widget": 1}),
+        ("site-name", "mkdocs.yml", [1], {"Widget": 1})]
+    for edit in applied["edits"]:
+        assert edit["original_sha256"] == materialize.sha256_file(original / edit["path"])[0]
+        assert edit["transformed_sha256"] == materialize.sha256_file(source / edit["path"])[0]
+    assert all(check["result"] == "pass" for check in applied["validation"])
+    assert {check["check"] for check in applied["validation"]} == {
+        "map_contract", "approval", "repository", "variant_commit", "edit_path_class", "variant_tree",
+        "edit_file_hash", "edit_occurrences", "edit_line_structure", "unedited_files_unchanged"}
+    assert applied["location_remapping"] == {"lines": "identity", "paths": "identity",
+                                             "verified_paths": ["README.md", "docs/guide.md", "mkdocs.yml"]}
+    # What stays: the package name the README must keep, source, license, manifest, CI, instructions.
+    cues = applied["retained_identity_cues"]
+    assert cues["instruction_files"] == ["CLAUDE.md"] and record["instruction_files"] == ["CLAUDE.md"]
+    assert (cues["token_count"], cues["total_occurrences"], cues["path_count"]) == (2, 6, 6)
+    assert {entry["path"] for entry in cues["paths"]} == {
+        ".github/workflows/ci.yml", "CLAUDE.md", "LICENSE", "README.md", "package.json", "src/app.py"}
+    assert "not anonymization" in " ".join(record["limits"])
+
+
+def test_every_file_the_map_does_not_edit_is_byte_identical_to_the_original(tmp_path, widget):
+    trial = tmp_path / "trial"
+    export_blinded(widget, widget_map(widget), trial)
+
+    before, after = file_map(trial / "original" / "source"), file_map(trial / "source")
+
+    assert set(after) == set(before), "blinding never adds, removes, or renames a path"
+    assert {path for path in before if after[path] != before[path]} == set(EDITED)
+    for relative in before:
+        modes = {stat.S_IMODE(os.stat(root / relative).st_mode)
+                 for root in (trial / "original" / "source", trial / "source")}
+        assert len(modes) == 1, f"{relative} changed its mode"
+
+
+def test_an_edited_files_lines_map_to_the_original_as_the_identity(tmp_path, widget):
+    trial = tmp_path / "trial"
+    record = export_blinded(widget, widget_map(widget), trial)
+
+    for relative in EDITED:
+        old = (trial / "original" / "source" / relative).read_text(encoding="utf-8").split("\n")
+        new = (trial / "source" / relative).read_text(encoding="utf-8").split("\n")
+        assert len(new) == len(old)
+        assert new == [blinded_text(line) for line in old], "line n is line n with its tokens replaced"
+    checks = [check["detail"] for check in record["blinding"]["validation"] if check["check"] == "edit_line_structure"]
+    assert checks == ["readme-brand: 4 line(s) before and after; each line maps to the same line",
+                      "guide-title: 2 line(s) before and after; each line maps to the same line",
+                      "site-name: 1 line(s) before and after; each line maps to the same line"]
+
+
+def test_repeating_a_valid_transformation_gives_byte_identical_source_and_provenance(tmp_path, widget):
+    document = widget_map(widget)
+
+    first = export_blinded(widget, deepcopy(document), tmp_path / "first")
+    second = export_blinded(widget, deepcopy(document), tmp_path / "second")
+
+    assert canonical_json(first) == canonical_json(second)
+    for tree in ("source", "original/source"):
+        one, two = tmp_path / "first" / tree, tmp_path / "second" / tree
+        assert file_map(one) == file_map(two)
+        assert all((one / relative).read_bytes() == (two / relative).read_bytes() for relative in file_map(one))
+
+
+def test_the_vulnerable_and_fixed_variants_use_one_map_with_the_same_pseudonyms(tmp_path, widget):
+    document = widget_map(widget)
+
+    vulnerable = export_blinded(widget, document, tmp_path / "vulnerable", "snap-a")
+    fixed = export_blinded(widget, document, tmp_path / "fixed", "snap-fixed")
+
+    assert vulnerable["blinding"]["map_sha256"] == fixed["blinding"]["map_sha256"]
+    assert (tmp_path / "fixed" / "source" / "README.md").read_text(encoding="utf-8") == blinded_text(README_FIXED)
+    assert "Sprocket 1.1 passes an argument list instead." in (tmp_path / "fixed" / "source" / "README.md").read_text(
+        encoding="utf-8")
+    assert not (tmp_path / "fixed" / "source" / "docs" / "guide.md").exists()
+    assert [edit["edit_id"] for edit in fixed["blinding"]["edits"]] == ["readme-brand", "site-name"]
+    assert fixed["blinding"]["edits"][0]["occurrences"] == {"Widget": 3, "AcmeCorp": 1}
+    assert "guide-title: docs/guide.md is absent, as expected" in [
+        check["detail"] for check in fixed["blinding"]["validation"] if check["check"] == "edit_absent"]
+
+
+def test_a_dry_run_reports_an_unapproved_map_instead_of_refusing_it(tmp_path, widget):
+    document = widget_map(widget, approved=False)
+
+    with pytest.raises(MaterializationError, match="unreviewed"):
+        export_blinded(widget, document, tmp_path / "refused")
+    record = blinding.dry_run(document, cached(widget, "snap-a"), "snap-a", tmp_path / "dry", clock=CLOCK)
+
+    assert "unreviewed" in blinding.approval_gap(document)
+    assert record["blinding"]["reviewers"] == []
+    assert "approval" not in {check["check"] for check in record["blinding"]["validation"]}
+    assert not (tmp_path / "refused" / "source").exists()
+
+
+# --- refusals: every one before a transformed tree exists and before any scanner runs ----------
+
+
+def _ambiguous(document: dict, widget: dict) -> None:
+    document["pseudonyms"].append({"original": "**", "replacement": "++"})
+    guide = _edit(document, "guide-title")
+    guide["replacements"].append("**")
+    _expected(guide, "snap-a")["occurrences"]["**"] = 1
+
+
+def _forbidden(path: str, replacements: list[str], role: str = "documentation_identifier",
+               role_check: str | None = None) -> Callable[[dict, dict], None]:
+    def mutate(document: dict, widget: dict) -> None:
+        document["edits"].append(edit_entry(widget, "forbidden", path, role, replacements, role_check=role_check))
+    return mutate
+
+
+# Each refusal the acceptance list names: (mutation, whether the curator re-approved afterwards,
+# the words the refusal carries). A structural edit is re-approved so the refusal reached is the
+# one under test and not the approval check in front of it.
+REFUSALS = {
+    "stale-commit": (lambda document, widget: _variant(document, "snap-a").update(commit="0" * 40), True,
+                     r"stale map: .* at commit 0{40}"),
+    "stale-tree": (lambda document, widget: _variant(document, "snap-a").update(tree_hash="sha256:" + "0" * 64),
+                   True, r"stale map: .* as tree sha256:0{64}"),
+    "stale-file-hash": (lambda document, widget: _expected(_edit(document, "readme-brand"), "snap-a").update(
+        file_sha256="sha256:" + "0" * 64), True, r"stale map: edit readme-brand: README\.md is expected at"),
+    "unexpected-count": (lambda document, widget: _expected(_edit(document, "readme-brand"), "snap-a")[
+        "occurrences"].update(Widget=3), True, "unexpected occurrence count"),
+    "overlapping": (lambda document, widget: document["pseudonyms"].append(
+        {"original": "Widget Docs", "replacement": "Handbook"}), True, "overlapping matches"),
+    "ambiguous": (_ambiguous, True, r"'\*\*' overlaps itself .* ambiguous"),
+    "python-file": (_forbidden("src/app.py", ["Widget"]), True, "neither documentation"),
+    "license": (_forbidden("LICENSE", ["AcmeCorp"]), True, "license, attribution, or security file"),
+    "package-json": (_forbidden("package.json", ["Widget"], "display_metadata", ROLE_CHECK), True,
+                     r"dependency manifest.*\(package\.json\)"),
+    "workflow": (_forbidden(".github/workflows/ci.yml", ["Widget"], "display_metadata", ROLE_CHECK), True,
+                 r"under \.github/workflows/"),
+    "unreviewed": (lambda document, widget: (document.update(reviews=[]), document.pop("reviews_sha256")), False,
+                   "unreviewed: no review is recorded"),
+    "rejected": (lambda document, widget: approve(document, "reject"), False, f"rejected by {re.escape(REVIEWER)}"),
+    "reopened": (lambda document, widget: approve(document, "unresolved"), False,
+                 f"reopened by {re.escape(REVIEWER)}"),
+    "approval-of-older-content": (lambda document, widget: _edit(document, "readme-brand").update(
+        rationale="Reworded after the approval."), False, "edited after it was approved"),
+}
+
+
+def refused_map(widget: dict, name: str) -> dict:
+    mutate, reapprove, _ = REFUSALS[name]
+    document = widget_map(widget)
+    mutate(document, widget)
+    if reapprove:
+        reapproved(document)
+    validate_document("blinding-map", document)
+    return document
+
+
+@pytest.mark.parametrize("name", sorted(REFUSALS))
+def test_a_map_that_does_not_fit_is_refused_before_a_transformed_tree_exists(tmp_path, widget, name):
+    document = refused_map(widget, name)
+    trial = tmp_path / "trial"
+
+    with pytest.raises(MaterializationError, match=REFUSALS[name][2]):
+        export_blinded(widget, document, trial)
+
+    assert not (trial / "source").exists(), "nothing is transformed unless every check passes"
+
+
+def _other_repository(document: dict) -> str:
+    document["repository"]["url"] = "https://example.invalid/other.git"
+    return "snap-a"
+
+
+def _absent_expected_but_present(document: dict) -> str:
+    guide = _edit(document, "guide-title")
+    guide["expected"] = [{"snapshot_id": "snap-a", "state": "absent"}, _expected(guide, "snap-fixed")]
+    return "snap-a"
+
+
+def _present_expected_but_missing(document: dict) -> str:
+    guide = _edit(document, "guide-title")
+    guide["expected"] = [_expected(guide, "snap-a"), {"snapshot_id": "snap-fixed", "state": "present",
+                                                      "file_sha256": "sha256:" + "1" * 64,
+                                                      "occurrences": {"Widget": 1}}]
+    return "snap-fixed"
+
+
+def _no_variant(document: dict) -> str:
+    document["variants"] = [_variant(document, "snap-a")]
+    for edit in document["edits"]:
+        edit["expected"] = [_expected(edit, "snap-a")]
+    return "snap-fixed"
+
+
+@pytest.mark.parametrize(("mutate", "match"), [
+    (_other_repository, "is for repository https://example.invalid/other.git"),
+    (_absent_expected_but_present, r"stale map: edit guide-title: docs/guide\.md is expected to be absent"),
+    (_present_expected_but_missing, r"stale map: edit guide-title: docs/guide\.md is expected in snapshot snap-fixed"),
+    (_no_variant, "stale map: map widget-metadata 1 has no variant for snapshot snap-fixed"),
+], ids=["other-repository", "absent-expected-but-present", "present-expected-but-missing", "no-variant"])
+def test_a_map_written_for_another_repository_or_another_state_is_refused(tmp_path, widget, mutate, match):
+    document = widget_map(widget)
+    snapshot_id = mutate(document)
+    reapproved(document)
+
+    with pytest.raises(MaterializationError, match=match):
+        export_blinded(widget, document, tmp_path / "trial", snapshot_id)
+    assert not (tmp_path / "trial" / "source").exists()
+
+
+def _one_file_edit(tmp_path: Path, widget: dict, content: bytes, pseudonyms: dict[str, str],
+                   counts: dict[str, int]) -> tuple[dict, dict, Path, dict]:
+    """A map whose one README edit is checked against a scratch file holding *content*."""
+    source = tmp_path / "scratch"
+    source.mkdir()
+    (source / "README.md").write_bytes(content)
+    digest = materialize.sha256_file(source / "README.md")[0]
+    document = widget_map(widget, approved=False)
+    document["pseudonyms"] = [{"original": original, "replacement": replacement}
+                              for original, replacement in pseudonyms.items()]
+    edit = {"edit_id": "readme-brand", "path": "README.md", "role": "non_runtime_branding",
+            "rationale": "The README names the project in prose.", "replacements": sorted(counts),
+            "expected": [{"snapshot_id": "snap-a", "state": "present", "file_sha256": digest,
+                          "occurrences": dict(counts)}, {"snapshot_id": "snap-fixed", "state": "absent"}]}
+    document["edits"] = [edit]
+    validate_document("blinding-map", document)
+    return document, edit, source, {"README.md": digest}
+
+
+def test_a_replacement_that_forms_the_original_again_with_its_neighbours_is_refused(tmp_path, widget):
+    """``Widget`` replaced by ``Wid`` inside ``Widgetget`` spells ``Widget`` again."""
+    document, edit, source, hashes = _one_file_edit(tmp_path, widget, b"Widgetget\n",
+                                                    {"Widget": "Wid", "AcmeCorp": "ExampleCo"}, {"Widget": 1})
+
+    with pytest.raises(MaterializationError, match="replacing forms 'Widget' again"):
+        blinding._edit_for(document, edit, "snap-a", source, hashes)
+
+
+def test_a_file_that_is_not_strict_utf8_is_refused(tmp_path, widget):
+    document, edit, source, hashes = _one_file_edit(tmp_path, widget, b"Widget caf\xe9\n",
+                                                    PSEUDONYMS, {"Widget": 1})
+
+    with pytest.raises(MaterializationError, match="is not strict UTF-8 text"):
+        blinding._edit_for(document, edit, "snap-a", source, hashes)
+
+
+@pytest.mark.parametrize(("path", "role", "role_check", "reason"), [
+    ("README.md", "documentation_identifier", None, None),
+    ("docs/guide.rst", "non_runtime_branding", None, None),
+    ("mkdocs.yml", "display_metadata", ROLE_CHECK, None),
+    ("mkdocs.yml", "non_runtime_branding", None, "only as display_metadata"),
+    ("mkdocs.yml", "display_metadata", None, "states no role check"),
+    ("README.md", "rebranding", None, "is not an edit role"),
+    ("src/app.py", "documentation_identifier", None, "neither documentation"),
+    ("scripts/build.sh", "documentation_identifier", None, "neither documentation"),
+    ("CHANGES", "documentation_identifier", None, "neither documentation"),
+    ("LICENSE", "documentation_identifier", None, "license"),
+    ("License.md", "documentation_identifier", None, "license"),
+    ("SECURITY.md", "documentation_identifier", None, "security"),
+    ("AUTHORS.txt", "documentation_identifier", None, "attribution"),
+    ("package.json", "display_metadata", ROLE_CHECK, "dependency manifest"),
+    ("requirements-dev.txt", "documentation_identifier", None, "requirements*.txt"),
+    ("CMakeLists.txt", "documentation_identifier", None, "cmakelists.txt"),
+    ("pyproject.toml", "display_metadata", ROLE_CHECK, "pyproject.toml"),
+    (".github/workflows/ci.yml", "display_metadata", ROLE_CHECK, "under .github/workflows/"),
+    ("tools/.circleci/config.yml", "display_metadata", ROLE_CHECK, "under .circleci/"),
+    (".env.example.txt", "documentation_identifier", None, ".env*"),
+    ("CLAUDE.md", "documentation_identifier", None, "reads as instructions"),
+    (".github/copilot-instructions.md", "documentation_identifier", None, "reads as instructions"),
+])
+def test_only_documentation_and_reviewed_display_metadata_may_be_edited(path, role, role_check, reason):
+    gap = blinding.path_class_gap(path, role, role_check)
+    if reason is None:
+        assert gap is None
+    else:
+        assert gap is not None and reason in gap

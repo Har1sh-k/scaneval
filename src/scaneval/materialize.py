@@ -421,21 +421,28 @@ def export_snapshot(
     *,
     profile: str = "standard",
     blinding_map: dict | None = None,
+    snapshot_id: str | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> dict:
     """Copy the tracked regular files of *snapshot* into ``trial_dir/source`` and record provenance.
 
-    ``metadata_blinded`` is refused without a reviewed replacement map, and this build does not
-    apply one: blinding is reported unavailable rather than silently replaced by ``standard``.
-    The export is :func:`export_tree` and the record :func:`provenance_record`; together they
-    write exactly the tree and the record this function has always written.
+    The ``standard`` profile writes exactly the export and the record this function has always
+    written; ``blinding_map`` and ``snapshot_id`` play no part in it. ``metadata_blinded`` needs
+    the reviewed replacement map and the pack snapshot id its variants are keyed by, and is
+    delegated to :func:`scaneval.blinding.export_blinded`: the original export goes to
+    ``trial_dir/original/source``, which no scanner is handed, and the transformed copy to
+    ``trial_dir/source``. A map that is not approved or does not fit this export is refused with
+    the reason, and without a map blinding is reported unavailable; neither is ever silently
+    replaced by ``standard``.
     """
     if profile not in PROFILES:
         raise MaterializationError(f"unknown input profile {profile!r}; expected one of {PROFILES}")
     if profile == "metadata_blinded":
         if blinding_map is None:
             raise MaterializationError("metadata blinding unavailable: no reviewed replacement map was supplied")
-        raise MaterializationError("metadata blinding is not implemented in this build; do not substitute standard")
+        # Imported here because the blinding module builds on this one.
+        from .blinding import export_blinded
+        return export_blinded(snapshot, trial_dir, blinding_map, snapshot_id=snapshot_id, clock=clock)
     source = trial_dir / "source"
     if source.exists():
         raise MaterializationError(f"trial source directory already exists: {source}")
@@ -495,7 +502,8 @@ def provenance_record(snapshot: CachedSnapshot, profile: str, exported: Exported
                       clock: Callable[[], datetime] | None = None) -> dict:
     """The preparation record of one export, as :func:`export_snapshot` writes it for ``standard``.
 
-    Every field describes *exported*, the tree a scanner is handed.
+    Every field describes *exported*, the tree a scanner is handed. A blinded record starts from
+    this one and adds what describes the original export and the transformation.
     """
     now = (clock or (lambda: datetime.now(timezone.utc)))()
     record = {

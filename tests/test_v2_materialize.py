@@ -145,16 +145,22 @@ def test_export_strips_state_skips_links_records_cues_and_hashes_tree(tmp_path, 
 
 
 def test_export_refuses_existing_source_and_unavailable_blinding(tmp_path, upstream):
+    """Blinding without a map is unavailable, and a map that is not a blinding map is refused.
+
+    The second refusal used to read "not implemented". Blinding is implemented now, so a supplied
+    map is validated as the blinding-map contract it claims to be, and an empty one is refused by
+    that contract before anything is exported; ``test_v2_blinding.py`` covers real maps.
+    """
     repo, first = upstream
     snapshot = fetch_snapshot(str(repo), first, tmp_path / "cache")
     trial = tmp_path / "trial"
     with pytest.raises(MaterializationError, match="blinding unavailable"):
         export_snapshot(snapshot, trial, profile="metadata_blinded")
-    with pytest.raises(MaterializationError, match="not implemented"):
-        export_snapshot(snapshot, trial, profile="metadata_blinded", blinding_map={})
+    with pytest.raises(ContractError, match="not a blinding-map version"):
+        export_snapshot(snapshot, trial, profile="metadata_blinded", blinding_map={}, snapshot_id="snap-a")
     with pytest.raises(MaterializationError, match="unknown input profile"):
         export_snapshot(snapshot, trial, profile="anonymized")
-    assert not (trial / "source").exists()
+    assert not (trial / "source").exists() and not (trial / "original").exists()
     export_snapshot(snapshot, trial)
     with pytest.raises(MaterializationError, match="already exists"):
         export_snapshot(snapshot, trial)
