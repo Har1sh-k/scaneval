@@ -16,12 +16,15 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
+import subprocess
 import sys
 
 import pytest
 
 from scaneval import cases, materialize, review, scoring
+from scaneval.adapters.semgrep import import_semgrep_results
 from scaneval.cli import main
 from scaneval.contracts import (
     CONTRACT_KINDS,
@@ -1649,3 +1652,157 @@ def test_an_import_opens_nothing_the_log_names_and_reaches_no_network(workspace,
         if name in ("os.open", "io.open", "os.scandir"):
             assert target == str(path) or target.startswith(allowed), (name, target)
     assert ("os.open", str(path)) in during
+
+
+# --- one Semgrep finding, through the live adapter's JSON path and through a SARIF import -----
+
+
+# The fields scoring reads a claim's exact-duplicate identity from, less native_rule_id, whose
+# spelling is the one thing the two producers are expected to disagree on.
+CANONICAL_FIELDS = ("allegation", "kind", "primary_location", "related_locations", "evidence_text")
+
+
+def reviewed_score(plan: dict, pack: dict, result: dict) -> dict:
+    """Score *result* under the decisions a reviewer records the same way for either producer:
+    the routed claim accepted for the case's target, and every control assessed quiet."""
+    decisions = review.draft_decisions(plan, result, pack)
+    (match,) = decisions["claim_matches"]
+    match.update(decision="accepted", reason="the claim names the shell call this target is about")
+    for assessment in decisions["control_assessments"]:
+        assessment.update(decision="quiet", reason="no claim names the file helper")
+    return scoring.score(plan, result, decisions)
+
+
+def comparable(evaluation: dict) -> dict:
+    """What a score says about the scan, without the run's identity or its measured usage."""
+    metrics = {key: value for key, value in evaluation["metrics"].items() if key != "usage"}
+    return {"metrics": metrics, **{key: evaluation[key] for key in ("scope", "status", "targets", "warnings")}}
+
+
+def adapter_result(payload: bytes, claims: list, tree_hash: str) -> dict:
+    """The scan result execution frames around the Semgrep adapter's claims after a clean run."""
+    return validate_document("scan-result", {
+        "schema_version": "2.0", "run_id": "semgrep-live", "system_id": "semgrep-fixture", "input_hash": tree_hash,
+        "status": "success", "ranking": "unranked", "claims": claims, "bundles_resolved": True,
+        "usage": {"wall_seconds": 1.5, "cost_usd": 0.0},
+        "raw_artifacts": [{"id": "semgrep-json", "path": "raw/semgrep.json",
+                           "sha256": "sha256:" + hashlib.sha256(payload).hexdigest()}]})
+
+
+def test_one_semgrep_finding_scores_alike_through_the_adapter_json_path_and_a_sarif_import(tmp_path):
+    source = tmp_path / "export" / "source"
+    tree_hash = write_tree(source)
+    pack = make_pack(source, tree_hash, control=True, target=("src/app.py", 5), kind="command_injection")
+    plan, _ = cases.build_plan(pack, "snap-a", tree_hash)
+
+    # The live adapter's path: Semgrep JSON through import_semgrep_results, with the ruleset
+    # checkout root the adapter passes, which it strips from every check_id.
+    payload = (FIXTURES / "semgrep-shell.json").read_bytes()
+    live = import_semgrep_results(json.loads(payload), ruleset_roots=("build/rules",))
+    assert live.lost == 0
+    (live_claim,) = live.claims
+    # The same finding in the SARIF Semgrep writes, imported offline: result 0 of the fixture.
+    log = fixture("semgrep.sarif")
+    log["runs"][0]["results"] = log["runs"][0]["results"][:1]
+    outcome = import_sarif(write_log({"tmp": tmp_path}, log, "semgrep-shell.sarif"), pack=pack, snapshot_id="snap-a",
+                           tree_hash=tree_hash, system_id="semgrep-fixture", output=tmp_path / "bundle",
+                           source_dir=source, clock=CLOCK)
+    (sarif_claim,) = outcome.result["claims"]
+    assert (outcome.result["status"], outcome.result["bundles_resolved"]) == ("success", True)
+
+    # The canonical allegation is the same claim from either producer.
+    assert {key: sarif_claim.get(key) for key in CANONICAL_FIELDS + ("native_cwe",)} == {
+        key: live_claim.get(key) for key in CANONICAL_FIELDS + ("native_cwe",)} == {
+        "allegation": "subprocess call with shell=True", "kind": "command_injection",
+        "primary_location": {"path": "src/app.py", "start_line": 5, "end_line": 5}, "related_locations": None,
+        "evidence_text": None, "native_cwe": ["CWE-78"]}
+    # The rule id is spelled differently. Semgrep writes the rule file's directory, dotted, into
+    # the id in both formats; the adapter strips the ruleset checkout it pinned, and an import
+    # has no checkout to strip, so it keeps the id as the log wrote it. Severity is each format's
+    # own word for the same thing and is not part of a claim's identity.
+    assert (live_claim["native_rule_id"], sarif_claim["native_rule_id"]) == (
+        "python.probe.subprocess-shell", "build.rules.python.probe.subprocess-shell")
+    assert (live_claim["native_severity"], sarif_claim["native_severity"]) == ("WARNING", "warning")
+    # So the exact-duplicate identities differ by that spelling alone: with the id spelled alike,
+    # or with no checkout root for the adapter to strip, they are one identity.
+    assert scoring.claim_fingerprint(live_claim) != scoring.claim_fingerprint(sarif_claim)
+    assert scoring.claim_fingerprint({**sarif_claim, "native_rule_id": live_claim["native_rule_id"]}) == \
+        scoring.claim_fingerprint(live_claim)
+    (verbatim,) = import_semgrep_results(json.loads(payload)).claims
+    assert scoring.claim_fingerprint(verbatim) == scoring.claim_fingerprint(sarif_claim)
+
+    # Under the same decisions, the two score alike, down to the controls and the warnings.
+    live_score = reviewed_score(plan, pack, adapter_result(payload, live.claims, tree_hash))
+    sarif_score = reviewed_score(plan, pack, outcome.result)
+    assert comparable(live_score) == comparable(sarif_score)
+    assert live_score["metrics"]["targets_detected"] == 1
+    assert live_score["metrics"]["controls"]["capability_safe"]["resolved"] == 1
+    # Usage is where they differ: a live run measures its wall time; a log reports none.
+    assert (live_score["metrics"]["usage"]["wall_seconds"], sarif_score["metrics"]["usage"]) == (
+        1.5, {"wall_seconds": None})
+
+
+semgrep_required = pytest.mark.skipif(
+    not (Path(sys.executable).with_name("semgrep").exists() or shutil.which("semgrep")),
+    reason="semgrep binary not installed")
+
+SHELL_RULE_YAML = """rules:
+  - id: probe.subprocess-shell
+    languages: [python]
+    severity: WARNING
+    message: subprocess call with shell=True
+    metadata:
+      cwe:
+        - "CWE-78: OS Command Injection"
+    patterns:
+      - pattern: subprocess.$F(..., shell=True, ...)
+"""
+SHELL_SOURCE = "import subprocess\n\n\ndef run(cmd):\n    return subprocess.run(cmd, shell=True)\n"
+
+
+@semgrep_required
+def test_real_semgrep_json_and_sarif_from_one_scan_score_one_finding_alike(tmp_path):
+    sibling = Path(sys.executable).with_name("semgrep")
+    binary = str(sibling) if sibling.exists() else shutil.which("semgrep")
+    rules = tmp_path / "rules"
+    (rules / "python").mkdir(parents=True)
+    (rules / "python" / "shell.yaml").write_text(SHELL_RULE_YAML, encoding="utf-8")
+    source = tmp_path / "export" / "source"
+    tree_hash = write_tree(source, {"README.md": "fixture\n", "src/app.py": SHELL_SOURCE})
+    pack = make_pack(source, tree_hash, target=("src/app.py", 5), kind="command_injection")
+    plan, _ = cases.build_plan(pack, "snap-a", tree_hash)
+    # One scan writes both formats. HOME and the temporary and cache directories are redirected
+    # into this test's own directory, and metrics and the version check are off.
+    home = tmp_path / "home"
+    (home / "tmp").mkdir(parents=True)
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home), "TMPDIR": str(home / "tmp"),
+           "XDG_CONFIG_HOME": str(home / ".config"), "XDG_CACHE_HOME": str(home / ".cache"), "LANG": "C.UTF-8"}
+    completed = subprocess.run(
+        [binary, "scan", "--metrics=off", "--disable-version-check", "--quiet", f"--config={rules / 'python'}",
+         f"--json-output={tmp_path / 'semgrep.json'}", f"--sarif-output={tmp_path / 'semgrep.sarif'}", "."],
+        cwd=source, env=env, capture_output=True, text=True, timeout=300)
+    assert completed.returncode == 0, completed.stderr[-2000:]
+
+    payload = (tmp_path / "semgrep.json").read_bytes()
+    live = import_semgrep_results(json.loads(payload), ruleset_roots=(str(rules),))
+    (live_claim,) = live.claims
+    # --source-dir re-hashes the tree, so this also shows the scan left the exported tree as it was.
+    outcome = import_sarif(tmp_path / "semgrep.sarif", pack=pack, snapshot_id="snap-a", tree_hash=tree_hash,
+                           system_id="semgrep-fixture", output=tmp_path / "bundle", source_dir=source, clock=CLOCK)
+    (sarif_claim,) = outcome.result["claims"]
+    assert (outcome.result["status"], outcome.record["execution"]["evidence"]) == ("success", "reported_success")
+    assert outcome.record["tool"]["name"] == "Semgrep OSS"
+    assert outcome.record["claims"][0]["fingerprints"] == {"matchBasedId/v1": None}
+
+    assert {key: sarif_claim.get(key) for key in CANONICAL_FIELDS + ("native_cwe",)} == {
+        key: live_claim.get(key) for key in CANONICAL_FIELDS + ("native_cwe",)}
+    assert sarif_claim["primary_location"] == {"path": "src/app.py", "start_line": 5, "end_line": 5}
+    # Real Semgrep spells the rule with this test's own directory, dotted, in both formats.
+    check_id = json.loads(payload)["results"][0]["check_id"]
+    assert sarif_claim["native_rule_id"] == check_id
+    assert live_claim["native_rule_id"] == "python.probe.subprocess-shell"
+    assert check_id.endswith(".rules.python.probe.subprocess-shell")
+    assert scoring.claim_fingerprint({**sarif_claim, "native_rule_id": live_claim["native_rule_id"]}) == \
+        scoring.claim_fingerprint(live_claim)
+    assert comparable(reviewed_score(plan, pack, adapter_result(payload, live.claims, tree_hash))) == \
+        comparable(reviewed_score(plan, pack, outcome.result))
