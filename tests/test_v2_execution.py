@@ -207,6 +207,17 @@ def test_successful_invocation_writes_validated_bundle_and_captures_state(tmp_pa
         run(tmp_path, adapter)
 
 
+def test_a_local_record_lists_the_names_the_runner_offers_the_scanner_and_the_adapters_own(tmp_path):
+    """Without a backend the scanner gets the operator's own variables, so the record names the offer."""
+
+    class Keyed(FakeAdapter):
+        env_passthrough = ("FIXTURE_API_KEY",)
+
+    execution = load_document(run(tmp_path, Keyed()) / "execution.json", "execution-record")
+    assert execution["environment"]["passthrough"] == [
+        "FIXTURE_API_KEY", "HOME", "LANG", "LC_ALL", "PATH", "SHELL", "TERM", "TMPDIR", "USER"]
+
+
 def test_scanner_edits_to_source_are_detected(tmp_path):
     bundle = run(tmp_path, FakeAdapter("modify"))
     execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))

@@ -35,7 +35,7 @@ snapshot, the binding is the operator's declaration alone, and `import.json` say
 | `--source-root-uri URI` | The absolute `file` URI of the scanned tree's root on the machine that wrote the log. |
 | `--normalization FILE` | Recorded bundle-review decisions, described below. |
 | `--include-suppressed` | Import suppressed results as claims. Their suppression is recorded either way. |
-| `--max-bytes N` | Refuse a larger log. Default 64 MiB. |
+| `--max-bytes N` | Refuse a larger log. Default 64 MiB. What follows the read is bounded only in part: one message is at most 65536 characters, written or formatted, and the taxonomies and each rule's relationships and tags are read once, not once per result. A run's messages together are not bounded, so results that share one long string each carry a copy of it, up to that bound, and a rule that lists many CWE ids gives each of its claims a copy of the list. |
 
 `--system-config` and `--normalization` files are read as strictly as the log, up to 1 MiB each.
 Exit codes: `2` when the log is refused whole or an option cannot be used, and then nothing is
@@ -64,8 +64,10 @@ so no review-budget recall is read from an import. The log's SHA-256 is recorded
 `request.json` or `execution.json`, because nothing ran; `import.json` records the import instead.
 
 Everything is built and validated before the directory exists, the output must not exist, every
-file is created exclusively, and a write that fails part way removes what the import created. An
-output path inside a trial directory, or inside `--source-dir`, is refused.
+file is created exclusively, and a write that fails part way removes what the import created,
+including any parent directory it had to make (one that was already there stays, and so does a
+directory that holds anything the import did not write). An output path inside a trial directory,
+or inside `--source-dir`, is refused.
 
 ## Refused whole
 
@@ -92,18 +94,20 @@ property of the wrong JSON type, is refused too.
   a status; it counts as suppressed here, as the SARIF SDK reads it, and it is how Semgrep writes a
   `nosemgrep` match.
 - **Loss**, listed with its reason: a rule reference that conflicts with itself or names a
-  descriptor ambiguously, a message that does not resolve, a primary location that is not a file in
-  the scanned tree, malformed coordinates, or a value outside SARIF's enumerations. Any loss sets
-  `bundles_resolved` false and turns an otherwise clean run into `partial` with error code
-  `import_loss`, so a scan whose finding could not be read earns neither completeness nor quiet
-  credit.
+  descriptor ambiguously, a message that does not resolve (a placeholder index of more than nine
+  digits, or a message of more than 65536 characters, included), a primary location that is not a
+  file in the scanned tree, malformed coordinates, a value outside SARIF's enumerations, or
+  anything else that raised a `ValueError` while the result was read, so that no one result can end
+  the import. Any loss sets `bundles_resolved` false and turns an otherwise clean run into
+  `partial` with error code `import_loss`, so a scan whose finding could not be read earns neither
+  completeness nor quiet credit.
 
 | Claim field | Where it comes from |
 |---|---|
-| `allegation` | The full resolved message: its `text`, else the rule's `messageStrings[id]`, else the component's `globalMessageStrings[id]`, formatted with `arguments` (`{n}`, and `{{`/`}}` for literal braces). A `text` is formatted only when it carries `arguments`, because producers that use none write braces unescaped. Markdown is never read. |
+| `allegation` | The full resolved message: its `text`, else the rule's `messageStrings[id]`, else the component's `globalMessageStrings[id]`, formatted with `arguments` (`{n}`, and `{{`/`}}` for literal braces). A `text` is formatted only when it carries `arguments`, because producers that use none write braces unescaped. Markdown is never read. A message of more than 65536 characters, as written or once formatted, is a loss. |
 | `native_rule_id` | The resolved descriptor's `id`, else the result's `ruleId` or `rule.id`. |
 | `native_severity` | The effective level (`result.level`, else the rule's `defaultConfiguration.level`, else `warning`), followed by `; security-severity N` when the rule has that GitHub property. For `review` and `open`, the kind. |
-| `native_cwe`, `kind` | CWE ids from the rule's `superset`/`equal` relationships to the CWE taxonomy, the result's `taxa`, then rule and result tags (`CWE-89: ...`, `external/cwe/cwe-089`); `kind` maps them through the versioned kind mapping, else `unmapped`. |
+| `native_cwe`, `kind` | CWE ids from the rule's `superset`/`equal` relationships to the CWE taxonomy, the result's `taxa`, then rule and result tags (`CWE-89: ...`, `external/cwe/cwe-089`), leaving out an id of more than nine digits, which is not a CWE; `native_cwe` lists them in that order, and `kind` is the versioned kind mapping's kind for the lowest-numbered of them it knows, whatever order they came in, else `unmapped`. |
 | `native_id` | `result.guid`, when present. |
 | `primary_location` | `locations[0]`. |
 | `related_locations` | `locations[1:]`, then `relatedLocations`. |
@@ -145,9 +149,9 @@ file, and one whose region gives only `charOffset` or `byteOffset` stays file-on
 lines are never computed from offsets. Malformed coordinates are a loss.
 
 A primary location that does not map is a loss. A related location or a flow step that does not
-map, a message link `[text](n)` that does not name exactly one location of the result, and flow
-steps past the rendering bound (256 steps or 64 KiB) are **evidence losses**, recorded against the
-claim, which stays.
+map, a message link `[text](n)` that does not name exactly one location of the result (one of more
+than nine digits names none), and flow steps past the rendering bound (256 steps or 64 KiB) are
+**evidence losses**, recorded against the claim, which stays.
 
 ## Bundle review and the normalization file
 
@@ -175,16 +179,24 @@ keeps the bundles unresolved whatever was decided.
 | What the log reports | `execution.evidence` | Status and error code |
 |---|---|---|
 | `run.results` `null` or absent | from the invocations, as below | `error`, `results_absent`, no claims |
-| An invocation with `executionSuccessful: false`, or an `error`-level execution or configuration notification, even beside `executionSuccessful: true` | `reported_failed` | `partial` when a claim was imported, else `error`; `execution_failed` |
-| No invocation, or one whose `executionSuccessful` or notifications cannot be read | `unreported` | `partial`, `execution_unreported` |
+| An invocation with `executionSuccessful: false`, an `error`-level execution or configuration notification, or an `exitSignalName` or a `processStartFailureMessage`, each even beside `executionSuccessful: true` | `reported_failed` | `partial` when a claim was imported, else `error`; `execution_failed` |
+| No invocation, or one whose `executionSuccessful`, `exitSignalName`, `processStartFailureMessage`, or a notification's level cannot be read | `unreported` | `partial`, `execution_unreported` |
 | Otherwise | `reported_success` | `success` |
 
-A notification without a level takes its descriptor's default level, else `warning`. Import loss
-makes a run that would otherwise be `success` `partial` with `import_loss`. Every reason that
-applies is named in the error message, and the error code is the first of them in the table's
-order. `execution.verified` is always false. Because only a `success` scan over resolved bundles
-can establish a quiet control, a log that does not report its execution earns no quiet credit, even
-with no results at all.
+A notification's level is its own `level`. Without one it is what the invocation's
+`notificationConfigurationOverrides` give the notification's descriptor (SARIF 3.58.6), else the
+descriptor's `defaultConfiguration.level`, else `warning`, which is also the level of a notification
+that names no descriptor. A descriptor is found by `index`, `guid`, or `id` in the component its
+reference names, and an override applies when it names the same descriptor, whichever of the three
+each one uses. What cannot be read is never taken for `warning`: a level that is not `none`, `note`,
+`warning`, or `error` (in the notification, an override, or a default), a descriptor the log does not
+hold or names ambiguously, and overrides that cannot be matched to a descriptor or that disagree
+make the evidence `unreported`. So does an `exitSignalName` or `processStartFailureMessage` that is
+not a string; an empty one says nothing. Import loss makes a run that would otherwise be `success`
+`partial` with `import_loss`. Every reason that applies is named in the error message, and the error
+code is the first of them in the table's order. `execution.verified` is always false. Because only a
+`success` scan over resolved bundles can establish a quiet control, a log that does not report its
+execution earns no quiet credit, even with no results at all.
 
 ## Producer notes
 
@@ -197,6 +209,11 @@ same finding's `native_rule_id` and exact-duplicate fingerprint differ between t
 everything else, and the score under the same decisions, agrees
 (`test_one_semgrep_finding_scores_alike_through_the_adapter_json_path_and_a_sarif_import`, and
 `test_real_semgrep_json_and_sarif_from_one_scan_score_one_finding_alike` against the real binary).
+That includes `kind`, which both paths take from the lowest-numbered CWE id the kind mapping knows
+(`test_a_rule_declaring_two_cwes_gets_one_kind_through_the_adapter_and_the_import`). Semgrep's JSON
+keeps a rule's CWE ids in the order the rule declares them and its SARIF writes them sorted, so
+`native_cwe` lists the same ids, each path in the order it read them, which is not part of a
+claim's identity.
 
 **CodeQL** keeps rules in `driver.rules` or in a query pack under `tool.extensions`, reached by
 `rule.toolComponent.index`; indexes `run.artifacts`; links its message to `relatedLocations` ids;
@@ -205,8 +222,8 @@ so one result can carry flows from several sources; those are flagged, not split
 
 ## Not done
 
-Rule configuration overrides in an invocation, columns and `columnKind`, `graphs`, `stacks` (other
-than counting location ids for message links), `fixes`, and attachments are not read into claims,
-and a logical-only location names no file (as a primary location it is a loss). Markdown is never
-rendered. SARIF other than 2.1.0, several runs merged into one bundle, and saved vendor formats
-other than SARIF have no importer.
+Rule configuration overrides in an invocation (its notification overrides are read, for execution
+evidence only), columns and `columnKind`, `graphs`, `stacks` (other than counting location ids for
+message links), `fixes`, and attachments are not read into claims, and a logical-only location names
+no file (as a primary location it is a loss). Markdown is never rendered. SARIF other than 2.1.0,
+several runs merged into one bundle, and saved vendor formats other than SARIF have no importer.

@@ -24,7 +24,7 @@ import sys
 
 import pytest
 
-from scaneval import cases, materialize, review, scoring
+from scaneval import cases, materialize, review, sarif as sarif_module, scoring
 from scaneval.adapters.semgrep import import_semgrep_results
 from scaneval.cli import main
 from scaneval.contracts import (
@@ -39,6 +39,7 @@ from scaneval.contracts import (
 )
 from scaneval.sarif import (
     FLOW_STEP_LIMIT,
+    MESSAGE_LIMIT,
     SarifImportError,
     SourceTree,
     UriSettings,
@@ -935,7 +936,8 @@ def test_cwe_ids_come_from_taxonomy_relationships_result_taxa_and_tags():
         {"target": {"id": "1", "toolComponent": {"name": "CodeScanner"}}, "kinds": ["superset"]}]
     first, second = convert_run(log).claims
     assert first["native_cwe"] == ["CWE-89", "CWE-327", "CWE-79", "CWE-22"]
-    assert first["kind"] == "sql_injection"
+    # The kind is the lowest-numbered id the mapping knows, CWE-22, not the first one listed.
+    assert first["kind"] == "path_traversal"
     assert second["native_cwe"] == ["CWE-89", "CWE-327", "CWE-22"]
 
 
@@ -974,6 +976,166 @@ def test_a_global_message_string_is_the_last_place_an_id_is_looked_up():
 ])
 def test_a_message_that_does_not_resolve_is_a_loss(message, expected):
     assert expected in only_loss(converted([result_at("src/app.py", message=message)]))
+
+
+# More digits than int() will read (4300 by default): a log can put a string this long in a message
+# link, a placeholder, a taxon id, or a tag, and none of them can mean a number.
+LONG_DIGITS = "1" * 5000
+
+
+def test_a_message_link_to_a_location_id_of_more_than_nine_digits_is_an_evidence_loss():
+    result = result_at("src/app.py", message={"text": f"see [x]({LONG_DIGITS}) and [y](0000000001)"})
+    result["locations"][0]["id"] = 1
+    claim, entry = only_claim(converted([result]))
+    assert claim["allegation"] == f"see [x]({LONG_DIGITS}) and [y](0000000001)"
+    (loss,) = entry["evidence_losses"]
+    assert loss["pointer"] == "/runs/0/results/0/message" and len(loss["reason"]) < 200
+    assert "location id of more than 9 digits" in loss["reason"]
+
+
+def test_a_placeholder_index_of_more_than_nine_digits_is_a_loss_and_one_with_leading_zeros_is_read_by_value():
+    reason = only_loss(converted([result_at("src/app.py", message={"text": "{" + LONG_DIGITS + "}", "arguments": ["a"]})]))
+    assert "uses placeholder" in reason and "1 argument(s) are supplied" in reason and len(reason) < 200
+    reason = only_loss(converted([result_at("src/app.py", message={"text": "{1000000000}", "arguments": ["a"]})]))
+    assert "uses placeholder {1000000000}" in reason
+    padded = {"text": "{" + "0" * 5000 + "1}", "arguments": ["a", "b"]}
+    assert only_claim(converted([result_at("src/app.py", message=padded)]))[0]["allegation"] == "b"
+
+
+def test_a_taxon_id_or_a_tag_of_more_digits_than_any_cwe_has_is_not_a_cwe():
+    log = minimal_log(results=[
+        result_at("src/app.py", taxa=[{"id": LONG_DIGITS, "toolComponent": {"name": "CWE"}},
+                                      {"id": "CWE-" + LONG_DIGITS, "toolComponent": {"name": "CWE"}},
+                                      {"id": "0000000079", "toolComponent": {"name": "CWE"}}],
+                  properties={"tags": ["external/cwe/cwe-" + LONG_DIGITS, "CWE-89"]})])
+    log["runs"][0]["tool"]["driver"]["rules"][0]["properties"]["tags"].append("CWE-" + LONG_DIGITS)
+    (claim,) = convert_run(log).claims
+    assert claim["native_cwe"] == ["CWE-79", "CWE-78", "CWE-89"]
+
+
+def test_a_result_that_raises_a_value_error_is_a_loss_and_the_rest_of_the_run_still_imports(monkeypatch):
+    kind_for_cwes = sarif_module.kind_for_cwes
+
+    def refuse_one(cwes):
+        if "CWE-79" in cwes:
+            raise ValueError("a value no reader anticipated")
+        return kind_for_cwes(cwes)
+
+    monkeypatch.setattr(sarif_module, "kind_for_cwes", refuse_one)
+    taxon = [{"id": "79", "toolComponent": {"name": "CWE"}}]
+    conversion = converted([result_at("src/app.py", taxa=taxon), result_at("src/app.py")])
+    assert [claim["claim_id"] for claim in conversion.claims] == ["r0-1"]
+    (loss,) = conversion.losses
+    assert loss["pointer"] == "/runs/0/results/0"
+    assert loss["reason"] == "/runs/0/results/0 could not be read: ValueError: a value no reader anticipated"
+    status, error = conversion.outcome()
+    assert (status, error["code"]) == ("partial", "import_loss")
+
+
+def test_a_refusal_of_the_whole_log_is_never_recorded_as_one_results_loss(monkeypatch):
+    def refuse(cwes):
+        raise SarifImportError("refused as a whole")
+
+    monkeypatch.setattr(sarif_module, "kind_for_cwes", refuse)
+    with pytest.raises(SarifImportError, match="refused as a whole"):
+        converted([result_at("src/app.py")])
+
+
+# --- bounds: a small log must not become a large allegation or a long run -------------------------
+
+
+def test_a_message_of_exactly_the_bound_imports_and_one_character_more_is_a_loss():
+    at_bound = "x" * MESSAGE_LIMIT
+    for message in ({"text": at_bound}, {"text": "{0}", "arguments": [at_bound]},
+                    {"id": "long", "arguments": [at_bound]}):
+        log = minimal_log(results=[result_at("src/app.py", message=message)])
+        log["runs"][0]["tool"]["driver"]["rules"][0]["messageStrings"] = {"long": {"text": "{0}"}}
+        assert len(only_claim(convert_run(log))[0]["allegation"]) == MESSAGE_LIMIT
+    over = "x" * (MESSAGE_LIMIT + 1)
+    for message in ({"text": over}, {"text": "{0}", "arguments": [over]}, {"text": over, "arguments": []},
+                    {"text": "{0}{0}", "arguments": ["x" * (MESSAGE_LIMIT // 2 + 1)]}):
+        reason = only_loss(converted([result_at("src/app.py", message=message)]))
+        assert reason == (f"/runs/0/results/0/message is longer than {MESSAGE_LIMIT} characters, as written or "
+                          "once formatted, so it is not read; the raw artifact keeps it")
+
+
+def test_a_small_log_cannot_be_formatted_into_a_large_allegation():
+    """A 16 KiB log of 4000 placeholders over one 4000-character argument formatted to 16 MB."""
+    expanding = result_at("src/app.py", message={"text": "{0}" * 4000, "arguments": ["A" * 4000]})
+    conversion = converted([expanding])
+    assert conversion.claims == [] and len(conversion.losses) == 1
+    assert sum(len(loss["reason"]) for loss in conversion.losses) < 300
+    # The same expansion through one messageStrings entry that every result shares.
+    log = minimal_log(results=[result_at("src/app.py", message={"id": "m", "arguments": ["B" * 2000]})
+                               for _ in range(50)])
+    log["runs"][0]["tool"]["driver"]["rules"][0]["messageStrings"] = {"m": {"text": "{0}" * 2000}}
+    conversion = convert_run(log)
+    assert conversion.claims == [] and len(conversion.losses) == 50
+    status, error = conversion.outcome()
+    assert (status, error["code"]) == ("partial", "import_loss")
+
+
+def test_a_template_longer_than_the_bound_is_refused_before_it_is_scanned():
+    # 90000 characters of placeholders over an empty argument would format to nothing, but it is
+    # 90000 characters of template for every result that names it.
+    reason = only_loss(converted([result_at("src/app.py", message={"text": "{0}" * 30000, "arguments": [""]})]))
+    assert f"is longer than {MESSAGE_LIMIT} characters" in reason
+
+
+def test_a_flow_step_message_over_the_bound_is_an_evidence_loss_and_the_claim_stays():
+    result = result_at("src/app.py", codeFlows=[flow(step("src/app.py", 1, "x" * (MESSAGE_LIMIT + 1)),
+                                                     step("src/app.py", 2, "kept"))])
+    claim, entry = only_claim(converted([result]))
+    assert claim["evidence_text"] == "flow 1, thread 1, step 1: src/app.py:1\nflow 1, thread 1, step 2: src/app.py:2 kept"
+    (loss,) = entry["evidence_losses"]
+    assert loss["pointer"] == "/runs/0/results/0/codeFlows/0/threadFlows/0/locations/0/location/message"
+    assert "is longer than" in loss["reason"]
+
+
+class Counted(list):
+    """A list that counts how often it is iterated, to show what a run reads once and what it rereads."""
+
+    def __init__(self, *items):
+        super().__init__(*items)
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        return super().__iter__()
+
+
+def test_taxonomies_and_a_rules_relationships_are_read_once_however_many_results_use_them():
+    """Every relationship of every result used to rescan every taxonomy: results x relationships x taxonomies."""
+    taxonomies = Counted([{"name": f"Other{number}", "guid": f"guid-{number}"} for number in range(200)]
+                         + [{"name": "CWE", "guid": "cwe-guid"}])
+    relationships = Counted([{"target": {"id": str(1000 + number), "toolComponent": {"guid": "cwe-guid"}},
+                              "kinds": ["superset"]} for number in range(200)])
+    tags = Counted(["security", "CWE-78: OS Command Injection"])
+    log = minimal_log(results=[result_at("src/app.py", taxa=[{"id": "79", "toolComponent": {"index": 200}}])
+                               for _ in range(20)])
+    run = log["runs"][0]
+    run["taxonomies"] = taxonomies
+    rule = run["tool"]["driver"]["rules"][0]
+    rule["relationships"], rule["properties"]["tags"] = relationships, tags
+    conversion = convert_run(log)
+    assert len(conversion.claims) == 20 and conversion.losses == []
+    assert conversion.claims[0]["native_cwe"][:3] == ["CWE-1000", "CWE-1001", "CWE-1002"]
+    assert conversion.claims[0]["native_cwe"][-2:] == ["CWE-79", "CWE-78"]
+    assert (taxonomies.iterations, relationships.iterations, tags.iterations) == (1, 1, 1)
+
+
+def test_a_taxonomy_is_found_by_guid_then_index_then_name_and_failing_all_three_by_its_own_name():
+    log = minimal_log(results=[
+        result_at("src/app.py", taxa=[{"id": "79", "toolComponent": reference}])
+        for reference in ({"guid": "the-cwe"}, {"index": 1}, {"name": "CWE"}, {"guid": "no-such", "name": "CWE"},
+                          {"guid": "the-cwe", "index": 0}, {"guid": "other"}, {"index": 5}, {"index": 0},
+                          {"name": "cwe "})])
+    log["runs"][0]["taxonomies"] = ["not a taxonomy", {"name": "CWE", "guid": "the-cwe"},
+                                    {"name": "Other", "guid": "other"}, {"name": "CWE"}]
+    # The rule's own tag, CWE-78, follows whatever the taxon contributes.
+    cwe, no_cwe = ["CWE-79", "CWE-78"], ["CWE-78"]
+    assert [claim["native_cwe"] for claim in convert_run(log).claims] == [
+        cwe, cwe, cwe, cwe, cwe, no_cwe, no_cwe, no_cwe, cwe]
 
 
 def test_the_guid_is_the_native_id_and_fingerprints_are_provenance_only():
@@ -1125,6 +1287,198 @@ def test_an_error_notification_beside_execution_successful_true_is_a_failed_run(
     assert convert_run(log).execution["evidence"] == "reported_failed"
     log["runs"][0]["tool"]["driver"]["notifications"][0]["defaultConfiguration"]["level"] = "note"
     assert convert_run(log).execution["evidence"] == "reported_success"
+
+
+ENGINE_NOTE = {"descriptor": {"id": "engine-crash"}, "message": {"text": "analysis aborted: out of memory"}}
+ENGINE_GUID = "5b8b2f40-0000-4000-8000-00000000e001"
+OTHER_GUID = "5b8b2f40-0000-4000-8000-00000000e002"
+
+
+def notified(*, descriptors=None, overrides=None, notification=None, **invocation):
+    """A run with no results whose one invocation reports success beside one notification.
+
+    *descriptors* are the driver's notification descriptors and *overrides* the invocation's
+    ``notificationConfigurationOverrides``; both are left out of the log when ``None``.
+    """
+    body = {"executionSuccessful": True, "toolExecutionNotifications": [notification or ENGINE_NOTE], **invocation}
+    if overrides is not None:
+        body["notificationConfigurationOverrides"] = overrides
+    log = minimal_log(results=[], invocations=[body])
+    if descriptors is not None:
+        log["runs"][0]["tool"]["driver"]["notifications"] = descriptors
+    return convert_run(log)
+
+
+def engine_descriptors(default=None) -> list:
+    """Two notification descriptors: the engine's, with *default* as its level when given, and another."""
+    engine = {"id": "engine-crash", "guid": ENGINE_GUID}
+    if default is not None:
+        engine["defaultConfiguration"] = {"level": default}
+    return [engine, {"id": "other-note", "guid": OTHER_GUID}]
+
+
+@pytest.mark.parametrize("named,overridden,expected", [
+    ({"id": "engine-crash"}, {"id": "engine-crash"}, "reported_failed"),
+    ({"id": "engine-crash"}, {"index": 0}, "reported_failed"),
+    ({"index": 0}, {"guid": ENGINE_GUID}, "reported_failed"),
+    ({"guid": ENGINE_GUID}, {"id": "engine-crash"}, "reported_failed"),
+    ({"id": "engine-crash", "index": 0, "guid": ENGINE_GUID}, {"id": "engine-crash", "index": -1}, "reported_failed"),
+    # An override for another descriptor says nothing about this one, whose own default is a warning.
+    ({"id": "engine-crash"}, {"id": "other-note"}, "reported_success"),
+])
+def test_an_invocations_override_sets_the_level_of_a_notification_that_names_the_same_descriptor(
+        named, overridden, expected):
+    """SARIF 3.58.6: an absent level is the descriptor's, as this invocation's overrides configure it."""
+    overrides = [{"descriptor": overridden, "configuration": {"level": "error"}}]
+    conversion = notified(descriptors=engine_descriptors("warning"), overrides=overrides,
+                          notification={**ENGINE_NOTE, "descriptor": named})
+    assert conversion.execution["evidence"] == expected
+    if expected == "reported_failed":
+        assert conversion.execution["invocations"][0]["error_notifications"] == [
+            "/runs/0/invocations/0/toolExecutionNotifications/0"]
+        assert conversion.outcome()[0] == "error"
+
+
+def test_an_override_replaces_the_default_in_either_direction_and_never_the_notifications_own_level():
+    lowered = [{"descriptor": {"id": "engine-crash"}, "configuration": {"level": "note", "enabled": True}}]
+    assert notified(descriptors=engine_descriptors("error"), overrides=lowered).execution["evidence"] == \
+        "reported_success"
+    assert notified(descriptors=engine_descriptors("error")).execution["evidence"] == "reported_failed"
+    # An override with no level configures something else, so the default level stands.
+    other = [{"descriptor": {"id": "engine-crash"}, "configuration": {"enabled": True}}]
+    assert notified(descriptors=engine_descriptors("error"), overrides=other).execution["evidence"] == \
+        "reported_failed"
+    raised = [{"descriptor": {"id": "engine-crash"}, "configuration": {"level": "error"}}]
+    own = {**ENGINE_NOTE, "level": "note"}
+    assert notified(descriptors=engine_descriptors("warning"), overrides=raised,
+                    notification=own).execution["evidence"] == "reported_success"
+
+
+def test_a_notification_is_at_warning_only_when_the_log_says_nothing_that_configures_it():
+    assert notified(descriptors=engine_descriptors()).execution["evidence"] == "reported_success"
+    assert notified(descriptors=engine_descriptors("warning")).execution["evidence"] == "reported_success"
+    # No descriptor to configure: the level SARIF gives a notification that names none is warning.
+    anonymous = {"message": {"text": "something happened"}}
+    assert notified(notification=anonymous).execution["evidence"] == "reported_success"
+    # A descriptor in a tool extension is found through the component the reference names.
+    log = minimal_log(results=[], invocations=[{"executionSuccessful": True, "toolExecutionNotifications": [
+        {"descriptor": {"id": "pack-crash", "toolComponent": {"index": 0}}}]}])
+    log["runs"][0]["tool"]["extensions"] = [{"name": "queries", "notifications": [
+        {"id": "pack-crash", "defaultConfiguration": {"level": "error"}}]}]
+    assert convert_run(log).execution["evidence"] == "reported_failed"
+
+
+UNREADABLE = {
+    "default-level-capitalised": dict(descriptors=engine_descriptors("Error")),
+    "default-level-not-a-level": dict(descriptors=engine_descriptors("fatal")),
+    "default-level-not-a-string": dict(descriptors=engine_descriptors(3)),
+    "no-descriptors": dict(),
+    "descriptor-not-listed": dict(descriptors=[{"id": "other-note"}]),
+    "descriptor-index-out-of-range": dict(descriptors=engine_descriptors("warning"),
+                                          notification={**ENGINE_NOTE, "descriptor": {"index": 7}}),
+    "descriptor-index-and-id-disagree": dict(descriptors=engine_descriptors("warning"),
+                                             notification={**ENGINE_NOTE, "descriptor": {"index": 1, "id": "engine-crash"}}),
+    "descriptor-id-shared": dict(descriptors=engine_descriptors("warning") + [{"id": "engine-crash"}]),
+    "descriptor-not-an-object": dict(descriptors=engine_descriptors("warning"),
+                                     notification={**ENGINE_NOTE, "descriptor": "engine-crash"}),
+    "descriptor-names-no-field": dict(descriptors=engine_descriptors("warning"),
+                                      notification={**ENGINE_NOTE, "descriptor": {}}),
+    "descriptor-component-missing": dict(descriptors=engine_descriptors("warning"), notification={
+        **ENGINE_NOTE, "descriptor": {"id": "engine-crash", "toolComponent": {"index": 4}}}),
+    "override-level-not-a-level": dict(descriptors=engine_descriptors("warning"), overrides=[
+        {"descriptor": {"id": "engine-crash"}, "configuration": {"level": "Error"}}]),
+    "override-names-no-listed-descriptor": dict(descriptors=engine_descriptors("warning"), overrides=[
+        {"descriptor": {"id": "no-such-note"}, "configuration": {"level": "note"}}]),
+    "override-not-an-object": dict(descriptors=engine_descriptors("warning"), overrides=["error"]),
+    "override-configuration-not-an-object": dict(descriptors=engine_descriptors("warning"), overrides=[
+        {"descriptor": {"id": "engine-crash"}, "configuration": "error"}]),
+    "overrides-not-an-array": dict(descriptors=engine_descriptors("warning"), overrides={"level": "error"}),
+    "overrides-disagree": dict(descriptors=engine_descriptors("warning"), overrides=[
+        {"descriptor": {"id": "engine-crash"}, "configuration": {"level": "error"}},
+        {"descriptor": {"index": 0}, "configuration": {"level": "note"}}]),
+}
+
+
+@pytest.mark.parametrize("name", sorted(UNREADABLE))
+def test_a_notification_level_the_log_leaves_unreadable_is_never_read_as_a_warning(name):
+    conversion = notified(**UNREADABLE[name])
+    assert conversion.execution["evidence"] == "unreported"
+    assert conversion.execution["invocations"][0]["error_notifications"] == []
+    (note,) = conversion.notes
+    assert note.startswith("/runs/0/invocations/0/toolExecutionNotifications/0 ")
+    status, error = conversion.outcome()
+    assert (status, error["code"]) == ("partial", "execution_unreported")
+
+
+def test_a_failed_run_earns_no_quiet_credit_whatever_way_the_log_spells_its_error_level(tmp_path):
+    source = tmp_path / "export" / "source"
+    tree_hash = write_tree(source)
+    pack = make_pack(source, tree_hash, control=True)
+
+    def credit(name: str, log: dict) -> tuple[dict, dict]:
+        """Import *log*, record the control as quiet the way a reviewer would, and score it."""
+        path = tmp_path / f"{name}.sarif"
+        path.write_bytes(encoded(log))
+        outcome = import_sarif(path, pack=pack, snapshot_id="snap-a", tree_hash=tree_hash, system_id="semgrep-fixture",
+                               output=tmp_path / name, clock=CLOCK)
+        decisions = deepcopy(outcome.decisions)
+        decisions["control_assessments"][0].update(decision="quiet", reason="no claim names the file helper")
+        return outcome, scoring.score(outcome.plan, outcome.result, decisions)["metrics"]["controls"]["capability_safe"]
+
+    def log_with(descriptor: dict, overrides=None) -> dict:
+        body = {"executionSuccessful": True, "toolExecutionNotifications": [ENGINE_NOTE]}
+        if overrides is not None:
+            body["notificationConfigurationOverrides"] = overrides
+        log = minimal_log(results=[], invocations=[body])
+        log["runs"][0]["tool"]["driver"]["notifications"] = [descriptor]
+        return log
+
+    raised = [{"descriptor": {"id": "engine-crash"}, "configuration": {"level": "error"}}]
+    outcome, safe = credit("override-to-error", log_with({"id": "engine-crash", "defaultConfiguration": {"level": "warning"}},
+                                                         raised))
+    assert (outcome.record["execution"]["evidence"], outcome.result["status"]) == ("reported_failed", "error")
+    assert (safe["assigned"], safe["completed"], safe["resolved"]) == (1, 0, 0)
+    for spelling in ("Error", "fatal"):
+        outcome, safe = credit(f"default-{spelling}", log_with(
+            {"id": "engine-crash", "defaultConfiguration": {"level": spelling}}))
+        assert (outcome.record["execution"]["evidence"], outcome.result["status"]) == ("unreported", "partial")
+        assert (safe["completed"], safe["resolved"]) == (0, 0)
+    # The same silence from a run whose notification really is a warning is still a quiet control.
+    outcome, safe = credit("warning", log_with({"id": "engine-crash", "defaultConfiguration": {"level": "warning"}}))
+    assert (outcome.result["status"], safe["completed"], safe["resolved"]) == ("success", 1, 1)
+
+
+@pytest.mark.parametrize("changes", [
+    {"exitSignalName": "SIGSEGV"},
+    {"exitSignalName": "SIGKILL", "exitCode": 137},
+    {"processStartFailureMessage": "the tool could not be started: exec format error"},
+    {"exitSignalName": "SIGTERM", "processStartFailureMessage": "killed while starting"},
+])
+def test_a_signal_or_a_failed_process_start_beside_execution_successful_true_is_a_failed_run(changes):
+    """The log claims success while saying the process was killed, or never started."""
+    conversion = converted([], invocations=[{"executionSuccessful": True, **changes}])
+    assert conversion.execution["evidence"] == "reported_failed"
+    assert conversion.execution["invocations"][0]["exit_signal_name"] == changes.get("exitSignalName")
+    status, error = conversion.outcome()
+    assert (status, error["code"]) == ("error", "execution_failed")
+    assert "the log reports a failed execution at /runs/0/invocations/0" in error["message"]
+    (note,) = conversion.notes
+    assert note.startswith("/runs/0/invocations/0 reports ") and "did not run to completion" in note
+    # With a claim already imported the run is partial, as for any reported failure.
+    assert converted([result_at("src/app.py")], invocations=[
+        {"executionSuccessful": True, **changes}]).outcome()[0] == "partial"
+
+
+def test_a_blank_signal_or_start_failure_says_nothing_and_an_unreadable_one_leaves_the_run_unreported():
+    for blank in ({"exitSignalName": None}, {"exitSignalName": ""}, {"processStartFailureMessage": None},
+                  {"processStartFailureMessage": ""}):
+        assert converted([], invocations=[{"executionSuccessful": True, **blank}]).execution["evidence"] == \
+            "reported_success"
+    for unreadable in ({"exitSignalName": 9}, {"processStartFailureMessage": ["failed"]}):
+        conversion = converted([], invocations=[{"executionSuccessful": True, **unreadable}])
+        assert conversion.execution["evidence"] == "unreported"
+        (note,) = conversion.notes
+        assert "is not a string" in note
 
 
 @pytest.mark.parametrize("results", [None, "absent"])
@@ -1340,6 +1694,50 @@ def test_a_write_that_fails_part_way_removes_what_the_import_created(workspace, 
     assert not (workspace["out"] / "bundle").exists()
 
 
+def test_a_failed_write_also_removes_the_parent_directories_the_import_made_and_only_those(workspace, monkeypatch):
+    """The output's parents are created for it, so a write that fails part way left `new/nested` behind."""
+
+    def refuse(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(review, "write_evaluator_records", refuse)
+    with pytest.raises(OSError, match="No space left on device"):
+        imported(workspace, name="new/nested/bundle")
+    assert not workspace["out"].exists()
+    # A parent that was already there stays, and stays empty: only what this call made is removed.
+    workspace["out"].mkdir()
+    (workspace["out"] / "kept").mkdir()
+    with pytest.raises(OSError, match="No space left on device"):
+        imported(workspace, name="kept/new/bundle")
+    assert [path.name for path in workspace["out"].iterdir()] == ["kept"]
+    assert list((workspace["out"] / "kept").iterdir()) == []
+    # A directory holding something this call did not write is not removed, nor are its parents.
+
+    def another_writer_then_no_space(bundle, *records):
+        Path(bundle, "raw", "other.txt").write_text("not written by the import", encoding="utf-8")
+        refuse()
+
+    monkeypatch.setattr(review, "write_evaluator_records", another_writer_then_no_space)
+    with pytest.raises(OSError, match="No space left on device"):
+        imported(workspace, name="shared/bundle")
+    assert sorted(path.relative_to(workspace["out"]).as_posix() for path in (workspace["out"] / "shared").rglob("*")) == [
+        "shared/bundle", "shared/bundle/raw", "shared/bundle/raw/other.txt"]
+
+
+def test_parents_are_removed_when_the_bundle_directory_itself_cannot_be_made(workspace, monkeypatch):
+    real_mkdir = Path.mkdir
+
+    def mkdir(self, *args, **kwargs):
+        if self.name == "bundle":
+            raise OSError(13, "Permission denied")
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    with pytest.raises(OSError, match="Permission denied"):
+        imported(workspace, name="new/nested/bundle")
+    assert not workspace["out"].exists()
+
+
 # --- the command line ------------------------------------------------------------------------
 
 
@@ -1503,6 +1901,14 @@ def test_import_sarif_exits_1_for_a_log_that_holds_no_usable_scan_and_still_writ
     code, out, err = cli(capsys, *import_argv(workspace, write_log(workspace, log, "partial.sarif"), "partial"))
     assert code == 0 and "status=partial claims=3" in out
     assert "scaneval: status partial (execution_unreported)" in err and "no usable scan" not in err
+
+
+def test_import_sarif_imports_a_log_with_a_string_of_digits_no_number_can_be_read_from(workspace, capsys):
+    log = minimal_log(results=[result_at("src/app.py", message={"text": f"see [x]({LONG_DIGITS})"})])
+    code, out, err = cli(capsys, *import_argv(workspace, write_log(workspace, log, "digits.sarif")))
+    assert (code, err) == (0, "") and "status=success claims=1" in out
+    record = load_document(workspace["out"] / "bundle" / "import.json", "import-record")
+    assert [loss["pointer"] for loss in record["claims"][0]["evidence_losses"]] == ["/runs/0/results/0/message"]
 
 
 def test_import_sarif_imports_the_named_run_of_a_multi_run_log(workspace, capsys):
@@ -1774,6 +2180,30 @@ def test_one_semgrep_finding_scores_alike_through_the_adapter_json_path_and_a_sa
     # Usage is where they differ: a live run measures its wall time; a log reports none.
     assert (live_score["metrics"]["usage"]["wall_seconds"], sarif_score["metrics"]["usage"]) == (
         1.5, {"wall_seconds": None})
+
+
+def test_a_rule_declaring_two_cwes_gets_one_kind_through_the_adapter_and_the_import():
+    """Semgrep keeps a rule's own CWE order in its JSON and writes the tags sorted into its SARIF.
+
+    The kind was the first mapped CWE in whichever order a path read them: a rule declaring
+    CWE-918 before CWE-22 was ssrf through the adapter and path_traversal through the import.
+    """
+    declared = ["CWE-918: Server-Side Request Forgery (SSRF)",
+                "CWE-22: Improper Limitation of a Pathname to a Restricted Directory"]
+    payload = {"results": [{"check_id": "probe.url-open", "path": "src/app.py", "start": {"line": 5},
+                            "end": {"line": 5}, "extra": {"message": "request data reaches urlopen",
+                                                          "metadata": {"cwe": declared}, "severity": "WARNING"}}]}
+    (live,) = import_semgrep_results(payload).claims
+    log = minimal_log(results=[result_at("src/app.py", ruleId="probe.url-open",
+                                         message={"text": "request data reaches urlopen"})])
+    rule = log["runs"][0]["tool"]["driver"]["rules"][0]
+    rule["id"] = rule["name"] = "probe.url-open"
+    rule["properties"]["tags"] = sorted(declared) + ["security"]
+    (imported,) = convert_run(log).claims
+    assert (live["kind"], imported["kind"]) == ("path_traversal", "path_traversal")
+    # Each path lists the ids in the order it read them; the same ids, and now the same identity.
+    assert (live["native_cwe"], imported["native_cwe"]) == (["CWE-918", "CWE-22"], ["CWE-22", "CWE-918"])
+    assert scoring.claim_fingerprint(live) == scoring.claim_fingerprint(imported)
 
 
 semgrep_required = pytest.mark.skipif(

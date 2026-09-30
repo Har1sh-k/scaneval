@@ -609,6 +609,42 @@ def test_a_file_that_is_not_strict_utf8_is_refused(tmp_path, widget):
     (".env.example.txt", "documentation_identifier", None, ".env*"),
     ("CLAUDE.md", "documentation_identifier", None, "reads as instructions"),
     (".github/copilot-instructions.md", "documentation_identifier", None, "reads as instructions"),
+    # Dependency files a suffix alone would have let through: any name holding requirements or
+    # constraints that ends .txt, whatever comes before it, and anything in a requirements/ directory.
+    ("dev-requirements.txt", "documentation_identifier", None, "*requirements*.txt"),
+    ("test-requirements.txt", "non_runtime_branding", None, "*requirements*.txt"),
+    ("docs/requirements_docs.txt", "documentation_identifier", None, "*requirements*.txt"),
+    ("dev-constraints.txt", "documentation_identifier", None, "*constraints*.txt"),
+    ("requirements/prod.txt", "documentation_identifier", None, "under requirements/"),
+    ("Requirements/README.md", "documentation_identifier", None, "under requirements/"),
+    ("backend/requirements/base.txt", "documentation_identifier", None, "under requirements/"),
+    ("runtime.txt", "documentation_identifier", None, "runtime.txt"),
+    # License and attribution files by their other names: copyright, third-party notices, licenses/.
+    ("COPYRIGHT.txt", "documentation_identifier", None, "license, attribution, or security file"),
+    ("Copyright-Notice.md", "documentation_identifier", None, "license, attribution, or security file"),
+    ("THIRD-PARTY-NOTICES.txt", "documentation_identifier", None, "license, attribution, or security file"),
+    ("docs/ThirdPartyLicenses.md", "documentation_identifier", None, "license, attribution, or security file"),
+    ("third_party_credits.rst", "non_runtime_branding", None, "license, attribution, or security file"),
+    ("LICENSES/MIT.txt", "documentation_identifier", None, "under licenses/"),
+    ("vendor/licenses/Apache-2.0.txt", "documentation_identifier", None, "under licenses/"),
+    # Instruction files in any case, and the local one.
+    ("CLAUDE.local.md", "documentation_identifier", None, "reads as instructions"),
+    ("docs/claude.local.MD", "documentation_identifier", None, "reads as instructions"),
+    ("claude.md", "documentation_identifier", None, "reads as instructions"),
+    ("docs/Agents.md", "non_runtime_branding", None, "reads as instructions"),
+    ("GEMINI.MD", "documentation_identifier", None, "reads as instructions"),
+    (".Claude/notes.md", "documentation_identifier", None, "reads as instructions"),
+    (".GitHub/Copilot-Instructions.md", "documentation_identifier", None, "reads as instructions"),
+    (".github/INSTRUCTIONS/backend.md", "documentation_identifier", None, "reads as instructions"),
+    # Manifests and CI configuration that a display suffix and any stated role check let through.
+    ("environment.yml", "display_metadata", ROLE_CHECK, "environment.yml"),
+    ("ci/environment.yaml", "display_metadata", ROLE_CHECK, "environment.yaml"),
+    ("bower.json", "display_metadata", ROLE_CHECK, "bower.json"),
+    ("pubspec.yaml", "display_metadata", ROLE_CHECK, "pubspec.yaml"),
+    ("compose.yaml", "display_metadata", ROLE_CHECK, "compose.yaml"),
+    ("deploy/Compose.yml", "display_metadata", ROLE_CHECK, "compose.yml"),
+    ("bitbucket-pipelines.yml", "display_metadata", ROLE_CHECK, "bitbucket-pipelines.yml"),
+    (".github/codeql/codeql-config.yml", "display_metadata", ROLE_CHECK, "under .github/codeql/"),
 ])
 def test_only_documentation_and_reviewed_display_metadata_may_be_edited(path, role, role_check, reason):
     gap = blinding.path_class_gap(path, role, role_check)
@@ -616,6 +652,26 @@ def test_only_documentation_and_reviewed_display_metadata_may_be_edited(path, ro
         assert gap is None
     else:
         assert gap is not None and reason in gap
+
+
+@pytest.mark.parametrize("path", [
+    "README.md", "docs/guide.rst", "docs/requirements.md", "docs/party-third.md", "docs/third-parties.md",
+    "docs/on-copyright-and-licensing.md", "docs/claude-notes.md", "docs/my-agents.md", "docs/instructions.md",
+    ".github/ISSUE_TEMPLATE/bug.md",
+])
+def test_a_document_that_only_resembles_a_forbidden_file_stays_editable(path):
+    """The rules match a name's start, a dependency file's kind, or a directory, not any word in a path."""
+    assert blinding.path_class_gap(path, "documentation_identifier") is None
+
+
+def test_a_scanner_reads_an_instruction_file_by_any_case_and_a_blinded_export_lists_it():
+    listed = ["CLAUDE.md"]
+    paths = ["CLAUDE.md", "claude.md", "docs/Agents.md", "CLAUDE.local.md", ".CLAUDE/notes.md", "src/app.py",
+             "docs/claude-notes.md", ".github/workflows/ci.yml", ".GITHUB/copilot-instructions.md"]
+    assert blinding._instruction_files(paths, listed) == [
+        ".CLAUDE/notes.md", ".GITHUB/copilot-instructions.md", "CLAUDE.local.md", "CLAUDE.md", "claude.md",
+        "docs/Agents.md"]
+    assert blinding._instruction_files(["src/app.py"], []) == []
 
 
 # --- the runner: refusals are preparation failures; nothing reaches a scanner ------------------
@@ -855,6 +911,78 @@ def test_a_leak_check_reads_keys_and_values_and_ignores_case(widget):
     assert blinding.leaked_originals(document, {"a": ["x", {"acmecorp": 1}], "b": "the WIDGET way"}) == [
         "AcmeCorp", "Widget"]
     assert blinding.leaked_originals(document, {"a": [1, 2.0, None, True], "b": "sprocket"}) == []
+
+
+def blinded_config(tmp_path: Path, widget: dict, *, directory: str = "config", inputs: list[dict] | None = None,
+                   **config_changes) -> Path:
+    """A run configuration in its own directory, with its pack and approved map beside it."""
+    home = tmp_path / directory
+    home.mkdir()
+    write_pack(home / "pack.json", widget)
+    blinding.save_map(home / "widget-map.json", widget_map(widget))
+    config = write_config(home / "run.json", inputs or [{"snapshot_id": "snap-a"}, BLINDED])
+    (home / "run.json").write_text(canonical_json({**config, **config_changes}) + "\n", encoding="utf-8")
+    return home / "run.json"
+
+
+def leaky_paths(tmp_path: Path) -> dict:
+    """Each path a scanner is told, once with an original token in its name: what the refusal calls it,
+    the token it names first, and the arguments that make the run name it so."""
+    return {
+        "workspace_root": ("workspace_root", "AcmeCorp", {"workspace_root": tmp_path / "AcmeCorp-Widget-eval"}),
+        "cache_root": ("cache_root", "Widget", {"cache_root": "widget-cache"}),
+        "configuration directory": ("the configuration directory", "Widget",
+                                    {"directory": "Widget-eval", "cache_root": str(tmp_path / "cache")}),
+    }
+
+
+@pytest.mark.parametrize("name", ["workspace_root", "cache_root", "configuration directory"])
+def test_a_path_naming_an_original_token_reaches_the_scan_so_the_run_is_refused(tmp_path, widget, name):
+    """A scanner is handed its workspace as an absolute path, its rules under the cache root, and both sit
+    beside the configuration; the guard read the run id and the system fields but never these."""
+    label, token, changes = leaky_paths(tmp_path)[name]
+    workspace_root = changes.pop("workspace_root", None)
+    if workspace_root is not None:
+        workspace_root.mkdir()
+    config = blinded_config(tmp_path, widget, directory=changes.pop("directory", "config"), **changes)
+    adapter, out = FakeAdapter(), tmp_path / "out"
+
+    with pytest.raises(ContractError, match=rf"{label} \S+ names '{token}', an original identity token of "
+                                            "blinding map widget-metadata, which would reach the scan of blinded "
+                                            "input snap-a.blinded"):
+        run_from_config(config, out, clock=CLOCK, workspace_root=workspace_root, adapters={"fake": adapter})
+
+    assert not out.exists() and adapter.calls == 0
+
+
+def test_a_symbolic_link_is_read_both_as_named_and_as_resolved(tmp_path, widget):
+    """The scanner sees the workspace as it was named; the resolved path is where it really is."""
+    (tmp_path / "AcmeCorp-real").mkdir()
+    (tmp_path / "neutral-real").mkdir()
+    (tmp_path / "AcmeCorp-link").symlink_to(tmp_path / "neutral-real")
+    (tmp_path / "neutral-link").symlink_to(tmp_path / "AcmeCorp-real")
+    for link in ("AcmeCorp-link", "neutral-link"):
+        out = tmp_path / f"out-{link}"
+        with pytest.raises(ContractError, match="workspace_root .* names 'AcmeCorp'"):
+            run_from_config(blinded_config(tmp_path, widget, directory=f"config-{link}"), out, clock=CLOCK,
+                            workspace_root=tmp_path / link, adapters={"fake": FakeAdapter()})
+        assert not out.exists()
+
+
+def test_paths_that_name_no_original_token_and_standard_inputs_are_not_refused(tmp_path, widget):
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    manifest = run_from_config(blinded_config(tmp_path, widget), tmp_path / "out", clock=CLOCK,
+                               workspace_root=workspace_root, adapters={"fake": FakeAdapter()})
+    assert manifest["status"] == "completed"
+    # The guard is for a blinded input: a standard one is handed the original tree whatever its paths say.
+    leaky = tmp_path / "AcmeCorp-workspaces"
+    leaky.mkdir()
+    manifest = run_from_config(blinded_config(tmp_path, widget, directory="standard-config",
+                                              inputs=[{"snapshot_id": "snap-a"}]),
+                               tmp_path / "out-standard", clock=CLOCK, workspace_root=leaky,
+                               adapters={"fake": FakeAdapter()})
+    assert manifest["status"] == "completed"
 
 
 def test_related_blinded_inputs_are_blinded_with_one_map(tmp_path, widget):

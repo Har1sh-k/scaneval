@@ -38,7 +38,8 @@ Every result of the selected run is accounted for exactly once, by :func:`conver
   listed, never dropped in silence.
 - **A loss**, when the result alleges something this importer cannot place: a rule reference
   that names no descriptor or conflicts with itself, a message that does not resolve, or a
-  primary location that is not a file in the scanned tree. A loss is import loss: it leaves the
+  primary location that is not a file in the scanned tree, or when reading it raised a
+  ``ValueError`` (no one result can end an import). A loss is import loss: it leaves the
   bundles unresolved and a clean run ``partial`` with error code ``import_loss``, so a scan whose
   finding ScanEval could not read can earn neither completeness nor quiet credit.
 
@@ -46,6 +47,14 @@ Within a claim, a related location or a code-flow step that does not resolve is 
 loss recorded against that claim, not a reason to drop the claim. A result whose shape suggests
 it may bundle separate allegations (several primary locations, or code flows that start in
 different places) is flagged for bundle review rather than split or guessed at.
+
+What is bounded, and what is not. ``--max-bytes`` bounds the bytes read. After that, one message,
+as written or once formatted, is at most :data:`MESSAGE_LIMIT` characters, and a rule's
+relationships and tags and the run's taxonomies are read once, not once per result. Not bounded: a
+run's messages together (results that share one long string each hold a copy of it), the CWE ids a
+rule lists (each of its claims holds a copy), and the search for a rule or a component named by
+guid, which reads the list each time. So the size bound of a log is not a bound on the memory or
+the time an import takes.
 
 What it never invents. A line range is read from a region's ``startLine`` and ``endLine`` or not
 at all: an offset-only region stays file-only. Execution success is the log's own report and is
@@ -134,6 +143,16 @@ DIVERGENT_CODE_FLOWS = "divergent_code_flows"
 # rest is counted, recorded as an evidence loss, and kept in the raw artifact.
 FLOW_STEP_LIMIT = 256
 FLOW_TEXT_LIMIT = 65536
+# A message is at most this many characters, as written or once formatted. A tool's message is a
+# sentence or two, but formatting turns a few bytes of log into megabytes (one long argument under
+# thousands of placeholders, or one messageStrings entry shared by every result), and the import
+# keeps a copy of the message in every claim. A longer message is a loss; the raw artifact keeps it.
+MESSAGE_LIMIT = 65536
+
+# The most digits a log's number can have where this module reads one out of a string: a placeholder
+# index or a location id. int() refuses a string of more than 4300 digits (a limit an environment can
+# lower), so a longer one is never handed to it, and no log holds a billion arguments or locations.
+_MAX_DIGITS = 9
 
 _SCHEME = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):")
 _DRIVE = re.compile(r"^[A-Za-z]:")
@@ -155,9 +174,37 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _bounded_int(digits: str) -> int | None:
+    """The value of the ASCII digit string *digits*, or ``None`` when it needs more than :data:`_MAX_DIGITS`.
+
+    Leading zeros do not count: ``0007`` is 7. A longer number is not converted at all.
+    """
+    trimmed = digits.lstrip("0")
+    if len(trimmed) > _MAX_DIGITS:
+        return None
+    return int(trimmed) if trimmed else 0
+
+
 def _text(value: Any) -> str | None:
     """*value* when it is a non-empty string, else ``None``."""
     return value if isinstance(value, str) and value else None
+
+
+def _elided(text: str, limit: int = 80) -> str:
+    """*text* as a reason quotes it: whole when short, cut at *limit* characters with ``...`` when a log made it long."""
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def _shown(value: Any, limit: int = 80) -> str:
+    """*value* as a phrase in a reason: a scalar as written, cut at *limit* characters, and an array
+    or an object by its type.
+
+    A reason is built from what a log holds. The repr of a structure a log nested deeply can run past
+    the recursion limit, so a container is never walked here.
+    """
+    if isinstance(value, (dict, list)):
+        return "an object" if isinstance(value, dict) else "an array"
+    return _elided(repr(value), limit)
 
 
 # --- reading the artifact ---------------------------------------------------------------
@@ -647,32 +694,52 @@ class _Place:
 # --- messages and rules ------------------------------------------------------------------
 
 
+def _too_long(label: str) -> _Unusable:
+    return _Unusable(f"{label} is longer than {MESSAGE_LIMIT} characters, as written or once formatted, so it "
+                     "is not read; the raw artifact keeps it")
+
+
 def _formatted(template: str, arguments: list[str], label: str) -> str:
     """*template* with ``{n}`` replaced by ``arguments[n]`` and ``{{``/``}}`` undoubled (SARIF 3.11.5).
 
-    A placeholder past the end of *arguments*, or a single brace that is neither half of an
-    escape nor part of a placeholder, leaves the message unresolved rather than guessed at.
+    A placeholder past the end of *arguments*, one with more than :data:`_MAX_DIGITS` digits, or a
+    single brace that is neither half of an escape nor part of a placeholder, leaves the message
+    unresolved rather than guessed at. So does a template longer than :data:`MESSAGE_LIMIT`
+    characters, which is refused before it is scanned, and one that formats to more than that: the
+    text is built piece by piece and stops at the bound, so the work is bounded by it whatever the
+    log holds. That bounds one message, not a run: results that share a long string each hold a copy.
     """
+    if len(template) > MESSAGE_LIMIT:
+        raise _too_long(label)
     pieces: list[str] = []
+    size = 0
+
+    def emit(piece: str) -> None:
+        nonlocal size
+        size += len(piece)
+        if size > MESSAGE_LIMIT:
+            raise _too_long(label)
+        pieces.append(piece)
+
     position = 0
     for match in _TOKEN.finditer(template):
-        pieces.append(template[position:match.start()])
+        emit(template[position:match.start()])
         token = match.group(0)
         if token == "{{":
-            pieces.append("{")
+            emit("{")
         elif token == "}}":
-            pieces.append("}")
+            emit("}")
         elif match.group(1) is not None:
-            index = int(match.group(1))
-            if index >= len(arguments):
-                raise _Unusable(f"{label} uses placeholder {token}, and {len(arguments)} argument(s) "
+            index = _bounded_int(match.group(1))
+            if index is None or index >= len(arguments):
+                raise _Unusable(f"{label} uses placeholder {_elided(token)}, and {len(arguments)} argument(s) "
                                 "are supplied (SARIF 3.11.11)")
-            pieces.append(arguments[index])
+            emit(arguments[index])
         else:
             raise _Unusable(f"{label} has a lone {token!r} that is neither a placeholder nor an "
                             "escaped brace (SARIF 3.11.5)")
         position = match.end()
-    pieces.append(template[position:])
+    emit(template[position:])
     return "".join(pieces)
 
 
@@ -683,7 +750,8 @@ def _message_text(message: Any, label: str, *, descriptor: dict | None, componen
     ``arguments``: a producer that uses no placeholders (Semgrep and CodeQL both) writes braces
     unescaped, and its text is the message as written. Without text, ``id`` is looked up in the
     rule's ``messageStrings`` and then in its component's ``globalMessageStrings``, and the string
-    found is formatted with the message's arguments. Markdown is never read.
+    found is formatted with the message's arguments. Markdown is never read. A message of more
+    than :data:`MESSAGE_LIMIT` characters, written or formatted, is refused.
     """
     if not isinstance(message, dict):
         raise _Unusable(f"{label} is a {type(message).__name__}, not a message object")
@@ -695,7 +763,11 @@ def _message_text(message: Any, label: str, *, descriptor: dict | None, componen
     if text is not None and not isinstance(text, str):
         raise _Unusable(f"{label}.text is a {type(text).__name__}, not a string")
     if text is not None and text.strip():
-        return _formatted(text, arguments, label) if arguments is not None else text
+        if arguments is not None:
+            return _formatted(text, arguments, label)
+        if len(text) > MESSAGE_LIMIT:
+            raise _too_long(label)
+        return text
     identifier = message.get("id")
     if identifier is None:
         state = "blank text and no id" if text is not None else "no text and no id"
@@ -731,12 +803,13 @@ class _Rule:
 
 
 def _cwe_token(value: Any) -> str | None:
-    """``CWE-<n>`` for a taxon id such as ``"327"`` or ``"CWE-327"``, else ``None``."""
+    """``CWE-<n>`` for a taxon id such as ``"327"`` or ``"CWE-327"``, else ``None``.
+
+    An id of more digits than :func:`scaneval.kinds.cwe_ids` reads is not a CWE.
+    """
     if not isinstance(value, str):
         return None
-    if _DIGITS.fullmatch(value):
-        return f"CWE-{int(value)}"
-    found = cwe_ids(value)
+    found = cwe_ids(f"CWE-{value}" if _DIGITS.fullmatch(value) else value)
     return found[0] if found else None
 
 
@@ -754,9 +827,10 @@ class Conversion:
     """What :func:`convert_run` made of one run: claims, their import entries, and the rest.
 
     ``claims`` and ``entries`` are parallel lists in result order. ``execution`` is the log's own
-    account of the run, never verified. ``status`` and ``error`` are the scan status this profile
-    derives from that account and from the losses; ``flagged`` maps the pointer of every claim
-    flagged for bundle review to its reasons.
+    account of the run, never verified, and ``failed`` the pointer of every invocation it reports
+    failed. ``status`` and ``error`` are the scan status this profile derives from that account and
+    from the losses; ``flagged`` maps the pointer of every claim flagged for bundle review to its
+    reasons.
     """
 
     run_index: int
@@ -769,6 +843,7 @@ class Conversion:
     results_present: bool
     execution: dict
     notes: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
 
     @property
     def result_count(self) -> int:
@@ -793,15 +868,13 @@ class Conversion:
             reasons.append(("results_absent", "run.results is null or absent: the tool produced no "
                                               "result list (SARIF 3.14.23)"))
         if evidence == "reported_failed":
-            failed = [row["pointer"] for row in self.execution["invocations"]
-                      if row["execution_successful"] is False or row["error_notifications"]]
             reasons.append(("execution_failed", "the log reports a failed execution at "
-                            + ", ".join(failed) + "; a failed run's results are not complete "
+                            + ", ".join(self.failed) + "; a failed run's results are not complete "
                             "(SARIF 3.20.21)"))
         elif evidence == "unreported":
             reasons.append(("execution_unreported", "the log does not report whether the tool ran to "
-                            "completion (no invocation with executionSuccessful), so this is not a "
-                            "complete scan"))
+                            "completion (no invocation, or one whose executionSuccessful or notification "
+                            "levels cannot be read), so this is not a complete scan"))
         if self.losses:
             reasons.append(("import_loss", f"{len(self.losses)} result(s) the log reports could not be "
                             "imported as claims"))
@@ -856,6 +929,16 @@ class _RunReader:
         self._paths: dict[tuple[Any, Any], str | _Unusable] = {}
         self._indexed: dict[int, str | _Unusable] = {}
         self._rule_ids: dict[str, dict[str, list[int]]] = {}
+        self._notification_tables: dict[str, dict[str, dict[str, list[int]]]] = {}
+        # Each taxonomy is found by guid or by name from one table, built here once, because every
+        # relationship and taxon of every result asks; the first taxonomy carrying a value wins.
+        self._taxonomy_by: dict[str, dict[str, dict]] = {"guid": {}, "name": {}}
+        for taxonomy in self.taxonomies:
+            if isinstance(taxonomy, dict):
+                for key, table in self._taxonomy_by.items():
+                    if isinstance(taxonomy.get(key), str):
+                        table.setdefault(taxonomy[key], taxonomy)
+        self._descriptor_cwes: dict[str | None, tuple[list[str], list[str]]] = {}
 
     @staticmethod
     def _array(owner: dict, key: str, pointer: str) -> list:
@@ -1146,18 +1229,18 @@ class _RunReader:
         SARIF 3.54.2 locates components only among the driver and extensions, while its own
         taxonomy examples point into ``run.taxonomies``; a reference is read against
         ``run.taxonomies`` by guid, then index, then name, and failing all three by its own name.
+        A guid or name is a string, and is looked up in the table built once for the run.
         """
         if not isinstance(reference, dict):
             return False
-        candidates = [taxonomy for taxonomy in self.taxonomies if isinstance(taxonomy, dict)]
         found = None
         guid, index, name = reference.get("guid"), reference.get("index"), reference.get("name")
-        if guid is not None:
-            found = next((taxonomy for taxonomy in candidates if taxonomy.get("guid") == guid), None)
+        if isinstance(guid, str):
+            found = self._taxonomy_by["guid"].get(guid)
         if found is None and _is_int(index) and 0 <= index < len(self.taxonomies):
             found = self.taxonomies[index] if isinstance(self.taxonomies[index], dict) else None
         if found is None and isinstance(name, str):
-            found = next((taxonomy for taxonomy in candidates if taxonomy.get("name") == name), None)
+            found = self._taxonomy_by["name"].get(name)
         label = found.get("name") if found is not None else name
         return isinstance(label, str) and label.strip().upper() == "CWE"
 
@@ -1166,32 +1249,45 @@ class _RunReader:
             return None
         return _cwe_token(reference.get("id"))
 
-    def _cwes(self, descriptor: dict | None, result: dict) -> list[str]:
+    def _descriptor_cwe_ids(self, rule: _Rule) -> tuple[list[str], list[str]]:
+        """The CWE ids a descriptor gives every result of its rule: from its relationships, then its tags.
+
+        Read once per descriptor, however many results name it: what a descriptor lists does not
+        depend on the result, and a rule with thousands of relationships used by thousands of
+        results was read thousands of times over.
+        """
+        if rule.pointer not in self._descriptor_cwes:
+            descriptor = rule.descriptor
+            related: list[str | None] = []
+            relationships = descriptor.get("relationships") if descriptor else None
+            for relationship in relationships if isinstance(relationships, list) else []:
+                if not isinstance(relationship, dict):
+                    continue
+                kinds = relationship.get("kinds", ["relevant"])
+                if isinstance(kinds, list) and {"superset", "equal"} & {kind for kind in kinds if isinstance(kind, str)}:
+                    related.append(self._taxon_cwe(relationship.get("target")))
+            self._descriptor_cwes[rule.pointer] = (list(dict.fromkeys(cwe for cwe in related if cwe)),
+                                                   cwe_ids(_tags(descriptor)))
+        return self._descriptor_cwes[rule.pointer]
+
+    def _cwes(self, rule: _Rule, result: dict) -> list[str]:
         """CWE ids for one result: the rule's CWE relationships, the result's taxa, then tags.
 
         A rule relationship counts only when its kinds include ``superset`` or ``equal``, which
         SARIF 3.27.8 says place every result of the rule in the taxon; any narrower relationship
         applies to a result only through that result's own ``taxa``. Tags follow, rule then
         result, through :func:`scaneval.kinds.cwe_ids`, which reads ``CWE-89`` and
-        ``external/cwe/cwe-089`` alike. The order is the order :func:`kind_for_cwes` tries them in.
+        ``external/cwe/cwe-089`` alike. Each id is listed once, in the order found, which is the
+        order ``native_cwe`` keeps; :func:`scaneval.kinds.kind_for_cwes` reads them in its own order.
         """
-        found: list[str] = []
-        relationships = descriptor.get("relationships") if descriptor else None
-        for relationship in relationships if isinstance(relationships, list) else []:
-            if not isinstance(relationship, dict):
-                continue
-            kinds = relationship.get("kinds", ["relevant"])
-            if isinstance(kinds, list) and {"superset", "equal"} & {kind for kind in kinds if isinstance(kind, str)}:
-                found.append(self._taxon_cwe(relationship.get("target")))
+        related, tagged = self._descriptor_cwe_ids(rule)
+        found: list[str | None] = list(related)
         taxa = result.get("taxa")
         for reference in taxa if isinstance(taxa, list) else []:
             found.append(self._taxon_cwe(reference))
-        found.extend(cwe_ids(_tags(descriptor) + _tags(result)))
-        unique: list[str] = []
-        for cwe in found:
-            if cwe and cwe not in unique:
-                unique.append(cwe)
-        return unique
+        found.extend(tagged)
+        found.extend(cwe_ids(_tags(result)))
+        return list(dict.fromkeys(cwe for cwe in found if cwe))
 
     # -- one result ---------------------------------------------------------------------
 
@@ -1384,15 +1480,23 @@ class _RunReader:
         return counts
 
     def _link_losses(self, allegation: str, result: dict, label: str) -> list[dict]:
-        """An evidence loss for each embedded link (``[text](n)``) that names no single location."""
-        links = sorted({int(match.group(1)) for match in _LINK.finditer(allegation)})
-        if not links:
-            return []
-        counts = self._location_ids(result)
-        return [{"pointer": f"{label}/message", "reason": f"the message links to location id {link}, and "
-                 f"the result holds {counts.get(link, 0)} location(s) with that id, not exactly one "
-                 "(SARIF 3.11.6)"}
-                for link in links if counts.get(link, 0) != 1]
+        """An evidence loss for each embedded link (``[text](n)``) that names no single location.
+
+        A link of more than :data:`_MAX_DIGITS` digits names no location this import looks for, and
+        is one loss however many there are.
+        """
+        digits = {match.group(1) for match in _LINK.finditer(allegation)}
+        numbers = {_bounded_int(item) for item in digits}
+        links = sorted(number for number in numbers if number is not None)
+        counts = self._location_ids(result) if links else {}
+        losses = [{"pointer": f"{label}/message", "reason": f"the message links to location id {link}, and "
+                   f"the result holds {counts.get(link, 0)} location(s) with that id, not exactly one "
+                   "(SARIF 3.11.6)"}
+                  for link in links if counts.get(link, 0) != 1]
+        if None in numbers:
+            losses.append({"pointer": f"{label}/message", "reason": "the message links to a location id of "
+                           f"more than {_MAX_DIGITS} digits, which this import does not look for (SARIF 3.11.6)"})
+        return losses
 
     def convert(self, index: int, result: Any) -> tuple[str, dict, dict | None]:
         """``("claim", claim, entry)``, ``("excluded", exclusion, None)`` or ``("loss", loss, None)``."""
@@ -1403,6 +1507,13 @@ class _RunReader:
             return "loss", {"pointer": pointer, "reason": str(exc)}, None
         except RecursionError:
             return "loss", {"pointer": pointer, "reason": f"{pointer} nests too deeply to read"}, None
+        except SarifImportError:
+            # A refusal of the whole log is not one result's loss, though it is a ValueError too.
+            raise
+        except ValueError as exc:
+            # Whatever else a hostile value turns into, one result never ends the import.
+            return "loss", {"pointer": pointer,
+                            "reason": f"{pointer} could not be read: {type(exc).__name__}: {exc}"[:300]}, None
 
     def _convert(self, index: int, pointer: str, result: Any) -> tuple[str, dict, dict | None]:
         if not isinstance(result, dict):
@@ -1464,7 +1575,7 @@ class _RunReader:
             bundle_review.append(DIVERGENT_CODE_FLOWS)
         evidence_losses.extend(self._link_losses(allegation, result, pointer))
 
-        cwes = self._cwes(rule.descriptor, result)
+        cwes = self._cwes(rule, result)
         if rule.descriptor is None and rule.reference is not None:
             notes.append(f"no rule descriptor matches {rule.reference!r}; the level and CWE ids come from "
                          "the result alone")
@@ -1503,48 +1614,137 @@ class _RunReader:
 
     # -- the run's own account of its execution -------------------------------------------
 
-    def _notification_level(self, notification: Any) -> str | None:
-        """A notification's level (SARIF 3.58.6), or ``None`` when the notification is unreadable."""
+    def _notification_ids(self, component: dict, pointer: str) -> dict[str, dict[str, list[int]]]:
+        """Where each ``id`` and ``guid`` sits among *component*'s notification descriptors, built once.
+
+        At most two positions are kept for a value: two descriptors that share one already make a
+        reference by it ambiguous, and no log can make a lookup cost more than that.
+        """
+        if pointer not in self._notification_tables:
+            table: dict[str, dict[str, list[int]]] = {"id": {}, "guid": {}}
+            for position, descriptor in enumerate(component.get("notifications") or []):
+                for key, positions in table.items():
+                    value = descriptor.get(key) if isinstance(descriptor, dict) else None
+                    if _text(value):
+                        found = positions.setdefault(value, [])
+                        if len(found) < 2:
+                            found.append(position)
+            self._notification_tables[pointer] = table
+        return self._notification_tables[pointer]
+
+    def _notification_descriptor(self, reference: Any) -> tuple[tuple[str, int], dict]:
+        """The notification descriptor *reference* names and where it sits, or why it names none.
+
+        Found as SARIF 3.52 finds a descriptor: in the component ``toolComponent`` names, else
+        the driver, by ``index``, else by ``guid``, else by ``id``; every other one of the three that
+        the reference states must agree with the descriptor found. A value no descriptor carries,
+        one that two carry, and a reference that states none of the three name nothing.
+        """
+        if not isinstance(reference, dict):
+            raise _Unusable("descriptor is not a reportingDescriptorReference object")
+        component, pointer = self._component(reference.get("toolComponent"), "descriptor")
+        descriptors = component.get("notifications") or []
+        table = self._notification_ids(component, pointer)
+        index, guid, identifier = reference.get("index"), reference.get("guid"), reference.get("id")
+        if index is not None and index != -1:
+            found = [index] if _is_int(index) and 0 <= index < len(descriptors) else []
+        elif guid is not None:
+            found = table["guid"].get(guid, []) if isinstance(guid, str) else []
+        elif identifier is not None:
+            found = table["id"].get(identifier, []) if isinstance(identifier, str) else []
+        else:
+            raise _Unusable("descriptor states none of index, guid, and id")
+        descriptor = descriptors[found[0]] if len(found) == 1 else None
+        if not isinstance(descriptor, dict) or any(
+                value is not None and descriptor.get(key) != value for key, value in (("guid", guid), ("id", identifier))):
+            stated = ", ".join(f"{key} {_shown(value)}" for key, value in
+                               (("index", index), ("guid", guid), ("id", identifier)) if value is not None)
+            raise _Unusable(f"descriptor with {stated} names no single notification descriptor of {pointer}")
+        return (pointer, found[0]), descriptor
+
+    def _override_levels(self, overrides: Any) -> dict[tuple[str, int], set[str | None]]:
+        """The levels an invocation's ``notificationConfigurationOverrides`` set, by the descriptor each names.
+
+        An entry configures one notification descriptor for this invocation, and only its ``level``
+        is read; a level that is not a SARIF level is kept as ``None``, which cannot be read. An
+        entry that is not an object, or whose descriptor reference names no single descriptor, could
+        configure any notification, so the whole set is refused with :class:`_Unusable`.
+        """
+        if overrides is None:
+            return {}
+        if not isinstance(overrides, list):
+            raise _Unusable("notificationConfigurationOverrides is not an array")
+        levels: dict[tuple[str, int], set[str | None]] = {}
+        for number, entry in enumerate(overrides):
+            where = f"notificationConfigurationOverrides/{number}"
+            if not isinstance(entry, dict):
+                raise _Unusable(f"{where} is not a configurationOverride object")
+            try:
+                position, _ = self._notification_descriptor(entry.get("descriptor"))
+            except _Unusable as exc:
+                raise _Unusable(f"{where}: {exc}") from None
+            configuration = entry.get("configuration")
+            level = configuration.get("level") if isinstance(configuration, dict) else None
+            if not isinstance(configuration, dict) or level is not None:
+                levels.setdefault(position, set()).add(level if level in LEVELS else None)
+        return levels
+
+    def _notification_level(self, notification: Any, overrides: dict | _Unusable) -> str:
+        """A notification's level (SARIF 3.58.6), or why the log leaves it unreadable.
+
+        The notification's own ``level`` comes first. Without one, its descriptor is looked up, and
+        the level is what the invocation's ``notificationConfigurationOverrides`` (*overrides*) give
+        that descriptor, else the descriptor's ``defaultConfiguration.level``, else ``warning``. A
+        notification that names no descriptor has nothing to configure it and is at ``warning``.
+        Nothing unreadable is read as ``warning``: a level that is not one of SARIF's four, a
+        descriptor the log does not hold or names ambiguously, and overrides that cannot be told
+        apart raise :class:`_Unusable`, so the evidence is ``unreported`` and a quiet control earns
+        nothing on a guess.
+        """
         if not isinstance(notification, dict):
-            return None
+            raise _Unusable("it is not a notification object")
         level = notification.get("level")
         if level is not None:
-            return level if level in LEVELS else None
-        descriptor = self._notification_descriptor(notification.get("descriptor"))
-        configuration = descriptor.get("defaultConfiguration") if descriptor else None
+            if level not in LEVELS:
+                raise _Unusable(f"its level {_shown(level)} is not a SARIF level")
+            return level
+        reference = notification.get("descriptor")
+        if reference is None:
+            return "warning"
+        position, descriptor = self._notification_descriptor(reference)
+        if isinstance(overrides, _Unusable):
+            raise _Unusable(str(overrides))
+        configured = overrides.get(position)
+        if configured:
+            if None in configured or len(configured) > 1:
+                raise _Unusable(f"the overrides for {position[0]}/notifications/{position[1]} do not give one "
+                                "readable level (a level that is not a SARIF level, a configuration that "
+                                "is not an object, or levels that disagree)")
+            return next(iter(configured))
+        configuration = descriptor.get("defaultConfiguration")
         default = configuration.get("level") if isinstance(configuration, dict) else None
-        return default if default in LEVELS else "warning"
+        if default is None:
+            return "warning"
+        if default not in LEVELS:
+            raise _Unusable(f"its descriptor's default level {_shown(default)} is not a SARIF level")
+        return default
 
-    def _notification_descriptor(self, reference: Any) -> dict | None:
-        if not isinstance(reference, dict):
-            return None
-        try:
-            component, _ = self._component(reference.get("toolComponent"), "descriptor")
-        except _Unusable:
-            return None
-        notifications = [item if isinstance(item, dict) else {} for item in component.get("notifications") or []]
-        index = reference.get("index")
-        if _is_int(index) and 0 <= index < len(notifications):
-            return notifications[index]
-        for key in ("guid", "id"):
-            value = reference.get(key)
-            matches = [item for item in notifications if value is not None and item.get(key) == value]
-            if len(matches) == 1:
-                return matches[0]
-        return None
+    def execution(self) -> tuple[dict, list[str], list[str]]:
+        """The log's own account of execution, notes on reading it, and where it reports failure.
 
-    def execution(self) -> tuple[dict, list[str]]:
-        """The log's own account of execution, summarized per invocation, and notes on reading it.
-
-        ``reported_failed`` when any invocation says ``executionSuccessful: false`` or carries a
-        tool execution or configuration notification at level ``error`` (SARIF 3.20.21-22), even
-        beside ``executionSuccessful: true``. ``unreported`` when there is no invocation, or one
-        that says nothing this can read about how it ended. ``reported_success`` otherwise. None of
-        these is verified: nothing here watched the tool run.
+        ``reported_failed`` when any invocation says ``executionSuccessful: false``, carries a tool
+        execution or configuration notification at level ``error`` (SARIF 3.20.21-22), or names a
+        signal that ended the process or a failure to start it (``exitSignalName``,
+        ``processStartFailureMessage``), even beside ``executionSuccessful: true``.
+        ``unreported`` when there is no invocation, or one that says nothing this can read about how
+        it ended, a notification whose level is unreadable (:meth:`_notification_level`) included.
+        ``reported_success`` otherwise. None of these is verified: nothing here watched the tool run.
+        The last value is the pointer of every invocation reported failed.
         """
         rows: list[dict] = []
         notes: list[str] = []
-        failed = unknown = False
+        failed_at: list[str] = []
+        unknown = False
         for index, invocation in enumerate(self.invocations):
             pointer = f"{self.pointer}/invocations/{index}"
             if not isinstance(invocation, dict):
@@ -1553,6 +1753,7 @@ class _RunReader:
                 rows.append({"pointer": pointer, "execution_successful": None, "exit_code": None,
                              "exit_signal_name": None, "notifications": 0, "error_notifications": []})
                 continue
+            failed = False
             succeeded = invocation.get("executionSuccessful")
             if not isinstance(succeeded, bool):
                 unknown = True
@@ -1560,8 +1761,25 @@ class _RunReader:
                 succeeded = None
             elif not succeeded:
                 failed = True
+            stopped = []
+            for key in ("exitSignalName", "processStartFailureMessage"):
+                value = invocation.get(key)
+                if value is None or value == "":
+                    continue
+                if not isinstance(value, str):
+                    unknown = True
+                    notes.append(f"{pointer}/{key} is not a string; whether the process was stopped cannot be read")
+                else:
+                    stopped.append(f"{key} {_shown(value)}")
+            if stopped:
+                failed = True
+                notes.append(f"{pointer} reports {' and '.join(stopped)}, so the tool did not run to completion")
             count = 0
             errors: list[str] = []
+            try:
+                overrides: dict | _Unusable = self._override_levels(invocation.get("notificationConfigurationOverrides"))
+            except _Unusable as exc:
+                overrides = exc
             for key in ("toolExecutionNotifications", "toolConfigurationNotifications"):
                 notifications = invocation.get(key)
                 if notifications is None:
@@ -1572,22 +1790,26 @@ class _RunReader:
                     continue
                 for number, notification in enumerate(notifications):
                     count += 1
-                    level = self._notification_level(notification)
-                    if level is None:
+                    try:
+                        level = self._notification_level(notification, overrides)
+                    except _Unusable as exc:
                         unknown = True
-                        notes.append(f"{pointer}/{key}/{number} has no readable level")
-                    elif level == "error":
-                        errors.append(f"{pointer}/{key}/{number}")
+                        notes.append(f"{pointer}/{key}/{number} has no readable level: {exc}")
+                    else:
+                        if level == "error":
+                            errors.append(f"{pointer}/{key}/{number}")
             if errors:
                 failed = True
+            if failed:
+                failed_at.append(pointer)
             exit_code = invocation.get("exitCode")
             rows.append({"pointer": pointer, "execution_successful": succeeded,
                          "exit_code": exit_code if _is_int(exit_code) else None,
                          "exit_signal_name": _text(invocation.get("exitSignalName")),
                          "notifications": count, "error_notifications": errors})
-        evidence = "reported_failed" if failed else "unreported" if unknown or not rows else "reported_success"
+        evidence = "reported_failed" if failed_at else "unreported" if unknown or not rows else "reported_success"
         return {"evidence": evidence, "results": "absent" if self.results is None else "present",
-                "verified": False, "invocations": rows}, notes
+                "verified": False, "invocations": rows}, notes, failed_at
 
     def tool(self) -> dict:
         def component(value: dict) -> dict:
@@ -1642,10 +1864,10 @@ def convert_run(log: dict, run_index: int | None = None, *, settings: UriSetting
     index, run, count = select_run(log, run_index)
     reader = _RunReader(run, index, settings=settings or UriSettings(), tree=tree,
                         include_suppressed=include_suppressed)
-    execution, notes = reader.execution()
+    execution, notes, failed = reader.execution()
     conversion = Conversion(run_index=index, run_count=count, tool=reader.tool(), claims=[], entries=[],
                             excluded=[], losses=[], results_present=reader.results is not None,
-                            execution=execution, notes=notes)
+                            execution=execution, notes=notes, failed=failed)
     for number, result in enumerate(reader.results or []):
         outcome, record, entry = reader.convert(number, result)
         if outcome == "claim":
@@ -1781,9 +2003,10 @@ def import_sarif(sarif_path: Path, *, pack: dict, snapshot_id: str, tree_hash: s
     and no result was lost, are the bundles resolved.
 
     Everything is built and validated in memory first: a refused import, whatever refused it,
-    leaves no directory behind. *output* must not exist; it is resolved once, so every path written
-    is inside the same real directory. The run id defaults to :func:`default_run_id`. The review
-    is a machine draft: every decision is ``unresolved`` and the record's state is ``draft``.
+    leaves no directory behind. *output* must not exist, and the parents it lacks are created and
+    removed again if the write fails; it is resolved once, so every path written is inside the same
+    real directory. The run id defaults to :func:`default_run_id`. The review is a machine draft:
+    every decision is ``unresolved`` and the record's state is ``draft``.
     """
     if not isinstance(tree_hash, str) or not _TREE_HASH.match(tree_hash):
         raise SarifImportError(f"the tree hash must be a sha256:<64 hex digits> digest, not {tree_hash!r}")
@@ -1882,12 +2105,15 @@ def import_sarif(sarif_path: Path, *, pack: dict, snapshot_id: str, tree_hash: s
 
 def _write_bundle(bundle: Path, raw_path: str, data: bytes, *, result: dict, record: dict, plan: dict,
                   decisions: dict, review_record: dict, evaluation: dict, report_html: str) -> None:
-    """Create *bundle* and write every file into it exclusively, or leave nothing this call made.
+    """Create *bundle*, and any parent directory it lacks, and write every file into it exclusively,
+    or leave nothing this call made.
 
     Every payload is encoded before the directory is created, so text UTF-8 cannot encode is a
     refusal rather than a half-written bundle. The evaluator files go through
     :func:`scaneval.review.write_evaluator_records`, the one writer every bundle's review files
-    use. A failure part way removes the files and directories this call created and re-raises.
+    use. A failure part way, in making a directory as much as in writing a file, removes the files
+    and the directories this call created, the parents it made included, and re-raises. A parent
+    that was already there is never removed, and neither is a directory that holds anything else.
     """
     early = [(bundle / raw_path, data), (bundle / RESULT_FILE, _document(result)),
              (bundle / RECORD_FILE, _document(record))]
@@ -1895,15 +2121,28 @@ def _write_bundle(bundle: Path, raw_path: str, data: bytes, *, result: dict, rec
             (bundle / "report.html", _encoded(report_html, "the report"))]
     for value, label in ((plan, "the plan"), (decisions, "the decisions"), (review_record, "the review record")):
         _encoded(canonical_json(value), label)
-    bundle.parent.mkdir(parents=True, exist_ok=True)
-    bundle.mkdir()
-    directories = [bundle, bundle / RAW_DIR, bundle / review.EVALUATOR_DIR]
+    missing = [bundle]
+    for parent in bundle.parents:
+        if parent.exists():
+            break
+        missing.append(parent)
+    directories: list[Path] = []
     files: list[Path] = []
     try:
+        for directory in reversed(missing):
+            try:
+                directory.mkdir()
+            except FileExistsError:
+                if directory == bundle:
+                    raise
+                continue  # made by someone else since it was looked for: not this call's to remove
+            directories.append(directory)
         (bundle / RAW_DIR).mkdir()
+        directories.append(bundle / RAW_DIR)
         for path, payload in early:
             _write_new(path, payload)
             files.append(path)
+        directories.append(bundle / review.EVALUATOR_DIR)
         files.extend(review.write_evaluator_records(bundle, plan, decisions, review_record).values())
         for path, payload in late:
             _write_new(path, payload)

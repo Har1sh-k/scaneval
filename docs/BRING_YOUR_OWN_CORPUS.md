@@ -679,9 +679,10 @@ repository lists both as variants, and each edit then states an expectation for 
 `"state": "absent"` where the file does not exist; related snapshots in one run must be blinded
 with the same map. Documentation files may be edited under any role. `.yml`, `.yaml`, `.toml`,
 `.json`, `.cfg`, and `.ini` files may be edited only as `display_metadata` with a `role_check`.
-License and security files, dependency manifests, build, CI, and security configuration, files a
-scanner reads as instructions, and every other file, source included, are refused. [Current
-capabilities](INITIAL_BUILD.md#metadata-blinding) lists every rule.
+License, attribution, and security files, dependency manifests, build, CI, and security
+configuration, files a scanner reads as instructions (in any case), and every other file, source
+included, are refused. [Current capabilities](INITIAL_BUILD.md#metadata-blinding) lists every rule,
+and says what the lists do not cover.
 
 **Check it before anyone reviews it.** `blinding check` fetches each variant, applies the map in a
 temporary directory exactly as a run would, and reports approval instead of requiring it:
@@ -761,9 +762,13 @@ configuration file. It can sit beside the standard input of the same snapshot:
 }
 ```
 
-A scanner is told its run id, system id, model, and configuration, so a run in which any of them
-names an original token, ignoring case, is refused before anything is written. A run id like the
-one this guide used earlier, `acme-internal-pilot-2026-09-20`, names the company:
+A scanner is told its run id, system id, model, and configuration, and it runs in a workspace, beside
+a source cache, whose absolute paths it can read. A run in which any of them names an original
+token, ignoring case, is refused before anything is written, and that includes the workspace root,
+the cache root, and the directory the configuration sits in (each as named and as resolved).
+Without `--workspace-root` a workspace is made in the system's temporary directory, which this
+check does not read. A run id like the one this guide used earlier,
+`acme-internal-pilot-2026-09-20`, names the company:
 
 ```
 $ $SB run "$BYOC/run-leaky.json" --output "$BYOC/runs/leaky" --workspace-root "$BYOC/workspaces"

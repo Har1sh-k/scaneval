@@ -68,9 +68,13 @@ from .contracts import (
 from .materialize import (
     CachedSnapshot,
     ExportedTree,
+    INSTRUCTION_FILE_NAMES,
+    INSTRUCTION_PATH_PREFIXES,
+    INSTRUCTION_PATHS,
+    INSTRUCTION_TOP_LEVEL,
     MaterializationError,
-    # The one definition of what a scanner reads as instructions: the export records those files
-    # as retained cues, and blinding never edits one.
+    # The export's own test of what a scanner reads as instructions. It compares exact case, so
+    # :func:`_reads_as_instructions` asks it and then asks the same lists again without regard to case.
     _is_instruction_file,
     export_tree,
     provenance_record,
@@ -98,21 +102,28 @@ REVIEW_DECISIONS = ("approve", "reject", "unresolved")
 DOCUMENTATION_SUFFIXES = frozenset({".md", ".markdown", ".rst", ".txt", ".adoc", ".asciidoc", ".org"})
 DISPLAY_SUFFIXES = frozenset({".yml", ".yaml", ".toml", ".json", ".cfg", ".ini"})
 # Refused whatever the suffix or role. File names compare case-insensitively.
-FORBIDDEN_NAME_PREFIXES = ("license", "licence", "copying", "notice", "authors", "contributors",
+FORBIDDEN_NAME_PREFIXES = ("license", "licence", "copying", "copyright", "notice", "authors", "contributors",
                            "citation", "patents", "security")
+# Attribution notices for third-party code, wherever in the name the two words fall.
+FORBIDDEN_ATTRIBUTION_NAMES = ("*third*party*",)
 FORBIDDEN_NAMES = (
     # Dependency manifests and lockfiles: they name what is installed and run.
     "package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
     "pyproject.toml", "setup.cfg", "setup.py", "pipfile*", "poetry.lock", "uv.lock",
-    "requirements*.txt", "constraints*.txt", "go.mod", "go.sum", "cargo.toml", "cargo.lock",
+    "*requirements*.txt", "*constraints*.txt", "runtime.txt", "go.mod", "go.sum", "cargo.toml", "cargo.lock",
     "composer.*", "gemfile*", "*.gemspec", "pom.xml", "build.gradle*", "settings.gradle*",
-    "tsconfig*.json", "jsconfig.json", "deno.json*",
+    "tsconfig*.json", "jsconfig.json", "deno.json*", "environment.yml", "environment.yaml", "bower.json",
+    "pubspec.yaml",
     # Build, CI, and security configuration.
-    "dockerfile*", "docker-compose*", "makefile", "jenkinsfile", ".gitlab-ci.yml", ".travis.yml",
-    "azure-pipelines.yml", ".pre-commit-config.yaml", "tox.ini", "pytest.ini", ".env*",
-    "cmakelists.txt", "action.yml", "action.yaml", "dependabot.yml", "dependabot.yaml",
+    "dockerfile*", "docker-compose*", "compose.yml", "compose.yaml", "makefile", "jenkinsfile",
+    ".gitlab-ci.yml", ".travis.yml", "azure-pipelines.yml", "bitbucket-pipelines.yml",
+    ".pre-commit-config.yaml", "tox.ini", "pytest.ini", ".env*", "cmakelists.txt", "action.yml",
+    "action.yaml", "dependabot.yml", "dependabot.yaml",
 )
-FORBIDDEN_DIRECTORIES = (".github/workflows", ".github/actions", ".circleci", ".git")
+FORBIDDEN_DIRECTORIES = (".github/workflows", ".github/actions", ".github/codeql", ".circleci", ".git")
+# Refused for what they hold, whatever their files are called. Directory names compare like file names.
+DEPENDENCY_DIRECTORIES = ("requirements",)
+LICENSE_DIRECTORIES = ("licenses",)
 # Retained cues are reported for at most this many paths, the most affected first.
 CUE_PATH_LIMIT = 50
 
@@ -253,35 +264,77 @@ def leaked_originals(document: dict, value: Any) -> list[str]:
 # --- which paths an edit may touch -------------------------------------------------------------
 
 
+# What a scanner reads as instructions, spelled in lower case for a comparison that ignores case:
+# the export's own lists, and CLAUDE.local.md, the local instructions file, which they do not name.
+_INSTRUCTION_NAMES = frozenset(name.casefold() for name in INSTRUCTION_FILE_NAMES) | {"claude.local.md"}
+_INSTRUCTION_ROOTS = frozenset(name.casefold() for name in INSTRUCTION_TOP_LEVEL)
+_INSTRUCTION_PATHS = frozenset(path.casefold() for path in INSTRUCTION_PATHS)
+_INSTRUCTION_PREFIXES = tuple(prefix.casefold() for prefix in INSTRUCTION_PATH_PREFIXES)
+
+
+def _reads_as_instructions(path: str) -> bool:
+    """Whether a scanner may read *path* as project instructions, whatever the case of its name.
+
+    The export records instruction files exactly as it spells them, and a case-insensitive file
+    system opens ``claude.md`` as ``CLAUDE.md``, so blinding asks the export's test and then the
+    same lists again with case ignored, plus ``CLAUDE.local.md``.
+    """
+    folded = path.casefold()
+    return (_is_instruction_file(path)
+            or folded.rsplit("/", 1)[-1] in _INSTRUCTION_NAMES
+            or folded.split("/", 1)[0] in _INSTRUCTION_ROOTS
+            or folded in _INSTRUCTION_PATHS
+            or folded.startswith(_INSTRUCTION_PREFIXES))
+
+
+def _instruction_files(paths, listed) -> list[str]:
+    """The instruction files among *paths* by this module's test, with those the export *listed*."""
+    return sorted({*listed, *(path for path in paths if _reads_as_instructions(path))})
+
+
 def path_class_gap(path: str, role: str, role_check: str | None = None) -> str | None:
     """Why *path* may not be edited under *role*, or ``None`` when it may.
 
     Documentation (``.md``, ``.rst``, ``.txt`` and the like) may be edited under any role.
     Configuration with a display suffix (``.yml``, ``.toml``, ``.json`` and the like) only as
     ``display_metadata`` with a stated ``role_check``, the reviewer's reason the field is not read
-    at runtime. Refused whatever the suffix and role: license, attribution, and security files;
-    dependency manifests and lockfiles; build, CI, and security configuration; anything under
-    ``.github/workflows/``, ``.github/actions/``, ``.circleci/``, or ``.git/``; and the files a
-    scanner reads as instructions, since changing those changes the execution condition. Every
-    other file, source and scripts included, is never edited. This reads the path only.
+    at runtime. Refused whatever the suffix and role, with names and directories compared without
+    regard to case: license, attribution, and security files (a name that starts ``license``,
+    ``copyright``, ``notice``, ``authors``, ``security`` and the like, or holds ``third`` then
+    ``party``, and anything under ``licenses/``); dependency manifests and lockfiles (a ``.txt``
+    whose name holds ``requirements`` or ``constraints``, and anything under ``requirements/``);
+    build, CI, and security configuration; anything under ``.github/workflows/``,
+    ``.github/actions/``, ``.github/codeql/``, ``.circleci/``, or ``.git/``; and the files a scanner
+    reads as instructions, ``CLAUDE.local.md`` among them, since changing those changes the
+    execution condition. Every other file, source and scripts included, is never edited. The lists
+    are a guard, not a classifier: they name what is known to matter and cannot name everything.
+    This reads the path only.
     """
     if role not in EDIT_ROLES:
         return f"{role!r} is not an edit role; the roles are {', '.join(EDIT_ROLES)}"
     parts = PurePosixPath(path).parts
     folded_parts = tuple(part.casefold() for part in parts)
-    for directory in FORBIDDEN_DIRECTORIES:
+
+    def under(directory: str) -> bool:
         needle = tuple(directory.split("/"))
-        if any(folded_parts[index:index + len(needle)] == needle
-               for index in range(len(folded_parts) - len(needle))):
-            return f"{path} is under {directory}/, which is build, CI, or repository machinery"
+        return any(folded_parts[index:index + len(needle)] == needle
+                   for index in range(len(folded_parts) - len(needle)))
+
+    for directories, what in ((FORBIDDEN_DIRECTORIES, "which is build, CI, or repository machinery"),
+                              (DEPENDENCY_DIRECTORIES, "which holds dependency manifests"),
+                              (LICENSE_DIRECTORIES, "which holds license and attribution texts")):
+        for directory in directories:
+            if under(directory):
+                return f"{path} is under {directory}/, {what}"
     name = folded_parts[-1]
-    if name.startswith(FORBIDDEN_NAME_PREFIXES):
+    if name.startswith(FORBIDDEN_NAME_PREFIXES) or any(
+            fnmatch.fnmatchcase(name, pattern) for pattern in FORBIDDEN_ATTRIBUTION_NAMES):
         return f"{path} is a license, attribution, or security file"
     for pattern in FORBIDDEN_NAMES:
         if fnmatch.fnmatchcase(name, pattern):
             return (f"{path} is a dependency manifest, a lockfile, or build, CI, or security "
                     f"configuration ({pattern})")
-    if _is_instruction_file(path):
+    if _reads_as_instructions(path):
         return (f"{path} is a file a scanner reads as instructions; editing it changes the execution "
                 "condition, not display metadata")
     suffix = PurePosixPath(name).suffix
@@ -537,7 +590,7 @@ def _write_transformed(original_source: Path, source: Path, original: ExportedTr
         shutil.rmtree(source, ignore_errors=True)
         raise
     return ExportedTree(hashes, list(original.stripped), list(original.skipped),
-                        list(original.instruction_files), byte_count)
+                        _instruction_files(hashes, original.instruction_files), byte_count)
 
 
 def _retained_cues(document: dict, source: Path, paths: list[str], instruction_files: list[str]) -> dict:
