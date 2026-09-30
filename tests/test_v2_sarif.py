@@ -936,7 +936,8 @@ def test_cwe_ids_come_from_taxonomy_relationships_result_taxa_and_tags():
         {"target": {"id": "1", "toolComponent": {"name": "CodeScanner"}}, "kinds": ["superset"]}]
     first, second = convert_run(log).claims
     assert first["native_cwe"] == ["CWE-89", "CWE-327", "CWE-79", "CWE-22"]
-    assert first["kind"] == "sql_injection"
+    # The kind is the lowest-numbered id the mapping knows, CWE-22, not the first one listed.
+    assert first["kind"] == "path_traversal"
     assert second["native_cwe"] == ["CWE-89", "CWE-327", "CWE-22"]
 
 
@@ -2135,6 +2136,30 @@ def test_one_semgrep_finding_scores_alike_through_the_adapter_json_path_and_a_sa
     # Usage is where they differ: a live run measures its wall time; a log reports none.
     assert (live_score["metrics"]["usage"]["wall_seconds"], sarif_score["metrics"]["usage"]) == (
         1.5, {"wall_seconds": None})
+
+
+def test_a_rule_declaring_two_cwes_gets_one_kind_through_the_adapter_and_the_import():
+    """Semgrep keeps a rule's own CWE order in its JSON and writes the tags sorted into its SARIF.
+
+    The kind was the first mapped CWE in whichever order a path read them: a rule declaring
+    CWE-918 before CWE-22 was ssrf through the adapter and path_traversal through the import.
+    """
+    declared = ["CWE-918: Server-Side Request Forgery (SSRF)",
+                "CWE-22: Improper Limitation of a Pathname to a Restricted Directory"]
+    payload = {"results": [{"check_id": "probe.url-open", "path": "src/app.py", "start": {"line": 5},
+                            "end": {"line": 5}, "extra": {"message": "request data reaches urlopen",
+                                                          "metadata": {"cwe": declared}, "severity": "WARNING"}}]}
+    (live,) = import_semgrep_results(payload).claims
+    log = minimal_log(results=[result_at("src/app.py", ruleId="probe.url-open",
+                                         message={"text": "request data reaches urlopen"})])
+    rule = log["runs"][0]["tool"]["driver"]["rules"][0]
+    rule["id"] = rule["name"] = "probe.url-open"
+    rule["properties"]["tags"] = sorted(declared) + ["security"]
+    (imported,) = convert_run(log).claims
+    assert (live["kind"], imported["kind"]) == ("path_traversal", "path_traversal")
+    # Each path lists the ids in the order it read them; the same ids, and now the same identity.
+    assert (live["native_cwe"], imported["native_cwe"]) == (["CWE-918", "CWE-22"], ["CWE-22", "CWE-918"])
+    assert scoring.claim_fingerprint(live) == scoring.claim_fingerprint(imported)
 
 
 semgrep_required = pytest.mark.skipif(

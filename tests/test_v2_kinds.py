@@ -11,7 +11,7 @@ import time
 import pytest
 
 from scaneval.adapters.semgrep import import_semgrep_results
-from scaneval.kinds import cwe_ids
+from scaneval.kinds import cwe_ids, kind_for_cwes
 
 
 # More digits than int() will read (4300 by default).
@@ -57,3 +57,27 @@ def test_reading_many_distinct_tags_takes_linear_time():
     elapsed = time.perf_counter() - started
     assert found == tags
     assert elapsed < 2, f"reading 50000 tags took {elapsed:.1f}s"
+
+
+@pytest.mark.parametrize("cwes,kind", [
+    (["CWE-918", "CWE-22"], "path_traversal"),
+    (["CWE-22", "CWE-918"], "path_traversal"),
+    (["CWE-89", "CWE-78", "CWE-22"], "path_traversal"),
+    # An id the mapping does not know never hides a higher one it does.
+    (["CWE-20", "CWE-918"], "ssrf"),
+    (["CWE-918", "CWE-20"], "ssrf"),
+    (["CWE-1000", "CWE-563", "CWE-564", "CWE-862"], "sql_injection"),
+    (["CWE-20", "CWE-79"], "unmapped"),
+    ([], "unmapped"),
+    # Numbers compare as numbers, not as text: CWE-100 is above CWE-78, though it sorts below it as text.
+    (["CWE-100", "CWE-78"], "command_injection"),
+    # Anything that is not a CWE-<n> identifier is tried after every one that is, in the order given.
+    (["not-a-cwe", "CWE-918"], "ssrf"),
+])
+def test_the_kind_is_the_lowest_numbered_cwe_the_mapping_knows_whatever_order_they_arrive_in(cwes, kind):
+    assert kind_for_cwes(cwes) == kind
+    assert kind_for_cwes(list(reversed(cwes))) == kind
+
+
+def test_the_kind_ignores_a_cwe_identifier_too_long_to_compare():
+    assert kind_for_cwes(["CWE-" + LONG_DIGITS, "CWE-918"]) == "ssrf"

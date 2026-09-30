@@ -2,6 +2,8 @@
 
 The mapping never decides truth. It only labels which canonical family a native
 allegation belongs to; anything unknown stays ``unmapped`` and keeps its native identity.
+When several CWE ids of one allegation map to different kinds, the lowest-numbered id the
+mapping knows decides, so no producer's ordering of them picks the kind.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ import json
 import re
 
 _CWE = re.compile(r"CWE-(\d+)", re.IGNORECASE)
+_CWE_TOKEN = re.compile(r"CWE-([0-9]+)")
 # CWE ids have four digits today. A tag can be any string, and int() refuses one of more than 4300
 # digits (a limit an environment can lower), so an id of more than this many digits is not read as a
 # CWE at all, whatever a rule or a result tags itself with.
@@ -50,9 +53,26 @@ def cwe_ids(values) -> list[str]:
     return list(seen)
 
 
+def _numeric_order(cwe: str) -> tuple[int, int]:
+    """Sort key for :func:`kind_for_cwes`: a ``CWE-<n>`` identifier by its number, anything else after them all."""
+    match = _CWE_TOKEN.fullmatch(cwe) if isinstance(cwe, str) else None
+    if match and len(match.group(1)) <= MAX_CWE_DIGITS:
+        return 0, int(match.group(1))
+    return 1, 0
+
+
 def kind_for_cwes(cwes: list[str]) -> str:
+    """The canonical kind of the lowest-numbered of *cwes* that the mapping knows, else ``unmapped``.
+
+    The choice does not depend on the order *cwes* arrive in. A rule that lists CWE-918 before
+    CWE-22, one that lists them the other way, and a producer that sorts what another keeps in order
+    all get the kind of CWE-22, so two paths that read one finding (the Semgrep adapter and the
+    SARIF import) cannot disagree about it. An id the mapping does not know never hides a higher
+    one it does. Anything that is not a ``CWE-<n>`` identifier is tried after every one that is,
+    in the order given.
+    """
     mapping = load_mapping()
-    for cwe in cwes:
+    for cwe in sorted(cwes, key=_numeric_order):
         kind = mapping["cwe"].get(cwe)
         if kind:
             return kind
