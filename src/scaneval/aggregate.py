@@ -1,10 +1,11 @@
-"""Corpus aggregation of frozen run directories.
+"""Corpus aggregation and paired comparison of frozen run directories.
 
 :func:`aggregate` reads one or more run directories and reports, for every system, the corpus metrics
 of ``docs/EVALUATION_MATH.md`` sections 1, 2, 4, and 5 under a frozen aggregation policy: full-output
 and budgeted known-target recall, control false-alarm rates with their missing-assessment bounds,
 vulnerable/fixed pair correctness, completion, claim volume, usage and cost, run variability, and
-cluster bootstrap intervals.
+cluster bootstrap intervals. :func:`compare` does the same for two systems that were assigned exactly
+the same frozen work and reports candidate minus baseline with paired intervals.
 
 What is read. A run directory is read through its 2.1 run manifest, the schedule that manifest names,
 and the configuration the run copied, each bound to the others by hash; a 2.0 manifest names no
@@ -76,6 +77,7 @@ from .schedule import SCHEDULE_KIND
 
 POLICY_KIND = "aggregation-policy"
 REPORT_KIND = "aggregate-report"
+COMPARISON_KIND = "comparison-report"
 SCHEMA_VERSION = "2.1"
 CONFIG_NAME = "run-config.json"
 
@@ -605,6 +607,10 @@ def _unavailable_interval() -> dict:
 
 def _only(values: list[Fraction]) -> Fraction:
     return values[0]
+
+
+def _minus(values: list[Fraction]) -> Fraction:
+    return values[1] - values[0]
 
 
 def _integers(part: _Ratio) -> tuple[dict[str, int], dict[str, int]]:
@@ -1541,6 +1547,205 @@ def aggregate(run_dirs: Iterable[str | PathLike[str]], *, policy: dict | None = 
     return validate_document(REPORT_KIND, report)
 
 
+# --- paired comparison --------------------------------------------------------------------------
+
+
+_CONTRACT_FIELDS = ("input_id", "mode", "profile", "snapshot_id", "change_set_id", "change_set", "blinding",
+                    "declared_tree_hash", "project", "workload", "component_role")
+
+
+def _contract(corpus: _Corpus, system_id: str) -> dict:
+    """The frozen evaluation contract of one system: every input it was assigned, as frozen, and the pairs.
+
+    Run ids are left out, so a baseline and a candidate scheduled by separate runs of one configuration
+    have one contract. Plan notes are prose and are left out; everything a metric reads is kept.
+    """
+    inputs, pairs = [], []
+    for run in corpus.runs:
+        if system_id not in run.system_ids:
+            continue
+        for row in run.schedule["inputs"]:
+            inputs.append({**{name: row[name] for name in _CONTRACT_FIELDS},
+                           "plan": {key: value for key, value in row["plan"].items() if key != "notes"},
+                           "repetitions": run.repetitions})
+        pairs.extend(run.schedule["pairs"])
+    return {"pack": corpus.runs[0].schedule["pack"], "inputs": sorted(inputs, key=canonical_json),
+            "pairs": sorted(pairs, key=canonical_json)}
+
+
+def _contract_gap(baseline: dict, candidate: dict, names: tuple[str, str]) -> str | None:
+    """The first difference between two frozen contracts, in words, or ``None`` when they are one."""
+    if canonical_json(baseline) == canonical_json(candidate):
+        return None
+    grouped = []
+    for contract in (baseline, candidate):
+        found: dict[str, list[dict]] = defaultdict(list)
+        for entry in contract["inputs"]:
+            found[entry["input_id"]].append(entry)
+        grouped.append(found)
+    left, right = grouped
+    for input_id in sorted(set(left) | set(right)):
+        if input_id not in right:
+            return f"input {input_id} is scheduled for {names[0]} but not for {names[1]}"
+        if input_id not in left:
+            return f"input {input_id} is scheduled for {names[1]} but not for {names[0]}"
+        if len(left[input_id]) != len(right[input_id]):
+            return (f"input {input_id} is scheduled in {len(left[input_id])} run(s) for {names[0]} and "
+                    f"{len(right[input_id])} for {names[1]}")
+        for mine, theirs in zip(left[input_id], right[input_id]):
+            for name in sorted(set(mine) | set(theirs)):
+                if canonical_json(mine.get(name)) == canonical_json(theirs.get(name)):
+                    continue
+                if name == "plan":
+                    differing = sorted(key for key in set(mine["plan"]) | set(theirs["plan"])
+                                       if canonical_json(mine["plan"].get(key))
+                                       != canonical_json(theirs["plan"].get(key)))
+                    return f"input {input_id} differs in its frozen plan ({', '.join(differing)})"
+                return f"input {input_id} differs in {name}"
+    return "their frozen vulnerable/fixed pairs differ"
+
+
+def _flatten(value: Any, prefix: str) -> dict[str, Any]:
+    """Dotted keys to leaves: nested objects are walked, and a list or an empty object is one leaf."""
+    if isinstance(value, dict) and value:
+        flat: dict[str, Any] = {}
+        for key in sorted(value):
+            flat.update(_flatten(value[key], f"{prefix}.{key}" if prefix else key))
+        return flat
+    return {prefix: value}
+
+
+def configuration_differences(baseline: dict, candidate: dict) -> list[dict]:
+    """Every dotted key whose value differs between two system configurations, sorted by key.
+
+    Values are compared as canonical JSON, so ``1`` and ``true`` differ. ``absent_in`` names the side
+    that has no such key at all, which is different from a key present with a null value. A key that
+    itself contains a dot is not escaped.
+    """
+    left, right = _flatten(baseline, ""), _flatten(candidate, "")
+    rows = []
+    for key in sorted(set(left) | set(right)):
+        if key in left and key in right and canonical_json(left[key]) == canonical_json(right[key]):
+            continue
+        absent = "baseline" if key not in left else "candidate" if key not in right else None
+        rows.append({"key": key, "baseline": left.get(key), "candidate": right.get(key), "absent_in": absent})
+    return rows
+
+
+def _difference(context: _Context, baseline: _SliceResult, candidate: _SliceResult) -> dict:
+    """Candidate minus baseline for one slice, each interval from the same replicates of both systems.
+
+    Differences are taken between exact values and rounded once. A difference is null when either
+    side is undefined, and so is its interval.
+    """
+    uncertainty = context.policy["uncertainty"]
+    for family in ("detection", "controls"):
+        mine, theirs = baseline.resamplers[family], candidate.resamplers[family]
+        if (mine is None) != (theirs is None) or (mine is not None and mine.universe != theirs.universe):
+            raise ContractError(f"slice {_slice_key(baseline.slice_)} resamples different {family} clusters "
+                                "for the two systems")
+
+    def minus(key: tuple[str, ...]) -> float | None:
+        left, right = baseline.exact.get(key), candidate.exact.get(key)
+        return None if left is None or right is None else float(right - left)
+
+    def paired(key: tuple[str, ...]) -> dict:
+        left, right = baseline.parts.get(key), candidate.parts.get(key)
+        if left is None or right is None or left.value is None or right.value is None:
+            return {"value": None, "interval": _unavailable_interval()}
+        return {"value": float(right.value - left.value),
+                "interval": _bootstrap([left, right], _minus, baseline.resamplers[key[0]], uncertainty)}
+
+    detection = []
+    for left, right in zip(baseline.block["detection"], candidate.block["detection"]):
+        weighting = left["weighting"]
+        if left["state"] != "ok" or right["state"] != "ok":
+            detection.append({"weighting": weighting, "state": "unavailable",
+                              "reason": left["reason"] or right["reason"], "full_output_recall": None,
+                              "recall_at_budget": [], "pair_correctness": None, "pair_availability": None,
+                              "completed_mass": None, "assessable_mass": None})
+            continue
+        budgets = []
+        for row in left["recall_at_budget"]:
+            value = paired(("detection", weighting, f"recall_at_budget/{row['budget']}"))
+            lower = paired(("detection", weighting, f"recall_at_budget_lower/{row['budget']}"))
+            budgets.append({"budget": row["budget"], "value": value["value"], "lower_bound": lower["value"],
+                            "interval": value["interval"]})
+        detection.append({
+            "weighting": weighting, "state": "ok", "reason": None,
+            "full_output_recall": paired(("detection", weighting, "full_output_recall")),
+            "recall_at_budget": budgets,
+            "pair_correctness": paired(("detection", weighting, "pair_correctness")),
+            "pair_availability": minus(("detection", weighting, "pair_availability")),
+            "completed_mass": minus(("detection", weighting, "completed_mass")),
+            "assessable_mass": minus(("detection", weighting, "assessable_mass"))})
+    controls = {}
+    for name in CONTROL_CLASSES:
+        controls[name] = {"resolved_rate": paired(("controls", name, "resolved_rate")),
+                          "completed_upper": paired(("controls", name, "completed_upper")),
+                          "completed_mass": minus(("controls", name, "completed_mass")),
+                          "assessable_mass": minus(("controls", name, "assessable_mass"))}
+    return {"slice": baseline.block["slice"], "detection": detection, "controls": controls,
+            "completion": minus(("completion",))}
+
+
+def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate: str,
+            policy: dict | None = None) -> dict:
+    """The validated comparison report of *candidate* against *baseline* over *run_dirs*.
+
+    The two systems must have been assigned exactly the same frozen work: the same inputs with the same
+    mode, profile, snapshot or change set, blinding map, declared tree hash, frozen plan items, levels,
+    scope and budgets, the same repetitions, the same pairs, and the same pack. Anything else is refused
+    before a metric is computed ("the systems do not share the frozen evaluation contract"), so a
+    system cannot improve its numbers by being assigned less. Everything :func:`aggregate` refuses is
+    refused here too. Differences are candidate minus baseline; each interval resamples the same
+    clusters for both systems in every replicate.
+    """
+    if baseline == candidate:
+        raise ContractError("the baseline and the candidate are one system; name two systems to compare")
+    context = _Context(_load_corpus(run_dirs), resolve_policy(policy))
+    corpus = context.corpus
+    for system_id in (baseline, candidate):
+        if system_id not in corpus.systems:
+            raise ContractError(f"system {system_id} is not scheduled in any of the given runs")
+    contracts = {system_id: _contract(corpus, system_id) for system_id in (baseline, candidate)}
+    gap = _contract_gap(contracts[baseline], contracts[candidate], (baseline, candidate))
+    if gap is not None:
+        raise ContractError(f"the systems do not share the frozen evaluation contract: {gap}")
+    views = []
+    for mode, profile in _view_keys(corpus, (baseline,)):
+        facts = _view_facts(corpus, mode, profile, (baseline,))
+        left = _evaluate_system(context, mode, profile, baseline, facts["review_budgets"])
+        right = _evaluate_system(context, mode, profile, candidate, facts["review_budgets"])
+        _refuse_mixed_scopes(mode, profile, (left, right))
+        views.append({
+            "mode": mode, "profile": profile,
+            "evidence_scope": {"baseline": left.block["evidence_scope"],
+                               "candidate": right.block["evidence_scope"]},
+            "inputs": facts["inputs"], "canonical_targets": facts["canonical_targets"],
+            "canonical_controls": facts["canonical_controls"],
+            "systems": {"baseline": left.block, "candidate": right.block},
+            "differences": [_difference(context, mine, theirs)
+                            for mine, theirs in zip(left.slices, right.slices)],
+            "warnings": _view_warnings(facts, (left, right))})
+    structure = contracts[baseline]
+    report = {
+        "schema_version": SCHEMA_VERSION, "evaluator_version": __version__,
+        "policy": context.policy, "policy_sha256": canonical_sha256(context.policy),
+        "runs": [_run_row(corpus, run) for run in corpus.runs
+                 if baseline in run.system_ids or candidate in run.system_ids],
+        "baseline": _system_row(baseline, corpus.systems[baseline]),
+        "candidate": _system_row(candidate, corpus.systems[candidate]),
+        "contract": {"structure_sha256": canonical_sha256(structure), "inputs": len(structure["inputs"]),
+                     "pairs": len(structure["pairs"])},
+        "configuration_differences": configuration_differences(corpus.systems[baseline]["configuration"],
+                                                               corpus.systems[candidate]["configuration"]),
+        "views": views,
+        "notes": _notes(context.policy),
+    }
+    return validate_document(COMPARISON_KIND, report)
+
+
 # --- summaries for the command line -------------------------------------------------------------
 
 
@@ -1573,4 +1778,23 @@ def summary(report: dict) -> list[str]:
                                f"{_interval_text(metric['interval'])}")
             lines.append(f"  {system['system_id']} scope={system['evidence_scope']} full_output_recall "
                          f"{' '.join(recalls)} completion={_number(whole['completion']['value'])}")
+    return lines
+
+
+def comparison_summary(report: dict) -> list[str]:
+    """One line per view and weighting of a comparison: the full-output recall difference."""
+    lines = [f"baseline={report['baseline']['system_id']} candidate={report['candidate']['system_id']} "
+             f"configuration_differences={len(report['configuration_differences'])}"]
+    for view in report["views"]:
+        scope = view["evidence_scope"]
+        lines.append(f"view {view['mode']}/{view['profile']} scope baseline={scope['baseline']} "
+                     f"candidate={scope['candidate']}")
+        for block in view["differences"][0]["detection"]:
+            if block["state"] != "ok":
+                lines.append(f"  {block['weighting']} unavailable")
+                continue
+            metric = block["full_output_recall"]
+            value = "n/a" if metric["value"] is None else f"{metric['value']:+.3f}"
+            lines.append(f"  {block['weighting']} full_output_recall difference={value} "
+                         f"{_interval_text(metric['interval'])}")
     return lines

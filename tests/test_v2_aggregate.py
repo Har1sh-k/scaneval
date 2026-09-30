@@ -1037,6 +1037,113 @@ def test_a_schedule_that_does_not_bind_to_the_run_configuration_is_refused(tmp_p
         aggregate.aggregate([run])
 
 
+# --- paired comparison --------------------------------------------------------------------------
+
+
+def comparison_run(tmp_path: Path, run_id: str = "run-compare") -> Path:
+    """Five projects, one target each; the baseline detects T-p1 and T-p2, the candidate T-p1 to T-p4.
+
+    The candidate's configuration differs in config.knob, adds config.depth.max, and names a model.
+    """
+    outcomes = {(f"p{index}", "baseline", 1): scan(hits={f"T-p{index}": 1}) for index in (1, 2)}
+    outcomes.update({(f"p{index}", "candidate", 1): scan(hits={f"T-p{index}": 1}) for index in (1, 2, 3, 4)})
+    candidate = {"config": {"knob": 2, "depth": {"max": 3}}, "model_id": "vendor/model-y"}
+    return write_run(tmp_path, run_id, five_project_inputs(), systems=("baseline", "candidate"), outcomes=outcomes,
+                     configs={"candidate": candidate})
+
+
+def test_a_paired_comparison_reports_the_hand_calculated_difference_with_a_reproducible_interval(tmp_path):
+    """Candidate minus baseline on one frozen workload, with the same replicates for both systems.
+
+    - Baseline recall 2/5, candidate 4/5, difference 2/5 under equal_target and equal_project alike.
+    - Each replicate draws five projects with replacement; p3 and p4 are the only projects where the
+      two systems differ (by 1 each), so a replicate's difference is (draws of p3 + draws of p4)/5.
+      With 200 replicates the interval is the 5th and 195th sorted values, recomputed here from the
+      stream the policy's seed and the label bootstrap/full/standard/all/targets name.
+    - Running the comparison again gives the same bytes.
+    """
+    run = comparison_run(tmp_path)
+
+    report = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=policy(seed=7))
+
+    assert validate_document("comparison-report", report) is report
+    difference = next(item for item in view(report)["differences"] if item["slice"]["dimension"] == "all")
+    for weighting in ("equal_target", "equal_project"):
+        block = detection(difference, weighting)
+        assert block["full_output_recall"]["value"] == 0.4
+    assert detection(slice_of(view(report)["systems"]["baseline"]))["full_output_recall"]["value"] == 0.4
+    assert detection(slice_of(view(report)["systems"]["candidate"]))["full_output_recall"]["value"] == 0.8
+    replicates = share_of_draws(7, "targets", [f"acme/p{index}" for index in range(1, 6)],
+                                {"acme/p3", "acme/p4"})
+    interval = detection(difference)["full_output_recall"]["interval"]
+    assert interval == {"state": "ok", "lower": replicates[4], "upper": replicates[194], "clusters": 5}
+    assert detection(difference)["pair_correctness"] == {"value": None, "interval": {
+        "state": "unavailable", "lower": None, "upper": None, "clusters": 0}}
+    assert difference["completion"] == 0.0
+    assert difference["controls"]["capability_safe"]["resolved_rate"]["value"] is None
+    again = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=policy(seed=7))
+    assert canonical_json(again) == canonical_json(report)
+
+
+def test_configuration_differences_are_listed_as_dotted_keys(tmp_path):
+    report = aggregate.compare([comparison_run(tmp_path)], baseline="baseline", candidate="candidate",
+                               policy=policy())
+
+    assert report["configuration_differences"] == [
+        {"key": "config.depth.max", "baseline": None, "candidate": 3, "absent_in": "baseline"},
+        {"key": "config.knob", "baseline": 1, "candidate": 2, "absent_in": None},
+        {"key": "model_id", "baseline": None, "candidate": "vendor/model-y", "absent_in": None}]
+    assert report["baseline"]["system_id"] == "baseline" and report["candidate"]["model_id"] == "vendor/model-y"
+    assert report["contract"]["inputs"] == 5 and report["contract"]["pairs"] == 0
+
+
+def test_systems_scheduled_by_separate_runs_compare_when_their_frozen_work_is_the_same(tmp_path):
+    """Run ids are not part of the contract: the same inputs, plans, and repetitions compare."""
+    base = write_run(tmp_path / "a", "run-base", five_project_inputs(), systems=("baseline",),
+                     outcomes={("p1", "baseline", 1): scan(hits={"T-p1": 1})})
+    cand = write_run(tmp_path / "b", "run-cand", five_project_inputs(), systems=("candidate",),
+                     outcomes={("p1", "candidate", 1): scan(hits={"T-p1": 1}),
+                               ("p2", "candidate", 1): scan(hits={"T-p2": 1})})
+
+    report = aggregate.compare([cand, base], baseline="baseline", candidate="candidate", policy=policy())
+
+    difference = next(item for item in view(report)["differences"] if item["slice"]["dimension"] == "all")
+    assert detection(difference)["full_output_recall"]["value"] == 0.2
+    assert [run["run_id"] for run in report["runs"]] == ["run-base", "run-cand"]
+
+
+def test_a_candidate_whose_schedule_drops_an_input_is_refused(tmp_path):
+    """Assigning the candidate less work cannot improve its numbers: the comparison is refused."""
+    base = write_run(tmp_path / "a", "run-base", five_project_inputs(), systems=("baseline",))
+    cand = write_run(tmp_path / "b", "run-cand", five_project_inputs()[:4], systems=("candidate",))
+
+    with pytest.raises(ContractError, match="do not share the frozen evaluation contract: input p5 is scheduled "
+                                           "for baseline but not for candidate"):
+        aggregate.compare([base, cand], baseline="baseline", candidate="candidate")
+
+
+def test_a_candidate_whose_frozen_plan_items_differ_is_refused(tmp_path):
+    changed = five_project_inputs()
+    changed[0]["plan"]["targets"][0]["validation_level"] = "L4"
+    base = write_run(tmp_path / "a", "run-base", five_project_inputs(), systems=("baseline",))
+    cand = write_run(tmp_path / "b", "run-cand", changed, systems=("candidate",))
+    fewer_repetitions = write_run(tmp_path / "c", "run-twice", five_project_inputs(), systems=("candidate",),
+                                  repetitions=2)
+
+    with pytest.raises(ContractError, match=r"input p1 differs in its frozen plan \(targets\)"):
+        aggregate.compare([base, cand], baseline="baseline", candidate="candidate")
+    with pytest.raises(ContractError, match="input p1 differs in repetitions"):
+        aggregate.compare([base, fewer_repetitions], baseline="baseline", candidate="candidate")
+
+
+def test_a_comparison_needs_two_scheduled_systems(tmp_path):
+    run = comparison_run(tmp_path)
+    with pytest.raises(ContractError, match="one system"):
+        aggregate.compare([run], baseline="baseline", candidate="baseline")
+    with pytest.raises(ContractError, match="system ghost is not scheduled"):
+        aggregate.compare([run], baseline="baseline", candidate="ghost")
+
+
 # --- a run directory written by the runner ------------------------------------------------------
 
 
