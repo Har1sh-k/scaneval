@@ -681,6 +681,52 @@ def test_reviews_disagreement_adjudication_and_revisions_are_chained_and_resolve
     assert complete["evidence_grade"] == "double_review_or_adjudicated" and complete["review_entries"] == 12
 
 
+def test_an_adjudication_reaches_the_top_grade_only_with_independent_reviews_by_other_names(tmp_path):
+    """Four units, all drawn (a census, every weight 1), each ending in an adjudicator's verdict.
+
+    k1: the adjudicator alone, true. k2: the same person as an independent reviewer (true) and then as the
+    adjudicator (false). k3: A independent (true), then the adjudicator (true). k4: A (true) and B (false)
+    disagree, and the adjudicator says false. The adjudicator's verdict decides every class, so T = 2 (k1, k3),
+    F = 2 (k2, k4), and resolved precision is 2/4 = 0.5.
+    - k1 and k2 have no independent review by another name, so they rest on one person: single_review.
+    - k3 and k4 do: adjudicated. The grade is single_review while k1 or k2 is there.
+    Once A reviews k1 and k2 as an independent, each has an independent review by a name other than the
+    adjudicator's, both count as adjudicated, and the grade is the top one.
+    """
+    sample = precision.draw_sample(precision.build_frame([one_system_run(tmp_path, 4)], population="full"),
+                                   size=4, seed=1)
+    unit = {f"k{index}": f"run-one/snap-a__sys-a__r1/k{index}" for index in range(1, 5)}
+    solo = "Only Person (fictional)"
+    steps = [("k1", solo, "adjudicator", "true"),
+             ("k2", solo, "independent", "true"), ("k2", solo, "adjudicator", "false"),
+             ("k3", REVIEWER_A, "independent", "true"), ("k3", ADJUDICATOR, "adjudicator", "true"),
+             ("k4", REVIEWER_A, "independent", "true"), ("k4", REVIEWER_B, "independent", "false"),
+             ("k4", ADJUDICATOR, "adjudicator", "false")]
+    reviews = None
+    for key, reviewer, role, outcome in steps:
+        reviews = precision.record_review(sample, reviews, unit_id=unit[key], reviewer=reviewer, role=role,
+                                          outcome=outcome, clock=CLOCK)
+
+    estimated = precision.estimate(sample, reviews)
+
+    assert {u["unit_id"]: (u["class"], u["basis"]) for u in estimated["units"]} == {
+        unit["k1"]: ("true", "single_review"), unit["k2"]: ("false", "single_review"),
+        unit["k3"]: ("true", "adjudicated"), unit["k4"]: ("false", "adjudicated")}
+    assert estimated["sample"]["bases"] == {"adjudicated": 2, "double_review": 0, "single_review": 2,
+                                            "disagreement": 0, "nonresponse": 0}
+    assert estimated["precision_resolved"] == 0.5 and estimated["evidence_grade"] == "single_review"
+
+    for key in ("k1", "k2"):
+        reviews = precision.record_review(sample, reviews, unit_id=unit[key], reviewer=REVIEWER_A,
+                                          role="independent", outcome="true", clock=LATER)
+    checked = precision.estimate(sample, reviews)
+    assert {u["unit_id"]: (u["class"], u["basis"]) for u in checked["units"]} == {
+        unit["k1"]: ("true", "adjudicated"), unit["k2"]: ("false", "adjudicated"),
+        unit["k3"]: ("true", "adjudicated"), unit["k4"]: ("false", "adjudicated")}
+    assert checked["sample"]["bases"]["adjudicated"] == 4
+    assert checked["evidence_grade"] == "double_review_or_adjudicated"
+
+
 def test_an_edited_reordered_or_truncated_review_history_is_refused(tmp_path):
     sample = precision.draw_sample(precision.build_frame([one_system_run(tmp_path, 2)], population="full"),
                                    size=2, seed=1)

@@ -1804,6 +1804,32 @@ def test_a_review_by_one_person_meets_a_single_review_grade_and_not_a_double_one
     assert strict["outcome"] == "inconclusive" and relaxed["outcome"] == "pass"
 
 
+def test_one_person_using_the_adjudicator_role_does_not_meet_the_double_review_grade(corpus):
+    """Every sampled claim is judged by one fictional person as an adjudicator, and no one else reviewed any.
+
+    Nothing independent stands behind a single verdict, so the review is a single review whatever role its author
+    took, and a requirement for the double-review grade is unresolved.
+    """
+    frame = precision.build_frame([corpus["run"]], population="first_b", budget=5, systems=["improved"])
+    sample = precision.draw_sample(frame, size=len(frame["units"]), seed=11)
+    verdict = verdict_for("improved")
+    reviews = None
+    for entry in sample["selected"]:
+        reviews = precision.record_review(sample, reviews, unit_id=entry["unit_id"], reviewer=REVIEWER,
+                                          role="adjudicator", outcome=verdict(entry["unit_id"]),
+                                          note="fixture review by a fictional person", clock=CLOCK)
+    alone = precision.estimate(sample, reviews)
+    assert alone["precision_resolved"] == 0.8 and alone["evidence_grade"] == "single_review"
+
+    decision = decide(corpus, gate_policy(precision=precision_block()), precision_candidate=alone)
+
+    item = requirement(decision, "precision.min_evidence_grade")
+    assert item["status"] == "inconclusive"
+    assert item["explanation"] == (
+        "the review's evidence grade is single_review, below the required double_review_or_adjudicated: 10 "
+        "sampled claim(s) rest on a single reviewer")
+
+
 def test_an_estimate_whose_sample_leaves_strata_unsampled_does_not_meet_a_coverage_requirement(corpus):
     """Ten one-claim inputs stratified by input with a sample of 5: five strata draw a unit, five draw none.
 

@@ -74,7 +74,7 @@ scaneval precision estimate sample.json --reviews reviews.json --output estimate
   - A reviewer who changes their mind records a new entry, and their earlier one stays in the history.
   - Appends are not locked, so record one at a time.
 - **Resolution** of each sampled unit. "Latest" means latest in chain order, never by timestamp. Reviewers are distinguished by their names exactly as written.
-  - The latest adjudication wins (`adjudicated`).
+  - The latest adjudication decides the unit's class. It is `adjudicated` evidence only when at least one independent reviewer other than the adjudicator also reviewed the unit. An adjudication with no independent review by another name rests on one person: the class is the adjudicator's and the basis is `single_review`, whatever role the entry states.
   - Otherwise each independent reviewer's latest entry counts once. One reviewer gives `single_review`; two or more who agree give `double_review`.
   - Any disagreement leaves the unit unresolved (`disagreement`) until an adjudicator records an outcome.
   - A unit with no review is unresolved (`nonresponse`).

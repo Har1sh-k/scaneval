@@ -659,12 +659,14 @@ def record_review(sample: dict, reviews: dict | None, *, unit_id: str, reviewer:
 def _resolve(sample: dict, reviews: dict | None) -> list[dict]:
     """Every sampled unit's final class and its basis, by the documented rule, in unit-id order.
 
-    The latest adjudication of a unit wins. Otherwise each independent reviewer's latest entry
-    counts once: one reviewer gives ``single_review``; two or more who all agree give
-    ``double_review``; any disagreement leaves the unit ``unresolved`` (``disagreement``) until an
-    adjudicator records an outcome; no review leaves it ``unresolved`` (``nonresponse``). "Latest"
-    is chain order, never a timestamp, and reviewers are told apart by their stated names exactly as
-    written.
+    The latest adjudication of a unit decides its class, and is ``adjudicated`` evidence only when an
+    independent reviewer other than that adjudicator also reviewed the unit: an adjudication with no
+    independent review by another name rests on one person, so the unit is ``single_review`` whatever
+    role the entry states. Without an adjudication each independent reviewer's latest entry counts
+    once: one reviewer gives ``single_review``; two or more who all agree give ``double_review``; any
+    disagreement leaves the unit ``unresolved`` (``disagreement``) until an adjudicator records an
+    outcome; no review leaves it ``unresolved`` (``nonresponse``). "Latest" is chain order, never a
+    timestamp, and reviewers are told apart by their stated names exactly as written.
     """
     history: dict[str, list[dict]] = defaultdict(list)
     for entry in reviews["reviews"] if reviews is not None else []:
@@ -678,7 +680,9 @@ def _resolve(sample: dict, reviews: dict | None) -> list[dict]:
             if entry["role"] == "independent":
                 latest[entry["reviewer"]] = entry["outcome"]
         if adjudications:
-            outcome, basis = adjudications[-1]["outcome"], "adjudicated"
+            judge = adjudications[-1]
+            outcome = judge["outcome"]
+            basis = "adjudicated" if any(name != judge["reviewer"] for name in latest) else "single_review"
         elif not latest:
             outcome, basis = "unresolved", "nonresponse"
         elif len(set(latest.values())) > 1:
