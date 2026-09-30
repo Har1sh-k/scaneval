@@ -405,8 +405,9 @@ def test_mock_run_records_the_mock_route_and_its_policy_note(tmp_path):
     assert any("no model process is spawned" in note for note in execution["notes"])
     # 2.2.0 is the release that made the capture matrix depend on the harness build: the same
     # adapter now reports different categories against different harnesses, which is a change a
-    # reader of an old execution record must be able to date.
-    assert execution["adapter"]["version"] == "2.2.0"
+    # reader of an old execution record must be able to date. 2.3.0 is the release that runs the
+    # harness's pr mode as well (changed deliberately from the value 2.2.0 this line pinned).
+    assert execution["adapter"]["version"] == "2.3.0"
 
 
 # Where an observation came from, as the trace event contract spells it. Two of these are this
@@ -481,7 +482,7 @@ def test_the_runner_hooks_make_every_cli_attempt_a_paired_request_and_response(t
     requests = [event for event in events if event["type"] == "model.request"]
     responses = [event for event in events if event["type"] == "model.response"]
 
-    assert output["driver_version"] == "2.2.0"
+    assert output["driver_version"] == "2.3.0"
     assert output["hooks"] == {"runner": 1, "engine": 1}
     assert len(requests) == output["model_attempts"] >= output["model_calls"] >= 1
     for event in requests + responses:
@@ -1184,7 +1185,7 @@ def _stub_driver(monkeypatch, records: dict[str, str], *, state_dir: str = ".sec
     def fake_run_command(argv, *, cwd, timeout_seconds, env, stdout_path, stderr_path, stdin_text=None):
         config = json.loads(Path(argv[-1]).read_text(encoding="utf-8"))
         if observed is not None:
-            observed.update({"argv": list(argv), "env": dict(env)})
+            observed.update({"argv": list(argv), "env": dict(env), "config": config})
         state = Path(config["repo_path"]) / state_dir
         if state_as_link is not None:
             state_as_link.mkdir(parents=True, exist_ok=True)
@@ -1225,7 +1226,8 @@ def _stubbed_bundle(tmp_path: Path, monkeypatch, records: dict[str, str], *, run
                     trace_mode: str = "off", output: dict | None = None,
                     block_plan_staging: bool = False, state_as_link: Path | None = None,
                     stage_as_link: Path | None = None, observed: dict | None = None,
-                    output_as_pipe: bool = False, runner: str = "mock") -> Path:
+                    output_as_pipe: bool = False, runner: str = "mock",
+                    prepared: PreparedInput | None = None) -> Path:
     root = _fake_harness_root(tmp_path)
     sdk = tmp_path / "observer-sdk.js"
     sdk.write_text("// stub\n", encoding="utf-8")
@@ -1240,9 +1242,9 @@ def _stubbed_bundle(tmp_path: Path, monkeypatch, records: dict[str, str], *, run
     _stub_driver(monkeypatch, records, plan_as_link=plan_as_link, output=output,
                  block_plan_staging=block_plan_staging, state_as_link=state_as_link,
                  stage_as_link=stage_as_link, observed=observed, output_as_pipe=output_as_pipe)
-    return run_invocation(prepared=_prepared(tmp_path), adapter=adapter, spec=spec, preparation=preparation,
-                          out_dir=tmp_path / "out", run_id=run_id, timeout_seconds=60, trace_mode=trace_mode,
-                          network_policy="none", clock=CLOCK)
+    return run_invocation(prepared=prepared or _prepared(tmp_path), adapter=adapter, spec=spec,
+                          preparation=preparation, out_dir=tmp_path / "out", run_id=run_id, timeout_seconds=60,
+                          trace_mode=trace_mode, network_policy="none", clock=CLOCK)
 
 
 USAGE_OUTPUT = {**DRIVER_OUTPUT, "observed_routes": ["claude"], "hooks": {"runner": 1, "engine": 1},
@@ -2104,6 +2106,204 @@ def test_a_workspace_swapped_after_the_enclosure_was_captured_cannot_move_the_bo
     assert any("does not resolve inside the workspace" in note for note in imported.notes)
     assert not (raw / "harness-findings").exists(), "nothing from the substituted tree was staged"
     assert [path.name for path in (elsewhere / "findings").iterdir()] == ["planted.md"]
+
+
+# --- PR mode: the harness's pr mode over the synthetic base and head commits ---------------------------
+
+BASE_SERVER = ("const express = require('express');\nconst app = express();\n"
+               "app.get('/', (req, res) => res.send('ok'));\napp.listen(3000);\n")
+HELPER_JS = "module.exports = function helper() { return 'shared by the rename'; };\n"
+PR_CHANGES = {"added": ["src/routes.js"], "deleted": ["docs/old.md"], "modified": ["src/server.js"],
+              "renamed": [["lib/a.js", "lib/b.js"]], "mode_changed": ["bin/start.sh"]}
+
+
+def _pr_prepared(tmp_path: Path) -> PreparedInput:
+    """A real PR input over a small JavaScript project: an edit, an addition, a deletion, a rename, a mode change.
+
+    The head is the fixture :func:`_prepared` writes plus a routes module, and the base is that
+    project before the pull request added the shell routes. The synthetic commits are the ones
+    preparation computes, so the workspace history the run builds must reproduce them.
+    """
+    import dataclasses
+
+    from scaneval.contracts import pr_diff_sha256, pr_input_hash
+    from scaneval.materialize import compute_pr_history, diff_trees
+
+    head, base = tmp_path / "trial" / "source", tmp_path / "trial" / "base" / "source"
+    for root, server in ((base, BASE_SERVER), (head, _prepared(tmp_path / "scratch").source_dir / "src" / "server.js")):
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "server.js").write_text(server if isinstance(server, str) else server.read_text(encoding="utf-8"),
+                                                encoding="utf-8")
+        (root / "package.json").write_text('{"name": "pilot-fixture", "version": "1.0.0"}\n', encoding="utf-8")
+        (root / "README.md").write_text("# fixture\n", encoding="utf-8")
+    (base / "docs").mkdir()
+    (base / "docs" / "old.md").write_text("removed by the pull request\n", encoding="utf-8")
+    (base / "lib").mkdir()
+    (base / "lib" / "a.js").write_text(HELPER_JS, encoding="utf-8")
+    (base / "bin").mkdir()
+    (base / "bin" / "start.sh").write_text("#!/bin/sh\necho start\n", encoding="utf-8")
+    (head / "src" / "routes.js").write_text("module.exports = { added: true };\n", encoding="utf-8")
+    (head / "lib").mkdir()
+    (head / "lib" / "b.js").write_text(HELPER_JS, encoding="utf-8")
+    (head / "bin").mkdir()
+    (head / "bin" / "start.sh").write_text("#!/bin/sh\necho start\n", encoding="utf-8")
+    (head / "bin" / "start.sh").chmod(0o755)
+    head_hash, base_hash = hash_exported_tree(head)["tree_hash"], hash_exported_tree(base)["tree_hash"]
+    changes = diff_trees(base, head)
+    assert changes == PR_CHANGES
+    digest = pr_diff_sha256(base_hash, head_hash, changes)
+    history = compute_pr_history(head, base, changes)
+    pr = {"change_set_id": "cs-1", "base_snapshot_id": "snap-base", "head_snapshot_id": "snap-head",
+          "boundary": "introducing", "review_scope": "changed_files", "base_tree_hash": base_hash,
+          "head_tree_hash": head_hash, "diff_sha256": digest, "changes": changes,
+          "base_commit": history["base_commit"], "head_commit": history["head_commit"],
+          "history": {key: history[key] for key in ("messages", "identity", "date")}, "prepared_state": "fresh"}
+    return PreparedInput("fixture-pr", head, head_hash, ("javascript",), {"source": {"commit": "fixture"}},
+                         mode="pr", input_hash=pr_input_hash(base_hash, head_hash, digest), pr=pr,
+                         base_source_dir=base)
+
+
+PR_OUTPUT = {**DRIVER_OUTPUT, "mode": "pr",
+             "summary": {"changeScan": {"llmCalls": 2, "failedCalls": 0, "status": "complete",
+                                        "hypothesisCoverage": 1.0},
+                         "runtimeProfile": "lite", "degraded": False}}
+
+
+def test_the_adapter_declares_full_and_pr_scans():
+    adapter = get_adapter("llm-harness")
+
+    assert adapter.scan_modes == frozenset({"full", "pr"})
+    assert adapter.adapter_version == "2.3.0"
+
+
+def test_a_pr_request_runs_the_harness_in_pr_mode_between_the_commits_the_request_names(tmp_path, monkeypatch):
+    prepared = _pr_prepared(tmp_path)
+    observed: dict = {}
+
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {"a.md": FINDING}, prepared=prepared, output=PR_OUTPUT,
+                             observed=observed)
+
+    config = observed["config"]
+    request = json.loads((bundle / "request.json").read_text(encoding="utf-8"))
+    assert request["input"]["mode"] == "pr"
+    assert config["mode"] == "pr", "the harness mode follows the request, whatever the configuration"
+    assert (config["base_ref"], config["head_ref"]) == (prepared.pr["base_commit"], prepared.pr["head_commit"]) == (
+        request["input"]["pr"]["base"], request["input"]["pr"]["head"]), \
+        "the engine is told the two commits the request names and never resolves a base of its own"
+    assert set(config) == {"harness_root", "engine_entry", "runner_entry", "mock_entry", "observer_sdk",
+                           "repo_path", "mode", "base_ref", "head_ref", "model", "runner", "trace_mode",
+                           "run_id", "producer_id", "output_path", "progress_path", "flush_timeout_ms"}, \
+        "pr writability and trust are left unset, so the engine keeps its own default"
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "success" and result["location_basis"] == "pr_head"
+    assert [claim["claim_id"] for claim in result["claims"]] == ["SV-AUTH-AUTHBYPASS-001"]
+    assert execution["provenance"]["mode"] == "pr" and execution["adapter"]["version"] == "2.3.0"
+    assert execution["provenance"]["pr"]["prepared_state"] == "fresh"
+    assert any(note.startswith("Prepared state: fresh.") for note in execution["notes"])
+    assert all(not note.startswith("Prepared state") for note in
+               load_document(_stubbed_bundle(tmp_path / "full", monkeypatch, {"a.md": FINDING}) / "execution.json",
+                             "execution-record")["notes"]), "a full run makes no such statement"
+
+
+def test_a_full_request_keeps_running_bootstrap_and_hands_the_driver_no_refs(tmp_path, monkeypatch):
+    observed: dict = {}
+
+    _stubbed_bundle(tmp_path, monkeypatch, {"a.md": FINDING}, observed=observed)
+
+    assert observed["config"]["mode"] == "bootstrap"
+    assert "base_ref" not in observed["config"] and "head_ref" not in observed["config"]
+
+
+@pytest.mark.parametrize(("summary", "status", "code"), [
+    ({"changeScan": {"llmCalls": 2, "failedCalls": 0, "status": "complete", "hypothesisCoverage": 1.0}},
+     "success", None),
+    ({"changeScan": {"llmCalls": 3, "failedCalls": 3, "status": "complete"}}, "partial", "llm_path_failed"),
+    ({"changeScan": {"llmCalls": 2, "failedCalls": 0, "status": "inconclusive", "reasons": ["quota"]}},
+     "partial", "harness_inconclusive"),
+    ({"changeScan": {"llmCalls": 0, "failedCalls": 0, "status": "skipped", "reasons": [],
+                     "advisories": ["no_scan_required"]}}, "success", None),
+    # A bootstrap record beside a change scan is not what a pr run reports; it is never read.
+    ({"changeScan": {"llmCalls": 1, "failedCalls": 0, "status": "complete"},
+      "bootstrapScan": {"llmCalls": 9, "failedCalls": 9, "status": "inconclusive"}}, "success", None),
+], ids=["complete", "every-call-failed", "inconclusive", "skipped-by-the-harness", "bootstrap-record-ignored"])
+def test_a_pr_run_reads_its_status_and_call_counts_from_the_change_scan(tmp_path, monkeypatch, summary, status, code):
+    output = {**PR_OUTPUT, "summary": {**summary, "runtimeProfile": "lite", "degraded": False}}
+
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {"a.md": FINDING}, prepared=_pr_prepared(tmp_path),
+                             output=output)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == status and (result.get("error") or {}).get("code") == code
+    counted = summary["changeScan"]
+    assert any(f"llm_calls={counted['llmCalls']} failed_calls={counted['failedCalls']}" in note
+               for note in execution["notes"]), "the self-report note is the change scan's own numbers"
+    if counted.get("status") == "skipped":
+        assert any("skips is its native scope, not a failure of this run" in note for note in execution["notes"])
+
+
+def test_a_bootstrap_run_never_reads_a_change_scan_record(tmp_path, monkeypatch):
+    output = {**DRIVER_OUTPUT, "summary": {
+        "changeScan": {"llmCalls": 9, "failedCalls": 9, "status": "inconclusive"},
+        "bootstrapScan": {"llmCalls": 1, "failedCalls": 0, "status": "complete"},
+        "runtimeProfile": "lite", "degraded": False}}
+
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {"a.md": FINDING}, output=output)
+
+    assert load_document(bundle / "result.json", "scan-result")["status"] == "success"
+
+
+def test_a_pr_run_whose_summary_carries_no_change_scan_says_so_instead_of_reading_zero_calls_as_a_fact(tmp_path,
+                                                                                                      monkeypatch):
+    output = {**PR_OUTPUT, "summary": {"runtimeProfile": "lite", "degraded": False, "newFindings": []}}
+
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {}, prepared=_pr_prepared(tmp_path), output=output)
+
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert any("carried no changeScan record" in note for note in execution["notes"])
+
+
+def test_a_pr_request_the_adapter_cannot_honour_is_refused_and_never_run_as_a_full_scan(tmp_path):
+    adapter = get_adapter("llm-harness")
+    root = _fake_harness_root(tmp_path)
+    sdk = tmp_path / "observer-sdk.js"
+    sdk.write_text("// stub\n", encoding="utf-8")
+    spec = SystemSpec("sv", "llm-harness", {"harness": "securevibes-agent", "root": str(root),
+                                            "model": "m", "observer_sdk": str(sdk)})
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    base = {"tree_hash": "sha256:" + "a" * 64, "root": ".", "languages": ["python"], "profile": "standard"}
+    arguments = {"source_dir": tmp_path / "source", "raw_dir": tmp_path / "raw", "spec": spec,
+                 "preparation": preparation, "timeout_seconds": 5, "trace_mode": "off", "trace_dir": None}
+
+    for request_input, message in (
+        ({**base, "mode": "pr"}, "must name the base and head commits"),
+        ({**base, "mode": "pr", "pr": {"base": "a" * 40}}, "must name the base and head commits"),
+        ({**base, "mode": "pr", "pr": {"base": "", "head": "b" * 40}}, "must name the base and head commits"),
+        ({**base, "mode": "batch"}, "carries out full, pr scans, not 'batch'"),
+    ):
+        with pytest.raises(AdapterError, match=message):
+            adapter.scan(request={"run_id": "r", "input": request_input}, **arguments)
+    odd = SystemSpec("sv", "llm-harness", {**spec.config, "mode": "batch"})
+    with pytest.raises(AdapterError, match="config.mode names the harness mode of a full request"):
+        adapter.scan(request={"run_id": "r", "input": {**base, "mode": "full"}}, **{**arguments, "spec": odd})
+    with pytest.raises(AdapterError, match="config.mode names the harness mode of a full request"):
+        adapter.scan(request={"run_id": "r", "input": {**base, "mode": "pr", "pr": {"base": "a", "head": "b"}}},
+                     **{**arguments, "spec": odd})
+
+
+def test_a_pr_run_is_the_only_run_that_says_why_no_validation_stage_ran_in_pr_terms(tmp_path, monkeypatch):
+    hooked = {**PR_OUTPUT, "hooks": {"runner": 1, "engine": 1}}
+
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {"a.md": FINDING}, prepared=_pr_prepared(tmp_path),
+                             output=hooked, trace_mode="content")
+
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["capture"]["finding_validation"] == "not_applicable"
+    assert any("a pr scan runs no validation stage either, because the consensus judge is the only one and "
+               "this adapter never configures consensus, so there is no validation to miss" in note
+               for note in execution["notes"])
+    assert not any("a bootstrap scan runs no validation stage" in note for note in execution["notes"])
 
 
 def test_capture_is_described_for_the_two_modes_this_adapter_runs_and_refuses_any_other():
