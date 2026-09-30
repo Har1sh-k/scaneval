@@ -21,7 +21,8 @@ import pytest
 
 from scaneval import aggregate, cases, review, schedule
 from scaneval.adapters.base import Adapter, NativeOutcome
-from scaneval.contracts import ContractError, canonical_json, canonical_sha256, validate_document
+from scaneval.cli import main
+from scaneval.contracts import ContractError, canonical_json, canonical_sha256, load_document, validate_document
 from scaneval.resampling import Stream, resample_with_replacement
 from scaneval.runner import run_from_config
 
@@ -1253,3 +1254,86 @@ def test_a_run_directory_written_by_the_runner_aggregates_as_draft_evidence(tmp_
     assert whole["claims"]["records"] == 1 and whole["claims"]["pending_matching"] == 1
     assert block["observations"]["review_states"]["draft"] == 1
     assert report["runs"][0]["timing"]["execution_records"] == 1
+
+
+# --- command line -------------------------------------------------------------------------------
+
+
+def cli(capsys, *argv: str) -> tuple[int, str, str]:
+    code = main(list(argv))
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def test_cli_aggregate_writes_one_new_report_and_summarizes_it(tmp_path, capsys):
+    run = two_project_run(tmp_path / "runs")
+    output = tmp_path / "aggregate.json"
+
+    code, out, err = cli(capsys, "aggregate", str(run), "--policy", str(EXAMPLE_POLICY), "--output", str(output))
+
+    assert code == 0, err
+    report = load_document(output, "aggregate-report")
+    assert output.read_text(encoding="utf-8") == canonical_json(report) + "\n"
+    assert "view full/standard scope=reviewed inputs=2 canonical_targets=4" in out
+    assert "sys-a scope=reviewed full_output_recall equal_target=0.500 (insufficient_clusters)" in out
+    assert f"Report: {output}" in out
+    code, _out, err = cli(capsys, "aggregate", str(run), "--output", str(output))
+    assert code == 2 and "scaneval:" in err
+    assert output.read_text(encoding="utf-8") == canonical_json(report) + "\n"
+
+
+def test_cli_aggregate_is_byte_identical_in_any_directory_order(tmp_path, capsys):
+    first = two_project_run(tmp_path / "one")
+    second = blinded_and_standard_run(tmp_path / "two")
+
+    assert cli(capsys, "aggregate", str(first), str(second), "--output", str(tmp_path / "a.json"))[0] == 0
+    assert cli(capsys, "aggregate", str(second), str(first), "--output", str(tmp_path / "b.json"))[0] == 0
+
+    assert (tmp_path / "a.json").read_bytes() == (tmp_path / "b.json").read_bytes()
+
+
+def test_cli_aggregate_refuses_an_output_inside_a_trial_directory_and_a_refused_run(tmp_path, capsys):
+    run = two_project_run(tmp_path / "runs")
+    trial = tmp_path / "trial"
+    (trial / "source").mkdir(parents=True)
+    (trial / "provenance.json").write_text("{}", encoding="utf-8")
+
+    code, _out, err = cli(capsys, "aggregate", str(run), "--output", str(trial / "report.json"))
+    assert code == 2 and "inside the trial directory" in err
+    assert not (trial / "report.json").exists()
+
+    code, _out, err = cli(capsys, "aggregate", str(tmp_path / "trial"), "--output", str(tmp_path / "out.json"))
+    assert code == 2 and "holds no run-manifest.json" in err
+    assert not (tmp_path / "out.json").exists()
+
+
+def test_cli_help_describes_both_commands(capsys):
+    for command in ("aggregate", "compare"):
+        with pytest.raises(SystemExit) as raised:
+            main([command, "--help"])
+        assert raised.value.code == 0
+    text = " ".join(capsys.readouterr().out.split())
+    assert "Every scheduled assignment is an observation; a failed one stays in every denominator." in text
+    assert "Refused unless both were assigned exactly the same frozen work" in text
+    assert "--baseline BASELINE" in text and "--policy POLICY" in text
+
+
+def test_cli_compare_writes_a_new_report_or_refuses_with_exit_2(tmp_path, capsys):
+    run = comparison_run(tmp_path / "runs")
+    output = tmp_path / "comparison.json"
+
+    code, out, err = cli(capsys, "compare", str(run), "--baseline", "baseline", "--candidate", "candidate",
+                         "--policy", str(EXAMPLE_POLICY), "--output", str(output))
+
+    assert code == 0, err
+    report = load_document(output, "comparison-report")
+    assert output.read_text(encoding="utf-8") == canonical_json(report) + "\n"
+    assert "baseline=baseline candidate=candidate configuration_differences=3" in out
+    assert "equal_target full_output_recall difference=+0.400 (insufficient_clusters)" not in out
+    assert "equal_target full_output_recall difference=+0.400 [" in out
+    assert f"Comparison: {output}" in out
+    refused = tmp_path / "refused.json"
+    code, _out, err = cli(capsys, "compare", str(run), "--baseline", "baseline", "--candidate", "ghost",
+                          "--output", str(refused))
+    assert code == 2 and "scaneval: system ghost is not scheduled" in err
+    assert not refused.exists()
