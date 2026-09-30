@@ -1469,7 +1469,7 @@ def test_a_signal_or_a_failed_process_start_beside_execution_successful_true_is_
         {"executionSuccessful": True, **changes}]).outcome()[0] == "partial"
 
 
-def test_a_signal_or_start_failure_the_log_leaves_blank_or_unreadable_is_not_a_clean_scan():
+def test_a_blank_signal_or_start_failure_says_nothing_and_an_unreadable_one_leaves_the_run_unreported():
     for blank in ({"exitSignalName": None}, {"exitSignalName": ""}, {"processStartFailureMessage": None},
                   {"processStartFailureMessage": ""}):
         assert converted([], invocations=[{"executionSuccessful": True, **blank}]).execution["evidence"] == \

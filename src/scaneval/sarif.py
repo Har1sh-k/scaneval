@@ -2002,8 +2002,8 @@ def import_sarif(sarif_path: Path, *, pack: dict, snapshot_id: str, tree_hash: s
     Everything is built and validated in memory first: a refused import, whatever refused it,
     leaves no directory behind. *output* must not exist, and the parents it lacks are created and
     removed again if the write fails; it is resolved once, so every path written is inside the same
-    real directory. The run id defaults to :func:`default_run_id`. The review
-    is a machine draft: every decision is ``unresolved`` and the record's state is ``draft``.
+    real directory. The run id defaults to :func:`default_run_id`. The review is a machine draft:
+    every decision is ``unresolved`` and the record's state is ``draft``.
     """
     if not isinstance(tree_hash, str) or not _TREE_HASH.match(tree_hash):
         raise SarifImportError(f"the tree hash must be a sha256:<64 hex digits> digest, not {tree_hash!r}")

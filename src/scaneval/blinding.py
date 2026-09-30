@@ -104,7 +104,7 @@ DISPLAY_SUFFIXES = frozenset({".yml", ".yaml", ".toml", ".json", ".cfg", ".ini"}
 # Refused whatever the suffix or role. File names compare case-insensitively.
 FORBIDDEN_NAME_PREFIXES = ("license", "licence", "copying", "copyright", "notice", "authors", "contributors",
                            "citation", "patents", "security")
-# Attribution files named for whose code they credit, wherever in the name the words fall.
+# Attribution notices for third-party code, wherever in the name the two words fall.
 FORBIDDEN_ATTRIBUTION_NAMES = ("*third*party*",)
 FORBIDDEN_NAMES = (
     # Dependency manifests and lockfiles: they name what is installed and run.

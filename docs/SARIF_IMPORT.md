@@ -95,12 +95,12 @@ property of the wrong JSON type, is refused too.
   `nosemgrep` match.
 - **Loss**, listed with its reason: a rule reference that conflicts with itself or names a
   descriptor ambiguously, a message that does not resolve (a placeholder index of more than nine
-  digits, or a message of more than 65536 characters, included), a primary location that is not a file in the scanned tree, malformed
-  coordinates, a value outside SARIF's enumerations, or anything else that raised a `ValueError`
-  while the result was read, so that no one result can end the import. Any loss sets
-  `bundles_resolved` false and turns an otherwise clean run into `partial` with error code
-  `import_loss`, so a scan whose finding could not be read earns neither completeness nor quiet
-  credit.
+  digits, or a message of more than 65536 characters, included), a primary location that is not a
+  file in the scanned tree, malformed coordinates, a value outside SARIF's enumerations, or
+  anything else that raised a `ValueError` while the result was read, so that no one result can end
+  the import. Any loss sets `bundles_resolved` false and turns an otherwise clean run into
+  `partial` with error code `import_loss`, so a scan whose finding could not be read earns neither
+  completeness nor quiet credit.
 
 | Claim field | Where it comes from |
 |---|---|
