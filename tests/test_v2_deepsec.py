@@ -2554,8 +2554,8 @@ def test_an_exit_other_than_0_and_1_from_process_is_still_fatal_and_names_the_st
     outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
     assert outcome.status == "error" and outcome.error["code"] == "process_exit_2" and outcome.claims == []
     assert "deepsec process exited 2" in outcome.error["message"]
-    assert "export" not in [word for word in outcome.command[:1]]
     assert not (tmp_path / "raw" / "deepsec-export.json").exists(), "a fatal exit does not go on to export"
+    assert not (tmp_path / "raw" / "deepsec-export.stdout.txt").exists()
 
 
 def test_a_pr_run_whose_export_fails_after_an_exit_of_1_is_an_export_error(tmp_path):
