@@ -399,6 +399,22 @@ def _is_instruction_file(path: str) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class ExportedTree:
+    """What one export wrote: ``{relative path: content hash}`` for every file, and what it left out.
+
+    ``hashes`` covers exactly the regular files written, so :func:`tree_hash` over it is the tree
+    hash of the export. ``stripped``, ``skipped``, and ``instruction_files`` are sorted as the
+    provenance record carries them.
+    """
+
+    hashes: dict[str, str]
+    stripped: list[str]
+    skipped: list[dict]
+    instruction_files: list[str]
+    byte_count: int
+
+
 def export_snapshot(
     snapshot: CachedSnapshot,
     trial_dir: Path,
@@ -411,6 +427,8 @@ def export_snapshot(
 
     ``metadata_blinded`` is refused without a reviewed replacement map, and this build does not
     apply one: blinding is reported unavailable rather than silently replaced by ``standard``.
+    The export is :func:`export_tree` and the record :func:`provenance_record`; together they
+    write exactly the tree and the record this function has always written.
     """
     if profile not in PROFILES:
         raise MaterializationError(f"unknown input profile {profile!r}; expected one of {PROFILES}")
@@ -419,6 +437,18 @@ def export_snapshot(
             raise MaterializationError("metadata blinding unavailable: no reviewed replacement map was supplied")
         raise MaterializationError("metadata blinding is not implemented in this build; do not substitute standard")
     source = trial_dir / "source"
+    if source.exists():
+        raise MaterializationError(f"trial source directory already exists: {source}")
+    return provenance_record(snapshot, profile, export_tree(snapshot, source), clock=clock)
+
+
+def export_tree(snapshot: CachedSnapshot, source: Path) -> ExportedTree:
+    """Write the tracked regular files of *snapshot* under *source*, which must not exist yet.
+
+    Controller and harness state and every ``.git`` path are stripped; submodule gitlinks,
+    symbolic links, and anything else that is not a blob are skipped with a reason. Files keep
+    their executable bit and nothing else of their metadata.
+    """
     if source.exists():
         raise MaterializationError(f"trial source directory already exists: {source}")
     listing = _git(["ls-tree", "-r", "-z", snapshot.commit], snapshot.path)
@@ -457,6 +487,16 @@ def export_snapshot(
         byte_count += size
         if _is_instruction_file(rel):
             instructions.append(rel)
+    return ExportedTree(hashes, sorted(stripped), sorted(skipped, key=lambda item: item["path"]),
+                        sorted(instructions), byte_count)
+
+
+def provenance_record(snapshot: CachedSnapshot, profile: str, exported: ExportedTree, *,
+                      clock: Callable[[], datetime] | None = None) -> dict:
+    """The preparation record of one export, as :func:`export_snapshot` writes it for ``standard``.
+
+    Every field describes *exported*, the tree a scanner is handed.
+    """
     now = (clock or (lambda: datetime.now(timezone.utc)))()
     record = {
         "schema_version": SCHEMA_VERSION,
@@ -469,13 +509,13 @@ def export_snapshot(
         "profile": profile,
         "trial": {
             "root": "source",
-            "tree_hash": tree_hash(hashes),
-            "file_count": len(hashes),
-            "byte_count": byte_count,
+            "tree_hash": tree_hash(exported.hashes),
+            "file_count": len(exported.hashes),
+            "byte_count": exported.byte_count,
         },
-        "stripped": sorted(stripped),
-        "skipped": sorted(skipped, key=lambda item: item["path"]),
-        "instruction_files": sorted(instructions),
+        "stripped": list(exported.stripped),
+        "skipped": list(exported.skipped),
+        "instruction_files": list(exported.instruction_files),
         "synthetic_history": None,
         "exported_at": now.astimezone(timezone.utc).isoformat(timespec="seconds"),
         "tool_versions": {"git": git_version()},
