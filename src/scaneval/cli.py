@@ -1,9 +1,11 @@
 """Local validation, saved-output scoring, deterministic replay, and the corpus-to-run workflow.
 
 The evaluation commands (validate, score, replay, report, demo) stay offline and read saved
-documents only. The corpus, plan, review, and run commands drive :mod:`scaneval.cases`,
-:mod:`scaneval.materialize`, :mod:`scaneval.review`, and :mod:`scaneval.runner`; this module
-holds no pack, planning, routing, execution, or scoring logic of its own.
+documents only. ``import sarif`` is offline too: it reads one saved SARIF 2.1.0 log into a new
+bundle through :mod:`scaneval.sarif` and never fetches or opens anything the log names. The
+corpus, plan, review, and run commands drive :mod:`scaneval.cases`, :mod:`scaneval.materialize`,
+:mod:`scaneval.review`, and :mod:`scaneval.runner`; this module holds no pack, planning, routing,
+import, execution, or scoring logic of its own.
 
 Boundaries this module keeps. No command infers approval: ``corpus approve`` and ``review
 approve`` record the reviewer name the caller supplies, and nothing else raises a case or a
@@ -31,20 +33,21 @@ status`` resolve the bundle path and report on the bundle it reaches, so a bundl
 a symlinked parent is read rather than refused. They write nothing into the bundle.
 
 No command writes inside a materialized trial directory: the output path of ``plan``, ``run``,
-``demo``, ``score``, ``replay`` and ``report``, the pack path of ``corpus init`` and of every
-corpus command that rewrites a pack, the map ``blinding review`` rewrites, the bundle argument of
-all four ``review`` subcommands, and the directory ``corpus validate`` exports a snapshot into,
-are each refused when a trial's ``provenance.json`` and ``source`` sit in them or above them.
-That keeps evaluator material out of the tree a scanner is handed; it is a check on the path, not
-an isolation boundary. ``review status`` is checked although it only reads, so the ``review``
-group is uniform; the other read-only commands read whatever path they are given.
+``import sarif``, ``demo``, ``score``, ``replay`` and ``report``, the pack path of ``corpus
+init`` and of every corpus command that rewrites a pack, the map ``blinding review`` rewrites, the
+bundle argument of all four ``review`` subcommands, and the directory ``corpus validate`` exports a
+snapshot into, are each refused when a trial's ``provenance.json`` and ``source`` sit in them or
+above them. That keeps evaluator material out of the tree a scanner is handed; it is a check on the
+path, not an isolation boundary. ``review status`` is checked although it only reads, so the
+``review`` group is uniform; the other read-only commands read whatever path they are given.
 
 Exit codes. 2 means the command could not be carried out: a usage or contract error, a refused
-overwrite, a failed fetch or export. 1 means the command ran and reports a negative result: a
-mechanical check set failed, a run could not prepare some input or produced no usable scan from
-some system, a blinding map is not approved or a variant refused it, or ``diagnose`` was given
-something that is not a bundle it can read. 0 means it ran and reports nothing wrong, which is
-not a statement that any label or decision is correct.
+overwrite, a failed fetch or export, a SARIF log refused whole. 1 means the command ran and
+reports a negative result: a mechanical check set failed, a run could not prepare some input or
+produced no usable scan from some system, an imported log holds no usable scan, a blinding map is
+not approved or a variant refused it, or ``diagnose`` was given something that is not a bundle it
+can read. 0 means it ran and reports nothing wrong, which is not a statement that any label or
+decision is correct.
 
 ``diagnose`` reads a saved invocation bundle and writes a diagnostic document. It scores nothing,
 changes nothing in the bundle, and its answer never reaches a metric: a target whose code was
@@ -66,7 +69,7 @@ import tempfile
 from typing import Callable
 from urllib.parse import urlsplit
 
-from . import __version__, blinding, cases, materialize, review, runner
+from . import __version__, blinding, cases, materialize, review, runner, sarif
 from .adapters.base import AdapterError
 # _is_stated is imported rather than re-implemented so a blank value is judged by one rule here,
 # in cases, and in review: a string made only of zero-width or control characters is not a value.
@@ -289,22 +292,23 @@ def _refuse_trial_path(output: Path) -> None:
 
     A trial holds the exported source a scanner is handed, so anything this tool writes inside
     one would put evaluator material where the scanned tree lives. Every command that names a
-    path it may write checks it: ``plan``, ``run``, ``demo``, the ``--output`` of ``score``,
-    ``replay`` and ``report``, the pack ``corpus init`` creates, the pack every corpus command
-    that rewrites one is given (``add-snapshot``, ``import``, ``validate --snapshot-id``,
-    ``approve``, ``admit``, ``disposition``, all through :func:`_pack_for_change`), the map
-    ``blinding review`` rewrites, the bundle ``review init``, ``review record`` and ``review
+    path it may write checks it: ``plan``, ``run``, ``demo``, the bundle ``import sarif``
+    creates, the ``--output`` of ``score``, ``replay`` and ``report``, the pack ``corpus init``
+    creates, the pack every corpus command that rewrites one is given (``add-snapshot``,
+    ``import``, ``validate --snapshot-id``, ``approve``, ``admit``, ``disposition``, all through
+    :func:`_pack_for_change`), the map ``blinding review`` rewrites, the bundle ``review init``,
+    ``review record`` and ``review
     approve`` write into, and the trial ``corpus validate`` is about to export into. ``review
     status`` checks the bundle it reads as well, so every ``review`` subcommand refuses the same
     paths. Commands that only read are otherwise not checked: a bundle handed to ``replay`` or
     ``report``, a pack that is only summarized by ``corpus validate`` or read by ``plan`` and
     ``review init``, a map ``blinding check`` reads, and a supplied artifact are read wherever
-    they sit. A trial is recognized by a ``provenance.json`` file beside a
-    ``source`` directory; any other directory is left alone. *output* itself is examined along
-    with its parents, so a bundle that is itself a trial root is refused as well as one sitting
-    under one; a path that does not exist yet carries no marker and is judged by its parents
-    alone. The comparison resolves symlinks in the path but follows no bind mount or hard link,
-    so it catches the obvious mistake and is not an isolation boundary.
+    they sit. A trial is recognized by a ``provenance.json`` file beside a ``source`` directory;
+    any other directory is left alone. *output* itself is examined along with its parents, so a
+    bundle that is itself a trial root is refused as well as one sitting under one; a path that
+    does not exist yet carries no marker and is judged by its parents alone. The comparison
+    resolves symlinks in the path but follows no bind mount or hard link, so it catches the
+    obvious mistake and is not an isolation boundary.
     """
     resolved = output.expanduser().resolve()
     for directory in (resolved, *resolved.parents):
@@ -701,6 +705,74 @@ def _blinding(args: argparse.Namespace) -> int:
     return {"check": _blinding_check, "review": _blinding_review}[args.blinding_command](args)
 
 
+def _uri_bases(values: list[str]) -> dict[str, str]:
+    """The ``--uri-base NAME=URI`` values as a mapping, refusing a malformed or repeated name.
+
+    The name is everything before the first ``=``, so a value may itself hold one. Whether a value
+    can name a directory inside the scanned tree is decided by :class:`scaneval.sarif.UriSettings`,
+    not here; a name given twice is refused rather than letting the later value win unseen.
+    """
+    bases: dict[str, str] = {}
+    for value in values:
+        name, separator, uri = value.partition("=")
+        if not separator or not name:
+            raise ContractError(f"--uri-base {value!r} must be NAME=URI, a base id and where it points")
+        if name in bases:
+            raise ContractError(f"--uri-base names {name!r} twice; say where it points once")
+        bases[name] = uri
+    return bases
+
+
+def _import_sarif(args: argparse.Namespace) -> int:
+    """Import one run of a saved SARIF 2.1.0 log into a new bundle and say what it made of it.
+
+    The work is :func:`scaneval.sarif.import_sarif`; this reads the operator's files, refuses a
+    bundle path inside a trial directory, and reports. The pack is read and never rewritten. A log
+    refused whole is exit 2 and leaves nothing behind. A bundle whose status is ``error`` (the
+    log has no result list, or reports a failed run that left no claim) holds no usable scan and
+    exits 1, as ``run`` does for such an invocation; ``partial`` exits 0 as it does there, with
+    the reason printed. Every decision in the bundle is an unresolved machine draft, and the
+    execution evidence is the log's own report, which this command says rather than verifies.
+    """
+    _refuse_trial_path(args.output)
+    pack = cases.load_pack(args.pack)
+    system_config = (None if args.system_config is None
+                     else sarif.load_json_object(args.system_config, "--system-config"))
+    normalization = (None if args.normalization is None
+                     else sarif.load_json_object(args.normalization, "--normalization"))
+    outcome = sarif.import_sarif(
+        args.sarif_file, pack=pack, snapshot_id=args.snapshot_id, tree_hash=args.tree_hash,
+        system_id=args.system_id, output=args.output, run_index=args.run_index, run_id=args.run_id,
+        system_config=system_config, source_dir=args.source_dir, uri_bases=_uri_bases(args.uri_bases),
+        source_root_uri=args.source_root_uri, normalization=normalization,
+        include_suppressed=args.include_suppressed, max_bytes=args.max_bytes)
+    result, record = outcome.result, outcome.record
+    counts = record["counts"]
+    print(f"Imported run {record['sarif']['run_index']} of {record['sarif']['run_count']} from "
+          f"{args.sarif_file} as {result['run_id']}: status={result['status']} claims={counts['claims']} "
+          f"excluded={counts['excluded']} losses={counts['losses']} "
+          f"evidence_losses={counts['evidence_losses']}")
+    print(f"Bundle review: {counts['bundle_review_flagged']} flagged, {counts['bundle_review_resolved']} "
+          f"decided in the normalization file; bundles_resolved={str(result['bundles_resolved']).lower()}")
+    print(f"Execution evidence: {record['execution']['evidence']}, as the log reports it; not verified")
+    checked = "yes" if record["source_binding"]["source_dir_verified"] else "no"
+    print(f"Locations checked against an exported tree: {checked}")
+    print(f"Review state: {outcome.review_record['state']}; every decision stays unresolved until a "
+          "person records one")
+    print(f"Bundle: {args.output}")
+    if "error" in result:
+        print(f"scaneval: status {result['status']} ({result['error']['code']}): {result['error']['message']}",
+              file=sys.stderr)
+    if result["status"] == "error":
+        print("scaneval: the imported log holds no usable scan", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _import(args: argparse.Namespace) -> int:
+    return {"sarif": _import_sarif}[args.import_command](args)
+
+
 def _diagnose_context_coverage(args: argparse.Namespace) -> int:
     """Attribute each labeled target to the invocations that were supplied its code region.
 
@@ -884,6 +956,46 @@ def _add_review_commands(sub: argparse._SubParsersAction) -> None:
     status.add_argument("bundle", type=Path)
 
 
+def _add_import_commands(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser("import", help="import a saved scanner log into a new bundle, offline")
+    commands = parser.add_subparsers(dest="import_command", required=True)
+
+    log = commands.add_parser(
+        "sarif", help="import one run of a saved SARIF 2.1.0 log (profile sarif-import-1)",
+        description="Import one run of a saved SARIF 2.1.0 log into a new bundle that review, score, "
+                    "replay, and report read unchanged. Nothing the log names is fetched or opened, "
+                    "every decision is an unresolved draft, and the log's execution report is recorded "
+                    "unverified. See docs/SARIF_IMPORT.md.")
+    log.add_argument("sarif_file", type=Path, metavar="SARIF_FILE", help="the saved log; read once, never changed")
+    log.add_argument("--pack", required=True, type=Path, help="case pack holding the snapshot; read, never rewritten")
+    log.add_argument("--snapshot-id", required=True, help="the pack snapshot the scan read")
+    log.add_argument("--tree-hash", required=True,
+                     help="sha256:<64 hex> of the exported tree the scan read; the result binds to it")
+    log.add_argument("--system-id", required=True, help="the system that produced the log; recorded as stated")
+    log.add_argument("--output", required=True, type=Path, help="new bundle directory, must not exist")
+    log.add_argument("--run-index", type=int, help="which run to import from a log holding several, from 0")
+    log.add_argument("--run-id", help="run id; default import-<12 hex of the log's SHA-256>-r<run index>")
+    log.add_argument("--system-config", type=Path,
+                     help="JSON object describing the system; only its canonical SHA-256 is recorded")
+    log.add_argument("--source-dir", type=Path,
+                     help="the exported tree; it must hash to --tree-hash, and every mapped path and line is "
+                          "checked against it")
+    log.add_argument("--uri-base", action="append", dest="uri_bases", default=[], metavar="NAME=URI",
+                     help="where a uriBaseId points: a directory inside the scanned tree ending in '/' ('.' for "
+                          "its root), or a file URI under --source-root-uri; used before the log's own "
+                          "originalUriBaseIds; repeatable")
+    log.add_argument("--source-root-uri", metavar="FILE_URI",
+                     help="absolute file URI of the scanned tree's root where the log was written; an absolute "
+                          "file URI in the log maps only under it")
+    log.add_argument("--normalization", type=Path,
+                     help="recorded bundle-review decisions for this log, bound to its SHA-256; never written "
+                          "by the tool")
+    log.add_argument("--include-suppressed", action="store_true",
+                     help="import suppressed results as claims; every suppression is recorded either way")
+    log.add_argument("--max-bytes", type=int, default=sarif.DEFAULT_MAX_BYTES,
+                     help="refuse a log larger than this many bytes (default %(default)s)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--version", action="version", version=__version__)
@@ -920,6 +1032,7 @@ def build_parser() -> argparse.ArgumentParser:
     running.add_argument("--only-input", action="append",
                          help="input id to run (a 2.0 configuration's snapshot id); repeatable")
     running.add_argument("--workspace-root", type=Path)
+    _add_import_commands(sub)
     return parser
 
 
@@ -931,9 +1044,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Valid {args.kind}: {args.path}")
         elif args.command == "demo":
             _demo(args.directory)
-        elif args.command in ("blinding", "corpus", "diagnose", "plan", "review", "run"):
-            return {"blinding": _blinding, "corpus": _corpus, "diagnose": _diagnose, "plan": _plan,
-                    "review": _review, "run": _run}[args.command](args)
+        elif args.command in ("blinding", "corpus", "diagnose", "import", "plan", "review", "run"):
+            return {"blinding": _blinding, "corpus": _corpus, "diagnose": _diagnose, "import": _import,
+                    "plan": _plan, "review": _review, "run": _run}[args.command](args)
         else:
             if args.output:
                 _refuse_trial_path(args.output)

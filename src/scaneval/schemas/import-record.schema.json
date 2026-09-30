@@ -1,0 +1,680 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/import-record.schema.json",
+  "title": "ScanEval import record (SARIF import, profile sarif-import-1)",
+  "description": "What one offline SARIF import did with every result of the run it read. Written beside result.json; evaluator-side provenance, never scored.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile",
+    "run_id",
+    "system_id",
+    "input_hash",
+    "result_sha256",
+    "artifact",
+    "sarif",
+    "tool",
+    "source_binding",
+    "system",
+    "versions",
+    "execution",
+    "options",
+    "counts",
+    "claims",
+    "excluded",
+    "losses",
+    "normalization",
+    "notes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.1"
+    },
+    "profile": {
+      "const": "sarif-import-1"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "system_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "input_hash": {
+      "$ref": "#/$defs/sha256",
+      "description": "The tree hash the operator declared; result.json binds to the same value."
+    },
+    "result_sha256": {
+      "$ref": "#/$defs/sha256",
+      "description": "Canonical SHA-256 of the result.json this import wrote."
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "bytes"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where the SARIF bytes were copied, relative to the bundle."
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "sarif": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "run_index",
+        "run_count"
+      ],
+      "properties": {
+        "version": {
+          "const": "2.1.0"
+        },
+        "run_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "run_count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "semanticVersion",
+        "organization",
+        "extensions"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "$ref": "#/$defs/text_or_null"
+        },
+        "semanticVersion": {
+          "$ref": "#/$defs/text_or_null"
+        },
+        "organization": {
+          "$ref": "#/$defs/text_or_null"
+        },
+        "extensions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "version",
+              "semanticVersion",
+              "organization"
+            ],
+            "properties": {
+              "name": {
+                "$ref": "#/$defs/text_or_null"
+              },
+              "version": {
+                "$ref": "#/$defs/text_or_null"
+              },
+              "semanticVersion": {
+                "$ref": "#/$defs/text_or_null"
+              },
+              "organization": {
+                "$ref": "#/$defs/text_or_null"
+              }
+            }
+          }
+        }
+      }
+    },
+    "source_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pack_sha256",
+        "snapshot_id",
+        "tree_hash",
+        "source_dir_verified"
+      ],
+      "properties": {
+        "pack_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tree_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_dir_verified": {
+          "type": "boolean",
+          "description": "True only when an exported tree hashing to tree_hash was supplied and every mapped path and line was checked against it."
+        }
+      }
+    },
+    "system": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "system_id",
+        "config_sha256"
+      ],
+      "properties": {
+        "system_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "config_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scaneval",
+        "kind_mapping"
+      ],
+      "properties": {
+        "scaneval": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind_mapping": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence",
+        "results",
+        "verified",
+        "invocations"
+      ],
+      "properties": {
+        "evidence": {
+          "enum": [
+            "reported_success",
+            "reported_failed",
+            "unreported"
+          ],
+          "description": "What the log itself says about execution. Nothing here observed the scan."
+        },
+        "results": {
+          "enum": [
+            "present",
+            "absent"
+          ],
+          "description": "absent: run.results was null or missing, so the tool produced no result list."
+        },
+        "verified": {
+          "const": false
+        },
+        "invocations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/invocation"
+          }
+        }
+      }
+    },
+    "options": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_index",
+        "include_suppressed",
+        "uri_bases",
+        "source_root_uri",
+        "max_bytes"
+      ],
+      "properties": {
+        "run_index": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "The run index the operator named; null when the log's single run was taken."
+        },
+        "include_suppressed": {
+          "type": "boolean"
+        },
+        "uri_bases": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "source_root_uri": {
+          "$ref": "#/$defs/text_or_null"
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "results",
+        "claims",
+        "excluded",
+        "losses",
+        "evidence_losses",
+        "bundle_review_flagged",
+        "bundle_review_resolved"
+      ],
+      "properties": {
+        "results": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "claims": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "excluded": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "losses": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "evidence_losses": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bundle_review_flagged": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bundle_review_resolved": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/claim"
+      }
+    },
+    "excluded": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/excluded"
+      }
+    },
+    "losses": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/pointed"
+      }
+    },
+    "normalization": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/normalization"
+        }
+      ]
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "text_or_null": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "result_pointer": {
+      "type": "string",
+      "pattern": "^/runs/[0-9]+/results/[0-9]+$"
+    },
+    "pointed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pointer",
+        "reason"
+      ],
+      "properties": {
+        "pointer": {
+          "type": "string",
+          "pattern": "^/runs/[0-9]+(/.*)?$"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "fingerprints": {
+      "description": "Recorded as provenance only, never as duplicate identity. null for a value the producer withheld (Semgrep's login-gated placeholder).",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      ]
+    },
+    "suppression": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "entries"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "unavailable",
+            "none",
+            "suppressed",
+            "not_suppressed"
+          ]
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "status"
+            ],
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/text_or_null"
+              },
+              "status": {
+                "enum": [
+                  "accepted",
+                  "underReview",
+                  "rejected",
+                  null
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claim_id",
+        "pointer",
+        "rule_id",
+        "descriptor",
+        "kind",
+        "level",
+        "fingerprints",
+        "partial_fingerprints",
+        "suppression",
+        "baseline_state",
+        "bundle_review",
+        "evidence_losses",
+        "notes"
+      ],
+      "properties": {
+        "claim_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pointer": {
+          "$ref": "#/$defs/result_pointer"
+        },
+        "rule_id": {
+          "$ref": "#/$defs/text_or_null",
+          "description": "The ruleId or rule.id the result carried, verbatim."
+        },
+        "descriptor": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^/runs/[0-9]+/tool/(driver|extensions/[0-9]+)/rules/[0-9]+$"
+            }
+          ]
+        },
+        "kind": {
+          "enum": [
+            "fail",
+            "review",
+            "open"
+          ],
+          "description": "The SARIF result kind, not the canonical claim kind."
+        },
+        "level": {
+          "enum": [
+            "none",
+            "note",
+            "warning",
+            "error"
+          ]
+        },
+        "fingerprints": {
+          "$ref": "#/$defs/fingerprints"
+        },
+        "partial_fingerprints": {
+          "$ref": "#/$defs/fingerprints"
+        },
+        "suppression": {
+          "$ref": "#/$defs/suppression"
+        },
+        "baseline_state": {
+          "enum": [
+            "new",
+            "unchanged",
+            "updated",
+            null
+          ]
+        },
+        "bundle_review": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "multiple_locations",
+              "divergent_code_flows"
+            ]
+          }
+        },
+        "evidence_losses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pointed"
+          }
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "excluded": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pointer",
+        "reason"
+      ],
+      "properties": {
+        "pointer": {
+          "$ref": "#/$defs/result_pointer"
+        },
+        "reason": {
+          "enum": [
+            "kind:pass",
+            "kind:notApplicable",
+            "kind:informational",
+            "baseline:absent",
+            "suppressed"
+          ]
+        },
+        "suppression": {
+          "$ref": "#/$defs/suppression"
+        }
+      }
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pointer",
+        "execution_successful",
+        "exit_code",
+        "exit_signal_name",
+        "notifications",
+        "error_notifications"
+      ],
+      "properties": {
+        "pointer": {
+          "type": "string",
+          "pattern": "^/runs/[0-9]+/invocations/[0-9]+$"
+        },
+        "execution_successful": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "exit_signal_name": {
+          "$ref": "#/$defs/text_or_null"
+        },
+        "notifications": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "error_notifications": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^/runs/[0-9]+/invocations/[0-9]+/tool(Execution|Configuration)Notifications/[0-9]+$"
+          }
+        }
+      }
+    },
+    "normalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "decisions"
+      ],
+      "properties": {
+        "sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "Canonical SHA-256 of the normalization document the operator supplied."
+        },
+        "decisions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "pointer",
+              "decision",
+              "reviewer",
+              "note"
+            ],
+            "properties": {
+              "pointer": {
+                "$ref": "#/$defs/result_pointer"
+              },
+              "decision": {
+                "const": "atomic"
+              },
+              "reviewer": {
+                "type": "string",
+                "minLength": 1
+              },
+              "note": {
+                "type": "string",
+                "minLength": 1
+              },
+              "at": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "properties": {
+        "fixture": "Fabricated for ScanEval tests in the shape Semgrep OSS 1.177 writes with --sarif; not the output of a real scan."
+      },
+      "tool": {
+        "driver": {
+          "name": "Semgrep OSS",
+          "semanticVersion": "1.177.0",
+          "rules": [
+            {
+              "id": "build.rules.python.probe.sql-format",
+              "name": "build.rules.python.probe.sql-format",
+              "shortDescription": {"text": "Semgrep Finding: build.rules.python.probe.sql-format"},
+              "fullDescription": {"text": "SQL built with string formatting from request data"},
+              "help": {"text": "SQL built with string formatting from request data", "markdown": "SQL built with string formatting from request data"},
+              "defaultConfiguration": {"level": "error"},
+              "properties": {"precision": "very-high", "tags": ["CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')", "security"]}
+            },
+            {
+              "id": "build.rules.python.probe.subprocess-shell",
+              "name": "build.rules.python.probe.subprocess-shell",
+              "shortDescription": {"text": "Semgrep Finding: build.rules.python.probe.subprocess-shell"},
+              "fullDescription": {"text": "subprocess call with shell=True"},
+              "help": {"text": "subprocess call with shell=True", "markdown": "subprocess call with shell=True"},
+              "defaultConfiguration": {"level": "warning"},
+              "properties": {"precision": "very-high", "tags": ["CWE-78: OS Command Injection", "security"]}
+            }
+          ]
+        }
+      },
+      "invocations": [
+        {"executionSuccessful": true, "toolExecutionNotifications": []}
+      ],
+      "results": [
+        {
+          "ruleId": "build.rules.python.probe.subprocess-shell",
+          "message": {"text": "subprocess call with shell=True"},
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {"uri": "src/app.py", "uriBaseId": "%SRCROOT%"},
+                "region": {"startLine": 5, "startColumn": 12, "endLine": 5, "endColumn": 43, "snippet": {"text": "    return subprocess.run(cmd, shell=True)"}}
+              }
+            }
+          ],
+          "fingerprints": {"matchBasedId/v1": "requires login"},
+          "properties": {}
+        },
+        {
+          "ruleId": "build.rules.python.probe.subprocess-shell",
+          "message": {"text": "subprocess call with shell=True"},
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {"uri": "src/app.py", "uriBaseId": "%SRCROOT%"},
+                "region": {"startLine": 9, "startColumn": 12, "endLine": 9, "endColumn": 47, "snippet": {"text": "    return subprocess.run(\"make\", shell=True)  # nosemgrep"}}
+              }
+            }
+          ],
+          "suppressions": [{"kind": "inSource"}],
+          "fingerprints": {"matchBasedId/v1": "requires login"},
+          "properties": {}
+        },
+        {
+          "ruleId": "build.rules.python.probe.sql-format",
+          "message": {"text": "SQL built with string formatting from request data"},
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {"uri": "src/db.py", "uriBaseId": "%SRCROOT%"},
+                "region": {"startLine": 7, "startColumn": 5, "endLine": 7, "endColumn": 51, "snippet": {"text": "    cursor.execute(\"SELECT * FROM t WHERE n = '%s'\" % name)"}}
+              }
+            }
+          ],
+          "codeFlows": [
+            {
+              "message": {"text": "Untrusted dataflow from src/db.py:4 to src/db.py:7"},
+              "threadFlows": [
+                {
+                  "locations": [
+                    {
+                      "location": {
+                        "message": {"text": "Source: 'request.args' @ 'src/db.py:4'"},
+                        "physicalLocation": {"artifactLocation": {"uri": "src/db.py"}, "region": {"startLine": 4, "startColumn": 12, "endLine": 4, "endColumn": 24}}
+                      },
+                      "nestingLevel": 0
+                    },
+                    {
+                      "location": {
+                        "message": {"text": "Propagator : 'name' @ 'src/db.py:4'"},
+                        "physicalLocation": {"artifactLocation": {"uri": "src/db.py"}, "region": {"startLine": 4, "startColumn": 5, "endLine": 4, "endColumn": 9}}
+                      },
+                      "nestingLevel": 0
+                    },
+                    {
+                      "location": {
+                        "message": {"text": "Taint reaches: 'cursor.execute(...)' @ 'src/db.py:7'"},
+                        "physicalLocation": {"artifactLocation": {"uri": "src/db.py"}, "region": {"startLine": 7, "startColumn": 5, "endLine": 7, "endColumn": 51}}
+                      },
+                      "nestingLevel": 1
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "fingerprints": {"matchBasedId/v1": "requires login"},
+          "properties": {}
+        }
+      ]
+    }
+  ]
+}

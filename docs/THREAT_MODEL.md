@@ -268,7 +268,8 @@ it does not enforce it.
 
 - Check that both `result.json` and `execution.json` are there before reading either. A bundle
   holding one without the other is a killed or failed write, not a result: the exception named at
-  the top of this document.
+  the top of this document. A bundle `scaneval import sarif` wrote is not a run: nothing executed,
+  and its `import.json` stands where `execution.json` would ([SARIF import](SARIF_IMPORT.md)).
 - A clean bundle says the record is internally consistent and that no refused path, capture gap,
   source modification, or import loss was observed. It is not a certificate that the scanner
   behaved.

@@ -1,0 +1,23 @@
+{
+  "version": "1.177.0",
+  "results": [
+    {
+      "check_id": "build.rules.python.probe.subprocess-shell",
+      "path": "src/app.py",
+      "start": {"line": 5, "col": 12, "offset": 70},
+      "end": {"line": 5, "col": 43, "offset": 101},
+      "extra": {
+        "message": "subprocess call with shell=True",
+        "metadata": {"cwe": ["CWE-78: OS Command Injection"]},
+        "severity": "WARNING",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "validation_state": "NO_VALIDATOR",
+        "engine_kind": "OSS"
+      }
+    }
+  ],
+  "errors": [],
+  "paths": {"scanned": ["src/app.py", "src/db.py"]},
+  "skipped_rules": []
+}

@@ -36,6 +36,7 @@ The scorer reports known-target detection, recall within review budgets, reviewe
 | `scaneval plan --pack --snapshot-id --tree-hash --output` | Build an evaluation plan for one materialized input. |
 | `scaneval run <config> --output <new dir>` | Run a frozen configuration and save its artifacts. |
 | `scaneval blinding check\|review` | Dry-run a metadata blinding map against its snapshots, and record a named review of it. |
+| `scaneval import sarif <log> --pack --snapshot-id --tree-hash --system-id --output` | Import one run of a saved SARIF 2.1.0 log into a new bundle for review, offline. |
 | `scaneval review init\|record\|approve\|status` | Prepare and record the review of an invocation bundle. |
 | `scaneval diagnose context-coverage <bundle>` | Compare captured context spans with labeled targets. Does not change scores. |
 
@@ -63,7 +64,8 @@ Guides: [Observer SDK](docs/OBSERVER_SDK.md), [native CLI collectors](docs/COLLE
 - Full-scan execution, case packs, source export, review, scoring, replay, and reports are implemented.
 - Each run freezes its evaluation schedule (every assignment, pre-registered plan, and vulnerable/fixed pair) before it prepares an input. An input it cannot prepare is recorded with its skipped assignments, and the other inputs still run.
 - The `metadata_blinded` profile applies a reviewed per-repository map to documentation and display metadata only. It is partial blinding, not anonymization: package names, source, and paths are unchanged.
-- Native PR mode, SARIF import, corpus-level aggregation, precision sampling, promotion gates, and enforced isolation are not implemented.
+- A saved SARIF 2.1.0 log imports offline into a bundle that review, score, and replay read; its execution report is recorded unverified ([SARIF import](docs/SARIF_IMPORT.md)). Other saved vendor formats have no importer.
+- Native PR mode, corpus-level aggregation, precision sampling, promotion gates, and enforced isolation are not implemented.
 - The initial public workload is not selected. The pilot is an integration exercise, not a representative benchmark or scanner comparison.
 
 [Current capabilities](docs/INITIAL_BUILD.md) describes the implementation. [Design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) describe the broader contract and planned work.
