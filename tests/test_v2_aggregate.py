@@ -55,9 +55,13 @@ def target(target_id: str, *, canonical: str | None = None, project: str = "acme
 
 
 def control(control_id: str, *, kind: str = "capability_safe", target_id: str | None = None,
-            canonical: str | None = None, level: str = "L3") -> dict:
-    """One planned control as a schedule freezes it; a fixed-target control names its target."""
-    return {"control_id": control_id, "case_id": f"case-{target_id or control_id}",
+            canonical: str | None = None, level: str = "L3", case: str | None = None) -> dict:
+    """One planned control as a schedule freezes it; a fixed-target control names its target.
+
+    ``case`` names the case record the control belongs to. A canonical control is registered under one family,
+    so the records of one that guard no target must share a case.
+    """
+    return {"control_id": control_id, "case_id": case or f"case-{target_id or control_id}",
             "canonical_id": canonical or control_id, "type": kind, "target_id": target_id,
             "validation_level": level}
 
@@ -812,6 +816,88 @@ def test_a_frozen_control_missing_from_a_completed_scans_plan_is_completed_and_u
     assert block["completed_mass"] == 1.0 and block["assessable_mass"] == 0.7
     assert block["resolved_rate"]["value"] == 0.0
     assert block["completed_lower"] == 0.0 and block["completed_upper"]["value"] == 0.3
+
+
+def alias_control_run(root: Path, run_id: str, **choices) -> Path:
+    """One input freezes two records, C-1 and C-2, of one canonical safe control; one system scans it once.
+
+    The records belong to one case, so the canonical control has one family. *choices* are the arguments of
+    :func:`scan`: the scan succeeds with resolved bundles unless they say otherwise, and ``drop`` leaves a
+    record out of the bundle's plan.
+    """
+    records = [control(name, canonical="C", case="case-C") for name in ("C-1", "C-2")]
+    return write_run(root, run_id, [planned("safe", controls=records)],
+                     outcomes={("safe", "sys-a", 1): scan(**choices)})
+
+
+def safe_controls(report: dict) -> dict:
+    """The capability-safe control block of a report's whole view, for its one system."""
+    return slice_of(system(view(report)))["controls"]["capability_safe"]
+
+
+def test_a_quiet_assessment_of_one_alias_of_a_control_leaves_it_unresolved_while_another_alias_is_unplanned(tmp_path):
+    """Two frozen records of one safe control, C-1 and C-2; the bundle's plan holds C-1 only, assessed quiet.
+
+    The scan succeeded with resolved bundles, so the control was observed in the frozen scope (c = 1); C-2 was
+    never assessed, so the control has no resolved assessment (b = 0) however quiet C-1 was.
+    - C = 1 and A = 0, and nothing is confirmed false, so E = 0 and the resolved rate E/A is undefined.
+    - The completed bounds [E/C, (E + C - A)/C] are [0, 1]: the control counts as false in F+.
+    - Counts: 1 observation, completed, unresolved, and unscored; the schedule froze one item the plan lacks.
+    Crediting C-1's quiet to the control made A = 1, a resolved rate of 0, and F+ = 0.
+    """
+    run = alias_control_run(tmp_path, "run-alias-quiet", drop=("C-2",))
+
+    report = aggregate.aggregate([run], policy=policy())
+
+    block = safe_controls(report)
+    assert block["canonical_controls"] == 1
+    assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (1, 1, 0, 1)
+    assert block["unscored"] == 1 and block["false_allegations"] == 0
+    assert block["completed_mass"] == 1.0 and block["assessable_mass"] == 0.0
+    assert block["resolved_rate"]["value"] is None
+    assert block["completed_lower"] == 0.0 and block["completed_upper"]["value"] == 1.0
+    assert system(view(report))["observations"]["unscored_items"] == 1
+
+
+def test_a_false_allegation_on_one_alias_of_a_control_stands_while_another_alias_is_unplanned(tmp_path):
+    """The same two records and a plan holding C-1 only, but the reviewer confirmed a false allegation on C-1.
+
+    A false allegation about the control is evidence of a false alarm whether or not C-2 was ever assessed, so
+    the control is resolved, and false: c = b = 1 and e = 1.
+    - C = A = 1 and E = 1: the resolved rate E/A is 1 and the completed bounds are [1, (1 + 1 - 1)/1] = [1, 1].
+    - Counts: 1 observation, completed, resolved, and false; it is still unscored, for the record C-2 lacks.
+    """
+    run = alias_control_run(tmp_path, "run-alias-false", drop=("C-2",), controls={"C-1": ("false_allegation", 1)})
+
+    block = safe_controls(aggregate.aggregate([run], policy=policy()))
+
+    assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (1, 1, 1, 0)
+    assert block["false_allegations"] == 1 and block["observed_false_allegations"] == 1
+    assert block["unscored"] == 1
+    assert block["completed_mass"] == 1.0 and block["assessable_mass"] == 1.0
+    assert block["resolved_rate"]["value"] == 1.0
+    assert block["completed_lower"] == 1.0 and block["completed_upper"]["value"] == 1.0
+
+
+def test_a_control_is_resolved_quiet_when_every_alias_the_schedule_froze_was_assessed_quiet(tmp_path):
+    """The same two records, both in the bundle's plan: the credit an unplanned alias withholds is granted here.
+
+    Both quiet: c = b = 1, so C = A = 1 and E = 0, the resolved rate is 0, and the completed bounds are
+    [0, (0 + 1 - 1)/1] = [0, 0]. Counts: 1 observation, completed, and resolved; nothing is unscored.
+    With the reviewer leaving C-2 unresolved instead, one record of the control is unsettled, as it is when C-2 is
+    absent from the plan: b = 0, so A = 0, the resolved rate is undefined, and F+ = (0 + 1 - 0)/1 = 1.
+    """
+    quiet = safe_controls(aggregate.aggregate([alias_control_run(tmp_path, "run-alias-both")], policy=policy()))
+    unsettled = safe_controls(aggregate.aggregate(
+        [alias_control_run(tmp_path, "run-alias-unsettled", controls={"C-2": "unresolved"})], policy=policy()))
+
+    assert (quiet["observations"], quiet["completed"], quiet["resolved"], quiet["unresolved"]) == (1, 1, 1, 0)
+    assert quiet["unscored"] == 0 and quiet["false_allegations"] == 0
+    assert quiet["assessable_mass"] == 1.0 and quiet["resolved_rate"]["value"] == 0.0
+    assert quiet["completed_lower"] == 0.0 and quiet["completed_upper"]["value"] == 0.0
+    assert (unsettled["completed"], unsettled["resolved"], unsettled["unresolved"]) == (1, 0, 1)
+    assert unsettled["unscored"] == 0 and unsettled["assessable_mass"] == 0.0
+    assert unsettled["resolved_rate"]["value"] is None and unsettled["completed_upper"]["value"] == 1.0
 
 
 def test_a_control_on_a_failed_scan_is_neither_completed_nor_resolved(tmp_path):

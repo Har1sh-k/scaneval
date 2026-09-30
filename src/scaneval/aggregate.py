@@ -24,10 +24,15 @@ What is scored against what. An input is scored on the targets and controls its 
 the run. An item frozen there but absent from the bundle's plan is a miss (``unscored``): a target is
 not detected, and a control on a scan that completed is a completed observation with no resolved
 assessment, which the false-alarm bound counts as unresolved. An item a bundle's plan adds is ignored.
-An input whose schedule froze no plan takes no part in any target or control metric and is listed as
-such; its assignments still count toward completion, claims, and usage. Observations are keyed by run
-and input, so one input scanned by two runs is two positive inputs of its targets, each averaged over
-its own repetitions.
+A canonical control an input froze as several records of one property is one item, ``unscored`` when
+any of its records is absent from the plan, not only when all are. The records present still count for
+what they establish: a confirmed false allegation on any of them is a false allegation on the control.
+Nothing stands in for a record that was never assessed, so quiet assessments of the others leave the
+control unresolved: it is resolved quiet only when every one of its records was assessed and quiet. An
+input whose schedule froze no plan takes no part in any target or control metric and is listed as such;
+its assignments still count toward completion, claims, and usage. Observations are keyed by run and
+input, so one input scanned by two runs is two positive inputs of its targets, each averaged over its
+own repetitions.
 
 Evidence scope. An observation is reviewed evidence only when its bundle's plan is reviewed and its
 review record is human-approved; a failure takes the scope of the plan its schedule froze. A view that
@@ -749,13 +754,16 @@ def _target_outcome(observation: _Observation, target_ids: tuple[str, ...], budg
 def _control_outcome(observation: _Observation, control_ids: tuple[str, ...]) -> dict:
     """What one observation establishes about one canonical control planned on its input.
 
-    A confirmed false allegation about any of the input's records of the control is one; the control
-    is resolved quiet only when every record of it is. Completion and resolution follow
+    The control ids are the input's frozen records of that canonical control, and the bundle's plan may
+    hold only some of them. A confirmed false allegation about any record the plan holds is one, whether
+    or not another record is absent: the control is resolved, and false. Otherwise the control is
+    resolved quiet only when every frozen record of it is in the plan and resolved. A record the plan
+    lacks was never assessed, so quiet assessments of the others do not resolve the control; it is
+    ``unscored`` when any record is absent, not only when all are. Completion and resolution follow
     :func:`scaneval.scoring.observe`: only a successful scan completes, and a failure resolves nothing.
-    A control frozen in the schedule that the bundle's plan lacks was never assessed, but the scan still
-    completed in the frozen scope: on a successful scan it is a completed, unresolved observation
-    (``unscored``), which the false-alarm bound counts as a false allegation rather than dropping from
-    the completed mass.
+    A control with a record the plan lacks was still in a scan that completed in the frozen scope: on a
+    successful scan it is a completed observation, and while it is unresolved the false-alarm bound counts
+    it as a false allegation rather than dropping it from the completed mass.
     """
     observed = observation.observed
     empty = {"completed": False, "resolved": False, "false_allegation": False,
@@ -763,14 +771,16 @@ def _control_outcome(observation: _Observation, control_ids: tuple[str, ...]) ->
     if observed is None:
         return empty
     rows = {row["control_id"]: row for row in observed["controls"]}
+    missing = any(control_id not in rows for control_id in control_ids)
     scored = [rows[control_id] for control_id in control_ids if control_id in rows]
     if not scored:
         return {**empty, "completed": observed["completed"], "unscored": True}
     false = any(row["false_allegation"] for row in scored)
-    return {"completed": observed["completed"], "resolved": false or all(row["resolved"] for row in scored),
+    return {"completed": observed["completed"],
+            "resolved": false or (not missing and all(row["resolved"] for row in scored)),
             "false_allegation": false,
             "observed_false_allegation": any(row["observed_false_allegation"] for row in scored),
-            "unscored": False}
+            "unscored": missing}
 
 
 # --- one system in one view ---------------------------------------------------------------------
