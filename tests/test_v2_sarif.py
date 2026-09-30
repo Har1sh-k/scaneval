@@ -632,8 +632,11 @@ def test_absolute_file_uris_map_only_under_the_declared_source_root():
     ("app\\web.py", "holds a backslash"),
     ("app/web.py?raw=1", "has a query or fragment"),
     ("app/web.py#L5", "has a query or fragment"),
-    ("app/%2Fetc/passwd", "encodes a slash or a NUL"),
-    ("app/web%00.py", "encodes a slash or a NUL"),
+    ("app/%2Fetc/passwd", "encodes a slash, a backslash, or a NUL"),
+    ("app/web%00.py", "encodes a slash, a backslash, or a NUL"),
+    # Decoded, this is "..\..\etc\passwd" in one segment, which every later reader splits.
+    ("%2E%2E%5C%2E%2E%5Cetc%5Cpasswd", "encodes a slash, a backslash, or a NUL"),
+    ("app%5Cweb.py", "encodes a slash, a backslash, or a NUL"),
     ("app/%FF.py", "percent-decodes to bytes that are not UTF-8"),
     ("app/", "names a directory, not a file"),
     ("", "names a directory, not a file"),

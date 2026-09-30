@@ -388,9 +388,10 @@ class _Uri:
 def _segments(path: str, label: str, raw: str) -> tuple[str, ...]:
     """Percent-decode *path* one segment at a time, dropping empty and ``.`` segments.
 
-    Decoding is per segment and strict UTF-8 (SARIF 3.10.4), so an encoded slash or NUL inside a
-    segment is refused rather than turned into a separator. A ``..`` segment is refused, never
-    resolved away (SARIF 3.10.2).
+    Decoding is per segment and strict UTF-8 (SARIF 3.10.4), so an encoded slash, backslash, or
+    NUL inside a segment is refused rather than turned into a separator: every reader of a claim
+    path downstream (the scan-result contract, scoring, review routing) takes a backslash as a
+    separator too. A ``..`` segment is refused, never resolved away (SARIF 3.10.2).
     """
     kept: list[str] = []
     for part in path.split("/"):
@@ -403,8 +404,9 @@ def _segments(path: str, label: str, raw: str) -> tuple[str, ...]:
         if decoded == "..":
             raise _Unusable(f"{label} {raw!r} has a '..' segment, which is refused rather than "
                             "resolved (SARIF 3.10.2)")
-        if "/" in decoded or "\x00" in decoded:
-            raise _Unusable(f"{label} {raw!r} encodes a slash or a NUL inside one path segment")
+        if "/" in decoded or "\\" in decoded or "\x00" in decoded:
+            raise _Unusable(f"{label} {raw!r} encodes a slash, a backslash, or a NUL inside one path "
+                            "segment")
         kept.append(decoded)
     return tuple(kept)
 
