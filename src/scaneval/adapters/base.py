@@ -220,6 +220,7 @@ class Adapter(ABC):
     adapter_version: str = "0.0.0"
     requires_git: bool = False
     supported_languages: frozenset[str] = frozenset()
+    scan_modes: frozenset[str] = frozenset({'full'})
     env_passthrough: tuple[str, ...] = ()
     # Whether this adapter may run under the ``oci`` execution backend. True is three promises:
     # every scanner process it starts goes through :func:`run_command` from the thread that called
