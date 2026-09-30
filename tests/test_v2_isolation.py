@@ -1,17 +1,22 @@
-"""The execution backend seam, the selection of a backend, and the reads made of what a scanner wrote.
+"""The execution backend seam, the selection of a backend, and the egress proxy, without an engine.
 
 These run the pieces of the isolation work that need no engine: the reads of files a scanner
-wrote, the routing of ``run_command``, and the settings and refusals that decide which backend a
-system runs under. No network, no model calls, no engine.
+wrote, the routing of ``run_command``, the settings and refusals that decide which backend a
+system runs under, and the egress proxy script on the loopback interface. No network beyond
+loopback, no model calls, no engine.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import socket
+import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
@@ -22,6 +27,7 @@ from scaneval.adapters.base import (Adapter, AdapterError, CommandResult, System
                                     tail_text)
 from scaneval.adapters.semgrep import SemgrepAdapter, semgrep_version
 from scaneval.isolation import IsolationError, refusal_for, resolve_execution
+from scaneval.isolation import egress_proxy
 
 
 IMAGE = "scanner:1@sha256:" + "a" * 64
@@ -281,3 +287,123 @@ def test_adapters_that_do_not_declare_oci_compatibility_are_refused_under_oci():
             raise AssertionError("not called")
 
     assert refusal_for(Claims(), oci) is not None
+
+
+# --- the egress proxy script, run locally --------------------------------------------------
+
+
+def test_split_authority_reads_host_and_port_and_refuses_anything_else():
+    assert egress_proxy.split_authority("API.Example.com:443") == ("api.example.com", 443)
+    assert egress_proxy.split_authority("[2001:DB8::1]:8443") == ("2001:db8::1", 8443)
+    for bad in ("example.com", "example.com:0", "example.com:65536", "a b:1", "user@host:1", "/x:1",
+                "2001:db8::1:443", "[2001:db8::1]", ":443", "host:44a"):
+        assert egress_proxy.split_authority(bad) is None, bad
+
+
+def test_the_egress_proxy_gives_a_request_head_one_deadline_not_one_per_read(monkeypatch):
+    """A client trickling one byte at a time must not hold a connection slot past the head deadline."""
+    monkeypatch.setattr(egress_proxy, "HEAD_TIMEOUT", 0.5)
+    client, server = socket.socketpair()
+    stop = threading.Event()
+
+    def trickle():
+        while not stop.is_set():
+            try:
+                client.sendall(b"C")
+            except OSError:
+                return
+            time.sleep(0.1)
+
+    feeder = threading.Thread(target=trickle, daemon=True)
+    feeder.start()
+    started = time.monotonic()
+    try:
+        assert finishes(lambda: egress_proxy.read_head(server)) is None
+        assert time.monotonic() - started < 5
+    finally:
+        stop.set()
+        client.close()
+        server.close()
+        feeder.join(5)
+
+
+@contextmanager
+def local_service(body: bytes):
+    """A one-thread HTTP/1.0 server on 127.0.0.1 answering every request with *body*."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    stop = threading.Event()
+
+    def serve():
+        listener.settimeout(0.2)
+        while not stop.is_set():
+            try:
+                connection, _ = listener.accept()
+            except OSError:
+                continue
+            with connection:
+                connection.settimeout(5)
+                try:
+                    connection.recv(4096)
+                    connection.sendall(b"HTTP/1.0 200 OK\r\nContent-Length: %d\r\n\r\n%s" % (len(body), body))
+                except OSError:
+                    pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield listener.getsockname()[1]
+    finally:
+        stop.set()
+        thread.join(5)
+        listener.close()
+
+
+def proxy_request(port: int, head: bytes, then: bytes = b"") -> bytes:
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as connection:
+        connection.sendall(head)
+        reply = connection.recv(4096)
+        if then and reply.startswith(b"HTTP/1.1 200"):
+            connection.sendall(then)
+            chunks = []
+            while True:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            reply += b"".join(chunks)
+        return reply
+
+
+def test_the_egress_proxy_forwards_only_declared_pairs_and_logs_every_decision(tmp_path):
+    with local_service(b"model-endpoint-token") as allowed_port, local_service(b"undeclared") as other_port:
+        process = subprocess.Popen(
+            [sys.executable, "-I", egress_proxy.__file__, "--bind", "127.0.0.1", "--port", "0",
+             "--log-dir", str(tmp_path), "--allow", f"127.0.0.1:{allowed_port}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 30
+            while not (tmp_path / "ready").exists():
+                assert process.poll() is None, process.stderr.read().decode()
+                assert time.monotonic() < deadline, "the proxy never became ready"
+                time.sleep(0.05)
+            port = json.loads((tmp_path / "ready").read_text(encoding="utf-8"))["port"]
+            tunnelled = proxy_request(port, f"CONNECT 127.0.0.1:{allowed_port} HTTP/1.1\r\nHost: x\r\n\r\n".encode(),
+                                      b"GET / HTTP/1.0\r\n\r\n")
+            assert tunnelled.startswith(b"HTTP/1.1 200") and b"model-endpoint-token" in tunnelled
+            assert proxy_request(port, f"CONNECT 127.0.0.1:{other_port} HTTP/1.1\r\n\r\n".encode()).startswith(
+                b"HTTP/1.1 403")
+            assert proxy_request(port, f"GET http://127.0.0.1:{allowed_port}/ HTTP/1.1\r\n\r\n".encode()).startswith(
+                b"HTTP/1.1 405")
+            assert proxy_request(port, b"CONNECT nowhere HTTP/1.1\r\n\r\n").startswith(b"HTTP/1.1 400")
+        finally:
+            process.kill()
+            process.wait(10)
+            process.stderr.close()
+    entries = [json.loads(line) for line in (tmp_path / "egress.jsonl").read_text(encoding="utf-8").splitlines()]
+    events = [entry["event"] for entry in entries]
+    assert events[0] == "listening" and events.count("allow") == 1 and events.count("deny") == 3
+    denied = [entry for entry in entries if entry["event"] == "deny"]
+    assert {"host": "127.0.0.1", "port": other_port} == {key: denied[0][key] for key in ("host", "port")}
+    assert "only CONNECT" in denied[1]["reason"] and "not host:port" in denied[2]["reason"]
