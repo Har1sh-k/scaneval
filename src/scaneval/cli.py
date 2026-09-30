@@ -17,7 +17,8 @@ source tree or a scanner workspace.
 What each command writes:
 
 - A pack file is rewritten in place. Every corpus command that changes a pack (``add-snapshot``,
-  ``import``, ``validate --snapshot-id``, ``approve``, ``admit``, ``disposition``) writes a
+  ``import``, ``validate --snapshot-id``, ``approve``, ``admit``, ``disposition``, and the three
+  that write 2.1 labels, ``add-change-set``, ``pr-scope``, and ``canonical``) writes a
   temporary file beside it and renames that over the pack, so a reader sees the whole old pack
   or the whole new one. The previous version is not kept, and a pack whose status is no longer
   ``draft`` is refused unless ``--new-version`` opens a new draft version of it.
@@ -295,7 +296,8 @@ def _refuse_trial_path(output: Path) -> None:
     path it may write checks it: ``plan``, ``run``, ``demo``, the bundle ``import sarif``
     creates, the ``--output`` of ``score``, ``replay`` and ``report``, the pack ``corpus init``
     creates, the pack every corpus command that rewrites one is given (``add-snapshot``,
-    ``import``, ``validate --snapshot-id``, ``approve``, ``admit``, ``disposition``, all through
+    ``import``, ``validate --snapshot-id``, ``approve``, ``admit``, ``disposition``,
+    ``add-change-set``, ``pr-scope``, ``canonical``, all through
     :func:`_pack_for_change`), the map ``blinding review`` rewrites, the bundle ``review init``,
     ``review record`` and ``review
     approve`` write into, and the trial ``corpus validate`` is about to export into. ``review
@@ -496,10 +498,75 @@ def _corpus_disposition(args: argparse.Namespace) -> int:
     return 0
 
 
+def _corpus_add_change_set(args: argparse.Namespace) -> int:
+    """Declare one change set: a base and a head snapshot the pack already holds, and a review scope.
+
+    The first one upgrades the pack to 2.1, which is the only version that can carry it. Nothing is
+    fetched: this records a boundary, and neither reads the two commits nor checks that one
+    descends from the other. Which items are scored under it is stated separately, by ``pr-scope``.
+    """
+    pack = _pack_for_change(args)
+    change_set = {"change_set_id": args.change_set_id, "base_snapshot_id": args.base_snapshot_id,
+                  "head_snapshot_id": args.head_snapshot_id, "boundary": args.boundary,
+                  "review_scope": args.review_scope, "description": args.description,
+                  **({"reference": args.reference} if args.reference else {})}
+    recorded = cases.add_change_set(pack, change_set)
+    _save_pack(args.pack, pack)
+    sys.stdout.write(cases.dump_json(recorded))
+    return 0
+
+
+def _say_if_approval_lapsed(pack: dict, case_id: str, was_current: bool) -> None:
+    """Say on stderr that a label write left the case's recorded approval covering other labels.
+
+    The write never carries an approval onto the labels it changed, so this is a statement of what
+    the write did, not a warning that something went wrong: the review stays recorded as it was,
+    the case is left out of a plan, and a review of the labels as they now stand plans it again.
+    """
+    if was_current and not cases.approval_is_current(pack, cases.case_by_id(pack, case_id)):
+        print(f"note: the recorded approval of case {case_id} no longer covers its labels, which this "
+              "write changed; it is left out of a plan until a review covers them as they now stand "
+              "(corpus approve)", file=sys.stderr)
+
+
+def _corpus_pr_scope(args: argparse.Namespace) -> int:
+    """State how a target, or one control, is scored in the PR review of a declared change set.
+
+    A label write: an approval recorded before it no longer covers the labels it changed, and this
+    never carries one onto them. An item with no entry for a change set is outside that review.
+    """
+    pack = _pack_for_change(args)
+    was_current = cases.approval_is_current(pack, cases.case_by_id(pack, args.case_id))
+    recorded = cases.set_pr_eligibility(pack, args.case_id, args.change_set_id, args.relation,
+                                        args.code_scope, note=args.note, control_id=args.control_id)
+    _save_pack(args.pack, pack)
+    sys.stdout.write(cases.dump_json(recorded))
+    _say_if_approval_lapsed(pack, args.case_id, was_current)
+    return 0
+
+
+def _corpus_canonical(args: argparse.Namespace) -> int:
+    """State which canonical root cause a target, or which property one control, belongs to.
+
+    A label write, with the same effect on a recorded approval as ``pr-scope``. Two records given
+    one canonical id are one root cause or one property because the person running this said so.
+    """
+    pack = _pack_for_change(args)
+    was_current = cases.approval_is_current(pack, cases.case_by_id(pack, args.case_id))
+    recorded = cases.set_canonical_id(pack, args.case_id, args.canonical_id, control_id=args.control_id)
+    _save_pack(args.pack, pack)
+    owner = ({"control_id": args.control_id} if args.control_id
+             else {"target_id": cases.case_by_id(pack, args.case_id)["target"]["target_id"]})
+    sys.stdout.write(cases.dump_json({"case_id": args.case_id, **owner, "canonical_id": recorded}))
+    _say_if_approval_lapsed(pack, args.case_id, was_current)
+    return 0
+
+
 def _corpus(args: argparse.Namespace) -> int:
     return {"init": _corpus_init, "add-snapshot": _corpus_add_snapshot, "import": _corpus_import,
             "validate": _corpus_validate, "approve": _corpus_approve, "admit": _corpus_admit,
-            "disposition": _corpus_disposition}[args.corpus_command](args)
+            "disposition": _corpus_disposition, "add-change-set": _corpus_add_change_set,
+            "pr-scope": _corpus_pr_scope, "canonical": _corpus_canonical}[args.corpus_command](args)
 
 
 def _plan(args: argparse.Namespace) -> int:
@@ -893,6 +960,51 @@ def _add_corpus_commands(sub: argparse._SubParsersAction) -> None:
     disposition.add_argument("--value", required=True, choices=cases.DISPOSITIONS)
     disposition.add_argument("--reason", required=True)
     _add_new_version(disposition)
+
+    change_set = commands.add_parser(
+        "add-change-set",
+        help="declare a base/head boundary a native PR review runs between; the first one upgrades "
+             "the pack to 2.1")
+    change_set.add_argument("pack", type=Path)
+    change_set.add_argument("--change-set-id", required=True)
+    change_set.add_argument("--base-snapshot-id", required=True, help="a snapshot the pack declares")
+    change_set.add_argument("--head-snapshot-id", required=True,
+                            help="a snapshot of the same repository; a PR review reads this tree, and "
+                                 "every item scored under the change set is on it")
+    change_set.add_argument("--boundary", required=True, choices=cases.CHANGE_SET_BOUNDARIES,
+                            help="introducing: the head introduces a root cause the base lacks; repair: "
+                                 "the head repairs one the base carries; ordinary: neither")
+    change_set.add_argument("--review-scope", required=True, choices=cases.CHANGE_SET_SCOPES,
+                            help="the scope the review is declared to score at, stated before any run")
+    change_set.add_argument("--description", required=True)
+    change_set.add_argument("--reference", help="where the change came from, such as a pull request URL")
+    _add_new_version(change_set)
+
+    scoped = commands.add_parser(
+        "pr-scope",
+        help="state how a target, or one control, is scored in a change set's PR review; an approval "
+             "recorded before it no longer covers the changed labels")
+    scoped.add_argument("pack", type=Path)
+    scoped.add_argument("--case-id", required=True)
+    scoped.add_argument("--control-id", help="a control of the case; without it the entry is the target's")
+    scoped.add_argument("--change-set-id", required=True)
+    scoped.add_argument("--relation", required=True, choices=cases.PR_RELATIONS,
+                        help="how the item relates to the change; a target is never repaired")
+    scoped.add_argument("--code-scope", required=True, choices=cases.PR_CODE_SCOPES,
+                        help="changed: the code the item is about is part of the change; context: it is "
+                             "reached from the change")
+    scoped.add_argument("--note")
+    _add_new_version(scoped)
+
+    canonical = commands.add_parser(
+        "canonical",
+        help="state which canonical root cause a target, or which property a control, belongs to; an "
+             "approval recorded before it no longer covers the changed labels")
+    canonical.add_argument("pack", type=Path)
+    canonical.add_argument("--case-id", required=True)
+    canonical.add_argument("--control-id", help="a control of the case; without it the id is the target's")
+    canonical.add_argument("--canonical-id", required=True)
+    _add_new_version(canonical)
 
 
 def _add_diagnose_commands(sub: argparse._SubParsersAction) -> None:
