@@ -382,17 +382,19 @@ def planned(input_id: str, *, targets=(), controls=(), project: str, workload: s
 
 
 def scan(*, hits=None, claims: int | None = None, ranking: str = "native", status: str = "success",
-         resolved: bool = True, controls=None, usage=None, review_state: str = "approved",
+         resolved: bool = True, controls=None, pending=None, usage=None, review_state: str = "approved",
          duplicate: bool = False, scope: str | None = None) -> dict:
     """What one bundle holds.
 
-    ``hits`` maps a target id to the 1-based position of the claim a reviewer accepted for it;
-    ``controls`` maps a control id to ``"quiet"``, ``"unresolved"``, or ``("false_allegation",
-    position)``. ``duplicate`` makes every delivered claim an exact copy of the first, which is how a
-    system spams the reviewer without adding an allegation.
+    ``hits`` maps a target id to the 1-based position of the claim a reviewer accepted for it, and
+    ``pending`` does the same for a match the reviewer left unresolved; ``controls`` maps a control id
+    to ``"quiet"``, ``"unresolved"``, or ``("false_allegation", position)``. ``duplicate`` makes every
+    delivered claim an exact copy of the first, which is how a system spams the reviewer without adding
+    an allegation.
     """
     return {"hits": hits or {}, "claims": claims, "ranking": ranking, "status": status, "resolved": resolved,
-            "controls": controls or {}, "usage": usage if usage is not None else {"wall_seconds": 1.0},
+            "controls": controls or {}, "pending": pending or {},
+            "usage": usage if usage is not None else {"wall_seconds": 1.0},
             "review_state": review_state, "duplicate": duplicate, "scope": scope}
 
 
@@ -413,7 +415,7 @@ def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: d
             "targets": [_plan_item(item, "targets") for item in frozen["targets"]],
             "controls": [_plan_item(item, "controls") for item in frozen["controls"]],
             "review_budgets": frozen["review_budgets"]}
-    positions = list(spec["hits"].values())
+    positions = list(spec["hits"].values()) + list(spec["pending"].values())
     positions += [value[1] for value in spec["controls"].values() if isinstance(value, tuple)]
     count = spec["claims"] if spec["claims"] is not None else max(positions, default=0)
     native = spec["ranking"] == "native"
@@ -429,6 +431,8 @@ def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: d
     matches = [{"claim_id": f"c{position}", "target_id": target_id, "decision": "accepted",
                 "reason": "fixture: accepted by a fictional reviewer"}
                for target_id, position in spec["hits"].items()]
+    matches += [{"claim_id": f"c{position}", "target_id": target_id, "decision": "unresolved",
+                 "reason": "fixture: pending"} for target_id, position in spec["pending"].items()]
     assessments = []
     for item in plan["controls"]:
         decision = spec["controls"].get(item["control_id"], "quiet")
@@ -562,7 +566,7 @@ def aggregation_policy(**uncertainty) -> dict:
 
 PROJECTS = 10
 SYSTEMS = ("baseline", "improved", "silent", "flagging", "duplicating", "malformed", "regressing", "late",
-           "unranked")
+           "unranked", "flaky")
 CANDIDATES = tuple(name for name in SYSTEMS if name != "baseline")
 
 
@@ -586,6 +590,7 @@ def behave(system: str, index: int) -> dict:
     - regressing detects T-p2 to T-p8: better overall, but it loses the baseline's T-p1.
     - late detects T-p1 to T-p8, but only at position 3 of three claims.
     - unranked detects T-p1 to T-p8 in output that has no native order.
+    - flaky detects T-p1 to T-p8 like improved, but its scans of the last two projects end in an error.
     """
     goal, guard = f"T-p{index}", f"C-p{index}"
     if system == "baseline":
@@ -606,6 +611,8 @@ def behave(system: str, index: int) -> dict:
         return scan(hits={goal: 3} if index <= 8 else {}, claims=3)
     if system == "unranked":
         return scan(hits={goal: 1} if index <= 8 else {}, claims=1, ranking="unranked")
+    if system == "flaky":
+        return scan(hits={goal: 1}, claims=1) if index <= 8 else scan(status="error", claims=0)
     raise AssertionError(system)
 
 
@@ -1672,3 +1679,255 @@ def test_a_supplied_estimate_the_policy_does_not_read_is_recorded_by_digest_and_
                     precision_candidate=estimates["improved"])
     assert ("A baseline precision estimate was supplied, but the policy declares no maximum decrease from the "
             "baseline, so it is recorded by digest and was not read.") in unread["notes"]
+
+
+# --- controls, completion, and target coverage ------------------------------------------------------
+
+
+def bounds(**changes) -> dict:
+    block = {"max_false_alarm_upper": 0.1, "min_completed_mass": 0.9, "min_assessable_mass": 0.9}
+    block.update(changes)
+    return block
+
+
+def control_run(root: Path, run_id: str, *, kind: str | None = "capability_safe", candidate_controls=None,
+                baseline_pending=()) -> Path:
+    """Five projects, one target and (unless *kind* is None) one control each.
+
+    The baseline detects T-p1 and T-p2, the second only as an unresolved match when *baseline_pending* names
+    it; the candidate detects T-p1 to T-p4 with one claim per scan. *candidate_controls* maps a project number
+    to the candidate's assessment of its control.
+    """
+    inputs = [planned(f"p{index}", project=f"acme/p{index}",
+                      targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}")],
+                      controls=[] if kind is None else [control(f"C-p{index}", kind=kind, target_id=f"T-p{index}"
+                                                                if kind != "capability_safe" else None)])
+              for index in range(1, 6)]
+    outcomes = {}
+    for index in range(1, 6):
+        pending = {f"T-p{index}": 1} if index in baseline_pending else {}
+        outcomes[(f"p{index}", "baseline", 1)] = scan(hits={f"T-p{index}": 1} if index == 1 else {}, pending=pending,
+                                                      claims=1)
+        outcomes[(f"p{index}", "candidate", 1)] = scan(
+            hits={f"T-p{index}": 1} if index <= 4 else {}, claims=1,
+            controls={f"C-p{index}": (candidate_controls or {}).get(index, "quiet")} if kind else {})
+    return write_run(root, run_id, inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                     configs={"candidate": {"config": {"knob": 2}}})
+
+
+def control_comparison(root: Path, run_id: str, **choices) -> dict:
+    return aggregate.compare([control_run(root, run_id, **choices)], baseline="baseline", candidate="candidate",
+                             policy=aggregation_policy())
+
+
+def test_a_genuine_improvement_passes_every_control_requirement(corpus):
+    """The improved system is quiet on all ten controls: E = 0, and every control completed and resolved.
+
+    C = 1 and A = 1, so the completed bounds are [0/1, (0 + 1 - 1)/1] = [0, 0], and F+ is 0.
+    """
+    decision = decide(corpus, gate_policy(controls={"capability_safe": bounds()}))
+
+    assert decision["outcome"] == "pass"
+    assert [item["id"] for item in decision["requirements"] if item["id"].startswith("controls.")] == [
+        "controls.capability_safe.false_alarm_upper", "controls.capability_safe.completed_mass",
+        "controls.capability_safe.assessable_mass"]
+    upper = requirement(decision, "controls.capability_safe.false_alarm_upper")
+    assert upper["explanation"] == (
+        "the capability_safe false-alarm upper bound F+ is 0 (confirmed rate 0 on resolved controls; 0 unresolved "
+        "assessment(s) counted as false allegations), within the allowed 0.1")
+    assert upper["observed"]["false_alarm_upper"] == 0.0 and upper["observed"]["completed"] == 10
+    assert upper["threshold"] == {"class": "capability_safe", "max_false_alarm_upper": 0.1}
+    assert requirement(decision, "controls.capability_safe.completed_mass")["explanation"] == (
+        "the completed capability_safe control mass is 1 (10 of 10 observations completed, 10 resolved), at least "
+        "the required 0.9")
+
+
+def test_a_flag_everything_candidate_fails_the_control_false_alarm_bound_whatever_its_recall(corpus):
+    """The flagging system alleges every control falsely: E = 1, C = A = 1, so F+ = (1 + 1 - 1)/1 = 1."""
+    decision = decide(corpus, gate_policy(controls={"capability_safe": bounds()}), "flagging")
+
+    assert requirement(decision, "primary.improvement")["observed"]["candidate"] == 1.0
+    assert decision["outcome"] == "fail" and decision["failed"] == ["controls.capability_safe.false_alarm_upper"]
+    assert requirement(decision, "controls.capability_safe.false_alarm_upper")["explanation"] == (
+        "the capability_safe false-alarm upper bound F+ is 1 (confirmed rate 1 on resolved controls; 0 unresolved "
+        "assessment(s) counted as false allegations), above the allowed 0.1")
+
+
+def test_a_silent_candidate_is_quiet_on_controls_and_only_its_detection_fails(corpus):
+    decision = decide(corpus, gate_policy(controls={"capability_safe": bounds()}), "silent")
+
+    assert statuses(decision)["controls.capability_safe.false_alarm_upper"] == "pass"
+    assert decision["failed"] == ["primary.improvement"]
+
+
+def test_missing_required_controls_are_inconclusive_and_never_a_perfect_score(corpus, tmp_path):
+    """No fixed-target control is planned anywhere, and a pack with no controls at all has none to read."""
+    decision = decide(corpus, gate_policy(controls={"capability_safe": bounds(), "fixed_target": bounds()}))
+
+    assert decision["outcome"] == "inconclusive" and decision["failed"] == []
+    assert statuses(decision)["controls.capability_safe.false_alarm_upper"] == "pass"
+    for check in ("false_alarm_upper", "completed_mass", "assessable_mass"):
+        item = requirement(decision, f"controls.fixed_target.{check}")
+        assert item["status"] == "inconclusive" and item["observed"] is None
+        assert item["explanation"] == ("the comparison plans no fixed_target control in full/standard, so there is "
+                                       "no false-alarm bound to read, and none is assumed to be zero")
+
+    bare = control_comparison(tmp_path, "run-bare", kind=None)
+    assert bare["views"][0]["systems"]["candidate"]["slices"][0]["controls"]["capability_safe"][
+        "resolved_rate"]["value"] is None
+    unresolved = gate.evaluate_gate(gate_policy(controls={"capability_safe": bounds()}), bare)
+    assert unresolved["outcome"] == "inconclusive" and len(unresolved["unresolved"]) == 3
+
+
+def test_unresolved_control_assessments_count_as_false_alarms_in_the_bound_and_leave_the_mass_short(tmp_path):
+    """Two of five controls are left unresolved by the reviewer, the other three quiet.
+
+    Every control completed, so C = 1; three are resolved, so A = 3/5; none was confirmed false, so E = 0. The
+    confirmed rate E/A is 0, but F+ = (0 + 1 - 3/5)/1 = 0.4 counts the two unresolved as false allegations, so the
+    bound fails at 0.1 while the assessable mass 0.6 is short of 0.9 and unresolved.
+    """
+    comparison = control_comparison(tmp_path, "run-hesitant", candidate_controls={1: "unresolved", 2: "unresolved"})
+
+    decision = gate.evaluate_gate(gate_policy(controls={"capability_safe": bounds()}), comparison)
+
+    assert decision["outcome"] == "fail" and decision["failed"] == ["controls.capability_safe.false_alarm_upper"]
+    assert decision["unresolved"] == ["controls.capability_safe.assessable_mass"]
+    upper = requirement(decision, "controls.capability_safe.false_alarm_upper")
+    assert upper["observed"]["false_alarm_upper"] == pytest.approx(0.4) and upper["observed"]["resolved_rate"] == 0.0
+    assert upper["explanation"] == (
+        "the capability_safe false-alarm upper bound F+ is 0.4 (confirmed rate 0 on resolved controls; 2 unresolved "
+        "assessment(s) counted as false allegations), above the allowed 0.1")
+    assert requirement(decision, "controls.capability_safe.assessable_mass")["explanation"] == (
+        "the resolved (assessable) capability_safe control mass is 0.6 (5 of 5 observations completed, 3 resolved), "
+        "below the required 0.9: failed and unresolved controls are not quiet ones, so the false-alarm bound rests "
+        "on too little of the frozen weight")
+    lenient = gate.evaluate_gate(gate_policy(controls={"capability_safe": bounds(
+        max_false_alarm_upper=0.4, min_assessable_mass=0.6)}), comparison)
+    assert lenient["outcome"] == "pass", "F+ = 0.4 and A = 0.6 sit exactly on the tolerances"
+
+
+def test_a_failed_scan_is_not_a_quiet_control(corpus):
+    """The flaky system errors on two projects: its controls there are neither completed nor resolved.
+
+    C = A = 8/10, E = 0, so F+ = (0 + 0.8 - 0.8)/0.8 = 0 on what completed, but only 0.8 of the frozen control
+    weight completed, which is below 0.9: unresolved. The malformed system completed nothing, so its bound is
+    undefined rather than zero.
+    """
+    policy = gate_policy(controls={"capability_safe": bounds()})
+
+    flaky = decide(corpus, policy, "flaky")
+    assert statuses(flaky)["controls.capability_safe.false_alarm_upper"] == "pass"
+    assert requirement(flaky, "controls.capability_safe.completed_mass")["status"] == "inconclusive"
+    assert requirement(flaky, "controls.capability_safe.completed_mass")["explanation"].startswith(
+        "the completed capability_safe control mass is 0.8 (8 of 10 observations completed, 8 resolved), below "
+        "the required 0.9")
+
+    malformed = decide(corpus, policy, "malformed")
+    upper = requirement(malformed, "controls.capability_safe.false_alarm_upper")
+    assert upper["status"] == "inconclusive"
+    assert upper["explanation"] == ("no capability_safe control observation completed, so the completed false-alarm "
+                                    "bound is undefined; a failed scan is not a quiet one")
+    assert requirement(malformed, "controls.capability_safe.assessable_mass")["status"] == "inconclusive"
+
+
+def test_a_control_of_both_types_is_read_in_each_class(tmp_path):
+    """A 'both' control appears in the capability-safe and the fixed-target view, with the same figures."""
+    comparison = control_comparison(tmp_path, "run-both", kind="both", candidate_controls={5: ("false_allegation", 1)})
+
+    decision = gate.evaluate_gate(gate_policy(controls={"capability_safe": bounds(max_false_alarm_upper=0.2),
+                                                        "fixed_target": bounds(max_false_alarm_upper=0.2)}),
+                                  comparison)
+
+    for name in ("capability_safe", "fixed_target"):
+        item = requirement(decision, f"controls.{name}.false_alarm_upper")
+        assert item["status"] == "pass" and item["observed"]["false_allegations"] == 1
+        assert item["observed"]["false_alarm_upper"] == pytest.approx(0.2)
+
+
+def test_completion_is_read_from_the_assigned_work_with_every_failure_counted(corpus):
+    """The flaky system succeeds on 8 of 10 scans and errors on 2: completion 0.8 against the baseline's 1."""
+    policy = gate_policy(completion={"min": 0.9, "max_decrease": 0.02})
+
+    good = decide(corpus, policy)
+    assert good["outcome"] == "pass"
+    assert requirement(good, "completion.min")["explanation"] == (
+        "the candidate completed 1 of the assigned work (success 10 scan(s) by status), at least the required 0.9")
+    assert requirement(good, "completion.max_decrease")["explanation"] == (
+        "completion went from 1 to 1, +0, a decrease of at most the allowed 0.02")
+
+    flaky = decide(corpus, policy, "flaky")
+    assert flaky["failed"] == ["completion.min", "completion.max_decrease"]
+    assert requirement(flaky, "completion.min")["explanation"] == (
+        "the candidate completed 0.8 of the assigned work (success 8, error 2 scan(s) by status), below the "
+        "required 0.9")
+    assert requirement(flaky, "completion.max_decrease")["explanation"] == (
+        "completion went from 1 to 0.8, -0.2, a decrease of more than the allowed 0.02")
+    assert requirement(flaky, "completion.min")["observed"]["baseline"] == 1.0
+    lenient = decide(corpus, gate_policy(completion={"min": 0.8, "max_decrease": 0.2}), "flaky")
+    assert statuses(lenient)["completion.min"] == statuses(lenient)["completion.max_decrease"] == "pass"
+
+
+def test_a_malformed_output_candidate_fails_completion(corpus):
+    """An error on every scan completes 0 of the assigned work, so both completion requirements fail."""
+    decision = decide(corpus, gate_policy(completion={"min": 0.9, "max_decrease": 0.02}), "malformed")
+
+    assert decision["outcome"] == "fail"
+    assert decision["failed"] == ["primary.improvement", "completion.min", "completion.max_decrease"]
+    assert requirement(decision, "completion.min")["explanation"] == (
+        "the candidate completed 0 of the assigned work (error 10 scan(s) by status), below the required 0.9")
+
+
+def test_inputs_that_could_not_be_prepared_stay_in_the_completion_denominator(tmp_path):
+    """Two of five inputs fail preparation for both systems; both complete 3 of 5 = 0.6, and neither drops them."""
+    inputs = [planned(f"p{index}", project=f"acme/p{index}",
+                      targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}")])
+              for index in range(1, 6)]
+    run = write_run(tmp_path, "run-failed", inputs, systems=("baseline", "candidate"), failed_inputs=("p4", "p5"),
+                    outcomes={("p1", "baseline", 1): scan(hits={"T-p1": 1}, claims=1),
+                              ("p1", "candidate", 1): scan(hits={"T-p1": 1}, claims=1),
+                              ("p2", "candidate", 1): scan(hits={"T-p2": 1}, claims=1)},
+                    configs={"candidate": {"config": {"knob": 2}}})
+    comparison = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=aggregation_policy())
+
+    decision = gate.evaluate_gate(gate_policy(completion={"min": 0.9, "max_decrease": 0.0}), comparison)
+
+    assert requirement(decision, "completion.min")["observed"]["candidate"] == 0.6
+    assert requirement(decision, "completion.min")["observed"]["failures"]["failed_preparation"] == 2
+    assert statuses(decision)["completion.min"] == "fail" and statuses(decision)["completion.max_decrease"] == "pass"
+
+
+def test_an_unresolved_baseline_cannot_make_a_candidate_look_better(tmp_path):
+    """The baseline's T-p2 match is left unresolved: it earns no credit and is not assessable.
+
+    The baseline detects T-p1 only (recall 0.2) and has 4 of 5 target observations assessable (the pending one
+    is not), a mass of 0.8; the candidate detects four targets (0.8) and all five are assessable. Recall rose by
+    +0.6, but part of that is a baseline nobody finished reviewing, so a coverage requirement of 0.9 on BOTH
+    systems leaves the improvement unestablished.
+    """
+    comparison = control_comparison(tmp_path, "run-pending", kind=None, baseline_pending=(2,))
+    assert difference_of(comparison)["assessable_mass"] == pytest.approx(0.2)
+
+    decision = gate.evaluate_gate(gate_policy(target_coverage={"min_assessable_mass": 0.9}), comparison)
+
+    assert requirement(decision, "primary.improvement")["status"] == "pass"
+    item = requirement(decision, "target_coverage.min_assessable_mass")
+    assert item["status"] == "inconclusive" and decision["outcome"] == "inconclusive"
+    assert item["observed"]["baseline"]["assessable_mass"] == 0.8 and item["observed"]["candidate"]["assessable_mass"] == 1.0
+    assert item["explanation"] == (
+        "the baseline has 4 of 5 target observations assessable, a mass of 0.8, below the required 0.9: unresolved "
+        "or failed observations count as misses, so recall over them is a lower bound and the improvement is not "
+        "established")
+    assert statuses(gate.evaluate_gate(gate_policy(target_coverage={"min_assessable_mass": 0.8}), comparison))[
+        "target_coverage.min_assessable_mass"] == "pass"
+
+
+def test_target_coverage_holds_both_systems_and_passes_when_both_are_assessable(corpus):
+    decision = decide(corpus, gate_policy(target_coverage={"min_assessable_mass": 0.9}))
+
+    item = requirement(decision, "target_coverage.min_assessable_mass")
+    assert item["status"] == "pass" and item["threshold"] == {"weighting": "equal_target", "min_assessable_mass": 0.9}
+    assert item["explanation"] == ("the assessable target mass is 1 for the baseline and 1 for the candidate, at "
+                                   "least the required 0.9")
+    flaky = decide(corpus, gate_policy(target_coverage={"min_assessable_mass": 0.9}), "flaky")
+    assert requirement(flaky, "target_coverage.min_assessable_mass")["explanation"].startswith(
+        "the candidate has 8 of 10 target observations assessable, a mass of 0.8, below the required 0.9")

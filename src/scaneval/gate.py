@@ -13,8 +13,9 @@ against one another: detection cannot compensate for noise, false alarms, burden
 scans, and a strong figure on one requirement never turns another's failure into a pass. A requirement
 is inconclusive, never a pass, when what it needs is missing or cannot be trusted: an unavailable or
 unmeasurable metric, an interval that is not ``ok``, an aborted run, a difference the policy did not
-intend to measure, or evidence below the scope the policy requires. No absent figure is read as a
-perfect one.
+intend to measure, evidence below the scope the policy requires, a precision estimate that is missing
+or not bound to the comparison, no eligible control, or a completed, assessable, or covered mass below
+its minimum. No absent figure is read as a perfect one.
 
 What is decided from what. Only the documents passed in: the policy, the comparison report, and the
 precision estimates. The decision is a function of them and of the evaluator version, so the same
@@ -179,6 +180,10 @@ class _Context:
         if ("all", None) not in self.differences or any(("all", None) not in self.slices[side] for side in SIDES):
             return f"the comparison's {self.view_name} view has no whole-view slice"
         return None
+
+    def whole(self, side: str) -> dict | None:
+        """One system's whole-view slice block, or ``None`` when the comparison has no such view."""
+        return self.slices[side].get(("all", None))
 
 
 def _reading(ctx: _Context, metric: dict, weighting: str, dimension: str,
@@ -696,6 +701,133 @@ def _precision_decrease(ctx: _Context) -> Result:
             f"{text}, a decrease of {_n(observed['decrease'])}, more than the allowed {_n(limit)}")
 
 
+# --- controls, completion, and target coverage --------------------------------------------------
+
+
+def _counts_text(counts: dict) -> str:
+    """The non-zero entries of a status or failure count, as ``name n`` pairs."""
+    shown = [f"{name} {count}" for name, count in counts.items() if count]
+    return ", ".join(shown) if shown else "none"
+
+
+def _control(ctx: _Context, name: str, check: str) -> Result:
+    """One of the candidate's control requirements: the F+ bound, the completed mass, or the assessable mass.
+
+    Read from the candidate's whole-view control block of one class. A class with no eligible control
+    is unresolved, never a perfect score, and so is a rate with nothing completed or resolved behind it.
+    A mass below its minimum is unresolved rather than failed, because failed and unresolved
+    controls are not quiet ones and a bound over too little of the frozen weight says nothing. The
+    F+ bound counts every unresolved assessment as a false allegation, so it fails when it exceeds the
+    tolerance whatever the confirmed rate is; the explanation says how much of it is unresolved.
+    """
+    bounds = ctx.policy["controls"][name]
+    key = {"false_alarm_upper": "max_false_alarm_upper", "completed_mass": "min_completed_mass",
+           "assessable_mass": "min_assessable_mass"}[check]
+    threshold = {"class": name, key: bounds[key]}
+    problem = ctx.missing_view()
+    if problem is not None:
+        return _open(problem, threshold)
+    block = ctx.whole("candidate")["controls"][name]
+    if block["state"] != "ok":
+        return _open(f"the {name} controls are unavailable: {block['reason']}", threshold)
+    if block["canonical_controls"] == 0:
+        return _open(f"the comparison plans no {name} control in {ctx.view_name}, so there is no false-alarm bound to "
+                     "read, and none is assumed to be zero", threshold)
+    counts = {"observations": block["observations"], "completed": block["completed"],
+              "resolved": block["resolved"], "unresolved": block["unresolved"],
+              "false_allegations": block["false_allegations"],
+              "observed_false_allegations": block["observed_false_allegations"]}
+    if check == "false_alarm_upper":
+        upper = block["completed_upper"]["value"]
+        observed = {"false_alarm_upper": upper, "resolved_rate": block["resolved_rate"]["value"],
+                    "completed_lower": block["completed_lower"], "completed_mass": block["completed_mass"],
+                    "assessable_mass": block["assessable_mass"], **counts}
+        if upper is None:
+            return _open(f"no {name} control observation completed, so the completed false-alarm bound is undefined; "
+                         "a failed scan is not a quiet one", threshold, observed)
+        text = (f"the {name} false-alarm upper bound F+ is {_n(upper)} (confirmed rate {_n(observed['resolved_rate'])} "
+                f"on resolved controls; {block['unresolved']} unresolved assessment(s) counted as false allegations)")
+        if upper <= bounds[key]:
+            return PASS, observed, threshold, f"{text}, within the allowed {_n(bounds[key])}"
+        return FAIL, observed, threshold, f"{text}, above the allowed {_n(bounds[key])}"
+    mass = block[check]
+    observed = {check: mass, **counts}
+    word = "completed" if check == "completed_mass" else "resolved (assessable)"
+    if mass is None:
+        return _open(f"the {word} {name} control mass is undefined", threshold, observed)
+    text = (f"the {word} {name} control mass is {_n(mass)} ({block['completed']} of {block['observations']} "
+            f"observations completed, {block['resolved']} resolved)")
+    if mass >= bounds[key]:
+        return PASS, observed, threshold, f"{text}, at least the required {_n(bounds[key])}"
+    return _open(f"{text}, below the required {_n(bounds[key])}: failed and unresolved controls are not quiet ones, "
+                 "so the false-alarm bound rests on too little of the frozen weight", threshold, observed)
+
+
+def _completion_minimum(ctx: _Context) -> Result:
+    minimum = ctx.policy["completion"]["min"]
+    threshold = {"min": minimum}
+    problem = ctx.missing_view()
+    if problem is not None:
+        return _open(problem, threshold)
+    completion = ctx.whole("candidate")["completion"]
+    observed = {"baseline": ctx.whole("baseline")["completion"]["value"], "candidate": completion["value"],
+                "statuses": completion["statuses"], "failures": completion["failures"]}
+    if completion["value"] is None:
+        return _open("no input was assigned in this view, so completion is undefined", threshold, observed)
+    text = (f"the candidate completed {_n(completion['value'])} of the assigned work "
+            f"({_counts_text(completion['statuses'])} scan(s) by status)")
+    if completion["value"] >= minimum:
+        return PASS, observed, threshold, f"{text}, at least the required {_n(minimum)}"
+    return FAIL, observed, threshold, f"{text}, below the required {_n(minimum)}"
+
+
+def _completion_decrease(ctx: _Context) -> Result:
+    limit = ctx.policy["completion"]["max_decrease"]
+    threshold = {"max_decrease": limit}
+    problem = ctx.missing_view()
+    if problem is not None:
+        return _open(problem, threshold)
+    change = ctx.differences[("all", None)]["completion"]
+    observed = {"baseline": ctx.whole("baseline")["completion"]["value"],
+                "candidate": ctx.whole("candidate")["completion"]["value"], "difference": change}
+    if change is None:
+        return _open("no input was assigned in this view, so completion is undefined", threshold, observed)
+    text = (f"completion went from {_n(observed['baseline'])} to {_n(observed['candidate'])}, "
+            f"{_signed(change)}")
+    if -change <= limit:
+        return PASS, observed, threshold, f"{text}, a decrease of at most the allowed {_n(limit)}"
+    return FAIL, observed, threshold, f"{text}, a decrease of more than the allowed {_n(limit)}"
+
+
+def _target_coverage(ctx: _Context) -> Result:
+    """The assessable target mass of BOTH systems: an unresolved baseline flatters any candidate."""
+    minimum = ctx.policy["target_coverage"]["min_assessable_mass"]
+    weighting = ctx.policy["primary"]["weighting"]
+    threshold = {"weighting": weighting, "min_assessable_mass": minimum}
+    problem = ctx.missing_view()
+    if problem is not None:
+        return _open(problem, threshold)
+    covered = {}
+    for side in SIDES:
+        block = next((item for item in ctx.whole(side)["detection"] if item["weighting"] == weighting), None)
+        if block is None or block["state"] != "ok":
+            return _open(f"{weighting} target coverage is unavailable for the {side}: "
+                         f"{'no such weighting' if block is None else block['reason']}", threshold)
+        covered[side] = block["coverage"]
+    observed = {side: {key: covered[side][key] for key in ("assessable_mass", "completed_mass", "assessable",
+                                                           "target_observations")} for side in SIDES}
+    short = [side for side in SIDES if covered[side]["assessable_mass"] < minimum]
+    if not short:
+        return (PASS, observed, threshold,
+                f"the assessable target mass is {_n(covered['baseline']['assessable_mass'])} for the baseline and "
+                f"{_n(covered['candidate']['assessable_mass'])} for the candidate, at least the required {_n(minimum)}")
+    parts = [f"the {side} has {covered[side]['assessable']} of {covered[side]['target_observations']} target "
+             f"observations assessable, a mass of {_n(covered[side]['assessable_mass'])}" for side in short]
+    return _open(f"{'; '.join(parts)}, below the required {_n(minimum)}: unresolved or failed observations count "
+                 "as misses, so recall over them is a lower bound and the improvement is not established",
+                 threshold, observed)
+
+
 # --- evaluation ---------------------------------------------------------------------------------
 
 
@@ -713,6 +845,9 @@ _FIXED: dict[str, Callable[[_Context], Result]] = {
     "precision.min_coverage": _precision_coverage,
     "precision.interval": _precision_interval,
     "precision.max_decrease": _precision_decrease,
+    "completion.min": _completion_minimum,
+    "completion.max_decrease": _completion_decrease,
+    "target_coverage.min_assessable_mass": _target_coverage,
 }
 
 
@@ -724,6 +859,9 @@ def _requirement(requirement_id: str, ctx: _Context) -> Result:
     family, _, rest = requirement_id.partition(".")
     if family == "regression" and rest in ctx.regressions:
         return _regression(ctx, ctx.regressions[rest])
+    if family == "controls":
+        name, _, check = rest.partition(".")
+        return _control(ctx, name, check)
     raise ContractError(f"this build has no evaluator for the requirement {requirement_id}")
 
 
