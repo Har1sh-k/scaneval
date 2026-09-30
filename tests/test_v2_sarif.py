@@ -1,9 +1,10 @@
 """SARIF 2.1.0 import (profile sarif-import-1): the import record, the importer, and its CLI.
 
 Every log here is a fabricated fixture under ``tests/fixtures/sarif`` or a document built in the
-test; no test fetches anything, calls a model, or reads a file a log names. The one test that
-runs the real Semgrep binary is skipped when it is not installed, and it runs with HOME redirected
-into the test's own directory. Reviewers named here are fictional.
+test, except in the one test that runs the real Semgrep binary, which imports the log that binary
+wrote into the test's own directory; that test is skipped when Semgrep is not installed and runs
+it with HOME redirected there. No test fetches anything, calls a model, or reads a file a log
+names. Reviewers named here are fictional.
 """
 
 from __future__ import annotations
@@ -1380,6 +1381,9 @@ def test_import_sarif_writes_the_bundle_the_library_writes_and_says_what_it_made
                  "evaluation.json"):
         assert (bundle / name).read_bytes() == (library.bundle / name).read_bytes(), name
     assert review.review_status(bundle) == "draft"
+    # The import record is a contract kind like any other, so validate reads it from the command line.
+    code, out, _ = cli(capsys, "validate", "import-record", bundle / "import.json")
+    assert (code, out.strip()) == (0, f"Valid import-record: {bundle / 'import.json'}")
 
 
 def test_import_sarif_help_names_every_option(capsys):
