@@ -148,6 +148,12 @@ FLOW_TEXT_LIMIT = 65536
 # thousands of placeholders, or one messageStrings entry shared by every result), and the import
 # keeps a copy of the message in every claim. A longer message is a loss; the raw artifact keeps it.
 MESSAGE_LIMIT = 65536
+# The claim text of one whole run (every allegation and every evidence text, counted in characters) is
+# at most this much. MESSAGE_LIMIT bounds one message, but every result can name the same one: a single
+# messageStrings entry used by 4000 results turned a 1.45 MB log into 252 MB of allegations. Claims are
+# read in result order until the next one would take the total past the budget; that result and every
+# one after it is a loss, and the raw artifact keeps them. It is a constant of the profile, not an option.
+RUN_TEXT_BUDGET = 64 * 1024 * 1024
 
 # The most digits a log's number can have where this module reads one out of a string: a placeholder
 # index or a location id. int() refuses a string of more than 4300 digits (a limit an environment can
@@ -939,6 +945,20 @@ class _RunReader:
                     if isinstance(taxonomy.get(key), str):
                         table.setdefault(taxonomy[key], taxonomy)
         self._descriptor_cwes: dict[str | None, tuple[list[str], list[str]]] = {}
+        # A tool component is found by guid from one table too, because every result that names one
+        # by guid asks, and so does every notification descriptor that does. A guid is a string, as
+        # SARIF defines it, and a reference whose guid is not one names no component.
+        self._component_guids: dict[str, list[tuple[dict, str]]] = {}
+        for pair in self._components():
+            if isinstance(pair[0].get("guid"), str):
+                self._component_guids.setdefault(pair[0]["guid"], []).append(pair)
+        self._rule_guids: dict[str, dict[str, list[int]]] = {}
+        # A uriBaseId is followed to the end of its chain once, however many results sit under it.
+        self._bases: dict[str, _Base | _Unusable] = {}
+        # The characters of allegation and evidence text the claims so far hold, and, once a claim
+        # would take that past RUN_TEXT_BUDGET, the reason every result from it on is a loss.
+        self._text_used = 0
+        self._budget_reason: str | None = None
 
     @staticmethod
     def _array(owner: dict, key: str, pointer: str) -> list:
@@ -963,7 +983,27 @@ class _RunReader:
         can say where a base the log hid (an entry without ``uri``) points. A chain that loops, an
         entry that is not an absolute URI and names no further base, and an entry URI that does
         not end in ``/`` do not resolve (SARIF 3.14.14).
+
+        The chain is followed once for each name a result asks for, and the answer, a base or the
+        reason there is none, is kept: every result under a base asks, and a chain of hundreds of
+        entries followed again for each of them costs the whole run again. A name met part way along
+        a chain is not kept, because what it answers there depends on the names before it, which
+        decide whether it loops.
         """
+        if seen:
+            return self._follow_base(name, seen)
+        if name not in self._bases:
+            try:
+                self._bases[name] = self._follow_base(name, seen)
+            except _Unusable as exc:
+                self._bases[name] = exc
+        answer = self._bases[name]
+        if isinstance(answer, _Unusable):
+            raise _Unusable(str(answer))
+        return answer
+
+    def _follow_base(self, name: str, seen: tuple[str, ...]) -> _Base:
+        """One step of :meth:`_resolve_base`: *name*, and then, through its entry, the rest of its chain."""
         if name in seen:
             raise _Unusable(f"uriBaseId chain {' -> '.join(seen + (name,))} loops")
         if name in self.settings.bases:
@@ -986,7 +1026,7 @@ class _RunReader:
             if not _text(inner):
                 raise _Unusable(f"{label} has a relative uri and no uriBaseId to resolve it against "
                                 "(SARIF 3.14.14)")
-            return self._resolve_base(inner, seen + (name,)).join(parsed.segments)
+            return self._follow_base(inner, seen + (name,)).join(parsed.segments)
         if name.upper() == SRCROOT:
             return _Base(())
         raise _Unusable(f"uriBaseId {name!r} is not configured with --uri-base, not declared in "
@@ -1135,7 +1175,7 @@ class _RunReader:
             return self.extensions[index], f"{self.pointer}/tool/extensions/{index}"
         guid = reference.get("guid")
         if guid is not None:
-            matches = [pair for pair in self._components() if pair[0].get("guid") == guid]
+            matches = self._component_guids.get(guid, []) if isinstance(guid, str) else []
             if len(matches) != 1:
                 raise _Unusable(f"{label}.guid {guid!r} names {len(matches)} tool components, not one")
             return matches[0]
@@ -1150,6 +1190,21 @@ class _RunReader:
             self._rule_ids[pointer] = table
         return self._rule_ids[pointer]
 
+    def _rules_by_guid(self, component: dict, pointer: str) -> dict[str, list[int]]:
+        """Where each ``guid`` sits among *component*'s rule descriptors, built once per component.
+
+        Every position is kept, not the first, because how many descriptors carry a guid is what a
+        reference by it reports when it is ambiguous. A guid is a string, as SARIF defines it, and
+        a descriptor whose guid is not one is never named by a reference.
+        """
+        if pointer not in self._rule_guids:
+            table: dict[str, list[int]] = {}
+            for index, descriptor in enumerate(component.get("rules") or []):
+                if isinstance(descriptor, dict) and isinstance(descriptor.get("guid"), str):
+                    table.setdefault(descriptor["guid"], []).append(index)
+            self._rule_guids[pointer] = table
+        return self._rule_guids[pointer]
+
     def _rule(self, result: dict, label: str) -> _Rule:
         """The rule *result* names, located as SARIF 3.52.3 says, and matched by id where it cannot be.
 
@@ -1158,7 +1213,9 @@ class _RunReader:
         descriptor is found by index, else by guid, else, for producers such as Semgrep that name a
         rule by id alone, by a whole-id match or the id less one trailing hierarchical component.
         A found descriptor must carry an id the reference names (SARIF 3.52.4). A result naming no
-        rule at all, or an id no descriptor carries, has no descriptor, which is not a loss.
+        rule at all, or an id no descriptor carries, has no descriptor, which is not a loss. A guid
+        and an id are each looked up in a table built once for the component, not by reading its
+        rules again for every result that names one.
         """
         rule_id = result.get("ruleId")
         if rule_id is not None and not _text(rule_id):
@@ -1197,8 +1254,7 @@ class _RunReader:
             if guid is not None and isinstance(rules[position], dict) and rules[position].get("guid") != guid:
                 raise _Unusable(f"{label} names one rule by index and another by guid")
         elif guid is not None:
-            matches = [index for index, descriptor in enumerate(rules)
-                       if isinstance(descriptor, dict) and descriptor.get("guid") == guid]
+            matches = self._rules_by_guid(component, component_pointer).get(guid, []) if isinstance(guid, str) else []
             if len(matches) != 1:
                 raise _Unusable(f"{label}/rule/guid {guid!r} names {len(matches)} rules in "
                                 f"{component_pointer}, not one")
@@ -1499,10 +1555,18 @@ class _RunReader:
         return losses
 
     def convert(self, index: int, result: Any) -> tuple[str, dict, dict | None]:
-        """``("claim", claim, entry)``, ``("excluded", exclusion, None)`` or ``("loss", loss, None)``."""
+        """``("claim", claim, entry)``, ``("excluded", exclusion, None)`` or ``("loss", loss, None)``.
+
+        Results are read in order while the claims they make hold at most :data:`RUN_TEXT_BUDGET`
+        characters of allegation and evidence text. The first result whose claim would take the
+        total past it is a loss, and so is every result after it, which is not read at all: no
+        result is dropped in silence, and none can make the run cost more than the budget allows.
+        """
         pointer = f"{self.pointer}/results/{index}"
+        if self._budget_reason is not None:
+            return "loss", {"pointer": pointer, "reason": self._budget_reason}, None
         try:
-            return self._convert(index, pointer, result)
+            outcome = self._convert(index, pointer, result)
         except _Unusable as exc:
             return "loss", {"pointer": pointer, "reason": str(exc)}, None
         except RecursionError:
@@ -1514,6 +1578,16 @@ class _RunReader:
             # Whatever else a hostile value turns into, one result never ends the import.
             return "loss", {"pointer": pointer,
                             "reason": f"{pointer} could not be read: {type(exc).__name__}: {exc}"[:300]}, None
+        if outcome[0] == "claim":
+            size = len(outcome[1]["allegation"]) + len(outcome[1].get("evidence_text", ""))
+            if self._text_used + size > RUN_TEXT_BUDGET:
+                self._budget_reason = (
+                    f"reading {pointer} would take the run's claim text (allegations and evidence text) past "
+                    f"its budget of {RUN_TEXT_BUDGET} characters, so that result and every later one are not "
+                    "read; the raw artifact keeps them")
+                return "loss", {"pointer": pointer, "reason": self._budget_reason}, None
+            self._text_used += size
+        return outcome
 
     def _convert(self, index: int, pointer: str, result: Any) -> tuple[str, dict, dict | None]:
         if not isinstance(result, dict):

@@ -1138,6 +1138,206 @@ def test_a_taxonomy_is_found_by_guid_then_index_then_name_and_failing_all_three_
         cwe, cwe, cwe, cwe, cwe, no_cwe, no_cwe, no_cwe, cwe]
 
 
+def shared_message_log(count: int, *, repeat: int = 100, argument: str = "abc") -> dict:
+    """*count* results that all name one messageStrings entry of *repeat* placeholders.
+
+    Each allegation is ``len(argument) * repeat`` characters (300 by default) from a few bytes of log.
+    """
+    log = minimal_log(results=[result_at("src/app.py", message={"id": "m", "arguments": [argument]})
+                               for _ in range(count)])
+    log["runs"][0]["tool"]["driver"]["rules"][0]["messageStrings"] = {"m": {"text": "{0}" * repeat}}
+    return log
+
+
+def test_claim_text_that_would_pass_the_run_budget_is_a_loss_for_that_result_and_every_later_one(monkeypatch):
+    """One messageStrings entry named by 4000 results turned a 1.45 MB log into 252 MB of allegations."""
+    monkeypatch.setattr(sarif_module, "RUN_TEXT_BUDGET", 1000)
+    conversion = convert_run(shared_message_log(20))
+    # Three allegations of 300 characters fit in 1000; the fourth would make 1200.
+    assert [claim["claim_id"] for claim in conversion.claims] == ["r0-0", "r0-1", "r0-2"]
+    assert sum(len(claim["allegation"]) for claim in conversion.claims) == 900
+    assert [loss["pointer"] for loss in conversion.losses] == [f"/runs/0/results/{number}" for number in range(3, 20)]
+    (reason,) = {loss["reason"] for loss in conversion.losses}
+    assert "budget of 1000 characters" in reason and "/runs/0/results/3" in reason
+    assert "every later one" in reason and "the raw artifact keeps them" in reason
+    # Every result is still accounted for once, and the run is partial, as for any other import loss.
+    assert conversion.excluded == [] and conversion.result_count == 20
+    status, error = conversion.outcome()
+    assert (status, error["code"]) == ("partial", "import_loss")
+
+
+def test_the_run_budget_counts_evidence_text_with_the_allegation_and_is_met_exactly_at_its_size(monkeypatch):
+    result = result_at("src/app.py", message={"text": "x" * 40},
+                       codeFlows=[flow(step("src/app.py", 1, "a"), step("src/app.py", 2, "b"))])
+    (claim,) = convert_run(minimal_log(results=[result])).claims
+    size = len(claim["allegation"]) + len(claim["evidence_text"])
+    assert len(claim["allegation"]) == 40 and size > 2 * 40
+    twice = minimal_log(results=[deepcopy(result), deepcopy(result)])
+    monkeypatch.setattr(sarif_module, "RUN_TEXT_BUDGET", 2 * size)
+    assert len(convert_run(twice).claims) == 2
+    monkeypatch.setattr(sarif_module, "RUN_TEXT_BUDGET", 2 * size - 1)
+    conversion = convert_run(twice)
+    assert [claim["claim_id"] for claim in conversion.claims] == ["r0-0"] and len(conversion.losses) == 1
+    # The allegations alone (80 characters) are far inside the budget: the evidence text is what passes it.
+    assert 2 * 40 < 2 * size - 1
+
+
+def test_only_a_claim_uses_the_run_budget_and_once_it_is_passed_no_later_result_is_read(monkeypatch):
+    monkeypatch.setattr(sarif_module, "RUN_TEXT_BUDGET", 700)
+    long = {"text": "x" * 300}
+    conversion = convert_run(minimal_log(results=[
+        result_at("src/app.py", kind="pass"),
+        result_at("/etc/passwd", message=long),
+        result_at("src/app.py", message=long),
+        result_at("src/app.py", message=long),
+        result_at("src/app.py", message=long),
+        result_at("src/app.py", message={"text": "small enough to fit in what is left"}),
+        result_at("src/app.py", kind="pass"),
+        "not a result object"]))
+    # An exclusion and a loss for another reason hold no claim text, so neither uses any of the budget.
+    assert [claim["claim_id"] for claim in conversion.claims] == ["r0-2", "r0-3"]
+    assert conversion.excluded == [{"pointer": "/runs/0/results/0", "reason": "kind:pass"}]
+    reasons = {loss["pointer"]: loss["reason"] for loss in conversion.losses}
+    assert list(reasons) == [f"/runs/0/results/{number}" for number in (1, 4, 5, 6, 7)]
+    assert "is an absolute path" in reasons["/runs/0/results/1"] and "budget" not in reasons["/runs/0/results/1"]
+    # The third long claim passes the budget. It is a loss, and so is everything after it: a result
+    # that would fit, an exclusion, and one that is not even an object, none of them read.
+    assert all("reading /runs/0/results/4 would take the run's claim text" in reasons[f"/runs/0/results/{number}"]
+               for number in (4, 5, 6, 7))
+
+
+def test_an_import_whose_claim_text_passes_the_run_budget_still_writes_its_bundle(workspace, monkeypatch):
+    log = write_log(workspace, shared_message_log(20))
+    whole = imported(workspace, log, name="whole")
+    assert (whole.result["status"], whole.result["bundles_resolved"]) == ("success", True)
+    assert len(whole.result["claims"]) == 20 and whole.record["losses"] == []
+
+    monkeypatch.setattr(sarif_module, "RUN_TEXT_BUDGET", 1000)
+    outcome = imported(workspace, log, name="over")
+    assert bundle_files(outcome.bundle) == (BUNDLE_FILES - {"raw/codeql.sarif"}) | {"raw/built.sarif"}
+    result = load_document(outcome.bundle / "result.json", "scan-result")
+    record = load_document(outcome.bundle / "import.json", "import-record")
+    assert [claim["claim_id"] for claim in result["claims"]] == ["r0-0", "r0-1", "r0-2"]
+    # The claims that were lost keep the bundles unresolved, as every other loss does.
+    assert (result["status"], result["error"]["code"], result["bundles_resolved"]) == ("partial", "import_loss", False)
+    assert record["counts"] == {"results": 20, "claims": 3, "excluded": 0, "losses": 17, "evidence_losses": 0,
+                                "bundle_review_flagged": 0, "bundle_review_resolved": 0}
+    assert [loss["pointer"] for loss in record["losses"]] == [f"/runs/0/results/{number}" for number in range(3, 20)]
+    assert all("budget of 1000 characters" in loss["reason"] for loss in record["losses"])
+    # The log itself is kept whole, so nothing the import did not read is gone.
+    assert (outcome.bundle / "raw" / "built.sarif").read_bytes() == log.read_bytes()
+
+
+class Watched(dict):
+    """A JSON object that counts reads of one member (of any member when *key* is ``None``) in a shared counter.
+
+    A lookup that scans reads its member from every candidate once for every result; one that uses
+    a table built once reads each of them a bounded number of times however many results ask.
+    """
+
+    def __init__(self, reads: list, key: str | None, members: dict):
+        super().__init__(members)
+        self.reads, self.key = reads, key
+
+    def get(self, key, default=None):
+        self.reads[0] += self.key in (None, key)
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        self.reads[0] += self.key in (None, key)
+        return super().__getitem__(key)
+
+
+def test_a_rule_or_a_component_named_by_guid_is_found_in_a_table_not_by_scanning_for_each_result():
+    """A guid was looked for in every rule, and in every tool component, by every result that named one."""
+    count, reads = 150, [0]
+    rules = [Watched(reads, "guid", {"id": f"rule-{number}", "guid": f"rule-guid-{number}"}) for number in range(count)]
+    packs = [Watched(reads, "guid", {"name": f"pack-{number}", "guid": f"pack-guid-{number}",
+                                     "rules": [{"id": f"pack-rule-{number}"}]}) for number in range(count)]
+    log = minimal_log(results=(
+        [result_at("src/app.py", ruleId=None, rule={"guid": f"rule-guid-{number}"}) for number in range(count)]
+        + [result_at("src/app.py", ruleId=None, rule={"id": f"pack-rule-{number}",
+                                                       "toolComponent": {"guid": f"pack-guid-{number}"}})
+           for number in range(count)]))
+    log["runs"][0]["tool"]["driver"]["rules"], log["runs"][0]["tool"]["extensions"] = rules, packs
+    conversion = convert_run(log)
+    assert len(conversion.claims) == 2 * count and conversion.losses == []
+    assert [claim["native_rule_id"] for claim in conversion.claims] == (
+        [f"rule-{number}" for number in range(count)] + [f"pack-rule-{number}" for number in range(count)])
+    assert [entry["descriptor"] for entry in conversion.entries] == (
+        [f"/runs/0/tool/driver/rules/{number}" for number in range(count)]
+        + [f"/runs/0/tool/extensions/{number}/rules/0" for number in range(count)])
+    # Scanning reads a guid once per candidate per result: 300 results over 150 candidates is 45000 reads.
+    assert reads[0] <= 2 * (len(rules) + len(packs))
+
+
+@pytest.mark.parametrize("rule,message", [
+    ({"guid": "twin"}, "names 2 rules in /runs/0/tool/driver, not one"),
+    ({"guid": "nobody"}, "names 0 rules in /runs/0/tool/driver, not one"),
+    ({"guid": 7}, "names 0 rules in /runs/0/tool/driver, not one"),
+    ({"guid": "one", "toolComponent": {"guid": "twin-pack"}}, "toolComponent.guid 'twin-pack' names 2 tool components, not one"),
+    ({"guid": "one", "toolComponent": {"guid": "no-pack"}}, "toolComponent.guid 'no-pack' names 0 tool components, not one"),
+    ({"guid": "one", "toolComponent": {"guid": 7}}, "toolComponent.guid 7 names 0 tool components, not one"),
+])
+def test_a_guid_that_names_no_single_rule_or_component_is_a_loss_that_counts_what_it_names(rule, message):
+    """A guid is a string: a descriptor whose guid is the number 7 is named by no reference at all."""
+    log = minimal_log(results=[result_at("src/app.py", ruleId=None, rule=rule)])
+    run = log["runs"][0]
+    run["tool"]["driver"]["rules"] = [{"id": "rule-one", "guid": "one"}, {"id": "rule-a", "guid": "twin"},
+                                      {"id": "rule-b", "guid": "twin"}, {"id": "rule-seven", "guid": 7}]
+    run["tool"]["extensions"] = [{"name": "pack", "guid": "twin-pack", "rules": [{"id": "in-pack", "guid": "one"}]},
+                                 {"name": "pack", "guid": "twin-pack"}, {"name": "seven", "guid": 7}]
+    assert message in only_loss(convert_run(log))
+
+
+def test_a_rule_named_by_guid_resolves_in_the_driver_and_in_the_component_that_is_named():
+    log = minimal_log(results=[
+        result_at("src/app.py", ruleId=None, rule={"guid": "one"}),
+        result_at("src/app.py", ruleId=None, rule={"guid": "one", "toolComponent": {"guid": "pack-guid"}}),
+        result_at("src/app.py", ruleId=None, rule={"guid": "one", "index": 0, "toolComponent": {"index": 0}}),
+        result_at("src/app.py", ruleId=None, rule={"guid": "two", "index": 0})])
+    run = log["runs"][0]
+    run["tool"]["driver"]["rules"] = [{"id": "rule-one", "guid": "one"}]
+    run["tool"]["extensions"] = [{"name": "pack", "guid": "pack-guid", "rules": [{"id": "in-pack", "guid": "one"}]}]
+    conversion = convert_run(log)
+    assert [(claim["native_rule_id"], entry["descriptor"]) for claim, entry in zip(conversion.claims, conversion.entries)] == [
+        ("rule-one", "/runs/0/tool/driver/rules/0"), ("in-pack", "/runs/0/tool/extensions/0/rules/0"),
+        ("in-pack", "/runs/0/tool/extensions/0/rules/0")]
+    # A guid and an index that name two rules are a loss.
+    assert "names one rule by index and another by guid" in conversion.losses[0]["reason"]
+
+
+def test_a_uri_base_chain_is_followed_once_per_base_however_many_results_sit_under_it():
+    """Every result under a base followed the whole chain of originalUriBaseIds to its end again."""
+    depth, reads = 40, [0]
+    chain = {"b0": {"uri": "file:///w/"}}
+    chain.update({f"b{number}": {"uri": f"d{number}/", "uriBaseId": f"b{number - 1}"} for number in range(1, depth)})
+    log = minimal_log(results=[result_at(f"f{number}.py", base=f"b{depth - 1}") for number in range(100)])
+    log["runs"][0]["originalUriBaseIds"] = Watched(reads, None, chain)
+    conversion = convert_run(log, settings=UriSettings(source_root_uri="file:///w/"))
+    assert len(conversion.claims) == 100 and conversion.losses == []
+    deepest = "/".join(f"d{number}" for number in range(1, depth))
+    assert [claim["primary_location"]["path"] for claim in conversion.claims[:2]] == [
+        f"{deepest}/f0.py", f"{deepest}/f1.py"]
+    assert reads[0] <= 2 * depth
+
+
+def test_a_uri_base_that_cannot_be_resolved_says_why_for_every_result_under_it():
+    """The answer is kept for a base, so a loop or a hidden uri must read the same for the second result as the first."""
+    chain = {"loop-a": {"uri": "a/", "uriBaseId": "loop-b"}, "loop-b": {"uri": "b/", "uriBaseId": "loop-a"},
+             "hidden": {"uriBaseId": "loop-a"}}
+    log = minimal_log(results=[result_at(f"f{number}.py", base=base) for base in ("loop-a", "loop-b", "hidden")
+                               for number in range(2)])
+    log["runs"][0]["originalUriBaseIds"] = chain
+    reasons = [loss["reason"] for loss in convert_run(log).losses]
+    assert len(reasons) == 6
+    assert reasons[0].endswith("uriBaseId chain loop-a -> loop-b -> loop-a loops")
+    assert reasons[1].endswith("uriBaseId chain loop-a -> loop-b -> loop-a loops") and reasons[0] != reasons[1]
+    assert reasons[2].endswith("uriBaseId chain loop-b -> loop-a -> loop-b loops")
+    assert reasons[4].endswith("omits its uri, so only --uri-base hidden=... can say where it points")
+    assert reasons[4] != reasons[5] and reasons[4].split(": ", 1)[1] == reasons[5].split(": ", 1)[1]
+
+
 def test_the_guid_is_the_native_id_and_fingerprints_are_provenance_only():
     result = result_at("src/app.py", guid="c0ffee00-0000-4000-8000-000000000001",
                        fingerprints={"matchBasedId/v1": "abc_0", "withheld/v1": "requires login", "odd": 5},
