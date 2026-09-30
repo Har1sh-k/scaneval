@@ -727,9 +727,11 @@ def _interval(resolved: list[dict], strata: list[dict], precision: Fraction | No
     ``sum_h N_h^2 (1 - n_h/N_h) s_h^2 / n_h``, where ``s_h^2`` is the sample variance of z within
     stratum h. A stratum taken whole contributes nothing (no sampling variance), an uncovered one is
     outside the estimate, and one that drew a single unit of several makes the interval
-    ``insufficient``. A zero variance from a sample that is not a census is ``degenerate`` and gets
-    no bounds, because it is the normal approximation failing, not certainty. The interval covers
-    sampling only; reviewer error, disagreement, and unresolved units are outside it.
+    ``insufficient``. A census is a sample that took every stratum whole: a stratum that drew nothing
+    was never observed, so a sample with one is no census, however little variance the strata it covers
+    show. A zero variance from a sample that is not a census is ``degenerate`` and gets no bounds,
+    because it is the normal approximation failing, not certainty. The interval covers sampling only;
+    reviewer error, disagreement, and unresolved units are outside it.
     """
     z = NormalDist().inv_cdf(0.5 + confidence / 2)
     base = {"method": INTERVAL_METHOD, "confidence": confidence, "z": z, "variance": None,
@@ -740,13 +742,12 @@ def _interval(resolved: list[dict], strata: list[dict], precision: Fraction | No
     for unit in resolved:
         by_stratum[unit["stratum"]].append(unit)
     variance = _ZERO
-    census = True
+    census = all(row["sampled_units"] == row["population_units"] for row in strata)
     insufficient = []
     for row in strata:
         size, drawn = row["population_units"], row["sampled_units"]
         if drawn in (0, size):
             continue
-        census = False
         if drawn < 2:
             insufficient.append(row["stratum"])
             continue

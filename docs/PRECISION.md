@@ -100,8 +100,8 @@ With π_h = n_h/N_h, the Horvitz-Thompson total of class c is N̂_c = Σ over sa
 The interval uses the stratified linearized variance of the ratio R = T/X, where X = T+F. Each sampled unit scores z = (1[true] − R·1[true or false])/X, and V̂ = Σ_h N_h² (1 − n_h/N_h) s²_h / n_h, where s²_h is the sample variance of z in stratum h. The interval is R ± z_{(1+c)/2}·√V̂, clipped to [0, 1], with confidence `--confidence` (default 0.95). Its states:
 
 - `ok`;
-- `census`: every sampled stratum was taken whole, so there is no sampling variance;
-- `degenerate`: zero variance from a sample that is not a census. The normal approximation has failed, so no bounds are given;
+- `census`: every stratum was taken whole, none left uncovered, so there is no sampling variance;
+- `degenerate`: zero variance from a sample that is not a census. The normal approximation has failed, so no bounds are given. A sample with an uncovered stratum is never a census, whatever its covered strata show: nothing was observed of the rest, and a zero-width interval would state certainty about it;
 - `insufficient`: a stratum not taken whole drew one unit, so its variance cannot be estimated;
 - `unavailable`: nothing resolved true or false.
 

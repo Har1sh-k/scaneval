@@ -1822,6 +1822,25 @@ def test_an_estimate_whose_sample_leaves_strata_unsampled_does_not_meet_a_covera
         "stratum that drew no unit is not estimated at all")
 
 
+def test_a_sample_with_unsampled_strata_gives_the_interval_bound_nothing_to_pass_on(corpus):
+    """The same half sample: p1, p10, p2, p3, and p4 drew their one unit, so the covered strata have no variance.
+
+    Four true and one false give resolved precision 0.8, and the interval bound of 0.4 would have been met by a
+    "census" of [0.8, 0.8] over five units nothing was observed of. The sample is no census, so its interval is
+    degenerate and carries no bounds, and the requirement waits, as it does for any other zero variance.
+    """
+    half = estimate_for(corpus["run"], "improved", size=5, stratify_by="input")
+    assert half["precision_resolved"] == 0.8 and half["coverage"]["share"] == 0.5
+
+    decision = decide(corpus, gate_policy(precision=precision_block(min_interval_lower_bound=0.4)),
+                      precision_candidate=half)
+
+    item = requirement(decision, "precision.interval")
+    assert item["status"] == "inconclusive"
+    assert item["observed"]["interval"]["state"] == "degenerate"
+    assert item["explanation"] == "the estimate's interval is degenerate, so it carries no bounds"
+
+
 def test_the_precision_interval_bound_passes_fails_or_waits_on_what_the_interval_shows(corpus, estimates):
     """A census has no sampling variance; a doctored interval stands in for the other states."""
     policy = gate_policy(precision=precision_block(min_interval_lower_bound=0.6))

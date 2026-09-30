@@ -798,6 +798,40 @@ def test_a_hand_computed_stratified_sample_reproduces_the_horvitz_thompson_estim
     assert canonical_json(precision.estimate(deepcopy(sample), deepcopy(reviews))) == canonical_json(estimated)
 
 
+def test_a_sample_that_leaves_a_stratum_uncovered_is_never_reported_as_a_census(tmp_path):
+    """Input strata of 1, 1, and 5 units; equal allocation of 2 takes the singletons whole and draws nothing from
+    the third.
+
+    Both drawn units are reviewed true, so resolved precision is 1 and the strata the sample covers have no
+    sampling variance. But it covers 2 of 7 units, and nothing was observed of the other 5: calling it a census
+    would report a zero-width interval [1, 1] over units nobody looked at. It is a zero variance from a sample
+    that is not a census, so it is degenerate and carries no bounds, and coverage says how little it covers. The
+    same population drawn whole (size 7) is a census, with bounds [1, 1].
+    """
+    run_dir = write_run(tmp_path, "run-census", {("in-a", "sys-a"): output(distinct("a", 1)),
+                                                 ("in-b", "sys-a"): output(distinct("b", 1)),
+                                                 ("in-c", "sys-a"): output(distinct("c", 5))})
+    frame = precision.build_frame([run_dir], population="full")
+    partial = precision.draw_sample(frame, size=2, seed=0, stratify_by="input", allocation="equal")
+    assert partial["uncovered_strata"] == ["in-c"]
+
+    estimated = precision.estimate(partial, review_all(partial, {entry["unit_id"]: "true"
+                                                                 for entry in partial["selected"]}))
+
+    assert estimated["precision_resolved"] == 1.0
+    assert estimated["coverage"] == {"population_units": 7, "covered_units": 2, "share": 2 / 7,
+                                     "uncovered_strata": [{"stratum": "in-c", "population_units": 5}]}
+    interval = estimated["interval"]
+    assert interval["state"] == "degenerate" and interval["lower"] is None and interval["upper"] is None
+    assert interval["variance"] == 0.0 and interval["standard_error"] == 0.0
+
+    whole = precision.draw_sample(frame, size=7, seed=0, stratify_by="input", allocation="equal")
+    census = precision.estimate(whole, review_all(whole, {entry["unit_id"]: "true" for entry in whole["selected"]}))
+    assert whole["uncovered_strata"] == []
+    assert census["interval"]["state"] == "census"
+    assert (census["interval"]["lower"], census["interval"]["upper"]) == (1.0, 1.0)
+
+
 def test_an_oversampled_stratum_is_weighted_back_while_the_unweighted_share_is_biased(tmp_path):
     """sys-a delivered 18 claims, all real; sys-b delivered 2, both false. The population's precision
     is 18/20 = 0.9. Equal allocation of 4 oversamples sys-b: 2 of 18 from sys-a (weight 9) and both

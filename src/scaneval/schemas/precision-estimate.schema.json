@@ -509,7 +509,7 @@
             "insufficient",
             "unavailable"
           ],
-          "description": "ok: bounds from a positive variance. census: every sampled stratum was taken whole, so there is no sampling variance. degenerate: a zero variance from a sample that is not a census, which is not certainty, so no bounds. insufficient: a sampled stratum that was not taken whole drew fewer than two units, so its variance cannot be estimated. unavailable: no unit was resolved true or false."
+          "description": "ok: bounds from a positive variance. census: every stratum was taken whole, none left uncovered, so there is no sampling variance. degenerate: a zero variance from a sample that is not a census (a sample with an uncovered stratum is never one), which is not certainty, so no bounds. insufficient: a sampled stratum that was not taken whole drew fewer than two units, so its variance cannot be estimated. unavailable: no unit was resolved true or false."
         },
         "method": {
           "const": "stratified_linearized_normal"
