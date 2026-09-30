@@ -19,10 +19,11 @@ its minimum, or a claim volume or cost nobody recorded. No absent figure is read
 
 What is decided from what. Only the documents passed in: the policy, the comparison report, and the
 precision estimates. The decision is a function of them and of the evaluator version, so the same
-inputs give the same document byte for byte under :func:`scaneval.contracts.canonical_json`. Nothing
-here reads a clock, the network, a filesystem path, or an unseeded random source, and no model or
-judge is consulted. The comparison is read as recorded: nothing is recomputed from run directories,
-so the decision is exactly as trustworthy as the comparison it names, and it says which by digest.
+inputs give the same document byte for byte under :func:`scaneval.contracts.canonical_json`.
+:func:`evaluate_gate` reads no clock, network, filesystem path, or unseeded random source, and no
+model or judge is consulted; only :func:`load_policy` opens a file. The comparison is read as
+recorded: nothing is recomputed from run directories, so the decision is exactly as trustworthy as
+the comparison it names, and it says which by digest.
 
 What the decision binds. Its policy is recorded whole beside its digest. The comparison, and each
 precision estimate that was supplied, are recorded by digest, with the digests of the manifest,
@@ -508,7 +509,10 @@ def _binding_problems(ctx: _Context, side: str) -> list[str]:
     runs of this comparison: every run it rests on must be one the comparison read, with the same
     manifest and schedule digests, and every run of the comparison in which the system was scheduled
     must be among them, so it describes the compared workload and none other. This compares the
-    documents' records; it cannot show the claims a person reviewed came from those runs.
+    documents' records; it cannot show the claims a person reviewed came from those runs. A first-B
+    estimate also binds only when it leaves no invocation out for want of a measured native position:
+    an unranked or bundle-unresolved invocation is outside that population, so noise in it would be
+    invisible to the estimate.
     """
     estimate = ctx.estimates[side]
     system = ctx.names[side]
@@ -526,6 +530,13 @@ def _binding_problems(ctx: _Context, side: str) -> list[str]:
     if (population["name"], population["budget"]) != (declared["name"], declared.get("budget")):
         problems.append(f"the estimate is over {_population_text(population)}, but the policy declares "
                         f"{_population_text({'name': declared['name'], 'budget': declared.get('budget')})}")
+    if population["name"] == "first_b":
+        left_out = [f"{estimate['exclusions'][key]['invocations']} {label}" for key, label in (
+            ("unranked", "unranked"), ("bundle_unresolved", "bundle-unresolved"))
+            if estimate["exclusions"][key]["invocations"]]
+        if left_out:
+            problems.append(f"the estimate leaves out {' and '.join(left_out)} invocation(s), whose claims have no "
+                            f"measured native position, so it does not describe all of the {side}'s output")
     compared = {run["run_id"]: run for run in ctx.comparison["runs"]}
     for run in estimate["runs"]:
         known = compared.get(run["run_id"])

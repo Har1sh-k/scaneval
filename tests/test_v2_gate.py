@@ -1396,13 +1396,13 @@ def test_the_decision_states_what_it_is_and_which_blocks_the_policy_left_out(cor
 # --- reviewed precision -----------------------------------------------------------------------------
 
 
-def verdict_for(system: str):
+def verdict_for(system: str, hit_inputs: int | None = None):
     """What a fictional reviewer finds: a claim is true only when it is the one that hit a target.
 
     The baseline and the duplicating system hit T-p1 and T-p2, the improved system T-p1 to T-p8, and the
     flagging system every target, always with their first claim; every other claim they deliver is false.
     """
-    hit_inputs = {"baseline": 2, "duplicating": 2, "improved": 8, "flagging": 10}[system]
+    hit_inputs = hit_inputs or {"baseline": 2, "duplicating": 2, "improved": 8, "flagging": 10}[system]
 
     def verdict(unit_id: str) -> str:
         _run, invocation, claim = unit_id.split("/")
@@ -1553,6 +1553,37 @@ def test_an_estimate_of_another_system_or_workload_or_population_does_not_bind(c
         assert item["explanation"] == ("the candidate's precision estimate is missing or not bound to this "
                                        f"comparison: {reason}")
         assert requirement(decision, "precision.min_value")["status"] == "inconclusive"
+
+
+def test_a_first_b_estimate_that_leaves_invocations_out_does_not_describe_the_whole_output(tmp_path):
+    """The mixed system ranks its output on six inputs and leaves it unranked on four.
+
+    An unranked invocation has no measured native position, so the first-5 population leaves it out whole and
+    its claims are invisible to that estimate. The estimate says how many it left out, and the gate does not
+    treat it as the candidate's precision; the full population leaves nothing out and binds.
+    """
+    outcomes = {(f"p{index}", "baseline", 1): behave("baseline", index) for index in range(1, 11)}
+    outcomes.update({(f"p{index}", "mixed", 1): scan(hits={f"T-p{index}": 1} if index <= 8 else {}, claims=1,
+                                                     ranking="native" if index <= 6 else "unranked")
+                     for index in range(1, 11)})
+    run = write_run(tmp_path, "run-mixed", corpus_inputs(), systems=("baseline", "mixed"), outcomes=outcomes,
+                    configs={"mixed": {"config": {"knob": 2}}})
+    comparison = aggregate.compare([run], baseline="baseline", candidate="mixed", policy=aggregation_policy())
+    first_b = estimate_for(run, "mixed", verdict_for("mixed", 8))
+    assert first_b["exclusions"]["unranked"]["invocations"] == 4 and first_b["coverage"]["population_units"] == 6
+
+    decision = gate.evaluate_gate(gate_policy(precision=precision_block()), comparison, precision_candidate=first_b)
+
+    assert decision["outcome"] == "inconclusive" and decision["failed"] == []
+    assert requirement(decision, "precision.binding")["explanation"] == (
+        "the candidate's precision estimate is missing or not bound to this comparison: the estimate leaves out 4 "
+        "unranked invocation(s), whose claims have no measured native position, so it does not describe all of "
+        "the candidate's output")
+    everything = estimate_for(run, "mixed", verdict_for("mixed", 8), population="full")
+    covered = gate.evaluate_gate(gate_policy(precision=precision_block(population={"name": "full"})), comparison,
+                                 precision_candidate=everything)
+    assert requirement(covered, "precision.binding")["status"] == "pass"
+    assert requirement(covered, "precision.min_value")["observed"]["value"] == 0.8
 
 
 def test_a_run_of_the_compared_system_that_the_estimate_leaves_out_does_not_bind(corpus, estimates):
