@@ -16,6 +16,7 @@ No benchmark results are published. Every case in the pilot pack carries mechani
 - Import the records an agent CLI wrote for itself — Claude Code transcripts and `stream-json`, and `codex exec --json` — into trace events, so a harness that shells out to one becomes observable without being edited.
 - Report, from a saved bundle, whether each labeled target's code region was supplied to the model and in which invocation.
 - Replay the same saved records without models or network access, and generate a standalone HTML report.
+- Import one run of a saved SARIF 2.1.0 log, offline, into a bundle that review, score, replay, and report read unchanged, with an import record accounting for every result; the log's own account of how its tool ran is recorded, not verified ([SARIF import](SARIF_IMPORT.md)).
 
 The core does not determine whether an arbitrary natural-language allegation establishes a root cause. That decision comes from a frozen evaluator-side review record. Replaying that record is deterministic; producing the underlying security label or a live model response is not made deterministic by this package.
 
@@ -214,9 +215,10 @@ A run configuration is a frozen document naming the pack, the inputs, the system
 | `review approve <bundle> --reviewer --note` | Record one explicit human approval. | none |
 | `review status <bundle>` | Report missing, stale, draft, or human_approved. | none |
 | `run <config> --output <new dir>` | Execute one frozen run configuration. | depends on the configured systems |
+| `import sarif <log> --pack --snapshot-id --tree-hash --system-id --output` | Import one run of a saved SARIF 2.1.0 log into a new bundle; nothing the log names is fetched or opened. | none |
 | `diagnose context-coverage <bundle>` | Report whether each labeled target's code was supplied to the model. Writes nothing into the bundle. | none |
 
-Exit codes: `2` means the command could not be carried out (a usage or contract error, a refused overwrite, a failed fetch or export). `1` means it ran and reports a negative result (a mechanical check set failed, or a run produced no usable scan from some system). `0` means it ran and reports nothing wrong, which is not a statement that any label or decision is correct.
+Exit codes: `2` means the command could not be carried out (a usage or contract error, a refused overwrite, a failed fetch or export, a SARIF log refused whole). `1` means it ran and reports a negative result (a mechanical check set failed, a run produced no usable scan from some system, or an imported SARIF log holds none). `0` means it ran and reports nothing wrong, which is not a statement that any label or decision is correct.
 
 No command writes inside a materialized trial directory, and every output path except a pack file and a review record is create-only.
 
@@ -267,7 +269,7 @@ Strict parsing rejects duplicate JSON keys, nonfinite numbers, escaping file pat
 
 - **Scanner boundary:** `ScanRequest` cannot contain evaluator target IDs, regions, fixes, or matching decisions. This is a shape check, not automatic source sanitization.
 - **Locations:** file-only reports stay file-only. A line range is optional; if supplied it must be positive and ordered. Location overlap alone never earns credit.
-- **Claims:** one allegation and its evidence per normalized claim. Separately structured bundles must be split by an importer or reviewer before claiming an atomic count. Adapters normalize the output of the system they just ran; there is no importer for a saved vendor file, SARIF or native, produced outside a ScanEval invocation.
+- **Claims:** one allegation and its evidence per normalized claim. Separately structured bundles must be split by an importer or reviewer before claiming an atomic count. Adapters normalize the output of the system they just ran. `scaneval import sarif` turns each result of a saved SARIF 2.1.0 log into at most one claim and flags a result that may bundle several allegations for recorded review instead of splitting it ([SARIF import](SARIF_IMPORT.md)); a saved native vendor file has no importer.
 - **Duplicates:** canonicalize allegation, kind, native rule ID, primary/related locations, and evidence text. Normalize path separators and line endings. Ignore delivery IDs and ranks. Different evidence stays distinct; semantic duplicate review is not implemented yet.
 - **Credit:** one claim or exact-duplicate group can hit at most one canonical target. Duplicate copies keep their review positions. Contradictory frozen decisions are rejected.
 - **Ranking:** native ranks must be contiguous and follow the submitted array. Unranked output has no native budget score. Its optional random-order expectation is a separate diagnostic and can be affected by duplicate spam.
@@ -306,7 +308,7 @@ npm test
 - **Visibility depends on the build that was run, not only on this package.** The own-harness driver sees attempts, token usage, supplied-context spans and the candidate lifecycle only against a harness build that exports the hooks, and falls back for each surface it does not find. Tool dispatch on the claude route is unobserved either way. What a given run could see is recorded per run, not promised here.
 - **Nothing a collector or the DeepSec adapter reports was watched as it happened.** Both read records written after the fact, so their events are derived and say so; a record the CLI never wrote is a record nothing can recover.
 - **Single-invocation numbers only.** No corpus aggregation, pair aggregation, repeated-run uncertainty, precision sampling, promotion gate, trace viewer, exporter, or multi-model planner is implemented.
-- **Not implemented at all:** native PR mode through an adapter, metadata blinding, SARIF or saved vendor output import, and semantic duplicate review. The collectors import an agent CLI's own trace records; nothing imports a scanner's saved findings file produced outside a ScanEval invocation.
+- **Not implemented at all:** native PR mode through an adapter, metadata blinding, import of saved vendor output other than SARIF 2.1.0, and semantic duplicate review. The collectors import an agent CLI's own trace records, and `import sarif` imports a saved SARIF log; no other scanner findings file produced outside a ScanEval invocation is imported.
 
 ## Requirements for a reviewed comparison
 

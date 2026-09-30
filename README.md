@@ -35,6 +35,7 @@ The scorer reports known-target detection, recall within review budgets, reviewe
 | `scaneval corpus init\|add-snapshot\|import\|validate\|approve\|admit\|disposition` | Prepare case packs, run mechanical checks, and record explicit reviews and admissions. |
 | `scaneval plan --pack --snapshot-id --tree-hash --output` | Build an evaluation plan for one materialized input. |
 | `scaneval run <config> --output <new dir>` | Run a frozen configuration and save its artifacts. |
+| `scaneval import sarif <log> --pack --snapshot-id --tree-hash --system-id --output` | Import one run of a saved SARIF 2.1.0 log into a new bundle for review, offline. |
 | `scaneval review init\|record\|approve\|status` | Prepare and record the review of an invocation bundle. |
 | `scaneval diagnose context-coverage <bundle>` | Compare captured context spans with labeled targets. Does not change scores. |
 
@@ -61,7 +62,8 @@ Guides: [Observer SDK](docs/OBSERVER_SDK.md), [native CLI collectors](docs/COLLE
 
 - Full-scan execution, case packs, source export, review, scoring, replay, and reports are implemented.
 - Only the `standard` input profile is supported. `metadata_blinded` is refused.
-- Native PR mode, SARIF import, corpus-level aggregation, precision sampling, promotion gates, and enforced isolation are not implemented.
+- A saved SARIF 2.1.0 log imports offline into a bundle that review, score, and replay read; its execution report is recorded unverified ([SARIF import](docs/SARIF_IMPORT.md)). Other saved vendor formats have no importer.
+- Native PR mode, corpus-level aggregation, precision sampling, promotion gates, and enforced isolation are not implemented.
 - The initial public workload is not selected. The pilot is an integration exercise, not a representative benchmark or scanner comparison.
 
 [Current capabilities](docs/INITIAL_BUILD.md) describes the implementation. [Design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) describe the broader contract and planned work.
