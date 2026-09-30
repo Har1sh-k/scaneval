@@ -10,10 +10,10 @@ to do. The schedule names:
 - for each input, the plan the pack gives it before execution: the targets and controls it
   carries, their canonical ids and validation levels, and the scope and review budgets, when the
   snapshot declares the tree hash a plan binds to;
-- the vulnerable/fixed observation pairs, matched in advance: a target planned on one input with a
-  fixed-target control of that target planned on another input of the same profile and mode, each
-  repetition paired with the same repetition, so a pair is never chosen after its outcomes are
-  known (``docs/EVALUATION_MATH.md``, pair correctness).
+- the vulnerable/fixed observation pairs, matched in advance: a target planned on one full-scan
+  input with a fixed-target control of that target planned on another full-scan input of the same
+  profile, each repetition paired with the same repetition, so a pair is never chosen after its
+  outcomes are known (``docs/EVALUATION_MATH.md``, pair correctness).
 
 What it is not. It is not a result and holds no outcome, no claim, and no label content beyond
 ids, kinds, and levels. A plan recorded ``unavailable`` means the snapshot declared no tree hash
@@ -140,19 +140,19 @@ def _system_row(entry: dict, default_policy: str) -> dict:
 def _pairs(rows: list[dict], repetitions: int) -> list[dict]:
     """Every vulnerable/fixed pair the frozen plans support, each repetition with its own number.
 
-    A target planned on input V pairs with a ``fixed_target`` or ``both`` control of that target
-    planned on a different input F of the same profile and mode. Only plans frozen before execution
-    take part, because a pair matched from a plan built during the run is a pair matched after the
-    run had started observing.
+    A target planned on full-scan input V pairs with a ``fixed_target`` or ``both`` control of
+    that target planned on a different full-scan input F of the same profile. Only plans frozen
+    before execution take part, because a pair matched from a plan built during the run is a pair
+    matched after the run had started observing. A PR input pairs with nothing here: what a
+    vulnerable/fixed pair of change sets is has not been defined, and a pair invented for one would
+    be read as a pair correctness result.
     """
     pairs = []
-    frozen = [row for row in rows if row["plan"]["state"] == "frozen"]
+    frozen = [row for row in rows if row["plan"]["state"] == "frozen" and row["mode"] == "full"]
     for vulnerable in frozen:
         for target in vulnerable["plan"]["targets"]:
             for fixed in frozen:
-                if fixed["input_id"] == vulnerable["input_id"]:
-                    continue
-                if (fixed["profile"], fixed["mode"]) != (vulnerable["profile"], vulnerable["mode"]):
+                if fixed["input_id"] == vulnerable["input_id"] or fixed["profile"] != vulnerable["profile"]:
                     continue
                 for control in fixed["plan"]["controls"]:
                     if control["type"] in ("fixed_target", "both") and control["target_id"] == target["target_id"]:

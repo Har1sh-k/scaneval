@@ -535,7 +535,7 @@
         "fixed_input_id",
         "repetition_pairs"
       ],
-      "description": "A vulnerable/fixed observation pair matched before execution: the target planned on one input and a fixed-target control of that target planned on another input of the same profile and mode. Each repetition of the vulnerable input is paired with the same repetition of the fixed one, for every system.",
+      "description": "A vulnerable/fixed observation pair matched before execution: the target planned on one full-scan input and a fixed-target control of that target planned on another full-scan input of the same profile. No pair of PR inputs is defined. Each repetition of the vulnerable input is paired with the same repetition of the fixed one, for every system.",
       "properties": {
         "target_id": {
           "type": "string",

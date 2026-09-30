@@ -3,7 +3,8 @@
 Every assignment is listed, including the ones a failed input or a skipped system will never run;
 each input carries the plan the pack gave it before execution, or says why it had none, and a
 blinded input names the map it is transformed with; and the vulnerable/fixed pairs are matched in
-advance. The same configuration, pack, and moment always give the same document. Runner-level checks that the schedule is written before preparation live in
+advance, between full scans of one profile. The same configuration, pack, and moment always give
+the same document. Runner-level checks that the schedule is written before preparation live in
 ``test_v2_runner_inputs.py``.
 """
 
@@ -17,7 +18,7 @@ import pytest
 
 from scaneval import blinding, cases
 from scaneval.contracts import ContractError, canonical_json, canonical_sha256, validate_document
-from scaneval.schedule import SCHEDULE_PATH, build_schedule
+from scaneval.schedule import SCHEDULE_PATH, _pairs, build_schedule
 
 
 CLOCK = lambda: datetime(2026, 9, 20, 17, 0, tzinfo=timezone.utc)  # noqa: E731
@@ -302,6 +303,24 @@ def test_the_contract_refuses_a_pair_the_frozen_plans_do_not_support(tmp_path):
     renamed["pairs"][0]["canonical_id"] = "something-else"
     with pytest.raises(ContractError, match="canonical_id"):
         validate_document("evaluation-schedule", renamed)
+
+
+def test_a_pair_joins_two_full_scans_of_one_profile_and_nothing_else(tmp_path):
+    """No vulnerable/fixed pair of change sets is defined, so neither side makes one up."""
+    schedule = build_schedule(config(), two_snapshot_pack(tmp_path), base_dir=tmp_path, created_at=CREATED_AT)
+
+    reviewed = deepcopy(schedule)
+    for row in reviewed["inputs"]:
+        row.update(mode="pr", change_set_id=f"cs-{row['input_id']}")
+    assert _pairs(reviewed["inputs"], schedule["repetitions"]) == [], "the builder pairs no PR inputs"
+    with pytest.raises(ContractError, match="two full-scan inputs"):
+        validate_document("evaluation-schedule", reviewed)
+    mixed = deepcopy(schedule)
+    mixed["inputs"][1].update(profile="metadata_blinded",
+                              blinding={"map_id": "m", "map_version": "1", "map_sha256": HASH})
+    assert _pairs(mixed["inputs"], schedule["repetitions"]) == [], "the builder pairs within one profile"
+    with pytest.raises(ContractError, match="inputs of one profile"):
+        validate_document("evaluation-schedule", mixed)
 
 
 def test_the_contract_ties_a_blinding_identity_to_the_blinded_profile(tmp_path):

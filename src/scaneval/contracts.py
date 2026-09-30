@@ -1570,9 +1570,10 @@ def _validate_evaluation_schedule(document: dict[str, Any]) -> None:
     (``<input>__<system>__r<n>``, the one format :func:`scaneval.execution.invocation_id` writes), so
     a schedule cannot leave out the assignment that later failed. A full input names its snapshot
     and no change set; a PR input names its change set. A blinded input names the map it is
-    transformed with, and no other input names one. A pair joins a target planned on one input with
-    a fixed-target control of that target planned on a different input of the same profile and mode,
-    and pairs repetitions this schedule declares. Nothing here reads a pack, an export, or a result.
+    transformed with, and no other input names one. A pair joins a target planned on one full-scan
+    input with a fixed-target control of that target planned on a different full-scan input of the
+    same profile, and pairs repetitions this schedule declares. Nothing here reads a pack, an
+    export, or a result.
     """
     inputs = {item["input_id"]: item for item in document["inputs"]}
     _unique([item["input_id"] for item in document["inputs"]], "inputs.input_id")
@@ -1608,8 +1609,10 @@ def _validate_evaluation_schedule(document: dict[str, Any]) -> None:
             raise ContractError(f"{label} names an input this schedule does not declare")
         if pair["vulnerable_input_id"] == pair["fixed_input_id"]:
             raise ContractError(f"{label}: the vulnerable and fixed observations are on one input")
-        if (vulnerable["profile"], vulnerable["mode"]) != (fixed["profile"], fixed["mode"]):
-            raise ContractError(f"{label}: a pair joins inputs of one profile and one mode")
+        if vulnerable["mode"] != "full" or fixed["mode"] != "full":
+            raise ContractError(f"{label}: a pair joins two full-scan inputs; no pair of PR inputs is defined")
+        if vulnerable["profile"] != fixed["profile"]:
+            raise ContractError(f"{label}: a pair joins inputs of one profile")
         if vulnerable["plan"]["state"] != "frozen" or fixed["plan"]["state"] != "frozen":
             raise ContractError(f"{label}: a pair is matched only between plans frozen before execution")
         targets = {target["target_id"]: target for target in vulnerable["plan"]["targets"]}
