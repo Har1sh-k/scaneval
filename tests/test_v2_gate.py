@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from scaneval import aggregate, gate, precision, review, schedule
+from scaneval.cli import main
 from scaneval.contracts import (
     CONTRACT_KINDS,
     SCHEMA_VERSIONS,
@@ -27,6 +28,7 @@ from scaneval.contracts import (
     canonical_sha256,
     gate_declared_blocks,
     gate_requirement_ids,
+    load_document,
     schema_file,
     validate_document,
 )
@@ -2259,3 +2261,182 @@ def test_high_recall_cannot_compensate_for_noise_and_no_recall_can_rescue_a_fail
         decision = decide(corpus, gate_policy(**block), "flagging", precision_candidate=estimates["flagging"])
         assert requirement(decision, "primary.improvement")["observed"]["difference"] == 0.8
         assert decision["outcome"] == "fail" and decision["failed"] == expected
+
+
+# --- the command line -------------------------------------------------------------------------------
+
+
+def cli(capsys, *argv: str) -> tuple[int, str, str]:
+    code = main(list(argv))
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def write_json(path: Path, document: dict) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(canonical_json(document) + "\n", encoding="utf-8")
+    return path
+
+
+def gate_command(tmp_path: Path, corpus: dict, policy: dict, system: str = "improved", *, output: str = "decision.json",
+                 baseline: dict | None = None, candidate: dict | None = None) -> list[str]:
+    """The argv of one ``scaneval gate`` over documents written into *tmp_path*."""
+    argv = ["gate", "--policy", str(write_json(tmp_path / "policy.json", policy)),
+            "--comparison", str(write_json(tmp_path / f"comparison-{system}.json", corpus["comparisons"][system])),
+            "--output", str(tmp_path / output)]
+    if baseline is not None:
+        argv += ["--precision-baseline", str(write_json(tmp_path / "estimate-baseline.json", baseline))]
+    if candidate is not None:
+        argv += ["--precision-candidate", str(write_json(tmp_path / f"estimate-{system}.json", candidate))]
+    return argv
+
+
+def test_cli_gate_writes_a_decision_and_exits_0_for_a_pass(corpus, tmp_path, capsys):
+    argv = gate_command(tmp_path, corpus, gate_policy())
+
+    code, out, err = cli(capsys, *argv)
+
+    assert code == 0 and err == ""
+    output = tmp_path / "decision.json"
+    decision = load_document(output, "gate-decision")
+    assert output.read_text(encoding="utf-8") == canonical_json(decision) + "\n"
+    assert canonical_json(decision) == canonical_json(gate.evaluate_gate(gate_policy(), corpus["comparisons"]["improved"]))
+    lines = out.splitlines()
+    assert lines[0] == ("Gate pass: baseline=baseline candidate=improved view=full/standard "
+                        "recommendation_scope=reviewed")
+    assert lines[1] == f"Policy fixture-gate 1 ({decision['policy_sha256']})"
+    assert lines[2] == "Requirements: 5 evaluated, 5 passed, 0 failed, 0 inconclusive"
+    assert lines[3] == ("Not part of this policy, so not evaluated: regressions, precision, controls, completion, "
+                        "target_coverage, burden, cost")
+    assert lines[-1] == f"Decision: {output}"
+    code, out, _err = cli(capsys, "validate", "gate-decision", str(output))
+    assert code == 0 and f"Valid gate-decision: {output}" in out
+    code, out, _err = cli(capsys, "validate", "gate-policy", str(tmp_path / "policy.json"))
+    assert code == 0 and "Valid gate-policy" in out
+
+
+def test_cli_gate_exits_1_and_names_every_failed_and_unresolved_requirement(corpus, estimates, tmp_path, capsys):
+    """The flagging system fails five requirements and leaves three cost requirements unresolved: all eight are named."""
+    policy = complete_policy()
+    argv = gate_command(tmp_path, corpus, policy, "flagging", baseline=estimates["baseline"],
+                        candidate=estimates["flagging"])
+
+    code, out, err = cli(capsys, *argv)
+
+    assert code == 1 and err == ""
+    decision = load_document(tmp_path / "decision.json", "gate-decision")
+    assert decision["outcome"] == "fail" and len(decision["failed"]) == 5 and len(decision["unresolved"]) == 3
+    lines = out.splitlines()
+    assert lines[0].startswith("Gate fail: baseline=baseline candidate=flagging")
+    assert lines[2] == "Requirements: 28 evaluated, 20 passed, 5 failed, 3 inconclusive"
+    for requirement_id in decision["failed"]:
+        assert f"FAIL {requirement_id}: {requirement(decision, requirement_id)['explanation']}" in lines
+    for requirement_id in decision["unresolved"]:
+        assert f"INCONCLUSIVE {requirement_id}: {requirement(decision, requirement_id)['explanation']}" in lines
+    assert "FAIL precision.min_value: resolved precision is 0.2, below the required 0.5" in lines
+    assert not any(line.startswith("Not part of this policy") for line in lines), "every block is declared"
+
+
+def test_cli_gate_exits_1_for_an_inconclusive_decision(corpus, tmp_path, capsys):
+    argv = gate_command(tmp_path, corpus, gate_policy(configuration={"allowed_differences": []}))
+
+    code, out, err = cli(capsys, *argv)
+
+    assert code == 1 and err == ""
+    assert out.splitlines()[0].startswith("Gate inconclusive:")
+    assert ("INCONCLUSIVE configuration.allowed_differences: the systems also differ in config.knob, which the policy "
+            "does not intend to measure, so the comparison does not isolate the intended change") in out.splitlines()
+    assert load_document(tmp_path / "decision.json", "gate-decision")["outcome"] == "inconclusive"
+
+
+def test_cli_gate_needs_the_estimates_a_policy_reads_and_names_the_ones_it_lacks(corpus, estimates, tmp_path, capsys):
+    argv = gate_command(tmp_path, corpus, gate_policy(precision=precision_block(max_decrease_vs_baseline=0.05)))
+
+    code, out, _err = cli(capsys, *argv)
+
+    assert code == 1
+    assert "INCONCLUSIVE precision.binding: the candidate's precision estimate is missing or not bound to this " \
+           "comparison: no precision estimate was supplied for the candidate improved" in out.splitlines()
+    supplied = gate_command(tmp_path, corpus, gate_policy(precision=precision_block(max_decrease_vs_baseline=0.05)),
+                            output="second.json", baseline=estimates["baseline"], candidate=estimates["improved"])
+    code, out, _err = cli(capsys, *supplied)
+    assert code == 0, out
+    decision = load_document(tmp_path / "second.json", "gate-decision")
+    assert decision["precision"]["candidate"]["sha256"] == canonical_sha256(estimates["improved"])
+
+
+def test_cli_gate_exits_2_and_writes_nothing_when_it_cannot_evaluate(corpus, estimates, tmp_path, capsys):
+    random_order = write_json(tmp_path / "random.json", gate_policy(primary=primary("random_order_expected_recall")))
+    comparison = write_json(tmp_path / "comparison.json", corpus["comparisons"]["improved"])
+    policy = write_json(tmp_path / "policy.json", gate_policy())
+    not_a_comparison = write_json(tmp_path / "not-a-comparison.json", {"schema_version": "2.0"})
+
+    for argv, message in (
+            (["--policy", str(random_order), "--comparison", str(comparison)],
+             "primary.metric: 'random_order_expected_recall'"),
+            (["--policy", str(tmp_path / "absent.json"), "--comparison", str(comparison)], "could not load"),
+            (["--policy", str(policy), "--comparison", str(tmp_path / "absent.json")], "could not load"),
+            (["--policy", str(policy), "--comparison", str(not_a_comparison)], "schema_version"),
+            (["--policy", str(policy), "--comparison", str(comparison), "--precision-candidate", str(comparison)],
+             "Additional properties are not allowed")):
+        output = tmp_path / "refused.json"
+        code, out, err = cli(capsys, "gate", *argv, "--output", str(output))
+        assert code == 2 and out == "" and err.startswith("scaneval: ") and message in err, err
+        assert not output.exists()
+
+
+def test_cli_gate_output_is_create_only_and_refused_inside_a_trial_or_a_run_directory(corpus, tmp_path, capsys):
+    argv = gate_command(tmp_path, corpus, gate_policy())
+    assert cli(capsys, *argv)[0] == 0
+    output = tmp_path / "decision.json"
+    written = output.read_bytes()
+
+    code, out, err = cli(capsys, *argv)
+    assert code == 2 and out == "" and "scaneval:" in err
+    assert output.read_bytes() == written, "an existing decision is never overwritten"
+
+    trial = tmp_path / "trial"
+    (trial / "source").mkdir(parents=True)
+    (trial / "provenance.json").write_text("{}", encoding="utf-8")
+    inside_trial = trial / "decision.json"
+    argv_trial = gate_command(tmp_path, corpus, gate_policy(), output="trial/decision.json")
+    code, out, err = cli(capsys, *argv_trial)
+    assert code == 2 and out == "" and "inside the trial directory" in err
+    assert not inside_trial.exists()
+
+    inside_run = corpus["run"] / "decision.json"
+    argv_run = [*gate_command(tmp_path, corpus, gate_policy())[:-1], str(inside_run)]
+    code, out, err = cli(capsys, *argv_run)
+    assert code == 2 and out == "" and "inside the run directory" in err
+    assert "a gate decision binds to the runs its comparison read and stays outside them" in err
+    assert not inside_run.exists()
+
+
+def test_cli_gate_decisions_replay_to_the_same_bytes(corpus, estimates, tmp_path, capsys):
+    """The same policy, comparison, and estimates in two directories give identical files and identical stdout."""
+    written, printed = [], []
+    for name in ("first", "second"):
+        directory = tmp_path / name
+        argv = gate_command(directory, corpus, complete_policy(), "flagging", baseline=estimates["baseline"],
+                            candidate=estimates["flagging"])
+        code, out, _err = cli(capsys, *argv)
+        assert code == 1
+        written.append((directory / "decision.json").read_bytes())
+        printed.append(out.replace(str(directory), "<dir>"))
+
+    assert written[0] == written[1] and printed[0] == printed[1]
+    assert printed[0].splitlines()[-1] == "Decision: <dir>/decision.json"
+
+
+def test_cli_help_describes_the_gate_command(capsys):
+    with pytest.raises(SystemExit) as raised:
+        main(["gate", "--help"])
+    assert raised.value.code == 0
+    text = " ".join(capsys.readouterr().out.split())
+
+    assert "pass only when every requirement the policy declares holds, fail when any fails, inconclusive when " \
+           "none fails and any could not be settled" in text
+    assert "Exit 0 for a pass, 1 for a fail or an inconclusive decision, 2 when it could not evaluate." in text
+    assert "--policy POLICY" in text and "--comparison COMPARISON" in text and "--output OUTPUT" in text
+    assert "--precision-baseline PRECISION_BASELINE" in text and "--precision-candidate PRECISION_CANDIDATE" in text
+    assert "nothing is approved or promoted" in text

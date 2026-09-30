@@ -39,20 +39,20 @@ No command writes inside a materialized trial directory: the output path of ``pl
 ``import sarif``, ``demo``, ``score``, ``replay``, ``report``, ``aggregate`` and ``compare``, the
 pack path of ``corpus init`` and of every corpus command that rewrites a pack, the map ``blinding
 review`` rewrites, the bundle argument of all four ``review`` subcommands, the output of
-``precision sample``, ``queue`` and ``estimate`` and the reviews file of ``precision record``, and
-the directory ``corpus validate`` exports a snapshot into, are each refused when a trial's
-``provenance.json`` and ``source`` sit in them or above them. That keeps evaluator material out of
-the tree a scanner is handed; it is a check on the path, not an isolation boundary. ``review
-status`` is checked although it only reads, so the ``review`` group is uniform; the other read-only
-commands read whatever path they are given.
+``precision sample``, ``queue`` and ``estimate`` and the reviews file of ``precision record``, the
+output of ``gate``, and the directory ``corpus validate`` exports a snapshot into, are each refused
+when a trial's ``provenance.json`` and ``source`` sit in them or above them. That keeps evaluator
+material out of the tree a scanner is handed; it is a check on the path, not an isolation boundary.
+``review status`` is checked although it only reads, so the ``review`` group is uniform; the other
+read-only commands read whatever path they are given.
 
 Exit codes. 2 means the command could not be carried out: a usage or contract error, a refused
 overwrite, a failed fetch or export, a SARIF log refused whole. 1 means the command ran and
 reports a negative result: a mechanical check set failed, a run could not prepare some input or
 produced no usable scan from some system, an imported log holds no usable scan, a blinding map is
-not approved or a variant refused it, or ``diagnose`` was given something that is not a bundle it
-can read. 0 means it ran and reports nothing wrong, which is not a statement that any label or
-decision is correct.
+not approved or a variant refused it, ``diagnose`` was given something that is not a bundle it can
+read, or ``gate`` reached a decision that is not a pass. 0 means it ran and reports nothing wrong,
+which is not a statement that any label or decision is correct.
 
 ``diagnose`` reads a saved invocation bundle and writes a diagnostic document. It scores nothing,
 changes nothing in the bundle, and its answer never reaches a metric: a target whose code was
@@ -76,6 +76,14 @@ estimates reviewed precision from them (:mod:`scaneval.precision`, ``docs/PRECIS
 runs and never writes into one: each of its outputs is refused inside a run directory as well as
 inside a trial. It supplies no reviewer and changes no decision, score, or detection credit. It
 exits 0 once its document is written, whatever the document reports, and 2 when refused.
+
+``gate`` holds one saved comparison, and optionally a precision estimate of each system, to a gate
+policy and writes the decision (:mod:`scaneval.gate`, ``docs/GATE.md``). It runs no scan, model, or
+judge, approves nothing, and promotes nothing: it reads documents and writes one new one, refused
+inside a trial or a run directory like every precision output. It prints the outcome and every failed
+or unresolved requirement with its reason, and exits 0 for a pass, 1 for a fail or an inconclusive
+decision, and 2 when it could not evaluate: a document that is not what it is named, a policy that is
+refused, or an output that cannot be written.
 """
 
 import argparse
@@ -87,7 +95,7 @@ import tempfile
 from typing import Callable
 from urllib.parse import urlsplit
 
-from . import __version__, aggregate, blinding, cases, materialize, precision, review, runner, sarif
+from . import __version__, aggregate, blinding, cases, gate, materialize, precision, review, runner, sarif
 from .adapters.base import AdapterError
 # _is_stated is imported rather than re-implemented so a blank value is judged by one rule here,
 # in cases, and in review: a string made only of zero-width or control characters is not a value.
@@ -316,18 +324,18 @@ def _refuse_trial_path(output: Path) -> None:
     is given (``add-snapshot``, ``import``, ``validate --snapshot-id``, ``approve``, ``admit``,
     ``disposition``, all through :func:`_pack_for_change`), the map ``blinding review`` rewrites,
     the bundle ``review init``, ``review record`` and ``review approve`` write into, the output of
-    every ``precision`` command and the reviews file ``precision record`` appends to, and the trial
-    ``corpus validate`` is about to export into. ``review status`` checks the bundle it reads as
-    well, so every ``review`` subcommand refuses the same paths. Commands that only read are
-    otherwise not checked: a bundle handed to ``replay`` or ``report``, a run directory handed to
-    ``aggregate`` or ``compare``, a pack that is only summarized by ``corpus validate`` or read by
-    ``plan`` and ``review init``, a map ``blinding check`` reads, and a supplied artifact are read
-    wherever they sit. A trial is recognized by a ``provenance.json`` file beside a ``source``
-    directory; any other directory is left alone. *output* itself is examined along with its
-    parents, so a bundle that is itself a trial root is refused as well as one sitting under one; a
-    path that does not exist yet carries no marker and is judged by its parents alone. The
-    comparison resolves symlinks in the path but follows no bind mount or hard link, so it catches
-    the obvious mistake and is not an isolation boundary.
+    every ``precision`` command and the reviews file ``precision record`` appends to, the decision
+    ``gate`` writes, and the trial ``corpus validate`` is about to export into. ``review status``
+    checks the bundle it reads as well, so every ``review`` subcommand refuses the same paths.
+    Commands that only read are otherwise not checked: a bundle handed to ``replay`` or ``report``,
+    a run directory handed to ``aggregate`` or ``compare``, a pack that is only summarized by
+    ``corpus validate`` or read by ``plan`` and ``review init``, a map ``blinding check`` reads, and
+    a supplied artifact are read wherever they sit. A trial is recognized by a ``provenance.json``
+    file beside a ``source`` directory; any other directory is left alone. *output* itself is
+    examined along with its parents, so a bundle that is itself a trial root is refused as well as
+    one sitting under one; a path that does not exist yet carries no marker and is judged by its
+    parents alone. The comparison resolves symlinks in the path but follows no bind mount or hard
+    link, so it catches the obvious mistake and is not an isolation boundary.
     """
     resolved = output.expanduser().resolve()
     for directory in (resolved, *resolved.parents):
@@ -1002,6 +1010,43 @@ def _precision(args: argparse.Namespace) -> int:
             "estimate": _precision_estimate}[args.precision_command](args)
 
 
+def _refuse_gate_path(output: Path) -> None:
+    """Refuse a gate decision inside a trial directory or inside a run directory.
+
+    A decision binds by digest to the runs its comparison read, so one written into a run directory
+    would sit inside the evidence it judges. A run is recognized by a ``run-manifest.json`` in *output*
+    or in any of its parents. Like the trial check, this compares resolved paths only: it is a check on
+    the path, not an isolation boundary.
+    """
+    _refuse_trial_path(output)
+    resolved = output.expanduser().resolve()
+    for directory in (resolved, *resolved.parents):
+        if (directory / runner.MANIFEST_NAME).is_file():
+            raise ContractError(
+                f"refusing to write {output} inside the run directory {directory}; a gate decision binds to the "
+                "runs its comparison read and stays outside them")
+
+
+def _gate(args: argparse.Namespace) -> int:
+    """Hold a comparison to a policy, write the decision create-only, and say what did not pass.
+
+    The decision is computed in full before the output file is created, so a refusal leaves nothing
+    behind. 0 means the outcome is a pass; 1 means it is a fail or is inconclusive, and the summary
+    names every failed and every unresolved requirement with its reason; a refusal is 2.
+    """
+    _refuse_gate_path(args.output)
+    policy = gate.load_policy(args.policy)
+    comparison = load_document(args.comparison, gate.COMPARISON_KIND)
+    estimates = [load_document(path, gate.ESTIMATE_KIND) if path is not None else None
+                 for path in (args.precision_baseline, args.precision_candidate)]
+    decision = gate.evaluate_gate(policy, comparison, *estimates)
+    _write_new(args.output, _json(decision))
+    for line in gate.summary(decision):
+        print(line)
+    print(f"Decision: {args.output}")
+    return 0 if decision["outcome"] == gate.PASS else 1
+
+
 def _warn_unreviewed(state: str) -> None:
     """Say on stderr that a bundle carries no recorded review. The report itself is unchanged."""
     if state in UNREVIEWED_REVIEW_STATES:
@@ -1279,6 +1324,30 @@ def _add_precision_commands(sub: argparse._SubParsersAction) -> None:
                            help="confidence of the approximate interval; default 0.95")
 
 
+def _add_gate_commands(sub: argparse._SubParsersAction) -> None:
+    gating = sub.add_parser(
+        "gate",
+        help="hold a comparison to a gate policy and write a decision; promotes nothing",
+        description="Hold a saved comparison of a candidate against a baseline, and optionally a reviewed-precision "
+                    "estimate of each system, to a gate policy, and write the decision: pass only when every "
+                    "requirement the policy declares holds, fail when any fails, inconclusive when none fails and "
+                    "any could not be settled. Every failed or unresolved requirement is named on stdout with its "
+                    "reason. Exit 0 for a pass, 1 for a fail or an inconclusive decision, 2 when it could not "
+                    "evaluate. No scan, model, or judge runs, and nothing is approved or promoted.")
+    gating.add_argument("--policy", required=True, type=Path,
+                        help="gate-policy JSON, frozen before any result is read")
+    gating.add_argument("--comparison", required=True, type=Path,
+                        help="comparison-report JSON written by 'scaneval compare'")
+    gating.add_argument("--precision-baseline", type=Path,
+                        help="precision-estimate JSON of the baseline system; needed only when the policy bounds a "
+                             "decrease in precision from it")
+    gating.add_argument("--precision-candidate", type=Path,
+                        help="precision-estimate JSON of the candidate system alone; needed when the policy "
+                             "declares precision")
+    gating.add_argument("--output", required=True, type=Path,
+                        help="new JSON file, outside any trial or run directory")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--version", action="version", version=__version__)
@@ -1318,6 +1387,7 @@ def build_parser() -> argparse.ArgumentParser:
     running.add_argument("--workspace-root", type=Path)
     _add_import_commands(sub)
     _add_aggregate_commands(sub)
+    _add_gate_commands(sub)
     return parser
 
 
@@ -1329,6 +1399,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Valid {args.kind}: {args.path}")
         elif args.command == "precision":
             return _precision(args)
+        elif args.command == "gate":
+            return _gate(args)
         elif args.command == "demo":
             _demo(args.directory)
         elif args.command in ("aggregate", "blinding", "compare", "corpus", "diagnose", "import", "plan",
