@@ -81,6 +81,17 @@ INTERVAL_STATES = {
     "unavailable": "the metric is undefined",
 }
 
+# The statements every decision carries about what it is and is not. A decision's conditional notes, about
+# what the policy left out or the gate did not read, follow them.
+STANDING_NOTES = (
+    "This decision holds one candidate to one policy over one saved comparison. It approves, promotes, and "
+    "deploys nothing; the external workflow that owns the harness owns any promotion.",
+    "No requirement is weighed against another: any failure fails the decision, so detection cannot "
+    "compensate for noise, false alarms, review burden, cost, or failed scans.",
+    "An absent figure is never a perfect one: a requirement whose evidence is missing, unmeasurable, or "
+    "below the required scope is inconclusive, not passed.",
+)
+
 Result = tuple[str, Any, Any, str]
 
 
@@ -1089,15 +1100,8 @@ def _comparison_record(comparison: dict) -> dict:
 
 
 def _notes(ctx: _Context, declared: list[str]) -> list[str]:
-    """The statements every decision carries about what it is and is not, and what it did not read."""
-    notes = [
-        "This decision holds one candidate to one policy over one saved comparison. It approves, promotes, and "
-        "deploys nothing; the external workflow that owns the harness owns any promotion.",
-        "No requirement is weighed against another: any failure fails the decision, so detection cannot "
-        "compensate for noise, false alarms, review burden, cost, or failed scans.",
-        "An absent figure is never a perfect one: a requirement whose evidence is missing, unmeasurable, or "
-        "below the required scope is inconclusive, not passed.",
-    ]
+    """The standing statements, then what the policy left out and what the gate was given and did not read."""
+    notes = list(STANDING_NOTES)
     undeclared = [name for name in GATE_BLOCKS if name not in declared]
     if undeclared:
         notes.append(f"The policy declares no {', '.join(undeclared)} block, so those requirements are not part "
@@ -1180,7 +1184,11 @@ def evaluate_gate(policy: dict, comparison: dict, precision_baseline: dict | Non
 
 
 def summary(decision: dict) -> list[str]:
-    """The lines a person needs: the outcome and its scope, and every failed or unresolved requirement."""
+    """The lines a person needs: the outcome and its scope, every failed or unresolved requirement, and the notes.
+
+    The notes are the decision's conditional ones (the blocks the policy left out, an estimate that was
+    supplied and not read, another view left alone), not the statements every decision carries.
+    """
     comparison = decision["comparison"]
     view = decision["view"]
     counts = decision["summary"]
@@ -1198,6 +1206,5 @@ def summary(decision: dict) -> list[str]:
         lines.append(f"FAIL {requirement_id}: {by_id[requirement_id]['explanation']}")
     for requirement_id in decision["unresolved"]:
         lines.append(f"INCONCLUSIVE {requirement_id}: {by_id[requirement_id]['explanation']}")
-    if decision["blocks"]["not_declared"]:
-        lines.append("Not part of this policy, so not evaluated: " + ", ".join(decision["blocks"]["not_declared"]))
+    lines += [f"Note: {note}" for note in decision["notes"][len(STANDING_NOTES):]]
     return lines

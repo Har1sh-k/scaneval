@@ -2348,8 +2348,9 @@ def test_cli_gate_writes_a_decision_and_exits_0_for_a_pass(corpus, tmp_path, cap
                         "recommendation_scope=reviewed")
     assert lines[1] == f"Policy fixture-gate 1 ({decision['policy_sha256']})"
     assert lines[2] == "Requirements: 5 evaluated, 5 passed, 0 failed, 0 inconclusive"
-    assert lines[3] == ("Not part of this policy, so not evaluated: regressions, precision, controls, completion, "
-                        "target_coverage, burden, cost")
+    assert lines[3] == ("Note: The policy declares no regressions, precision, controls, completion, "
+                        "target_coverage, burden, cost block, so those requirements are not part of it and were "
+                        "not evaluated.")
     assert lines[-1] == f"Decision: {output}"
     code, out, _err = cli(capsys, "validate", "gate-decision", str(output))
     assert code == 0 and f"Valid gate-decision: {output}" in out
@@ -2376,7 +2377,7 @@ def test_cli_gate_exits_1_and_names_every_failed_and_unresolved_requirement(corp
     for requirement_id in decision["unresolved"]:
         assert f"INCONCLUSIVE {requirement_id}: {requirement(decision, requirement_id)['explanation']}" in lines
     assert "FAIL precision.min_value: resolved precision is 0.2, below the required 0.5" in lines
-    assert not any(line.startswith("Not part of this policy") for line in lines), "every block is declared"
+    assert not any(line.startswith("Note: The policy declares no") for line in lines), "every block is declared"
 
 
 def test_cli_gate_exits_1_for_an_inconclusive_decision(corpus, tmp_path, capsys):
@@ -2405,6 +2406,18 @@ def test_cli_gate_needs_the_estimates_a_policy_reads_and_names_the_ones_it_lacks
     assert code == 0, out
     decision = load_document(tmp_path / "second.json", "gate-decision")
     assert decision["precision"]["candidate"]["sha256"] == canonical_sha256(estimates["improved"])
+
+
+def test_cli_gate_says_when_it_was_given_an_estimate_the_policy_does_not_read(corpus, estimates, tmp_path, capsys):
+    argv = gate_command(tmp_path, corpus, gate_policy(), candidate=estimates["improved"])
+
+    code, out, err = cli(capsys, *argv)
+
+    assert code == 0 and err == ""
+    assert ("Note: A precision estimate was supplied for the candidate but the policy declares no precision block, "
+            "so it is recorded by digest and was not read.") in out.splitlines()
+    assert not any(line.startswith("Note: This decision holds") for line in out.splitlines()), (
+        "the standing statements stay in the decision and are not repeated on every run")
 
 
 def test_cli_gate_exits_2_and_writes_nothing_when_it_cannot_evaluate(corpus, estimates, tmp_path, capsys):
