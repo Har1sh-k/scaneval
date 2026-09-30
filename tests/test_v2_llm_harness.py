@@ -2306,6 +2306,58 @@ def test_a_pr_run_is_the_only_run_that_says_why_no_validation_stage_ran_in_pr_te
     assert not any("a bootstrap scan runs no validation stage" in note for note in execution["notes"])
 
 
+def test_the_real_engine_reviews_the_synthetic_change_in_pr_mode(tmp_path):
+    """The real securevibes-agent engine entry point, with its own mock runner, in pr mode.
+
+    No model is called. What it proves is the seam: the engine is started in pr mode, resolves the
+    two refs the request names to the commits the workspace holds, and lists as changed exactly
+    the files the recorded diff records, which git reports for the same two commits.
+    """
+    root = SECUREVIBES
+    if not (root / "node_modules" / ".bin" / "tsx").exists():
+        pytest.skip("securevibes-agent checkout with node_modules not available")
+    from scaneval.materialize import changed_paths
+
+    prepared = _pr_prepared(tmp_path)
+    adapter = get_adapter("llm-harness")
+    spec = SystemSpec("sv-pr-mock", "llm-harness", {
+        "harness": "securevibes-agent", "root": str(root), "model": "test/mock-llm", "runner": "mock",
+        "qmd_profile": "lite", "llm_max_files": 5, "llm_timeout_ms": 20000, "flush_timeout_ms": 5000})
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+
+    bundle = run_invocation(prepared=prepared, adapter=adapter, spec=spec, preparation=preparation,
+                            out_dir=tmp_path / "out", run_id="run-pr-mock", timeout_seconds=600,
+                            trace_mode="content", network_policy="none", clock=CLOCK)
+
+    output = json.loads((bundle / "raw" / "driver-output.json").read_text(encoding="utf-8"))
+    execution = load_document(bundle / "execution.json", "execution-record")
+    result = load_document(bundle / "result.json", "scan-result")
+    if output.get("summary") is None:
+        pytest.skip(f"the securevibes-agent checkout did not complete a pr-mode driver run: {output.get('error')}")
+    summary = output["summary"]
+    assert output["mode"] == "pr" and output["runner"] == "mock"
+    assert (summary["baseRef"], summary["headRef"]) == (prepared.pr["base_commit"], prepared.pr["head_commit"]), \
+        "the engine resolved the two refs the request named, and not origin/main or HEAD~1"
+    assert sorted(summary["changedFiles"]) == changed_paths(prepared.pr["changes"]), \
+        "the files the engine reviews are the recorded diff's, read by git from the same two commits"
+    assert result["status"] in ("success", "partial"), execution["error"]
+    assert execution["provenance"]["mode"] == "pr" and execution["provenance"]["source_modified"] is False
+    assert execution["provenance"]["synthetic_history"]["head_commit"] == prepared.pr["head_commit"]
+    assert result["location_basis"] == "pr_head"
+    assert "changeScan" in summary and "bootstrapScan" not in summary, "a pr run reports a change scan"
+    engine_hooks = bool(output["hooks"]["engine"])
+    events = [json.loads(line) for line in (bundle / "trace" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert not [event for event in events if event["type"] == "finding.validation"], \
+        "the consensus judge never runs, because this adapter never configures it"
+    assert execution["capture"]["finding_validation"] == ("not_applicable" if engine_hooks else "unavailable")
+    assert any(entry.startswith("finding.validation") for entry in output["trace"]["unavailable"]) \
+        and (not engine_hooks or any("this driver never configures consensus" in entry
+                                     for entry in output["trace"]["unavailable"]))
+    assert {"model.request", "model.response"} <= {event["type"] for event in events}
+    assert any(note.startswith("Prepared state: fresh.") for note in execution["notes"])
+    assert execution["provenance"]["captured_state_dirs"] == [".securevibes"]
+
+
 def test_capture_is_described_for_the_two_modes_this_adapter_runs_and_refuses_any_other():
     gapless = {"capture_gap": False, "dropped_events": 0}
     hooked = {"runner": 1, "engine": 1}
