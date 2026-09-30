@@ -10,6 +10,7 @@ import time
 
 import pytest
 
+from scaneval import kinds
 from scaneval.adapters.semgrep import import_semgrep_results
 from scaneval.kinds import cwe_ids, kind_for_cwes
 
@@ -81,3 +82,15 @@ def test_the_kind_is_the_lowest_numbered_cwe_the_mapping_knows_whatever_order_th
 
 def test_the_kind_ignores_a_cwe_identifier_too_long_to_compare():
     assert kind_for_cwes(["CWE-" + LONG_DIGITS, "CWE-918"]) == "ssrf"
+
+
+def test_choosing_a_kind_orders_only_the_ids_the_mapping_knows(monkeypatch):
+    """Every id was sorted by number first: a rule with 20000 CWE relationships cost 17 ms a claim."""
+    ordered = []
+    numeric_order = kinds._numeric_order
+    monkeypatch.setattr(kinds, "_numeric_order", lambda cwe: ordered.append(cwe) or numeric_order(cwe))
+    unknown = [f"CWE-{number}" for number in range(2000, 22000)]
+    assert kind_for_cwes(unknown + ["CWE-918", "CWE-89"] + unknown) == "sql_injection"
+    assert sorted(ordered) == ["CWE-89", "CWE-918"]
+    ordered.clear()
+    assert kind_for_cwes(unknown) == "unmapped" and ordered == []

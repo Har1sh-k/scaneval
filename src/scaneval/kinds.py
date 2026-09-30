@@ -68,14 +68,14 @@ def kind_for_cwes(cwes: list[str]) -> str:
     CWE-22, one that lists them the other way, and a producer that sorts what another keeps in order
     all get the kind of CWE-22, so two paths that read one finding (the Semgrep adapter and the
     SARIF import) cannot disagree about it. An id the mapping does not know never hides a higher
-    one it does. Anything that is not a ``CWE-<n>`` identifier is tried after every one that is,
-    in the order given.
+    one it does, and is never ordered at all: only the few ids the mapping holds are compared, so
+    the cost is one lookup for each id given however many there are. Anything that is not a
+    ``CWE-<n>`` identifier ranks after every one that is.
     """
     mapping = load_mapping()
-    for cwe in sorted(cwes, key=_numeric_order):
-        kind = mapping["cwe"].get(cwe)
-        if kind:
-            return kind
+    known = {cwe for cwe in cwes if mapping["cwe"].get(cwe)}
+    if known:
+        return mapping["cwe"][min(known, key=_numeric_order)]
     return mapping["unmapped_kind"]
 
 
