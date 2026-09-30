@@ -3387,6 +3387,39 @@ def test_a_figure_the_gate_derives_is_exact_so_binary_floats_never_move_it_acros
                                    "0.05, a ratio of 1.4, within the allowed 1.4")
 
 
+def test_a_mean_cost_equal_to_its_cap_on_paper_meets_it_however_the_scans_are_summed(tmp_path):
+    """The candidate's two scans cost $0.10 and $0.20 and the baseline's two cost $0.10 each.
+
+    The candidate's mean is exactly $0.15 and its ratio to the baseline's $0.10 exactly 1.5, so a cap of 0.15 and
+    a ratio of 1.5 are met. Summed as binary floats the candidate's cost is 0.30000000000000004, a mean of
+    0.15000000000000002, over both limits by a unit in the last place; the comparison records the exact sum, 0.3.
+    A step past either limit still fails.
+    """
+    inputs = [planned(f"p{index}", project=f"acme/p{index}",
+                      targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}")])
+              for index in (1, 2)]
+    cost = {("baseline", "p1"): 0.1, ("baseline", "p2"): 0.1, ("candidate", "p1"): 0.1, ("candidate", "p2"): 0.2}
+    outcomes = {(project, system, 1): scan(hits={f"T-{project}": 1} if system == "candidate" else {}, claims=1,
+                                           usage={"wall_seconds": 1.0, "cost_usd": spent})
+                for (system, project), spent in cost.items()}
+    run = write_run(tmp_path, "run-exact-cost", inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                    configs={"candidate": {"config": {"knob": 2}}})
+    comparison = aggregate.compare([run], baseline="baseline", candidate="candidate",
+                                   policy=aggregation_policy(min_clusters=2))
+    assert comparison["views"][0]["systems"]["candidate"]["slices"][0]["usage"]["cost_usd"]["known_sum"] == 0.3
+
+    def decide_cost(**limits) -> dict:
+        return gate.evaluate_gate(gate_policy(cost=limits), comparison)
+
+    met = decide_cost(max_per_assignment_usd=0.15, max_increase_ratio=1.5)
+    assert statuses(met)["cost.per_assignment"] == statuses(met)["cost.increase_ratio"] == "pass"
+    assert requirement(met, "cost.per_assignment")["explanation"] == (
+        "the candidate's recorded cost is 0.15 USD per executed scan, over 2 scan(s), within the allowed 0.15")
+    assert requirement(met, "cost.increase_ratio")["observed"] == {"baseline": 0.1, "candidate": 0.15, "ratio": 1.5}
+    past = decide_cost(max_per_assignment_usd=0.15 - NEAR, max_increase_ratio=1.5 - NEAR)
+    assert statuses(past)["cost.per_assignment"] == statuses(past)["cost.increase_ratio"] == "fail"
+
+
 # --- a view that spans workloads --------------------------------------------------------------------
 
 

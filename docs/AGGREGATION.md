@@ -40,7 +40,7 @@ Observations are keyed by run and input, so one input scanned by two runs is two
 | Pair `v_i` | Target weights renormalized over targets with a frozen pair. Frozen pairs weigh equally within a target, and repetition pairs within a pair. |
 | Workload | A slice spanning two or more workloads needs the policy's `workload_weights`, renormalized over the workloads present. Without them it reports no pooled number (`unavailable`). The workload slices still report theirs. |
 
-Weights, means, and ratios are exact rationals, rounded once to a float when written. A hand-calculated `2/3` is reported as the float nearest 2/3.
+Weights, means, and ratios are exact rationals, rounded once to a float when written. A hand-calculated `2/3` is reported as the float nearest 2/3. Cost is read the same way: the decimals the scanners wrote are summed exactly and rounded once, so costs of `0.1` and `0.2` sum to `0.3` and not to `0.30000000000000004`. Seconds are summed as floats.
 
 ## Metrics
 

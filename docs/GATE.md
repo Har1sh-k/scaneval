@@ -52,7 +52,7 @@ Each id below is one requirement in the decision.
 | `cost.coverage` | The share of executed scans whose cost is known is at least `min_coverage` (every cost, when the policy states none), for the candidate and, with a ratio, the baseline. An executed scan whose bundle is missing or unusable is a scan whose cost is unknown, and the explanation says how many there are. | inconclusive |
 | `cost.per_assignment`, `increase_ratio` | The mean recorded cost per executed scan, over scans whose cost is known, is within the cap and within the ratio of the baseline's. | fail |
 
-Comparisons are between the figures the comparison and estimates recorded and the policy's thresholds as written, with no tolerance of their own: a figure that equals its threshold meets it. A figure the gate derives itself (a share, a ratio, a mean cost, or the difference of two recorded precisions) is computed exactly from the decimals recorded, so binary floating point never moves it across a threshold it equals on paper.
+Comparisons are between the figures the comparison and estimates recorded and the policy's thresholds as written, with no tolerance of their own: a figure that equals its threshold meets it. A figure the gate derives itself (a share, a ratio, a mean cost, or the difference of two recorded precisions) is computed exactly from the decimals recorded, so binary floating point never moves it across a threshold it equals on paper. The cost sum it starts from is itself the exact sum of the decimals the scanners wrote, rounded once when the comparison is written ([aggregation](AGGREGATION.md)), so a mean cost that equals its cap on paper meets it.
 
 ## What the decision binds
 

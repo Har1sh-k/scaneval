@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -543,6 +544,28 @@ def test_a_scan_the_manifest_records_as_run_stays_in_usage_and_claim_volume_when
     assert norow["usage"]["executed"] == 0 and norow["usage"]["cost_usd"]["coverage"] is None
     assert any("2 of them ran, so their claim volume, wall time, and cost are unknown, not zero" in warning
                for warning in view(report)["warnings"])
+
+
+def test_cost_is_summed_exactly_from_the_decimals_the_scanners_wrote(tmp_path):
+    """sys-a's two scans report $0.10 and $0.20 and sys-b's $0.70 and $0.10: exactly 3/10 and 4/5 as written.
+
+    As binary floats 0.1 + 0.2 and math.fsum([0.1, 0.2]) are both 0.30000000000000004, and fsum([0.7, 0.1]) is
+    0.7999999999999999, because the doubles nearest the decimals do not add to the double nearest their sum. The
+    cost a gate holds to a limit is read as the decimals the scanners wrote, summed exactly, and rounded once, so
+    the sums are 0.3 and 0.8.
+    """
+    assert 0.1 + 0.2 != 0.3 and math.fsum([0.1, 0.2]) != 0.3 and math.fsum([0.7, 0.1]) != 0.8, "the float sums"
+    run = write_run(tmp_path, "run-exact-cost", five_project_inputs()[:2], systems=("sys-a", "sys-b"), outcomes={
+        ("p1", "sys-a", 1): scan(usage={"wall_seconds": 1.0, "cost_usd": 0.1}),
+        ("p2", "sys-a", 1): scan(usage={"wall_seconds": 1.0, "cost_usd": 0.2}),
+        ("p1", "sys-b", 1): scan(usage={"wall_seconds": 1.0, "cost_usd": 0.7}),
+        ("p2", "sys-b", 1): scan(usage={"wall_seconds": 1.0, "cost_usd": 0.1})})
+
+    report = aggregate.aggregate([run], policy=policy())
+
+    cost = {name: slice_of(system(view(report), name))["usage"]["cost_usd"] for name in ("sys-a", "sys-b")}
+    assert cost["sys-a"] == {"known_sum": 0.3, "known": 2, "unknown": 0, "coverage": 1.0}
+    assert cost["sys-b"] == {"known_sum": 0.8, "known": 2, "unknown": 0, "coverage": 1.0}
 
 
 def blinded_and_standard_run(tmp_path: Path) -> Path:

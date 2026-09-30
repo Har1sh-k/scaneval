@@ -38,13 +38,15 @@ Determinism and exactness. Runs are ordered by run id and every other collection
 means, masses, and ratios are exact rationals (:class:`fractions.Fraction`; a weight a policy states
 as a decimal is read as that decimal), each rounded once to the nearest float when a report is
 written, so a hand-calculated 2/3 is reported as the float nearest 2/3 and a degenerate interval
-cannot pass for a narrow one through rounding. Usage figures the scanners reported are floats and are
-summed with :func:`math.fsum`. Bootstrap draws come from :class:`scaneval.resampling.Stream` under the
-policy's seed and a label naming the view, the slice, and the family resampled: the clusters carrying
-targets, those carrying a frozen pair, or those carrying controls. The same run directories and policy
-therefore give byte-identical documents under :func:`scaneval.contracts.canonical_json`, whatever
-order the directories are named in. Nothing here reads a clock, the network, or an unseeded random
-source, and no model or judge is consulted. A report carries no filesystem path.
+cannot pass for a narrow one through rounding. Usage figures the scanners reported are floats: seconds
+are summed with :func:`math.fsum`, and cost, which a gate holds to a limit, is read as the decimals
+the scanners wrote, summed exactly, and rounded once, so costs of 0.1 and 0.2 sum to 0.3. Bootstrap
+draws come from :class:`scaneval.resampling.Stream` under the policy's seed and a label naming the
+view, the slice, and the family resampled: the clusters carrying targets, those carrying a frozen
+pair, or those carrying controls. The same run directories and policy therefore give byte-identical
+documents under :func:`scaneval.contracts.canonical_json`, whatever order the directories are named
+in. Nothing here reads a clock, the network, or an unseeded random source, and no model or judge is
+consulted. A report carries no filesystem path.
 
 What this is not. It scores no claim and approves nothing, and it reads no label content beyond the
 schedule's ids, kinds, levels, and groupings. It does not estimate reviewed precision or review time
@@ -490,6 +492,17 @@ def _decimal(value: float | int) -> Fraction:
 def _float(value: Fraction | None) -> float | None:
     """An exact value rounded once to the nearest float for the report; ``None`` stays undefined."""
     return None if value is None else float(value)
+
+
+def _decimal_sum(values: list[float | int]) -> float | None:
+    """The exact sum of figures read as the decimals they are written as, rounded once; ``None`` over none.
+
+    The doubles nearest 0.1 and 0.2 add to more than the double nearest 0.3, so a float sum, however
+    carefully rounded, can sit a unit in the last place from the sum on paper, and a gate holding it to
+    a limit that equals the sum on paper would fail it. The decimals sum exactly, and one rounding
+    then reports the float nearest that sum.
+    """
+    return _float(sum((_decimal(value) for value in values), Fraction(0))) if values else None
 
 
 def _within(attributes: dict[str, dict], weighting: str) -> dict[str, Fraction]:
@@ -1132,7 +1145,10 @@ def _usage(observations: list[_Observation]) -> dict:
     Every scan the manifest records as run counts in ``executed``, whether or not its bundle could be
     read (``bundles`` counts those that could). An executed scan with no usable bundle has an unknown
     wall time and cost, like one whose result reports none: an unknown value is counted as unknown and
-    never summed as 0, and a sum over no known value is null. These are the scanners' own figures, summed as floats.
+    never summed as 0, and a sum over no known value is null. These are the scanners' own figures.
+    Seconds are summed as floats (:func:`math.fsum`). Cost is what a gate holds to a limit, so it is read
+    as the decimals the scanners wrote and summed exactly (:func:`_decimal_sum`): costs of 0.1 and 0.2
+    sum to 0.3, not to 0.30000000000000004.
     """
     executed = [observation for observation in observations if observation.executed]
     usages = [observation.observed["usage"] if observation.observed is not None else {}
@@ -1152,7 +1168,7 @@ def _usage(observations: list[_Observation]) -> dict:
                              "reported": len(input_tokens)},
             "output_tokens": {"sum": sum(output_tokens) if output_tokens else None,
                               "reported": len(output_tokens)},
-            "cost_usd": {"known_sum": math.fsum(cost) if cost else None, "known": len(cost),
+            "cost_usd": {"known_sum": _decimal_sum(cost), "known": len(cost),
                          "unknown": len(usages) - len(cost),
                          "coverage": _float(Fraction(len(cost), len(usages))) if usages else None}}
 

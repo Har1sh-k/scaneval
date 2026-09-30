@@ -1161,7 +1161,7 @@
         "output_tokens",
         "cost_usd"
       ],
-      "description": "Reported usage summed over the executed scans, each once however many targets it covers. bundles counts the executed scans whose bundle could be read; one whose bundle is missing or unusable has unknown wall time and cost. Unknown values stay unknown and are counted, never summed as 0.",
+      "description": "Reported usage summed over the executed scans, each once however many targets it covers. bundles counts the executed scans whose bundle could be read; one whose bundle is missing or unusable has unknown wall time and cost. Unknown values stay unknown and are counted, never summed as 0. Cost is read as the decimals the scanners wrote, summed exactly, and rounded once.",
       "properties": {
         "bundles": {
           "type": "integer",
