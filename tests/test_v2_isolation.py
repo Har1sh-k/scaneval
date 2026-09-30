@@ -1,10 +1,9 @@
-"""What ScanEval reads of the files a scanner wrote, before the execution layer's own sweep does.
+"""The execution backend seam in :mod:`scaneval.adapters.base`, and the reads made of what a scanner wrote.
 
-A scanner can leave a link, a named pipe, or anything else at a path it was handed. The sweep in
-:mod:`scaneval.execution` refuses to follow any of them once the staged output reaches a bundle,
-but two reads happen before that: the stderr tail every failure message quotes, and an adapter's
-own read of its output. These tests pin that neither follows a link or blocks on a pipe. No
-network, no model calls.
+``run_command`` hands every command to the backend active in its context and refuses one started
+from a thread that does not carry it; the stderr tail every failure message quotes, and an
+adapter's own read of its output, never follow a link or block on a pipe. No network, no model
+calls, no engine.
 """
 
 from __future__ import annotations
@@ -17,7 +16,9 @@ import threading
 
 import pytest
 
-from scaneval.adapters.base import AdapterError, SystemSpec, tail_text
+from scaneval.adapters import base as base_module
+from scaneval.adapters.base import (Adapter, AdapterError, CommandResult, SystemSpec, build_env, run_command,
+                                    tail_text)
 from scaneval.adapters.semgrep import SemgrepAdapter, semgrep_version
 
 
@@ -130,3 +131,66 @@ def test_semgrep_reads_back_what_it_wrote_without_following_a_link_the_scanner_p
                                     preparation=preparation, timeout_seconds=60, trace_mode="off", trace_dir=None)
     assert outcome.status == "error" and outcome.error["code"] == "unparseable_output"
     assert outcome.claims == [] and token not in outcome.error["message"]
+
+
+# --- routing in adapters.base ----------------------------------------------------------------
+
+
+class RecordingBackend:
+    name = "recording"
+
+    def __init__(self):
+        self.commands = []
+
+    def run_command(self, argv, **kwargs):
+        self.commands.append((list(argv), kwargs))
+        return CommandResult(list(argv), 0, False, 0.0, kwargs["stdout_path"], kwargs["stderr_path"])
+
+
+def test_run_command_goes_to_the_active_backend_and_runs_on_the_host_otherwise(tmp_path):
+    held = RecordingBackend()
+    with base_module.routed_through(held):
+        assert base_module.active_backend() is held
+        routed = run_command(["scanner", "--version"], cwd=tmp_path, timeout_seconds=5, env={"A": "1"},
+                             stdout_path=tmp_path / "out.txt", stderr_path=tmp_path / "err.txt")
+    assert base_module.active_backend() is None
+    assert routed.exit_code == 0 and held.commands[0][0] == ["scanner", "--version"]
+    assert held.commands[0][1]["env"] == {"A": "1"} and not (tmp_path / "out.txt").exists()
+    local = run_command([sys.executable, "-c", "print('local')"], cwd=tmp_path, timeout_seconds=30, env=build_env(),
+                        stdout_path=tmp_path / "out.txt", stderr_path=tmp_path / "err.txt")
+    assert local.exit_code == 0 and (tmp_path / "out.txt").read_text(encoding="utf-8") == "local\n"
+
+
+def test_a_command_started_from_a_thread_outside_the_routed_context_is_refused_not_run_on_the_host(tmp_path):
+    """A context variable does not follow a thread, so such a command would otherwise run on the host."""
+    held = RecordingBackend()
+    marker = tmp_path / "ran-on-the-host"
+    raised: list[BaseException] = []
+
+    def from_a_thread():
+        try:
+            run_command([sys.executable, "-c", f"open({str(marker)!r}, 'w')"], cwd=tmp_path, timeout_seconds=30,
+                        env=build_env(), stdout_path=tmp_path / "o.txt", stderr_path=tmp_path / "e.txt")
+        except BaseException as exc:
+            raised.append(exc)
+
+    with base_module.routed_through(held):
+        worker = threading.Thread(target=from_a_thread)
+        worker.start()
+        worker.join(30)
+    assert raised and isinstance(raised[0], AdapterError) and "not run on the host" in str(raised[0])
+    assert not marker.exists() and held.commands == []
+    # Once the routed block is closed, a thread runs locally again.
+    worker = threading.Thread(target=from_a_thread)
+    worker.start()
+    worker.join(30)
+    assert marker.exists() and len(raised) == 1
+
+
+def test_an_adapter_is_not_oci_compatible_and_mounts_nothing_unless_it_says_so():
+    class Plain(Adapter):
+        def scan(self, **kwargs):
+            raise AssertionError("not called")
+
+    assert Plain.oci_compatible is False
+    assert Plain().runtime_mounts(SystemSpec("plain", "plain", {}), {}) == ()

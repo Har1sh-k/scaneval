@@ -3,24 +3,44 @@
 An adapter runs the real product once, preserves its raw output, and translates the
 native findings into normalized claims. It never receives labels, never decides whether
 a claim is true, and never turns an execution failure into an empty successful scan.
+
+Every scanner process an adapter starts goes through :func:`run_command`, and that is what lets
+an execution backend hold it: while a backend is active (:func:`routed_through`, which the
+backend's own ``activate()`` enters for the span of one scan), :func:`run_command` hands the
+command to that backend instead of starting it on the host. With no backend active the command
+runs locally exactly as it always has. A process an adapter starts any other way is outside every
+backend, which is why only an adapter declaring :attr:`Adapter.oci_compatible` is run under one.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import signal
 import stat
 import subprocess
+import threading
 import time
-from typing import Any
+from typing import Any, Iterator
 
 
 STATUSES = ("success", "partial", "unsupported", "error", "timeout")
 # Environment variables passed to scanner subprocesses unless an adapter adds more.
 BASE_ENV_PASSTHROUGH = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "USER", "SHELL")
+
+# The execution backend every scanner process in this context is routed through, or None, which
+# runs it on the host. Set only by :func:`routed_through`.
+_ACTIVE_BACKEND: ContextVar[Any] = ContextVar("scaneval_execution_backend", default=None)
+# How many backends are routing commands anywhere in this process. A context variable does not
+# follow a thread started inside the routed block, so a command started on such a thread finds no
+# backend in its context; this count is what makes that a refusal rather than a process started
+# on the host while the scan it belongs to is recorded as contained.
+_ROUTING = 0
+_ROUTING_LOCK = threading.Lock()
 
 
 class AdapterError(RuntimeError):
@@ -80,6 +100,34 @@ def build_env(extra_names: tuple[str, ...] = (), overrides: dict[str, str] | Non
     return env
 
 
+@contextmanager
+def routed_through(backend: Any) -> Iterator[None]:
+    """Hand every :func:`run_command` in this context to *backend* until the block exits.
+
+    *backend* provides ``run_command`` with this module's signature and returns a
+    :class:`CommandResult`. The routing follows the context, not the process: a thread started
+    inside the block does not carry it. While any such block is open, a :func:`run_command` whose
+    context carries no backend is therefore refused instead of run on the host, because the only
+    way to reach that state during a routed scan is a command the backend would never see. The
+    block does not start, stop, or clean up anything itself; that is the backend's job.
+    """
+    global _ROUTING
+    token = _ACTIVE_BACKEND.set(backend)
+    with _ROUTING_LOCK:
+        _ROUTING += 1
+    try:
+        yield
+    finally:
+        with _ROUTING_LOCK:
+            _ROUTING -= 1
+        _ACTIVE_BACKEND.reset(token)
+
+
+def active_backend() -> Any:
+    """The backend :func:`run_command` hands commands to in this context, or ``None`` (the host)."""
+    return _ACTIVE_BACKEND.get()
+
+
 def run_command(
     argv: list[str],
     *,
@@ -94,7 +142,23 @@ def run_command(
 
     On timeout the whole process group is killed and ``timed_out`` is reported; the
     partial stdout/stderr files are kept as raw artifacts.
+
+    Inside :func:`routed_through` the command goes to the active backend instead, with the same
+    arguments, and what that backend returns is returned; the backend decides where the process
+    runs and states its own guarantees. A command started outside every routed context while one
+    is open elsewhere in the process, which is a thread the routed scan started, is refused with
+    :class:`AdapterError` and never started. Everything below that applies only when no backend
+    is involved, and it is the same code path this function has always had.
     """
+    backend = _ACTIVE_BACKEND.get()
+    if backend is not None:
+        return backend.run_command(argv, cwd=cwd, timeout_seconds=timeout_seconds, env=env,
+                                   stdout_path=stdout_path, stderr_path=stderr_path, stdin_text=stdin_text)
+    if _ROUTING:
+        raise AdapterError(
+            f"could not start {argv[0] if argv else 'a command'}: an execution backend is holding a "
+            "scan in this process and this command was started outside it, from a thread that does "
+            "not carry the backend; it was not run on the host")
     started = time.monotonic()
     with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
         try:
@@ -157,10 +221,31 @@ class Adapter(ABC):
     requires_git: bool = False
     supported_languages: frozenset[str] = frozenset()
     env_passthrough: tuple[str, ...] = ()
+    # Whether this adapter may run under the ``oci`` execution backend. True is three promises:
+    # every scanner process it starts goes through :func:`run_command` from the thread that called
+    # ``scan()``; its scanner exists in a Linux image and it takes the in-image tool when a backend
+    # is active; and every host-side read of what a command wrote goes through
+    # :func:`~scaneval.execution.read_regular_file` or :func:`tail_text`, because a container can
+    # replace any path under its writable mounts with a link to a host file, and a read that
+    # followed it would carry that file across the boundary. An adapter that shells out any other
+    # way, whose tools exist only as host installs, or whose reads follow links would run partly
+    # outside the boundary, so the default is False and the runner refuses such a system under
+    # ``oci`` with a recorded reason instead of running it.
+    oci_compatible: bool = False
 
     def prepare(self, spec: SystemSpec, cache_root: Path) -> dict[str, Any]:
         """Separately recorded preparation phase (rulesets, dependencies). Default: nothing."""
         return {}
+
+    def runtime_mounts(self, spec: SystemSpec, preparation: dict) -> tuple[str, ...]:
+        """Host paths the scanner reads at run time besides its workspace. Default: none.
+
+        An isolating backend mounts each of them read-only at its own path, so a path the adapter
+        hands its scanner means the same file inside the boundary as outside it. Only what the
+        scan needs belongs here, and never a directory holding evaluator material: whatever is
+        listed becomes readable to the scanner.
+        """
+        return ()
 
     @abstractmethod
     def scan(
