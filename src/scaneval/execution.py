@@ -191,6 +191,28 @@ def invocation_id(input_id: str, system_id: str, repetition: int) -> str:
     return f"{input_id}__{system_id}__r{repetition}"
 
 
+def _passthrough(adapter: Adapter, isolation: dict) -> list[str]:
+    """The environment variable names this record says reached the scanner, sorted.
+
+    Without a backend the scanner process gets the operator's variables, and the record names the
+    runner's own offer: its base names and the adapter's, whether or not the operator's environment
+    holds each of them. Under a backend the scanner's environment is the one the backend built and
+    the operator's is not what it receives, so the names are the backend's own record of it
+    (``isolation.settings.environment``): what it set in the container, and the declared
+    credentials it passed by name. A backend that ran nothing set nothing. One that records no
+    environment leaves the runner's offer, which is then all the record can say.
+    """
+    settings = isolation.get("settings")
+    environment = settings.get("environment") if isinstance(settings, dict) else None
+    if not isinstance(environment, dict):
+        return sorted(set(("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "USER", "SHELL")
+                          + tuple(adapter.env_passthrough)))
+    names = {name for name in environment.get("set") or () if isinstance(name, str)}
+    names |= {item["env"] for item in environment.get("credentials") or ()
+              if isinstance(item, dict) and item.get("passed") is True and isinstance(item.get("env"), str)}
+    return sorted(names)
+
+
 def _now(clock: Callable[[], datetime] | None) -> str:
     moment = (clock or (lambda: datetime.now(timezone.utc)))()
     return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
@@ -1458,8 +1480,7 @@ def run_invocation(
                                if network_enforced else
                                {"declared": network_policy, "enforced": False,
                                 "note": "Policy is recorded, not enforced by this runner; enforce it in the execution environment."}),
-            "environment": {"passthrough": sorted(set(("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "USER", "SHELL")
-                                                      + tuple(adapter.env_passthrough)))},
+            "environment": {"passthrough": _passthrough(adapter, isolation)},
             # One derivation for both: the capture mapping and the trace record cannot claim
             # different things about how completely this run was observed.
             "capture": _capture_record(dict(outcome.capture), outcome.capture_state, trace_record)[0],

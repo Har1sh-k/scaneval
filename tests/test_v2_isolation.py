@@ -755,6 +755,41 @@ def test_credentials_reach_the_container_by_name_only_and_never_appear_in_a_reco
     assert "SCANEVAL_FIXTURE_TOKEN" in environment["dropped"] and "PATH" in environment["dropped"]
 
 
+def test_the_record_lists_the_variables_the_container_was_given_as_the_environment_passthrough(tmp_path, monkeypatch):
+    """The scanner's environment is what the backend built, and the record must not say another one.
+
+    The execution record listed the runner's own offer (PATH, HOME, SHELL, TMPDIR, USER, and the rest)
+    as passed through, while its isolation block said PATH, SHELL, and USER were dropped and only
+    HOME, LANG, TERM, and TMPDIR were set.
+    """
+    monkeypatch.setenv("LANG", "C.UTF-8")
+    monkeypatch.setenv("TERM", "xterm")
+    monkeypatch.setenv("FIXTURE_API_KEY", "sk-fixture-" + "9" * 24)
+    monkeypatch.delenv("FIXTURE_UNSET_KEY", raising=False)
+    fake = FakeDocker(behavior=finds_one)
+    execution_settings = settings(credentials=[{"env": "FIXTURE_API_KEY", "provider": "fixture"},
+                                               {"env": "FIXTURE_UNSET_KEY", "provider": "fixture"}])
+    bundle, _held = invoke(tmp_path, fake, execution=execution_settings)
+    execution = documents(bundle)[1]
+    environment = execution["isolation"]["settings"]["environment"]
+    passthrough = execution["environment"]["passthrough"]
+    # Exactly what the container was given: the names the backend set, and the credentials it passed.
+    assert passthrough == sorted(set(environment["set"]) | {"FIXTURE_API_KEY"})
+    assert {"HOME", "LANG", "TERM", "TMPDIR", "FIXTURE_API_KEY"} <= set(passthrough)
+    # Nothing the record says was dropped, and nothing a credential declared but the host did not set.
+    assert set(passthrough).isdisjoint(environment["dropped"])
+    assert {"PATH", "SHELL", "USER", "FIXTURE_UNSET_KEY"}.isdisjoint(passthrough)
+    assert "sk-fixture-" not in json.dumps(execution)
+
+
+def test_a_backend_that_refused_before_any_container_passed_nothing_through(tmp_path):
+    fake = FakeDocker(reachable=False)
+    bundle, _held = invoke(tmp_path, fake)
+    result, execution = documents(bundle)
+    assert result["status"] == "error" and execution["isolation"]["enforced"] is False
+    assert execution["environment"]["passthrough"] == []
+
+
 def test_a_timeout_kills_the_container_by_name_then_inspects_and_removes_it(tmp_path):
     fake = FakeDocker(behavior=lambda *args: "timeout")
     bundle, _held = invoke(tmp_path, fake)

@@ -308,7 +308,10 @@ these against a real engine; they were measured on Docker 29 under Colima.
   anything unmounted.
 - **Only these variables:** `HOME`, `TMPDIR`, `LANG`, `LC_ALL`, `TERM`, the proxy variables, and the
   declared credentials, each passed by name so its value reaches the container through the docker
-  client's own environment and never appears on a command line or in a record.
+  client's own environment and never appears on a command line or in a record. The record's
+  `environment.passthrough` lists the names the backend recorded in
+  `isolation.settings.environment` (what it set, and the credentials it passed), and nothing of the
+  operator's environment that was dropped.
 - **The network policy.** `none` is no interface but loopback. `model_provider_only` is an internal
   network made for the invocation with `gateway_mode_ipv4=isolated`, refused unless inspection shows
   no gateway (the engine accepts an option it does not apply), and a dual-homed egress proxy that
