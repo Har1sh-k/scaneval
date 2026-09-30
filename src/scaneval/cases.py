@@ -102,6 +102,13 @@ decided, which the digest covers, planning routes decisions by it, and a pack wh
 longer names the target of the case it names is refused. Renaming two cases around a standing
 rejection therefore moves neither.
 
+Two library writes edit a label rather than record a decision: :func:`set_pr_eligibility` states how
+a target or a control is scored in the PR review of one declared change set (:func:`add_change_set`
+declares one), and :func:`set_canonical_id` states which root cause or property a record belongs to.
+Both change what :func:`label_digest` covers, so an approval recorded before the write no longer
+covers the labels it changed. Neither carries it onto them: the case keeps its reviews and waits
+for a review of the labels as they now stand, exactly as it does after any other edit to a label.
+
 An approval also covers the tree the checks behind it ran against. Which export a check set read
 is recorded twice in a case, in its ``validation.check_sets`` record and in the ``detail`` of its
 passing ``snapshot_hash_recorded`` check, and a third time in the snapshot's declared ``tree_hash``.
@@ -148,6 +155,12 @@ PACK_KIND = "case-pack"
 LEVELS = ("L1", "L2", "L3", "L4")
 DISPOSITIONS = ("validate", "needs_evidence", "extended_regression", "exclude")
 REVIEWED_LEVELS = ("L3", "L4")
+# The values a change set and a PR eligibility entry take; the 2.1 case-pack schema stays
+# authoritative, and every value is validated against it again on the way in.
+CHANGE_SET_BOUNDARIES = ("introducing", "repair", "ordinary")
+CHANGE_SET_SCOPES = ("changed_files", "change_affected_flow")
+PR_RELATIONS = ("introduced", "affected", "repaired")
+PR_CODE_SCOPES = ("changed", "context")
 # The three decisions a recorded review can carry: one approval and the two withdrawals.
 REVIEW_DECISIONS = ("approve", "reject", "unresolved")
 # A public identifier must be well formed, so a typo in a CVE or GHSA id is caught. Any other
@@ -850,6 +863,151 @@ def set_disposition(pack: dict, case_id: str, value: str, reason: str) -> dict:
         case["disposition"] = {"value": value, "reason": reason}
         case["notes"].append(f"disposition changed from {previous} to {value}: {reason}")
         return case["disposition"]
+
+    return _apply_validated(pack, mutate)
+
+
+def change_set_by_id(pack: dict, change_set_id: str) -> dict:
+    """The declared change set named *change_set_id*, or a refusal saying what the pack declares."""
+    declared = pack.get("change_sets") or []
+    for change_set in declared:
+        if change_set["change_set_id"] == change_set_id:
+            return change_set
+    known = ", ".join(change_set["change_set_id"] for change_set in declared) or "none"
+    raise ContractError(
+        f"unknown change set {change_set_id!r} in pack {pack['namespace']}/{pack['pack_id']}; "
+        f"the pack declares: {known}")
+
+
+def _require_2_1(candidate: dict) -> None:
+    """Move *candidate* to protocol 2.1, the version that can carry what the caller is writing.
+
+    A change set, a PR eligibility, and a canonical id are 2.1 fields, and a pack is written at 2.1
+    only when it holds one, so a pack that never names any of them keeps the 2.0 schema it was
+    written against. ``schema_version`` is one of the identity fields the anchor leaves out (see
+    :data:`scaneval.contracts.PACK_UNANCHORED_FIELDS`), so the upgrade costs no anchor rebuild
+    beyond the one every write pays. Nothing is downgraded, and a version this build does not read
+    is left for the contract to refuse.
+    """
+    if candidate.get("schema_version") == "2.0":
+        candidate["schema_version"] = "2.1"
+
+
+def add_change_set(pack: dict, change_set: dict) -> dict:
+    """Record one change set: a declared base and head snapshot of one repository and a review scope.
+
+    A change set is the boundary a native PR review runs between, so it names two snapshots the
+    pack already declares, what kind of boundary it is (``introducing``: the head introduces a root
+    cause the base lacks; ``repair``: the head repairs one the base carries; ``ordinary``: neither),
+    and the scope the review is declared to score at (``changed_files`` or
+    ``change_affected_flow``), with a stated description. Which targets and controls are scored under
+    it is not decided here: each of those is stated per item with :func:`set_pr_eligibility`, and
+    never computed from any overlap between the change and a label.
+
+    The first change set upgrades the pack to protocol 2.1, the version that can carry one; a pack
+    with none stays at the version it was. The change sets are anchored like every other pack-level
+    field (see :func:`scaneval.contracts.pack_anchor_projection`), so the write re-anchors, and a
+    label that later names this change set carries its boundary inside :func:`label_digest`.
+
+    A change set the contract refuses (two snapshots of different repositories, a snapshot the pack
+    does not declare, the same snapshot on both sides) leaves the pack exactly as it was, and so
+    does a duplicate id. Nothing here reads a repository, checks that the head descends from the
+    base, or says the boundary kind is the truth about the change: the kind is a curator's claim,
+    validated separately for an introducing boundary and a repair boundary, and reviewed like any
+    other label.
+    """
+    record = copy.deepcopy(change_set)
+    _require_stated(record.get("description"), "a change set needs a non-blank description")
+
+    def mutate(candidate: dict) -> dict:
+        declared = candidate.setdefault("change_sets", [])
+        if any(existing.get("change_set_id") == record.get("change_set_id") for existing in declared):
+            raise ContractError(f"change set {record.get('change_set_id')} already exists")
+        declared.append(record)
+        _require_2_1(candidate)
+        return record
+
+    return _apply_validated(pack, mutate)
+
+
+def _label_record(case: dict, control_id: str | None) -> dict:
+    """The record of *case* a label write edits: its target, or the control named *control_id*."""
+    if control_id is None:
+        return case["target"]
+    for control in case["controls"]:
+        if control["control_id"] == control_id:
+            return control
+    raise ContractError(f"case {case['case_id']} has no control {control_id!r}")
+
+
+def set_pr_eligibility(pack: dict, case_id: str, change_set_id: str, relation: str, code_scope: str,
+                       note: str | None = None, control_id: str | None = None) -> dict:
+    """State how a target, or one control, is scored in the native PR review of one change set.
+
+    An item with no entry for a change set is outside that review's scope: it is not in the PR
+    plan, it earns nothing there, and its silence earns no credit. An entry says how the item
+    relates to the change (``introduced`` or ``affected`` for a target; a control may also be
+    ``repaired``) and whether the code it is about is part of the change (``changed``) or reached
+    from it (``context``). Only a person's judgment states either; nothing here compares a location
+    with a diff. Setting the entry for a change set that already has one replaces it, in place, and
+    the entries stay in ``change_set_id`` order.
+
+    This is a label write. Eligibility is inside :func:`label_digest`, so an approval recorded
+    before the write no longer covers the labels it changed, and that approval is never carried onto
+    them: the case keeps its reviews as the historical fact they are, :func:`build_plan` leaves it
+    out with the note the lapse earns, and a review of the labels as they now stand is what plans it
+    again. That is the point of writing it here and not by hand, where the same edit would have
+    looked like a file no record disagreed with.
+
+    The contract refuses what it can decide from the record alone, and the pack is left exactly as
+    it was: a change set the pack does not declare, an item that is not on the change set's head
+    snapshot (a PR review reads the head tree), and a target marked ``repaired``. A pack that
+    declares no change set is refused with that fact, whatever version it is at. Nothing here says
+    the eligibility is right.
+    """
+    if relation not in PR_RELATIONS:
+        raise ContractError(f"relation must be one of {PR_RELATIONS}")
+    if code_scope not in PR_CODE_SCOPES:
+        raise ContractError(f"code_scope must be one of {PR_CODE_SCOPES}")
+    if note is not None:
+        _require_stated(note, "a PR eligibility note, when given, must say something")
+    entry = {"change_set_id": change_set_id, "relation": relation, "code_scope": code_scope,
+             **({"note": note} if note is not None else {})}
+
+    def mutate(candidate: dict) -> dict:
+        record = _label_record(case_by_id(candidate, case_id), control_id)
+        entries = [existing for existing in record.get("pr_eligibility", [])
+                   if existing["change_set_id"] != change_set_id]
+        record["pr_eligibility"] = sorted([*entries, entry], key=lambda item: item["change_set_id"])
+        _require_2_1(candidate)
+        return entry
+
+    return _apply_validated(pack, mutate)
+
+
+def set_canonical_id(pack: dict, case_id: str, canonical_id: str, control_id: str | None = None) -> str:
+    """State which canonical root cause a case's target, or which property one control, belongs to.
+
+    Several target records on several snapshots can be one root cause, and several control records
+    can state one property; naming them with one canonical id is what keeps a repeated observation
+    of the same thing from counting as several. The default, when none is named, is the target id
+    or the control id (see :func:`target_canonical_id` and :func:`control_canonical_id`). The id is
+    a stated grouping only: nothing here compares two targets, and two records given one id are
+    one root cause because a person said so.
+
+    Like :func:`set_pr_eligibility` this is a label write. The canonical id is inside
+    :func:`label_digest`, so an approval recorded before the write no longer covers the labels, and
+    is never carried onto them. A canonical id is a 2.1 field, so the write upgrades a 2.0 pack.
+    Returns the id it recorded; an id the contract refuses leaves the pack exactly as it was.
+    """
+    def mutate(candidate: dict) -> str:
+        case = case_by_id(candidate, case_id)
+        if control_id is None:
+            case["canonical_target"]["canonical_id"] = canonical_id
+        else:
+            _label_record(case, control_id)["canonical_id"] = canonical_id
+        _require_2_1(candidate)
+        return canonical_id
 
     return _apply_validated(pack, mutate)
 

@@ -391,16 +391,30 @@ PACK_UNANCHORED_FIELDS = frozenset({
 _PACK_RECORD_FIELDS = frozenset({"snapshots", "cases", "admissions"})
 
 
+def _in_change_set_order(entries: Any) -> Any:
+    """PR eligibility *entries* in ``change_set_id`` order, which is the only order that carries content.
+
+    The contract keeps the ids unique, so an item's eligibility is a set keyed by change set and
+    the order it was written in says nothing. Anything that is not a list of objects is returned as
+    it is, because this is read before the contract has validated a candidate and the contract is
+    what refuses it.
+    """
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+        return entries
+    return sorted(entries, key=lambda entry: str(entry.get("change_set_id", "")))
+
+
 def case_label_projection(case: dict[str, Any]) -> dict[str, Any]:
     """The fields of *case* that say what is alleged: what a reviewer of it passed judgment on.
 
     Every field named in :data:`CASE_LABEL_FIELDS` is projected whole, subfields included, so a
     field added inside a target, a control, or an evidence record is covered the day it is added
-    rather than the day someone remembers to list it here. Three orderings are normalized because
+    rather than the day someone remembers to list it here. Five orderings are normalized because
     none of them carries content: controls are read in ``control_id`` order, each control's evidence
-    ids are sorted, evidence records are read in ``evidence_id`` order, and aliases are sorted. The
-    contract keeps all four unique, so reordering one of those lists alone is not a content change
-    while adding, removing, renaming, or editing an entry is.
+    ids are sorted, evidence records are read in ``evidence_id`` order, aliases are sorted, and the
+    PR eligibility entries of the target and of each control are read in ``change_set_id`` order.
+    The contract keeps every one of those unique, so reordering one of those lists alone is not a
+    content change while adding, removing, renaming, or editing an entry is.
 
     The evidence records are in here, not beside it: an L3 label is an allegation plus the evidence
     it rests on, so deleting the advisory a case cites, or rewriting what it says, is a change to
@@ -421,9 +435,14 @@ def case_label_projection(case: dict[str, Any]) -> dict[str, Any]:
     if "canonical_target" in projected:
         canonical = projected["canonical_target"]
         projected["canonical_target"] = {**canonical, "aliases": sorted(canonical["aliases"])}
+    if "target" in projected and "pr_eligibility" in projected["target"]:
+        projected["target"] = {**projected["target"],
+                               "pr_eligibility": _in_change_set_order(projected["target"]["pr_eligibility"])}
     if "controls" in projected:
         projected["controls"] = [
-            {**control, "evidence_ids": sorted(control["evidence_ids"])}
+            {**control, "evidence_ids": sorted(control["evidence_ids"]),
+             **({"pr_eligibility": _in_change_set_order(control["pr_eligibility"])}
+                if "pr_eligibility" in control else {})}
             for control in sorted(projected["controls"], key=lambda item: item["control_id"])]
     if "evidence" in projected:
         projected["evidence"] = sorted(projected["evidence"],
