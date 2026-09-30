@@ -2170,6 +2170,20 @@ def test_a_cost_coverage_the_policy_accepts_lets_the_known_scans_stand_for_the_r
     assert [item["id"] for item in only_coverage["requirements"] if item["id"].startswith("cost.")] == ["cost.coverage"]
 
 
+def test_a_system_that_recorded_no_result_has_an_unknown_cost_not_a_zero_one(corpus):
+    """With no bundle read there is no cost to average and no coverage to speak of: unknown, so unresolved."""
+    comparison = deepcopy(corpus["comparisons"]["improved"])
+    usage = comparison["views"][0]["systems"]["candidate"]["slices"][0]["usage"]
+    usage.update(bundles=0, cost_usd={"known_sum": None, "known": 0, "unknown": 0, "coverage": None})
+
+    decision = gate.evaluate_gate(cost_policy(), comparison)
+
+    assert decision["unresolved"] == ["cost.coverage", "cost.per_assignment", "cost.increase_ratio"]
+    assert requirement(decision, "cost.coverage")["explanation"] == (
+        "no scan of the candidate recorded a result, so its cost is unknown, not zero")
+    assert requirement(decision, "cost.per_assignment")["observed"]["mean"] is None
+
+
 def test_a_cost_increase_from_a_free_baseline_is_unbounded(corpus):
     comparison = deepcopy(corpus["comparisons"]["improved"])
     comparison["views"][0]["systems"]["baseline"]["slices"][0]["usage"]["cost_usd"] = {
@@ -2550,7 +2564,7 @@ def git(*args: str, cwd: Path) -> str:
 
 
 class ScriptedAdapter(Adapter):
-    """Delivers as many claims on the accepted location as its system's configuration says. No network."""
+    """Delivers as many claims on the accepted location as its system's configuration says, or fails. No network."""
 
     name = "fake"
     adapter_version = "1.0.0"
@@ -2562,6 +2576,11 @@ class ScriptedAdapter(Adapter):
     def scan(self, *, request, source_dir, raw_dir, spec, preparation, timeout_seconds, trace_mode, trace_dir):
         native = raw_dir / "native.json"
         native.write_text('{"findings": []}\n', encoding="utf-8")
+        if spec.config.get("status") == "error":
+            return NativeOutcome(status="error", exit_code=1, command=["fake", "scan"],
+                                 artifacts=[{"id": "native", "path": native}], tool_versions={"fake": "1.0.0"},
+                                 error={"code": "malformed_output", "message": "the scripted output cannot be parsed"},
+                                 capture={"model_requests": "not_applicable"}, notes=["scripted failure"])
         claims = [{"claim_id": f"c{index}", "allegation": f"shell=True with a caller-controlled command ({index})",
                    "kind": "command_injection", "native_rule_id": "fake.shell", "raw_artifact_id": "native",
                    "primary_location": {"path": "src/app.py", "start_line": 5, "end_line": 5}}
@@ -2577,8 +2596,9 @@ def real_runs(root: Path) -> dict:
     The first run has no declared tree hash, so it freezes no plan, but it exports the snapshot and records
     its mechanical checks in the pack it freezes. A fictional reviewer then approves that case at L3 and a
     fictional curator admits it, and the second run, from that pack, freezes a plan whose scope is reviewed.
-    The 'silent' system delivers nothing and the 'finder' one claim on the labeled sink. Every bundle the
-    second run wrote is still a machine draft.
+    The 'silent' system delivers nothing, the 'finder' one claim on the labeled sink, the 'flagger' twelve
+    claims there, and the 'broken' one fails every scan. Every bundle the second run wrote is still a machine
+    draft.
     """
     repo = root / "upstream"
     (repo / "src").mkdir(parents=True)
@@ -2615,7 +2635,9 @@ def real_runs(root: Path) -> dict:
     config = {"schema_version": "2.1", "run_id": "run-first", "pack": "pack.json", "cache_root": "cache",
               "inputs": [{"snapshot_id": "snap-a"}],
               "systems": [{"system_id": "silent", "adapter": "fake", "config": {"claims": 0}},
-                          {"system_id": "finder", "adapter": "fake", "config": {"claims": 1}}],
+                          {"system_id": "finder", "adapter": "fake", "config": {"claims": 1}},
+                          {"system_id": "flagger", "adapter": "fake", "config": {"claims": 12}},
+                          {"system_id": "broken", "adapter": "fake", "config": {"status": "error"}}],
               "repetitions": 1, "timeout_seconds": 60, "trace_mode": "off", "network_policy": "none"}
     (root / "run.json").write_text(canonical_json(config) + "\n", encoding="utf-8")
     first = root / "first"
@@ -2633,20 +2655,32 @@ def real_runs(root: Path) -> dict:
     return {"first": first, "second": second}
 
 
-def approve_like_a_reviewer(bundle: Path, capsys) -> None:
+def approve_like_a_reviewer(bundle: Path, capsys, false_control_claims=()) -> None:
     """A fictional reviewer's decisions for one bundle, filed through the real ``review`` commands.
 
-    Every routed match is accepted (the claim is the labeled sink) and the control is assessed quiet; the
-    decisions file is edited by hand, re-drafted with ``review record``, and approved with ``review approve``.
+    The first claim is accepted as the labeled sink and any other routed claim is rejected. The control is
+    assessed quiet, or a false allegation citing *false_control_claims* when those are named. The decisions
+    file is edited by hand, re-drafted with ``review record`` when it changed, and approved with ``review
+    approve``.
     """
     path = bundle / "evaluator" / "decisions.json"
-    decisions = json.loads(path.read_text(encoding="utf-8"))
+    before = path.read_text(encoding="utf-8")
+    decisions = json.loads(before)
     for match in decisions["claim_matches"]:
-        match.update(decision="accepted", reason="fixture: the labeled sink, accepted by a fictional reviewer")
+        if match["claim_id"] == "c1":
+            match.update(decision="accepted", reason="fixture: the labeled sink, accepted by a fictional reviewer")
+        else:
+            match.update(decision="rejected", reason="fixture: not the labeled sink, rejected by a fictional reviewer")
     for assessment in decisions["control_assessments"]:
-        assessment.update(decision="quiet", reason="fixture: no allegation about the control's property")
-    path.write_text(canonical_json(decisions) + "\n", encoding="utf-8")
-    assert cli(capsys, "review", "record", str(bundle))[0] == 0
+        if false_control_claims:
+            assessment.update(decision="false_allegation", claim_ids=list(false_control_claims),
+                              reason="fixture: alleges what the control rules out")
+        else:
+            assessment.update(decision="quiet", reason="fixture: no allegation about the control's property")
+    after = canonical_json(decisions) + "\n"
+    if after != before:
+        path.write_text(after, encoding="utf-8")
+        assert cli(capsys, "review", "record", str(bundle))[0] == 0
     code, _out, err = cli(capsys, "review", "approve", str(bundle), "--reviewer", REVIEWER, "--note",
                           "fixture approval by a fictional reviewer")
     assert code == 0, err
@@ -2709,6 +2743,49 @@ def test_evidence_from_a_real_run_is_draft_until_a_reviewer_approves_it_and_only
     assert requirement(decision, "precision.binding")["status"] == "pass"
     replay = gate.evaluate_gate(reviewed_policy, approved, precision_candidate=estimate)
     assert canonical_json(replay) == canonical_json(decision)
+
+
+def test_the_real_runner_scenarios_fail_where_the_fixtures_do(tmp_path, capsys):
+    """Four scripted systems, all approved by a fictional reviewer, each compared with the silent baseline.
+
+    The finder detects the labeled target with one true claim and passes. The flagger detects it too, among 12
+    claims of which 1 is true and one is a false allegation about the control, so its recall (+1) cannot save
+    it: the control bound, precision (1/12), and burden fail. The broken system fails every scan: it detects
+    nothing and completes nothing, and it delivered no claim, so no precision estimate can exist.
+    """
+    second = real_runs(tmp_path)["second"]
+    for name, false_claims in (("silent", ()), ("finder", ()), ("flagger", ("c2",)), ("broken", ())):
+        approve_like_a_reviewer(second / "invocations" / f"snap-a__{name}__r1", capsys, false_claims)
+    policy = gate_policy(
+        configuration={"allowed_differences": ["config"]}, primary=primary(minimum=0.5),
+        precision=precision_block(population={"name": "full"}), controls={"capability_safe": bounds()},
+        completion={"min": 1.0}, burden={"max_claims_per_assignment": 5, "max_duplicate_share": 0.0})
+
+    def decide_real(name: str) -> dict:
+        comparison = aggregate.compare([second], baseline="silent", candidate=name,
+                                       policy=aggregation_policy(min_clusters=2))
+        frame = precision.build_frame([second], population="full", systems=[name])
+        estimate = None
+        if frame["units"]:
+            sample = precision.draw_sample(frame, size=len(frame["units"]), seed=5)
+            estimate = precision.estimate(
+                sample, review_units(sample, lambda unit_id: "true" if unit_id.endswith("/c1") else "false"))
+        return gate.evaluate_gate(policy, comparison, precision_candidate=estimate)
+
+    finder, flagger, broken = decide_real("finder"), decide_real("flagger"), decide_real("broken")
+
+    assert finder["outcome"] == "pass" and finder["recommendation_scope"] == "reviewed", (
+        finder["failed"], finder["unresolved"])
+    assert requirement(flagger, "primary.improvement")["observed"]["difference"] == 1.0
+    assert flagger["outcome"] == "fail"
+    assert flagger["failed"] == ["precision.min_value", "controls.capability_safe.false_alarm_upper",
+                                 "burden.claims_per_assignment"]
+    assert requirement(flagger, "precision.min_value")["observed"]["value"] == pytest.approx(1 / 12)
+    assert broken["outcome"] == "fail" and broken["failed"] == ["primary.improvement", "completion.min"]
+    assert requirement(broken, "precision.binding")["status"] == "inconclusive"
+    assert statuses(broken)["controls.capability_safe.false_alarm_upper"] == "inconclusive"
+    assert requirement(broken, "completion.min")["explanation"] == (
+        "the candidate completed 0 of the assigned work (error 1 scan(s) by status), below the required 1")
 
 
 def test_a_policy_reads_only_its_own_view_and_the_decision_says_which_others_it_left_alone(corpus):
