@@ -15,11 +15,13 @@ import sys
 
 import pytest
 
+from scaneval.adapters import base as base_module
 from scaneval.adapters import semgrep as semgrep_module
 from scaneval.adapters.base import AdapterError, CommandResult, SystemSpec
 from scaneval.contracts import _require_relative_path as validate_relative_path
 from scaneval.adapters.semgrep import (SemgrepAdapter, _dotted_prefixes, import_semgrep_results,
                                         semgrep_version)
+from scaneval.execution import PreparedInput, build_request
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -1084,3 +1086,296 @@ def test_the_semgrep_loss_contract_matches_the_harness_one():
     doc = " ".join((import_semgrep_results.__doc__ or "").split())
     assert "it is counted in ``lost``" in doc
     assert "neither completeness nor quiet credit" in doc
+
+
+# --- PR mode ----------------------------------------------------------------------------
+#
+# A PR request names the two commits of a history the runner builds in the scanner's workspace,
+# and the scan is Semgrep's own diff scan over it. The workspaces below are built the same way:
+# a base commit, a head commit, HEAD at head, a clean status, and a neutral identity.
+
+
+def pr_workspace(tmp_path: Path, base: dict, head: dict, *, name: str = "pr-source") -> tuple[Path, str, str]:
+    """A workspace holding a base commit and a head commit, and the two commit ids.
+
+    *base* and *head* map a path to its text. In *head* a value of ``None`` deletes the path, and a
+    path *head* does not name is left as the base commit had it.
+    """
+    workspace = tmp_path / name
+    workspace.mkdir()
+    _git("init", "-q", "-b", "main", cwd=workspace)
+
+    def commit(files: dict, message: str) -> str:
+        for relative, content in files.items():
+            target = workspace / relative
+            if content is None:
+                target.unlink()
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        _git("add", "-A", "-f", ".", cwd=workspace)
+        _git("commit", "-q", "--no-verify", "--allow-empty", "-m", message, cwd=workspace)
+        return _git("rev-parse", "HEAD", cwd=workspace)
+
+    return workspace, commit(base, "base"), commit(head, "head")
+
+
+def pr_scan_request(base: str, head: str) -> dict:
+    """The scan request the runner would build for a PR input, checked against the request contract."""
+    prepared = PreparedInput("pr-fixture", Path("."), "sha256:" + "0" * 64, ("python",), {}, mode="pr",
+                             pr={"base_commit": base, "head_commit": head})
+    return build_request("run-pr", prepared, SystemSpec("semgrep-pr", "semgrep", {}), timeout_seconds=300,
+                         trace_mode="off", pr={"base": base, "head": head})
+
+
+def working_tree(workspace: Path) -> dict[str, bytes]:
+    """Every file outside ``.git`` and its bytes, for comparing a workspace before and after a scan."""
+    return {path.relative_to(workspace).as_posix(): path.read_bytes()
+            for path in sorted(workspace.rglob("*")) if path.is_file() and ".git" not in path.relative_to(workspace).parts}
+
+
+def scan_pr_with_fake(tmp_path: Path, stdout_text: str, exit_code: int, *, request=None, config=None,
+                      base=None, head=None):
+    """One PR-mode scan whose scanner is the stand-in binary, over a two-commit workspace."""
+    workspace, base_commit, head_commit = pr_workspace(
+        tmp_path, base or {"app.py": "import subprocess\n"}, head or {"app.py": "import subprocess\nimport os\n"})
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    settings = {"binary": str(fake_semgrep(tmp_path, stdout_text, exit_code))}
+    settings.update(config or {})
+    outcome = SemgrepAdapter().scan(
+        request=request or pr_scan_request(base_commit, head_commit), source_dir=workspace, raw_dir=raw,
+        spec=SystemSpec("semgrep-fake", "semgrep", settings), preparation=fake_preparation(tmp_path),
+        timeout_seconds=60, trace_mode="off", trace_dir=None)
+    return outcome, raw, workspace, base_commit, head_commit
+
+
+def prepared_semgrep(tmp_path: Path) -> tuple[SystemSpec, dict]:
+    """A system over the offline one-rule ruleset, and its preparation record."""
+    rules, commit = pinned_rules_repo(tmp_path)
+    spec = SystemSpec("semgrep-pr", "semgrep",
+                      {"ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}})
+    return spec, SemgrepAdapter().prepare(spec, tmp_path / "cache")
+
+
+def scan_pr(tmp_path: Path, workspace: Path, base: str, head: str, spec: SystemSpec, preparation: dict):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    outcome = SemgrepAdapter().scan(request=pr_scan_request(base, head), source_dir=workspace, raw_dir=raw,
+                                    spec=spec, preparation=preparation, timeout_seconds=300, trace_mode="off",
+                                    trace_dir=None)
+    text = (raw / "semgrep.json").read_text(encoding="utf-8")
+    return outcome, (json.loads(text) if text else None)
+
+
+def test_semgrep_declares_pr_beside_full():
+    assert SemgrepAdapter.scan_modes == frozenset({"full", "pr"})
+
+
+def test_semgrep_full_mode_argv_is_what_it_always_was_and_carries_no_baseline(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["app.py"]}, "errors": []})
+    outcome, _ = scan_with_fake(tmp_path, payload, 0)
+    binary = str(tmp_path / "fake-semgrep")
+    assert outcome.command == [binary, "scan", "--json", "--metrics=off", "--disable-version-check", "--quiet",
+                               "--timeout", "30", "--jobs", "1", f"--config={tmp_path / 'rules' / 'python'}", "."]
+    assert not any("baseline" in word for word in outcome.command)
+    assert not any("PR mode" in note for note in outcome.notes)
+
+
+def test_semgrep_pr_mode_adds_only_the_baseline_option_to_the_full_argv(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["app.py"]}, "errors": []})
+    outcome, raw, _workspace, base, _head = scan_pr_with_fake(tmp_path, payload, 0)
+    binary = str(tmp_path / "fake-semgrep")
+    assert outcome.command == [binary, "scan", "--json", "--metrics=off", "--disable-version-check", "--quiet",
+                               "--timeout", "30", "--jobs", "1", f"--baseline-commit={base}",
+                               f"--config={tmp_path / 'rules' / 'python'}", "."]
+    assert outcome.status == "success" and outcome.claims == []
+    assert any(note.startswith("PR mode: Semgrep ran with --baseline-commit") for note in outcome.notes)
+    assert (raw / "semgrep.json").read_text(encoding="utf-8") == payload
+
+
+def test_semgrep_pr_mode_keeps_import_loss_accounting(tmp_path):
+    """A result the importer cannot place is a finding Semgrep reported, in a PR review as in a full scan."""
+    payload = {"version": "9.9.9", "paths": {"scanned": ["app.py"]}, "errors": [], "results": [PLACEABLE, UNPLACEABLE]}
+    outcome, *_ = scan_pr_with_fake(tmp_path, json.dumps(payload), 0)
+    assert outcome.status == "partial" and outcome.bundles_resolved is False
+    assert outcome.error["code"] == "import_loss"
+    assert "1 semgrep result(s) could not be imported" in outcome.error["message"]
+    assert [claim["claim_id"] for claim in outcome.claims] == ["c1"]
+
+
+def test_semgrep_pr_mode_keeps_the_failure_classification_of_a_nonzero_exit(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": []},
+                          "errors": [{"level": "error", "message": "baseline commit is not in this repository"}]})
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 2)
+    assert outcome.status == "error" and outcome.exit_code == 2 and outcome.claims == []
+    assert outcome.error["code"] == "exit_2"
+    assert "baseline commit is not in this repository" in outcome.error["message"]
+
+
+def test_semgrep_pr_mode_notes_that_a_timeout_can_leave_the_tree_at_the_base_commit(tmp_path, monkeypatch):
+    workspace, base, head = pr_workspace(tmp_path, {"app.py": "1\n"}, {"app.py": "2\n"})
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    real_run = semgrep_module.run_command
+
+    def killed_scan(argv, **kwargs):
+        if "scan" in argv:
+            return CommandResult(list(argv), None, True, 61.0, kwargs["stdout_path"], kwargs["stderr_path"])
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(semgrep_module, "run_command", killed_scan)
+    spec = SystemSpec("semgrep-fake", "semgrep", {"binary": str(fake_semgrep(tmp_path, "{}", 0))})
+    outcome = SemgrepAdapter().scan(request=pr_scan_request(base, head), source_dir=workspace, raw_dir=raw,
+                                    spec=spec, preparation=fake_preparation(tmp_path), timeout_seconds=60,
+                                    trace_mode="off", trace_dir=None)
+    assert outcome.status == "timeout" and outcome.timed_out is True and outcome.claims == []
+    assert any("leaves the tree at the base commit" in note for note in outcome.notes)
+
+
+# --- PR mode: what is refused before anything runs --------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["batch", "bootstrap", "PR", ""])
+def test_semgrep_refuses_a_mode_it_does_not_implement_and_runs_nothing(tmp_path, mode):
+    request = {"input": {"mode": mode}}
+    with pytest.raises(AdapterError, match="semgrep does not implement scan mode"):
+        scan_pr_with_fake(tmp_path, "{}", 0, request=request)
+    assert list((tmp_path / "raw").iterdir()) == [], "no output file was claimed and no process ran"
+
+
+def test_semgrep_refuses_a_pr_request_that_does_not_name_two_commits_and_runs_nothing(tmp_path):
+    with pytest.raises(AdapterError, match="input.pr is absent"):
+        scan_pr_with_fake(tmp_path, "{}", 0, request={"input": {"mode": "pr"}})
+    assert list((tmp_path / "raw").iterdir()) == []
+
+
+def test_semgrep_refuses_a_full_request_that_carries_a_pr_rather_than_ignoring_it(tmp_path):
+    request = {"input": {"mode": "full", "pr": {"base": "a" * 40, "head": "b" * 40}}}
+    with pytest.raises(AdapterError, match="full-mode request that also carries input.pr"):
+        scan_pr_with_fake(tmp_path, "{}", 0, request=request)
+    assert list((tmp_path / "raw").iterdir()) == []
+
+
+def test_semgrep_refuses_a_pr_request_over_a_workspace_that_does_not_hold_its_history(tmp_path):
+    """Semgrep would otherwise fail inside its own git call, or scan a tree the request does not describe."""
+    workspace, base, head = pr_workspace(tmp_path, {"app.py": "1\n"}, {"app.py": "2\n"})
+    _git("checkout", "-q", "--detach", base, cwd=workspace)
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    spec = SystemSpec("semgrep-fake", "semgrep", {"binary": str(fake_semgrep(tmp_path, "{}", 0))})
+    with pytest.raises(AdapterError, match="not at the request's head commit"):
+        SemgrepAdapter().scan(request=pr_scan_request(base, head), source_dir=workspace, raw_dir=raw, spec=spec,
+                              preparation=fake_preparation(tmp_path), timeout_seconds=60, trace_mode="off",
+                              trace_dir=None)
+    assert list(raw.iterdir()) == []
+
+
+class HeldBackend:
+    """A backend that holds every command it is handed and never runs one."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.commands: list[list[str]] = []
+
+    def run_command(self, argv, **kwargs):
+        self.commands.append(list(argv))
+        return CommandResult(list(argv), 0, False, 0.0, kwargs["stdout_path"], kwargs["stderr_path"])
+
+
+def test_semgrep_pr_mode_is_refused_under_the_oci_backend_with_the_reason_recorded(tmp_path):
+    """The container mounts the source read-only and Semgrep's baseline scan rewrites the tree in place."""
+    workspace, base, head = pr_workspace(tmp_path, {"app.py": "1\n"}, {"app.py": "2\n"})
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    held = HeldBackend("oci")
+    with base_module.routed_through(held):
+        outcome = SemgrepAdapter().scan(
+            request=pr_scan_request(base, head), source_dir=workspace, raw_dir=raw,
+            spec=SystemSpec("semgrep-oci", "semgrep", {}), preparation=fake_preparation(tmp_path),
+            timeout_seconds=60, trace_mode="off", trace_dir=None)
+    assert outcome.status == "unsupported" and outcome.claims == [] and outcome.command == []
+    assert outcome.error["code"] == "unsupported_mode"
+    assert "oci backend" in outcome.error["message"] and "read-only" in outcome.error["message"]
+    assert "--baseline-commit" in outcome.error["message"]
+    assert any("stays in the denominator" in note for note in outcome.notes)
+    assert held.commands == [] and list(raw.iterdir()) == [], "nothing ran and nothing was claimed"
+
+
+def test_semgrep_full_mode_still_runs_under_oci_and_only_pr_is_refused(tmp_path):
+    """The refusal is about the mode, not the backend: a full scan goes through the backend as before."""
+    workspace, base, head = pr_workspace(tmp_path, {"app.py": "1\n"}, {"app.py": "2\n"})
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["app.py"]}, "errors": []})
+
+    class ScanningBackend(HeldBackend):
+        def run_command(self, argv, **kwargs):
+            result = super().run_command(argv, **kwargs)
+            kwargs["stdout_path"].write_text("9.9.9\n" if "--version" in argv else payload, encoding="utf-8")
+            return result
+
+    held = ScanningBackend("oci")
+    with base_module.routed_through(held):
+        outcome = SemgrepAdapter().scan(
+            request={}, source_dir=workspace, raw_dir=raw, spec=SystemSpec("semgrep-oci", "semgrep", {}),
+            preparation=fake_preparation(tmp_path), timeout_seconds=60, trace_mode="off", trace_dir=None)
+    assert outcome.status == "success"
+    assert [argv[0] for argv in held.commands] == ["semgrep", "semgrep"]
+    assert not any("--baseline-commit" in word for argv in held.commands for word in argv)
+
+
+# --- PR mode: the real binary -----------------------------------------------------------
+
+
+@semgrep_required
+def test_semgrep_pr_mode_reports_only_the_new_finding_and_never_scans_an_unchanged_file(tmp_path):
+    """The workspace holds two findings at base and a third added by the change.
+
+    ``old.py`` is touched but keeps its finding; ``keep.py`` is not touched at all. Only the
+    finding the change introduced is reported, ``keep.py`` is neither scanned nor reported, and
+    the workspace is exactly as it was handed over once Semgrep's in-place baseline scan is done.
+    """
+    spec, preparation = prepared_semgrep(tmp_path)
+    workspace, base, head = pr_workspace(
+        tmp_path,
+        {"old.py": VULNERABLE_PY, "keep.py": VULNERABLE_PY, "README.md": "# readme\n"},
+        {"new.py": VULNERABLE_PY, "old.py": "# a comment that shifts the finding down\n" + VULNERABLE_PY})
+    before = working_tree(workspace)
+
+    outcome, payload = scan_pr(tmp_path, workspace, base, head, spec, preparation)
+
+    assert outcome.status == "success", outcome.error
+    assert [(claim["primary_location"]["path"], claim["primary_location"]["start_line"])
+            for claim in outcome.claims] == [("new.py", 3)]
+    assert [claim["native_rule_id"] for claim in outcome.claims] == ["python.probe.subprocess-shell"]
+    assert outcome.bundles_resolved is True
+    assert [result["path"] for result in payload["results"]] == ["new.py"]
+    assert payload["paths"]["scanned"] == ["new.py", "old.py"], "the unchanged file was not scanned"
+    assert "keep.py" not in json.dumps(payload["results"]) and "README.md" not in payload["paths"]["scanned"]
+    assert f"--baseline-commit={base}" in outcome.command
+
+    assert working_tree(workspace) == before
+    assert _git("rev-parse", "HEAD", cwd=workspace) == head
+    assert _git("status", "--porcelain", cwd=workspace) == ""
+
+
+@semgrep_required
+def test_semgrep_pr_mode_reports_the_added_finding_in_a_file_that_already_had_one(tmp_path):
+    spec, preparation = prepared_semgrep(tmp_path)
+    second = VULNERABLE_PY + "def other(cmd):\n    return subprocess.call(cmd, shell=True)\n"
+    workspace, base, head = pr_workspace(tmp_path, {"old.py": VULNERABLE_PY}, {"old.py": second})
+    outcome, _payload = scan_pr(tmp_path, workspace, base, head, spec, preparation)
+    assert outcome.status == "success", outcome.error
+    assert [(claim["primary_location"]["path"], claim["primary_location"]["start_line"])
+            for claim in outcome.claims] == [("old.py", 5)]
+
+
+@semgrep_required
+def test_semgrep_pr_mode_does_not_report_a_finding_that_only_moved_with_a_renamed_file(tmp_path):
+    spec, preparation = prepared_semgrep(tmp_path)
+    workspace, base, head = pr_workspace(tmp_path, {"old.py": VULNERABLE_PY}, {"old.py": None, "moved.py": VULNERABLE_PY})
+    outcome, payload = scan_pr(tmp_path, workspace, base, head, spec, preparation)
+    assert outcome.status == "success", outcome.error
+    assert outcome.claims == []
+    assert payload["paths"]["scanned"] == ["moved.py"], "the renamed file was scanned, and its finding matched to base"

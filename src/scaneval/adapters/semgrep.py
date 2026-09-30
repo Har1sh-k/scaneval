@@ -43,6 +43,18 @@ leave anything at those names. That is what makes the adapter ``oci_compatible``
 ``semgrep`` rather than a host install, and the pinned rules checkout is declared as a read-only
 runtime mount at its own path, so the ``--config`` paths and the ``check_id`` prefixes they
 produce are the same inside the container as outside it.
+
+PR mode. A request whose ``input.mode`` is ``pr`` is a review of the change between two commits of
+the workspace's own history (:mod:`scaneval.adapters.pr`), and the scan argv is the full-scan argv
+plus ``--baseline-commit=<base>``: Semgrep's own diff scan. Semgrep then scans the files changed
+between the two commits and drops every finding its own baseline comparison matches to the base
+commit, one that moved with a renamed file included; this adapter compares nothing itself. Semgrep
+does it by resetting the workspace tree to the base commit and back to head in place (for a clean
+repository, which the request promises and this adapter checks first), so the source must be
+writable. Under the ``oci`` backend, which mounts it read-only, a PR request is answered
+``unsupported`` with the reason recorded and nothing is run. A kill between the two resets leaves
+the tree at the base commit, which the invocation's own source check then reports. Import-loss
+accounting and every other outcome rule below are the full-scan ones, unchanged.
 """
 
 from __future__ import annotations
@@ -60,6 +72,7 @@ from ..kinds import cwe_ids, kind_for_cwes, mapping_version
 from ..materialize import MaterializationError, fetch_snapshot, sha256_file, tree_hash
 from .base import (Adapter, AdapterError, NativeOutcome, SystemSpec, active_backend, build_env, run_command,
                    tail_text)
+from .pr import pr_range, workspace_changes
 
 
 ARTIFACT_JSON = "semgrep-json"
@@ -72,6 +85,14 @@ _RULE_ID_DROPPED = re.compile(r"[^A-Za-z0-9._-]")
 _YAML_SUFFIXES = frozenset({".yaml", ".yml"})
 _RULE_TEST_SUFFIX = ".test"
 _RULE_FIXTEST_SUFFIX = ".fixed"
+# Recorded on every PR-mode outcome, so a reader of the result knows what the claims are relative to.
+_PR_NOTE = (
+    "PR mode: Semgrep ran with --baseline-commit set to the request's base commit over the workspace's two-commit "
+    "history. It scans the files changed between base and head and reports only the findings its own baseline "
+    "comparison does not match to the base commit; this adapter does no baseline comparison of its own, so a finding "
+    "Semgrep matched to the base is absent from the claims rather than marked pre-existing, and a file the change did "
+    "not touch is not scanned. Semgrep 1.177 also drops a head finding on a file whose baseline scan failed (a "
+    "timeout or an out-of-memory) and records that failure only as a diagnostic in the raw errors list.")
 # A backslash separates directories only on Windows. On POSIX it is an ordinary character in a
 # file name, so a payload path is only translated when it cannot be a POSIX path.
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
@@ -531,6 +552,7 @@ class SemgrepAdapter(Adapter):
     adapter_version = "2.0.0"
     requires_git = False
     supported_languages = frozenset({"python", "javascript", "typescript", "go", "rust"})
+    scan_modes = frozenset({"full", "pr"})
     oci_compatible = True
 
     def runtime_mounts(self, spec: SystemSpec, preparation: dict) -> tuple[str, ...]:
@@ -670,11 +692,30 @@ class SemgrepAdapter(Adapter):
         otherwise have been a clean success, makes the outcome ``partial`` with error code
         ``import_loss``. A timeout and an unreadable payload return before the import, so
         neither reports a loss count: nothing was imported at all.
+
+        A PR request (``request["input"]["mode"] == "pr"``) adds one option to the argv,
+        ``--baseline-commit=<base>``, and is otherwise the same scan. It is refused before anything
+        runs, as an ``AdapterError``, when the request does not name two full commit ids or the
+        workspace does not hold the clean two-commit history it names, and it is answered
+        ``unsupported``, not run, under the ``oci`` backend. Any mode but ``full`` and ``pr`` is
+        refused too, so a request this adapter cannot serve is never run as a full scan.
         """
+        pr = pr_range(request, self)
         binary = _binary(spec)
         rule_timeout = _integer_config(spec, "rule_timeout_seconds", 30, minimum=0)
         jobs = _integer_config(spec, "jobs", 1, minimum=1)
         config_dirs, ruleset_commit, ruleset_tree_hash = _prepared_ruleset(preparation)
+        if pr is not None:
+            if getattr(active_backend(), "name", None) == "oci":
+                return NativeOutcome(
+                    status="unsupported", exit_code=None, command=[],
+                    error={"code": "unsupported_mode",
+                           "message": "semgrep does not run a PR review under the oci backend: --baseline-commit "
+                                      "resets the scanned tree to the merge base and restores it in place, and "
+                                      "that backend mounts the source read-only, so the scan was not started"},
+                    notes=["Unsupported work stays in the denominator; nothing was executed."])
+            # Read before Semgrep starts, from a repository nothing but the runner has written to.
+            workspace_changes(Path(source_dir), pr)
         stdout = raw_dir / "semgrep.json"
         stderr = raw_dir / "semgrep.stderr.txt"
         _claim_output(stdout, f"semgrep output under {raw_dir}")
@@ -685,6 +726,8 @@ class SemgrepAdapter(Adapter):
             "--timeout", str(rule_timeout),
             "--jobs", str(jobs),
         ]
+        if pr is not None:
+            argv.append(f"--baseline-commit={pr.base}")
         for directory in config_dirs:
             argv.append(f"--config={directory}")
         argv.append(".")
@@ -699,8 +742,15 @@ class SemgrepAdapter(Adapter):
         capture = {"model_requests": "not_applicable", "tool_calls": "not_applicable",
                    "context_selection": "not_applicable", "finding_lifecycle": "not_applicable"}
         base = dict(command=argv, artifacts=artifacts, tool_versions=tool_versions, capture=capture,
-                    usage={"cost_usd": 0.0}, notes=["Semgrep OSS has no metered cost; license cost not included."])
+                    usage={"cost_usd": 0.0},
+                    notes=["Semgrep OSS has no metered cost; license cost not included."]
+                    + ([_PR_NOTE] if pr is not None else []))
         if result.timed_out:
+            if pr is not None:
+                base["notes"].append(
+                    "Semgrep was killed at the timeout. Its --baseline-commit scan resets the workspace tree to the "
+                    "base commit and back in place, so a kill between the two resets leaves the tree at the base "
+                    "commit; the invocation's source check reports that as a modified source.")
             return NativeOutcome(status="timeout", exit_code=None, timed_out=True, error={"code": "timeout",
                                  "message": f"semgrep exceeded {timeout_seconds}s; output written at exit only"}, **base)
         try:
