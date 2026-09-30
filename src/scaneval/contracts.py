@@ -47,6 +47,11 @@ SCHEMA_VERSIONS: dict[str, tuple[str, ...]] = {
     "precision-sample": ("2.1",),
     "precision-reviews": ("2.1",),
     "precision-estimate": ("2.1",),
+    # Promotion gate decisions (scaneval.gate, docs/GATE.md): the policy a gate is evaluated under,
+    # frozen before any result is read, and the decision made over a comparison. Each is first
+    # published at 2.1, so plain file names.
+    "gate-policy": ("2.1",),
+    "gate-decision": ("2.1",),
 }
 CONTRACT_KINDS = frozenset(SCHEMA_VERSIONS)
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
@@ -2109,6 +2114,174 @@ def _validate_precision_estimate(document: dict[str, Any]) -> None:
         raise ContractError("sample.selected_units must equal the number of units resolved")
 
 
+# --- promotion gate decisions ---------------------------------------------------------------------
+
+
+# The requirement blocks a gate policy may declare, in the order a decision lists them. A policy always
+# declares primary and configuration; every other block is a requirement it makes only by writing it.
+GATE_BLOCKS = ("primary", "configuration", "regressions", "precision", "controls", "completion",
+               "target_coverage", "burden", "cost")
+GATE_CONTROL_CLASSES = ("capability_safe", "fixed_target")
+# The only metrics a gate reads for detection: measured known-target recall. Whatever else the
+# comparison reports about detection is a diagnostic, or is not read by a gate at all.
+GATE_METRICS = ("full_recall", "recall_at_budget")
+# Names a comparison or the math gives a diagnostic. A policy naming one is told so, rather than
+# only that its metric is not one of two.
+_GATE_DIAGNOSTICS = frozenset({
+    "random_order_diagnostic", "run_variability", "leave_one_project_out", "first_hit_ranks",
+    "targets_per_input", "claims", "usage"})
+
+
+def gate_declared_blocks(policy: dict[str, Any]) -> list[str]:
+    """The requirement blocks *policy* declares, in the order a decision lists them."""
+    return [name for name in GATE_BLOCKS if name in policy]
+
+
+def gate_requirement_ids(policy: dict[str, Any]) -> list[str]:
+    """Every requirement id a decision under *policy* must carry, in decision order.
+
+    The ids follow from the policy alone, never from what a comparison holds, so a decision that
+    drops a requirement its policy declares (a failed one, say) is refused by
+    :func:`_validate_gate_decision`, and :mod:`scaneval.gate` evaluates exactly these, in this order.
+    The first five are always there; each other block adds what it declares.
+    """
+    ids = ["contract.shared", "contract.runs_completed", "configuration.allowed_differences",
+           "evidence.scope", "primary.improvement"]
+    if "uncertainty" in policy["primary"]:
+        ids.append("primary.uncertainty")
+    ids += [f"regression.{entry['id']}" for entry in policy.get("regressions", [])]
+    if "precision" in policy:
+        precision = policy["precision"]
+        ids += ["precision.binding", "precision.min_value", "precision.max_unresolved_share",
+                "precision.min_evidence_grade"]
+        ids += [f"precision.{name}" for field, name in (
+            ("min_coverage", "min_coverage"), ("min_interval_lower_bound", "interval"),
+            ("max_decrease_vs_baseline", "max_decrease")) if field in precision]
+    for name in GATE_CONTROL_CLASSES:
+        if name in policy.get("controls", {}):
+            ids += [f"controls.{name}.{check}" for check in
+                    ("false_alarm_upper", "completed_mass", "assessable_mass")]
+    completion = policy.get("completion", {})
+    ids += [f"completion.{name}" for name in ("min", "max_decrease") if name in completion]
+    if "target_coverage" in policy:
+        ids.append("target_coverage.min_assessable_mass")
+    burden = policy.get("burden", {})
+    ids += [f"burden.{name}" for field, name in (
+        ("max_claims_per_assignment", "claims_per_assignment"), ("max_duplicate_share", "duplicate_share"),
+        ("max_increase_ratio", "increase_ratio")) if field in burden]
+    cost = policy.get("cost")
+    if cost is not None:
+        ids.append("cost.coverage")
+        ids += [f"cost.{name}" for field, name in (
+            ("max_per_assignment_usd", "per_assignment"), ("max_increase_ratio", "increase_ratio"))
+            if field in cost]
+    return ids
+
+
+def _gate_metric(metric: dict[str, Any], where: str) -> None:
+    """Refuse a gate metric that is not measured known-target recall, naming a diagnostic as one."""
+    kind = metric["kind"]
+    if kind == "recall_at_budget":
+        if "budget" not in metric:
+            raise ContractError(f"{where}: recall_at_budget names the budget B it reads")
+    elif kind == "full_recall":
+        if "budget" in metric:
+            raise ContractError(f"{where}: full_recall takes no budget")
+    elif "random" in kind.lower():
+        raise ContractError(
+            f"{where}: {kind!r} is a random-order expectation, a diagnostic over an order the system never "
+            "chose and never a promotion metric; use full_recall or recall_at_budget")
+    elif kind in _GATE_DIAGNOSTICS:
+        raise ContractError(
+            f"{where}: {kind!r} is a diagnostic, not a promotion metric; use full_recall or recall_at_budget")
+    else:
+        raise ContractError(f"{where}: {kind!r} is not a metric a gate reads; use full_recall or recall_at_budget")
+
+
+def _gate_slice(slice_: dict[str, Any], where: str, *, single: bool) -> None:
+    """The whole view has no value; a project or workload slice names one unless it may cover each."""
+    value = slice_.get("value")
+    if slice_["dimension"] == "all":
+        if value is not None:
+            raise ContractError(f"{where}: the whole-view slice has no value")
+    elif value is None and single:
+        raise ContractError(f"{where}: a {slice_['dimension']} slice names which {slice_['dimension']} it is")
+
+
+def _validate_gate_policy(document: dict[str, Any]) -> None:
+    """Check that a policy's requirements can be read; it says nothing about their merit.
+
+    The primary metric and every regression's metric must be measured known-target recall: a
+    random-order expectation or any other diagnostic is refused here, by name, so no policy can ask a
+    decision to rest on one. The primary metric names one slice, regression ids are unique, a budget
+    is named exactly for recall_at_budget and for the first_b population, and a precision interval
+    bound is asked of resolved precision only, the one figure that has an interval.
+    """
+    primary = document["primary"]
+    _gate_metric(primary["metric"], "primary.metric")
+    _gate_slice(primary.get("slice", {"dimension": "all"}), "primary.slice", single=True)
+    regressions = document.get("regressions", [])
+    _unique([entry["id"] for entry in regressions], "regressions.id")
+    for entry in regressions:
+        _gate_metric(entry["metric"], f"regressions[{entry['id']}].metric")
+        _gate_slice(entry.get("slice", {"dimension": "all"}), f"regressions[{entry['id']}].slice", single=False)
+    precision = document.get("precision")
+    if precision is not None:
+        if (precision["population"]["name"] == "first_b") != ("budget" in precision["population"]):
+            raise ContractError("precision.population: a budget is named exactly for the first_b population")
+        if precision["basis"] != "resolved" and "min_interval_lower_bound" in precision:
+            raise ContractError("precision.min_interval_lower_bound: only resolved precision has an interval")
+
+
+def _validate_gate_decision(document: dict[str, Any]) -> None:
+    """Check that a decision is derived from what it records; the requirements are not recomputed here.
+
+    The embedded policy is a valid gate policy and hashes to ``policy_sha256``. The requirements are
+    exactly the ones the policy declares (:func:`gate_requirement_ids`), in order, so a decision cannot
+    leave out one that failed. The outcome, the failed and unresolved lists, and the counts follow from
+    the requirement statuses, the declared and undeclared blocks from the policy, and the
+    recommendation scope from the policy's required scope and the evidence-scope requirement. Nothing
+    here reads a comparison or an estimate: :func:`scaneval.gate.evaluate_gate` is what decides, and a
+    replay of it is what checks a decision against the documents it names.
+    """
+    policy = document["policy"]
+    validate_document("gate-policy", policy)
+    if document["policy_sha256"] != canonical_sha256(policy):
+        raise ContractError("policy_sha256 does not hash the policy this decision carries")
+    requirements = document["requirements"]
+    ids = [requirement["id"] for requirement in requirements]
+    if ids != gate_requirement_ids(policy):
+        raise ContractError("the requirements must be exactly the ones the embedded policy declares, in order")
+    statuses = [requirement["status"] for requirement in requirements]
+    outcome = "fail" if "fail" in statuses else "inconclusive" if "inconclusive" in statuses else "pass"
+    if document["outcome"] != outcome:
+        raise ContractError(f"outcome is {document['outcome']}, but the requirement statuses give {outcome}")
+    for field, status in (("failed", "fail"), ("unresolved", "inconclusive")):
+        if document[field] != [requirement["id"] for requirement in requirements
+                               if requirement["status"] == status]:
+            raise ContractError(f"{field} must list the {status} requirements, in decision order")
+    summary = document["summary"]
+    counts = {"requirements": len(requirements), "passed": statuses.count("pass"),
+              "failed": statuses.count("fail"), "inconclusive": statuses.count("inconclusive")}
+    if summary != counts:
+        raise ContractError(f"summary must count the requirements ({counts}), not {summary}")
+    declared = gate_declared_blocks(policy)
+    blocks = document["blocks"]
+    if blocks["declared"] != declared or blocks["not_declared"] != [
+            name for name in GATE_BLOCKS if name not in declared]:
+        raise ContractError("blocks must list the policy's declared and undeclared requirement blocks")
+    if document["view"] != policy["view"]:
+        raise ContractError("view must be the policy's view")
+    if document["comparison"]["baseline"]["system_id"] == document["comparison"]["candidate"]["system_id"]:
+        raise ContractError("a decision names two different systems")
+    evidence = requirements[ids.index("evidence.scope")]
+    expected = ("none" if evidence["status"] != "pass" else
+                "reviewed" if policy.get("required_scope", "reviewed") == "reviewed" else "development")
+    if document["recommendation_scope"] != expected:
+        raise ContractError(f"recommendation_scope is {document['recommendation_scope']}, but the evidence "
+                            f"requirement and the policy's required scope give {expected}")
+
+
 _RUNTIME_VALIDATORS = {
     "case-pack": _validate_case_pack,
     "review-record": _validate_review_record,
@@ -2132,6 +2305,9 @@ _RUNTIME_VALIDATORS = {
     "precision-sample": _validate_precision_sample,
     "precision-reviews": _validate_precision_reviews,
     "precision-estimate": _validate_precision_estimate,
+    # Promotion gate decisions.
+    "gate-policy": _validate_gate_policy,
+    "gate-decision": _validate_gate_decision,
 }
 
 
