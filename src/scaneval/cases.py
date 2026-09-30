@@ -137,12 +137,14 @@ from .contracts import (
     claimed_level_gap,
     covering_review,
     effective_level,
+    input_identity,
     label_digest,
     latest_review,
     load_document,
     operative_review_gap,
     pack_anchor_digest,
     pack_anchor_gap,
+    pr_input_hash,
     recorded_check_state,
     recorded_level_gap,
     review_chain_digest,
@@ -1119,9 +1121,180 @@ def plan_scope(planned: list[tuple[dict, str, dict | None]]) -> str:
     return "draft"
 
 
+def _gate(pack: dict, candidates: list[dict]) -> tuple[list[tuple[dict, str, dict | None]], list[str]]:
+    """The cases among *candidates* a plan may carry, each with its level and the admission covering it.
+
+    A case is planned only when its disposition is not ``exclude``, no check set failed after
+    approval, the latest admission covering its content is not ``rejected``, the pack records a
+    passing mechanical check set for every snapshot it references, and the recorded reviews do not
+    stand in the way (see :func:`_planning_review_gap`). The second value says why each of the
+    others is left out. This is the one gate every plan asks, a full plan and a PR plan alike, so
+    the two cannot disagree about a case.
+    """
+    notes: list[str] = []
+    included: list[tuple[dict, str, dict | None]] = []
+    for case in candidates:
+        case_id = case["case_id"]
+        validation = case["validation"]
+        admission = latest_admission(pack, case_id)
+        review_gap = _planning_review_gap(pack, case)
+        if case["disposition"]["value"] == "exclude":
+            notes.append(f"{case_id}: excluded by disposition ({case['disposition']['reason']})")
+        elif validation.get("checks_failed"):
+            notes.append(f"{case_id}: excluded because a mechanical check set failed after approval; "
+                         "the recorded review stands and needs a correction decision")
+        elif admission is not None and admission["decision"] == "rejected":
+            notes.append(f"{case_id}: excluded by the latest admission decision "
+                         f"(rejected by {admission['by']}: {admission['reason']})")
+        elif validation["review_state"] == "draft":
+            notes.append(f"{case_id}: draft without passed mechanical checks; not planned")
+        elif _unchecked_snapshots(case):
+            notes.append(f"{case_id}: no recorded passing mechanical check set for snapshot(s) "
+                         f"{', '.join(_unchecked_snapshots(case))}; not planned")
+        elif review_gap is not None:
+            notes.append(f"{case_id}: excluded because {review_gap}; the recorded "
+                         "review stands as recorded, and a review of the labels as they stand is "
+                         "needed")
+        elif planned_level(pack, case) is None:
+            notes.append(f"{case_id}: excluded because nothing in the pack establishes a validation "
+                         f"level for it ({recorded_level_gap(pack, case) or 'no level is recorded'})"
+                         "; not planned")
+        else:
+            included.append((case, planned_level(pack, case), admission))
+    return included, notes
+
+
+def _pr_scope(record: dict, change_set_id: str) -> dict | None:
+    """The ``pr_scope`` a target or control carries for *change_set_id*, or ``None`` when it names none."""
+    for entry in record.get("pr_eligibility") or []:
+        if entry["change_set_id"] == change_set_id:
+            return {"relation": entry["relation"], "code_scope": entry["code_scope"]}
+    return None
+
+
+def _check_snapshot_export(pack: dict, snapshot_id: str, tree_hash: str) -> None:
+    """Refuse a plan for a snapshot whose export the pack does not bind, or binds to another tree."""
+    snapshot = snapshot_by_id(pack, snapshot_id)
+    if snapshot.get("tree_hash") and snapshot["tree_hash"] != tree_hash:
+        raise ContractError(f"snapshot {snapshot_id} tree hash does not match the materialized input")
+    if not snapshot.get("tree_hash") and any(check.get("snapshot_id") == snapshot_id
+                                             for case in pack["cases"]
+                                             for check in case["validation"]["checks"]):
+        raise ContractError(
+            f"snapshot {snapshot_id} records mechanical checks but carries no tree hash, so nothing "
+            "binds those checks to this export; re-run the checks against the materialized input")
+
+
+def _pr_boundary(pack: dict, change_set_id: str, head_snapshot_id: str, head_source_hash: str,
+                 blinded: bool, base_tree_hash: str | None, head_tree_hash: str | None,
+                 diff_sha256: str | None, input_hash: str | None) -> tuple[dict, str]:
+    """The declared change set a PR plan is for, and the identity its input binds to.
+
+    The plan is built for the change set's head snapshot, and binds to the trio the input is
+    identified by: without all three of the base tree, the head tree, and the diff, nothing says
+    which change was reviewed. A standard input hands a scanner the export itself, so its head
+    tree is the head export, and a base export the pack declares a hash for must be that one; a
+    blinded input hands over transformed trees the pack's original hashes cannot vouch for, so
+    neither comparison is made there and the runner has already checked the originals. A given
+    ``input_hash`` must be the identity of the trio, because a plan bound to any other hash could
+    not be the plan of the input it says it is.
+    """
+    missing = [name for name, value in (("base_tree_hash", base_tree_hash), ("head_tree_hash", head_tree_hash),
+                                        ("diff_sha256", diff_sha256)) if value is None]
+    if missing:
+        raise ContractError(
+            "a PR plan binds to the base tree, the head tree, and the diff between them, so it "
+            f"needs {', '.join(missing)}")
+    change_set = change_set_by_id(pack, change_set_id)
+    if change_set["head_snapshot_id"] != head_snapshot_id:
+        raise ContractError(f"change set {change_set_id} reviews head snapshot "
+                            f"{change_set['head_snapshot_id']}, not {head_snapshot_id}")
+    if not blinded:
+        if head_tree_hash != head_source_hash:
+            raise ContractError(
+                "a standard PR input hands a scanner the head export itself, so its head tree hash "
+                f"must be the export's tree hash, {head_source_hash}")
+        base = snapshot_by_id(pack, change_set["base_snapshot_id"])
+        if base.get("tree_hash") and base["tree_hash"] != base_tree_hash:
+            raise ContractError(f"snapshot {base['snapshot_id']} tree hash does not match the "
+                                "materialized base of this PR input")
+    expected = pr_input_hash(base_tree_hash, head_tree_hash, diff_sha256)
+    if input_hash not in (None, expected):
+        raise ContractError("the input hash of a PR plan is the identity of its base tree, head tree, "
+                            f"and diff, {expected}; {input_hash} is not it")
+    return change_set, expected
+
+
+def _pr_items(pack: dict, snapshot_id: str, change_set_id: str
+              ) -> tuple[list[tuple[dict, str, dict | None]], list[dict], list[dict], str, list[str]]:
+    """What a PR review of one change set is planned to carry: cases, targets, controls, scope, notes.
+
+    The candidates are the cases with an item that names the change set, and they go through the
+    same gate as any other plan (:func:`_gate`). Of a planned case only the items that name the
+    change set are carried, each with the scope it was given; a case's other items are outside this
+    review however well the case is reviewed. What was left out is named in the notes.
+    """
+    on_snapshot = cases_for_snapshot(pack, snapshot_id)
+    included, notes = _gate(pack, [
+        case for case in on_snapshot
+        if _pr_scope(case["target"], change_set_id) is not None
+        or any(_pr_scope(control, change_set_id) is not None for control in case["controls"])])
+    targets, controls = [], []
+    for case, level, _ in included:
+        target = case["target"]
+        scope = _pr_scope(target, change_set_id)
+        if scope is not None:
+            targets.append({"target_id": target["target_id"], "description": target["description"],
+                            "kind": target["kind"], "validation_level": level,
+                            "canonical_id": target_canonical_id(case), "pr_scope": scope})
+        for control in case["controls"]:
+            scope = _pr_scope(control, change_set_id)
+            if scope is not None:
+                entry = {"control_id": control["control_id"], "description": control["description"],
+                         "type": control["type"], "validation_level": level,
+                         "canonical_id": control_canonical_id(control), "pr_scope": scope}
+                if control.get("target_id"):
+                    entry["target_id"] = control["target_id"]
+                controls.append(entry)
+    outside = []
+    for case in on_snapshot:
+        records = [case["target"]] + case["controls"]
+        outside += [record.get("control_id") or record["target_id"] for record in records
+                    if record["snapshot_id"] == snapshot_id and _pr_scope(record, change_set_id) is None]
+    if outside:
+        notes.append(f"outside change set {change_set_id}, so not planned and earning nothing in this "
+                     f"review: {', '.join(outside)}")
+    return included, targets, controls, plan_scope(included), notes
+
+
+def plan_pr_scope(pack: dict, change_set_id: str, head_tree_hash: str) -> dict:
+    """The scope, budgets, targets, and controls a PR review of *change_set_id* is planned to carry.
+
+    This is the identity-free half of :func:`build_plan` for a PR, for a caller that must state what
+    a review will score before the trees it will run against exist: the run's schedule freezes it
+    before it exports anything, from the head export's tree hash the pack already declares. It
+    reads exactly what :func:`build_plan` reads and returns the same items, so the plan a
+    finished invocation is scored against carries these targets and controls, unless the pack was
+    edited in between. It builds no plan and binds nothing, and asks the same gates: the pack must
+    load, and the head snapshot must be bound to the tree hash given.
+    """
+    require_loadable(pack, "no PR review can be planned from it")
+    change_set = change_set_by_id(pack, change_set_id)
+    head_id = change_set["head_snapshot_id"]
+    _check_snapshot_export(pack, head_id, head_tree_hash)
+    included, targets, controls, scope, notes = _pr_items(pack, head_id, change_set_id)
+    if scope == "reviewed" and not (targets or controls):
+        scope = "draft"
+    return {"scope": scope, "review_budgets": list(pack["review_budgets"]["pr"]),
+            "targets": targets, "controls": controls, "notes": notes,
+            "case_ids": [case["case_id"] for case, _, _ in included]}
+
+
 def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "full",
                input_id: str | None = None, input_hash: str | None = None,
-               profile: str | None = None, blinding: dict | None = None) -> tuple[dict, list[str]]:
+               profile: str | None = None, blinding: dict | None = None,
+               change_set_id: str | None = None, base_tree_hash: str | None = None,
+               head_tree_hash: str | None = None, diff_sha256: str | None = None) -> tuple[dict, list[str]]:
     """Targets and controls for one materialized input, with every exclusion stated in the notes.
 
     *tree_hash* is always the export of *snapshot_id* that the labels and the mechanical checks
@@ -1137,6 +1310,21 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
     and controls carry ``canonical_id`` (the pack's canonical id, or the target or control id when
     the pack names none), so records of one root cause or one property on several inputs can be
     grouped. Which cases are planned, and at which level and scope, does not depend on any of it.
+
+    A PR plan is the same function given a ``change_set_id``, the head snapshot as *snapshot_id* and
+    the head snapshot's original export as *tree_hash*, and the three hashes that identify a native
+    PR input: ``base_tree_hash`` and ``head_tree_hash``, the trees a scanner is handed (each equal to
+    the export of its snapshot unless the input is blinded), and ``diff_sha256``, the digest of the
+    recorded diff between them (see :func:`scaneval.contracts.pr_diff_sha256`). The plan's
+    ``input_hash`` is the identity of that trio (:func:`scaneval.contracts.pr_input_hash`); one
+    given here must be that hash. Only an item whose ``pr_eligibility`` names the change set is
+    planned, each with the ``pr_scope`` it was given, the usual case gating applies to the cases
+    they belong to, the budgets are the pack's ``pr`` budgets, and provenance records the boundary.
+    An item the change set does not name is outside that review: it is not in the plan, it earns
+    nothing, and a quiet scan earns it no credit, while an eligible control still needs a completed
+    run and a resolved assessment like any other. The plan says which items it left out.
+    ``mode="pr"`` with no change set is what it always was, a full plan carrying the ``pr`` review
+    budgets, which says nothing about any change.
 
     A case is planned only when its disposition is not ``exclude``, no check set failed after
     approval, the latest admission decision covering its content is not ``rejected``, the pack
@@ -1209,66 +1397,43 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
         raise ContractError(
             "a metadata_blinded input is planned with the identity of the map it was transformed "
             "with, and no other input carries one")
+    if change_set_id is None:
+        if any(value is not None for value in (base_tree_hash, head_tree_hash, diff_sha256)):
+            raise ContractError(
+                "a base tree hash, a head tree hash, and a diff digest identify a PR input, so they "
+                "are given with the change set it reviews and never without one")
+    elif mode != "pr":
+        raise ContractError(f"a change set is planned in pr mode, not {mode!r}")
     identified = (input_id not in (None, snapshot_id) or input_hash not in (None, tree_hash)
-                  or profile not in (None, "standard") or blinding is not None)
+                  or profile not in (None, "standard") or blinding is not None
+                  or change_set_id is not None)
     require_loadable(pack, "no plan can be built from it")
-    snapshot = snapshot_by_id(pack, snapshot_id)
-    if snapshot.get("tree_hash") and snapshot["tree_hash"] != tree_hash:
-        raise ContractError(f"snapshot {snapshot_id} tree hash does not match the materialized input")
-    if not snapshot.get("tree_hash") and any(check.get("snapshot_id") == snapshot_id
-                                             for case in pack["cases"]
-                                             for check in case["validation"]["checks"]):
-        raise ContractError(
-            f"snapshot {snapshot_id} records mechanical checks but carries no tree hash, so nothing "
-            "binds those checks to this export; re-run the checks against the materialized input")
-    notes: list[str] = []
-    included: list[tuple[dict, str, dict | None]] = []
-    for case in cases_for_snapshot(pack, snapshot_id):
-        case_id = case["case_id"]
-        validation = case["validation"]
-        admission = latest_admission(pack, case_id)
-        review_gap = _planning_review_gap(pack, case)
-        if case["disposition"]["value"] == "exclude":
-            notes.append(f"{case_id}: excluded by disposition ({case['disposition']['reason']})")
-        elif validation.get("checks_failed"):
-            notes.append(f"{case_id}: excluded because a mechanical check set failed after approval; "
-                         "the recorded review stands and needs a correction decision")
-        elif admission is not None and admission["decision"] == "rejected":
-            notes.append(f"{case_id}: excluded by the latest admission decision "
-                         f"(rejected by {admission['by']}: {admission['reason']})")
-        elif validation["review_state"] == "draft":
-            notes.append(f"{case_id}: draft without passed mechanical checks; not planned")
-        elif _unchecked_snapshots(case):
-            notes.append(f"{case_id}: no recorded passing mechanical check set for snapshot(s) "
-                         f"{', '.join(_unchecked_snapshots(case))}; not planned")
-        elif review_gap is not None:
-            notes.append(f"{case_id}: excluded because {review_gap}; the recorded "
-                         "review stands as recorded, and a review of the labels as they stand is "
-                         "needed")
-        elif planned_level(pack, case) is None:
-            notes.append(f"{case_id}: excluded because nothing in the pack establishes a validation "
-                         f"level for it ({recorded_level_gap(pack, case) or 'no level is recorded'})"
-                         "; not planned")
-        else:
-            included.append((case, planned_level(pack, case), admission))
-    scope = plan_scope(included)
-    targets, controls = [], []
-    for case, level, _ in included:
-        target = case["target"]
-        if target["snapshot_id"] == snapshot_id:
-            targets.append({"target_id": target["target_id"], "description": target["description"],
-                            "kind": target["kind"], "validation_level": level})
-            if identified:
-                targets[-1]["canonical_id"] = target_canonical_id(case)
-        for control in case["controls"]:
-            if control["snapshot_id"] == snapshot_id:
-                entry = {"control_id": control["control_id"], "description": control["description"],
-                         "type": control["type"], "validation_level": level}
-                if control.get("target_id"):
-                    entry["target_id"] = control["target_id"]
+    _check_snapshot_export(pack, snapshot_id, tree_hash)
+    change_set = None
+    if change_set_id is not None:
+        change_set, input_hash = _pr_boundary(pack, change_set_id, snapshot_id, tree_hash, blinded,
+                                              base_tree_hash, head_tree_hash, diff_sha256, input_hash)
+        included, targets, controls, scope, notes = _pr_items(pack, snapshot_id, change_set_id)
+    else:
+        included, notes = _gate(pack, cases_for_snapshot(pack, snapshot_id))
+        scope = plan_scope(included)
+        targets, controls = [], []
+        for case, level, _ in included:
+            target = case["target"]
+            if target["snapshot_id"] == snapshot_id:
+                targets.append({"target_id": target["target_id"], "description": target["description"],
+                                "kind": target["kind"], "validation_level": level})
                 if identified:
-                    entry["canonical_id"] = control_canonical_id(control)
-                controls.append(entry)
+                    targets[-1]["canonical_id"] = target_canonical_id(case)
+            for control in case["controls"]:
+                if control["snapshot_id"] == snapshot_id:
+                    entry = {"control_id": control["control_id"], "description": control["description"],
+                             "type": control["type"], "validation_level": level}
+                    if control.get("target_id"):
+                        entry["target_id"] = control["target_id"]
+                    if identified:
+                        entry["canonical_id"] = control_canonical_id(control)
+                    controls.append(entry)
     if scope == "reviewed" and not (targets or controls):
         scope = "draft"
     plan = {
@@ -1282,11 +1447,20 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
     if identified:
         plan["schema_version"] = "2.1"
         plan["input_hash"] = input_hash or tree_hash
-        plan["provenance"].update({"input_id": input_id or snapshot_id, "profile": profile or "standard",
+        default_id = (input_identity({"mode": "pr", "change_set_id": change_set_id, "profile": profile})
+                      if change_set_id is not None else snapshot_id)
+        plan["provenance"].update({"input_id": input_id or default_id, "profile": profile or "standard",
                                    "source_tree_hash": tree_hash})
         if blinding is not None:
             plan["provenance"]["blinding"] = {key: blinding.get(key)
                                               for key in ("map_id", "map_version", "map_sha256")}
+    if change_set is not None:
+        plan["provenance"]["pr"] = {
+            "change_set_id": change_set_id, "base_snapshot_id": change_set["base_snapshot_id"],
+            "head_snapshot_id": change_set["head_snapshot_id"], "base_tree_hash": base_tree_hash,
+            "head_tree_hash": head_tree_hash, "diff_sha256": diff_sha256,
+            "boundary": change_set["boundary"], "review_scope": change_set["review_scope"],
+            "location_basis": "pr_head"}
     validate_document("evaluation-plan", plan)
     if not targets and not controls:
         notes.append("no planned targets or controls for this input; scores will be N/A")
