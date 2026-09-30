@@ -41,6 +41,12 @@ SCHEMA_VERSIONS: dict[str, tuple[str, ...]] = {
     "aggregation-policy": ("2.1",),
     "aggregate-report": ("2.1",),
     "comparison-report": ("2.1",),
+    # Precision sampling and review (scaneval.precision, docs/PRECISION.md): the seeded sample of
+    # delivered claims with the frame it was drawn from, the chained human reviews of that sample,
+    # and the estimate computed from both. Each is first published at 2.1.
+    "precision-sample": ("2.1",),
+    "precision-reviews": ("2.1",),
+    "precision-estimate": ("2.1",),
 }
 CONTRACT_KINDS = frozenset(SCHEMA_VERSIONS)
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
@@ -1866,6 +1872,243 @@ def _validate_comparison_report(document: dict[str, Any]) -> None:
             raise ContractError("the baseline, the candidate, and the differences cover different slices")
 
 
+# --- precision sampling and review ---------------------------------------------------------------
+
+
+# The one stratum of an unstratified precision sample.
+PRECISION_SINGLE_STRATUM = "all"
+
+
+def precision_stratum(unit: dict[str, Any], stratify_by: str | None) -> str:
+    """The stratum a precision frame unit falls in when a sample is stratified by *stratify_by*.
+
+    One definition, read by :mod:`scaneval.precision` when it draws and by the sample contract when
+    it checks the recorded strata, so the two cannot disagree about where a unit belongs.
+    """
+    if stratify_by is None:
+        return PRECISION_SINGLE_STRATUM
+    return {"system": unit["system_id"], "input": unit["input_id"], "kind": unit["claim"]["kind"]}[stratify_by]
+
+
+def precision_exclusions(invocations: list[dict[str, Any]]) -> dict[str, Any]:
+    """What a precision frame leaves out, summed from its invocation rows, one entry per reason.
+
+    ``no_output`` counts assignments that delivered nothing (skipped, or never recorded);
+    ``unranked`` and ``bundle_unresolved`` count the invocations a ``first_b`` population leaves out
+    because their claims have no measured native position, with the claims and units they hold;
+    ``beyond_budget`` counts the units and copies of included invocations that lie past B.
+    """
+    out: dict[str, Any] = {
+        "no_output": {"invocations": 0},
+        "unranked": {"invocations": 0, "claim_records": 0, "units": 0},
+        "bundle_unresolved": {"invocations": 0, "claim_records": 0, "units": 0},
+        "beyond_budget": {"units": 0, "copies": 0},
+    }
+    for row in invocations:
+        state = row["state"]
+        if state == "no_output":
+            out["no_output"]["invocations"] += 1
+        elif state == "included":
+            out["beyond_budget"]["units"] += row["units"] - row["population_units"]
+            out["beyond_budget"]["copies"] += row["claim_records"] - row["population_copies"]
+        else:
+            out[state]["invocations"] += 1
+            out[state]["claim_records"] += row["claim_records"]
+            out[state]["units"] += row["units"]
+    return out
+
+
+def _precision_state(row: dict[str, Any], first_b: bool) -> str:
+    """The population state an invocation row's own output fields call for."""
+    if row["result_sha256"] is None:
+        return "no_output"
+    if first_b and row["ranking"] != "native":
+        return "unranked"
+    if first_b and not row["bundles_resolved"]:
+        return "bundle_unresolved"
+    return "included"
+
+
+def _validate_precision_frame(frame: dict[str, Any]) -> None:
+    """Check that a precision frame's units, invocation rows, and exclusion totals agree."""
+    population = frame["population"]
+    first_b = population["name"] == "first_b"
+    if first_b != (population["budget"] is not None):
+        raise ContractError("frame.population.budget is set exactly when the population is first_b")
+    _unique([run["run_id"] for run in frame["runs"]], "frame.runs.run_id")
+    runs = {run["run_id"] for run in frame["runs"]}
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in frame["invocations"]:
+        key = (row["run_id"], row["invocation_id"])
+        label = f"frame.invocations {key[0]}/{key[1]}"
+        if key in rows:
+            raise ContractError(f"{label} is listed twice")
+        if row["run_id"] not in runs or row["system_id"] not in population["systems"]:
+            raise ContractError(f"{label} names a run or a system outside this frame's population")
+        state = _precision_state(row, first_b)
+        if row["state"] != state:
+            raise ContractError(f"{label} records state {row['state']}, but its output calls for {state}")
+        empty = row["state"] == "no_output"
+        if empty != (row["ranking"] is None) or empty != (row["bundles_resolved"] is None) \
+                or empty != (row["input_hash"] is None) or (empty and row["claim_records"]):
+            raise ContractError(f"{label}: an assignment with no output records no result fields, and "
+                                "one with output records all of them")
+        if not row["population_units"] <= row["units"] <= row["claim_records"] \
+                or row["population_copies"] > row["claim_records"]:
+            raise ContractError(f"{label}: its population counts exceed the claims it delivered")
+        rows[key] = row
+    unit_ids = [unit["unit_id"] for unit in frame["units"]]
+    _unique(unit_ids, "frame.units.unit_id")
+    if unit_ids != sorted(unit_ids):
+        raise ContractError("frame.units must be sorted by unit_id")
+    counted: dict[tuple[str, str], tuple[int, int]] = {}
+    for unit in frame["units"]:
+        label = f"frame unit {unit['unit_id']}"
+        if unit["unit_id"] != f"{unit['run_id']}/{unit['invocation_id']}/{unit['claim_ids'][0]}":
+            raise ContractError(f"{label} is not named <run_id>/<invocation_id>/<first claim id>")
+        if unit["delivered_copies"] != len(unit["claim_ids"]) \
+                or unit["population_copies"] > unit["delivered_copies"]:
+            raise ContractError(f"{label}: its copy counts do not match the claims it lists")
+        key = (unit["run_id"], unit["invocation_id"])
+        row = rows.get(key)
+        if row is None or row["state"] != "included" \
+                or (row["system_id"], row["input_id"]) != (unit["system_id"], unit["input_id"]):
+            raise ContractError(f"{label} does not come from an included invocation of this frame")
+        if (row["ranking"] == "native") != (unit["first_rank"] is not None):
+            raise ContractError(f"{label}: a first rank is recorded exactly for native output")
+        if first_b and unit["first_rank"] > population["budget"]:
+            raise ContractError(f"{label} lies past B={population['budget']}, outside the first_b population")
+        found, copies = counted.get(key, (0, 0))
+        counted[key] = (found + 1, copies + unit["population_copies"])
+    for key, row in rows.items():
+        if (row["population_units"], row["population_copies"]) != counted.get(key, (0, 0)):
+            raise ContractError(f"frame.invocations {key[0]}/{key[1]}: its population counts are not "
+                                "the units the frame lists for it")
+    if frame["exclusions"] != precision_exclusions(frame["invocations"]):
+        raise ContractError("frame.exclusions is not the sum of the invocation rows it summarizes")
+
+
+def _validate_precision_sample(document: dict[str, Any]) -> None:
+    """Check that a precision sample agrees with its own frame; it says nothing about any claim.
+
+    The frame hashes to the recorded ``frame_sha256``, and every count the sample records is one its
+    frame and selection hold: each unit is named ``<run_id>/<invocation_id>/<first claim id>``,
+    comes from an included invocation of its frame, and lies inside the population (at native rank
+    at most B for ``first_b``); per-invocation counts and the exclusion totals are the sums of the
+    rows they summarize; each stratum's population and sample sizes are the units and selected units
+    that fall in it (:func:`precision_stratum`), and its inclusion probability is their ratio; a
+    stratum that drew nothing is listed as uncovered; and every population system has one alias.
+    Whether the selection is the one the recorded seed draws is checked by
+    :func:`scaneval.precision.verify_sample`, which can re-draw it. Nothing here reads a run.
+    """
+    frame = document["frame"]
+    if canonical_sha256(frame) != document["frame_sha256"]:
+        raise ContractError("frame_sha256 does not hash the frame this sample carries; the frame was "
+                            "edited after the sample was drawn")
+    _validate_precision_frame(frame)
+    design = document["design"]
+    stratified = design["stratify_by"] is not None
+    if (design["method"] == "stratified_srswor") != stratified or stratified != (design["allocation"] is not None):
+        raise ContractError("design: a stratified_srswor design names what it stratifies by and its "
+                            "allocation, and an srswor design names neither")
+    stratum_of = {unit["unit_id"]: precision_stratum(unit, design["stratify_by"]) for unit in frame["units"]}
+    population_counts: dict[str, int] = {}
+    for stratum in stratum_of.values():
+        population_counts[stratum] = population_counts.get(stratum, 0) + 1
+    selected_ids = [entry["unit_id"] for entry in document["selected"]]
+    _unique(selected_ids, "selected.unit_id")
+    _unique([entry["item_id"] for entry in document["selected"]], "selected.item_id")
+    if selected_ids != sorted(selected_ids):
+        raise ContractError("selected must be sorted by unit_id")
+    sample_counts: dict[str, int] = {}
+    for entry in document["selected"]:
+        if stratum_of.get(entry["unit_id"]) != entry["stratum"]:
+            raise ContractError(f"selected unit {entry['unit_id']} is not a unit of stratum "
+                                f"{entry['stratum']} in this frame")
+        sample_counts[entry["stratum"]] = sample_counts.get(entry["stratum"], 0) + 1
+    if design["size"] != len(selected_ids):
+        raise ContractError(f"design.size is {design['size']}, but {len(selected_ids)} units are selected")
+    names = [row["stratum"] for row in document["strata"]]
+    if names != sorted(population_counts):
+        raise ContractError("strata must list every stratum that holds a unit, once each, sorted by name")
+    for row in document["strata"]:
+        name = row["stratum"]
+        sampled = sample_counts.get(name, 0)
+        if (row["population_units"], row["sampled_units"]) != (population_counts[name], sampled):
+            raise ContractError(f"stratum {name} records {row['sampled_units']} of {row['population_units']} "
+                                f"units, but the frame and selection hold {sampled} of {population_counts[name]}")
+        if row["inclusion_probability"] != sampled / population_counts[name]:
+            raise ContractError(f"stratum {name}: the inclusion probability must be sampled/population units")
+    if document["uncovered_strata"] != [row["stratum"] for row in document["strata"] if not row["sampled_units"]]:
+        raise ContractError("uncovered_strata must list exactly the strata that drew no unit, sorted by name")
+    aliases = document["blinding"]["system_aliases"]
+    if [row["system_id"] for row in aliases] != sorted(frame["population"]["systems"]):
+        raise ContractError("blinding.system_aliases must give every population system one alias, "
+                            "sorted by system id")
+    _unique([row["alias"] for row in aliases], "blinding.system_aliases.alias")
+
+
+def _validate_precision_reviews(document: dict[str, Any]) -> None:
+    """Check that a precision review history is a chain that ends where it says it ends.
+
+    Every entry names its reviewer by the :func:`is_stated` rule and carries the chain value of its
+    own fields and of the entry before it (:func:`chain_link_gap`, kind ``precision_review``), and
+    ``reviews_sha256`` is the chain value of the last entry, present exactly when there is one, so an
+    entry edited, reordered, or deleted anywhere, the end included, is refused. A history wiped whole
+    and saved with no head reads as a fresh one; an estimate records the digest of the history it
+    used, which is where such a wipe shows. That the history belongs to a given sample and names
+    only units it drew is checked by :mod:`scaneval.precision` against that sample. Like every
+    recorded review here, this is not a signature: it says nothing about who typed an entry or
+    whether they read the claim.
+    """
+    reviews = document["reviews"]
+    for index, entry in enumerate(reviews):
+        if not is_stated(entry["reviewer"]):
+            raise ContractError(f"a precision review must name its reviewer; reviews[{index}].reviewer is blank")
+    gap, head = chain_link_gap(reviews, kind="precision_review", label="reviews")
+    if gap:
+        raise ContractError(gap)
+    recorded = document["reviews_sha256"]
+    if recorded == head:
+        return
+    if head is None:
+        raise ContractError(f"reviews_sha256 records {recorded}, but no review is recorded; the history "
+                            "it names was deleted whole")
+    if recorded is None:
+        raise ContractError("reviews_sha256 is missing, so nothing says where the recorded history ends "
+                            "and a review deleted from the end of it would leave no trace")
+    raise ContractError(f"reviews_sha256 records {recorded}, but the recorded history ends at {head}; a "
+                        "review was deleted from the end of it")
+
+
+def _validate_precision_estimate(document: dict[str, Any]) -> None:
+    """Check the estimate's shape rules; its numbers are recomputed by :mod:`scaneval.precision`, not here.
+
+    The sensitivity range is present or absent as a whole and ordered, the interval carries bounds
+    exactly in the states that have them and names its insufficient strata exactly when it is
+    insufficient, coverage cannot exceed the population, and every sampled unit appears once.
+    """
+    lower, upper = document["sensitivity"]["lower"], document["sensitivity"]["upper"]
+    if (lower is None) != (upper is None) or (lower is not None and lower > upper):
+        raise ContractError("sensitivity: lower and upper are both present and ordered, or both null")
+    interval = document["interval"]
+    bounded = interval["state"] in ("ok", "census")
+    if bounded != (interval["lower"] is not None and interval["upper"] is not None) \
+            or (not bounded and (interval["lower"] is not None or interval["upper"] is not None)):
+        raise ContractError(f"interval: bounds are recorded exactly in the ok and census states, and this "
+                            f"one is {interval['state']}")
+    if bounded and interval["lower"] > interval["upper"]:
+        raise ContractError("interval: lower must not exceed upper")
+    if (interval["state"] == "insufficient") != bool(interval["insufficient_strata"]):
+        raise ContractError("interval: insufficient_strata is named exactly when the interval is insufficient")
+    coverage = document["coverage"]
+    if coverage["covered_units"] > coverage["population_units"]:
+        raise ContractError("coverage: covered_units cannot exceed population_units")
+    _unique([unit["unit_id"] for unit in document["units"]], "units.unit_id")
+    if document["sample"]["selected_units"] != len(document["units"]):
+        raise ContractError("sample.selected_units must equal the number of units resolved")
+
+
 _RUNTIME_VALIDATORS = {
     "case-pack": _validate_case_pack,
     "review-record": _validate_review_record,
@@ -1885,6 +2128,10 @@ _RUNTIME_VALIDATORS = {
     "aggregation-policy": _validate_aggregation_policy,
     "aggregate-report": _validate_aggregate_report,
     "comparison-report": _validate_comparison_report,
+    # Precision sampling and review.
+    "precision-sample": _validate_precision_sample,
+    "precision-reviews": _validate_precision_reviews,
+    "precision-estimate": _validate_precision_estimate,
 }
 
 

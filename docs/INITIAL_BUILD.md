@@ -278,10 +278,14 @@ A 2.1 configuration can also name each input with `input_id` (its directory and 
 | `diagnose context-coverage <bundle>` | Report whether each labeled target's code was supplied to the model. Writes nothing into the bundle. | none |
 | `aggregate <run dir>... --output` | Weight every scheduled assignment of saved runs into corpus metrics. | none |
 | `compare <run dir>... --baseline --candidate --output` | Compare two systems assigned the same frozen work, with paired intervals. | none |
+| `precision sample <run dir>... --population --size --seed --output` | List a claim population from saved runs and draw a seeded probability sample. | none |
+| `precision queue <sample> --output` | Export the sampled claims for reviewers, each system shown only by an alias. | none |
+| `precision record <reviews> --sample --item --reviewer --role --outcome` | Append one stated human review to a chained reviews file. | none |
+| `precision estimate <sample> --reviews --output` | Estimate reviewed precision with its coverage, sensitivity range, and evidence grade. | none |
 
 Exit codes: `2` means the command could not be carried out (a usage or contract error, a refused overwrite, a failed fetch or export, a SARIF log refused whole). `1` means it ran and reports a negative result (a mechanical check set failed, a run could not prepare some input or produced no usable scan from some system, an imported SARIF log holds none, or a blinding map is not approved or a variant refused it). `0` means it ran and reports nothing wrong, which is not a statement that any label or decision is correct.
 
-No command writes inside a materialized trial directory, and every output path except a pack file, a blinding map, and a review record is create-only.
+No command writes inside a materialized trial directory, and every output path except a pack file, a blinding map, a review record, and a precision reviews file (which only grows) is create-only.
 
 ## Bundle and replay
 
@@ -337,7 +341,7 @@ Strict parsing rejects duplicate JSON keys, nonfinite numbers, escaping file pat
 - **Bundles:** unresolved bundles leave atomic-claim burden and finite-budget metrics pending. Confirmed full-output hits can still count.
 - **Execution:** `success`, `partial`, `unsupported`, `error`, and `timeout` remain distinct. Confirmed partial-output hits can count. Failed assignments remain in the denominator. Only successful, resolved, in-scope output can establish a quiet control.
 - **Controls:** all claims are eligible for control review, including those below the review budget. Missing assessments remain unresolved. The completed-observation upper bound counts unresolved assessments as false allegations; it is not a confidence interval. `false_allegations` is its completed-only numerator. `observed_false_allegations` also retains explicit reviewed failures from incomplete output, without using incomplete scans in that rate.
-- **Unknowns:** unmatched claims are not automatically false positives. This build does not estimate overall precision.
+- **Unknowns:** unmatched claims are not automatically false positives. Precision is estimated only from recorded human reviews of a seeded probability sample of delivered claims (`scaneval precision`, see [PRECISION.md](PRECISION.md)). Nothing infers it from matching, and reviewing a claim changes no score.
 - **Labels:** `diagnostic` plans allow only fixture labels; `reviewed` plans require declared L3/L4 labels; `draft` plans keep each item's real level and say in their scope that the plan as a whole is not reviewed evidence. Checking the field does not verify independent review.
 - **Packs:** a pack's self-consistency is checked, never its correctness. A pack that validates is consistent with itself: no check here reads source, a reviewer, or a scanner.
 - **Manifests:** an input with a recorded preparation failure has only skipped invocations, each with a reason and no bundle.
@@ -371,7 +375,7 @@ npm test
 - **Capture gaps are not absence.** An `unavailable` category establishes nothing about whether the underlying activity happened.
 - **Visibility depends on the build that was run, not only on this package.** The own-harness driver sees attempts, token usage, supplied-context spans and the candidate lifecycle only against a harness build that exports the hooks, and falls back for each surface it does not find. Tool dispatch on the claude route is unobserved either way. What a given run could see is recorded per run, not promised here.
 - **Nothing a collector or the DeepSec adapter reports was watched as it happened.** Both read records written after the fact, so their events are derived and say so; a record the CLI never wrote is a record nothing can recover.
-- **No precision sampling or promotion gate.** Corpus aggregation, pair aggregation, run variability, and paired comparison run over saved runs ([aggregation](AGGREGATION.md)). Precision sampling, a promotion gate, a trace viewer, an exporter, and a multi-model planner are not implemented.
+- **No promotion gate.** Corpus aggregation, pair aggregation, run variability, and paired comparison run over saved runs ([aggregation](AGGREGATION.md)), and `scaneval precision` estimates the reviewed precision of a declared claim population from a human-reviewed sample; it covers only the strata it sampled and is not a repository false-positive rate ([PRECISION.md](PRECISION.md)). A promotion gate, a trace viewer, an exporter, and a multi-model planner are not implemented.
 - **Metadata blinding is partial.** It edits reviewed documentation and display metadata only; package names, imports, identifiers, paths, and recognizable code stay, and every blinded export counts the cues that remain. It is not anonymization and does not show that a scanner could not recognize the repository.
 - **Not implemented at all:** native PR mode through an adapter, import of saved vendor output other than SARIF 2.1.0, and semantic duplicate review. The collectors import an agent CLI's own trace records, and `import sarif` imports a saved SARIF log; no other scanner findings file produced outside a ScanEval invocation is imported.
 

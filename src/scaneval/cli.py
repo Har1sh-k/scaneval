@@ -26,6 +26,9 @@ What each command writes:
 - ``evaluator/review-record.json`` is replaced the same way by ``review record`` and
   ``review approve``, through the one replace function :mod:`scaneval.review` uses. Both
   refuse a bundle reached through a symlink before writing.
+- A precision reviews file only grows. ``precision record`` creates it with its first review
+  and appends each later one through that same replace function, after checking the recorded
+  chain and the sample it is bound to, so no earlier entry is changed or dropped.
 - Everything else is create-only: an existing output path is refused, never overwritten.
 
 The read-only bundle commands do not refuse a symlink: ``replay``, ``report`` and ``review
@@ -35,12 +38,13 @@ a symlinked parent is read rather than refused. They write nothing into the bund
 No command writes inside a materialized trial directory: the output path of ``plan``, ``run``,
 ``import sarif``, ``demo``, ``score``, ``replay``, ``report``, ``aggregate`` and ``compare``, the
 pack path of ``corpus init`` and of every corpus command that rewrites a pack, the map ``blinding
-review`` rewrites, the bundle argument of all four ``review`` subcommands, and the directory
-``corpus validate`` exports a snapshot into, are each refused when a trial's ``provenance.json`` and
-``source`` sit in them or above them. That keeps evaluator material out of the tree a scanner is
-handed; it is a check on the path, not an isolation boundary. ``review status`` is checked although
-it only reads, so the ``review`` group is uniform; the other read-only commands read whatever path
-they are given.
+review`` rewrites, the bundle argument of all four ``review`` subcommands, the output of
+``precision sample``, ``queue`` and ``estimate`` and the reviews file of ``precision record``, and
+the directory ``corpus validate`` exports a snapshot into, are each refused when a trial's
+``provenance.json`` and ``source`` sit in them or above them. That keeps evaluator material out of
+the tree a scanner is handed; it is a check on the path, not an isolation boundary. ``review
+status`` is checked although it only reads, so the ``review`` group is uniform; the other read-only
+commands read whatever path they are given.
 
 Exit codes. 2 means the command could not be carried out: a usage or contract error, a refused
 overwrite, a failed fetch or export, a SARIF log refused whole. 1 means the command ran and
@@ -65,6 +69,13 @@ new report each; they write nothing into a run directory or a bundle. Both exit 
 computed, whatever it says, and 2 when they refuse: a directory that is not a run with a frozen
 schedule, runs of different packs, or, for ``compare``, two systems that were not assigned the same
 frozen work.
+
+``precision`` draws a seeded probability sample of delivered claims from saved run directories,
+exports it for human review with system identity blinded, records the reviews people state, and
+estimates reviewed precision from them (:mod:`scaneval.precision`, ``docs/PRECISION.md``). It reads
+runs and never writes into one: each of its outputs is refused inside a run directory as well as
+inside a trial. It supplies no reviewer and changes no decision, score, or detection credit. It
+exits 0 once its document is written, whatever the document reports, and 2 when refused.
 """
 
 import argparse
@@ -76,7 +87,7 @@ import tempfile
 from typing import Callable
 from urllib.parse import urlsplit
 
-from . import __version__, aggregate, blinding, cases, materialize, review, runner, sarif
+from . import __version__, aggregate, blinding, cases, materialize, precision, review, runner, sarif
 from .adapters.base import AdapterError
 # _is_stated is imported rather than re-implemented so a blank value is judged by one rule here,
 # in cases, and in review: a string made only of zero-width or control characters is not a value.
@@ -304,7 +315,8 @@ def _refuse_trial_path(output: Path) -> None:
     ``compare``, the pack ``corpus init`` creates, the pack every corpus command that rewrites one
     is given (``add-snapshot``, ``import``, ``validate --snapshot-id``, ``approve``, ``admit``,
     ``disposition``, all through :func:`_pack_for_change`), the map ``blinding review`` rewrites,
-    the bundle ``review init``, ``review record`` and ``review approve`` write into, and the trial
+    the bundle ``review init``, ``review record`` and ``review approve`` write into, the output of
+    every ``precision`` command and the reviews file ``precision record`` appends to, and the trial
     ``corpus validate`` is about to export into. ``review status`` checks the bundle it reads as
     well, so every ``review`` subcommand refuses the same paths. Commands that only read are
     otherwise not checked: a bundle handed to ``replay`` or ``report``, a run directory handed to
@@ -844,6 +856,152 @@ def _compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _figure(value: float | None) -> str:
+    """A ratio or total as printed in a summary line: four significant digits, or n/a when null."""
+    return "n/a" if value is None else f"{value:.4g}"
+
+
+def _refuse_precision_path(output: Path) -> None:
+    """Refuse a precision output inside a trial directory or inside a run directory.
+
+    A run directory is what a precision frame is read from and bound to by digest, so a sample,
+    queue, reviews file, or estimate written into one would change the run it describes. A run is
+    recognized by a ``run-manifest.json`` in *output* or in any of its parents. Like the trial
+    check, this compares resolved paths only: it is a check on the path, not an isolation boundary.
+    """
+    _refuse_trial_path(output)
+    resolved = output.expanduser().resolve()
+    for directory in (resolved, *resolved.parents):
+        if (directory / runner.MANIFEST_NAME).is_file():
+            raise ContractError(
+                f"refusing to write {output} inside the run directory {directory}; precision documents "
+                "stay outside the runs they are drawn from")
+
+
+def _precision_sample(args: argparse.Namespace) -> int:
+    """Build the frame from the run directories, draw the sample, and write it create-only.
+
+    Strata that drew no unit are named on stderr, because no estimate from this sample will say
+    anything about them; the sample is still written, and the command still exits 0.
+    """
+    _refuse_precision_path(args.output)
+    frame = precision.build_frame(args.runs, population=args.population, budget=args.budget,
+                                  systems=args.system, mode=args.mode, profile=args.profile)
+    sample = precision.draw_sample(frame, size=args.size, seed=args.seed, stratify_by=args.stratify_by,
+                                   allocation=args.allocation)
+    _write_new(args.output, _json(sample))
+    population = frame["population"]
+    budget = f" (B={population['budget']})" if population["budget"] is not None else ""
+    copies = sum(unit["population_copies"] for unit in frame["units"])
+    print(f"Frame: {population['name']}{budget} over {len(frame['runs'])} run(s), systems "
+          f"{', '.join(population['systems'])}: {len(frame['units'])} unit(s), {copies} copies inside it")
+    exclusions = frame["exclusions"]
+    if population["name"] == "first_b":
+        print(f"Left out: {exclusions['unranked']['invocations']} unranked invocation(s) "
+              f"({exclusions['unranked']['units']} unit(s)), {exclusions['bundle_unresolved']['invocations']} "
+              f"bundle-unresolved invocation(s) ({exclusions['bundle_unresolved']['units']} unit(s)), "
+              f"{exclusions['beyond_budget']['units']} unit(s) past B")
+    design = sample["design"]
+    stratified = (f" by {design['stratify_by']}, {design['allocation']} allocation"
+                  if design["stratify_by"] else "")
+    print(f"Design: {design['method']}{stratified}, size {design['size']}, seed {design['seed']} "
+          f"({design['algorithm']})")
+    for row in sample["strata"]:
+        print(f"Stratum {row['stratum']}: {row['sampled_units']} of {row['population_units']} unit(s), "
+              f"inclusion probability {_figure(row['inclusion_probability'])}")
+    if sample["uncovered_strata"]:
+        print(f"scaneval: warning: {len(sample['uncovered_strata'])} stratum/strata drew no unit "
+              f"({', '.join(sample['uncovered_strata'])}); no estimate from this sample represents them",
+              file=sys.stderr)
+    print(f"Sample: {args.output}")
+    return 0
+
+
+def _precision_queue(args: argparse.Namespace) -> int:
+    """Write the blinded review queue for reviewers; the sample itself stays with the evaluator."""
+    _refuse_precision_path(args.output)
+    sample = load_document(args.sample, precision.SAMPLE_KIND)
+    queue = precision.review_queue(sample)
+    _write_new(args.output, _readable_json(queue))
+    print(f"Wrote {len(queue['items'])} blinded review item(s): {args.output}")
+    return 0
+
+
+def _precision_record(args: argparse.Namespace) -> int:
+    """Append one stated human review to a reviews file, creating the file with the first one.
+
+    The reviewer is whoever ``--reviewer`` names; nothing here fills one in. An existing file is
+    verified (its chain, and the sample it is bound to) before anything is written, and replaced
+    whole through the one replace function review records use; a new file is created exclusively.
+    Appends are not locked, so record one review at a time.
+    """
+    _refuse_precision_path(args.reviews)
+    sample = load_document(args.sample, precision.SAMPLE_KIND)
+    unit_id = precision.unit_for_item(sample, args.item) if args.item is not None else args.unit
+    existing = None
+    if args.reviews.exists() or args.reviews.is_symlink():
+        existing = load_document(args.reviews, precision.REVIEWS_KIND)
+    updated = precision.record_review(sample, existing, unit_id=unit_id, reviewer=args.reviewer,
+                                      role=args.role, outcome=args.outcome, note=args.note)
+    if existing is None:
+        _write_new(args.reviews, _json(updated))
+    else:
+        _replace_document(args.reviews, updated)
+    named = args.item if args.item is not None else f"unit {unit_id}"
+    print(f"Recorded an {args.role} review of {named}: {args.outcome} "
+          f"({len(updated['reviews'])} review(s) in {args.reviews})")
+    return 0
+
+
+def _precision_estimate(args: argparse.Namespace) -> int:
+    """Estimate reviewed precision from a sample and its reviews, write it, and summarize it.
+
+    An incomplete review or a partly covered population is reported, not refused: the document
+    says so, and so does stderr. Without ``--reviews`` every sampled unit is nonresponse.
+    """
+    _refuse_precision_path(args.output)
+    sample = load_document(args.sample, precision.SAMPLE_KIND)
+    reviews = load_document(args.reviews, precision.REVIEWS_KIND) if args.reviews is not None else None
+    document = precision.estimate(sample, reviews, confidence=args.confidence)
+    _write_new(args.output, _json(document))
+    coverage = document["coverage"]
+    classes = document["sample"]["classes"]
+    bases = document["sample"]["bases"]
+    totals = document["totals"]
+    sensitivity = document["sensitivity"]
+    interval = document["interval"]
+    print(f"Sample: {document['sample']['selected_units']} unit(s) of {coverage['population_units']}; "
+          f"coverage {_figure(coverage['share'])}")
+    print(f"Reviewed: true {classes['true']}, false {classes['false']}, unresolved {classes['unresolved']} "
+          f"(disagreement {bases['disagreement']}, nonresponse {bases['nonresponse']}), "
+          f"out of scope {classes['out_of_scope']}")
+    print(f"Weighted totals: true {_figure(totals['true'])}, false {_figure(totals['false'])}, "
+          f"unresolved {_figure(totals['unresolved'])}, out of scope {_figure(totals['out_of_scope'])}")
+    print(f"Resolved precision {_figure(document['precision_resolved'])}; unresolved share "
+          f"{_figure(document['unresolved_share'])}; sensitivity range [{_figure(sensitivity['lower'])}, "
+          f"{_figure(sensitivity['upper'])}] (not a confidence interval)")
+    bounds = (f"[{_figure(interval['lower'])}, {_figure(interval['upper'])}]"
+              if interval["lower"] is not None else "no bounds")
+    print(f"Approximate {_figure(interval['confidence'])} interval: {bounds} ({interval['state']})")
+    burden = document["duplicate_burden"]
+    print(f"Duplicate burden: {burden['copies']} copies over {burden['units']} unit(s) "
+          f"({_figure(burden['copies_per_unit'])} per unit)")
+    print(f"Evidence grade: {document['evidence_grade']}")
+    if coverage["uncovered_strata"]:
+        print(f"scaneval: warning: the sample covers {coverage['covered_units']} of "
+              f"{coverage['population_units']} units; uncovered strata are not estimated", file=sys.stderr)
+    if document["evidence_grade"] == "incomplete":
+        print(f"scaneval: warning: the review is incomplete: {bases['nonresponse']} unit(s) unreviewed and "
+              f"{bases['disagreement']} in disagreement without adjudication", file=sys.stderr)
+    print(f"Estimate: {args.output}")
+    return 0
+
+
+def _precision(args: argparse.Namespace) -> int:
+    return {"sample": _precision_sample, "queue": _precision_queue, "record": _precision_record,
+            "estimate": _precision_estimate}[args.precision_command](args)
+
+
 def _warn_unreviewed(state: str) -> None:
     """Say on stderr that a bundle carries no recorded review. The report itself is unchanged."""
     if state in UNREVIEWED_REVIEW_STATES:
@@ -1068,6 +1226,59 @@ def _add_aggregate_commands(sub: argparse._SubParsersAction) -> None:
     comparing.add_argument("--output", required=True, type=Path, help=output_help)
 
 
+def _add_precision_commands(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser(
+        "precision", help="sample delivered claims for human review and estimate reviewed precision; "
+                          "no decision or score changes")
+    commands = parser.add_subparsers(dest="precision_command", required=True)
+
+    sampled = commands.add_parser(
+        "sample", help="list a claim population from run directories and draw a seeded probability sample")
+    sampled.add_argument("runs", nargs="+", type=Path, metavar="RUN_DIR",
+                         help="run directory written by 'scaneval run' (2.1 manifest and schedule)")
+    sampled.add_argument("--output", required=True, type=Path, help="new JSON file, outside any trial directory")
+    sampled.add_argument("--population", required=True, choices=precision.POPULATIONS,
+                         help="first_b: unique claims with a copy in the first --budget native positions; "
+                              "full: every unique delivered claim")
+    sampled.add_argument("--budget", type=int, help="B, required for first_b")
+    sampled.add_argument("--size", required=True, type=int, help="number of units to draw")
+    sampled.add_argument("--seed", required=True, type=int,
+                         help="non-negative integer, stated before the draw and recorded in the sample")
+    sampled.add_argument("--system", action="append",
+                         help="system id whose claims to sample; repeatable; default every scheduled system")
+    sampled.add_argument("--mode", choices=precision.MODES, default="full")
+    sampled.add_argument("--profile", choices=precision.PROFILES, default="standard")
+    sampled.add_argument("--stratify-by", choices=precision.STRATIFICATIONS)
+    sampled.add_argument("--allocation", choices=precision.ALLOCATIONS,
+                         help="stratum sizes for --stratify-by; default proportional")
+
+    queued = commands.add_parser(
+        "queue", help="export the sampled claims for reviewers, each system shown only by an alias")
+    queued.add_argument("sample", type=Path)
+    queued.add_argument("--output", required=True, type=Path, help="new JSON file")
+
+    recorded = commands.add_parser(
+        "record", help="append one human review of a sampled claim to a chained reviews file")
+    recorded.add_argument("reviews", type=Path, help="reviews file; the first review creates it")
+    recorded.add_argument("--sample", required=True, type=Path)
+    target = recorded.add_mutually_exclusive_group(required=True)
+    target.add_argument("--item", help="item id from the review queue")
+    target.add_argument("--unit", help="unit id from the sample")
+    recorded.add_argument("--reviewer", required=True, help="the reviewer's own name; never supplied by the tool")
+    recorded.add_argument("--role", required=True, choices=precision.ROLES)
+    recorded.add_argument("--outcome", required=True, choices=precision.OUTCOMES)
+    recorded.add_argument("--note", default="")
+
+    estimated = commands.add_parser(
+        "estimate", help="estimate reviewed precision from a sample and its recorded reviews")
+    estimated.add_argument("sample", type=Path)
+    estimated.add_argument("--reviews", type=Path, help="reviews file; without one every sampled unit is "
+                                                        "unreviewed")
+    estimated.add_argument("--output", required=True, type=Path, help="new JSON file")
+    estimated.add_argument("--confidence", type=float, default=precision.DEFAULT_CONFIDENCE,
+                           help="confidence of the approximate interval; default 0.95")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--version", action="version", version=__version__)
@@ -1097,6 +1308,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_review_commands(sub)
     _add_diagnose_commands(sub)
     _add_blinding_commands(sub)
+    _add_precision_commands(sub)
     running = sub.add_parser("run", help="execute one frozen run configuration into a new directory")
     running.add_argument("config", type=Path)
     running.add_argument("--output", required=True, type=Path, help="new directory, must not exist")
@@ -1115,6 +1327,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "validate":
             load_document(args.path, args.kind)
             print(f"Valid {args.kind}: {args.path}")
+        elif args.command == "precision":
+            return _precision(args)
         elif args.command == "demo":
             _demo(args.directory)
         elif args.command in ("aggregate", "blinding", "compare", "corpus", "diagnose", "import", "plan",
