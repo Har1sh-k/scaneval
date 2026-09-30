@@ -2904,16 +2904,19 @@ def pr_prepared_input(tmp_path: Path, head: dict) -> PreparedInput:
                          base_source_dir=base_dir)
 
 
-def test_a_quiet_assessment_of_a_control_on_a_quoted_name_earns_no_credit_for_a_review_that_never_read_it(tmp_path):
+@pytest.mark.parametrize("name", ["src/caf\u00e9.js", " src/handler.js", "src/handler.js "],
+                         ids=["quoted", "leading-space", "trailing-space"])
+def test_a_quiet_assessment_of_a_control_on_a_name_deepsec_cannot_list_earns_no_credit(tmp_path, name):
     """The reviewer's case through the runner and the scorer, not only through the adapter's outcome.
 
     A change that adds only src/café.js ends DeepSec's own run with "Nothing to process" and exit 0. It was saved as
     a ``success`` with resolved bundles, so the control planned on that file was completed and the reviewer's quiet
     assessment resolved it: a safe capability the scanner had been given and left alone, counted in the false-alarm
-    rate's denominator. No model ever opened the file.
+    rate's denominator. No model ever opened the file. A name that begins or ends with a space is the same case: git
+    prints it as it is and DeepSec trims the line before it looks for the file.
     """
     root = fake_deepsec_root(tmp_path)
-    prepared = pr_prepared_input(tmp_path, {"src/caf\u00e9.js": "module.exports = 2;\n"})
+    prepared = pr_prepared_input(tmp_path, {name: "module.exports = 2;\n"})
     adapter = get_adapter("deepsec")
     spec = system_spec(root)
 
@@ -2926,7 +2929,7 @@ def test_a_quiet_assessment_of_a_control_on_a_quoted_name_earns_no_credit_for_a_
     plan = {"schema_version": "2.0", "input_hash": result["input_hash"], "scope": "diagnostic",
             "targets": [{"target_id": "T1", "description": "the planted root cause in src/server.js",
                          "validation_level": "fixture"}],
-            "controls": [{"control_id": "C1", "description": "the safe handler in src/caf\u00e9.js",
+            "controls": [{"control_id": "C1", "description": f"the safe handler in {name!r}",
                           "type": "capability_safe", "validation_level": "fixture"}],
             "review_budgets": [3]}
     decisions = {"schema_version": "2.0", "run_id": result["run_id"], "input_hash": result["input_hash"],
@@ -2942,7 +2945,7 @@ def test_a_quiet_assessment_of_a_control_on_a_quoted_name_earns_no_credit_for_a_
     # Why: the saved result says the change was not read, which is the one thing the scorer reads.
     assert result["status"] == "error" and result["error"]["code"] == "scope_incomplete"
     assert result["claims"] == [] and result["bundles_resolved"] is False and result["location_basis"] == "pr_head"
-    assert "src/caf\u00e9.js" in result["error"]["message"]
+    assert name.strip() in result["error"]["message"]
     assert not any(note.startswith("Empty review:")
                    for note in load_document(bundle / "execution.json", "execution-record")["notes"])
 
