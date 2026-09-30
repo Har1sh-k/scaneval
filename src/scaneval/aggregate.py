@@ -37,6 +37,12 @@ assignments still count toward completion, claims, and usage. Observations are k
 so one input scanned by two runs is two positive inputs of its targets, each averaged over its own
 repetitions.
 
+Pairs. A vulnerable/fixed pair is scored on the same items, not on the one record it names: its
+vulnerable side is the whole canonical target, and its fixed state the whole canonical control of
+the pair's control on the fixed input. A record of that control the fixed plan lacks, or one left
+unresolved, leaves the pair unresolved however quiet the others were, and a confirmed false
+allegation on any record flags the fixed state.
+
 Evidence scope. An observation is reviewed evidence only when its bundle's plan is reviewed and its
 review record is human-approved; a failure takes the scope of the plan its schedule froze. A view that
 mixes diagnostic fixtures with any other evidence is refused, and reviewed evidence mixed with draft
@@ -1272,19 +1278,29 @@ def _pair_outcomes(frame: _Frame, observation: Callable[[Key, int], _Observation
     """For each canonical target, the outcome of every repetition pair of every frozen pair it has.
 
     A pair is resolved when the vulnerable observation has a resolved outcome for the target and the
-    fixed observation a resolved assessment of the control; only a resolved pair has an outcome.
+    fixed observation a resolved assessment of the control; only a resolved pair has an outcome. Each side
+    reads its whole canonical item, as the target and control blocks do, and not only the record the pair
+    names: the vulnerable side every planned record of the canonical target, and the fixed side every
+    planned fixed-target record of the pair control's canonical control on the fixed input. So a fixed-state
+    control with a record its bundle's plan lacks, or one left unresolved, is not resolved however quiet its
+    other records were, and a confirmed false allegation on any record flags the fixed state, whatever the
+    pair's own record says. A pair earns no credit for a control the ``fixed_target`` block counts as
+    unresolved.
     """
+    fixed_records = {(key, record): ids for found in frame.controls["fixed_target"].values()
+                     for key, ids in found for record in ids}
     pair_units: dict[str, list[list[dict]]] = {}
     for canonical, entries in frame.pairs.items():
         pair_units[canonical] = []
         for run_id, pair in entries:
             vulnerable = (run_id, pair["vulnerable_input_id"])
+            fixed_input = (run_id, pair["fixed_input_id"])
             target_ids = next(ids for key, ids in frame.targets[canonical] if key == vulnerable)
+            control_ids = fixed_records[(fixed_input, pair["control_id"])]
             outcomes = []
             for left, right in pair["repetition_pairs"]:
                 hit = _target_outcome(observation(vulnerable, left), target_ids, budgets)
-                fixed = _control_outcome(observation((run_id, pair["fixed_input_id"]), right),
-                                         (pair["control_id"],))
+                fixed = _control_outcome(observation(fixed_input, right), control_ids)
                 resolved = hit["assessable"] and fixed["resolved"]
                 outcome = None
                 if resolved:
