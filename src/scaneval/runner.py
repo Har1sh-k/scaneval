@@ -37,8 +37,8 @@ yields a draft plan.
 What fails where. A configuration this run cannot honour (an input the pack does not declare,
 a PR input naming a change set the pack does not declare, colliding invocation ids, a cache or
 workspace inside evaluator storage, a blinding map that cannot be loaded, blinded inputs of one
-repository naming different maps, a run or system that names an original token of a blinded
-input's map) is refused before the output directory exists, so nothing is written. An input that
+repository naming different maps, a run, system, or path that names an original token of a
+blinded input's map) is refused before the output directory exists, so nothing is written. An input that
 cannot be prepared (a failed fetch or export, a declared tree hash the export contradicts, a
 change with nothing in it, a history git reads differently from the export, a blinding map that is
 not approved or does not fit the export) is recorded against that input: its manifest row carries the failure,
@@ -273,8 +273,10 @@ def _input_specs(config: dict, only: set[str] | None, base: Path,
     return specs, excluded
 
 
-def _check_blinding(config: dict, pack: dict, inputs: list[_InputSpec], systems: list[dict]) -> None:
-    """Refuse blinded inputs that disagree about their map, or that a system would unblind.
+def _check_blinding(config: dict, pack: dict, inputs: list[_InputSpec], systems: list[dict], *,
+                    workspace_root: Path | None = None, cache_root: Path | None = None,
+                    config_dir: Path | None = None) -> None:
+    """Refuse blinded inputs that disagree about their map, or that a system or a path would unblind.
 
     Related inputs, those whose snapshots are fetched from one repository, are blinded with one
     map: the same map id and the same content digest, so a vulnerable and a fixed snapshot, or a
@@ -283,9 +285,14 @@ def _check_blinding(config: dict, pack: dict, inputs: list[_InputSpec], systems:
 
     A scanner is told the run id, and a system's id, model id, model revision, and configuration
     reach its request or its adapter, so any of them naming an original token of a blinded input's
-    map would carry the identity the map removes straight into the scan. Such a run is refused,
-    ignoring case and reading every key and value of the configuration. Both checks run before
-    the output directory exists.
+    map would carry the identity the map removes straight into the scan. So do the paths: a scanner
+    runs in a workspace whose absolute path it can read (the llm-harness adapter is handed the path
+    of the tree it reviews, and the oci backend mounts every path where it is), its rules and
+    runtime files sit under the cache root, and the configuration directory holds both by default.
+    Such a run is refused, ignoring case, reading every key and value of the configuration and each
+    path both as it was named, made absolute, and as it resolves. All the checks run before the
+    output directory exists. What this does not read: the temporary directory a workspace is made
+    in when no *workspace_root* is given, and any path a scanner finds for itself.
     """
     blinded = [spec for spec in inputs if spec.blinding_map is not None]
     by_repository: dict[str, _InputSpec] = {}
@@ -299,12 +306,19 @@ def _check_blinding(config: dict, pack: dict, inputs: list[_InputSpec], systems:
                 f"({url}) but name different maps ({first.blinding_map['map_id']} and "
                 f"{spec.blinding_map['map_id']}, or one map's content in two versions); related inputs "
                 "are blinded with one map")
+    paths = (("workspace_root", workspace_root), ("cache_root", cache_root),
+             ("the configuration directory", config_dir))
     for spec in blinded:
         fields = [("the run id", config["run_id"])]
         for system in systems:
             fields += [(f"system {system['system_id']}'s {name}", system.get(key))
                        for name, key in (("id", "system_id"), ("model_id", "model_id"),
                                          ("model_revision", "model_revision"), ("configuration", "config"))]
+        for label, path in paths:
+            if path is not None:
+                named = Path(path).expanduser().absolute()
+                fields += [(f"{label} {spelling}", spelling)
+                           for spelling in dict.fromkeys((str(named), str(_resolved(path))))]
         for where, value in fields:
             leaked = blinding.leaked_originals(spec.blinding_map, value)
             if leaked:
@@ -823,8 +837,9 @@ def run_from_config(
     a metadata-blinded input of a 2.0 configuration (which cannot name a map) or one whose map
     cannot be loaded, blinded inputs of
     one repository naming different maps, a run id or a system id, model, revision, or
-    configuration naming an original token of a blinded input's map, colliding invocation ids, a
-    cache root that overlaps the output directory, and a workspace inside evaluator storage.
+    configuration, or a workspace root, cache root, or configuration directory, naming an original
+    token of a blinded input's map, colliding invocation ids, a cache root that overlaps the
+    output directory, and a workspace inside evaluator storage.
 
     A native PR input is prepared, scheduled, planned, and invoked as the review of its change set:
     once per change set, system, and repetition, with the head as the tree a scanner is handed and
@@ -865,7 +880,8 @@ def run_from_config(
     systems = _selected(config["systems"], "system_id", only_systems, "systems")
     _check_invocation_ids(inputs, systems, config["repetitions"])
     _check_input_snapshots(pack, inputs)
-    _check_blinding(config, pack, inputs, systems)
+    _check_blinding(config, pack, inputs, systems, workspace_root=workspace_root, cache_root=cache_root,
+                    config_dir=base)
     _check_cache_root(cache_root, out_dir)
     _check_workspace_root(workspace_root, out_dir, cache_root,
                           [out_dir / "inputs" / spec.input_id for spec in inputs])

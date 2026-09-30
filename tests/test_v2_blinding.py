@@ -857,6 +857,78 @@ def test_a_leak_check_reads_keys_and_values_and_ignores_case(widget):
     assert blinding.leaked_originals(document, {"a": [1, 2.0, None, True], "b": "sprocket"}) == []
 
 
+def blinded_config(tmp_path: Path, widget: dict, *, directory: str = "config", inputs: list[dict] | None = None,
+                   **config_changes) -> Path:
+    """A run configuration in its own directory, with its pack and approved map beside it."""
+    home = tmp_path / directory
+    home.mkdir()
+    write_pack(home / "pack.json", widget)
+    blinding.save_map(home / "widget-map.json", widget_map(widget))
+    config = write_config(home / "run.json", inputs or [{"snapshot_id": "snap-a"}, BLINDED])
+    (home / "run.json").write_text(canonical_json({**config, **config_changes}) + "\n", encoding="utf-8")
+    return home / "run.json"
+
+
+def leaky_paths(tmp_path: Path) -> dict:
+    """Each path a scanner is told, once with an original token in its name: what the refusal calls it,
+    the token it names first, and the arguments that make the run name it so."""
+    return {
+        "workspace_root": ("workspace_root", "AcmeCorp", {"workspace_root": tmp_path / "AcmeCorp-Widget-eval"}),
+        "cache_root": ("cache_root", "Widget", {"cache_root": "widget-cache"}),
+        "configuration directory": ("the configuration directory", "Widget",
+                                    {"directory": "Widget-eval", "cache_root": str(tmp_path / "cache")}),
+    }
+
+
+@pytest.mark.parametrize("name", ["workspace_root", "cache_root", "configuration directory"])
+def test_a_path_naming_an_original_token_reaches_the_scan_so_the_run_is_refused(tmp_path, widget, name):
+    """A scanner is handed its workspace as an absolute path, its rules under the cache root, and both sit
+    beside the configuration; the guard read the run id and the system fields but never these."""
+    label, token, changes = leaky_paths(tmp_path)[name]
+    workspace_root = changes.pop("workspace_root", None)
+    if workspace_root is not None:
+        workspace_root.mkdir()
+    config = blinded_config(tmp_path, widget, directory=changes.pop("directory", "config"), **changes)
+    adapter, out = FakeAdapter(), tmp_path / "out"
+
+    with pytest.raises(ContractError, match=rf"{label} \S+ names '{token}', an original identity token of "
+                                            "blinding map widget-metadata, which would reach the scan of blinded "
+                                            "input snap-a.blinded"):
+        run_from_config(config, out, clock=CLOCK, workspace_root=workspace_root, adapters={"fake": adapter})
+
+    assert not out.exists() and adapter.calls == 0
+
+
+def test_a_symbolic_link_is_read_both_as_named_and_as_resolved(tmp_path, widget):
+    """The scanner sees the workspace as it was named; the resolved path is where it really is."""
+    (tmp_path / "AcmeCorp-real").mkdir()
+    (tmp_path / "neutral-real").mkdir()
+    (tmp_path / "AcmeCorp-link").symlink_to(tmp_path / "neutral-real")
+    (tmp_path / "neutral-link").symlink_to(tmp_path / "AcmeCorp-real")
+    for link in ("AcmeCorp-link", "neutral-link"):
+        out = tmp_path / f"out-{link}"
+        with pytest.raises(ContractError, match="workspace_root .* names 'AcmeCorp'"):
+            run_from_config(blinded_config(tmp_path, widget, directory=f"config-{link}"), out, clock=CLOCK,
+                            workspace_root=tmp_path / link, adapters={"fake": FakeAdapter()})
+        assert not out.exists()
+
+
+def test_paths_that_name_no_original_token_and_standard_inputs_are_not_refused(tmp_path, widget):
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    manifest = run_from_config(blinded_config(tmp_path, widget), tmp_path / "out", clock=CLOCK,
+                               workspace_root=workspace_root, adapters={"fake": FakeAdapter()})
+    assert manifest["status"] == "completed"
+    # The guard is for a blinded input: a standard one is handed the original tree whatever its paths say.
+    leaky = tmp_path / "AcmeCorp-workspaces"
+    leaky.mkdir()
+    manifest = run_from_config(blinded_config(tmp_path, widget, directory="standard-config",
+                                              inputs=[{"snapshot_id": "snap-a"}]),
+                               tmp_path / "out-standard", clock=CLOCK, workspace_root=leaky,
+                               adapters={"fake": FakeAdapter()})
+    assert manifest["status"] == "completed"
+
+
 def test_related_blinded_inputs_are_blinded_with_one_map(tmp_path, widget):
     document = widget_map(widget)
     other = deepcopy(document)
