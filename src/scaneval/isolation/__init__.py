@@ -1,22 +1,41 @@
 """Execution backends: where a scanner's processes run, and what bounds them while they do.
 
-A system in a 2.1 run configuration names its backend in an ``execution`` block. ``local`` runs
-every scanner process on the host as the operator, which is what
-:func:`scaneval.execution.run_invocation` does when it is handed no backend at all; nothing is
-enforced and the record says so. ``oci`` is a backend that holds each scanner process in a
-container of its own, on the settings this module reads.
+Two backends exist. ``local`` runs every scanner process on the host as the operator, which is
+what :func:`scaneval.execution.run_invocation` does when it is handed no backend at all; nothing is
+enforced and the record says so. ``oci`` runs every scanner process in a fresh Docker container
+created for that one process and removed after it (:mod:`scaneval.isolation.oci`), and records
+the engine, the image, every setting, every mount, the network, and each container's outcome.
+What that does and does not guarantee is stated in ``docs/THREAT_MODEL.md``.
 
-This module is the selection. :func:`resolve_execution` reads one system's ``execution`` block
-into :class:`ExecutionSettings`, adding the checks the contract cannot express. :func:`refusal_for`
-names why an adapter cannot run under the selected backend: under ``oci`` that is every adapter
-not declaring ``oci_compatible``, which today is ``llm-harness`` and ``deepsec``, whose tools exist
-only as host installs and whose processes have not been audited to go through a backend. Nothing
-here ever turns a system configured for ``oci`` into a local run.
+The interface :func:`~scaneval.execution.run_invocation` relies on, which a backend provides:
+
+- ``activate()``, a context manager in force while the adapter scans. Entering it runs the
+  preflight and sets up whatever the scan needs, and it routes every
+  :func:`~scaneval.adapters.base.run_command` of the scan through the backend
+  (:func:`~scaneval.adapters.base.routed_through`). Leaving it tears down what entering created.
+  A preflight that fails raises :class:`IsolationError` out of the ``with``, so the invocation is a
+  recorded error carrying the refusal, never an empty scan and never a local fallback.
+- ``run_command(...)``, with the signature of :func:`~scaneval.adapters.base.run_command`.
+- ``isolation_record()``, the 2.1 isolation block, read after the scan so it can carry each
+  container's outcome; ``backend``, ``enforced`` and ``note`` are always present.
+- ``network_enforced``, true only when the declared network policy was actually enforced.
+- ``close()``, which removes anything left behind and returns what it could not remove as
+  messages; it never raises.
+
+Selection is three steps, all here. :func:`resolve_execution` reads one system's ``execution``
+block from a 2.1 run configuration into :class:`ExecutionSettings`, adding the checks the
+contract cannot express. :func:`refusal_for` names why an adapter cannot run under the selected
+backend: under ``oci`` that is every adapter not declaring ``oci_compatible``, which today is
+``llm-harness`` and ``deepsec``, whose tools exist only as host installs and whose processes have
+not been audited to go through the backend. :func:`backend_for` builds the backend for one
+invocation, or returns ``None`` for ``local``. Nothing here ever turns a system configured for
+``oci`` into a local run.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 import re
 from typing import Any
 
@@ -194,5 +213,32 @@ def refusal_for(adapter: Any, settings: ExecutionSettings) -> str | None:
             "boundary or on the host")
 
 
-__all__ = ["BACKENDS", "DEFAULT_USER", "ExecutionSettings", "IsolationError", "Limits", "refusal_for",
-           "resolve_execution"]
+def backend_for(settings: ExecutionSettings, *, adapter: Any, spec: Any, preparation: dict,
+                run_id: str, invocation_id: str, scratch_root: Path | None,
+                protected: tuple[Path, ...] = (), runtime_roots: tuple[Path, ...] = ()) -> Any:
+    """The backend for one invocation of a system, or ``None`` when the system runs locally.
+
+    An ``oci`` backend owns a private scratch directory created here under *scratch_root* (the
+    system temporary directory when that is ``None``); the invocation's workspace must be created
+    inside its ``workspace_root``, and its ``close()`` must run after the invocation whatever
+    happened. The adapter's declared state directories are read here; its runtime paths are asked
+    for during the preflight, so a preparation they cannot be read from is a recorded refusal of
+    the invocation rather than a failure of the run. *protected* directories (the run's output)
+    may never overlap a mount, and a runtime path must sit strictly inside one of the
+    *runtime_roots* (the source cache), so the cache itself is never mounted whole.
+    """
+    if settings.backend == "local":
+        return None
+    refusal = refusal_for(adapter, settings)
+    if refusal is not None:
+        raise IsolationError(refusal)
+    from .oci import OciBackend
+
+    return OciBackend(settings, run_id=run_id, invocation_id=invocation_id, scratch_root=scratch_root,
+                      state_dirs=tuple(getattr(adapter, "state_dirs", ())),
+                      runtime_mounts=lambda: adapter.runtime_mounts(spec, preparation),
+                      protected=protected, runtime_roots=runtime_roots)
+
+
+__all__ = ["BACKENDS", "DEFAULT_USER", "ExecutionSettings", "IsolationError", "Limits", "backend_for",
+           "refusal_for", "resolve_execution"]

@@ -1,14 +1,19 @@
-"""The execution backend seam, the selection of a backend, and the egress proxy, without an engine.
+"""The execution backend seam and the oci backend, without an engine.
 
-These run the pieces of the isolation work that need no engine: the reads of files a scanner
-wrote, the routing of ``run_command``, the settings and refusals that decide which backend a
-system runs under, and the egress proxy script on the loopback interface. No network beyond
-loopback, no model calls, no engine.
+Every test here that concerns the oci backend talks to a scripted engine (:class:`FakeDocker`)
+that records the exact docker argument lists the backend sends and answers them the way Docker 29
+does, so what is checked is what the backend asks for and what it records, never what a real
+engine did. The rest run the pieces that need no engine at all: the reads of files a scanner
+wrote, the routing of ``run_command``, the selection of a backend, the egress proxy script on the
+loopback interface, and the docker client against a stand-in CLI. No network, no model calls, no
+engine.
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
+import errno
 import json
 import os
 from pathlib import Path
@@ -23,15 +28,23 @@ import pytest
 from scaneval import isolation
 from scaneval.adapters import get_adapter
 from scaneval.adapters import base as base_module
-from scaneval.adapters.base import (Adapter, AdapterError, CommandResult, SystemSpec, build_env, run_command,
-                                    tail_text)
+from scaneval.adapters.base import (Adapter, AdapterError, CommandResult, NativeOutcome, SystemSpec, build_env,
+                                    run_command, tail_text)
 from scaneval.adapters.semgrep import SemgrepAdapter, semgrep_version
-from scaneval.isolation import IsolationError, refusal_for, resolve_execution
+from scaneval.contracts import validate_document
+from scaneval.execution import PreparedInput, run_invocation
+from scaneval.isolation import IsolationError, backend_for, refusal_for, resolve_execution
 from scaneval.isolation import egress_proxy
+from scaneval.isolation import oci as oci_module
+from scaneval.isolation.oci import DockerClient, DockerResult, OciBackend
+from scaneval.materialize import hash_exported_tree
 
 
+CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
 IMAGE = "scanner:1@sha256:" + "a" * 64
 PROXY = "proxy:1@sha256:" + "b" * 64
+NEVER_STARTED = "0001-01-01T00:00:00Z"
+VULNERABLE = "import subprocess\n\n\ndef run(cmd):\n    return subprocess.run(cmd, shell=True)\n"
 mkfifo_required = pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no named pipes on this platform")
 
 
@@ -407,3 +420,696 @@ def test_the_egress_proxy_forwards_only_declared_pairs_and_logs_every_decision(t
     denied = [entry for entry in entries if entry["event"] == "deny"]
     assert {"host": "127.0.0.1", "port": other_port} == {key: denied[0][key] for key in ("host", "port")}
     assert "only CONNECT" in denied[1]["reason"] and "not host:port" in denied[2]["reason"]
+
+
+# --- the oci backend against a scripted engine ----------------------------------------------------
+
+
+def _flag_values(args: list[str], flag: str) -> list[str]:
+    return [args[index + 1] for index, word in enumerate(args[:-1]) if word == flag]
+
+
+def _mount_sources(args: list[str]) -> list[str]:
+    sources = []
+    for value in _flag_values(args, "--mount"):
+        for field in value.split(","):
+            field = field.strip('"')
+            if field.startswith("src="):
+                sources.append(field[4:])
+    return sources
+
+
+class FakeDocker:
+    """Answers the docker commands the oci backend sends, and records every one of them.
+
+    ``behavior(container, stdout, stderr, stdin_text)`` plays the scanner for ``docker start
+    --attach``: it writes what the process would have written and returns its exit code, the
+    string ``"timeout"``, or ``(exit code, oom_killed)``; it may also raise, as an interrupted
+    client would. With ``unstartable`` the engine fails the start the way Docker 29 does for an
+    entrypoint the image lacks: the container stays ``created`` with a zero start time. Output
+    files are opened the way the real client opens them. Nothing is executed.
+    """
+
+    def __init__(self, *, reachable: bool = True, images=(IMAGE, PROXY), invisible=(),
+                 isolated_applies: bool = True, behavior=None, proxy_log: str = "",
+                 unstartable: bool = False) -> None:
+        self.calls: list[list[str]] = []
+        self.extra_envs: list[dict] = []
+        self.reachable = reachable
+        self.images = {reference: {"Id": "sha256:" + reference.rsplit("sha256:", 1)[1],
+                                   "RepoDigests": [reference.split(":", 1)[0] + "@sha256:" + reference.rsplit("sha256:", 1)[1]],
+                                   "Os": "linux", "Architecture": "arm64"} for reference in images}
+        self.invisible = tuple(str(path) for path in invisible)
+        self.isolated_applies = isolated_applies
+        self.behavior = behavior or (lambda container, out, err, stdin: 0)
+        self.proxy_log = proxy_log
+        self.unstartable = unstartable
+        self.containers: dict[str, dict] = {}
+        self.networks: dict[str, dict] = {}
+
+    @staticmethod
+    def ok(stdout: str = "") -> DockerResult:
+        return DockerResult(0, stdout, "")
+
+    @staticmethod
+    def fail(stderr: str, code: int = 1) -> DockerResult:
+        return DockerResult(code, "", stderr)
+
+    def _labels(self, args: list[str]) -> dict:
+        return dict(value.split("=", 1) for value in _flag_values(args, "--label"))
+
+    def run(self, args, *, timeout, extra_env=None) -> DockerResult:
+        args = list(args)
+        self.calls.append(args)
+        self.extra_envs.append(dict(extra_env or {}))
+        head = args[0]
+        if head == "version":
+            if not self.reachable:
+                return DockerResult(1, json.dumps({"Client": {"Version": "29.4.3"}, "Server": None}),
+                                    "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+                                    "Is the docker daemon running?")
+            return self.ok(json.dumps({"Client": {"Version": "29.4.3", "ApiVersion": "1.53"},
+                                       "Server": {"Version": "29.2.1", "ApiVersion": "1.53", "Os": "linux",
+                                                  "Arch": "arm64", "KernelVersion": "6.8.0",
+                                                  "Components": [{"Name": "runc", "Version": "1.3.4"}]}}))
+        if head == "info":
+            return self.ok(json.dumps({"OperatingSystem": "Ubuntu 24.04.4 LTS", "CgroupVersion": "2",
+                                       "CgroupDriver": "cgroupfs", "DefaultRuntime": "runc",
+                                       "SecurityOptions": ["name=apparmor", "name=seccomp,profile=builtin"]}))
+        if args[:2] == ["image", "inspect"]:
+            found = self.images.get(args[2])
+            return self.ok(json.dumps([found])) if found else self.fail(f"Error: No such image: {args[2]}")
+        if head == "create":
+            name = _flag_values(args, "--name")[0]
+            for source in _mount_sources(args):
+                if any(source == hidden or source.startswith(hidden + "/") for hidden in self.invisible):
+                    return self.fail('Error response from daemon: invalid mount config for type "bind": '
+                                     f"bind source path does not exist: {source}")
+            self.containers[name] = {"name": name, "args": args, "labels": self._labels(args),
+                                     "networks": _flag_values(args, "--network"),
+                                     "state": {"Status": "created", "Running": False, "ExitCode": 0,
+                                               "OOMKilled": False, "Error": "", "StartedAt": NEVER_STARTED}}
+            return self.ok(f"{name}-id\n")
+        if head == "start":
+            container = self.containers[args[-1]]
+            container["state"].update(Status="running", Running=True, StartedAt="2026-09-20T15:00:00.1Z")
+            log_dir = _flag_values(container["args"], "--log-dir")
+            if log_dir:
+                Path(log_dir[0], "ready").write_text("{}\n", encoding="utf-8")
+                Path(log_dir[0], "egress.jsonl").write_text(self.proxy_log, encoding="utf-8")
+            return self.ok(args[-1])
+        if head == "kill":
+            container = self.containers.get(args[-1])
+            if container is None or not container["state"]["Running"]:
+                return self.fail(f"Error response from daemon: container {args[-1]} is not running")
+            container["state"].update(Status="exited", Running=False, ExitCode=137)
+            return self.ok(args[-1])
+        if head == "rm":
+            self.containers.pop(args[-1], None)
+            return self.ok(args[-1])
+        if args[:2] == ["container", "inspect"]:
+            name = args[-1]
+            container = self.containers.get(name)
+            if container is None:
+                return self.fail(f"Error: No such container: {name}")
+            if "{{json .State}}" in args:
+                return self.ok(json.dumps(container["state"]))
+            if "{{.Id}}" in args:
+                return self.ok(f"{name}-id")
+            networks = {network: {"IPAddress": f"172.30.0.{index + 2}"}
+                        for index, network in enumerate(container["networks"])}
+            return self.ok(json.dumps([{"NetworkSettings": {"Networks": networks}}]))
+        if args[:2] == ["network", "create"]:
+            name = args[-1]
+            options = dict(value.split("=", 1) for value in _flag_values(args, "--opt"))
+            internal = "--internal" in args
+            config = {"Subnet": f"172.{30 + len(self.networks)}.0.0/16"}
+            if not (internal and options.get(oci_module._ISOLATED_GATEWAY) == "isolated" and self.isolated_applies):
+                config["Gateway"] = f"172.{30 + len(self.networks)}.0.1"
+            self.networks[name] = {"Name": name, "Internal": internal, "EnableIPv6": False, "Options": options,
+                                   "IPAM": {"Config": [config]}, "labels": self._labels(args)}
+            return self.ok(f"{name}-id")
+        if args[:2] == ["network", "inspect"]:
+            found = self.networks.get(args[-1])
+            return self.ok(json.dumps([found])) if found else self.fail(f"Error: network {args[-1]} not found")
+        if args[:2] == ["network", "connect"]:
+            self.containers[args[-1]]["networks"].append(args[2])
+            return self.ok()
+        if args[:2] == ["network", "rm"]:
+            self.networks.pop(args[-1], None)
+            return self.ok(args[-1])
+        if args[:2] == ["network", "ls"]:
+            wanted = _flag_values(args, "--filter")[0].split("=", 1)[1].split("=", 1)
+            return self.ok("\n".join(name for name, network in self.networks.items()
+                                     if network["labels"].get(wanted[0]) == wanted[1]))
+        if head == "ps":
+            wanted = _flag_values(args, "--filter")[0].split("=", 1)[1].split("=", 1)
+            return self.ok("\n".join(name for name, container in self.containers.items()
+                                     if container["labels"].get(wanted[0]) == wanted[1]))
+        if head == "logs":
+            return self.ok()
+        raise AssertionError(f"the fake engine was sent an unexpected command: {args}")
+
+    def attach(self, args, *, stdout_path, stderr_path, stdin_text, timeout, on_timeout):
+        self.calls.append(list(args))
+        self.extra_envs.append({})
+        container = self.containers[args[-1]]
+        with os.fdopen(oci_module._open_output(Path(stdout_path)), "wb") as out, \
+                os.fdopen(oci_module._open_output(Path(stderr_path)), "wb") as err:
+            if self.unstartable:
+                err.write(b"Error response from daemon: failed to create task for container: exec: "
+                          b"\"scanner\": executable file not found in $PATH\n")
+                container["state"].update(ExitCode=127, Error='exec: "scanner": executable file not found in $PATH')
+                return 1, False
+            container["state"].update(Status="running", Running=True, StartedAt="2026-09-20T15:00:00.2Z")
+            outcome = self.behavior(container, out, err, stdin_text)
+        if outcome == "timeout":
+            on_timeout()
+            return None, True
+        code, oom = outcome if isinstance(outcome, tuple) else (outcome, False)
+        container["state"].update(Status="exited", Running=False, ExitCode=code, OOMKilled=oom)
+        return code, False
+
+    def creates(self, role: str = "worker") -> list[list[str]]:
+        return [call for call in self.calls
+                if call[0] == "create" and f"scaneval.role={role}" in _flag_values(call, "--label")]
+
+
+def prepared_input(tmp_path: Path, *, languages=("python",)) -> PreparedInput:
+    source = tmp_path / "trial" / "source"
+    source.mkdir(parents=True)
+    (source / "app.py").write_text(VULNERABLE, encoding="utf-8")
+    digest = hash_exported_tree(source)["tree_hash"]
+    return PreparedInput("input-a", source, digest, tuple(languages), {"source": {"commit": "x"}})
+
+
+class ScannerAdapter(Adapter):
+    """Runs one containerized command and turns the JSON it prints into claims."""
+
+    name = "container-fixture"
+    adapter_version = "1.0.0"
+    supported_languages = frozenset({"python"})
+    oci_compatible = True
+
+    def __init__(self, *, mounts=(), state_dirs=(), stdin_text=None):
+        self.mounts = tuple(mounts)
+        self.state_dirs = tuple(state_dirs)
+        self.stdin_text = stdin_text
+        self.results: list[CommandResult] = []
+        self.prepared = 0
+
+    def prepare(self, spec, cache_root):
+        self.prepared += 1
+        return {"fixture": True}
+
+    def runtime_mounts(self, spec, preparation):
+        return self.mounts
+
+    def scan(self, *, request, source_dir, raw_dir, spec, preparation, timeout_seconds, trace_mode, trace_dir):
+        stdout = raw_dir / "scanner.json"
+        result = run_command(["scanner", "--json", "."], cwd=source_dir, timeout_seconds=timeout_seconds,
+                             env=build_env(("SCANEVAL_FIXTURE_TOKEN",)), stdout_path=stdout,
+                             stderr_path=raw_dir / "scanner.stderr.txt", stdin_text=self.stdin_text)
+        self.results.append(result)
+        artifacts = [{"id": "scanner-json", "path": stdout}]
+        if result.timed_out:
+            return NativeOutcome(status="timeout", exit_code=None, timed_out=True, command=result.argv,
+                                 error={"code": "timeout", "message": "killed"}, artifacts=artifacts)
+        if result.exit_code != 0:
+            return NativeOutcome(status="error", exit_code=result.exit_code, command=result.argv,
+                                 error={"code": f"exit_{result.exit_code}", "message": "scanner failed"},
+                                 artifacts=artifacts)
+        findings = json.loads(stdout.read_text(encoding="utf-8"))["findings"]
+        claims = [{"claim_id": f"c{index}", "allegation": "shell=True with a caller-controlled command",
+                   "kind": "command_injection", "native_rule_id": "fixture.shell", "raw_artifact_id": "scanner-json",
+                   "primary_location": {"path": finding["path"], "start_line": finding["line"],
+                                        "end_line": finding["line"]}}
+                  for index, finding in enumerate(findings, start=1)]
+        return NativeOutcome(status="success", exit_code=0, command=result.argv, claims=claims,
+                             artifacts=artifacts, capture={"model_requests": "not_applicable"})
+
+
+def finds_one(container, out, err, stdin_text):
+    out.write(b'{"findings": [{"path": "src/app.py", "line": 5}]}\n')
+    return 0
+
+
+def backend(tmp_path: Path, fake: FakeDocker, policy: str = "none", *, adapter=None, **kwargs) -> OciBackend:
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(parents=True, exist_ok=True)
+    adapter = adapter or ScannerAdapter()
+    return OciBackend(kwargs.pop("execution", None) or settings(policy), run_id="run-1",
+                      invocation_id="input-a__fixture__r1", scratch_root=scratch,
+                      state_dirs=tuple(adapter.state_dirs),
+                      runtime_mounts=lambda: adapter.runtime_mounts(None, {}), docker=fake, **kwargs)
+
+
+def invoke(tmp_path: Path, fake: FakeDocker, policy: str = "none", *, adapter=None, prepared=None,
+           **kwargs) -> tuple[Path, OciBackend]:
+    adapter = adapter or ScannerAdapter()
+    held = backend(tmp_path, fake, policy, adapter=adapter, **kwargs)
+    try:
+        bundle = run_invocation(prepared=prepared or prepared_input(tmp_path), adapter=adapter,
+                                spec=SystemSpec("fixture", "container-fixture", {}), preparation={},
+                                out_dir=tmp_path / "out", run_id="run-1", network_policy=policy,
+                                workspace_root=held.workspace_root, clock=CLOCK, backend=held)
+    finally:
+        held.close()
+    return bundle, held
+
+
+def documents(bundle: Path) -> tuple[dict, dict]:
+    return (json.loads((bundle / "result.json").read_text(encoding="utf-8")),
+            json.loads((bundle / "execution.json").read_text(encoding="utf-8")))
+
+
+def test_every_scanner_container_gets_the_hardening_settings_and_identity_mounts_only(tmp_path):
+    cache = tmp_path / "cache"
+    rules = cache / "rules__abc"
+    rules.mkdir(parents=True)
+    fake = FakeDocker(behavior=finds_one)
+    adapter = ScannerAdapter(mounts=(str(rules),), state_dirs=(".scannerstate",))
+    bundle, held = invoke(tmp_path, fake, adapter=adapter, runtime_roots=(cache,))
+    result, execution = documents(bundle)
+    assert result["status"] == "success" and len(result["claims"]) == 1
+    [create] = fake.creates()
+    for expected in (["--read-only"], ["--cap-drop", "ALL"], ["--security-opt", "no-new-privileges"],
+                     ["--user", "65534:65534"], ["--ipc", "none"], ["--init"], ["--pids-limit", "256"],
+                     ["--memory", "2048m"], ["--memory-swap", "2048m"], ["--cpus", "2"],
+                     ["--ulimit", "core=0:0"], ["--ulimit", "nofile=4096:4096"],
+                     ["--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777"], ["--pull", "never"],
+                     ["--network", "none"], ["--env", "HOME=/tmp"], ["--env", "TMPDIR=/tmp"],
+                     ["--entrypoint", "scanner"]):
+        assert any(create[index:index + len(expected)] == expected for index in range(len(create))), expected
+    assert create[-3:] == [IMAGE, "--json", "."]
+    for forbidden in ("--rm", "-v", "--volume", "--privileged", "--cap-add"):
+        assert forbidden not in create, forbidden
+    mounts = _flag_values(create, "--mount")
+    for value in mounts:
+        fields = dict(field.split("=", 1) if "=" in field else (field, True) for field in value.split(","))
+        assert fields["type"] == "bind" and fields["src"] == fields["dst"], value
+    by_role = {entry["role"]: entry for entry in execution["isolation"]["mounts"]}
+    assert set(by_role) == {"source", "state", "raw", "runtime", "scratch"}
+    assert by_role["source"]["mode"] == "ro" and by_role["runtime"]["mode"] == "ro"
+    assert by_role["raw"]["mode"] == "rw" and by_role["state"]["mode"] == "rw"
+    workdir = _flag_values(create, "--workdir")[0]
+    assert workdir.endswith("/source") and workdir == [src for src in _mount_sources(create)
+                                                       if src.endswith("/source")][0]
+    # Nothing broad is ever mounted: not the home directory, not the run, not the cache, not the socket.
+    for source in _mount_sources(create):
+        assert source not in (str(Path.home()), "/", "/var/run/docker.sock", str(cache))
+        assert not str(tmp_path / "out").startswith(source)
+    # The container was stopped, read, and removed by name after it ran, and the record says so.
+    name = _flag_values(create, "--name")[0]
+    assert ["rm", "--force", name] in fake.calls and name not in fake.containers
+    [container] = [item for item in execution["isolation"]["containers"] if item["role"] == "worker"]
+    assert container["removed"] is True and container["exit_code"] == 0 and container["oom_killed"] is False
+    assert container["started"] is True and container["status"] == "exited"
+
+
+def test_credentials_reach_the_container_by_name_only_and_never_appear_in_a_record(tmp_path, monkeypatch):
+    secret = "sk-fixture-" + "9" * 24
+    monkeypatch.setenv("FIXTURE_API_KEY", secret)
+    monkeypatch.delenv("FIXTURE_UNSET_KEY", raising=False)
+    monkeypatch.setenv("SCANEVAL_FIXTURE_TOKEN", "dropped-not-declared")
+    fake = FakeDocker(behavior=finds_one)
+    execution_settings = settings(credentials=[{"env": "FIXTURE_API_KEY", "provider": "fixture"},
+                                               {"env": "FIXTURE_UNSET_KEY", "provider": "fixture"}])
+    bundle, _held = invoke(tmp_path, fake, execution=execution_settings)
+    [create] = fake.creates()
+    index = fake.calls.index(create)
+    assert ["--env", "FIXTURE_API_KEY"] == create[create.index("FIXTURE_API_KEY") - 1:create.index("FIXTURE_API_KEY") + 1]
+    assert all(secret not in word for call in fake.calls for word in call)
+    assert fake.extra_envs[index] == {"FIXTURE_API_KEY": secret}
+    assert "FIXTURE_UNSET_KEY" not in create and "SCANEVAL_FIXTURE_TOKEN" not in " ".join(create)
+    for name in ("result.json", "execution.json", "request.json"):
+        assert secret not in (bundle / name).read_text(encoding="utf-8")
+    environment = documents(bundle)[1]["isolation"]["settings"]["environment"]
+    assert environment["credentials"] == [{"env": "FIXTURE_API_KEY", "passed": True, "provider": "fixture"},
+                                          {"env": "FIXTURE_UNSET_KEY", "passed": False, "provider": "fixture"}]
+    assert "SCANEVAL_FIXTURE_TOKEN" in environment["dropped"] and "PATH" in environment["dropped"]
+
+
+def test_a_timeout_kills_the_container_by_name_then_inspects_and_removes_it(tmp_path):
+    fake = FakeDocker(behavior=lambda *args: "timeout")
+    bundle, _held = invoke(tmp_path, fake)
+    result, execution = documents(bundle)
+    assert result["status"] == "timeout" and execution["timed_out"] is True
+    name = _flag_values(fake.creates()[0], "--name")[0]
+    order = [call[0] if call[0] != "container" else "inspect" for call in fake.calls
+             if call[-1] == name and call[0] in ("kill", "rm", "start", "container")]
+    assert order == ["start", "kill", "inspect", "rm", "inspect"]
+    [container] = execution["isolation"]["containers"]
+    assert container["timed_out"] is True and container["removed"] is True and container["exit_code"] == 137
+
+
+def test_an_error_while_attached_still_stops_reads_and_removes_the_container(tmp_path):
+    """Whatever ends the attach, the container is killed if it runs and read before it is removed."""
+
+    def interrupted(container, out, err, stdin_text):
+        raise RuntimeError("the docker client lost its connection to the engine")
+
+    fake = FakeDocker(behavior=interrupted)
+    bundle, _held = invoke(tmp_path, fake)
+    result, execution = documents(bundle)
+    assert result["status"] == "error" and result["error"]["code"] == "adapter_failure"
+    assert "lost its connection" in result["error"]["message"]
+    name = _flag_values(fake.creates()[0], "--name")[0]
+    order = [call[0] if call[0] != "container" else "inspect" for call in fake.calls if call[-1] == name]
+    assert order == ["start", "inspect", "kill", "inspect", "rm", "inspect"]
+    [container] = execution["isolation"]["containers"]
+    assert container["removed"] is True and container["exit_code"] == 137 and container["started"] is True
+
+
+def test_an_oom_kill_is_read_from_inspection_and_recorded(tmp_path):
+    fake = FakeDocker(behavior=lambda *args: (137, True))
+    bundle, _held = invoke(tmp_path, fake, execution=settings(limits={"memory_mb": 128, "tmpfs_mb": 16}))
+    result, execution = documents(bundle)
+    assert result["status"] == "error" and result["error"]["code"] == "exit_137"
+    [container] = execution["isolation"]["containers"]
+    assert container["oom_killed"] is True and container["exit_code"] == 137
+    assert execution["isolation"]["settings"]["memory_mb"] == execution["isolation"]["settings"]["memory_swap_mb"] == 128
+    assert "recorded an out-of-memory kill under the 128 MB limit" in execution["isolation"]["note"]
+
+
+def test_an_oom_kill_under_a_clean_exit_is_a_failure_not_a_clean_success(tmp_path):
+    """A process of the scan was killed while the command reported success; the claims cannot stand."""
+
+    def starved(container, out, err, stdin_text):
+        finds_one(container, out, err, stdin_text)
+        return 0, True
+
+    fake = FakeDocker(behavior=starved)
+    bundle, _held = invoke(tmp_path, fake)
+    result, execution = documents(bundle)
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "adapter_failure" and "out-of-memory kill" in result["error"]["message"]
+    [container] = execution["isolation"]["containers"]
+    assert container["oom_killed"] is True and container["exit_code"] == 0 and container["removed"] is True
+    # The container did run, under the recorded limits, so what bounded it is still recorded as enforced.
+    assert execution["isolation"]["enforced"] is True
+    assert (bundle / "raw" / "scanner.json").is_file()
+
+
+def test_a_container_the_engine_could_not_start_is_a_refusal_and_nothing_is_enforced(tmp_path):
+    """Docker leaves a container whose start failed in ``created``; counting it as run would claim enforcement."""
+    fake = FakeDocker(unstartable=True)
+    bundle, _held = invoke(tmp_path, fake)
+    result, execution = documents(bundle)
+    validate_document("execution-record", execution)
+    assert result["status"] == "error" and result["error"]["code"] == "adapter_failure"
+    assert "could not start the container for scanner" in result["error"]["message"]
+    assert "executable file not found" in result["error"]["message"]
+    assert execution["isolation"]["enforced"] is False and execution["network_policy"]["enforced"] is False
+    assert execution["isolation"]["note"] == oci_module.NOTHING_RAN_NOTE
+    [container] = execution["isolation"]["containers"]
+    assert container["created"] is True and container["started"] is False and container["exit_code"] == 127
+    assert container["removed"] is True and fake.containers == {}
+
+
+def test_output_paths_a_container_could_have_planted_are_never_written_through(tmp_path):
+    """A link, a pipe, or a second name left where the next command's output goes is refused, not followed."""
+    secret = tmp_path / "host-only.txt"
+    secret.write_text("host-only\n", encoding="utf-8")
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    fresh = oci_module._open_output(raw / "fresh.txt")
+    os.write(fresh, b"new")
+    os.close(fresh)
+    existing = raw / "existing.txt"
+    existing.write_text("old content that is longer\n", encoding="utf-8")
+    descriptor = oci_module._open_output(existing)
+    os.write(descriptor, b"new")
+    os.close(descriptor)
+    assert (raw / "fresh.txt").read_bytes() == b"new" and existing.read_bytes() == b"new"
+    (raw / "linked.txt").symlink_to(secret)
+    os.link(secret, raw / "hard.txt")
+    (raw / "directory").mkdir()
+    for name, code in (("linked.txt", errno.ELOOP), ("hard.txt", errno.EMLINK), ("directory", errno.EISDIR)):
+        with pytest.raises(OSError) as raised:
+            oci_module._open_output(raw / name)
+        assert raised.value.errno == code, name
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(raw / "pipe.txt")
+        with pytest.raises(OSError):
+            finishes(lambda: oci_module._open_output(raw / "pipe.txt"))
+    assert secret.read_text(encoding="utf-8") == "host-only\n"
+
+    # A directory under a writable mount replaced by a link out of it: refused before any container.
+    held = backend(tmp_path / "held", FakeDocker())
+    held._mounts = [oci_module._Mount(str(raw), "rw", "raw")]
+    (raw / "nested").symlink_to(tmp_path)
+    with pytest.raises(OSError, match="resolves outside its writable mount"):
+        held._check_output(raw / "nested" / "out.txt")
+    held._check_output(raw / "out.txt")
+    held.close()
+
+
+def test_the_docker_client_never_writes_output_through_a_planted_link_and_kills_a_client_that_hangs(
+        tmp_path, monkeypatch):
+    """The real client, against a stand-in CLI: the open is refused before anything starts."""
+    started = tmp_path / "cli-started"
+    cli = tmp_path / "docker"
+    cli.write_text(f"#!{sys.executable}\nimport signal, sys, time\n"
+                   f"open({str(started)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+                   "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                   "print('streamed', flush=True)\n"
+                   "time.sleep(60) if 'hang' in sys.argv else None\n", encoding="utf-8")
+    cli.chmod(0o755)
+    client = DockerClient(binary=str(cli))
+    secret = tmp_path / "host-only.txt"
+    secret.write_text("host-only\n", encoding="utf-8")
+    out, err = tmp_path / "out.txt", tmp_path / "err.txt"
+    out.symlink_to(secret)
+    with pytest.raises(OSError):
+        client.attach(["start", "--attach", "c1"], stdout_path=out, stderr_path=err, stdin_text=None,
+                      timeout=30, on_timeout=lambda: None)
+    assert not started.exists() and secret.read_text(encoding="utf-8") == "host-only\n"
+    out.unlink()
+    assert client.attach(["start", "--attach", "c1"], stdout_path=out, stderr_path=err, stdin_text=None,
+                         timeout=30, on_timeout=lambda: None) == (0, False)
+    assert out.read_text(encoding="utf-8") == "streamed\n"
+
+    monkeypatch.setattr(oci_module, "KILL_GRACE", 0.5)
+    killed = []
+    begun = time.monotonic()
+    assert client.attach(["start", "--attach", "hang"], stdout_path=out, stderr_path=err, stdin_text=None,
+                         timeout=0.5, on_timeout=lambda: killed.append(True)) == (None, True)
+    assert killed == [True] and time.monotonic() - begun < 20
+
+
+def assert_refused(bundle: Path, fragment: str) -> dict:
+    result, execution = documents(bundle)
+    validate_document("execution-record", execution)
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "adapter_failure" and "IsolationError" in result["error"]["message"]
+    assert fragment in result["error"]["message"]
+    isolation_block = execution["isolation"]
+    assert isolation_block["backend"] == "oci" and isolation_block["enforced"] is False
+    assert fragment in isolation_block["note"] and "No scanner process ran" in isolation_block["note"]
+    assert execution["network_policy"]["enforced"] is False
+    return execution
+
+
+def test_a_mount_the_daemon_cannot_see_is_a_recorded_refusal_and_no_scanner_starts(tmp_path):
+    fake = FakeDocker(behavior=finds_one, invisible=(tmp_path / "scratch",))
+    bundle, _held = invoke(tmp_path, fake)
+    execution = assert_refused(bundle, "not visible to the Docker daemon")
+    assert "--workspace-root" in execution["isolation"]["note"]
+    assert not [call for call in fake.calls if call[0] == "start"] and fake.creates() == []
+    assert fake.containers == {}
+
+
+def test_an_unreachable_engine_and_a_missing_image_are_refusals(tmp_path):
+    bundle, _held = invoke(tmp_path / "a", FakeDocker(reachable=False))
+    assert_refused(bundle, "engine is not reachable")
+    bundle, _held = invoke(tmp_path / "b", FakeDocker(images=()))
+    assert_refused(bundle, "never pulls one")
+
+
+def test_model_provider_only_refuses_a_scan_network_the_engine_did_not_isolate(tmp_path):
+    """The engine accepts an option it does not apply, so the network is judged by inspection."""
+    fake = FakeDocker(isolated_applies=False)
+    bundle, _held = invoke(tmp_path, fake, "model_provider_only")
+    execution = assert_refused(bundle, "did not make the scan network isolated")
+    assert fake.networks == {} and fake.containers == {}
+    assert all(network["removed"] for network in execution["isolation"]["network"]["networks"])
+
+
+def test_runtime_mounts_are_allowed_only_inside_the_source_cache_and_never_widen_what_the_scanner_sees(
+        tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    checkout = home / "cache" / "checkout"
+    checkout.mkdir(parents=True)
+    (home / "run").mkdir()
+    (home / "elsewhere").mkdir()
+    socketed = home / "cache" / "socketed"
+    socketed.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(socketed)
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind("engine.sock")  # relative, so the path length limit of AF_UNIX is not the test's problem
+    try:
+        for declared, fragment in ((str(home), "home directory"), ("/", "home directory"),
+                                   (str(home / "run"), "evaluator material"),
+                                   (str(home / "cache"), "only one checkout inside it"),
+                                   (str(home / "elsewhere"), "is not inside ~/cache"),
+                                   (str(socketed), "holds a unix socket (engine.sock)"),
+                                   ("relative/path", "not an absolute path"),
+                                   (str(home / "missing"), "does not exist")):
+            fake = FakeDocker(behavior=finds_one)
+            target = tmp_path / f"case-{abs(hash(declared))}"
+            target.mkdir()
+            bundle, _held = invoke(target, fake, adapter=ScannerAdapter(mounts=(declared,)),
+                                   protected=(home / "run",), runtime_roots=(home / "cache",))
+            assert_refused(bundle, fragment)
+    finally:
+        listener.close()
+    # With no runtime root given, nothing may be mounted at all.
+    bundle, _held = invoke(tmp_path / "rootless", FakeDocker(behavior=finds_one),
+                           adapter=ScannerAdapter(mounts=(str(checkout),)))
+    assert_refused(bundle, "no runtime root was given")
+    # One checkout inside the cache is exactly what may be mounted.
+    fake = FakeDocker(behavior=finds_one)
+    bundle, _held = invoke(tmp_path / "allowed", fake, adapter=ScannerAdapter(mounts=(str(checkout),)),
+                           protected=(home / "run",), runtime_roots=(home / "cache",))
+    assert documents(bundle)[0]["status"] == "success"
+    assert str(checkout) in _mount_sources(fake.creates()[0])
+
+
+def test_model_provider_only_runs_the_scanner_behind_the_proxy_and_reads_back_its_decisions(tmp_path):
+    log = "".join(json.dumps(entry) + "\n" for entry in (
+        {"event": "listening", "port": 3128},
+        {"event": "allow", "host": "api.model.example", "port": 443, "outcome": "connected"},
+        {"event": "deny", "host": "exfil.example", "port": 443, "reason": "not a declared destination"},
+        {"event": "deny", "target": "http://plain.example/", "reason": "only CONNECT is forwarded"}))
+    fake = FakeDocker(behavior=finds_one, proxy_log=log)
+    bundle, _held = invoke(tmp_path, fake, "model_provider_only")
+    result, execution = documents(bundle)
+    validate_document("execution-record", execution)
+    assert result["status"] == "success" and execution["network_policy"]["enforced"] is True
+    [proxy_create] = fake.creates("proxy")
+    [worker_create] = fake.creates("worker")
+    internal, egress = [network["name"] for network in execution["isolation"]["network"]["networks"]]
+    assert ["--network", internal] == worker_create[worker_create.index("--network"):worker_create.index("--network") + 2]
+    assert ["network", "connect", internal, _flag_values(proxy_create, "--name")[0]] in fake.calls
+    assert _flag_values(proxy_create, "--network") == [egress]
+    assert ["--sysctl", "net.ipv4.ip_forward=0"] == proxy_create[proxy_create.index("--sysctl"):proxy_create.index("--sysctl") + 2]
+    assert _flag_values(proxy_create, "--allow") == ["api.model.example:443"]
+    for flag in ("--read-only", "--init"):
+        assert flag in proxy_create
+    assert _flag_values(proxy_create, "--user") == ["65534:65534"] and ["--cap-drop", "ALL"] == proxy_create[
+        proxy_create.index("--cap-drop"):proxy_create.index("--cap-drop") + 2]
+    assert "HTTPS_PROXY=http://172.30.0.3:3128" in _flag_values(worker_create, "--env")
+    assert "HTTP_PROXY=http://172.30.0.3:3128" in _flag_values(worker_create, "--env")
+    network = execution["isolation"]["network"]
+    assert network["policy"] == "model_provider_only" and network["enforced"] is True
+    assert network["networks"][0]["gateway_mode_ipv4"] == "isolated" and network["networks"][0]["gateways"] == []
+    proxy = network["proxy"]
+    assert proxy["allowed"] == 1 and proxy["denied"] == 2 and proxy["log"] == "read"
+    assert "exfil.example:443" in proxy["denied_destinations"] and "log_dir" not in proxy
+    assert fake.networks == {} and fake.containers == {}
+    assert all(item["removed"] for item in execution["isolation"]["containers"])
+
+
+def test_unrestricted_is_recorded_as_not_enforced_with_the_host_loopback_caveat(tmp_path):
+    fake = FakeDocker(behavior=finds_one)
+    bundle, _held = invoke(tmp_path, fake, "unrestricted")
+    result, execution = documents(bundle)
+    validate_document("execution-record", execution)
+    assert result["status"] == "success"
+    assert execution["isolation"]["enforced"] is True and execution["network_policy"]["enforced"] is False
+    assert execution["isolation"]["network"]["enforced"] is False
+    assert "host's own loopback" in execution["isolation"]["network"]["note"]
+    assert "Colima" in execution["isolation"]["network"]["note"]
+    [bridge] = execution["isolation"]["network"]["networks"]
+    assert bridge["internal"] is False and bridge["removed"] is True
+
+
+def test_an_oci_record_is_2_1_with_home_relative_mounts_and_nothing_enforced_when_nothing_ran(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    bundle, _held = invoke(tmp_path, FakeDocker(behavior=finds_one))
+    result, execution = documents(bundle)
+    validate_document("execution-record", execution)
+    assert execution["schema_version"] == "2.1" and result["schema_version"] == "2.0"
+    assert execution["provenance"]["mode"] == "full" and execution["provenance"]["pr"] is None
+    block = execution["isolation"]
+    assert block["enforced"] is True and block["runtime"]["server_version"] == "29.2.1"
+    assert block["image"]["id"] == "sha256:" + "a" * 64
+    assert block["image"]["repo_digests"] == ["scanner@sha256:" + "a" * 64]
+    assert all(entry["target"].startswith("~/") for entry in block["mounts"] if entry["role"] != "scratch")
+    assert str(tmp_path) not in json.dumps(block)
+    assert block["settings"]["uid"] == 65534 and block["settings"]["read_only_root_filesystem"] is True
+    # An invocation whose language the adapter does not support starts nothing, and says so.
+    unsupported = prepared_input(tmp_path / "go", languages=("go",))
+    bundle, _held = invoke(tmp_path / "go", FakeDocker(), prepared=unsupported)
+    result, execution = documents(bundle)
+    assert result["status"] == "unsupported" and execution["isolation"]["enforced"] is False
+    assert execution["isolation"]["note"].startswith("No scanner process was started")
+
+
+def test_close_removes_what_the_session_left_and_reports_what_it_cannot(tmp_path):
+    """The session label is what close() sweeps by, so a stray container of this invocation goes too."""
+
+    class StubbornDocker(FakeDocker):
+        def run(self, args, *, timeout, extra_env=None):
+            if args[0] == "rm":
+                self.calls.append(list(args))
+                return self.fail("Error response from daemon: removal of container stray is already in progress")
+            return super().run(args, timeout=timeout, extra_env=extra_env)
+
+    for fake, expected in ((FakeDocker(isolated_applies=False), 0), (StubbornDocker(isolated_applies=False), 1)):
+        root = tmp_path / type(fake).__name__
+        held = backend(root, fake, "model_provider_only")
+        (held.workspace_root / "scaneval-trial-x" / "source").mkdir(parents=True)
+        (held.workspace_root / "scaneval-trial-x" / "raw").mkdir()
+        # A preflight refused after it had created something on the engine: close() must sweep.
+        with pytest.raises(IsolationError, match="isolated"):
+            with held.activate():
+                pass
+        fake.containers["stray"] = {"labels": {"scaneval.session": held._session}, "state": {}}
+        problems = held.close()
+        assert len(problems) == expected and not held._private.exists()
+        assert ("stray" in fake.containers) is bool(expected)
+        if expected:
+            assert "could not be removed" in problems[0] and held._session in problems[0]
+
+
+@pytest.mark.parametrize("role", ["probe", "worker"])
+def test_a_create_the_client_gave_up_on_leaves_nothing_on_the_engine(tmp_path, role):
+    """A create that timed out on the client may still have made the container on the engine.
+
+    The mount probe's container used to be one nothing removed: the removal came after the create
+    returned, and close() swept only a backend that had recorded touching the engine, which a create
+    that raised had not yet done.
+    """
+
+    class SlowCreate(FakeDocker):
+        def run(self, args, *, timeout, extra_env=None):
+            if args[0] == "create" and f"scaneval.role={role}" in _flag_values(args, "--label"):
+                super().run(args, timeout=timeout, extra_env=extra_env)
+                raise IsolationError(f"docker create gave no answer within {timeout:g}s")
+            return super().run(args, timeout=timeout, extra_env=extra_env)
+
+    fake = SlowCreate(behavior=finds_one)
+    bundle, _held = invoke(tmp_path, fake)
+    if role == "probe":
+        assert_refused(bundle, "gave no answer")
+    else:
+        result, _execution = documents(bundle)
+        assert result["status"] == "error" and "gave no answer" in result["error"]["message"]
+    assert fake.containers == {}
+
+
+def test_backend_for_builds_nothing_for_local_and_refuses_what_refusal_for_refuses(tmp_path):
+    assert backend_for(resolve_execution(None, "none"), adapter=ScannerAdapter(), spec=None, preparation={},
+                       run_id="r", invocation_id="i", scratch_root=tmp_path) is None
+    for name in ("llm-harness", "deepsec"):
+        with pytest.raises(IsolationError, match="refuses adapter"):
+            backend_for(settings(), adapter=get_adapter(name), spec=None, preparation={}, run_id="r",
+                        invocation_id="i", scratch_root=tmp_path)
+    assert list(tmp_path.iterdir()) == []
+    held = backend_for(settings(), adapter=ScannerAdapter(), spec=None, preparation={}, run_id="r",
+                       invocation_id="i", scratch_root=tmp_path)
+    assert isinstance(held, OciBackend) and held.workspace_root.is_dir()
+    assert held.close() == [] and list(tmp_path.iterdir()) == []
