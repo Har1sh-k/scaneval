@@ -338,6 +338,8 @@ def do_direct(argv, settings):
     say("  Root: " + root)
     say()
     if not names:
+        if settings.get("stray_record"):
+            write(base / "files" / "stray.js.json", dict(scanned_record("stray.js", project), status="error"))
         if not settings.get("say_nothing"):
             say(paint("33", "No files matched git-diff:%s (after ignore filter)." % diff))
             say(paint("32", "Nothing to process \\u2014 exit 0."))
@@ -2567,6 +2569,44 @@ def test_a_pr_process_that_outlives_the_budget_is_a_timeout_like_any_other_step(
     assert "deepsec process exhausted the shared" in outcome.error["message"]
 
 
+# --- PR mode: nothing to process --------------------------------------------------------
+
+
+def test_a_change_deepsec_selects_nothing_from_is_a_completed_empty_review_and_says_which_paths(tmp_path):
+    """The real CLI, over a diff of only docs and tests, prints exactly this and exits 0 with no record."""
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, {"README.md": "# more\n", "tests/server.test.js": "t\n", "src/db.js": None})
+
+    outcome, raw, _ = scan_pr(tmp_path, root, workspace, pr)
+
+    assert "Nothing to process" in ANSI.sub("", (raw / "deepsec-process.stdout.txt").read_text(encoding="utf-8"))
+    assert outcome.status == "success" and outcome.error is None and outcome.claims == []
+    assert outcome.bundles_resolved is True and outcome.exit_code == 0
+    empty = next(note for note in outcome.notes if note.startswith("Empty review:"))
+    assert f"from {pr.base}..{pr.head}" in empty and "it said \"Nothing to process\"" in empty
+    assert "not a failure" in empty
+    assert not (raw / "deepsec-workspace" / "data" / PR_PROJECT / "files").exists()
+
+
+def test_silence_without_deepseccs_own_statement_is_an_error_and_not_an_empty_review(tmp_path):
+    """No record and no "Nothing to process": the run may simply not have read the change."""
+    root = fake_deepsec_root(tmp_path, say_nothing=True)
+    workspace, pr = pr_workspace(tmp_path, {"README.md": "# more\n"})
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+    assert outcome.status == "error" and outcome.claims == []
+    assert outcome.error["code"] == "nothing_processed"
+    assert "cannot be told from a run that read nothing" in outcome.error["message"]
+    assert not any(note.startswith("Empty review:") for note in outcome.notes)
+
+
+def test_nothing_to_process_is_not_a_completed_review_when_a_record_says_a_file_errored(tmp_path):
+    root = fake_deepsec_root(tmp_path, stray_record=True)
+    workspace, pr = pr_workspace(tmp_path, {"README.md": "# more\n"})
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+    assert outcome.status == "error" and outcome.error["code"] == "deepsec_batches_failed"
+    assert not any(note.startswith("Empty review:") for note in outcome.notes)
+
+
 # --- PR mode: what is refused before anything runs --------------------------------------
 
 
@@ -2634,14 +2674,17 @@ def test_a_pr_run_with_tracing_off_claims_no_observation(tmp_path):
 
 ANSI = deepsec_module.ANSI_ESCAPE
 # Excerpts of what the real 2.3.10 CLI printed, with its escape sequences: a run whose batch failed
-# (a Claude executable that exits at once).
+# (a Claude executable that exits at once), and a run whose diff selected nothing.
 REAL_ERRORED = ("\x1b[32mProcessing complete.\x1b[0m Run: \x1b[1m20260930055356-1ea8d1485890fae3\x1b[0m\n"
                 "  Analyses: 0\n  Findings: 0\n  \x1b[31mErrored batches: 1\x1b[0m\n\n"
                 "\x1b[31m1 batch(es) errored — exiting 1 (agent failure, not a clean review).\x1b[0m\n")
+REAL_NOTHING = ("\x1b[33mNo files matched git-diff:a..b (after ignore filter).\x1b[0m\n"
+                "\x1b[32mNothing to process — exit 0.\x1b[0m\n")
 
 
 def test_the_process_summary_is_read_through_its_colors():
     assert read_process_output(REAL_ERRORED) == ProcessOutput(errored_batches=1, findings=0)
+    assert read_process_output(REAL_NOTHING) == ProcessOutput(nothing_to_process=True)
     quota = ("  Findings: 4\n\n\x1b[31m\x1b[1m✘ Stopped: Vercel AI Gateway credits exhausted\x1b[0m\n\n"
              "  Upstream: 402\n")
     assert read_process_output(quota) == ProcessOutput(quota="Vercel AI Gateway credits", findings=4)
@@ -2651,6 +2694,7 @@ def test_the_process_summary_is_read_through_its_colors():
 
 def test_a_summary_line_counts_only_where_deepsec_prints_it():
     """A line an agent could echo mid-sentence is not a summary line."""
+    assert read_process_output("the agent wrote: Nothing to process — exit 0. and more\n") == ProcessOutput()
     assert read_process_output("note Findings: 9\nnote Errored batches: 9\n") == ProcessOutput()
 
 

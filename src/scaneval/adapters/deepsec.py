@@ -68,7 +68,9 @@ parse-failure dump. An exit 1 that none of those explains is an ``error`` naming
 DeepSec prints is used to name the reason, never to decide the status, because text an agent's
 output can reach must not be able to turn a failure into a success. A run stopped by an exhausted
 quota, or with an errored batch, is ``partial`` when some file still reached a verdict and an
-``error`` when none did. A run that left no file record at all is an error.
+``error`` when none did. "Nothing to process" is a completed empty review only with exit 0, no
+record of any kind, and DeepSec's own statement that it found nothing to do; the same silence
+without that statement is an error.
 """
 
 from __future__ import annotations
@@ -123,6 +125,7 @@ AGENTS = ("claude", "codex", "pi")
 # in its bundle). It colors its output whether or not stdout is a terminal, so the escape sequences
 # come off before anything is matched.
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+NOTHING_TO_PROCESS = re.compile("^Nothing to process \u2014 exit 0\\.$", re.MULTILINE)
 QUOTA_STOPPED = re.compile("^\u2718 Stopped: (.+) exhausted$", re.MULTILINE)
 PROCESS_FINDINGS = re.compile(r"^ *Findings: ([0-9]+)$", re.MULTILINE)
 PROCESS_ERRORED_BATCHES = re.compile(r"^ *Errored batches: ([0-9]+)$", re.MULTILINE)
@@ -1503,13 +1506,15 @@ class ProcessOutput(NamedTuple):
 
     Every field is absent unless DeepSec's own summary line for it is there. This is advisory by
     construction: stdout is text an agent's output can reach, so nothing here decides a status.
-    The records DeepSec wrote decide that, and this only names the reason: the quota source
-    DeepSec reported and how many batches it counted as errored.
+    The records DeepSec wrote decide that, and this only names the reason (the quota source
+    DeepSec reported, how many batches it counted as errored) and carries DeepSec's own statement
+    that a diff selected no file, which the caller accepts only beside the records that agree.
     """
 
     quota: str | None = None
     errored_batches: int | None = None
     findings: int | None = None
+    nothing_to_process: bool = False
 
 
 def read_process_output(text: str) -> ProcessOutput:
@@ -1528,7 +1533,8 @@ def read_process_output(text: str) -> ProcessOutput:
     errored, findings = last(PROCESS_ERRORED_BATCHES), last(PROCESS_FINDINGS)
     return ProcessOutput(quota=last(QUOTA_STOPPED),
                          errored_batches=int(errored) if errored is not None else None,
-                         findings=int(findings) if findings is not None else None)
+                         findings=int(findings) if findings is not None else None,
+                         nothing_to_process=bool(NOTHING_TO_PROCESS.search(plain)))
 
 
 class DeepsecAdapter(Adapter):
@@ -2002,11 +2008,21 @@ class DeepsecAdapter(Adapter):
                            f"part of the {subject} and says nothing about the "
                            "rest")
         if pr is not None and not records.files:
-            # No file record at all: nothing of the change is known to have been read.
-            return NativeOutcome(
-                status="error", exit_code=exit_code, claims=[],
-                error={"code": "nothing_processed",
-                       "message": (f"deepsec process exited {process_result.exit_code if process_result else None} "
-                                   "and left no file record, so nothing of the change is known to have been read; "
-                                   f"stderr: {tail('process')}")[:2000]}, **base)
+            # No file record at all. DeepSec says so itself when its diff selects nothing, and that
+            # statement is what makes this an empty review: without it the same silence could be a
+            # run that never read the change.
+            if process_result is not None and process_result.exit_code == 0 and output.nothing_to_process:
+                base["notes"].append(
+                    f"Empty review: DeepSec's direct mode resolved no file to investigate from {pr.revision_range} "
+                    "(it said \"Nothing to process\") and left no file record. Every path the change touches was "
+                    "deleted or dropped by DeepSec's own selection, so nothing was investigated; that is DeepSec's "
+                    "scope and not a failure, and it says nothing about the paths it did not read.")
+            else:
+                return NativeOutcome(
+                    status="error", exit_code=exit_code, claims=[],
+                    error={"code": "nothing_processed",
+                           "message": (f"deepsec process exited {process_result.exit_code if process_result else None} "
+                                       "and left no file record, and its output does not carry the statement DeepSec "
+                                       "prints when a diff selects no file, so an empty review cannot be told from a "
+                                       f"run that read nothing; stderr: {tail('process')}")[:2000]}, **base)
         return NativeOutcome(status="success", exit_code=exit_code, claims=imported.claims, **base)
