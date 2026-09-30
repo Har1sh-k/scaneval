@@ -1615,11 +1615,14 @@ def _validate_evaluation_schedule(document: dict[str, Any]) -> None:
     under every system for every repetition, each named by the invocation id its bundle carries
     (``<input>__<system>__r<n>``, the one format :func:`scaneval.execution.invocation_id` writes), so
     a schedule cannot leave out the assignment that later failed. A full input names its snapshot
-    and no change set; a PR input names its change set. A blinded input names the map it is
-    transformed with, and no other input names one. A pair joins a target planned on one full-scan
-    input with a fixed-target control of that target planned on a different full-scan input of the
-    same profile, and pairs repetitions this schedule declares. Nothing here reads a pack, an
-    export, or a result.
+    and no change set; a PR input names its change set and carries the frozen identity of it, the
+    change set block, which names that same change set and ends at the input's own snapshot, since
+    a PR review reads the head. A frozen plan states a ``pr_scope`` for every item of a PR input and
+    for no item of a full one, which is what freezing the eligibility before execution means. A
+    blinded input names the map it is transformed with, and no other input names one. A pair joins a
+    target planned on one full-scan input with a fixed-target control of that target planned on a
+    different full-scan input of the same profile, and pairs repetitions this schedule declares; no
+    pair of PR inputs is defined. Nothing here reads a pack, an export, or a result.
     """
     inputs = {item["input_id"]: item for item in document["inputs"]}
     _unique([item["input_id"] for item in document["inputs"]], "inputs.input_id")
@@ -1632,8 +1635,23 @@ def _validate_evaluation_schedule(document: dict[str, Any]) -> None:
             raise ContractError(f"{label}: a full input names a snapshot_id and no change set")
         if item["mode"] == "pr" and item["change_set_id"] is None:
             raise ContractError(f"{label}: a pr input names its change_set_id")
+        if item["mode"] == "pr":
+            change_set = item["change_set"]
+            if change_set is None:
+                raise ContractError(f"{label}: a pr input carries the frozen identity of its change set")
+            if (change_set["change_set_id"] != item["change_set_id"]
+                    or change_set["head_snapshot_id"] != item["snapshot_id"]):
+                raise ContractError(f"{label}: its change set block must be the change set it names, ending "
+                                    "at the snapshot the input reads, which is the head")
         if (item["profile"] == "metadata_blinded") != (item["blinding"] is not None):
             raise ContractError(f"{label}: a blinding map is named exactly when the profile is metadata_blinded")
+        if item["plan"]["state"] == "frozen":
+            scoped = [entry for entry in item["plan"]["targets"] + item["plan"]["controls"] if "pr_scope" in entry]
+            everything = len(item["plan"]["targets"]) + len(item["plan"]["controls"])
+            if item["mode"] == "pr" and len(scoped) != everything:
+                raise ContractError(f"{label}: every item of a frozen pr plan states its pr_scope")
+            if item["mode"] == "full" and scoped:
+                raise ContractError(f"{label}: only a pr input's frozen plan carries pr_scope")
     repetitions = document["repetitions"]
     expected = {f"{input_id}__{system['system_id']}__r{repetition}": (input_id, system["system_id"], repetition)
                 for input_id in inputs for system in document["systems"]

@@ -230,12 +230,15 @@ def test_a_narrowed_run_schedules_only_what_it_covers_and_says_so(tmp_path):
                for note in schedule["notes"])
 
 
-def test_an_input_this_build_cannot_prepare_is_refused_rather_than_scheduled(tmp_path):
+def test_an_input_the_pack_does_not_declare_is_refused_rather_than_scheduled(tmp_path):
+    """Renamed and changed deliberately: a native PR input is scheduled now, so what is refused is
+    a change set, like a snapshot, that the pack does not declare."""
     pack = two_snapshot_pack(tmp_path)
 
     with pytest.raises(ContractError, match="unknown snapshot 'widget-zzz'"):
         build_schedule(config(inputs=[{"snapshot_id": "widget-zzz"}]), pack, base_dir=tmp_path, created_at=CREATED_AT)
-    with pytest.raises(ContractError, match="native PR input"):
+    with pytest.raises(ContractError, match="unknown change set 'cs-1' in pack org.example/schedule; the pack "
+                                            "declares: none"):
         build_schedule(config(inputs=[{"mode": "pr", "change_set_id": "cs-1"}]), pack, base_dir=tmp_path, created_at=CREATED_AT)
 
 
@@ -311,7 +314,17 @@ def test_a_pair_joins_two_full_scans_of_one_profile_and_nothing_else(tmp_path):
 
     reviewed = deepcopy(schedule)
     for row in reviewed["inputs"]:
-        row.update(mode="pr", change_set_id=f"cs-{row['input_id']}")
+        # Changed deliberately: a PR input now carries its change set block and a scope on every
+        # planned item, so these rows are made whole PR inputs, frozen plans included. That keeps
+        # what the assertions below are about: the builder skips them because they are PR inputs,
+        # not because they lack a plan, and the contract still refuses to pair them.
+        row.update(mode="pr", change_set_id=f"cs-{row['input_id']}",
+                   change_set={"change_set_id": f"cs-{row['input_id']}", "base_snapshot_id": "widget-base",
+                               "head_snapshot_id": row["snapshot_id"], "boundary": "introducing",
+                               "review_scope": "changed_files"})
+        for item in row["plan"]["targets"] + row["plan"]["controls"]:
+            item["pr_scope"] = {"relation": "introduced", "code_scope": "changed"}
+    assert all(row["plan"]["state"] == "frozen" for row in reviewed["inputs"])
     assert _pairs(reviewed["inputs"], schedule["repetitions"]) == [], "the builder pairs no PR inputs"
     with pytest.raises(ContractError, match="two full-scan inputs"):
         validate_document("evaluation-schedule", reviewed)
@@ -334,3 +347,161 @@ def test_the_contract_ties_a_blinding_identity_to_the_blinded_profile(tmp_path):
     unnamed["inputs"][0]["profile"] = "metadata_blinded"
     with pytest.raises(ContractError, match="exactly when the profile is metadata_blinded"):
         validate_document("evaluation-schedule", unnamed)
+
+
+# --- native PR inputs: the change set and the eligibility are frozen before anything is exported ----
+
+BASE_HASH = "sha256:" + "a" * 64
+BASE_SNAPSHOT = {**SNAPSHOT, "snapshot_id": "widget-base", "commit": "1" * 40, "role": "ordinary",
+                 "reference": "the commit the pull request branched from"}
+BASE_SOURCE = "import subprocess\ndef run(cmd):\n    return subprocess.run(cmd)\n"
+
+
+def pr_pack(tmp_path: Path, *, declare_base: bool = True) -> dict:
+    """The two-snapshot pack plus a base snapshot and a change set from it to the vulnerable head.
+
+    The target is on the head and eligible under ``cs-shell``; the fixed-target control is on
+    another snapshot, so the contract cannot make it eligible and the frozen plan carries no control.
+    """
+    pack = two_snapshot_pack(tmp_path)
+    cases.add_snapshot(pack, BASE_SNAPSHOT)
+    if declare_base:
+        cases.mechanical_checks(pack, "widget-base", export(tmp_path, "base", BASE_SOURCE), BASE_HASH, clock=CLOCK)
+    cases.add_change_set(pack, {"change_set_id": "cs-shell", "base_snapshot_id": "widget-base",
+                                "head_snapshot_id": "widget-abc", "boundary": "introducing",
+                                "review_scope": "changed_files", "description": "adds the shell sink",
+                                "reference": "acme/widget#7"})
+    cases.set_pr_eligibility(pack, "widget-shell", "cs-shell", "introduced", "changed")
+    return pack
+
+
+def pr_config(**changes) -> dict:
+    return config(inputs=[{"mode": "pr", "change_set_id": "cs-shell"}], **changes)
+
+
+def test_a_pr_input_is_scheduled_as_the_review_of_its_change_set_with_the_eligibility_frozen(tmp_path):
+    pack = pr_pack(tmp_path)
+
+    schedule = build_schedule(pr_config(), pack, base_dir=tmp_path, created_at=CREATED_AT)
+
+    assert validate_document("evaluation-schedule", schedule) is schedule
+    [row] = schedule["inputs"]
+    assert (row["input_id"], row["mode"], row["profile"]) == ("cs-shell", "pr", "standard")
+    assert row["snapshot_id"] == "widget-abc" and row["change_set_id"] == "cs-shell"
+    assert row["change_set"] == {"change_set_id": "cs-shell", "base_snapshot_id": "widget-base",
+                                 "head_snapshot_id": "widget-abc", "boundary": "introducing",
+                                 "review_scope": "changed_files"}, "the reference and description stay in the pack"
+    assert row["declared_tree_hash"] == HASH and row["project"] == "acme/widget"
+    plan = row["plan"]
+    assert plan["state"] == "frozen" and plan["scope"] == "draft"
+    assert plan["review_budgets"] == [5, 10, 20], "a PR review is budgeted by the pack's pr budgets"
+    assert plan["targets"] == [{
+        "target_id": "T-widget-shell", "case_id": "widget-shell", "canonical_id": "T-widget-shell",
+        "kind": "command_injection", "variant_family": "shell-interpolation",
+        "workload": "conventional_application", "component_role": "application", "project": "acme/widget",
+        "validation_level": "L1", "pr_scope": {"relation": "introduced", "code_scope": "changed"}}]
+    assert plan["controls"] == [], "the fixed control is on another snapshot, so it is outside the review"
+    assert plan["notes"] == [], "every item of the head snapshot is eligible, so nothing is named as outside"
+    assert [a["assignment_id"] for a in schedule["assignments"]] == [
+        "cs-shell__sys-a__r1", "cs-shell__sys-a__r2", "cs-shell__sys-b__r1", "cs-shell__sys-b__r2"]
+    assert schedule["pairs"] == [], "no pair of PR inputs is defined"
+    assert any(note.startswith("A PR input's plan is frozen from the eligibility the pack states") for note in
+               schedule["notes"])
+
+
+def test_the_pr_eligibility_frozen_before_a_run_is_the_pack_as_supplied_and_byte_stable(tmp_path):
+    pack = pr_pack(tmp_path)
+
+    first = build_schedule(pr_config(), pack, base_dir=tmp_path, created_at=CREATED_AT)
+    second = build_schedule(deepcopy(pr_config()), deepcopy(pack), base_dir=tmp_path, created_at=CREATED_AT)
+    assert canonical_json(first) == canonical_json(second)
+
+    # Widening the eligibility in the pack is a different schedule; nothing the run finds later can be.
+    widened = deepcopy(pack)
+    cases.set_pr_eligibility(widened, "widget-shell", "cs-shell", "affected", "context")
+    other = build_schedule(pr_config(), widened, base_dir=tmp_path, created_at=CREATED_AT)
+    assert other["inputs"][0]["plan"]["targets"][0]["pr_scope"] == {"relation": "affected", "code_scope": "context"}
+    assert other["pack"]["sha256"] != first["pack"]["sha256"]
+
+
+def test_a_pr_plan_is_unavailable_until_both_snapshots_declare_their_exports(tmp_path):
+    pack = pr_pack(tmp_path, declare_base=False)
+
+    [row] = build_schedule(pr_config(), pack, base_dir=tmp_path, created_at=CREATED_AT)["inputs"]
+
+    assert row["plan"]["state"] == "unavailable"
+    assert row["plan"]["reason"].startswith(
+        "snapshot widget-base declares no tree hash, so no PR plan binds to the exports of its change set")
+    assert row["declared_tree_hash"] == HASH and row["change_set"]["change_set_id"] == "cs-shell"
+    schedule = build_schedule(pr_config(), pack, base_dir=tmp_path, created_at=CREATED_AT)
+    assert any("planned from the checked pack when its invocations run" in note for note in schedule["notes"])
+
+
+def test_a_pr_input_of_an_undeclared_change_set_is_refused_and_a_narrowed_run_schedules_only_what_it_covers(tmp_path):
+    pack = pr_pack(tmp_path)
+    document = config(inputs=[{"snapshot_id": "widget-abc"}, {"mode": "pr", "change_set_id": "cs-shell"}])
+
+    with pytest.raises(ContractError, match="unknown change set 'cs-missing'"):
+        build_schedule(config(inputs=[{"mode": "pr", "change_set_id": "cs-missing"}]), pack,
+                       base_dir=tmp_path, created_at=CREATED_AT)
+    narrowed = build_schedule(document, pack, base_dir=tmp_path, created_at=CREATED_AT,
+                              inputs=[document["inputs"][1]])
+    assert [row["input_id"] for row in narrowed["inputs"]] == ["cs-shell"]
+    assert any("1 configured input(s) and 0 configured system(s) are not scheduled" in n for n in narrowed["notes"])
+
+
+def test_a_pr_input_never_takes_part_in_a_vulnerable_fixed_pair(tmp_path):
+    pack = pr_pack(tmp_path)
+    document = config(inputs=[{"snapshot_id": "widget-abc"}, {"snapshot_id": "widget-fixed"},
+                              {"mode": "pr", "change_set_id": "cs-shell"}])
+
+    schedule = build_schedule(document, pack, base_dir=tmp_path, created_at=CREATED_AT)
+
+    assert [(pair["vulnerable_input_id"], pair["fixed_input_id"]) for pair in schedule["pairs"]] == [
+        ("widget-abc", "widget-fixed")]
+    assert [row["input_id"] for row in schedule["inputs"]] == ["widget-abc", "widget-fixed", "cs-shell"]
+    assert schedule["inputs"][0]["change_set"] is None and "pr_scope" not in schedule["inputs"][0]["plan"]["targets"][0]
+
+
+def test_a_blinded_pr_input_is_scheduled_under_its_own_id_with_the_identity_of_its_map(tmp_path):
+    pack = pr_pack(tmp_path)
+    document = blinding_map()
+    (tmp_path / "widget-map.json").write_text(canonical_json(document) + "\n", encoding="utf-8")
+    inputs = [{"mode": "pr", "change_set_id": "cs-shell", "profile": "metadata_blinded",
+               "blinding_map": "widget-map.json"}]
+
+    [row] = build_schedule(config(inputs=inputs), pack, base_dir=tmp_path, created_at=CREATED_AT)["inputs"]
+
+    assert (row["input_id"], row["profile"], row["blinding"]) == (
+        "cs-shell.blinded", "metadata_blinded", blinding.map_identity(document))
+    assert row["mode"] == "pr" and row["change_set_id"] == "cs-shell"
+
+
+def test_the_contract_ties_a_pr_input_to_its_change_set_and_to_a_scope_on_every_item(tmp_path):
+    schedule = build_schedule(pr_config(), pr_pack(tmp_path), base_dir=tmp_path, created_at=CREATED_AT)
+    assert validate_document("evaluation-schedule", schedule) is schedule
+
+    bare = deepcopy(schedule)
+    bare["inputs"][0]["change_set"] = None
+    with pytest.raises(ContractError, match="a pr input carries the frozen identity of its change set"):
+        validate_document("evaluation-schedule", bare)
+    other_set = deepcopy(schedule)
+    other_set["inputs"][0]["change_set"]["change_set_id"] = "cs-other"
+    with pytest.raises(ContractError, match="the change set it names, ending at the snapshot the input reads"):
+        validate_document("evaluation-schedule", other_set)
+    not_the_head = deepcopy(schedule)
+    not_the_head["inputs"][0]["change_set"]["head_snapshot_id"] = "widget-base"
+    with pytest.raises(ContractError, match="ending at the snapshot the input reads"):
+        validate_document("evaluation-schedule", not_the_head)
+    unscoped = deepcopy(schedule)
+    del unscoped["inputs"][0]["plan"]["targets"][0]["pr_scope"]
+    with pytest.raises(ContractError, match="every item of a frozen pr plan states its pr_scope"):
+        validate_document("evaluation-schedule", unscoped)
+    stray = build_schedule(config(), two_snapshot_pack(tmp_path / "again"), base_dir=tmp_path, created_at=CREATED_AT)
+    stray["inputs"][0]["plan"]["targets"][0]["pr_scope"] = {"relation": "introduced", "code_scope": "changed"}
+    with pytest.raises(ContractError, match="only a pr input's frozen plan carries pr_scope"):
+        validate_document("evaluation-schedule", stray)
+    loose = deepcopy(schedule)
+    loose["inputs"][0]["change_set"]["extra"] = "field"
+    with pytest.raises(ContractError, match="extra"):
+        validate_document("evaluation-schedule", loose)

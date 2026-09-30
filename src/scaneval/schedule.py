@@ -9,7 +9,11 @@ to do. The schedule names:
   assignment stays in every denominator rather than dropping out of it;
 - for each input, the plan the pack gives it before execution: the targets and controls it
   carries, their canonical ids and validation levels, and the scope and review budgets, when the
-  snapshot declares the tree hash a plan binds to;
+  snapshot declares the tree hash a plan binds to. For a native PR input that plan is what the
+  pack's eligibility for its change set selects, and each item carries the ``pr_scope`` it was
+  given, which is what freezing the eligibility before execution means: which items a PR review
+  scores is settled here, from the two tree hashes the change set's snapshots declare, and not by
+  what the run then finds. The change set itself is recorded as the pack declared it;
 - the vulnerable/fixed observation pairs, matched in advance: a target planned on one full-scan
   input with a fixed-target control of that target planned on another full-scan input of the same
   profile, each repetition paired with the same repetition, so a pair is never chosen after its
@@ -49,7 +53,8 @@ def _planned_targets(pack: dict, plan: dict, project: str) -> list[dict]:
                      "canonical_id": cases.target_canonical_id(case), "kind": target["kind"],
                      "variant_family": case["canonical_target"]["variant_family"],
                      "workload": case["workload"], "component_role": case["component_role"],
-                     "project": project, "validation_level": target["validation_level"]})
+                     "project": project, "validation_level": target["validation_level"],
+                     **({"pr_scope": target["pr_scope"]} if "pr_scope" in target else {})})
     return rows
 
 
@@ -63,7 +68,8 @@ def _planned_controls(pack: dict, plan: dict) -> list[dict]:
         rows.append({"control_id": planned["control_id"], "case_id": case["case_id"],
                      "canonical_id": cases.control_canonical_id(control), "type": planned["type"],
                      "target_id": planned.get("target_id"),
-                     "validation_level": planned["validation_level"]})
+                     "validation_level": planned["validation_level"],
+                     **({"pr_scope": planned["pr_scope"]} if "pr_scope" in planned else {})})
     return rows
 
 
@@ -91,20 +97,53 @@ def _frozen_plan(pack: dict, snapshot: dict, mode: str) -> dict:
             "controls": _planned_controls(pack, plan), "notes": notes}
 
 
+def _frozen_pr_plan(pack: dict, change_set: dict, base: dict, head: dict) -> dict:
+    """The plan the pack gives one PR input before execution, or why it gives none.
+
+    A PR plan binds to both exports of its change set, so it is frozen only when both snapshots
+    already declare the tree hash their export will have; either one declaring none is planned for
+    the first time once this run has exported and checked it, which is after the schedule is frozen.
+    What is frozen is which items the change set's eligibility selects and at what level and scope,
+    and never the diff, which does not exist until the two trees do. A refusal from
+    :func:`scaneval.cases.plan_pr_scope` is recorded with its own message rather than raised, as it
+    is for a full input.
+    """
+    missing = [snapshot["snapshot_id"] for snapshot in (base, head) if not snapshot.get("tree_hash")]
+    if missing:
+        return {"state": "unavailable",
+                "reason": (f"snapshot {', '.join(missing)} declares no tree hash, so no PR plan binds to "
+                           "the exports of its change set before this run exports and checks them")}
+    try:
+        planned = cases.plan_pr_scope(pack, change_set["change_set_id"], head["tree_hash"])
+    except ContractError as exc:
+        return {"state": "unavailable", "reason": f"the pack does not plan this input: {exc}"}
+    return {"state": "frozen", "scope": planned["scope"], "review_budgets": planned["review_budgets"],
+            "targets": _planned_targets(pack, planned, head["repository"]["name"]),
+            "controls": _planned_controls(pack, planned), "notes": planned["notes"]}
+
+
 def _input_row(entry: dict, pack: dict, base_dir: Path, maps: dict[str, dict]) -> dict:
     """One configured input as the schedule records it.
 
     A metadata-blinded input records the identity of its map: the document in *maps* under its
     input id when the caller loaded it already, which is what makes the schedule name the map the
     run actually applies, and otherwise the map its entry names under *base_dir*. A native PR input
-    is refused here as the runner refuses it, rather than scheduled as something it is not.
+    is scheduled as the review of a change set the pack declares: its row is about the change set's
+    head snapshot, carries the change set as the pack declared it, and freezes the plan the pack's
+    eligibility gives it; a change set the pack does not declare is refused, as an undeclared
+    snapshot is.
     """
     input_id = input_identity(entry)
     mode = entry.get("mode", "full")
     profile = entry.get("profile", "standard")
-    if mode != "full":
-        raise ContractError(f"input {input_id} is a native PR input, which this build cannot schedule")
-    snapshot = cases.snapshot_by_id(pack, entry["snapshot_id"])
+    change_set = None
+    if mode == "pr":
+        declared = cases.change_set_by_id(pack, entry["change_set_id"])
+        change_set = {key: declared[key] for key in ("change_set_id", "base_snapshot_id", "head_snapshot_id",
+                                                     "boundary", "review_scope")}
+        snapshot = cases.snapshot_by_id(pack, declared["head_snapshot_id"])
+    else:
+        snapshot = cases.snapshot_by_id(pack, entry["snapshot_id"])
     identity = None
     if profile == "metadata_blinded":
         document = maps.get(input_id)
@@ -113,12 +152,15 @@ def _input_row(entry: dict, pack: dict, base_dir: Path, maps: dict[str, dict]) -
                 raise ContractError(f"input {input_id} is metadata_blinded but names no blinding map")
             document = blinding.load_map(base_dir / entry["blinding_map"])
         identity = blinding.map_identity(document)
+    plan = (_frozen_pr_plan(pack, change_set, cases.snapshot_by_id(pack, change_set["base_snapshot_id"]), snapshot)
+            if change_set is not None else _frozen_plan(pack, snapshot, mode))
     return {"input_id": input_id, "mode": mode, "profile": profile,
-            "snapshot_id": snapshot["snapshot_id"], "change_set_id": None, "change_set": None,
+            "snapshot_id": snapshot["snapshot_id"],
+            "change_set_id": change_set["change_set_id"] if change_set is not None else None,
+            "change_set": change_set,
             "blinding": identity, "project": snapshot["repository"]["name"],
             "workload": snapshot["workload"], "component_role": snapshot["component_role"],
-            "declared_tree_hash": snapshot.get("tree_hash"),
-            "plan": _frozen_plan(pack, snapshot, mode)}
+            "declared_tree_hash": snapshot.get("tree_hash"), "plan": plan}
 
 
 def _system_row(entry: dict, default_policy: str) -> dict:
@@ -180,9 +222,9 @@ def build_schedule(config: dict, pack: dict, *, base_dir: Path, created_at: str,
     says in its notes what it left out. Inputs and systems keep configuration order, and
     assignments and pairs are sorted, so identical arguments give an identical document.
 
-    An input whose snapshot the pack does not declare, and a blinded input whose map cannot be
-    loaded, are refused, as the runner refuses them before anything is written. Nothing here
-    creates a file.
+    An input whose snapshot the pack does not declare, a PR input whose change set it does not
+    declare, and a blinded input whose map cannot be loaded, are refused, as the runner refuses
+    them before anything is written. Nothing here creates a file.
     """
     selected_inputs = list(config["inputs"] if inputs is None else inputs)
     selected_systems = list(config["systems"] if systems is None else systems)
@@ -199,6 +241,12 @@ def build_schedule(config: dict, pack: dict, *, base_dir: Path, created_at: str,
     if any(row["plan"]["state"] == "unavailable" for row in rows):
         notes.append("An input whose plan is unavailable here is planned from the checked pack when "
                      "its invocations run; that plan was not pre-registered in this schedule.")
+    if any(row["mode"] == "pr" for row in rows):
+        notes.append("A PR input's plan is frozen from the eligibility the pack states for its change set, "
+                     "each planned item carrying its pr_scope. The base and head trees a scanner is handed "
+                     "and the diff between them are known only once the run has exported both, so they are "
+                     "recorded with each invocation and not here; no vulnerable/fixed pair of PR inputs is "
+                     "defined.")
     if any(row["blinding"] is not None for row in rows):
         notes.append("A blinded input names the map it is transformed with. Whether that map is approved and "
                      "fits the export is asked when the input is prepared; a refusal is that input's "

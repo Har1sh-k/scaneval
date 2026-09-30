@@ -141,6 +141,30 @@
         }
       }
     },
+    "pr_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relation",
+        "code_scope"
+      ],
+      "description": "How an item relates to the change of a PR input, as the pack states it for that change set. Frozen with the plan, so which items a PR review scores is settled before it runs.",
+      "properties": {
+        "relation": {
+          "enum": [
+            "introduced",
+            "affected",
+            "repaired"
+          ]
+        },
+        "code_scope": {
+          "enum": [
+            "changed",
+            "context"
+          ]
+        }
+      }
+    },
     "planned_target": {
       "type": "object",
       "additionalProperties": false,
@@ -197,6 +221,9 @@
         },
         "validation_level": {
           "$ref": "#/$defs/validation_level"
+        },
+        "pr_scope": {
+          "$ref": "#/$defs/pr_scope"
         }
       }
     },
@@ -240,6 +267,9 @@
         },
         "validation_level": {
           "$ref": "#/$defs/validation_level"
+        },
+        "pr_scope": {
+          "$ref": "#/$defs/pr_scope"
         }
       }
     },
@@ -254,7 +284,7 @@
         "controls",
         "notes"
       ],
-      "description": "The plan the pack gave this input before execution, from the tree hash its snapshot declares.",
+      "description": "The plan the pack gave this input before execution, from the tree hash its snapshot declares, or for a PR input from the tree hashes of both snapshots of its change set.",
       "properties": {
         "state": {
           "const": "frozen"
@@ -366,7 +396,42 @@
             "object",
             "null"
           ],
-          "description": "The frozen identity of a PR input's change set; null for a full input."
+          "additionalProperties": false,
+          "required": [
+            "change_set_id",
+            "base_snapshot_id",
+            "head_snapshot_id",
+            "boundary",
+            "review_scope"
+          ],
+          "description": "The frozen identity of a PR input's change set: the boundary the pack declared for it, as it stood before this run. Null for a full input.",
+          "properties": {
+            "change_set_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "base_snapshot_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "head_snapshot_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "boundary": {
+              "enum": [
+                "introducing",
+                "repair",
+                "ordinary"
+              ]
+            },
+            "review_scope": {
+              "enum": [
+                "changed_files",
+                "change_affected_flow"
+              ]
+            }
+          }
         },
         "blinding": {
           "oneOf": [
