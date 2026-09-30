@@ -1127,11 +1127,10 @@ These are limits of the current implementation, not guarantees about your enviro
 
 - **No Jev intake assistance.** There is no Jev code in `src/`. No command suggests
   classifications, evidence gaps, duplicates, or fix candidates. Drafting and review are manual.
-- **Native PR review runs one adapter so far.** A PR input is prepared, scheduled, planned, and
-  invoked, but only `llm-harness` declares `pr`. Semgrep's baseline mode and DeepSec's diff mode are
-  added separately; until then a PR input given to either is recorded `unsupported`, and a full scan
-  of the head never stands in for it. Every PR run starts from a fresh state: a prepared-state run is
-  not implemented, and no vulnerable/fixed pair of PR inputs is defined.
+- **Native PR review is fresh-state only.** `llm-harness`, `semgrep`, and `deepsec` each review a
+  PR input with their own diff workflow; an adapter without a PR mode is recorded `unsupported`, and a
+  full scan of the head never stands in for it. Every PR run starts from a fresh state: a
+  prepared-state run is not implemented, and no vulnerable/fixed pair of PR inputs is defined.
 - **No corpus aggregation or cross-pack weighting.** The runner produces single-invocation numbers
   only. Nothing combines inputs, systems, repetitions, or packs, and nothing weights families or
   computes repeated-run uncertainty. Private and public results are separate because nothing
