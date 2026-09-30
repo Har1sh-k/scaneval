@@ -53,6 +53,7 @@ from .contracts import (
     load_document,
     validate_document,
 )
+from .precision import GRADES
 
 
 POLICY_KIND = "gate-policy"
@@ -66,6 +67,9 @@ SIDES = ("baseline", "candidate")
 WHOLE_VIEW = {"dimension": "all"}
 # Evidence scopes, strongest first: a requirement for one scope is met by any scope before it.
 SCOPE_RANK = {"reviewed": 2, "draft": 1, "diagnostic": 0}
+# Review grades of a precision estimate, strongest first: a requirement for one grade is met by any
+# grade before it, and an incomplete review meets none.
+GRADE_RANK = {grade: len(GRADES) - index for index, grade in enumerate(GRADES)}
 # What a paired interval's state means for a requirement that needs one; only "ok" carries bounds.
 INTERVAL_STATES = {
     "insufficient_clusters": "too few clusters carry the metric to resample it",
@@ -165,8 +169,16 @@ class _Context:
         self.regressions = {entry["id"]: entry for entry in policy.get("regressions", [])}
 
     def missing_view(self) -> str | None:
-        """Why nothing can be read from the policy's view, or ``None`` when the comparison has it."""
-        return None if self.view is not None else f"the comparison has no {self.view_name} view"
+        """Why nothing can be read from the policy's view, or ``None`` when the comparison has it whole.
+
+        A view is usable when it exists and both systems and the differences carry the whole-view
+        slice every metric outside a named slice reads.
+        """
+        if self.view is None:
+            return f"the comparison has no {self.view_name} view"
+        if ("all", None) not in self.differences or any(("all", None) not in self.slices[side] for side in SIDES):
+            return f"the comparison's {self.view_name} view has no whole-view slice"
+        return None
 
 
 def _reading(ctx: _Context, metric: dict, weighting: str, dimension: str,
@@ -206,7 +218,8 @@ def _reading(ctx: _Context, metric: dict, weighting: str, dimension: str,
         paired = next((row for row in changed["recall_at_budget"] if row["budget"] == budget), None)
         if paired is None or None in rows.values():
             reported = [str(row["budget"]) for row in blocks["baseline"]["recall_at_budget"]]
-            return None, f"the comparison reports no recall@{budget} for {where} (its budgets are {', '.join(reported)})"
+            return None, (f"the comparison reports no recall@{budget} for {where} "
+                          f"(its budgets are {', '.join(reported)})")
         unmeasured = [ctx.names[side] for side in SIDES if rows[side]["value"] is None]
         if unmeasured:
             return None, (f"recall@{budget} cannot be measured for {', '.join(unmeasured)}: its output is "
@@ -476,6 +489,213 @@ def _regression(ctx: _Context, entry: dict) -> Result:
             f"{what} fell by at most {_n(max(worst, 0))} across {len(rows)} slice(s), within the allowed {_n(limit)}")
 
 
+# --- reviewed precision -------------------------------------------------------------------------
+
+
+def _population_text(population: dict) -> str:
+    return "the full population" if population["name"] == "full" else f"the first-{population['budget']} population"
+
+
+def _binding_problems(ctx: _Context, side: str) -> list[str]:
+    """Why the estimate supplied for one system is not evidence about it in this comparison, if it is not.
+
+    An estimate binds when it names only that system, the policy's view and declared population, and
+    runs of this comparison: every run it rests on must be one the comparison read, with the same
+    manifest and schedule digests, and every run of the comparison in which the system was scheduled
+    must be among them, so it describes the compared workload and none other. This compares the
+    documents' records; it cannot show the claims a person reviewed came from those runs.
+    """
+    estimate = ctx.estimates[side]
+    system = ctx.names[side]
+    if estimate is None:
+        return [f"no precision estimate was supplied for the {side} {system}"]
+    population = estimate["population"]
+    problems = []
+    if population["systems"] != [system]:
+        problems.append(f"the estimate covers {', '.join(population['systems'])}, not only the {side} {system}")
+    wanted = ctx.policy["view"]
+    if (population["mode"], population["profile"]) != (wanted["mode"], wanted["profile"]):
+        problems.append(f"the estimate is over {population['mode']}/{population['profile']} inputs, not "
+                        f"{ctx.view_name}")
+    declared = ctx.policy["precision"]["population"]
+    if (population["name"], population["budget"]) != (declared["name"], declared.get("budget")):
+        problems.append(f"the estimate is over {_population_text(population)}, but the policy declares "
+                        f"{_population_text({'name': declared['name'], 'budget': declared.get('budget')})}")
+    compared = {run["run_id"]: run for run in ctx.comparison["runs"]}
+    for run in estimate["runs"]:
+        known = compared.get(run["run_id"])
+        if known is None:
+            problems.append(f"the estimate rests on run {run['run_id']}, which the comparison does not include")
+        elif (run["manifest_sha256"], run["schedule_sha256"]) != (known["manifest_sha256"], known["schedule_sha256"]):
+            problems.append(f"the estimate's record of run {run['run_id']} is not the comparison's (its manifest or "
+                            "schedule digest differs)")
+    named = {run["run_id"] for run in estimate["runs"]}
+    for run_id in ctx.comparison[side]["runs"]:
+        if run_id not in named:
+            problems.append(f"the {side}'s run {run_id} is not among the estimate's runs")
+    return problems
+
+
+def _figure(estimate: dict, basis: str) -> float | None:
+    """The figure a policy bounds: resolved precision, or the sensitivity lower bound."""
+    return estimate["precision_resolved"] if basis == "resolved" else estimate["sensitivity"]["lower"]
+
+
+def _figure_text(basis: str) -> str:
+    return "resolved precision" if basis == "resolved" else "the sensitivity lower bound of precision"
+
+
+def _bound_candidate(ctx: _Context) -> tuple[dict | None, str | None]:
+    """The candidate's estimate when it binds to this comparison, else ``None`` and why it does not."""
+    problems = _binding_problems(ctx, "candidate")
+    return (None, "; ".join(problems)) if problems else (ctx.estimates["candidate"], None)
+
+
+def _precision_binding(ctx: _Context) -> Result:
+    rule = ctx.policy["precision"]
+    threshold = {"systems": [ctx.names["candidate"]], "mode": ctx.policy["view"]["mode"],
+                 "profile": ctx.policy["view"]["profile"], "population": rule["population"],
+                 "runs": list(ctx.comparison["candidate"]["runs"])}
+    estimate = ctx.estimates["candidate"]
+    problems = _binding_problems(ctx, "candidate")
+    if problems:
+        observed = None if estimate is None else {
+            "systems": estimate["population"]["systems"], "mode": estimate["population"]["mode"],
+            "profile": estimate["population"]["profile"],
+            "population": {"name": estimate["population"]["name"], "budget": estimate["population"]["budget"]},
+            "runs": [run["run_id"] for run in estimate["runs"]]}
+        return (INCONCLUSIVE, observed, threshold,
+                f"the candidate's precision estimate is missing or not bound to this comparison: {'; '.join(problems)}")
+    population = estimate["population"]
+    return (PASS, {"systems": population["systems"], "mode": population["mode"], "profile": population["profile"],
+                   "population": {"name": population["name"], "budget": population["budget"]},
+                   "runs": [run["run_id"] for run in estimate["runs"]]}, threshold,
+            f"the estimate covers only the candidate {ctx.names['candidate']}, over {_population_text(population)} of "
+            f"{ctx.view_name} inputs, and rests on run(s) {', '.join(run['run_id'] for run in estimate['runs'])} "
+            "of this comparison")
+
+
+def _precision_min_value(ctx: _Context) -> Result:
+    rule = ctx.policy["precision"]
+    threshold = {"basis": rule["basis"], "min_value": rule["min_value"]}
+    estimate, problem = _bound_candidate(ctx)
+    if estimate is None:
+        return _open(f"the candidate's precision is not established: {problem}", threshold)
+    value = _figure(estimate, rule["basis"])
+    label = _figure_text(rule["basis"])
+    observed = {"value": value, "precision_resolved": estimate["precision_resolved"],
+                "sensitivity": estimate["sensitivity"]}
+    if value is None:
+        return _open(f"{label} is undefined: no sampled claim was judged" +
+                     (" true or false" if rule["basis"] == "resolved" else ""), threshold, observed)
+    text = f"{label} is {_n(value)}"
+    if value >= rule["min_value"]:
+        return PASS, observed, threshold, f"{text}, at least the required {_n(rule['min_value'])}"
+    return FAIL, observed, threshold, f"{text}, below the required {_n(rule['min_value'])}"
+
+
+def _precision_unresolved_share(ctx: _Context) -> Result:
+    rule = ctx.policy["precision"]
+    threshold = {"max_unresolved_share": rule["max_unresolved_share"]}
+    estimate, problem = _bound_candidate(ctx)
+    if estimate is None:
+        return _open(f"the candidate's unresolved share is not established: {problem}", threshold)
+    share = estimate["unresolved_share"]
+    observed = {"unresolved_share": share, "classes": estimate["sample"]["classes"],
+                "bases": estimate["sample"]["bases"]}
+    if share is None:
+        return _open("the unresolved share is undefined: no sampled claim was judged", threshold, observed)
+    if share <= rule["max_unresolved_share"]:
+        return (PASS, observed, threshold,
+                f"the unresolved share is {_n(share)}, within the allowed {_n(rule['max_unresolved_share'])}")
+    return _open(f"the unresolved share is {_n(share)}, above the allowed {_n(rule['max_unresolved_share'])}: too "
+                 "much of the review is unresolved for the figures to be trusted, so it is not a finding that "
+                 "the claims are false", threshold, observed)
+
+
+def _precision_grade(ctx: _Context) -> Result:
+    required = ctx.policy["precision"]["min_evidence_grade"]
+    threshold = {"min_evidence_grade": required}
+    estimate, problem = _bound_candidate(ctx)
+    if estimate is None:
+        return _open(f"the candidate's review grade is not established: {problem}", threshold)
+    grade = estimate["evidence_grade"]
+    bases = estimate["sample"]["bases"]
+    observed = {"evidence_grade": grade, "bases": bases}
+    if GRADE_RANK[grade] >= GRADE_RANK[required]:
+        return PASS, observed, threshold, f"the review's evidence grade is {grade}, which meets {required}"
+    if grade == "incomplete":
+        detail = (f"{bases['nonresponse']} sampled claim(s) have no review and {bases['disagreement']} have "
+                  "disagreeing reviews with no adjudication")
+    else:
+        detail = f"{bases['single_review']} sampled claim(s) rest on a single reviewer"
+    return _open(f"the review's evidence grade is {grade}, below the required {required}: {detail}", threshold,
+                 observed)
+
+
+def _precision_coverage(ctx: _Context) -> Result:
+    minimum = ctx.policy["precision"]["min_coverage"]
+    threshold = {"min_coverage": minimum}
+    estimate, problem = _bound_candidate(ctx)
+    if estimate is None:
+        return _open(f"the candidate's coverage is not established: {problem}", threshold)
+    coverage = estimate["coverage"]
+    observed = {"share": coverage["share"], "covered_units": coverage["covered_units"],
+                "population_units": coverage["population_units"], "uncovered_strata": coverage["uncovered_strata"]}
+    text = (f"the sampled strata hold {coverage['covered_units']} of the population's {coverage['population_units']} "
+            f"unit(s), a share of {_n(coverage['share'])}")
+    if coverage["share"] >= minimum:
+        return PASS, observed, threshold, f"{text}, at least the required {_n(minimum)}"
+    return _open(f"{text}, below the required {_n(minimum)}; a stratum that drew no unit is not estimated at all",
+                 threshold, observed)
+
+
+def _precision_interval(ctx: _Context) -> Result:
+    rule = ctx.policy["precision"]
+    bound = rule["min_interval_lower_bound"]
+    threshold = {"min_interval_lower_bound": bound}
+    estimate, problem = _bound_candidate(ctx)
+    if estimate is None:
+        return _open(f"the candidate's precision interval is not established: {problem}", threshold)
+    interval = estimate["interval"]
+    observed = {"interval": {key: interval[key] for key in ("state", "lower", "upper", "confidence")}}
+    if interval["state"] not in ("ok", "census"):
+        return _open(f"the estimate's interval is {interval['state']}, so it carries no bounds", threshold, observed)
+    text = f"the resolved-precision interval {_interval_text(interval)} at {_n(interval['confidence'])} confidence"
+    if interval["lower"] >= bound:
+        return PASS, observed, threshold, f"{text} has its lower bound at or above {_n(bound)}"
+    if interval["upper"] < bound:
+        return FAIL, observed, threshold, f"{text} lies wholly below {_n(bound)}"
+    return (INCONCLUSIVE, observed, threshold,
+            f"{text} reaches below {_n(bound)}, so precision at that level is not established")
+
+
+def _precision_decrease(ctx: _Context) -> Result:
+    rule = ctx.policy["precision"]
+    limit = rule["max_decrease_vs_baseline"]
+    threshold = {"basis": rule["basis"], "max_decrease_vs_baseline": limit}
+    problems = [f"candidate: {item}" for item in _binding_problems(ctx, "candidate")]
+    problems += [f"baseline: {item}" for item in _binding_problems(ctx, "baseline")]
+    if problems:
+        return _open(f"the change in precision is not established: {'; '.join(problems)}", threshold)
+    figures = {side: _figure(ctx.estimates[side], rule["basis"]) for side in SIDES}
+    weak = [side for side in SIDES if GRADE_RANK[ctx.estimates[side]["evidence_grade"]]
+            < GRADE_RANK[rule["min_evidence_grade"]]]
+    label = _figure_text(rule["basis"])
+    if None in figures.values():
+        return _open(f"{label} is undefined for the {', '.join(side for side in SIDES if figures[side] is None)}: no "
+                     "sampled claim was judged", threshold, figures)
+    observed = {**figures, "decrease": figures["baseline"] - figures["candidate"]}
+    if weak:
+        return _open(f"the {' and '.join(weak)} estimate is below the required {rule['min_evidence_grade']} grade, so "
+                     "the change in precision is not established", threshold, observed)
+    text = f"{label} went from {_n(figures['baseline'])} to {_n(figures['candidate'])}"
+    if observed["decrease"] <= limit:
+        return PASS, observed, threshold, f"{text}, a decrease of at most the allowed {_n(limit)}"
+    return (FAIL, observed, threshold,
+            f"{text}, a decrease of {_n(observed['decrease'])}, more than the allowed {_n(limit)}")
+
+
 # --- evaluation ---------------------------------------------------------------------------------
 
 
@@ -486,6 +706,13 @@ _FIXED: dict[str, Callable[[_Context], Result]] = {
     "evidence.scope": _evidence_scope,
     "primary.improvement": _primary_improvement,
     "primary.uncertainty": _primary_uncertainty,
+    "precision.binding": _precision_binding,
+    "precision.min_value": _precision_min_value,
+    "precision.max_unresolved_share": _precision_unresolved_share,
+    "precision.min_evidence_grade": _precision_grade,
+    "precision.min_coverage": _precision_coverage,
+    "precision.interval": _precision_interval,
+    "precision.max_decrease": _precision_decrease,
 }
 
 
@@ -534,6 +761,13 @@ def _notes(ctx: _Context, declared: list[str]) -> list[str]:
     if undeclared:
         notes.append(f"The policy declares no {', '.join(undeclared)} block, so those requirements are not part "
                      "of it and were not evaluated.")
+    supplied = [side for side in SIDES if ctx.estimates[side] is not None]
+    if "precision" not in ctx.policy and supplied:
+        notes.append(f"A precision estimate was supplied for the {' and '.join(supplied)} but the policy declares "
+                     "no precision block, so it is recorded by digest and was not read.")
+    elif "baseline" in supplied and "max_decrease_vs_baseline" not in ctx.policy.get("precision", {}):
+        notes.append("A baseline precision estimate was supplied, but the policy declares no maximum decrease from "
+                     "the baseline, so it is recorded by digest and was not read.")
     comparison = ctx.comparison
     if comparison["evaluator_version"] != __version__:
         notes.append(f"The comparison was computed by evaluator {comparison['evaluator_version']} and this "

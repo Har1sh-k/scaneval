@@ -1363,3 +1363,312 @@ def test_the_decision_states_what_it_is_and_which_blocks_the_policy_left_out(cor
     full = decide(corpus, gate_policy(regressions=[regression("whole-view")]))
     assert "regressions" in full["blocks"]["declared"] and "regressions" not in full["blocks"]["not_declared"]
     assert not any("The comparison also holds view" in note for note in decision["notes"])
+
+
+# --- reviewed precision -----------------------------------------------------------------------------
+
+
+def verdict_for(system: str):
+    """What a fictional reviewer finds: a claim is true only when it is the one that hit a target.
+
+    The baseline and the duplicating system hit T-p1 and T-p2, the improved system T-p1 to T-p8, and the
+    flagging system every target, always with their first claim; every other claim they deliver is false.
+    """
+    hit_inputs = {"baseline": 2, "duplicating": 2, "improved": 8, "flagging": 10}[system]
+
+    def verdict(unit_id: str) -> str:
+        _run, invocation, claim = unit_id.split("/")
+        return "true" if claim == "c1" and int(invocation.split("__")[0][1:]) <= hit_inputs else "false"
+
+    return verdict
+
+
+def review_units(sample: dict, verdict, *, reviewers=(REVIEWER_A, REVIEWER_B), only=None) -> dict | None:
+    """Independent reviews of the sampled units (every unit, or those *only* names), by each reviewer."""
+    reviews = None
+    for entry in sample["selected"]:
+        if only is not None and entry["unit_id"] not in only:
+            continue
+        for reviewer in reviewers:
+            reviews = precision.record_review(sample, reviews, unit_id=entry["unit_id"], reviewer=reviewer,
+                                              role="independent", outcome=verdict(entry["unit_id"]),
+                                              note="fixture review by a fictional reviewer", clock=CLOCK)
+    return reviews
+
+
+def estimate_for(run: Path, system: str, verdict=None, *, budget: int = 5, population: str = "first_b",
+                 size: int | None = None, seed: int = 11, only=None, reviewers=(REVIEWER_A, REVIEWER_B),
+                 stratify_by: str | None = None) -> dict:
+    """The real frame, seeded sample, recorded reviews, and estimate of one system's claims in a run."""
+    frame = precision.build_frame([run], population=population, budget=budget if population == "first_b" else None,
+                                  systems=[system])
+    sample = precision.draw_sample(frame, size=len(frame["units"]) if size is None else size, seed=seed,
+                                   stratify_by=stratify_by)
+    reviews = review_units(sample, verdict or verdict_for(system), reviewers=reviewers, only=only)
+    return precision.estimate(sample, reviews)
+
+
+@pytest.fixture(scope="module")
+def estimates(corpus) -> dict:
+    """Census estimates of the first-5 population of each system whose precision the tests read."""
+    return {name: estimate_for(corpus["run"], name) for name in ("baseline", "improved", "flagging", "duplicating")}
+
+
+def precision_block(**changes) -> dict:
+    block = {"basis": "resolved", "population": {"name": "first_b", "budget": 5}, "min_value": 0.5,
+             "max_unresolved_share": 0.2, "min_evidence_grade": "double_review_or_adjudicated"}
+    block.update(changes)
+    return block
+
+
+def test_the_fixture_estimates_are_the_hand_computed_figures(estimates):
+    """Each scan delivers one claim (the flagging system 12, of which the first five are in the first-5 list).
+
+    improved: 10 units, 8 true, 2 false: 0.8. baseline: 2 true of 10: 0.2. flagging: 5 units per scan, 50 in
+    all, of which each scan's first is true: 10 of 50, 0.2. duplicating: one unit per scan (its 20 copies are
+    one allegation), 2 true of 10: 0.2, at 5 copies inside the first-5 list per unit.
+    """
+    assert (estimates["improved"]["precision_resolved"], estimates["improved"]["totals"]["true"]) == (0.8, 8.0)
+    assert estimates["baseline"]["precision_resolved"] == 0.2
+    assert (estimates["flagging"]["precision_resolved"], estimates["flagging"]["coverage"]["population_units"]) == (0.2, 50)
+    assert estimates["duplicating"]["precision_resolved"] == 0.2
+    assert estimates["duplicating"]["duplicate_burden"]["copies_per_unit"] == 5.0
+    for estimate in estimates.values():
+        assert estimate["evidence_grade"] == "double_review_or_adjudicated" and estimate["unresolved_share"] == 0.0
+
+
+def test_a_genuine_improvement_passes_every_precision_requirement(corpus, estimates):
+    policy = gate_policy(precision=precision_block(min_coverage=0.9, min_interval_lower_bound=0.7,
+                                                   max_decrease_vs_baseline=0.05))
+
+    decision = decide(corpus, policy, precision_baseline=estimates["baseline"],
+                      precision_candidate=estimates["improved"])
+
+    assert decision["outcome"] == "pass", decision["unresolved"] + decision["failed"]
+    assert [item["id"] for item in decision["requirements"] if item["id"].startswith("precision.")] == [
+        "precision.binding", "precision.min_value", "precision.max_unresolved_share",
+        "precision.min_evidence_grade", "precision.min_coverage", "precision.interval", "precision.max_decrease"]
+    assert requirement(decision, "precision.min_value")["explanation"] == (
+        "resolved precision is 0.8, at least the required 0.5")
+    assert requirement(decision, "precision.max_unresolved_share")["explanation"] == (
+        "the unresolved share is 0, within the allowed 0.2")
+    assert requirement(decision, "precision.min_evidence_grade")["explanation"] == (
+        "the review's evidence grade is double_review_or_adjudicated, which meets double_review_or_adjudicated")
+    assert requirement(decision, "precision.min_coverage")["explanation"] == (
+        "the sampled strata hold 10 of the population's 10 unit(s), a share of 1, at least the required 0.9")
+    assert requirement(decision, "precision.max_decrease")["explanation"] == (
+        "resolved precision went from 0.2 to 0.8, a decrease of at most the allowed 0.05")
+    assert requirement(decision, "precision.binding")["explanation"] == (
+        "the estimate covers only the candidate improved, over the first-5 population of full/standard inputs, "
+        "and rests on run(s) run-gate of this comparison")
+    assert decision["precision"]["candidate"]["sha256"] == canonical_sha256(estimates["improved"])
+    assert decision["precision"]["baseline"]["sha256"] == canonical_sha256(estimates["baseline"])
+    assert decision["precision"]["candidate"]["reviews_sha256"] == estimates["improved"]["reviews_sha256"]
+
+
+def test_a_flag_everything_candidate_fails_precision_whatever_its_recall(corpus, estimates):
+    """The flagging system detects every target (recall 1.0, +0.8) but only 10 of its 50 first-5 claims are true."""
+    decision = decide(corpus, gate_policy(precision=precision_block()), "flagging",
+                      precision_candidate=estimates["flagging"])
+
+    assert requirement(decision, "primary.improvement")["status"] == "pass"
+    assert requirement(decision, "primary.improvement")["observed"]["candidate"] == 1.0
+    assert decision["outcome"] == "fail" and decision["failed"] == ["precision.min_value"]
+    assert requirement(decision, "precision.min_value")["explanation"] == (
+        "resolved precision is 0.2, below the required 0.5")
+
+
+def test_a_missing_precision_estimate_is_inconclusive_and_never_a_perfect_score(corpus):
+    decision = decide(corpus, gate_policy(precision=precision_block(min_coverage=0.5)))
+
+    assert decision["outcome"] == "inconclusive" and decision["failed"] == []
+    assert decision["unresolved"] == ["precision.binding", "precision.min_value", "precision.max_unresolved_share",
+                                      "precision.min_evidence_grade", "precision.min_coverage"]
+    assert requirement(decision, "precision.binding")["explanation"] == (
+        "the candidate's precision estimate is missing or not bound to this comparison: no precision estimate was "
+        "supplied for the candidate improved")
+    assert requirement(decision, "precision.min_value")["explanation"].startswith(
+        "the candidate's precision is not established: no precision estimate was supplied")
+    assert requirement(decision, "precision.min_value")["observed"] is None
+
+
+def test_an_estimate_of_another_system_or_workload_or_population_does_not_bind(corpus, estimates, tmp_path):
+    """Each mismatch is named, and the precision requirements wait rather than pass."""
+    policy = gate_policy(precision=precision_block())
+    both = estimate_for(corpus["run"], "improved")
+    both["population"]["systems"] = ["baseline", "improved"]
+    another_view = deepcopy(estimates["improved"])
+    another_view["population"].update(mode="pr", profile="metadata_blinded")
+    full = estimate_for(corpus["run"], "improved", population="full")
+    wider = estimate_for(corpus["run"], "improved", budget=10)
+    other_run = write_run(tmp_path, "run-other", corpus_inputs(), systems=("baseline", "improved"),
+                          outcomes={(f"p{index}", "improved", 1): behave("improved", index) for index in range(1, 11)})
+    elsewhere = estimate_for(other_run, "improved")
+    edited_run = deepcopy(estimates["improved"])
+    edited_run["runs"][0]["schedule_sha256"] = digest("another schedule")
+
+    for estimate, reason in (
+            (estimates["baseline"], "the estimate covers baseline, not only the candidate improved"),
+            (both, "the estimate covers baseline, improved, not only the candidate improved"),
+            (another_view, "the estimate is over pr/metadata_blinded inputs, not full/standard"),
+            (full, "the estimate is over the full population, but the policy declares the first-5 population"),
+            (wider, "the estimate is over the first-10 population, but the policy declares the first-5 population"),
+            (elsewhere, "the estimate rests on run run-other, which the comparison does not include; the "
+                        "candidate's run run-gate is not among the estimate's runs"),
+            (edited_run, "the estimate's record of run run-gate is not the comparison's (its manifest or "
+                         "schedule digest differs)")):
+        decision = decide(corpus, policy, precision_candidate=estimate)
+        assert decision["outcome"] == "inconclusive" and decision["failed"] == [], reason
+        item = requirement(decision, "precision.binding")
+        assert item["status"] == "inconclusive"
+        assert item["explanation"] == ("the candidate's precision estimate is missing or not bound to this "
+                                       f"comparison: {reason}")
+        assert requirement(decision, "precision.min_value")["status"] == "inconclusive"
+
+
+def test_a_run_of_the_compared_system_that_the_estimate_leaves_out_does_not_bind(corpus, estimates):
+    """The candidate was scheduled by two runs; an estimate resting on one describes only part of its output."""
+    comparison = deepcopy(corpus["comparisons"]["improved"])
+    second = deepcopy(comparison["runs"][0])
+    second["run_id"] = "run-second"
+    comparison["runs"].append(second)
+    comparison["candidate"]["runs"] = ["run-gate", "run-second"]
+
+    decision = gate.evaluate_gate(gate_policy(precision=precision_block()), comparison,
+                                  precision_candidate=estimates["improved"])
+
+    assert requirement(decision, "precision.binding")["explanation"] == (
+        "the candidate's precision estimate is missing or not bound to this comparison: the candidate's run "
+        "run-second is not among the estimate's runs")
+
+
+def test_unresolved_or_unreviewed_claims_leave_the_requirements_inconclusive_not_failed(corpus):
+    """Six of ten sampled claims are reviewed, by two reviewers each; the other four have no review at all.
+
+    By unit id the first six are p10, p1, p2, p3, p4, and p5: five true and one false. All four others count
+    as unresolved: the unresolved share is 4/10, the grade is incomplete, and resolved precision is 5/6 over
+    the reviewed claims. The share and the grade are unmet, which is unresolved evidence and not a finding
+    that the claims are false; the sensitivity lower bound, which counts them false, is 5/10 and falls below 0.6.
+    """
+    frame = precision.build_frame([corpus["run"]], population="first_b", budget=5, systems=["improved"])
+    sample = precision.draw_sample(frame, size=10, seed=11)
+    reviewed = {entry["unit_id"] for entry in sample["selected"][:6]}
+    partial = precision.estimate(sample, review_units(sample, verdict_for("improved"), only=reviewed))
+    assert partial["unresolved_share"] == 0.4 and partial["evidence_grade"] == "incomplete"
+    assert partial["precision_resolved"] == 5 / 6 and partial["sensitivity"]["lower"] == 0.5
+
+    decision = decide(corpus, gate_policy(precision=precision_block(min_value=0.5, max_unresolved_share=0.2)),
+                      precision_candidate=partial)
+
+    assert decision["failed"] == [] and decision["outcome"] == "inconclusive"
+    assert requirement(decision, "precision.max_unresolved_share")["explanation"] == (
+        "the unresolved share is 0.4, above the allowed 0.2: too much of the review is unresolved for the figures "
+        "to be trusted, so it is not a finding that the claims are false")
+    assert requirement(decision, "precision.min_evidence_grade")["explanation"] == (
+        "the review's evidence grade is incomplete, below the required double_review_or_adjudicated: 4 sampled "
+        "claim(s) have no review and 0 have disagreeing reviews with no adjudication")
+
+    lower = gate.evaluate_gate(gate_policy(precision=precision_block(basis="sensitivity_lower", min_value=0.6,
+                                                                     max_unresolved_share=1.0,
+                                                                     min_evidence_grade="single_review")),
+                               corpus["comparisons"]["improved"], precision_candidate=partial)
+    item = requirement(lower, "precision.min_value")
+    assert item["status"] == "fail" and item["observed"]["value"] == 0.5
+    assert item["explanation"] == "the sensitivity lower bound of precision is 0.5, below the required 0.6"
+    resolved = requirement(gate.evaluate_gate(gate_policy(precision=precision_block(min_value=0.6)),
+                                              corpus["comparisons"]["improved"], precision_candidate=partial),
+                           "precision.min_value")
+    assert resolved["status"] == "pass", "resolved precision 5/6 ignores the unreviewed claims"
+
+
+def test_a_review_by_one_person_meets_a_single_review_grade_and_not_a_double_one(corpus):
+    solo = estimate_for(corpus["run"], "improved", reviewers=(REVIEWER_A,))
+    assert solo["evidence_grade"] == "single_review"
+
+    strict = decide(corpus, gate_policy(precision=precision_block()), precision_candidate=solo)
+    relaxed = decide(corpus, gate_policy(precision=precision_block(min_evidence_grade="single_review")),
+                     precision_candidate=solo)
+
+    assert requirement(strict, "precision.min_evidence_grade")["explanation"] == (
+        "the review's evidence grade is single_review, below the required double_review_or_adjudicated: 10 "
+        "sampled claim(s) rest on a single reviewer")
+    assert strict["outcome"] == "inconclusive" and relaxed["outcome"] == "pass"
+
+
+def test_an_estimate_whose_sample_leaves_strata_unsampled_does_not_meet_a_coverage_requirement(corpus):
+    """Ten one-claim inputs stratified by input with a sample of 5: five strata draw a unit, five draw none.
+
+    Half the population is not estimated at all, so the share is 0.5 and the coverage requirement, which asks
+    for 0.9, is unresolved.
+    """
+    half = estimate_for(corpus["run"], "improved", size=5, stratify_by="input")
+    assert half["coverage"]["share"] == 0.5 and len(half["coverage"]["uncovered_strata"]) == 5
+
+    decision = decide(corpus, gate_policy(precision=precision_block(min_coverage=0.9)), precision_candidate=half)
+
+    item = requirement(decision, "precision.min_coverage")
+    assert item["status"] == "inconclusive" and item["observed"]["share"] == 0.5
+    assert item["explanation"] == (
+        "the sampled strata hold 5 of the population's 10 unit(s), a share of 0.5, below the required 0.9; a "
+        "stratum that drew no unit is not estimated at all")
+
+
+def test_the_precision_interval_bound_passes_fails_or_waits_on_what_the_interval_shows(corpus, estimates):
+    """A census has no sampling variance; a doctored interval stands in for the other states."""
+    policy = gate_policy(precision=precision_block(min_interval_lower_bound=0.6))
+
+    def verdict(**interval) -> tuple[str, str]:
+        estimate = deepcopy(estimates["improved"])
+        estimate["interval"].update(interval)
+        item = requirement(decide(corpus, policy, precision_candidate=estimate), "precision.interval")
+        return item["status"], item["explanation"]
+
+    assert verdict()[0] == "pass", "the census interval is [0.8, 0.8]"
+    assert verdict(state="ok", lower=0.6, upper=0.95)[0] == "pass"
+    status, explanation = verdict(state="ok", lower=0.5, upper=0.95)
+    assert status == "inconclusive" and "reaches below 0.6, so precision at that level is not established" in explanation
+    status, explanation = verdict(state="ok", lower=0.2, upper=0.5)
+    assert status == "fail" and "lies wholly below 0.6" in explanation
+    status, explanation = verdict(state="degenerate", lower=None, upper=None)
+    assert status == "inconclusive" and explanation == (
+        "the estimate's interval is degenerate, so it carries no bounds")
+
+
+def test_a_fall_in_precision_from_the_baseline_fails_and_needs_a_baseline_estimate(corpus, estimates):
+    """The flagging system's claims are all judged false: precision 0 against the baseline's 0.2, a fall of 0.2."""
+    worse = estimate_for(corpus["run"], "flagging", lambda unit_id: "false")
+    assert worse["precision_resolved"] == 0.0
+    policy = gate_policy(precision=precision_block(min_value=0.01, max_decrease_vs_baseline=0.05))
+
+    decision = decide(corpus, policy, "flagging", precision_baseline=estimates["baseline"],
+                      precision_candidate=worse)
+    assert requirement(decision, "precision.max_decrease")["status"] == "fail"
+    assert requirement(decision, "precision.max_decrease")["explanation"] == (
+        "resolved precision went from 0.2 to 0, a decrease of 0.2, more than the allowed 0.05")
+    same = decide(corpus, gate_policy(precision=precision_block(min_value=0.1, max_decrease_vs_baseline=0.0)),
+                  "flagging", precision_baseline=estimates["baseline"], precision_candidate=estimates["flagging"])
+    assert requirement(same, "precision.max_decrease")["status"] == "pass", "0.2 to 0.2 is no decrease"
+
+    missing = decide(corpus, policy, "flagging", precision_candidate=estimates["flagging"])
+    assert requirement(missing, "precision.max_decrease")["status"] == "inconclusive"
+    assert requirement(missing, "precision.max_decrease")["explanation"] == (
+        "the change in precision is not established: baseline: no precision estimate was supplied for the "
+        "baseline baseline")
+    wrong = decide(corpus, policy, "flagging", precision_baseline=estimates["improved"],
+                   precision_candidate=estimates["flagging"])
+    assert "baseline: the estimate covers improved, not only the baseline baseline" in requirement(
+        wrong, "precision.max_decrease")["explanation"]
+
+
+def test_a_supplied_estimate_the_policy_does_not_read_is_recorded_by_digest_and_noted(corpus, estimates):
+    decision = decide(corpus, gate_policy(), precision_candidate=estimates["improved"])
+
+    assert decision["precision"]["candidate"]["sha256"] == canonical_sha256(estimates["improved"])
+    assert decision["precision"]["baseline"] is None
+    assert ("A precision estimate was supplied for the candidate but the policy declares no precision block, so "
+            "it is recorded by digest and was not read.") in decision["notes"]
+    assert canonical_json(decision) != canonical_json(decide(corpus, gate_policy()))
+    unread = decide(corpus, gate_policy(precision=precision_block()), precision_baseline=estimates["baseline"],
+                    precision_candidate=estimates["improved"])
+    assert ("A baseline precision estimate was supplied, but the policy declares no maximum decrease from the "
+            "baseline, so it is recorded by digest and was not read.") in unread["notes"]
