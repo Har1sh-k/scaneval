@@ -851,9 +851,9 @@ JSON_REFUSED = {
     "changed-literal": ('{"a": null, "b": "null"}\n', {"null": "none"}, " the transformed file is not valid JSON ("),
     "token-spelled-with-an-escape": ('{"title": "Wid\\u0067et Docs"}\n', {"Widget": "Sprocket"},
                                      "$['title'] is 'Widget Docs', expected 'Sprocket Docs'"),
+    # The parser's own words differ by Python version (3.13 says Illegal trailing comma), so only ours are asserted.
     "trailing-comma": ('{"title": "Widget",}\n', {"Widget": "Sprocket"},
-                       " is not strict JSON, so an edit of it cannot be verified to keep its structure "
-                       "(Illegal trailing comma"),
+                       " is not strict JSON, so an edit of it cannot be verified to keep its structure ("),
     "not-a-number": ('{"n": NaN, "s": "Widget"}\n', {"Widget": "Sprocket"},
                      " is not strict JSON, so an edit of it cannot be verified to keep its structure "
                      "(NaN is not JSON"),
