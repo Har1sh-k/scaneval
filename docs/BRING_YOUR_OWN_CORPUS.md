@@ -679,9 +679,10 @@ repository lists both as variants, and each edit then states an expectation for 
 `"state": "absent"` where the file does not exist; related snapshots in one run must be blinded
 with the same map. Documentation files may be edited under any role. `.yml`, `.yaml`, `.toml`,
 `.json`, `.cfg`, and `.ini` files may be edited only as `display_metadata` with a `role_check`.
-License and security files, dependency manifests, build, CI, and security configuration, files a
-scanner reads as instructions, and every other file, source included, are refused. [Current
-capabilities](INITIAL_BUILD.md#metadata-blinding) lists every rule.
+License, attribution, and security files, dependency manifests, build, CI, and security
+configuration, files a scanner reads as instructions (in any case), and every other file, source
+included, are refused. [Current capabilities](INITIAL_BUILD.md#metadata-blinding) lists every rule,
+and says what the lists do not cover.
 
 **Check it before anyone reviews it.** `blinding check` fetches each variant, applies the map in a
 temporary directory exactly as a run would, and reports approval instead of requiring it:

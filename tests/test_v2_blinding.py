@@ -609,6 +609,42 @@ def test_a_file_that_is_not_strict_utf8_is_refused(tmp_path, widget):
     (".env.example.txt", "documentation_identifier", None, ".env*"),
     ("CLAUDE.md", "documentation_identifier", None, "reads as instructions"),
     (".github/copilot-instructions.md", "documentation_identifier", None, "reads as instructions"),
+    # Dependency files a suffix alone would have let through: any name holding requirements or
+    # constraints that ends .txt, whatever comes before it, and anything in a requirements/ directory.
+    ("dev-requirements.txt", "documentation_identifier", None, "*requirements*.txt"),
+    ("test-requirements.txt", "non_runtime_branding", None, "*requirements*.txt"),
+    ("docs/requirements_docs.txt", "documentation_identifier", None, "*requirements*.txt"),
+    ("dev-constraints.txt", "documentation_identifier", None, "*constraints*.txt"),
+    ("requirements/prod.txt", "documentation_identifier", None, "under requirements/"),
+    ("Requirements/README.md", "documentation_identifier", None, "under requirements/"),
+    ("backend/requirements/base.txt", "documentation_identifier", None, "under requirements/"),
+    ("runtime.txt", "documentation_identifier", None, "runtime.txt"),
+    # License and attribution files by their other names: copyright, third-party notices, licenses/.
+    ("COPYRIGHT.txt", "documentation_identifier", None, "license, attribution, or security file"),
+    ("Copyright-Notice.md", "documentation_identifier", None, "license, attribution, or security file"),
+    ("THIRD-PARTY-NOTICES.txt", "documentation_identifier", None, "license, attribution, or security file"),
+    ("docs/ThirdPartyLicenses.md", "documentation_identifier", None, "license, attribution, or security file"),
+    ("third_party_credits.rst", "non_runtime_branding", None, "license, attribution, or security file"),
+    ("LICENSES/MIT.txt", "documentation_identifier", None, "under licenses/"),
+    ("vendor/licenses/Apache-2.0.txt", "documentation_identifier", None, "under licenses/"),
+    # Instruction files in any case, and the local one.
+    ("CLAUDE.local.md", "documentation_identifier", None, "reads as instructions"),
+    ("docs/claude.local.MD", "documentation_identifier", None, "reads as instructions"),
+    ("claude.md", "documentation_identifier", None, "reads as instructions"),
+    ("docs/Agents.md", "non_runtime_branding", None, "reads as instructions"),
+    ("GEMINI.MD", "documentation_identifier", None, "reads as instructions"),
+    (".Claude/notes.md", "documentation_identifier", None, "reads as instructions"),
+    (".GitHub/Copilot-Instructions.md", "documentation_identifier", None, "reads as instructions"),
+    (".github/INSTRUCTIONS/backend.md", "documentation_identifier", None, "reads as instructions"),
+    # Manifests and CI configuration that a display suffix and any stated role check let through.
+    ("environment.yml", "display_metadata", ROLE_CHECK, "environment.yml"),
+    ("ci/environment.yaml", "display_metadata", ROLE_CHECK, "environment.yaml"),
+    ("bower.json", "display_metadata", ROLE_CHECK, "bower.json"),
+    ("pubspec.yaml", "display_metadata", ROLE_CHECK, "pubspec.yaml"),
+    ("compose.yaml", "display_metadata", ROLE_CHECK, "compose.yaml"),
+    ("deploy/Compose.yml", "display_metadata", ROLE_CHECK, "compose.yml"),
+    ("bitbucket-pipelines.yml", "display_metadata", ROLE_CHECK, "bitbucket-pipelines.yml"),
+    (".github/codeql/codeql-config.yml", "display_metadata", ROLE_CHECK, "under .github/codeql/"),
 ])
 def test_only_documentation_and_reviewed_display_metadata_may_be_edited(path, role, role_check, reason):
     gap = blinding.path_class_gap(path, role, role_check)
@@ -616,6 +652,26 @@ def test_only_documentation_and_reviewed_display_metadata_may_be_edited(path, ro
         assert gap is None
     else:
         assert gap is not None and reason in gap
+
+
+@pytest.mark.parametrize("path", [
+    "README.md", "docs/guide.rst", "docs/requirements.md", "docs/party-third.md", "docs/third-parties.md",
+    "docs/on-copyright-and-licensing.md", "docs/claude-notes.md", "docs/my-agents.md", "docs/instructions.md",
+    ".github/ISSUE_TEMPLATE/bug.md",
+])
+def test_a_document_that_only_resembles_a_forbidden_file_stays_editable(path):
+    """The rules match a name's start, a dependency file's kind, or a directory, not any word in a path."""
+    assert blinding.path_class_gap(path, "documentation_identifier") is None
+
+
+def test_a_scanner_reads_an_instruction_file_by_any_case_and_a_blinded_export_lists_it():
+    listed = ["CLAUDE.md"]
+    paths = ["CLAUDE.md", "claude.md", "docs/Agents.md", "CLAUDE.local.md", ".CLAUDE/notes.md", "src/app.py",
+             "docs/claude-notes.md", ".github/workflows/ci.yml", ".GITHUB/copilot-instructions.md"]
+    assert blinding._instruction_files(paths, listed) == [
+        ".CLAUDE/notes.md", ".GITHUB/copilot-instructions.md", "CLAUDE.local.md", "CLAUDE.md", "claude.md",
+        "docs/Agents.md"]
+    assert blinding._instruction_files(["src/app.py"], []) == []
 
 
 # --- the runner: refusals are preparation failures; nothing reaches a scanner ------------------
