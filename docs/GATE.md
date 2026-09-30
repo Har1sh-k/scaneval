@@ -24,7 +24,7 @@ Every other block (`regressions`, `precision`, `controls`, `completion`, `target
 
 A requirement reports `{id, status, observed, threshold, explanation}` and is `pass`, `fail`, or `inconclusive`. The outcome is `fail` if any requirement fails, else `inconclusive` if any is inconclusive, else `pass`. No requirement is weighed against another.
 
-A requirement **fails** when the recorded figures show it is not met. It is **inconclusive** when what it needs is missing or cannot be trusted: an unavailable or unmeasurable metric, no eligible control, no precision estimate, an unknown cost, an interval that is not `ok`, an unfinished run, or evidence below the required scope. An absent figure is never a perfect one.
+A requirement **fails** when the recorded figures show it is not met. It is **inconclusive** when what it needs is missing or cannot be trusted: an unavailable or unmeasurable metric, no eligible control, no precision estimate, an unknown cost, an interval that is not `ok`, an unfinished run, a run narrowed below its configured inputs, or evidence below the required scope. An absent figure is never a perfect one.
 
 ## Requirements
 
@@ -32,7 +32,7 @@ Each id below is one requirement in the decision.
 
 | Id | What it checks | Not met |
 |---|---|---|
-| `contract.shared` | The comparison's own records again: both systems were assigned the same frozen work (assignments, inputs, canonical targets and controls, clusters, target observations, and pairs agree in every view), the runs it names exist and froze one pack, and its aggregation policy matches its digest. `compare` refuses systems that differ, so this catches a document edited afterward. | fail |
+| `contract.shared` | The comparison's own records again: both systems were assigned the same frozen work (assignments, inputs, canonical targets and controls, clusters, target observations, and pairs agree in every view), the runs it names exist and froze one pack, and its aggregation policy matches its digest. `compare` refuses systems that differ, so this catches a document edited afterward. It is also unresolved when a compared run was narrowed: its configuration names more inputs than its schedule covers, or its manifest excludes some (`--only-input`). What a narrowing drops it drops for both systems, so the two schedules still agree and nothing else in the comparison shows that the inputs were not dropped after their results were seen. A run narrowed only by system is not one. | fail; inconclusive if a compared run was narrowed |
 | `contract.runs_completed` | Every compared run finished; an unfinished run's missing assignments stand as failures. | inconclusive |
 | `configuration.allowed_differences` | Every configuration difference is an allowed key or beneath one; anything else means the comparison does not isolate the intended change. | inconclusive |
 | `evidence.scope` | Both systems' evidence in the view is at least the required scope. Draft or diagnostic evidence supports no reviewed recommendation. A policy that itself declares `draft` accepts draft or reviewed evidence and yields a `development` decision. Diagnostic fixtures meet neither. | inconclusive |

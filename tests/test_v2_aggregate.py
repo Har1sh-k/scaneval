@@ -172,13 +172,15 @@ def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: d
 
 
 def write_run(root: Path, run_id: str, inputs: list[dict], *, systems=("sys-a",), repetitions: int = 1,
-              outcomes=None, configs=None, failed_inputs=(), skipped_systems=(), pack=PACK) -> Path:
+              outcomes=None, configs=None, failed_inputs=(), skipped_systems=(), pack=PACK, left_out=()) -> Path:
     """Write one run directory the way ``scaneval run`` lays it out, with hand-chosen outcomes.
 
     *outcomes* maps ``(input_id, system_id, repetition)`` to a :func:`scan` spec, or to
     ``"missing_row"`` (the manifest has no row) or ``"missing_bundle"`` (the row names a bundle that
     is not there); unlisted assignments are successful scans that detect nothing. An input in
-    *failed_inputs* was never prepared, and a system in *skipped_systems* was never invoked.
+    *failed_inputs* was never prepared, and a system in *skipped_systems* was never invoked. *left_out*
+    names configured inputs the run was narrowed away from, as ``--only-input`` does: the configuration
+    keeps them, and the schedule, the manifest, and the manifest's selection say they were left out.
     """
     outcomes = outcomes or {}
     configs = configs or {}
@@ -189,10 +191,14 @@ def write_run(root: Path, run_id: str, inputs: list[dict], *, systems=("sys-a",)
     config = {"schema_version": "2.1", "run_id": run_id, "pack": "pack.json",
               "inputs": [{"input_id": row["input_id"], "snapshot_id": row["snapshot_id"],
                           **({"profile": "metadata_blinded", "blinding_map": "fixture-map.json"}
-                             if row["profile"] == "metadata_blinded" else {})} for row in inputs],
+                             if row["profile"] == "metadata_blinded" else {})} for row in inputs]
+              + [{"input_id": name, "snapshot_id": name} for name in left_out],
               "systems": entries, "repetitions": repetitions, "timeout_seconds": 60, "trace_mode": "off",
               "network_policy": "none"}
     validate_document("run-config", config)
+    selection = NO_SELECTION if not left_out else {
+        "only_inputs": sorted(row["input_id"] for row in inputs), "only_systems": None,
+        "excluded_inputs": list(left_out), "excluded_systems": []}
     assignments = sorted(({"assignment_id": f"{row['input_id']}__{system_id}__r{repetition}",
                            "input_id": row["input_id"], "system_id": system_id, "repetition": repetition}
                           for row in inputs for system_id in systems for repetition in range(1, repetitions + 1)),
@@ -206,7 +212,9 @@ def write_run(root: Path, run_id: str, inputs: list[dict], *, systems=("sys-a",)
                      "execution": {"backend": "local", "enforced_expected": False, "image": None}}
                     for entry in entries],
         "assignments": assignments, "pairs": schedule._pairs(inputs, repetitions),
-        "notes": ["Hand-built fixture schedule."]}
+        "notes": ["Hand-built fixture schedule."] + ([
+            f"This run was narrowed: {len(left_out)} configured input(s) and 0 configured system(s) are not "
+            "scheduled here."] if left_out else [])}
     validate_document("evaluation-schedule", frozen_schedule)
     rows = {row["input_id"]: row for row in inputs}
     invocations = []
@@ -247,7 +255,7 @@ def write_run(root: Path, run_id: str, inputs: list[dict], *, systems=("sys-a",)
                  "review_states": {"draft": 0, "mechanically_checked": 0, "human_approved": 0},
                  "dispositions": {"validate": 0, "needs_evidence": 0, "extended_regression": 0, "exclude": 0},
                  "sha256": digest("frozen pack")},
-        "selection": NO_SELECTION,
+        "selection": selection,
         "inputs": [{"input_id": row["input_id"], "mode": "full", "profile": row["profile"],
                     "snapshot_id": row["snapshot_id"],
                     "tree_hash": None if row["input_id"] in failed_inputs else input_hash(row["input_id"]),
@@ -1209,6 +1217,32 @@ def test_a_candidate_whose_schedule_drops_an_input_is_refused(tmp_path):
         aggregate.compare([base, cand], baseline="baseline", candidate="candidate")
 
 
+def test_a_run_narrowed_after_its_configuration_was_written_records_its_selection_in_its_row(tmp_path):
+    """``--only-input`` leaves the configuration whole and shortens the schedule; the run row says both.
+
+    run-narrow's configuration names p1 to p5 and its schedule covers p1 to p4, so its selection lists p5 as
+    excluded and its row counts 5 configured inputs against 4 scheduled. run-whole was scheduled in full and
+    records no narrowing: an empty selection and equal counts. Both systems of run-narrow were assigned the
+    same four inputs, so a comparison accepts it (its schedules agree), and its run row says the same.
+    """
+    outcomes = {(f"p{index}", system, 1): scan(hits={f"T-p{index}": 1})
+                for index in range(1, 5) for system in ("baseline", "candidate")}
+    narrowed = write_run(tmp_path / "a", "run-narrow", five_project_inputs()[:4], systems=("baseline", "candidate"),
+                         outcomes=outcomes, left_out=("p5",))
+    whole = write_run(tmp_path / "b", "run-whole", five_project_inputs(), systems=("baseline", "candidate"))
+
+    report = aggregate.aggregate([narrowed, whole], policy=policy())
+    comparison = aggregate.compare([narrowed], baseline="baseline", candidate="candidate", policy=policy())
+
+    rows = {row["run_id"]: row for row in report["runs"]}
+    assert rows["run-narrow"]["selection"] == {"only_inputs": ["p1", "p2", "p3", "p4"], "only_systems": None,
+                                               "excluded_inputs": ["p5"], "excluded_systems": []}
+    assert (rows["run-narrow"]["configured_inputs"], rows["run-narrow"]["inputs"]) == (5, 4)
+    assert rows["run-whole"]["selection"] == NO_SELECTION
+    assert (rows["run-whole"]["configured_inputs"], rows["run-whole"]["inputs"]) == (5, 5)
+    assert comparison["runs"] == [rows["run-narrow"]]
+
+
 def test_a_candidate_whose_frozen_plan_items_differ_is_refused(tmp_path):
     changed = five_project_inputs()
     changed[0]["plan"]["targets"][0]["validation_level"] = "L4"
@@ -1332,6 +1366,36 @@ def test_a_run_directory_written_by_the_runner_aggregates_as_draft_evidence(tmp_
     assert whole["claims"]["records"] == 1 and whole["claims"]["pending_matching"] == 1
     assert block["observations"]["review_states"]["draft"] == 1
     assert report["runs"][0]["timing"]["execution_records"] == 1
+
+
+def test_a_run_the_runner_narrowed_with_only_inputs_records_its_selection_in_the_report(tmp_path, upstream):
+    """The real runner keeps the configuration whole, and the run row reports what it left out.
+
+    One snapshot is configured as two inputs, in-1 and in-2, and the run is narrowed to in-1. Its schedule and
+    manifest cover one input, its configuration still names two, and its manifest's selection excludes in-2.
+    """
+    repo, commit = upstream
+    pack = cases.new_pack("test", "aggregate-narrowed", "Local fixture pack for the narrowing test.")
+    cases.add_snapshot(pack, {
+        "snapshot_id": "snap-a", "repository": {"url": str(repo), "name": "widget"}, "commit": commit,
+        "reference": "Commit chosen by the test fixture; no advisory is claimed.", "languages": ["python"],
+        "workload": "conventional_application", "component_role": "application",
+        "license": {"spdx": None, "verified": False, "note": "Local fixture repository."}})
+    cases.save_pack(tmp_path / "pack.json", pack)
+    config = {"schema_version": "2.1", "run_id": "run-narrowed", "pack": "pack.json", "cache_root": "cache",
+              "inputs": [{"input_id": "in-1", "snapshot_id": "snap-a"}, {"input_id": "in-2", "snapshot_id": "snap-a"}],
+              "systems": [{"system_id": "fake-a", "adapter": "fake", "config": {"knob": 1}}],
+              "repetitions": 1, "timeout_seconds": 60, "trace_mode": "off", "network_policy": "none"}
+    (tmp_path / "run.json").write_text(canonical_json(config) + "\n", encoding="utf-8")
+    run = tmp_path / "narrowed"
+    run_from_config(tmp_path / "run.json", run, clock=CLOCK, adapters={"fake": FakeAdapter()}, only_inputs={"in-1"})
+
+    report = aggregate.aggregate([run], policy=policy())
+
+    row = report["runs"][0]
+    assert row["selection"] == {"only_inputs": ["in-1"], "only_systems": None, "excluded_inputs": ["in-2"],
+                                "excluded_systems": []}
+    assert (row["configured_inputs"], row["inputs"], row["assignments"]) == (2, 1, 1)
 
 
 # --- command line -------------------------------------------------------------------------------

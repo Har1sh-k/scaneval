@@ -1556,6 +1556,53 @@
         }
       }
     },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "only_inputs",
+        "only_systems",
+        "excluded_inputs",
+        "excluded_systems"
+      ],
+      "description": "Which configured inputs and systems this run actually covered. A null filter means no filter was supplied, not that nothing was excluded.",
+      "properties": {
+        "only_inputs": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "only_systems": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "excluded_inputs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "excluded_systems": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
     "run": {
       "type": "object",
       "additionalProperties": false,
@@ -1569,14 +1616,16 @@
         "evidence_sha256",
         "pack",
         "repetitions",
+        "configured_inputs",
         "inputs",
+        "selection",
         "systems",
         "assignments",
         "bundles",
         "failures",
         "timing"
       ],
-      "description": "One run directory as read, bound by canonical hashes of its manifest, its schedule, its configuration, and every assignment's evidence digests.",
+      "description": "One run directory as read, bound by canonical hashes of its manifest, its schedule, its configuration, and every assignment's evidence digests. configured_inputs counts the inputs its configuration names and inputs those its schedule covers; selection is the manifest's record of what the run was narrowed to, so a run narrowed with --only-input shows it.",
       "properties": {
         "run_id": {
           "type": "string",
@@ -1615,9 +1664,16 @@
           "type": "integer",
           "minimum": 1
         },
+        "configured_inputs": {
+          "type": "integer",
+          "minimum": 0
+        },
         "inputs": {
           "type": "integer",
           "minimum": 0
+        },
+        "selection": {
+          "$ref": "#/$defs/selection"
         },
         "systems": {
           "type": "array",

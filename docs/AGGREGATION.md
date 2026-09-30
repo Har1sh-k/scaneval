@@ -90,6 +90,8 @@ The schedules fix these sets before any outcome, so a project with controls and 
 
 `compare` first checks that baseline and candidate share one frozen evaluation contract: the same inputs with the same mode, profile, snapshot or change set, blinding map, declared tree hash, frozen plan items, levels, scope and budgets, repetitions, pairs, and pack. Run ids may differ. Anything else is refused with the first difference, for example `input p5 is scheduled for baseline but not for candidate`. A system cannot improve by being assigned less.
 
+That check compares the two systems' schedules, so it cannot see a narrowing that applies to both, such as a run started with `--only-input` after its configuration was written: the configuration keeps every input, both systems are assigned the same shorter schedule, and inputs could be dropped after their results were seen. Each run row therefore records the manifest's `selection` and `configured_inputs` beside `inputs`, the inputs its schedule covers, in `aggregate` and `compare` alike. `compare` does not refuse such a run, and [the gate](GATE.md) leaves its shared-contract requirement unresolved.
+
 Differences are candidate minus baseline for each view, slice, and weighting. They cover recall, recall@B and its lower bound, pair correctness and availability, the control rates and masses, and completion. Recall, recall@B, pair correctness, and the control rates carry paired intervals. `configuration_differences` lists every differing value as a dotted key over `adapter`, `config`, `model_id`, `model_revision`, `network_policy`, and `execution`.
 
 ## What is not claimed

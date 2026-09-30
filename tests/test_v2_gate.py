@@ -482,12 +482,15 @@ def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: d
 
 
 def write_run(root: Path, run_id: str, inputs: list[dict], *, systems, repetitions: int = 1, outcomes=None,
-              configs=None, failed_inputs=(), skipped_systems=(), run_status: str = "completed") -> Path:
+              configs=None, failed_inputs=(), skipped_systems=(), run_status: str = "completed",
+              left_out=()) -> Path:
     """Write one run directory the way ``scaneval run`` lays it out, with hand-chosen outcomes.
 
     *outcomes* maps ``(input_id, system_id, repetition)`` to a :func:`scan` spec; unlisted
     assignments are successful scans that detect nothing. An input in *failed_inputs* was never
-    prepared, and a system in *skipped_systems* was never invoked.
+    prepared, and a system in *skipped_systems* was never invoked. *left_out* names configured inputs
+    the run was narrowed away from, as ``--only-input`` does: the configuration keeps them, and the
+    schedule, the manifest, and the manifest's selection say they were left out.
     """
     outcomes = outcomes or {}
     configs = configs or {}
@@ -496,10 +499,14 @@ def write_run(root: Path, run_id: str, inputs: list[dict], *, systems, repetitio
     entries = [{"system_id": system_id, "adapter": "fake", "config": {"knob": 1}, **configs.get(system_id, {})}
                for system_id in systems]
     config = {"schema_version": "2.1", "run_id": run_id, "pack": "pack.json",
-              "inputs": [{"input_id": row["input_id"], "snapshot_id": row["snapshot_id"]} for row in inputs],
+              "inputs": [{"input_id": row["input_id"], "snapshot_id": row["snapshot_id"]} for row in inputs]
+              + [{"input_id": name, "snapshot_id": name} for name in left_out],
               "systems": entries, "repetitions": repetitions, "timeout_seconds": 60, "trace_mode": "off",
               "network_policy": "none"}
     validate_document("run-config", config)
+    selection = NO_SELECTION if not left_out else {
+        "only_inputs": sorted(row["input_id"] for row in inputs), "only_systems": None,
+        "excluded_inputs": list(left_out), "excluded_systems": []}
     assignments = sorted(({"assignment_id": f"{row['input_id']}__{system_id}__r{repetition}",
                            "input_id": row["input_id"], "system_id": system_id, "repetition": repetition}
                           for row in inputs for system_id in systems for repetition in range(1, repetitions + 1)),
@@ -513,7 +520,9 @@ def write_run(root: Path, run_id: str, inputs: list[dict], *, systems, repetitio
                      "execution": {"backend": "local", "enforced_expected": False, "image": None}}
                     for entry in entries],
         "assignments": assignments, "pairs": schedule._pairs(inputs, repetitions),
-        "notes": ["Hand-built fixture schedule."]}
+        "notes": ["Hand-built fixture schedule."] + ([
+            f"This run was narrowed: {len(left_out)} configured input(s) and 0 configured system(s) are not "
+            "scheduled here."] if left_out else [])}
     validate_document("evaluation-schedule", frozen_schedule)
     rows = {row["input_id"]: row for row in inputs}
     invocations = []
@@ -546,7 +555,7 @@ def write_run(root: Path, run_id: str, inputs: list[dict], *, systems, repetitio
                  "review_states": {"draft": 0, "mechanically_checked": 0, "human_approved": 0},
                  "dispositions": {"validate": 0, "needs_evidence": 0, "extended_regression": 0, "exclude": 0},
                  "sha256": digest("frozen pack")},
-        "selection": NO_SELECTION,
+        "selection": selection,
         "inputs": [{"input_id": row["input_id"], "mode": "full", "profile": row["profile"],
                     "snapshot_id": row["snapshot_id"],
                     "tree_hash": None if row["input_id"] in failed_inputs else input_hash(row["input_id"]),
@@ -1276,6 +1285,82 @@ def test_a_comparison_whose_records_contradict_a_shared_contract_fails_whatever_
     assert decision["outcome"] == "fail" and decision["failed"] == ["contract.shared"]
     assert item["explanation"].startswith("the comparison's own records show the two systems were not assigned "
                                           "the same frozen work, or do not bind to the runs they name: ")
+
+
+def narrowed_run(root: Path, run_id: str = "run-narrowed") -> Path:
+    """Both systems over p1 to p4 of a configuration that names p1 to p5; p5 was left out with --only-input.
+
+    The baseline misses p1 and detects the rest, and the candidate detects all four.
+    """
+    inputs = [planned(f"p{index}", project=f"acme/p{index}",
+                      targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}")])
+              for index in range(1, 5)]
+    outcomes = {}
+    for index in range(1, 5):
+        outcomes[(f"p{index}", "baseline", 1)] = scan(hits={f"T-p{index}": 1} if index > 1 else {}, claims=1)
+        outcomes[(f"p{index}", "candidate", 1)] = scan(hits={f"T-p{index}": 1}, claims=1)
+    return write_run(root, run_id, inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                     configs={"candidate": {"config": {"knob": 2}}}, left_out=("p5",))
+
+
+def test_a_run_narrowed_below_its_configured_inputs_leaves_the_shared_contract_inconclusive(tmp_path):
+    """The configuration names five projects; the run was narrowed to four, so p5 is out of both schedules.
+
+    The two systems were assigned the same four inputs, so the comparison is accepted, and recall reads 3/4 to
+    4/4, +0.25, without p5, where the candidate would have failed. Nothing in the schedules shows when that choice
+    was made, so the contract is unresolved and the decision is not a pass; no other requirement is disturbed.
+    """
+    comparison = aggregate.compare([narrowed_run(tmp_path)], baseline="baseline", candidate="candidate",
+                                   policy=aggregation_policy())
+    assert difference_of(comparison)["full_output_recall"]["value"] == 0.25
+
+    decision = gate.evaluate_gate(gate_policy(), comparison)
+
+    assert statuses(decision) == {
+        "contract.shared": "inconclusive", "contract.runs_completed": "pass",
+        "configuration.allowed_differences": "pass", "evidence.scope": "pass", "primary.improvement": "pass"}
+    assert decision["outcome"] == "inconclusive" and decision["failed"] == []
+    item = requirement(decision, "contract.shared")
+    assert item["observed"]["narrowed_runs"] == [
+        {"run_id": "run-narrowed", "configured_inputs": 5, "inputs": 4, "excluded_inputs": ["p5"]}]
+    assert item["observed"]["inputs"] == 4
+    assert item["explanation"] == (
+        "the two systems share one frozen contract, but run run-narrowed was narrowed and does not schedule 1 "
+        "input(s) its configuration names (p5): an input left out of a run's schedule is left out for both systems, "
+        "so nothing in the comparison shows that it was not dropped after its results were seen")
+
+
+def test_a_narrowing_shows_in_either_of_the_two_records_and_only_an_input_narrowing_counts(corpus):
+    """A comparison edited to carry the selection or the count alone is read the same; a system narrowing is not one.
+
+    The run row states how many inputs its configuration names and the manifest's selection. Either one showing
+    that inputs were left out leaves the contract unresolved. A run narrowed only by system, where every
+    configured input is scheduled, leaves both systems the same inputs and is no narrowing of the contract.
+    """
+    def status(change) -> str:
+        return requirement(gate.evaluate_gate(gate_policy(), edited(corpus, change)), "contract.shared")["status"]
+
+    assert status(lambda c: c["runs"][0]["selection"].update(excluded_inputs=["p9"])) == "inconclusive"
+    assert status(lambda c: c["runs"][0].update(configured_inputs=12)) == "inconclusive"
+    assert status(lambda c: c["runs"][0]["selection"].update(only_systems=["baseline", "improved"],
+                                                             excluded_systems=["silent"])) == "pass"
+    assert status(lambda c: None) == "pass"
+    count_only = edited(corpus, lambda c: c["runs"][0].update(configured_inputs=12))
+    assert requirement(gate.evaluate_gate(gate_policy(), count_only), "contract.shared")["explanation"].startswith(
+        "the two systems share one frozen contract, but run run-gate was narrowed and does not schedule 2 input(s) "
+        "its configuration names:")
+
+
+def test_a_contradiction_in_the_comparison_fails_the_contract_even_when_a_run_was_narrowed(corpus):
+    """Failing outranks waiting: a comparison whose own records disagree is not resolved by a narrowing note."""
+    def both(comparison: dict) -> None:
+        comparison["runs"][0]["selection"].update(excluded_inputs=["p9"])
+        comparison["views"][0]["systems"]["candidate"]["observations"].update(assignments=8)
+
+    decision = gate.evaluate_gate(gate_policy(), edited(corpus, both))
+
+    assert requirement(decision, "contract.shared")["status"] == "fail"
+    assert decision["outcome"] == "fail" and decision["failed"] == ["contract.shared"]
 
 
 def test_runs_that_froze_different_packs_fail_the_shared_contract(corpus):

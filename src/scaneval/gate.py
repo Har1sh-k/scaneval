@@ -12,8 +12,8 @@ fails, else ``inconclusive`` when any is inconclusive, else ``pass``. Requiremen
 against one another: detection cannot compensate for noise, false alarms, burden, cost, or failed
 scans, and a strong figure on one requirement never turns another's failure into a pass. A requirement
 is inconclusive, never a pass, when what it needs is missing or cannot be trusted: an unavailable or
-unmeasurable metric, an interval that is not ``ok``, an aborted run, a difference the policy did not
-intend to measure, evidence below the scope the policy requires, a precision estimate that is missing
+unmeasurable metric, an interval that is not ``ok``, an aborted run, a run narrowed below the inputs its
+configuration names, a difference the policy did not intend to measure, evidence below the scope the policy requires, a precision estimate that is missing
 or not bound to the comparison, no eligible control, a completed, assessable, or covered mass below
 its minimum, or a claim volume or cost nobody recorded, which includes those of a scan that ran and left
 no usable bundle. No absent figure is read as a perfect one.
@@ -333,17 +333,50 @@ def _contract_violations(comparison: dict) -> list[str]:
     return found
 
 
+def _narrowed_runs(comparison: dict) -> list[dict]:
+    """Every compared run whose schedule leaves out inputs its configuration names, as its row records.
+
+    ``scaneval run --only-input`` keeps the run's configuration whole and shortens its schedule. What a
+    narrowing drops it drops for both systems, so two systems assigned that one schedule agree however
+    the inputs were chosen, and nothing else in the comparison can show that some were left out. The
+    row states how many inputs the configuration names and what the manifest recorded as excluded;
+    either showing that inputs were left out is a narrowing. A run narrowed only by system schedules
+    every configured input and is not one.
+    """
+    found = []
+    for run in comparison["runs"]:
+        excluded = run["selection"]["excluded_inputs"]
+        if run["configured_inputs"] > run["inputs"] or excluded:
+            found.append({"run_id": run["run_id"], "configured_inputs": run["configured_inputs"],
+                          "inputs": run["inputs"], "excluded_inputs": list(excluded)})
+    return found
+
+
+def _narrowing_text(run: dict) -> str:
+    count = max(run["configured_inputs"] - run["inputs"], len(run["excluded_inputs"]))
+    named = f" ({_names(run['excluded_inputs'])})" if run["excluded_inputs"] else ""
+    return f"run {run['run_id']} was narrowed and does not schedule {count} input(s) its configuration names{named}"
+
+
 def _contract_shared(ctx: _Context) -> Result:
     comparison = ctx.comparison
-    threshold = "one frozen contract for both systems, every recorded count agreeing, every binding named"
+    threshold = ("one frozen contract for both systems, every recorded count agreeing, every binding named, and "
+                 "no compared run narrowed below the inputs its configuration names")
     violations = _contract_violations(comparison)
     if violations:
         return (FAIL, {"violations": violations}, threshold,
                 "the comparison's own records show the two systems were not assigned the same frozen work, "
                 f"or do not bind to the runs they name: {_names(violations)}")
     contract = comparison["contract"]
-    return (PASS, {"contract_sha256": contract["structure_sha256"], "inputs": contract["inputs"],
-                   "pairs": contract["pairs"], "views": len(comparison["views"])}, threshold,
+    observed = {"contract_sha256": contract["structure_sha256"], "inputs": contract["inputs"],
+                "pairs": contract["pairs"], "views": len(comparison["views"])}
+    narrowed = _narrowed_runs(comparison)
+    if narrowed:
+        return _open("the two systems share one frozen contract, but "
+                     f"{_names([_narrowing_text(run) for run in narrowed])}: an input left out of a run's schedule is "
+                     "left out for both systems, so nothing in the comparison shows that it was not dropped after "
+                     "its results were seen", threshold, {**observed, "narrowed_runs": narrowed})
+    return (PASS, observed, threshold,
             f"{ctx.names['baseline']} and {ctx.names['candidate']} share one frozen contract of "
             f"{contract['inputs']} input(s) and {contract['pairs']} pair(s), and every count the comparison "
             f"records for them agrees in each of its {len(comparison['views'])} view(s)")

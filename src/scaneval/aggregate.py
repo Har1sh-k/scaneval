@@ -1466,10 +1466,14 @@ def _view_warnings(facts: dict, results: Sequence[_SystemResult]) -> list[str]:
 
 
 def _run_row(corpus: _Corpus, run: _Run) -> dict:
-    """One run as read: its hashes, its evidence digest, its failures, and its execution timing.
+    """One run as read: its hashes, its evidence digest, its failures, its execution timing, and what it covers.
 
     The evidence digest hashes, per assignment in id order, its status, failure reason, review state,
     and the result, plan, and decisions digests of its bundle, so a report binds to exact evidence.
+    ``selection`` is the manifest's record of what the run was narrowed to, and ``configured_inputs``
+    counts the inputs its configuration names beside ``inputs``, those its schedule covers: a run
+    narrowed with ``--only-input`` keeps its configuration whole and shortens its schedule, which no
+    comparison of two systems assigned that same schedule could otherwise show.
     """
     observations = [item for key, item in sorted(corpus.observations.items()) if key[0] == run.run_id]
     timings = [item.timing for item in observations if item.timing is not None]
@@ -1491,7 +1495,9 @@ def _run_row(corpus: _Corpus, run: _Run) -> dict:
         "run_id": run.run_id, "status": run.manifest["status"], "created_at": run.schedule["created_at"],
         "manifest_sha256": canonical_sha256(run.manifest), "schedule_sha256": canonical_sha256(run.schedule),
         "config_sha256": run.schedule["config_sha256"], "evidence_sha256": canonical_sha256(evidence),
-        "pack": run.schedule["pack"], "repetitions": run.repetitions, "inputs": len(run.schedule["inputs"]),
+        "pack": run.schedule["pack"], "repetitions": run.repetitions,
+        "configured_inputs": len(run.config["inputs"]), "inputs": len(run.schedule["inputs"]),
+        "selection": deepcopy(run.manifest["selection"]),
         "systems": list(run.system_ids), "assignments": len(observations),
         "bundles": sum(item.observed is not None for item in observations),
         "failures": {reason: failures[reason] for reason in FAILURE_REASONS},
@@ -1746,9 +1752,12 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
     mode, profile, snapshot or change set, blinding map, declared tree hash, frozen plan items, levels,
     scope and budgets, the same repetitions, the same pairs, and the same pack. Anything else is refused
     before a metric is computed ("the systems do not share the frozen evaluation contract"), so a
-    system cannot improve its numbers by being assigned less. Everything :func:`aggregate` refuses is
-    refused here too. Differences are candidate minus baseline; each interval resamples the same
-    clusters for both systems in every replicate.
+    system cannot improve its numbers by being assigned less. A run narrowed for both systems at once
+    (``--only-input``) assigns them the same shorter schedule and is not refused; its row records the
+    manifest's selection and the inputs its configuration names, which is what the gate reads to leave
+    such a comparison unresolved. Everything :func:`aggregate` refuses is refused here too. Differences
+    are candidate minus baseline; each interval resamples the same clusters for both systems in every
+    replicate.
     """
     if baseline == candidate:
         raise ContractError("the baseline and the candidate are one system; name two systems to compare")
