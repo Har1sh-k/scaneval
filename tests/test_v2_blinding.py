@@ -1034,6 +1034,13 @@ def test_an_ini_edit_that_would_change_the_structure_or_cannot_be_verified_is_re
 DISPLAY_YAML = 'Widget:\n  title: "Widget Docs"\n  tags:\n    - Widget\n    - docs\ncount: 3\n'
 BOM = "\N{BYTE ORDER MARK}"
 W = {"Widget": "Sprocket"}
+COPYRIGHT = ('copyright: Copyright &copy; 2014 <a href="https://github.com/tomchristie">Tom Christie</a>, '
+             'Maintained by the <a href="/about/release-notes/#maintenance-team">MkDocs Team</a>.\n')
+MKDOCS_FULL = ("site_name: Widget Docs\nsite_description: The *Widget* documentation\n"
+               "site_url: https://widget.example.org/\nrepo_url: https://github.com/widget/widget\n" + COPYRIGHT +
+               "theme:\n  name: material\n  palette:\n    - scheme: default\n  features:\n    - navigation.tabs\n"
+               "nav:\n  - Home: index.md\n  - Widget Guide: guide.md\n"
+               "markdown_extensions:\n  - toc:\n      permalink: true\n")
 BAD_ENTRY = "a line that is not a 'key: value' entry (a scalar on its own line, or a key without ':')"
 BAD_INDENT = "a line more indented than the entries before it (a multi-line scalar, or misaligned indentation)"
 NOT_CLOSED = "a quoted scalar that does not close on its line (a multi-line scalar)"
@@ -1099,6 +1106,11 @@ YAML_READS = {
     "a-byte-order-mark": (BOM + "a: b\n", {"a": "b"}),
     "carriage-returns-before-line-feeds": ("a: b\r\nc:\r\n  - d\r\n", {"a": "b", "c": ["d"]}),
     "no-line-feed-at-the-end": ("a: b", {"a": "b"}),
+    "punctuation-inside-a-plain-scalar": (
+        "a: The *Widget* docs\nb: Run `Widget --help`\nc: Follow @Widget\nd: x &y z\ne: a, b [c] {d}\n"
+        "f: http://x.example/a?b=c\n",
+        {"a": "The *Widget* docs", "b": "Run `Widget --help`", "c": "Follow @Widget", "d": "x &y z",
+         "e": "a, b [c] {d}", "f": "http://x.example/a?b=c"}),
 }
 
 
@@ -1138,6 +1150,13 @@ YAML_ACCEPTED = {
     "a-quotation-mark-in-a-single-quoted-value": ("title: 'The Widget Docs'\n", {"Widget": 'Sprock"et'}),
     "an-apostrophe-in-a-double-quoted-value": ('title: "The Widget Docs"\n', {"Widget": "Sprocket's"}),
     "a-colon-and-a-hash-in-a-quoted-value": ('title: "The Widget Docs"\n', {"Widget": "Sprocket: Inc #1"}),
+    "the-mkdocs-copyright-line": (COPYRIGHT, {"Tom Christie": "Jane Doe"}),
+    "a-description-holding-asterisks": ("site_description: The *Widget* documentation\n", W),
+    "a-list-item-holding-asterisks": ("- The **Widget** documentation\n", W),
+    "a-value-holding-an-at-sign": ("tagline: Follow @Widget for updates\n", W),
+    "a-value-holding-backticks": ("description: Run `Widget --help` first\n", W),
+    "a-url": ("repo_url: https://github.com/widget/widget\n", {"widget": "sprocket"}),
+    "a-whole-mkdocs-file": (MKDOCS_FULL, {"Widget": "Sprocket", "widget": "sprocket", "Tom Christie": "Jane Doe"}),
     "values-that-are-not-strings-stay-as-they-are": ("year: 2019\nflag: true\nnothing:\nratio: 1.5\nwhen: 2019-01-01\n"
                                                      "title: Widget Docs\n", W),
     "keys-that-are-not-strings-stay-as-they-are": ("200: Widget ok\n404: missing\n", W),
@@ -1175,6 +1194,18 @@ def test_a_yaml_edit_that_keeps_the_structure_is_accepted(tmp_path, name, path):
     edit = display_edit(tmp_path, path, content, pseudonyms)
 
     assert edit.structure_check == "yaml" and edit.data.decode("utf-8") == replaced(content, pseudonyms)
+
+
+@pytest.mark.parametrize("replacement", [
+    'Sprock"et', "it's", "Sprocket & Sons", "Sprocket*", "50% Sprocket", "Sprocket, Inc.", "@sprocket", "`sprocket`",
+    "Sprocket - 2", "a#b", "Sprocket [beta]", "{x}", "Sprocket |", "Sprocket >", "Sprocket ? maybe", "Sprocket\\",
+    "!sprocket", "%sprocket", "=sprocket", "<<sprocket", "~sprocket", "-sprocket", ":sprocket", "sprocket:x",
+    "a b  c"])
+def test_a_replacement_inside_a_plain_value_may_hold_yaml_punctuation_that_does_not_end_the_value(tmp_path,
+                                                                                                   replacement):
+    edit = display_edit(tmp_path, "display.yml", "title: The Widget Docs\n", {"Widget": replacement})
+
+    assert edit.data.decode("utf-8") == f"title: The {replacement} Docs\n"
 
 
 OUTSIDE = "is outside the YAML subset read here"
@@ -1489,6 +1520,17 @@ def test_a_replacement_that_breaks_a_yaml_display_file_is_refused_before_a_trans
     written = (tmp_path / "plain" / "source" / "display.yml").read_text(encoding="utf-8")
     assert written == DISPLAY_YAML.replace("Widget", "Sprocket")
     assert "edit_structure" in {check["check"] for check in record["blinding"]["validation"]}
+
+
+def test_a_realistic_mkdocs_file_with_markup_in_its_values_is_blinded_and_verified(tmp_path, display):
+    """A copyright line holding HTML, asterisks, a URL, and nested lists are what an earlier lexical rule refused."""
+    widget = display("mkdocs.yml", MKDOCS_FULL)
+
+    record = export_blinded(widget, display_map(widget, "mkdocs.yml", "Sprocket"), tmp_path / "trial")
+
+    blinded = (tmp_path / "trial" / "source" / "mkdocs.yml").read_text(encoding="utf-8")
+    assert blinded == MKDOCS_FULL.replace("Widget", "Sprocket")
+    assert [check["check"] for check in record["blinding"]["validation"]].count("edit_structure") == 1
 
 
 def test_a_display_suffix_is_read_without_regard_to_case():
