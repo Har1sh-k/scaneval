@@ -667,10 +667,23 @@ def reconcile_import(imported: HarnessImport, report: SelfReport) -> ImportAccou
     return ImportAccounting(lost, message, tuple(notes))
 
 
+# The harness modes this adapter makes capture claims about: bootstrap for a full request, pr for a
+# PR request. A mode outside this pair has no claim behind it, so capture_status refuses it.
+CAPTURE_MODES = ("bootstrap", "pr")
+
+
 def capture_status(trace_mode: str, routes: list[str], *, has_summary: bool,
                    capture_state: dict | None = None, hooks: dict | None = None,
-                   hook_failures: int | None = None) -> dict[str, str]:
+                   hook_failures: int | None = None, mode: str = "bootstrap") -> dict[str, str]:
     """Per-category capture availability for one harness run.
+
+    *mode* is the harness mode the run was in, ``bootstrap`` (the default, and every run before PR
+    mode existed) or ``pr``. It changes no value returned here, and that is a claim, not an
+    oversight: what this adapter can observe depends on the trace mode, the routes, the summary,
+    the observer's own state, and which observation surfaces the harness build exports, and none of
+    those is a property of the mode. The documented matrix and its test hold every cell equal
+    across the two modes, so a difference between them would have to be found and stated. A mode
+    this adapter has no claim about is refused rather than answered as if it were bootstrap.
 
     *hooks* is the ``hooks`` object the driver reported: the harness observation surfaces that
     build actually exported, ``{"runner": <version or None>, "engine": <version or None>}``.
@@ -723,10 +736,12 @@ def capture_status(trace_mode: str, routes: list[str], *, has_summary: bool,
     at a thin attempt stream can find out why it is thin.
 
     ``finding_validation`` is ``not_applicable`` with the engine hooks, and that is a statement
-    about the scan and not about the observer: validation is the consensus judge, the judge runs
-    in pr mode, and :meth:`LlmHarnessAdapter.scan` refuses every mode but bootstrap, so no run
-    this adapter can produce has a validation stage in it. Without the hooks the honest answer is
-    the weaker one, ``unavailable``, which says nothing was observed and not that nothing ran.
+    about the scan and not about the observer: validation is the consensus judge, and no run this
+    adapter can produce has a validation stage in it. A bootstrap run never has one, because the
+    engine runs the judge only in pr mode. A pr run has one only when consensus is configured, and
+    this adapter never configures it: the driver passes no ``consensus`` option in either mode, so
+    the judge is never given the chance to run. Without the hooks the honest answer is the weaker
+    one, ``unavailable``, which says nothing was observed and not that nothing ran.
 
     ``finding_submitted`` is read off *capture_state*, the observer state the driver reported,
     and, where the engine hooks produced it, off *hook_failures* as well, rather than off the
@@ -741,6 +756,8 @@ def capture_status(trace_mode: str, routes: list[str], *, has_summary: bool,
     here is downgraded by :func:`~scaneval.execution._capture_record` when the bundle it lands in
     holds no counted trace, and the run is recorded as partial. Do not answer it twice.
     """
+    if mode not in CAPTURE_MODES:
+        raise ValueError(f"capture is described for the harness modes {', '.join(CAPTURE_MODES)}, not {mode!r}")
     request_capture = {"off": "unavailable", "metadata": "partial", "content": "partial"}[trace_mode]
     traced = trace_mode != "off"
     engine_hooks = bool(hooks.get("engine")) if isinstance(hooks, dict) else False

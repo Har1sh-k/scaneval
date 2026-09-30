@@ -2104,3 +2104,18 @@ def test_a_workspace_swapped_after_the_enclosure_was_captured_cannot_move_the_bo
     assert any("does not resolve inside the workspace" in note for note in imported.notes)
     assert not (raw / "harness-findings").exists(), "nothing from the substituted tree was staged"
     assert [path.name for path in (elsewhere / "findings").iterdir()] == ["planted.md"]
+
+
+def test_capture_is_described_for_the_two_modes_this_adapter_runs_and_refuses_any_other():
+    gapless = {"capture_gap": False, "dropped_events": 0}
+    hooked = {"runner": 1, "engine": 1}
+
+    for mode in ("bootstrap", "pr"):
+        matrix = capture_status("content", ["claude"], has_summary=True, capture_state=gapless, hooks=hooked,
+                                hook_failures=0, mode=mode)
+        assert matrix["finding_validation"] == "not_applicable" and matrix["finding_candidate"] == "complete"
+    assert capture_status("content", ["claude"], has_summary=True, capture_state=gapless) == capture_status(
+        "content", ["claude"], has_summary=True, capture_state=gapless, mode="bootstrap"), \
+        "a caller that names no mode is given the bootstrap matrix, which is what every caller was given before"
+    with pytest.raises(ValueError, match="bootstrap, pr, not 'batch'"):
+        capture_status("content", ["claude"], has_summary=True, mode="batch")
