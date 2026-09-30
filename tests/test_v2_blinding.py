@@ -928,6 +928,8 @@ INI_ACCEPTED = {
     "a-value-no-interpolating-reader-could-read-was-never-asked-to": ("[site]\nname = Widget 100%\n", "Sprocket"),
     "names-that-differ-in-case-stay-apart-for-a-reader-that-keeps-case": (
         "[site]\nWidget Name = 1\nwidget name = 2\n", "Sprocket"),
+    "an-inline-comment-in-the-original-is-cut-from-both-readings": (
+        "[site]\nname = Widget ; the brand\nother = Widget # too\nthird = a;b Widget\n", "Sprocket"),
 }
 
 
@@ -990,6 +992,14 @@ INI_REFUSED = {
         "[DEFAULT]\nWidget = 1\n[site]\nSprocket = 2\n", {"Widget": "Sprocket"},
         "the replacements make the options 'Widget' and 'Sprocket' of [site] the same option 'sprocket', so one "
         "would hide the other"),
+    "a-replacement-that-starts-an-inline-comment": (
+        "[site]\nname = Widget\n", {"Widget": "Sprocket ; note"},
+        ": read with option names folded to lower case, [DEFAULT] merged into each section, % interpolation, # and ; "
+        "inline comments, the transformed file does not read as the original with only the reviewed replacements "
+        "applied to its names and values ([site] name reads as 'Sprocket', expected 'Sprocket ; note')"),
+    "a-replacement-that-starts-a-hash-comment-in-a-name": (
+        "[site]\nWidget = 1\nother = 2\n", {"Widget": "Sprocket # x"},
+        "the original reads but the transformed file does not ("),
     "an-escaped-percent-sign-reads-as-one-by-the-default-reader": (
         "[site]\nname = Widget Docs\n", {"Widget": "Sprocket 100%%"},
         "[site] name reads as 'Sprocket 100% Docs', expected 'Sprocket 100%% Docs')"),

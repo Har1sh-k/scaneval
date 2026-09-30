@@ -635,17 +635,21 @@ def _difference(expected: Any, found: Any, path: tuple = ()) -> str | None:
 # An INI file that keeps its structure as written can still read differently. Python's ``configparser`` folds
 # option names to lower case unless it is told not to, so two options that differ only in case become one; it
 # merges the ``[DEFAULT]`` section's options into every section, so a section's option can start to hide a
-# default or be hidden by one; and its default reader interpolates ``%(name)s`` in every value, as
+# default or be hidden by one; its default reader interpolates ``%(name)s`` in every value, as
 # ``ExtendedInterpolation`` does ``${name}``, so a ``%`` or ``$`` in a replacement can fail to interpolate or
-# read as another option's value. The transformed file is therefore also compared with the original under each of
-# these readers that can read the original, the default reader first.
-def _ini_label(names: str, how: str) -> str:
-    label = f"option names {names}, [DEFAULT] merged into each section, {how}"
-    default = (names, how) == ("folded to lower case", "% interpolation")
+# read as another option's value; and a reader told to may end a line at a ``#`` or ``;`` that follows
+# whitespace, so a replacement that holds one cuts what follows it from the value. The transformed file is
+# therefore also compared with the original under each of these readers that can read the original, the default
+# reader first.
+def _ini_label(names: str, how: str, inline: str) -> str:
+    label = f"option names {names}, [DEFAULT] merged into each section, {how}" + (f", {inline}" if inline else "")
+    default = (names, how, inline) == ("folded to lower case", "% interpolation", "")
     return f"Python's default INI reader ({label})" if default else label
 
 
-_INI_READERS = tuple((_ini_label(names, how), fold, interpolation) for names, fold, how, interpolation in (
+_INI_READERS = tuple((_ini_label(names, how, inline), fold, interpolation, prefixes)
+                     for inline, prefixes in (("", None), ("# and ; inline comments", ("#", ";")))
+                     for names, fold, how, interpolation in (
     ("folded to lower case", str.lower, "% interpolation", configparser.BasicInterpolation),
     ("folded to lower case", str.lower, "no interpolation", lambda: None),
     ("folded to lower case", str.lower, "${} interpolation", configparser.ExtendedInterpolation),
@@ -661,14 +665,16 @@ class _Unreadable:
         self.reason = reason
 
 
-def _ini_reading(text: str, fold: Callable[[str], str], interpolation: Callable[[], Any]) -> dict[str, dict[str, Any]]:
-    """Each section's options as a reader that folds names by *fold* and interpolates as *interpolation* returns them.
+def _ini_reading(text: str, fold: Callable[[str], str], interpolation: Callable[[], Any],
+                 prefixes: tuple[str, ...] | None) -> dict[str, dict[str, Any]]:
+    """Each section's options as a reader that folds names by *fold*, interpolates as *interpolation*, and ends a line
+    at an inline comment beginning with one of *prefixes*, returns them.
 
     A section's options are the ``[DEFAULT]`` section's, then its own, keyed by the name *fold* gives them; a value
     the reader cannot interpolate is an :class:`_Unreadable`. Raises what ``configparser`` raises for a file the
     reader cannot read at all.
     """
-    parser = configparser.ConfigParser(interpolation=interpolation(), strict=True)
+    parser = configparser.ConfigParser(interpolation=interpolation(), strict=True, inline_comment_prefixes=prefixes)
     parser.optionxform = fold
     parser.read_string(text)
     defaults = list(parser.defaults())
@@ -695,13 +701,13 @@ def _check_ini_readings(where: str, text: str, new_text: str, before: Any, rewri
     """
     defaults = [option for _, pairs in before if isinstance(pairs, _Defaults) for option, _ in pairs]
     own = {name: [option for option, _ in pairs] for name, pairs in before if not isinstance(pairs, _Defaults)}
-    for label, fold, interpolation in _INI_READERS:
+    for label, fold, interpolation, prefixes in _INI_READERS:
         try:
-            old = _ini_reading(text, fold, interpolation)
+            old = _ini_reading(text, fold, interpolation, prefixes)
         except _PARSE_ERRORS:
             continue
         try:
-            new = _ini_reading(new_text, fold, interpolation)
+            new = _ini_reading(new_text, fold, interpolation, prefixes)
         except _PARSE_ERRORS as exc:
             raise _refused(f"{where}: read with {label}, the original reads but the transformed file does not "
                            f"({_reason(exc)}); a replacement is written into the file as it is, so one that repeats "
@@ -716,10 +722,11 @@ def _check_ini_readings(where: str, text: str, new_text: str, before: Any, rewri
             named: dict[str, str] = {}
             expected: dict[str, Any] = {}
             for option, value in options.items():
-                renamed = fold(rewrite(written[option]))
+                renamed = fold(rewrite(written.get(option, option)))
                 if named.setdefault(renamed, option) != option:
                     raise _refused(f"{where}: read with {label}, the replacements make the options "
-                                   f"{written[named[renamed]]!r} and {written[option]!r} of [{section}] the same "
+                                   f"{written.get(named[renamed], named[renamed])!r} and "
+                                   f"{written.get(option, option)!r} of [{section}] the same "
                                    f"option {renamed!r}, so one would hide the other")
                 expected[renamed] = value if isinstance(value, _Unreadable) else rewrite(value)
             found = new[rewrite(section)]
