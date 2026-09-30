@@ -928,6 +928,9 @@ INI_ACCEPTED = {
     "a-value-no-interpolating-reader-could-read-was-never-asked-to": ("[site]\nname = Widget 100%\n", "Sprocket"),
     "names-that-differ-in-case-stay-apart-for-a-reader-that-keeps-case": (
         "[site]\nWidget Name = 1\nwidget name = 2\n", "Sprocket"),
+    # Readers with inline comments end a header at a hash or semicolon, so they can read other sections than the raw parse.
+    "a-header-an-inline-comment-reader-reads-as-another-section": ("[site] ; x]\nname = Widget\n", "Sprocket"),
+    "a-header-that-is-one-section-as-written": ("[site] ; Widget]\nname = x\n", "Sprocket"),
     "an-inline-comment-in-the-original-is-cut-from-both-readings": (
         "[site]\nname = Widget ; the brand\nother = Widget # too\nthird = a;b Widget\n", "Sprocket"),
 }

@@ -534,9 +534,13 @@ def _parse_toml(text: str) -> Any:
 _NO_DEFAULT_SECTION = "\n"
 
 
-def _parse_ini(text: str) -> Any:
-    """Each section in order, with its own options in order; no interpolation, and any duplicate is refused."""
-    parser = configparser.ConfigParser(interpolation=None, strict=True, default_section=_NO_DEFAULT_SECTION)
+def _parse_ini(text: str, prefixes: tuple[str, ...] | None = None) -> Any:
+    """Each section in order, with its own options in order; no interpolation, and any duplicate is refused.
+
+    *prefixes* are the inline comment prefixes a reader is told to honour (the check as written has none).
+    """
+    parser = configparser.ConfigParser(interpolation=None, strict=True, default_section=_NO_DEFAULT_SECTION,
+                                       inline_comment_prefixes=prefixes)
     parser.optionxform = str
     parser.read_string(text)
     return _Pairs((name, (_Defaults if name == configparser.DEFAULTSECT else _Pairs)(parser.items(name, raw=True)))
@@ -666,19 +670,26 @@ class _Unreadable:
 
 
 def _ini_reading(text: str, fold: Callable[[str], str], interpolation: Callable[[], Any],
-                 prefixes: tuple[str, ...] | None) -> dict[str, dict[str, Any]]:
+                 prefixes: tuple[str, ...] | None) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, str]]]:
     """Each section's options as a reader that folds names by *fold*, interpolates as *interpolation*, and ends a line
-    at an inline comment beginning with one of *prefixes*, returns them.
+    at an inline comment beginning with one of *prefixes*, returns them, with the names as they are written.
 
     A section's options are the ``[DEFAULT]`` section's, then its own, keyed by the name *fold* gives them; a value
-    the reader cannot interpolate is an :class:`_Unreadable`. Raises what ``configparser`` raises for a file the
-    reader cannot read at all.
+    the reader cannot interpolate is an :class:`_Unreadable`. The second result gives, for each section, the name
+    as written of each option the first holds, read the same way but with names kept and nothing interpolated, so
+    that it names the sections that reader sees (an inline comment can end a header earlier). Raises what
+    ``configparser`` raises for a file the reader cannot read at all.
     """
     parser = configparser.ConfigParser(interpolation=interpolation(), strict=True, inline_comment_prefixes=prefixes)
     parser.optionxform = fold
     parser.read_string(text)
+    structure = _parse_ini(text, prefixes)
+    shared = [option for _, pairs in structure if isinstance(pairs, _Defaults) for option, _ in pairs]
+    own = {section: [option for option, _ in pairs] for section, pairs in structure
+           if not isinstance(pairs, _Defaults)}
     defaults = list(parser.defaults())
     reading: dict[str, dict[str, Any]] = {}
+    names: dict[str, dict[str, str]] = {}
     for section in parser.sections():
         options: dict[str, Any] = {}
         for option in defaults + [name for name in parser.options(section) if name not in parser.defaults()]:
@@ -687,27 +698,26 @@ def _ini_reading(text: str, fold: Callable[[str], str], interpolation: Callable[
             except configparser.Error as exc:
                 options[option] = _Unreadable(type(exc).__name__)
         reading[section] = options
-    return reading
+        names[section] = {fold(option): option for option in shared + own[section]}
+    return reading, names
 
 
-def _check_ini_readings(where: str, text: str, new_text: str, before: Any, rewrite: Callable[[str], str]) -> None:
+def _check_ini_readings(where: str, text: str, new_text: str, rewrite: Callable[[str], str]) -> None:
     """Refuse unless each reader of :data:`_INI_READERS` that reads the original reads the transformed file as it does.
 
     The expectation is the original as that reader reads it, with every name and value rewritten as the raw edit
     rewrote the text: the same sections, the same options under the names the replaced names fold to, and the
     same values, which a reader that interpolates has already resolved. A reader that cannot read the original
     (an option it folds twice, a value it cannot interpolate) is asked nothing it never did, so such a value is
-    not compared. *before* is the original as written, as :func:`_parse_ini` returns it.
+    not compared.
     """
-    defaults = [option for _, pairs in before if isinstance(pairs, _Defaults) for option, _ in pairs]
-    own = {name: [option for option, _ in pairs] for name, pairs in before if not isinstance(pairs, _Defaults)}
     for label, fold, interpolation, prefixes in _INI_READERS:
         try:
-            old = _ini_reading(text, fold, interpolation, prefixes)
+            old, written = _ini_reading(text, fold, interpolation, prefixes)
         except _PARSE_ERRORS:
             continue
         try:
-            new = _ini_reading(new_text, fold, interpolation, prefixes)
+            new, _ = _ini_reading(new_text, fold, interpolation, prefixes)
         except _PARSE_ERRORS as exc:
             raise _refused(f"{where}: read with {label}, the original reads but the transformed file does not "
                            f"({_reason(exc)}); a replacement is written into the file as it is, so one that repeats "
@@ -718,15 +728,14 @@ def _check_ini_readings(where: str, text: str, new_text: str, before: Any, rewri
                            f"the reviewed replacements applied to its names and values (it holds the sections "
                            f"{_shown(list(new))}, expected {_shown(sections)})")
         for section, options in old.items():
-            written = {fold(option): option for option in defaults + own[section]}
             named: dict[str, str] = {}
             expected: dict[str, Any] = {}
             for option, value in options.items():
-                renamed = fold(rewrite(written.get(option, option)))
+                renamed = fold(rewrite(written[section].get(option, option)))
                 if named.setdefault(renamed, option) != option:
                     raise _refused(f"{where}: read with {label}, the replacements make the options "
-                                   f"{written.get(named[renamed], named[renamed])!r} and "
-                                   f"{written.get(option, option)!r} of [{section}] the same "
+                                   f"{written[section].get(named[renamed], named[renamed])!r} and "
+                                   f"{written[section].get(option, option)!r} of [{section}] the same "
                                    f"option {renamed!r}, so one would hide the other")
                 expected[renamed] = value if isinstance(value, _Unreadable) else rewrite(value)
             found = new[rewrite(section)]
@@ -786,7 +795,7 @@ def _check_parsed(kind: str, where: str, text: str, new_text: str, originals: li
         raise _refused(f"{where}: the transformed file does not keep the original's structure: it is not the "
                        f"original with only the reviewed replacements applied to its keys and strings ({difference})")
     if kind == "ini":
-        _check_ini_readings(where, text, new_text, before, rewrite)
+        _check_ini_readings(where, text, new_text, rewrite)
 
 
 def _edit_for(document: dict, edit: dict, snapshot_id: str, source: Path, hashes: dict[str, str]) -> _Edit:
