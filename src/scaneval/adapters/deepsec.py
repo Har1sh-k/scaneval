@@ -1564,8 +1564,31 @@ def git_prints_quoted(path: str) -> bool:
     keeps only entries that name an existing file, so it never selects such a path: the entry it
     holds is the quoted spelling, which names nothing. Checked against the real CLI with a
     non-ASCII name; the other characters are quoted by the same git rule and are not checked.
+    :func:`listing_trims` is the other way a name is lost to that listing.
     """
     return any(ord(char) < 0x20 or ord(char) >= 0x7F or char in '"\\' for char in path)
+
+
+# What JavaScript's ``String.prototype.trim`` takes off both ends of a string (ECMAScript's WhiteSpace and
+# LineTerminator), as Node reports it. It is spelled out because Python's ``str.strip`` is not the same set: it also
+# removes U+001C to U+001F and U+0085, which JavaScript keeps, and keeps U+FEFF, which JavaScript removes.
+JS_TRIM = ("\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+           "\u2028\u2029\u202f\u205f\u3000\ufeff")
+
+
+def listing_trims(path: str) -> bool:
+    """Whether DeepSec 2.3.10 looks for something other than *path*, because it trims each line of its listing first.
+
+    ``resolveFiles`` runs ``entry.trim()`` on every line of ``git diff --name-only`` before it looks for the file. A
+    name that begins or ends with a character in :data:`JS_TRIM` is therefore looked for without it, and the entry it
+    holds names another path, or none. Git quotes every one of those characters but the space (a control character,
+    and by default a non-ASCII one), and a quoted line starts and ends with a quote, which the trim leaves alone. So
+    what is left is a space, which git prints as it is at the start or the end of a name. A space inside a name, or
+    at the end of a directory in it (``src /a.js``), is not at an end of the line and is not touched. Read from the
+    2.3.10 bundle, with the set of characters taken from Node's own ``trim`` and the unquoted spelling checked against
+    git's output for a leading and a trailing space; the real CLI was not run over such a name.
+    """
+    return path != path.strip(JS_TRIM)
 
 
 class DroppedPaths(NamedTuple):

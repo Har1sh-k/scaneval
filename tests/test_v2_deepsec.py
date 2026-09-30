@@ -2867,6 +2867,18 @@ def test_a_record_that_names_no_path_in_the_tree_cannot_hide_a_dropped_one():
     assert unreviewed_note(changes, (("/etc/passwd.json", {}), ("../escape.js.json", {}))) is not None
 
 
+@pytest.mark.parametrize("path, trimmed", [
+    (" src/app.js", True), ("src/app.js ", True), (" src/app.js ", True), ("src/app.js\t", True),
+    ("\nsrc/app.js", True), ("\u00a0src/app.js", True), ("src/app.js\ufeff", True), ("src/app.js\u3000", True),
+    ("src/app.js\u2028", True),
+    ("src/app.js", False), ("src/two words.js", False), ("src /app.js", False), ("src/ app.js", False),
+    # ``str.strip()`` removes these and JavaScript's ``trim()`` does not, so DeepSec keeps them in the name.
+    ("src/app.js\x1f", False), ("\x1csrc/app.js", False), ("\x85src/app.js", False),
+])
+def test_deepsec_trims_a_listed_line_as_javascript_does_and_only_at_its_ends(path, trimmed):
+    assert deepsec_module.listing_trims(path) is trimmed
+
+
 def test_the_quoted_omissions_are_the_paths_left_at_head_with_no_record_whose_name_git_prints_quoted():
     changes = (Change("M", "src/a.js"), Change("A", "src/caf\u00e9.js"), Change("A", "docs/r\u00e9sum\u00e9.md"),
                Change("A", "docs/readme.md"), Change("A", "src/recorded-\u00e9.js"), Change("D", "src/na\u00efve.js"),
