@@ -160,6 +160,19 @@ def _text(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _shown(value: Any, limit: int = 80) -> str:
+    """*value* as a phrase in a reason: a scalar as written, cut at *limit* characters, and an array
+    or an object by its type.
+
+    A reason is built from what a log holds. The repr of a structure a log nested deeply can run past
+    the recursion limit, so a container is never walked here.
+    """
+    if isinstance(value, (dict, list)):
+        return "an object" if isinstance(value, dict) else "an array"
+    text = repr(value)
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
 # --- reading the artifact ---------------------------------------------------------------
 
 
@@ -754,9 +767,10 @@ class Conversion:
     """What :func:`convert_run` made of one run: claims, their import entries, and the rest.
 
     ``claims`` and ``entries`` are parallel lists in result order. ``execution`` is the log's own
-    account of the run, never verified. ``status`` and ``error`` are the scan status this profile
-    derives from that account and from the losses; ``flagged`` maps the pointer of every claim
-    flagged for bundle review to its reasons.
+    account of the run, never verified, and ``failed`` the pointer of every invocation it reports
+    failed. ``status`` and ``error`` are the scan status this profile derives from that account and
+    from the losses; ``flagged`` maps the pointer of every claim flagged for bundle review to its
+    reasons.
     """
 
     run_index: int
@@ -769,6 +783,7 @@ class Conversion:
     results_present: bool
     execution: dict
     notes: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
 
     @property
     def result_count(self) -> int:
@@ -793,15 +808,13 @@ class Conversion:
             reasons.append(("results_absent", "run.results is null or absent: the tool produced no "
                                               "result list (SARIF 3.14.23)"))
         if evidence == "reported_failed":
-            failed = [row["pointer"] for row in self.execution["invocations"]
-                      if row["execution_successful"] is False or row["error_notifications"]]
             reasons.append(("execution_failed", "the log reports a failed execution at "
-                            + ", ".join(failed) + "; a failed run's results are not complete "
+                            + ", ".join(self.failed) + "; a failed run's results are not complete "
                             "(SARIF 3.20.21)"))
         elif evidence == "unreported":
             reasons.append(("execution_unreported", "the log does not report whether the tool ran to "
-                            "completion (no invocation with executionSuccessful), so this is not a "
-                            "complete scan"))
+                            "completion (no invocation, or one whose executionSuccessful or notification "
+                            "levels cannot be read), so this is not a complete scan"))
         if self.losses:
             reasons.append(("import_loss", f"{len(self.losses)} result(s) the log reports could not be "
                             "imported as claims"))
@@ -856,6 +869,7 @@ class _RunReader:
         self._paths: dict[tuple[Any, Any], str | _Unusable] = {}
         self._indexed: dict[int, str | _Unusable] = {}
         self._rule_ids: dict[str, dict[str, list[int]]] = {}
+        self._notification_tables: dict[str, dict[str, dict[str, list[int]]]] = {}
 
     @staticmethod
     def _array(owner: dict, key: str, pointer: str) -> list:
@@ -1503,48 +1517,137 @@ class _RunReader:
 
     # -- the run's own account of its execution -------------------------------------------
 
-    def _notification_level(self, notification: Any) -> str | None:
-        """A notification's level (SARIF 3.58.6), or ``None`` when the notification is unreadable."""
+    def _notification_ids(self, component: dict, pointer: str) -> dict[str, dict[str, list[int]]]:
+        """Where each ``id`` and ``guid`` sits among *component*'s notification descriptors, built once.
+
+        At most two positions are kept for a value: two descriptors that share one already make a
+        reference by it ambiguous, and no log can make a lookup cost more than that.
+        """
+        if pointer not in self._notification_tables:
+            table: dict[str, dict[str, list[int]]] = {"id": {}, "guid": {}}
+            for position, descriptor in enumerate(component.get("notifications") or []):
+                for key, positions in table.items():
+                    value = descriptor.get(key) if isinstance(descriptor, dict) else None
+                    if _text(value):
+                        found = positions.setdefault(value, [])
+                        if len(found) < 2:
+                            found.append(position)
+            self._notification_tables[pointer] = table
+        return self._notification_tables[pointer]
+
+    def _notification_descriptor(self, reference: Any) -> tuple[tuple[str, int], dict]:
+        """The notification descriptor *reference* names and where it sits, or why it names none.
+
+        Found as SARIF 3.52 finds a descriptor: in the component ``toolComponent`` names, else
+        the driver, by ``index``, else by ``guid``, else by ``id``; every other one of the three that
+        the reference states must agree with the descriptor found. A value no descriptor carries,
+        one that two carry, and a reference that states none of the three name nothing.
+        """
+        if not isinstance(reference, dict):
+            raise _Unusable("descriptor is not a reportingDescriptorReference object")
+        component, pointer = self._component(reference.get("toolComponent"), "descriptor")
+        descriptors = component.get("notifications") or []
+        table = self._notification_ids(component, pointer)
+        index, guid, identifier = reference.get("index"), reference.get("guid"), reference.get("id")
+        if index is not None and index != -1:
+            found = [index] if _is_int(index) and 0 <= index < len(descriptors) else []
+        elif guid is not None:
+            found = table["guid"].get(guid, []) if isinstance(guid, str) else []
+        elif identifier is not None:
+            found = table["id"].get(identifier, []) if isinstance(identifier, str) else []
+        else:
+            raise _Unusable("descriptor states none of index, guid, and id")
+        descriptor = descriptors[found[0]] if len(found) == 1 else None
+        if not isinstance(descriptor, dict) or any(
+                value is not None and descriptor.get(key) != value for key, value in (("guid", guid), ("id", identifier))):
+            stated = ", ".join(f"{key} {_shown(value)}" for key, value in
+                               (("index", index), ("guid", guid), ("id", identifier)) if value is not None)
+            raise _Unusable(f"descriptor with {stated} names no single notification descriptor of {pointer}")
+        return (pointer, found[0]), descriptor
+
+    def _override_levels(self, overrides: Any) -> dict[tuple[str, int], set[str | None]]:
+        """The levels an invocation's ``notificationConfigurationOverrides`` set, by the descriptor each names.
+
+        An entry configures one notification descriptor for this invocation, and only its ``level``
+        is read; a level that is not a SARIF level is kept as ``None``, which cannot be read. An
+        entry that is not an object, or whose descriptor reference names no single descriptor, could
+        configure any notification, so the whole set is refused with :class:`_Unusable`.
+        """
+        if overrides is None:
+            return {}
+        if not isinstance(overrides, list):
+            raise _Unusable("notificationConfigurationOverrides is not an array")
+        levels: dict[tuple[str, int], set[str | None]] = {}
+        for number, entry in enumerate(overrides):
+            where = f"notificationConfigurationOverrides/{number}"
+            if not isinstance(entry, dict):
+                raise _Unusable(f"{where} is not a configurationOverride object")
+            try:
+                position, _ = self._notification_descriptor(entry.get("descriptor"))
+            except _Unusable as exc:
+                raise _Unusable(f"{where}: {exc}") from None
+            configuration = entry.get("configuration")
+            level = configuration.get("level") if isinstance(configuration, dict) else None
+            if not isinstance(configuration, dict) or level is not None:
+                levels.setdefault(position, set()).add(level if level in LEVELS else None)
+        return levels
+
+    def _notification_level(self, notification: Any, overrides: dict | _Unusable) -> str:
+        """A notification's level (SARIF 3.58.6), or why the log leaves it unreadable.
+
+        The notification's own ``level`` comes first. Without one, its descriptor is looked up, and
+        the level is what the invocation's ``notificationConfigurationOverrides`` (*overrides*) give
+        that descriptor, else the descriptor's ``defaultConfiguration.level``, else ``warning``. A
+        notification that names no descriptor has nothing to configure it and is at ``warning``.
+        Nothing unreadable is read as ``warning``: a level that is not one of SARIF's four, a
+        descriptor the log does not hold or names ambiguously, and overrides that cannot be told
+        apart raise :class:`_Unusable`, so the evidence is ``unreported`` and a quiet control earns
+        nothing on a guess.
+        """
         if not isinstance(notification, dict):
-            return None
+            raise _Unusable("it is not a notification object")
         level = notification.get("level")
         if level is not None:
-            return level if level in LEVELS else None
-        descriptor = self._notification_descriptor(notification.get("descriptor"))
-        configuration = descriptor.get("defaultConfiguration") if descriptor else None
+            if level not in LEVELS:
+                raise _Unusable(f"its level {_shown(level)} is not a SARIF level")
+            return level
+        reference = notification.get("descriptor")
+        if reference is None:
+            return "warning"
+        position, descriptor = self._notification_descriptor(reference)
+        if isinstance(overrides, _Unusable):
+            raise _Unusable(str(overrides))
+        configured = overrides.get(position)
+        if configured:
+            if None in configured or len(configured) > 1:
+                raise _Unusable(f"the overrides for {position[0]}/notifications/{position[1]} do not give one "
+                                "readable level (a level that is not a SARIF level, a configuration that "
+                                "is not an object, or levels that disagree)")
+            return next(iter(configured))
+        configuration = descriptor.get("defaultConfiguration")
         default = configuration.get("level") if isinstance(configuration, dict) else None
-        return default if default in LEVELS else "warning"
+        if default is None:
+            return "warning"
+        if default not in LEVELS:
+            raise _Unusable(f"its descriptor's default level {_shown(default)} is not a SARIF level")
+        return default
 
-    def _notification_descriptor(self, reference: Any) -> dict | None:
-        if not isinstance(reference, dict):
-            return None
-        try:
-            component, _ = self._component(reference.get("toolComponent"), "descriptor")
-        except _Unusable:
-            return None
-        notifications = [item if isinstance(item, dict) else {} for item in component.get("notifications") or []]
-        index = reference.get("index")
-        if _is_int(index) and 0 <= index < len(notifications):
-            return notifications[index]
-        for key in ("guid", "id"):
-            value = reference.get(key)
-            matches = [item for item in notifications if value is not None and item.get(key) == value]
-            if len(matches) == 1:
-                return matches[0]
-        return None
+    def execution(self) -> tuple[dict, list[str], list[str]]:
+        """The log's own account of execution, notes on reading it, and where it reports failure.
 
-    def execution(self) -> tuple[dict, list[str]]:
-        """The log's own account of execution, summarized per invocation, and notes on reading it.
-
-        ``reported_failed`` when any invocation says ``executionSuccessful: false`` or carries a
-        tool execution or configuration notification at level ``error`` (SARIF 3.20.21-22), even
-        beside ``executionSuccessful: true``. ``unreported`` when there is no invocation, or one
-        that says nothing this can read about how it ended. ``reported_success`` otherwise. None of
-        these is verified: nothing here watched the tool run.
+        ``reported_failed`` when any invocation says ``executionSuccessful: false``, carries a tool
+        execution or configuration notification at level ``error`` (SARIF 3.20.21-22), or names a
+        signal that ended the process or a failure to start it (``exitSignalName``,
+        ``processStartFailureMessage``), even beside ``executionSuccessful: true``.
+        ``unreported`` when there is no invocation, or one that says nothing this can read about how
+        it ended, a notification whose level is unreadable (:meth:`_notification_level`) included.
+        ``reported_success`` otherwise. None of these is verified: nothing here watched the tool run.
+        The last value is the pointer of every invocation reported failed.
         """
         rows: list[dict] = []
         notes: list[str] = []
-        failed = unknown = False
+        failed_at: list[str] = []
+        unknown = False
         for index, invocation in enumerate(self.invocations):
             pointer = f"{self.pointer}/invocations/{index}"
             if not isinstance(invocation, dict):
@@ -1553,6 +1656,7 @@ class _RunReader:
                 rows.append({"pointer": pointer, "execution_successful": None, "exit_code": None,
                              "exit_signal_name": None, "notifications": 0, "error_notifications": []})
                 continue
+            failed = False
             succeeded = invocation.get("executionSuccessful")
             if not isinstance(succeeded, bool):
                 unknown = True
@@ -1560,8 +1664,25 @@ class _RunReader:
                 succeeded = None
             elif not succeeded:
                 failed = True
+            stopped = []
+            for key in ("exitSignalName", "processStartFailureMessage"):
+                value = invocation.get(key)
+                if value is None or value == "":
+                    continue
+                if not isinstance(value, str):
+                    unknown = True
+                    notes.append(f"{pointer}/{key} is not a string; whether the process was stopped cannot be read")
+                else:
+                    stopped.append(f"{key} {_shown(value)}")
+            if stopped:
+                failed = True
+                notes.append(f"{pointer} reports {' and '.join(stopped)}, so the tool did not run to completion")
             count = 0
             errors: list[str] = []
+            try:
+                overrides: dict | _Unusable = self._override_levels(invocation.get("notificationConfigurationOverrides"))
+            except _Unusable as exc:
+                overrides = exc
             for key in ("toolExecutionNotifications", "toolConfigurationNotifications"):
                 notifications = invocation.get(key)
                 if notifications is None:
@@ -1572,22 +1693,26 @@ class _RunReader:
                     continue
                 for number, notification in enumerate(notifications):
                     count += 1
-                    level = self._notification_level(notification)
-                    if level is None:
+                    try:
+                        level = self._notification_level(notification, overrides)
+                    except _Unusable as exc:
                         unknown = True
-                        notes.append(f"{pointer}/{key}/{number} has no readable level")
-                    elif level == "error":
-                        errors.append(f"{pointer}/{key}/{number}")
+                        notes.append(f"{pointer}/{key}/{number} has no readable level: {exc}")
+                    else:
+                        if level == "error":
+                            errors.append(f"{pointer}/{key}/{number}")
             if errors:
                 failed = True
+            if failed:
+                failed_at.append(pointer)
             exit_code = invocation.get("exitCode")
             rows.append({"pointer": pointer, "execution_successful": succeeded,
                          "exit_code": exit_code if _is_int(exit_code) else None,
                          "exit_signal_name": _text(invocation.get("exitSignalName")),
                          "notifications": count, "error_notifications": errors})
-        evidence = "reported_failed" if failed else "unreported" if unknown or not rows else "reported_success"
+        evidence = "reported_failed" if failed_at else "unreported" if unknown or not rows else "reported_success"
         return {"evidence": evidence, "results": "absent" if self.results is None else "present",
-                "verified": False, "invocations": rows}, notes
+                "verified": False, "invocations": rows}, notes, failed_at
 
     def tool(self) -> dict:
         def component(value: dict) -> dict:
@@ -1642,10 +1767,10 @@ def convert_run(log: dict, run_index: int | None = None, *, settings: UriSetting
     index, run, count = select_run(log, run_index)
     reader = _RunReader(run, index, settings=settings or UriSettings(), tree=tree,
                         include_suppressed=include_suppressed)
-    execution, notes = reader.execution()
+    execution, notes, failed = reader.execution()
     conversion = Conversion(run_index=index, run_count=count, tool=reader.tool(), claims=[], entries=[],
                             excluded=[], losses=[], results_present=reader.results is not None,
-                            execution=execution, notes=notes)
+                            execution=execution, notes=notes, failed=failed)
     for number, result in enumerate(reader.results or []):
         outcome, record, entry = reader.convert(number, result)
         if outcome == "claim":

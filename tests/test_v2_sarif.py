@@ -1127,6 +1127,198 @@ def test_an_error_notification_beside_execution_successful_true_is_a_failed_run(
     assert convert_run(log).execution["evidence"] == "reported_success"
 
 
+ENGINE_NOTE = {"descriptor": {"id": "engine-crash"}, "message": {"text": "analysis aborted: out of memory"}}
+ENGINE_GUID = "5b8b2f40-0000-4000-8000-00000000e001"
+OTHER_GUID = "5b8b2f40-0000-4000-8000-00000000e002"
+
+
+def notified(*, descriptors=None, overrides=None, notification=None, **invocation):
+    """A run with no results whose one invocation reports success beside one notification.
+
+    *descriptors* are the driver's notification descriptors and *overrides* the invocation's
+    ``notificationConfigurationOverrides``; both are left out of the log when ``None``.
+    """
+    body = {"executionSuccessful": True, "toolExecutionNotifications": [notification or ENGINE_NOTE], **invocation}
+    if overrides is not None:
+        body["notificationConfigurationOverrides"] = overrides
+    log = minimal_log(results=[], invocations=[body])
+    if descriptors is not None:
+        log["runs"][0]["tool"]["driver"]["notifications"] = descriptors
+    return convert_run(log)
+
+
+def engine_descriptors(default=None) -> list:
+    """Two notification descriptors: the engine's, with *default* as its level when given, and another."""
+    engine = {"id": "engine-crash", "guid": ENGINE_GUID}
+    if default is not None:
+        engine["defaultConfiguration"] = {"level": default}
+    return [engine, {"id": "other-note", "guid": OTHER_GUID}]
+
+
+@pytest.mark.parametrize("named,overridden,expected", [
+    ({"id": "engine-crash"}, {"id": "engine-crash"}, "reported_failed"),
+    ({"id": "engine-crash"}, {"index": 0}, "reported_failed"),
+    ({"index": 0}, {"guid": ENGINE_GUID}, "reported_failed"),
+    ({"guid": ENGINE_GUID}, {"id": "engine-crash"}, "reported_failed"),
+    ({"id": "engine-crash", "index": 0, "guid": ENGINE_GUID}, {"id": "engine-crash", "index": -1}, "reported_failed"),
+    # An override for another descriptor says nothing about this one, whose own default is a warning.
+    ({"id": "engine-crash"}, {"id": "other-note"}, "reported_success"),
+])
+def test_an_invocations_override_sets_the_level_of_a_notification_that_names_the_same_descriptor(
+        named, overridden, expected):
+    """SARIF 3.58.6: an absent level is the descriptor's, as this invocation's overrides configure it."""
+    overrides = [{"descriptor": overridden, "configuration": {"level": "error"}}]
+    conversion = notified(descriptors=engine_descriptors("warning"), overrides=overrides,
+                          notification={**ENGINE_NOTE, "descriptor": named})
+    assert conversion.execution["evidence"] == expected
+    if expected == "reported_failed":
+        assert conversion.execution["invocations"][0]["error_notifications"] == [
+            "/runs/0/invocations/0/toolExecutionNotifications/0"]
+        assert conversion.outcome()[0] == "error"
+
+
+def test_an_override_replaces_the_default_in_either_direction_and_never_the_notifications_own_level():
+    lowered = [{"descriptor": {"id": "engine-crash"}, "configuration": {"level": "note", "enabled": True}}]
+    assert notified(descriptors=engine_descriptors("error"), overrides=lowered).execution["evidence"] == \
+        "reported_success"
+    assert notified(descriptors=engine_descriptors("error")).execution["evidence"] == "reported_failed"
+    # An override with no level configures something else, so the default level stands.
+    other = [{"descriptor": {"id": "engine-crash"}, "configuration": {"enabled": True}}]
+    assert notified(descriptors=engine_descriptors("error"), overrides=other).execution["evidence"] == \
+        "reported_failed"
+    raised = [{"descriptor": {"id": "engine-crash"}, "configuration": {"level": "error"}}]
+    own = {**ENGINE_NOTE, "level": "note"}
+    assert notified(descriptors=engine_descriptors("warning"), overrides=raised,
+                    notification=own).execution["evidence"] == "reported_success"
+
+
+def test_a_notification_is_at_warning_only_when_the_log_says_nothing_that_configures_it():
+    assert notified(descriptors=engine_descriptors()).execution["evidence"] == "reported_success"
+    assert notified(descriptors=engine_descriptors("warning")).execution["evidence"] == "reported_success"
+    # No descriptor to configure: the level SARIF gives a notification that names none is warning.
+    anonymous = {"message": {"text": "something happened"}}
+    assert notified(notification=anonymous).execution["evidence"] == "reported_success"
+    # A descriptor in a tool extension is found through the component the reference names.
+    log = minimal_log(results=[], invocations=[{"executionSuccessful": True, "toolExecutionNotifications": [
+        {"descriptor": {"id": "pack-crash", "toolComponent": {"index": 0}}}]}])
+    log["runs"][0]["tool"]["extensions"] = [{"name": "queries", "notifications": [
+        {"id": "pack-crash", "defaultConfiguration": {"level": "error"}}]}]
+    assert convert_run(log).execution["evidence"] == "reported_failed"
+
+
+UNREADABLE = {
+    "default-level-capitalised": dict(descriptors=engine_descriptors("Error")),
+    "default-level-not-a-level": dict(descriptors=engine_descriptors("fatal")),
+    "default-level-not-a-string": dict(descriptors=engine_descriptors(3)),
+    "no-descriptors": dict(),
+    "descriptor-not-listed": dict(descriptors=[{"id": "other-note"}]),
+    "descriptor-index-out-of-range": dict(descriptors=engine_descriptors("warning"),
+                                          notification={**ENGINE_NOTE, "descriptor": {"index": 7}}),
+    "descriptor-index-and-id-disagree": dict(descriptors=engine_descriptors("warning"),
+                                             notification={**ENGINE_NOTE, "descriptor": {"index": 1, "id": "engine-crash"}}),
+    "descriptor-id-shared": dict(descriptors=engine_descriptors("warning") + [{"id": "engine-crash"}]),
+    "descriptor-not-an-object": dict(descriptors=engine_descriptors("warning"),
+                                     notification={**ENGINE_NOTE, "descriptor": "engine-crash"}),
+    "descriptor-names-no-field": dict(descriptors=engine_descriptors("warning"),
+                                      notification={**ENGINE_NOTE, "descriptor": {}}),
+    "descriptor-component-missing": dict(descriptors=engine_descriptors("warning"), notification={
+        **ENGINE_NOTE, "descriptor": {"id": "engine-crash", "toolComponent": {"index": 4}}}),
+    "override-level-not-a-level": dict(descriptors=engine_descriptors("warning"), overrides=[
+        {"descriptor": {"id": "engine-crash"}, "configuration": {"level": "Error"}}]),
+    "override-names-no-listed-descriptor": dict(descriptors=engine_descriptors("warning"), overrides=[
+        {"descriptor": {"id": "no-such-note"}, "configuration": {"level": "note"}}]),
+    "override-not-an-object": dict(descriptors=engine_descriptors("warning"), overrides=["error"]),
+    "override-configuration-not-an-object": dict(descriptors=engine_descriptors("warning"), overrides=[
+        {"descriptor": {"id": "engine-crash"}, "configuration": "error"}]),
+    "overrides-not-an-array": dict(descriptors=engine_descriptors("warning"), overrides={"level": "error"}),
+    "overrides-disagree": dict(descriptors=engine_descriptors("warning"), overrides=[
+        {"descriptor": {"id": "engine-crash"}, "configuration": {"level": "error"}},
+        {"descriptor": {"index": 0}, "configuration": {"level": "note"}}]),
+}
+
+
+@pytest.mark.parametrize("name", sorted(UNREADABLE))
+def test_a_notification_level_the_log_leaves_unreadable_is_never_read_as_a_warning(name):
+    conversion = notified(**UNREADABLE[name])
+    assert conversion.execution["evidence"] == "unreported"
+    assert conversion.execution["invocations"][0]["error_notifications"] == []
+    (note,) = conversion.notes
+    assert note.startswith("/runs/0/invocations/0/toolExecutionNotifications/0 ")
+    status, error = conversion.outcome()
+    assert (status, error["code"]) == ("partial", "execution_unreported")
+
+
+def test_a_failed_run_earns_no_quiet_credit_whatever_way_the_log_spells_its_error_level(tmp_path):
+    source = tmp_path / "export" / "source"
+    tree_hash = write_tree(source)
+    pack = make_pack(source, tree_hash, control=True)
+
+    def credit(name: str, log: dict) -> tuple[dict, dict]:
+        """Import *log*, record the control as quiet the way a reviewer would, and score it."""
+        path = tmp_path / f"{name}.sarif"
+        path.write_bytes(encoded(log))
+        outcome = import_sarif(path, pack=pack, snapshot_id="snap-a", tree_hash=tree_hash, system_id="semgrep-fixture",
+                               output=tmp_path / name, clock=CLOCK)
+        decisions = deepcopy(outcome.decisions)
+        decisions["control_assessments"][0].update(decision="quiet", reason="no claim names the file helper")
+        return outcome, scoring.score(outcome.plan, outcome.result, decisions)["metrics"]["controls"]["capability_safe"]
+
+    def log_with(descriptor: dict, overrides=None) -> dict:
+        body = {"executionSuccessful": True, "toolExecutionNotifications": [ENGINE_NOTE]}
+        if overrides is not None:
+            body["notificationConfigurationOverrides"] = overrides
+        log = minimal_log(results=[], invocations=[body])
+        log["runs"][0]["tool"]["driver"]["notifications"] = [descriptor]
+        return log
+
+    raised = [{"descriptor": {"id": "engine-crash"}, "configuration": {"level": "error"}}]
+    outcome, safe = credit("override-to-error", log_with({"id": "engine-crash", "defaultConfiguration": {"level": "warning"}},
+                                                         raised))
+    assert (outcome.record["execution"]["evidence"], outcome.result["status"]) == ("reported_failed", "error")
+    assert (safe["assigned"], safe["completed"], safe["resolved"]) == (1, 0, 0)
+    for spelling in ("Error", "fatal"):
+        outcome, safe = credit(f"default-{spelling}", log_with(
+            {"id": "engine-crash", "defaultConfiguration": {"level": spelling}}))
+        assert (outcome.record["execution"]["evidence"], outcome.result["status"]) == ("unreported", "partial")
+        assert (safe["completed"], safe["resolved"]) == (0, 0)
+    # The same silence from a run whose notification really is a warning is still a quiet control.
+    outcome, safe = credit("warning", log_with({"id": "engine-crash", "defaultConfiguration": {"level": "warning"}}))
+    assert (outcome.result["status"], safe["completed"], safe["resolved"]) == ("success", 1, 1)
+
+
+@pytest.mark.parametrize("changes", [
+    {"exitSignalName": "SIGSEGV"},
+    {"exitSignalName": "SIGKILL", "exitCode": 137},
+    {"processStartFailureMessage": "the tool could not be started: exec format error"},
+    {"exitSignalName": "SIGTERM", "processStartFailureMessage": "killed while starting"},
+])
+def test_a_signal_or_a_failed_process_start_beside_execution_successful_true_is_a_failed_run(changes):
+    """The log claims success while saying the process was killed, or never started."""
+    conversion = converted([], invocations=[{"executionSuccessful": True, **changes}])
+    assert conversion.execution["evidence"] == "reported_failed"
+    assert conversion.execution["invocations"][0]["exit_signal_name"] == changes.get("exitSignalName")
+    status, error = conversion.outcome()
+    assert (status, error["code"]) == ("error", "execution_failed")
+    assert "the log reports a failed execution at /runs/0/invocations/0" in error["message"]
+    (note,) = conversion.notes
+    assert note.startswith("/runs/0/invocations/0 reports ") and "did not run to completion" in note
+    # With a claim already imported the run is partial, as for any reported failure.
+    assert converted([result_at("src/app.py")], invocations=[
+        {"executionSuccessful": True, **changes}]).outcome()[0] == "partial"
+
+
+def test_a_signal_or_start_failure_the_log_leaves_blank_or_unreadable_is_not_a_clean_scan():
+    for blank in ({"exitSignalName": None}, {"exitSignalName": ""}, {"processStartFailureMessage": None},
+                  {"processStartFailureMessage": ""}):
+        assert converted([], invocations=[{"executionSuccessful": True, **blank}]).execution["evidence"] == \
+            "reported_success"
+    for unreadable in ({"exitSignalName": 9}, {"processStartFailureMessage": ["failed"]}):
+        conversion = converted([], invocations=[{"executionSuccessful": True, **unreadable}])
+        assert conversion.execution["evidence"] == "unreported"
+        (note,) = conversion.notes
+        assert "is not a string" in note
+
+
 @pytest.mark.parametrize("results", [None, "absent"])
 def test_absent_results_are_an_error_with_no_claims(results):
     log = minimal_log()

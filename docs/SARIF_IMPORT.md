@@ -175,16 +175,24 @@ keeps the bundles unresolved whatever was decided.
 | What the log reports | `execution.evidence` | Status and error code |
 |---|---|---|
 | `run.results` `null` or absent | from the invocations, as below | `error`, `results_absent`, no claims |
-| An invocation with `executionSuccessful: false`, or an `error`-level execution or configuration notification, even beside `executionSuccessful: true` | `reported_failed` | `partial` when a claim was imported, else `error`; `execution_failed` |
-| No invocation, or one whose `executionSuccessful` or notifications cannot be read | `unreported` | `partial`, `execution_unreported` |
+| An invocation with `executionSuccessful: false`, an `error`-level execution or configuration notification, or an `exitSignalName` or a `processStartFailureMessage`, each even beside `executionSuccessful: true` | `reported_failed` | `partial` when a claim was imported, else `error`; `execution_failed` |
+| No invocation, or one whose `executionSuccessful`, `exitSignalName`, `processStartFailureMessage`, or a notification's level cannot be read | `unreported` | `partial`, `execution_unreported` |
 | Otherwise | `reported_success` | `success` |
 
-A notification without a level takes its descriptor's default level, else `warning`. Import loss
-makes a run that would otherwise be `success` `partial` with `import_loss`. Every reason that
-applies is named in the error message, and the error code is the first of them in the table's
-order. `execution.verified` is always false. Because only a `success` scan over resolved bundles
-can establish a quiet control, a log that does not report its execution earns no quiet credit, even
-with no results at all.
+A notification's level is its own `level`. Without one it is what the invocation's
+`notificationConfigurationOverrides` give the notification's descriptor (SARIF 3.58.6), else the
+descriptor's `defaultConfiguration.level`, else `warning`, which is also the level of a notification
+that names no descriptor. A descriptor is found by `index`, `guid`, or `id` in the component its
+reference names, and an override applies when it names the same descriptor, whichever of the three
+each one uses. What cannot be read is never taken for `warning`: a level that is not `none`, `note`,
+`warning`, or `error` (in the notification, an override, or a default), a descriptor the log does not
+hold or names ambiguously, and overrides that cannot be matched to a descriptor or that disagree
+make the evidence `unreported`. So does an `exitSignalName` or `processStartFailureMessage` that is
+not a string; an empty one says nothing. Import loss makes a run that would otherwise be `success`
+`partial` with `import_loss`. Every reason that applies is named in the error message, and the error
+code is the first of them in the table's order. `execution.verified` is always false. Because only a
+`success` scan over resolved bundles can establish a quiet control, a log that does not report its
+execution earns no quiet credit, even with no results at all.
 
 ## Producer notes
 
@@ -205,8 +213,8 @@ so one result can carry flows from several sources; those are flagged, not split
 
 ## Not done
 
-Rule configuration overrides in an invocation, columns and `columnKind`, `graphs`, `stacks` (other
-than counting location ids for message links), `fixes`, and attachments are not read into claims,
-and a logical-only location names no file (as a primary location it is a loss). Markdown is never
-rendered. SARIF other than 2.1.0, several runs merged into one bundle, and saved vendor formats
-other than SARIF have no importer.
+Rule configuration overrides in an invocation (its notification overrides are read, for execution
+evidence only), columns and `columnKind`, `graphs`, `stacks` (other than counting location ids for
+message links), `fixes`, and attachments are not read into claims, and a logical-only location names
+no file (as a primary location it is a loss). Markdown is never rendered. SARIF other than 2.1.0,
+several runs merged into one bundle, and saved vendor formats other than SARIF have no importer.
