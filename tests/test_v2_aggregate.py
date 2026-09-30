@@ -489,6 +489,53 @@ def test_a_shared_scan_counts_its_cost_once_and_unknown_cost_stays_unknown(tmp_p
                                            "elapsed_wall_seconds": 25.0, "summed_wall_seconds": 19.0}
 
 
+def test_a_scan_the_manifest_records_as_run_stays_in_usage_and_claim_volume_when_its_bundle_is_gone(tmp_path):
+    """An executed scan with a missing or unusable bundle spent something and delivered something: unknown, not zero.
+
+    Five inputs, one system. ok ran and reads (4 s, $0.50, 2 claims). gone's manifest row names a bundle that is not
+    there. edited delivered 40 claims, and its result was re-saved with another cost after review, so it no longer
+    binds to its decisions and the bundle is unusable. norow has no manifest row and prep was never prepared, so
+    neither of those ran.
+    - Executed scans: ok, gone, and edited, 3 of the 5 assignments, of which 1 bundle reads.
+    - Wall time is known for 1 and unknown for 2. Cost is known for 1 of 3, a coverage of 1/3, not 1 of 1.
+    - Claim volume: 3 executed, 1 bundle read, 2 records over 5 assignments; the volume of gone and edited is
+      in no sum, because it is unknown.
+    - Slices count the same way: gone alone is 1 executed scan with no known cost, coverage 0, and norow alone
+      has no executed scan, so its coverage is undefined.
+    """
+    inputs = [planned(f"i-{name}", project=f"acme/{name}", targets=[target(f"T-{name}", project=f"acme/{name}")])
+              for name in ("ok", "gone", "edited", "norow", "prep")]
+    run = write_run(tmp_path, "run-executed", inputs, failed_inputs=("i-prep",), outcomes={
+        ("i-ok", "sys-a", 1): scan(hits={"T-ok": 1}, claims=2, usage={"wall_seconds": 4.0, "cost_usd": 0.5}),
+        ("i-gone", "sys-a", 1): "missing_bundle",
+        ("i-edited", "sys-a", 1): scan(hits={"T-edited": 1}, claims=40, usage={"wall_seconds": 3.0, "cost_usd": 0.25}),
+        ("i-norow", "sys-a", 1): "missing_row"})
+    result_path = run / "invocations" / "i-edited__sys-a__r1" / "result.json"
+    edited = json.loads(result_path.read_text())
+    edited["usage"]["cost_usd"] = 5.01
+    result_path.write_text(canonical_json(edited) + "\n", encoding="utf-8")
+
+    report = aggregate.aggregate([run], policy=policy())
+
+    block = system(view(report))
+    whole = slice_of(block)
+    assert block["observations"]["failures"] == {"failed_preparation": 1, "skipped_system": 0, "skipped": 0,
+                                                 "missing_row": 1, "missing_bundle": 1, "unusable_bundle": 1}
+    assert whole["usage"]["cost_usd"] == {"known_sum": 0.5, "known": 1, "unknown": 2, "coverage": 1 / 3}
+    assert whole["usage"]["wall_seconds"] == {"known_sum": 4.0, "known": 1, "unknown": 2}
+    assert (whole["usage"]["bundles"], whole["usage"]["executed"]) == (1, 3)
+    claims = whole["claims"]
+    assert (claims["bundles"], claims["executed"], claims["assignments"], claims["records"]) == (1, 3, 5, 2)
+    gone = slice_of(block, "project", "acme/gone")
+    assert (gone["usage"]["bundles"], gone["usage"]["executed"]) == (0, 1)
+    assert gone["usage"]["cost_usd"] == {"known_sum": None, "known": 0, "unknown": 1, "coverage": 0.0}
+    assert (gone["claims"]["bundles"], gone["claims"]["executed"]) == (0, 1)
+    norow = slice_of(block, "project", "acme/norow")
+    assert norow["usage"]["executed"] == 0 and norow["usage"]["cost_usd"]["coverage"] is None
+    assert any("2 of them ran, so their claim volume, wall time, and cost are unknown, not zero" in warning
+               for warning in view(report)["warnings"])
+
+
 def blinded_and_standard_run(tmp_path: Path) -> Path:
     """widget and gadget run standard; only widget has a blinded variant; widget-fixed pairs with widget.
 

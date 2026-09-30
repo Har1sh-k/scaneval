@@ -15,7 +15,8 @@ is inconclusive, never a pass, when what it needs is missing or cannot be truste
 unmeasurable metric, an interval that is not ``ok``, an aborted run, a difference the policy did not
 intend to measure, evidence below the scope the policy requires, a precision estimate that is missing
 or not bound to the comparison, no eligible control, a completed, assessable, or covered mass below
-its minimum, or a claim volume or cost nobody recorded. No absent figure is read as a perfect one.
+its minimum, or a claim volume or cost nobody recorded, which includes those of a scan that ran and left
+no usable bundle. No absent figure is read as a perfect one.
 
 What is decided from what. Only the documents passed in: the policy, the comparison report, and the
 precision estimates. The decision is a function of them and of the evaluator version, so the same
@@ -892,7 +893,8 @@ def _volume(ctx: _Context, side: str) -> tuple[dict, dict[str, Fraction | None]]
     exact = {"claims_per_assignment": Fraction(records, assignments) if assignments else None,
              "duplicate_share": Fraction(claims["duplicate_copies"], records) if records else None}
     seen = {"records": records, "unique": claims["unique"], "duplicate_copies": claims["duplicate_copies"],
-            "assignments": assignments, "bundles": claims["bundles"],
+            "assignments": assignments, "bundles": claims["bundles"], "executed": claims["executed"],
+            "unread": claims["executed"] - claims["bundles"],
             **{name: None if value is None else float(value) for name, value in exact.items()}}
     return seen, exact
 
@@ -904,7 +906,9 @@ def _burden(ctx: _Context, check: str) -> Result:
     the duplicate share is the exact-duplicate copies over the delivered records, so a candidate cannot
     lower either by failing to deliver output the requirement can see, and duplicates add burden
     without adding a claim. A system that delivered no result bundle at all has an unknown volume, not
-    a zero one.
+    a zero one, and so has one with an executed scan whose bundle is missing or unusable: what that scan
+    delivered is in no count, so the records read are only part of the volume and the requirement is
+    unresolved, never passed on the part that reads.
     """
     burden = ctx.policy["burden"]
     key = {"claims_per_assignment": "max_claims_per_assignment", "duplicate_share": "max_duplicate_share",
@@ -923,6 +927,10 @@ def _burden(ctx: _Context, check: str) -> Result:
         if volumes[side]["bundles"] == 0 or volumes[side]["assignments"] == 0:
             return _open(f"no result bundle was read for the {side}, so its delivered claim volume is unknown, not "
                          "zero", threshold, volumes[side])
+        if volumes[side]["unread"] > 0:
+            return _open(f"{volumes[side]['unread']} of the {side}'s {volumes[side]['executed']} executed scan(s) have "
+                         "no usable bundle, so their delivered claim volume is unknown, not zero, and what was read "
+                         f"is only part of what the {side} delivered", threshold, volumes[side])
     if check == "claims_per_assignment":
         text = (f"the candidate delivered {mine['records']} claim record(s) over {mine['assignments']} "
                 f"assignment(s), {_n(mine['claims_per_assignment'])} per assignment")
@@ -950,12 +958,14 @@ def _spend(ctx: _Context, side: str) -> dict:
     """One system's whole-view cost as the cost requirements read it.
 
     ``mean`` is the recorded cost of a scan, averaged over the scans whose cost is known, and ``None``
-    when none is. Usage is counted once per executed scan, however many targets it covers.
+    when none is. Usage is counted once per executed scan, however many targets it covers, and an
+    executed scan whose bundle is missing or unusable (``unread``) is a scan whose cost is unknown.
     """
     usage = ctx.whole(side)["usage"]
     cost = usage["cost_usd"]
     spend = {"coverage": cost["coverage"], "known": cost["known"], "unknown": cost["unknown"],
-             "scans": usage["bundles"], "known_sum": cost["known_sum"], "mean": None}
+             "scans": usage["executed"], "unread": usage["executed"] - usage["bundles"],
+             "known_sum": cost["known_sum"], "mean": None}
     mean = _mean(spend)
     spend["mean"] = None if mean is None else float(mean)
     return spend
@@ -982,7 +992,9 @@ def _cost_gap(ctx: _Context, sides: tuple[str, ...]) -> tuple[dict, str | None]:
             return spends, (f"the {side}'s cost is known for {spend['known']} of {spend['scans']} executed scan(s), a "
                             f"coverage of {_n(spend['coverage'])}, below the required {_n(required)}"
                             + ("" if "min_coverage" in ctx.policy["cost"] else
-                               " (the policy states no lower minimum, so every cost must be known)"))
+                               " (the policy states no lower minimum, so every cost must be known)")
+                            + ("" if not spend["unread"] else
+                               f"; {spend['unread']} of the {spend['scans']} executed scan(s) have no usable bundle"))
     return spends, None
 
 

@@ -13,9 +13,12 @@ and the configuration the run copied, each bound to the others by hash; a 2.0 ma
 schedule and is refused. Every assignment in the schedule is one observation, whatever became of it:
 an input that could not be prepared, a skipped system, an assignment the manifest has no row for, and
 a bundle that is missing or cannot be read are failures that detect nothing and complete nothing, and
-they stay in every denominator with their reason. A bundle is read through
-:func:`scaneval.scoring.observe`, which refuses a plan, result, and decisions that do not bind to one
-another, and :func:`scaneval.review.review_status`; a refused bundle is a failure too.
+they stay in every denominator with their reason. A failure whose manifest row names a bundle ran: the
+scan spent time and money and delivered claims that nothing here can read, so it counts among the
+executed scans of the usage and claim blocks with unknown wall time, cost, and claim volume, never zero.
+A bundle is read through :func:`scaneval.scoring.observe`, which refuses a plan, result, and decisions
+that do not bind to one another, and :func:`scaneval.review.review_status`; a refused bundle is a failure
+too.
 
 What is scored against what. An input is scored on the targets and controls its schedule froze before
 the run. An item frozen there but absent from the bundle's plan is a miss (``unscored``), and an item
@@ -88,6 +91,9 @@ CONTROL_CLASSES = {"capability_safe": ("capability_safe", "both"), "fixed_target
 STATUSES = ("success", "partial", "unsupported", "error", "timeout", "skipped", "missing")
 FAILURE_REASONS = ("failed_preparation", "skipped_system", "skipped", "missing_row", "missing_bundle",
                    "unusable_bundle")
+# The failures of an assignment the manifest records as run: its row names a bundle, and the bundle is gone
+# or cannot be read. Every other failure never ran, or left no record of running.
+EXECUTED_FAILURES = ("missing_bundle", "unusable_bundle")
 REVIEW_STATES = ("human_approved", "draft", "stale", "missing")
 PAIR_OUTCOMES = ("correct", "both_flagged", "both_silent", "reversed")
 # Leave-one-project-out sensitivity is shown while projects are few (docs/EVALUATION_MATH.md, section 5).
@@ -181,6 +187,16 @@ class _Observation:
     unscored: int = 0
     unregistered: int = 0
     timing: tuple[datetime | None, datetime | None, float] | None = None
+
+    @property
+    def executed(self) -> bool:
+        """Whether the manifest records this assignment as run: its row names a bundle, however that bundle reads.
+
+        A scan that ran spent time and money and delivered claims whether or not its bundle can still be
+        read, so its usage and claim volume are unknown, never zero. An assignment with no manifest row, a
+        skipped one, and one whose input was never prepared did not run as far as the record shows.
+        """
+        return self.observed is not None or self.reason in EXECUTED_FAILURES
 
 
 def _inside(root: Path, relative: str, label: str) -> Path:
@@ -1085,10 +1101,16 @@ def _completion(corpus: _Corpus, keys: list[Key],
 
 
 def _claims(observations: list[_Observation]) -> dict:
-    """Claim volume summed over the bundles read, each bundle once."""
+    """Claim volume summed over the bundles read, each bundle once.
+
+    ``executed`` counts the scans the manifest records as run, and ``bundles`` those of them whose bundle
+    could be read. What an executed scan delivered when its bundle is missing or unusable is unknown, not
+    zero: it is in no sum below, and ``executed`` above ``bundles`` says the sums are short by it.
+    """
     bundles = [observation.observed for observation in observations if observation.observed is not None]
     volume = [bundle["claims"] for bundle in bundles]
-    return {"bundles": len(bundles), "assignments": len(observations),
+    return {"bundles": len(bundles), "executed": sum(observation.executed for observation in observations),
+            "assignments": len(observations),
             "records": sum(item["records"] for item in volume),
             "unique": sum(item["unique"] for item in volume),
             "duplicate_copies": sum(item["duplicate_copies"] for item in volume),
@@ -1099,20 +1121,24 @@ def _claims(observations: list[_Observation]) -> dict:
 
 
 def _usage(observations: list[_Observation]) -> dict:
-    """Reported usage summed over bundles, each executed scan once however many targets it covers.
+    """Reported usage summed over the executed scans, each once however many targets it covers.
 
-    An unknown value (a null or absent wall time or cost) is counted as unknown and never summed as 0,
-    and a sum over no known value is null. These are the scanners' own figures, summed as floats.
+    Every scan the manifest records as run counts in ``executed``, whether or not its bundle could be
+    read (``bundles`` counts those that could). An executed scan with no usable bundle has an unknown
+    wall time and cost, like one whose result reports none: an unknown value is counted as unknown and
+    never summed as 0, and a sum over no known value is null. These are the scanners' own figures, summed as floats.
     """
-    usages = [observation.observed["usage"] for observation in observations
-              if observation.observed is not None]
+    executed = [observation for observation in observations if observation.executed]
+    usages = [observation.observed["usage"] if observation.observed is not None else {}
+              for observation in executed]
 
     def known(key: str) -> list:
         return [usage[key] for usage in usages if usage.get(key) is not None]
 
     wall, setup, cost = known("wall_seconds"), known("setup_seconds"), known("cost_usd")
     input_tokens, output_tokens = known("input_tokens"), known("output_tokens")
-    return {"bundles": len(usages),
+    return {"bundles": sum(observation.observed is not None for observation in executed),
+            "executed": len(usages),
             "wall_seconds": {"known_sum": math.fsum(wall) if wall else None, "known": len(wall),
                              "unknown": len(usages) - len(wall)},
             "setup_seconds": {"sum": math.fsum(setup) if setup else None, "reported": len(setup)},
@@ -1422,8 +1448,11 @@ def _view_warnings(facts: dict, results: Sequence[_SystemResult]) -> list[str]:
                             "adds beyond the frozen schedule are ignored")
         failed = sum(observations["failures"].values())
         if failed:
+            ran = sum(observations["failures"][reason] for reason in EXECUTED_FAILURES)
+            unknown = (f"; {ran} of them ran, so their claim volume, wall time, and cost are unknown, not zero"
+                       if ran else "")
             warnings.append(f"{system_id}: {failed} assignment(s) produced no usable bundle and stay in "
-                            "every denominator as failures")
+                            f"every denominator as failures{unknown}")
         if result.block["evidence_scope"] != "reviewed":
             warnings.append(f"{system_id}: evidence scope is {result.block['evidence_scope']}, not "
                             "reviewed benchmark evidence")

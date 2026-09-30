@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 
 import pytest
@@ -2237,6 +2238,122 @@ def test_a_system_that_recorded_no_result_has_an_unknown_cost_not_a_zero_one(cor
     assert requirement(decision, "cost.coverage")["explanation"] == (
         "no scan of the candidate recorded a result, so its cost is unknown, not zero")
     assert requirement(decision, "cost.per_assignment")["observed"]["mean"] is None
+
+
+def hidden_heavy_run(root: Path, run_id: str, *, hidden: str) -> Path:
+    """Five projects. One system delivers 2 claims a scan at $0.10; the other 100 at $5.00, except on p1.
+
+    The candidate detects every target and the baseline none. Every scan of the *hidden* system after p1 is then
+    re-saved with another cost, so its result no longer binds to the decisions a reviewer filed against it and
+    its bundle is unusable: the scans ran, delivered their claims, and spent their money, and none of it reads.
+    """
+    inputs = [planned(f"p{index}", project=f"acme/p{index}",
+                      targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}")])
+              for index in range(1, 6)]
+    outcomes = {}
+    for index in range(1, 6):
+        for system in ("baseline", "candidate"):
+            heavy = system == hidden and index > 1
+            outcomes[(f"p{index}", system, 1)] = scan(
+                hits={f"T-p{index}": 1} if system == "candidate" else {}, claims=100 if heavy else 2,
+                usage={"wall_seconds": 1.0, "cost_usd": 5.0 if heavy else 0.1})
+    run = write_run(root, run_id, inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                    configs={"candidate": {"config": {"knob": 2}}})
+    for index in range(2, 6):
+        path = run / "invocations" / f"p{index}__{hidden}__r1" / "result.json"
+        result = load_document(path, "scan-result")
+        result["usage"]["cost_usd"] = 5.01
+        path.write_text(canonical_json(result) + "\n", encoding="utf-8")
+    return run
+
+
+def burden_and_cost_policy() -> dict:
+    return gate_policy(burden={"max_claims_per_assignment": 10, "max_increase_ratio": 2.0},
+                       cost={"max_per_assignment_usd": 1.0, "max_increase_ratio": 2.0})
+
+
+def test_a_candidate_whose_heavy_scans_left_no_usable_bundle_cannot_pass_burden_or_cost(tmp_path):
+    """The candidate delivered 402 claims for about $20, but only its p1 scan (2 claims, $0.10) reads.
+
+    Read alone, the comparison shows 2 claims over 5 assignments and $0.10 a scan, far inside every limit:
+    0.4 a claim per assignment against a maximum of 10, and a cost ratio of 1 against a baseline that also
+    costs $0.10. The other four scans are executed scans with no usable bundle, so their claim volume and cost
+    are unknown, not zero, and nothing that reads them can pass.
+    """
+    run = hidden_heavy_run(tmp_path, "run-hidden-candidate", hidden="candidate")
+    comparison = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=aggregation_policy())
+    whole = comparison["views"][0]["systems"]["candidate"]["slices"][0]
+    assert whole["claims"]["records"] == 2 and whole["usage"]["cost_usd"]["known"] == 1
+
+    decision = gate.evaluate_gate(burden_and_cost_policy(), comparison)
+
+    assert statuses(decision) == {
+        "contract.shared": "pass", "contract.runs_completed": "pass", "configuration.allowed_differences": "pass",
+        "evidence.scope": "pass", "primary.improvement": "pass",
+        "burden.claims_per_assignment": "inconclusive", "burden.increase_ratio": "inconclusive",
+        "cost.coverage": "inconclusive", "cost.per_assignment": "inconclusive", "cost.increase_ratio": "inconclusive"}
+    assert decision["outcome"] == "inconclusive" and decision["failed"] == []
+    assert requirement(decision, "burden.claims_per_assignment")["explanation"] == (
+        "4 of the candidate's 5 executed scan(s) have no usable bundle, so their delivered claim volume is unknown, "
+        "not zero, and what was read is only part of what the candidate delivered")
+    assert requirement(decision, "burden.claims_per_assignment")["observed"]["executed"] == 5
+    assert requirement(decision, "cost.coverage")["explanation"] == (
+        "the candidate's cost is known for 1 of 5 executed scan(s), a coverage of 0.2, below the required 1 (the "
+        "policy states no lower minimum, so every cost must be known); 4 of the 5 executed scan(s) have no usable "
+        "bundle")
+
+
+def test_a_baseline_whose_heavy_scans_left_no_usable_bundle_leaves_only_the_ratios_unresolved(tmp_path):
+    """The baseline delivered 402 claims for about $20 and only its p1 scan reads; the candidate is light.
+
+    The candidate's own limits read the candidate alone and pass. A ratio to the baseline's volume or cost would
+    compare the candidate with a baseline that looks cheap only because its scans cannot be read, so both ratios
+    and the cost coverage of the pair wait.
+    """
+    run = hidden_heavy_run(tmp_path, "run-hidden-baseline", hidden="baseline")
+    comparison = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=aggregation_policy())
+
+    decision = gate.evaluate_gate(burden_and_cost_policy(), comparison)
+
+    assert statuses(decision) == {
+        "contract.shared": "pass", "contract.runs_completed": "pass", "configuration.allowed_differences": "pass",
+        "evidence.scope": "pass", "primary.improvement": "pass",
+        "burden.claims_per_assignment": "pass", "burden.increase_ratio": "inconclusive",
+        "cost.coverage": "inconclusive", "cost.per_assignment": "pass", "cost.increase_ratio": "inconclusive"}
+    assert requirement(decision, "burden.increase_ratio")["explanation"] == (
+        "4 of the baseline's 5 executed scan(s) have no usable bundle, so their delivered claim volume is unknown, "
+        "not zero, and what was read is only part of what the baseline delivered")
+    assert requirement(decision, "cost.coverage")["explanation"].startswith(
+        "the baseline's cost is known for 1 of 5 executed scan(s), a coverage of 0.2, below the required 1")
+
+
+def test_a_missing_bundle_is_an_unknown_cost_and_only_the_policys_stated_coverage_tolerates_it(tmp_path):
+    """Three of the candidate's four executed scans left no bundle, and the baseline's cost is fully known.
+
+    The candidate's one bundle reads $0.01, so the cost known is a mean of $0.01 over 1 of 4 executed scans, a
+    coverage of 0.25, not 1 of 1. Without a stated minimum every cost must be known, so cost waits; a policy
+    that accepts a coverage of 0.25 reads the one known scan, which is the policy's own tolerance of unknown cost.
+    """
+    inputs = [planned(f"p{index}", project=f"acme/p{index}",
+                      targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}")])
+              for index in range(1, 5)]
+    outcomes = {(f"p{index}", "baseline", 1): scan(claims=1, usage={"wall_seconds": 1.0, "cost_usd": 1.0})
+                for index in range(1, 5)}
+    outcomes[("p1", "candidate", 1)] = scan(hits={"T-p1": 1}, claims=1, usage={"wall_seconds": 1.0, "cost_usd": 0.01})
+    run = write_run(tmp_path, "run-cost-gone", inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                    configs={"candidate": {"config": {"knob": 2}}})
+    for index in range(2, 5):
+        shutil.rmtree(run / "invocations" / f"p{index}__candidate__r1")
+    comparison = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=aggregation_policy())
+    usage = comparison["views"][0]["systems"]["candidate"]["slices"][0]["usage"]
+    assert usage["cost_usd"]["coverage"] == 0.25 and (usage["bundles"], usage["executed"]) == (1, 4)
+
+    strict = gate.evaluate_gate(gate_policy(cost={"max_per_assignment_usd": 0.5}), comparison)
+
+    assert statuses(strict)["cost.coverage"] == statuses(strict)["cost.per_assignment"] == "inconclusive"
+    assert strict["outcome"] == "inconclusive"
+    accepting = gate.evaluate_gate(gate_policy(cost={"min_coverage": 0.25, "max_per_assignment_usd": 0.5}), comparison)
+    assert statuses(accepting)["cost.coverage"] == statuses(accepting)["cost.per_assignment"] == "pass"
 
 
 def test_a_cost_increase_from_a_free_baseline_is_unbounded(corpus):
