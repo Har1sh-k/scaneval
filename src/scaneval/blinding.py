@@ -589,7 +589,7 @@ def _rewritten(value: Any, rewrite: Callable[[str], str], where: str, path: tupl
         new = rewrite(key)
         if kept.setdefault(new, key) != key:
             raise _refused(f"{where}: the replacements make the keys {kept[new]!r} and {key!r} of the mapping at "
-                           f"{_at(path)} the same key {new!r}, so two entries would merge")
+                           f"{_at(path)} the same key {new!r}, a duplicate that would merge two entries")
         pairs.append((new, _rewritten(item, rewrite, where, path + (key,))))
     return type(value)(pairs)
 
@@ -664,8 +664,8 @@ def _check_parsed(kind: str, where: str, text: str, new_text: str, originals: li
     except RecursionError:
         raise _refused(f"{where} is nested too deeply for its structure to be compared") from None
     if difference:
-        raise _refused(f"{where}: the transformed file is not the original with the reviewed replacements applied "
-                       f"to its keys and strings: {difference}")
+        raise _refused(f"{where}: the transformed file does not keep the original's structure: it is not the "
+                       f"original with only the reviewed replacements applied to its keys and strings ({difference})")
 
 
 def _edit_for(document: dict, edit: dict, snapshot_id: str, source: Path, hashes: dict[str, str]) -> _Edit:

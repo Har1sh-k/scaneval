@@ -810,20 +810,20 @@ def test_a_json_edit_that_keeps_the_structure_is_accepted(tmp_path, name):
     assert edit.structure_check == "json" and edit.data.decode("utf-8") == content.replace("Widget", replacement)
 
 
+KEEP = ("the transformed file does not keep the original's structure: it is not the original with only the "
+        "reviewed replacements applied to its keys and strings ")
 JSON_REFUSED = {
     "quotation-mark": ('{"title": "Widget Docs"}\n', {"Widget": 'Sprock"et'},
                        " the transformed file is not valid JSON (Expecting ',' delimiter"),
     "invalid-escape": ('{"title": "Widget Docs"}\n', {"Widget": "Sprocket\\"},
                        " the transformed file is not valid JSON (Invalid \\escape"),
     "injected-key": ('{"title": "Widget Docs"}\n', {"Widget": 'Wid", "x": "y'},
-                     " the transformed file is not the original with the reviewed replacements applied to its keys "
-                     "and strings: $ holds the keys ['title', 'x'], expected ['title']"),
+                     f"{KEEP}($ holds the keys ['title', 'x'], expected ['title'])"),
     "decoded-escape": ('{"title": "Widget Docs"}\n', {"Widget": "Sprocket\\u0021"},
-                       " the transformed file is not the original with the reviewed replacements applied to its keys "
-                       "and strings: $['title'] is 'Sprocket! Docs', expected 'Sprocket\\\\u0021 Docs'"),
+                       f"{KEEP}($['title'] is 'Sprocket! Docs', expected 'Sprocket\\\\u0021 Docs')"),
     "merged-keys": ('{"Widget": 1, "Sprocket": 2}\n', {"Widget": "Sprocket"},
                     ": the replacements make the keys 'Widget' and 'Sprocket' of the mapping at $ the same key "
-                    "'Sprocket', so two entries would merge"),
+                    "'Sprocket', a duplicate that would merge two entries"),
     "merged-keys-below": ('{"a": [{"Widget": 1, "Sprocket": 2}]}\n', {"Widget": "Sprocket"},
                           ": the replacements make the keys 'Widget' and 'Sprocket' of the mapping at $['a'][0] the "
                           "same key 'Sprocket'"),
