@@ -1,0 +1,1929 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/comparison-report.schema.json",
+  "title": "ScanEval comparison report",
+  "description": "A baseline and a candidate system that were assigned exactly the same frozen work, each aggregated under one policy, with candidate-minus-baseline differences and paired cluster-bootstrap intervals. Comparing systems whose frozen evaluation contracts differ is refused before anything is computed. It decides nothing and is not a promotion gate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evaluator_version",
+    "policy",
+    "policy_sha256",
+    "runs",
+    "baseline",
+    "candidate",
+    "contract",
+    "configuration_differences",
+    "views",
+    "notes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.1"
+    },
+    "evaluator_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "policy": {
+      "type": "object",
+      "description": "The complete aggregation policy, validated as an aggregation-policy document."
+    },
+    "policy_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "runs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/run"
+      }
+    },
+    "baseline": {
+      "$ref": "#/$defs/system"
+    },
+    "candidate": {
+      "$ref": "#/$defs/system"
+    },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "structure_sha256",
+        "inputs",
+        "pairs"
+      ],
+      "description": "The frozen evaluation contract both systems share: inputs with their mode, profile, snapshot or change set, blinding map, declared tree hash, frozen plan items, levels and budgets, repetitions, pairs, and pack. structure_sha256 hashes it.",
+      "properties": {
+        "structure_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "inputs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pairs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "configuration_differences": {
+      "type": "array",
+      "description": "Every configuration value that differs between the two systems, as a dotted key over adapter, config, model_id, model_revision, network_policy, and execution.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "baseline",
+          "candidate",
+          "absent_in"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "baseline": {},
+          "candidate": {},
+          "absent_in": {
+            "enum": [
+              null,
+              "baseline",
+              "candidate"
+            ]
+          }
+        }
+      }
+    },
+    "views": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "mode",
+          "profile",
+          "evidence_scope",
+          "inputs",
+          "canonical_targets",
+          "canonical_controls",
+          "systems",
+          "differences",
+          "warnings"
+        ],
+        "properties": {
+          "mode": {
+            "enum": [
+              "full",
+              "pr"
+            ]
+          },
+          "profile": {
+            "enum": [
+              "standard",
+              "metadata_blinded"
+            ]
+          },
+          "evidence_scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "baseline",
+              "candidate"
+            ],
+            "properties": {
+              "baseline": {
+                "enum": [
+                  "diagnostic",
+                  "draft",
+                  "reviewed"
+                ]
+              },
+              "candidate": {
+                "enum": [
+                  "diagnostic",
+                  "draft",
+                  "reviewed"
+                ]
+              }
+            }
+          },
+          "inputs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "canonical_targets": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "canonical_controls": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "systems": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "baseline",
+              "candidate"
+            ],
+            "properties": {
+              "baseline": {
+                "$ref": "#/$defs/view_system"
+              },
+              "candidate": {
+                "$ref": "#/$defs/view_system"
+              }
+            }
+          },
+          "differences": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/slice_difference"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "slice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dimension",
+        "value"
+      ],
+      "description": "Which targets, controls, and inputs this block covers: all of the view, or those of one project or one workload. Weights are renormalized within the slice.",
+      "properties": {
+        "dimension": {
+          "enum": [
+            "all",
+            "project",
+            "workload"
+          ]
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      }
+    },
+    "interval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "lower",
+        "upper",
+        "clusters"
+      ],
+      "description": "A percentile cluster-bootstrap interval. Bounds are present only in state 'ok'. 'degenerate' means the two bounding replicate values are equal, a zero-width interval, which is not certainty; 'insufficient_clusters' means fewer clusters carry the metric than the policy's min_clusters; 'unstable' means some replicate left the metric undefined; 'unavailable' means the metric itself is undefined. 'clusters' counts the clusters that carry the metric.",
+      "properties": {
+        "state": {
+          "enum": [
+            "ok",
+            "degenerate",
+            "insufficient_clusters",
+            "unstable",
+            "unavailable"
+          ]
+        },
+        "lower": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "upper": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "clusters": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "interval"
+      ],
+      "description": "A value, null when undefined (never 0 for an empty denominator), and its interval.",
+      "properties": {
+        "value": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "interval": {
+          "$ref": "#/$defs/interval"
+        }
+      }
+    },
+    "difference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "interval"
+      ],
+      "description": "Candidate minus baseline, null when either side is undefined, with a paired interval from the same replicate resample of both systems.",
+      "properties": {
+        "value": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "interval": {
+          "$ref": "#/$defs/interval"
+        }
+      }
+    },
+    "status_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "success",
+        "partial",
+        "unsupported",
+        "error",
+        "timeout",
+        "skipped",
+        "missing"
+      ],
+      "description": "Assignments by status: a scan status, 'skipped' for an assignment the run never invoked, 'missing' for one with no usable bundle.",
+      "properties": {
+        "success": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "partial": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unsupported": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "error": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missing": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "failure_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "failed_preparation",
+        "skipped_system",
+        "skipped",
+        "missing_row",
+        "missing_bundle",
+        "unusable_bundle"
+      ],
+      "description": "Assignments that produced no usable bundle, by reason. Each stays in every denominator as a failure.",
+      "properties": {
+        "failed_preparation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped_system": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missing_row": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missing_bundle": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unusable_bundle": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "review_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "human_approved",
+        "draft",
+        "stale",
+        "missing"
+      ],
+      "description": "Bundles by review record state as review status reports it.",
+      "properties": {
+        "human_approved": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "draft": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stale": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missing": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "budget_metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "budget",
+        "value",
+        "lower_bound",
+        "unmeasured_mass",
+        "interval"
+      ],
+      "description": "Native recall within the first B claims. value is null whenever any observation's budget position is unmeasurable (unranked output or unresolved bundles); lower_bound counts those observations as misses and unmeasured_mass is their weight.",
+      "properties": {
+        "budget": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "value": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "lower_bound": {
+          "type": "number",
+          "minimum": 0
+        },
+        "unmeasured_mass": {
+          "type": "number",
+          "minimum": 0
+        },
+        "interval": {
+          "$ref": "#/$defs/interval"
+        }
+      }
+    },
+    "random_order": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "observation_mass",
+        "pending_mass",
+        "expected_recall"
+      ],
+      "description": "Expected recall under a uniform random order of the delivered claims, over unranked observations with resolved bundles only. A diagnostic: not native recall@B and not a promotion metric.",
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observation_mass": {
+          "type": "number",
+          "minimum": 0
+        },
+        "pending_mass": {
+          "type": "number",
+          "minimum": 0
+        },
+        "expected_recall": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "budget",
+              "value"
+            ],
+            "properties": {
+              "budget": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "value": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    "target_coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_observations",
+        "completed",
+        "assessable",
+        "detected",
+        "unscored",
+        "completed_mass",
+        "assessable_mass",
+        "unscored_mass"
+      ],
+      "description": "Assigned target observations and the weighted share that completed, that has a resolved outcome, and that was frozen in the schedule but absent from the bundle's plan (scored as a miss).",
+      "properties": {
+        "target_observations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "assessable": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "detected": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unscored": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed_mass": {
+          "type": "number",
+          "minimum": 0
+        },
+        "assessable_mass": {
+          "type": "number",
+          "minimum": 0
+        },
+        "unscored_mass": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "pair_outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pairs",
+        "mass"
+      ],
+      "properties": {
+        "pairs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mass": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "pairs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pairable_targets",
+        "availability",
+        "value",
+        "interval",
+        "assessable_mass",
+        "repetition_pairs",
+        "resolved_pairs",
+        "outcomes"
+      ],
+      "description": "Vulnerable/fixed pair correctness over the pairs frozen in the schedules: value is confirmed success only (both observations completed and resolved, target detected, no false allegation in the fixed state); outcomes cover resolved pairs; availability is the target weight with at least one pair.",
+      "properties": {
+        "pairable_targets": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "availability": {
+          "type": "number",
+          "minimum": 0
+        },
+        "value": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "interval": {
+          "$ref": "#/$defs/interval"
+        },
+        "assessable_mass": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "repetition_pairs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resolved_pairs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outcomes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "correct",
+            "both_flagged",
+            "both_silent",
+            "reversed"
+          ],
+          "properties": {
+            "correct": {
+              "$ref": "#/$defs/pair_outcome"
+            },
+            "both_flagged": {
+              "$ref": "#/$defs/pair_outcome"
+            },
+            "both_silent": {
+              "$ref": "#/$defs/pair_outcome"
+            },
+            "reversed": {
+              "$ref": "#/$defs/pair_outcome"
+            }
+          }
+        }
+      }
+    },
+    "variability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "variance",
+        "standard_error",
+        "uncovered_mass"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "ok",
+            "partial",
+            "unavailable"
+          ]
+        },
+        "variance": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "standard_error": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "uncovered_mass": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "budget_variability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "budget",
+        "state",
+        "variance",
+        "standard_error",
+        "uncovered_mass"
+      ],
+      "properties": {
+        "budget": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "enum": [
+            "ok",
+            "partial",
+            "unavailable"
+          ]
+        },
+        "variance": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "standard_error": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "uncovered_mass": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "run_variability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "full_output_recall",
+        "recall_at_budget"
+      ],
+      "description": "Conditional run noise from repeated runs of one input, under an independent-target approximation. Not corpus uncertainty; unavailable when every input ran once.",
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "full_output_recall": {
+          "$ref": "#/$defs/variability"
+        },
+        "recall_at_budget": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/budget_variability"
+          }
+        }
+      }
+    },
+    "leave_one_project_out": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "reason",
+        "values",
+        "min",
+        "max"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "ok",
+            "not_computed",
+            "unavailable"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "left_out",
+              "full_output_recall"
+            ],
+            "properties": {
+              "left_out": {
+                "type": "string",
+                "minLength": 1
+              },
+              "full_output_recall": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "min": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "detection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "weighting",
+        "state",
+        "reason",
+        "notes",
+        "full_output_recall",
+        "recall_at_budget",
+        "random_order_diagnostic",
+        "coverage",
+        "pairs",
+        "run_variability",
+        "leave_one_project_out"
+      ],
+      "description": "Target metrics under one weighting. An unavailable weighting (a cross-workload slice with no declared workload weights, explicit weights that do not cover or sum to 1 over the view) carries its reason and no numbers.",
+      "properties": {
+        "weighting": {
+          "enum": [
+            "equal_target",
+            "equal_project",
+            "equal_family",
+            "explicit"
+          ]
+        },
+        "state": {
+          "enum": [
+            "ok",
+            "unavailable"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "full_output_recall": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/metric"
+            }
+          ]
+        },
+        "recall_at_budget": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/budget_metric"
+          }
+        },
+        "random_order_diagnostic": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/random_order"
+            }
+          ]
+        },
+        "coverage": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/target_coverage"
+            }
+          ]
+        },
+        "pairs": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/pairs"
+            }
+          ]
+        },
+        "run_variability": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/run_variability"
+            }
+          ]
+        },
+        "leave_one_project_out": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/leave_one_project_out"
+            }
+          ]
+        }
+      }
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "reason",
+        "notes",
+        "canonical_controls",
+        "observations",
+        "completed",
+        "resolved",
+        "unresolved",
+        "false_allegations",
+        "observed_false_allegations",
+        "unscored",
+        "completed_mass",
+        "assessable_mass",
+        "false_allegation_mass",
+        "resolved_rate",
+        "completed_lower",
+        "completed_upper"
+      ],
+      "description": "One control class. Rates are null, never 0, when their denominator is empty: the resolved rate needs resolved mass and the completed bounds need completed mass. observed_false_allegations also counts confirmed allegations from incomplete output, which stay out of the rates.",
+      "properties": {
+        "state": {
+          "enum": [
+            "ok",
+            "unavailable"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "canonical_controls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resolved": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unresolved": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "false_allegations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observed_false_allegations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unscored": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed_mass": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "assessable_mass": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "false_allegation_mass": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "resolved_rate": {
+          "$ref": "#/$defs/metric"
+        },
+        "completed_lower": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "completed_upper": {
+          "$ref": "#/$defs/metric"
+        }
+      }
+    },
+    "completion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "inputs",
+        "assignments",
+        "statuses",
+        "failures"
+      ],
+      "description": "Equal weight over the assigned inputs, each averaged over its repetitions; only a successful scan completes.",
+      "properties": {
+        "value": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "inputs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "assignments": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "statuses": {
+          "$ref": "#/$defs/status_counts"
+        },
+        "failures": {
+          "$ref": "#/$defs/failure_counts"
+        }
+      }
+    },
+    "claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundles",
+        "assignments",
+        "records",
+        "unique",
+        "duplicate_copies",
+        "delivered",
+        "bundles_with_unresolved_delivery",
+        "unmatched_unique",
+        "pending_matching"
+      ],
+      "description": "Claim volume summed over bundles, each bundle once. delivered sums bundles whose bundles are resolved only.",
+      "properties": {
+        "bundles": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "assignments": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unique": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "duplicate_copies": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "delivered": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bundles_with_unresolved_delivery": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unmatched_unique": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending_matching": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundles",
+        "wall_seconds",
+        "setup_seconds",
+        "input_tokens",
+        "output_tokens",
+        "cost_usd"
+      ],
+      "description": "Reported usage summed over bundles, each executed scan once however many targets it covers. Unknown values stay unknown and are counted, never summed as 0.",
+      "properties": {
+        "bundles": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wall_seconds": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "known_sum",
+            "known",
+            "unknown"
+          ],
+          "properties": {
+            "known_sum": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "known": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unknown": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "setup_seconds": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sum",
+            "reported"
+          ],
+          "properties": {
+            "sum": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "reported": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "input_tokens": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sum",
+            "reported"
+          ],
+          "properties": {
+            "sum": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "reported": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "output_tokens": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sum",
+            "reported"
+          ],
+          "properties": {
+            "sum": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "reported": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "cost_usd": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "known_sum",
+            "known",
+            "unknown",
+            "coverage"
+          ],
+          "properties": {
+            "known_sum": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "known": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unknown": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "coverage": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "slice_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slice",
+        "canonical_targets",
+        "canonical_controls",
+        "inputs",
+        "clusters",
+        "detection",
+        "controls",
+        "completion",
+        "claims",
+        "usage"
+      ],
+      "properties": {
+        "slice": {
+          "$ref": "#/$defs/slice"
+        },
+        "canonical_targets": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "canonical_controls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inputs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "clusters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "targets",
+            "controls"
+          ],
+          "description": "The resampling clusters carrying the slice's targets, which every target metric resamples, and those carrying its controls, which every control metric resamples.",
+          "properties": {
+            "targets": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "controls": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "detection": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/detection"
+          }
+        },
+        "controls": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "capability_safe",
+            "fixed_target"
+          ],
+          "properties": {
+            "capability_safe": {
+              "$ref": "#/$defs/control"
+            },
+            "fixed_target": {
+              "$ref": "#/$defs/control"
+            }
+          }
+        },
+        "completion": {
+          "$ref": "#/$defs/completion"
+        },
+        "claims": {
+          "$ref": "#/$defs/claims"
+        },
+        "usage": {
+          "$ref": "#/$defs/usage"
+        }
+      }
+    },
+    "view_system": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "system_id",
+        "evidence_scope",
+        "observations",
+        "first_hit_ranks",
+        "slices"
+      ],
+      "properties": {
+        "system_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_scope": {
+          "enum": [
+            "diagnostic",
+            "draft",
+            "reviewed"
+          ]
+        },
+        "observations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "assignments",
+            "bundles",
+            "statuses",
+            "failures",
+            "failed_assignments",
+            "review_states",
+            "unscored_items",
+            "unregistered_items"
+          ],
+          "properties": {
+            "assignments": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "bundles": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "statuses": {
+              "$ref": "#/$defs/status_counts"
+            },
+            "failures": {
+              "$ref": "#/$defs/failure_counts"
+            },
+            "failed_assignments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "run_id",
+                  "assignment_id",
+                  "reason"
+                ],
+                "properties": {
+                  "run_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "assignment_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "reason": {
+                    "enum": [
+                      "failed_preparation",
+                      "skipped_system",
+                      "skipped",
+                      "missing_row",
+                      "missing_bundle",
+                      "unusable_bundle"
+                    ]
+                  }
+                }
+              }
+            },
+            "review_states": {
+              "$ref": "#/$defs/review_counts"
+            },
+            "unscored_items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unregistered_items": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "first_hit_ranks": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ranks",
+            "detected_without_rank",
+            "not_detected"
+          ],
+          "description": "Unweighted target observations by first accepted rank; a detection without a measured native rank is counted apart and is never given one.",
+          "properties": {
+            "ranks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "rank",
+                  "target_observations"
+                ],
+                "properties": {
+                  "rank": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "target_observations": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            },
+            "detected_without_rank": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "not_detected": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "slices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/slice_block"
+          }
+        }
+      }
+    },
+    "pack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "namespace",
+        "pack_id",
+        "version",
+        "sha256"
+      ],
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pack_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "status",
+        "created_at",
+        "manifest_sha256",
+        "schedule_sha256",
+        "config_sha256",
+        "evidence_sha256",
+        "pack",
+        "repetitions",
+        "inputs",
+        "systems",
+        "assignments",
+        "bundles",
+        "failures",
+        "timing"
+      ],
+      "description": "One run directory as read, bound by canonical hashes of its manifest, its schedule, its configuration, and every assignment's evidence digests.",
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "failed"
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "schedule_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "config_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "evidence_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "pack": {
+          "$ref": "#/$defs/pack"
+        },
+        "repetitions": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "inputs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "systems": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "assignments": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bundles": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failures": {
+          "$ref": "#/$defs/failure_counts"
+        },
+        "timing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "execution_records",
+            "records_without_timestamps",
+            "elapsed_wall_seconds",
+            "summed_wall_seconds"
+          ],
+          "description": "Elapsed wall time is the span from the earliest start to the latest finish the execution records state; summed wall time adds every record's own wall time.",
+          "properties": {
+            "execution_records": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "records_without_timestamps": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "elapsed_wall_seconds": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "summed_wall_seconds": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "system": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "system_id",
+        "adapter",
+        "model_id",
+        "model_revision",
+        "config_sha256",
+        "network_policy",
+        "execution",
+        "runs"
+      ],
+      "properties": {
+        "system_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "adapter": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "model_revision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "config_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "network_policy": {
+          "enum": [
+            "none",
+            "model_provider_only",
+            "unrestricted"
+          ]
+        },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "backend",
+            "enforced_expected",
+            "image"
+          ],
+          "properties": {
+            "backend": {
+              "enum": [
+                "local",
+                "oci"
+              ]
+            },
+            "enforced_expected": {
+              "type": "boolean"
+            },
+            "image": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            }
+          }
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "detection_difference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "weighting",
+        "state",
+        "reason",
+        "full_output_recall",
+        "recall_at_budget",
+        "pair_correctness",
+        "pair_availability",
+        "completed_mass",
+        "assessable_mass"
+      ],
+      "properties": {
+        "weighting": {
+          "enum": [
+            "equal_target",
+            "equal_project",
+            "equal_family",
+            "explicit"
+          ]
+        },
+        "state": {
+          "enum": [
+            "ok",
+            "unavailable"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "full_output_recall": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/difference"
+            }
+          ]
+        },
+        "recall_at_budget": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "budget",
+              "value",
+              "lower_bound",
+              "interval"
+            ],
+            "properties": {
+              "budget": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "value": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "lower_bound": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "interval": {
+                "$ref": "#/$defs/interval"
+              }
+            }
+          }
+        },
+        "pair_correctness": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/difference"
+            }
+          ]
+        },
+        "pair_availability": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "completed_mass": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "assessable_mass": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
+    "control_difference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resolved_rate",
+        "completed_upper",
+        "completed_mass",
+        "assessable_mass"
+      ],
+      "properties": {
+        "resolved_rate": {
+          "$ref": "#/$defs/difference"
+        },
+        "completed_upper": {
+          "$ref": "#/$defs/difference"
+        },
+        "completed_mass": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "assessable_mass": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
+    "slice_difference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slice",
+        "detection",
+        "controls",
+        "completion"
+      ],
+      "properties": {
+        "slice": {
+          "$ref": "#/$defs/slice"
+        },
+        "detection": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/detection_difference"
+          }
+        },
+        "controls": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "capability_safe",
+            "fixed_target"
+          ],
+          "properties": {
+            "capability_safe": {
+              "$ref": "#/$defs/control_difference"
+            },
+            "fixed_target": {
+              "$ref": "#/$defs/control_difference"
+            }
+          }
+        },
+        "completion": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

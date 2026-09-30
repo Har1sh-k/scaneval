@@ -31,6 +31,11 @@ SCHEMA_VERSIONS: dict[str, tuple[str, ...]] = {
     # The frozen evaluation schedule a run writes before it prepares any input. A kind first
     # published at 2.1 has 2.1 as its only version, so its schema keeps the plain file name.
     "evaluation-schedule": ("2.1",),
+    # Corpus aggregation and paired comparison (scaneval.aggregate): the policy an aggregation runs
+    # under, and the two reports it writes. First published at 2.1, so plain file names.
+    "aggregation-policy": ("2.1",),
+    "aggregate-report": ("2.1",),
+    "comparison-report": ("2.1",),
 }
 CONTRACT_KINDS = frozenset(SCHEMA_VERSIONS)
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
@@ -1630,6 +1635,80 @@ def _validate_evaluation_schedule(document: dict[str, Any]) -> None:
             seen.add((left, right))
 
 
+# --- corpus aggregation and paired comparison ---------------------------------------------------
+
+
+# How far a declared weight total may sit from 1 and still be read as 1; scaneval.aggregate reads
+# the same tolerance when it checks explicit target weights over one view.
+WEIGHT_TOLERANCE = 1e-9
+
+
+def _validate_aggregation_policy(document: dict[str, Any]) -> None:
+    """Check that a policy's weightings and weights can be applied; it says nothing about their merit.
+
+    The explicit weighting is listed exactly when explicit target weights are declared, so a policy
+    cannot ask for a view it gives no weights for, or declare weights no view reads. Declared
+    workload weights sum to 1. Whether explicit target weights cover a view's canonical targets and
+    sum to 1 over them depends on the runs aggregated, and is checked, per view, when they are.
+    """
+    if ("explicit" in document["views"]) != (document.get("target_weights") is not None):
+        raise ContractError("views lists 'explicit' exactly when target_weights is declared")
+    workloads = document.get("workload_weights")
+    if workloads is not None:
+        total = math.fsum(workloads.values())
+        if abs(total - 1) > WEIGHT_TOLERANCE:
+            raise ContractError(f"workload_weights must sum to 1, not {total!r}")
+
+
+def _validate_aggregate_report(document: dict[str, Any]) -> None:
+    """Check that an aggregate report is internally keyed; it says nothing about the numbers in it.
+
+    The embedded policy is a valid aggregation policy, run, system, and view keys are unique, and each
+    system appears once per view with one block per slice and one detection block per weighting the
+    policy lists. Nothing here reads a run directory or recomputes a metric.
+    """
+    validate_document("aggregation-policy", document["policy"])
+    _unique([run["run_id"] for run in document["runs"]], "runs.run_id")
+    _unique([system["system_id"] for system in document["systems"]], "systems.system_id")
+    _unique([f"{view['mode']}/{view['profile']}" for view in document["views"]], "views (mode, profile)")
+    for view in document["views"]:
+        _unique([system["system_id"] for system in view["systems"]], "view systems.system_id")
+        for system in view["systems"]:
+            _check_slices(system["slices"], document["policy"]["views"])
+
+
+def _check_slices(slices: list[dict[str, Any]], weightings: list[str]) -> None:
+    """Each slice once, only the whole-view slice without a value, and every weighting in order."""
+    _unique([f"{block['slice']['dimension']}={block['slice']['value']}" for block in slices], "slices")
+    for block in slices:
+        if (block["slice"]["dimension"] == "all") != (block["slice"]["value"] is None):
+            raise ContractError("only the 'all' slice has no value")
+        if [detection["weighting"] for detection in block["detection"]] != list(weightings):
+            raise ContractError("each slice carries one detection block per weighting, in policy order")
+
+
+def _validate_comparison_report(document: dict[str, Any]) -> None:
+    """Check that a comparison names two systems and lines their slices up; not that the numbers hold.
+
+    The embedded policy is valid, the baseline and candidate are different systems, and in every view
+    both systems and the differences carry the same slices in the same order.
+    """
+    validate_document("aggregation-policy", document["policy"])
+    if document["baseline"]["system_id"] == document["candidate"]["system_id"]:
+        raise ContractError("a comparison names two different systems")
+    _unique([run["run_id"] for run in document["runs"]], "runs.run_id")
+    _unique([f"{view['mode']}/{view['profile']}" for view in document["views"]], "views (mode, profile)")
+    for view in document["views"]:
+        keys = []
+        for side in ("baseline", "candidate"):
+            slices = view["systems"][side]["slices"]
+            _check_slices(slices, document["policy"]["views"])
+            keys.append([block["slice"] for block in slices])
+        keys.append([block["slice"] for block in view["differences"]])
+        if not keys[0] == keys[1] == keys[2]:
+            raise ContractError("the baseline, the candidate, and the differences cover different slices")
+
+
 _RUNTIME_VALIDATORS = {
     "case-pack": _validate_case_pack,
     "review-record": _validate_review_record,
@@ -1642,6 +1721,10 @@ _RUNTIME_VALIDATORS = {
     "run-manifest": _validate_run_manifest,
     # Kinds first published at 2.1, one per feature.
     "evaluation-schedule": _validate_evaluation_schedule,
+    # Corpus aggregation and paired comparison.
+    "aggregation-policy": _validate_aggregation_policy,
+    "aggregate-report": _validate_aggregate_report,
+    "comparison-report": _validate_comparison_report,
 }
 
 
