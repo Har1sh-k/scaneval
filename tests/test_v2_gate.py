@@ -893,6 +893,22 @@ def test_the_paired_interval_must_have_its_lower_bound_above_the_declared_thresh
         f"the paired interval [{lower:.6g}, {upper:.6g}] at 0.95 confidence has its lower bound above 0")
 
 
+def test_an_interval_that_ends_exactly_at_the_bound_shows_no_improvement_beyond_it(corpus):
+    """The bound must be exceeded: an interval whose upper end is the bound lies at or below it, so it fails."""
+    policy = gate_policy(primary=primary(uncertainty={"lower_bound_above": 0.0}))
+
+    def status(lower: float, upper: float) -> str:
+        doctored = deepcopy(corpus["comparisons"]["improved"])
+        difference_of(doctored)["full_output_recall"]["interval"] = {
+            "state": "ok", "lower": lower, "upper": upper, "clusters": 10}
+        return requirement(gate.evaluate_gate(policy, doctored), "primary.uncertainty")["status"]
+
+    assert status(-0.2, 0.0) == "fail"
+    assert status(-0.2, 0.01) == "inconclusive"
+    assert status(0.0, 0.3) == "inconclusive", "a lower bound equal to the bound does not exceed it"
+    assert status(0.01, 0.3) == "pass"
+
+
 def test_an_interval_that_is_not_ok_leaves_the_improvement_inconclusive(corpus):
     """Insufficient clusters, a degenerate interval, and an unavailable one carry no bounds and prove nothing."""
     rule = primary(uncertainty={"lower_bound_above": 0.0})
@@ -1032,6 +1048,9 @@ def test_a_regression_can_also_hold_the_paired_interval_within_the_allowed_decre
     assert status == "inconclusive" and "allows a decrease larger than 0.05" in explanation
     status, explanation = verdict(-0.4, -0.06)
     assert status == "fail" and "lies below -0.05" in explanation
+    status, explanation = verdict(-0.3, -0.05)
+    assert status == "inconclusive", "an interval that reaches the limit is not wholly below it"
+    assert "allows a decrease larger than 0.05" in explanation
     status, explanation = verdict(None, None, "degenerate")
     assert status == "inconclusive" and "the paired interval is degenerate" in explanation
     real = requirement(decide(corpus, policy), "regression.guard")
@@ -1699,6 +1718,8 @@ def test_the_precision_interval_bound_passes_fails_or_waits_on_what_the_interval
     assert "reaches below 0.6, so precision at that level is not established" in explanation
     status, explanation = verdict(state="ok", lower=0.2, upper=0.5)
     assert status == "fail" and "lies wholly below 0.6" in explanation
+    reaching = verdict(state="ok", lower=0.2, upper=0.6)
+    assert reaching[0] == "inconclusive", "an interval reaching the bound is not wholly below it"
     status, explanation = verdict(state="degenerate", lower=None, upper=None)
     assert status == "inconclusive" and explanation == (
         "the estimate's interval is degenerate, so it carries no bounds")
@@ -2920,3 +2941,60 @@ def test_a_figure_the_gate_derives_is_exact_so_binary_floats_never_move_it_acros
     assert item["observed"] == {"baseline": 0.05, "candidate": 0.07, "ratio": 1.4}
     assert item["explanation"] == ("the candidate's recorded cost per executed scan is 0.07 against the baseline's "
                                    "0.05, a ratio of 1.4, within the allowed 1.4")
+
+
+# --- a view that spans workloads --------------------------------------------------------------------
+
+
+def two_workload_comparison(root: Path, run_id: str, **uncertainty) -> dict:
+    """Four projects across two workloads; the baseline detects one target per workload, the candidate all four.
+
+    Each input carries one target and one capability-safe control, and every scan is quiet on its control.
+    """
+    workloads = {1: "conventional_application", 2: "conventional_application", 3: "agentic_application",
+                 4: "agentic_application"}
+    inputs = [planned(f"p{index}", project=f"acme/p{index}", workload=workloads[index],
+                      targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}",
+                                      workload=workloads[index])],
+                      controls=[control(f"C-p{index}")])
+              for index in range(1, 5)]
+    outcomes = {}
+    for index in range(1, 5):
+        outcomes[(f"p{index}", "baseline", 1)] = scan(hits={f"T-p{index}": 1} if index in (1, 3) else {}, claims=1)
+        outcomes[(f"p{index}", "candidate", 1)] = scan(hits={f"T-p{index}": 1}, claims=1)
+    run = write_run(root, run_id, inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                    configs={"candidate": {"config": {"knob": 2}}})
+    settings = aggregation_policy(min_clusters=2)
+    settings.update(uncertainty)
+    return aggregate.compare([run], baseline="baseline", candidate="candidate", policy=settings)
+
+
+def test_a_view_spanning_workloads_without_declared_weights_is_inconclusive_but_a_workload_slice_can_be_gated(tmp_path):
+    """No summary crosses workloads without predeclared weights, so the whole view reports none.
+
+    Recall is 2/4 to 4/4 in the pooled view the aggregation could not weight, but each workload has its own
+    numbers: conventional 1/2 to 2/2 and agentic 1/2 to 2/2, +0.5 each. A policy on a workload slice is decided;
+    one on the whole view, or on its controls, is unresolved with the reason the comparison gave.
+    """
+    comparison = two_workload_comparison(tmp_path, "run-workloads")
+    whole = gate.evaluate_gate(gate_policy(controls={"capability_safe": bounds()}), comparison)
+
+    assert whole["outcome"] == "inconclusive" and whole["failed"] == []
+    reason = ("this slice spans 2 workloads (agentic_application, conventional_application) and the policy declares "
+              "no workload weights; no summary crosses workloads without them")
+    assert requirement(whole, "primary.improvement")["explanation"] == (
+        f"equal_target detection is unavailable for the whole view of full/standard: {reason}")
+    for check in ("false_alarm_upper", "completed_mass", "assessable_mass"):
+        assert requirement(whole, f"controls.capability_safe.{check}")["explanation"] == (
+            f"the capability_safe controls are unavailable: {reason}")
+
+    sliced = gate.evaluate_gate(gate_policy(primary=primary(
+        slice={"dimension": "workload", "value": "agentic_application"}, minimum=0.5)), comparison)
+    assert requirement(sliced, "primary.improvement")["observed"] == {
+        "baseline": 0.5, "candidate": 1.0, "difference": 0.5}
+    assert sliced["outcome"] == "pass"
+
+    weighted = two_workload_comparison(tmp_path, "run-weighted", workload_weights={
+        "conventional_application": 0.5, "agentic_application": 0.5})
+    declared = gate.evaluate_gate(gate_policy(controls={"capability_safe": bounds()}), weighted)
+    assert declared["outcome"] == "pass", "declared workload weights let the whole view be summarized"
