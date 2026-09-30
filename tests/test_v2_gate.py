@@ -1,12 +1,13 @@
 """Promotion gate decisions: the two contract kinds, then the gate over comparisons built from saved runs.
 
-The contract tests use hand-written policies and decisions. The gate tests build run directories in
+The contract tests use hand-written policies and decisions. Most gate tests build run directories in
 ``tmp_path`` (a frozen schedule, a 2.1 manifest, and one invocation bundle per assignment whose plan,
 result, decisions, and review record bind to one another the way ``scaneval run`` and the review
 commands write them), then read them with the real :func:`scaneval.aggregate.compare` and the real
-precision sampling and estimate. Reviewed evidence is approved through :mod:`scaneval.review` by a
-reviewer, and precision claims are reviewed by reviewers, who are explicitly fictional. No scanner
-runs, no network is used, and no model or judge is consulted.
+precision sampling and estimate. The end-to-end tests run the real runner with scripted adapters over a
+local ``git init`` fixture instead, and file their decisions through the real review commands. Every
+reviewer, of a label, a bundle, or a claim, is explicitly fictional. No scanner runs, no network is
+used, and no model or judge is consulted.
 """
 
 from __future__ import annotations
@@ -1029,6 +1030,39 @@ def test_a_regression_the_comparison_cannot_supply_is_inconclusive(corpus):
     assert requirement(carrying, "regression.workloads")["status"] == "pass"
     assert requirement(carrying, "regression.workloads")["observed"]["slices"] == [
         {"slice": WORKLOAD, "baseline": 0.2, "candidate": 0.8, "difference": 0.6}]
+
+
+def test_a_project_that_carries_only_controls_takes_no_part_in_a_per_project_regression(tmp_path):
+    """Project acme/p3 has a control and no target, so it has no recall to lose.
+
+    Covering each project reads acme/p1 and acme/p2 and passes; naming acme/p3 outright asks for a figure the
+    comparison reports as unavailable, and that is unresolved rather than a pass.
+    """
+    inputs = [planned(f"p{index}", project=f"acme/p{index}",
+                      targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}")])
+              for index in (1, 2)]
+    inputs.append(planned("p3", project="acme/p3", controls=[control("C-p3")]))
+    outcomes = {("p1", "baseline", 1): scan(hits={"T-p1": 1}, claims=1),
+                ("p1", "candidate", 1): scan(hits={"T-p1": 1}, claims=1),
+                ("p2", "candidate", 1): scan(hits={"T-p2": 1}, claims=1)}
+    run = write_run(tmp_path, "run-controls-only", inputs, systems=("baseline", "candidate"), outcomes=outcomes,
+                    configs={"candidate": {"config": {"knob": 2}}})
+    comparison = aggregate.compare([run], baseline="baseline", candidate="candidate",
+                                   policy=aggregation_policy(min_clusters=2))
+
+    decision = gate.evaluate_gate(gate_policy(regressions=[
+        regression("each-project", slice={"dimension": "project"}),
+        regression("controls-only", slice={"dimension": "project", "value": "acme/p3"})]), comparison)
+
+    each = requirement(decision, "regression.each-project")
+    assert each["status"] == "pass" and [row["slice"] for row in each["observed"]["slices"]] == [
+        "acme/p1", "acme/p2"]
+    named = requirement(decision, "regression.controls-only")
+    assert named["status"] == "inconclusive"
+    assert named["explanation"] == (
+        "full-output recall (equal_target) in project acme/p3 could not be settled: project acme/p3: equal_target "
+        "detection is unavailable for project acme/p3 of full/standard: this slice has no target planned before "
+        "execution")
 
 
 def test_a_regression_can_also_hold_the_paired_interval_within_the_allowed_decrease(corpus):
