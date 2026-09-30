@@ -62,7 +62,7 @@ Each value is `null` when its denominator is empty, never `0`.
 | `claims` | Records, unique, duplicate copies, delivered (resolved bundles only), unmatched, and pending, summed per bundle. `executed` counts the scans the manifest records as run: when it exceeds `bundles`, the sums are short by the executed scans whose bundle is missing or unusable, whose volume is unknown. | Bundles read. |
 | `usage` | Wall, setup, tokens, and cost, summed once per executed scan however many targets it covers. An executed scan whose bundle is missing or unusable has unknown wall time and cost. Unknown values are counted, never summed as 0. Cost carries `coverage`, the share of executed scans whose cost is known. | Executed scans (`executed`); `bundles` counts those whose bundle was read. |
 | `runs[].timing` | Elapsed wall time from the earliest start to the latest finish in the execution records, beside the records' summed wall time. | Execution records. |
-| `first_hit_ranks`, `targets_per_input` | Unweighted rank distribution (a detection without a native rank is counted apart) and the planned target count per input. | Raw counts. |
+| `first_hit_ranks`, `targets_per_input` | Unweighted rank distribution (a detection without a native rank is counted apart) and the planned canonical target count per input, where the alias records of one root cause are one target. | Raw counts. |
 | `leave_one_project_out` | Full-output recall with each project's targets removed in turn, shown while a slice has 2 to 9 projects. | Remaining targets, renormalized. |
 
 ## Uncertainty

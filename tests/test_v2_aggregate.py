@@ -364,6 +364,24 @@ def test_equal_target_and_equal_project_recall_differ_when_scans_carry_different
     assert validate_document("aggregate-report", report) is report
 
 
+def test_targets_per_input_counts_canonical_targets_and_not_the_alias_records_of_one(tmp_path):
+    """One input plans a CVE record and a GHSA record of a single root cause, X, beside a target Y.
+
+    a1 has three records and two canonical targets (X and Y); a2 has one. Counting records would report inputs
+    with 3 and 1 targets, and a canonical target multiplied by its aliases; the count is 2 and 1, and the view
+    holds 3 canonical targets in all (X, Y, and a2's).
+    """
+    inputs = [planned("a1", targets=[target("CVE-1", canonical="X"), target("GHSA-1", canonical="X"),
+                                     target("T-2", canonical="Y")]),
+              planned("a2", targets=[target("T-3")])]
+    run = write_run(tmp_path, "run-aliases", inputs)
+
+    report = aggregate.aggregate([run], policy=policy())
+
+    assert view(report)["canonical_targets"] == 3
+    assert view(report)["targets_per_input"] == [{"targets": 1, "inputs": 1}, {"targets": 2, "inputs": 1}]
+
+
 def test_one_canonical_target_on_several_snapshots_is_one_target_with_rho_weighted_observations(tmp_path):
     """Two snapshots of one root cause add observations of one target, never a second target's weight.
 

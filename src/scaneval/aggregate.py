@@ -1432,14 +1432,18 @@ def _systems_in_view(corpus: _Corpus, mode: str, profile: str) -> list[str]:
 
 
 def _view_facts(corpus: _Corpus, mode: str, profile: str, system_ids: Iterable[str]) -> dict:
-    """What the schedules of the runs assigning *system_ids* froze for one view; no outcome is read."""
+    """What the schedules of the runs assigning *system_ids* froze for one view; no outcome is read.
+
+    ``targets_per_input`` counts the distinct canonical targets each frozen plan holds, so the alias
+    records of one root cause (a CVE and a GHSA record of it, say) are one target, never several.
+    """
     wanted = set(system_ids)
     rows = [(run, row) for run in corpus.runs if wanted & set(run.system_ids)
             for row in run.schedule["inputs"] if (row["mode"], row["profile"]) == (mode, profile)]
     frozen = [row for _run, row in rows if row["plan"]["state"] == "frozen"]
     targets = {target["canonical_id"] for row in frozen for target in row["plan"]["targets"]}
     controls = {control["canonical_id"] for row in frozen for control in row["plan"]["controls"]}
-    per_input = Counter(len(row["plan"]["targets"]) for row in frozen)
+    per_input = Counter(len({target["canonical_id"] for target in row["plan"]["targets"]}) for row in frozen)
     projects = {row["project"] for _run, row in rows} | {corpus.targets[key]["project"] for key in targets}
     workloads = {row["workload"] for _run, row in rows} | {corpus.targets[key]["workload"] for key in targets}
     return {
