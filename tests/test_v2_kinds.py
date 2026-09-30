@@ -6,6 +6,8 @@ a hostile or odd tag can do to it is checked here once. Every string is fabricat
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from scaneval.adapters.semgrep import import_semgrep_results
@@ -45,3 +47,13 @@ def test_the_semgrep_adapter_reads_a_rule_tagged_with_more_digits_than_any_cwe_h
     assert imported.lost == 0
     (claim,) = imported.claims
     assert (claim["native_cwe"], claim["kind"]) == (["CWE-78"], "command_injection")
+
+
+def test_reading_many_distinct_tags_takes_linear_time():
+    """Each tag was compared with every id already found: 50000 distinct ones took over a minute."""
+    tags = [f"CWE-{number}" for number in range(1, 50001)]
+    started = time.perf_counter()
+    found = cwe_ids(tags + tags)
+    elapsed = time.perf_counter() - started
+    assert found == tags
+    assert elapsed < 2, f"reading 50000 tags took {elapsed:.1f}s"

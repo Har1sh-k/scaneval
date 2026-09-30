@@ -39,6 +39,7 @@ from scaneval.contracts import (
 )
 from scaneval.sarif import (
     FLOW_STEP_LIMIT,
+    MESSAGE_LIMIT,
     SarifImportError,
     SourceTree,
     UriSettings,
@@ -1037,6 +1038,103 @@ def test_a_refusal_of_the_whole_log_is_never_recorded_as_one_results_loss(monkey
     monkeypatch.setattr(sarif_module, "kind_for_cwes", refuse)
     with pytest.raises(SarifImportError, match="refused as a whole"):
         converted([result_at("src/app.py")])
+
+
+# --- bounds: a small log must not become a large allegation or a long run -------------------------
+
+
+def test_a_message_of_exactly_the_bound_imports_and_one_character_more_is_a_loss():
+    at_bound = "x" * MESSAGE_LIMIT
+    for message in ({"text": at_bound}, {"text": "{0}", "arguments": [at_bound]},
+                    {"id": "long", "arguments": [at_bound]}):
+        log = minimal_log(results=[result_at("src/app.py", message=message)])
+        log["runs"][0]["tool"]["driver"]["rules"][0]["messageStrings"] = {"long": {"text": "{0}"}}
+        assert len(only_claim(convert_run(log))[0]["allegation"]) == MESSAGE_LIMIT
+    over = "x" * (MESSAGE_LIMIT + 1)
+    for message in ({"text": over}, {"text": "{0}", "arguments": [over]}, {"text": over, "arguments": []},
+                    {"text": "{0}{0}", "arguments": ["x" * (MESSAGE_LIMIT // 2 + 1)]}):
+        reason = only_loss(converted([result_at("src/app.py", message=message)]))
+        assert reason == (f"/runs/0/results/0/message is longer than {MESSAGE_LIMIT} characters, as written or "
+                          "once formatted, so it is not read; the raw artifact keeps it")
+
+
+def test_a_small_log_cannot_be_formatted_into_a_large_allegation():
+    """A 16 KiB log of 4000 placeholders over one 4000-character argument formatted to 16 MB."""
+    expanding = result_at("src/app.py", message={"text": "{0}" * 4000, "arguments": ["A" * 4000]})
+    conversion = converted([expanding])
+    assert conversion.claims == [] and len(conversion.losses) == 1
+    assert sum(len(loss["reason"]) for loss in conversion.losses) < 300
+    # The same expansion through one messageStrings entry that every result shares.
+    log = minimal_log(results=[result_at("src/app.py", message={"id": "m", "arguments": ["B" * 2000]})
+                               for _ in range(50)])
+    log["runs"][0]["tool"]["driver"]["rules"][0]["messageStrings"] = {"m": {"text": "{0}" * 2000}}
+    conversion = convert_run(log)
+    assert conversion.claims == [] and len(conversion.losses) == 50
+    status, error = conversion.outcome()
+    assert (status, error["code"]) == ("partial", "import_loss")
+
+
+def test_a_template_longer_than_the_bound_is_refused_before_it_is_scanned():
+    # 90000 characters of placeholders over an empty argument would format to nothing, but it is
+    # 90000 characters of template for every result that names it.
+    reason = only_loss(converted([result_at("src/app.py", message={"text": "{0}" * 30000, "arguments": [""]})]))
+    assert f"is longer than {MESSAGE_LIMIT} characters" in reason
+
+
+def test_a_flow_step_message_over_the_bound_is_an_evidence_loss_and_the_claim_stays():
+    result = result_at("src/app.py", codeFlows=[flow(step("src/app.py", 1, "x" * (MESSAGE_LIMIT + 1)),
+                                                     step("src/app.py", 2, "kept"))])
+    claim, entry = only_claim(converted([result]))
+    assert claim["evidence_text"] == "flow 1, thread 1, step 1: src/app.py:1\nflow 1, thread 1, step 2: src/app.py:2 kept"
+    (loss,) = entry["evidence_losses"]
+    assert loss["pointer"] == "/runs/0/results/0/codeFlows/0/threadFlows/0/locations/0/location/message"
+    assert "is longer than" in loss["reason"]
+
+
+class Counted(list):
+    """A list that counts how often it is iterated, to show what a run reads once and what it rereads."""
+
+    def __init__(self, *items):
+        super().__init__(*items)
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        return super().__iter__()
+
+
+def test_taxonomies_and_a_rules_relationships_are_read_once_however_many_results_use_them():
+    """Every relationship of every result used to rescan every taxonomy: results x relationships x taxonomies."""
+    taxonomies = Counted([{"name": f"Other{number}", "guid": f"guid-{number}"} for number in range(200)]
+                         + [{"name": "CWE", "guid": "cwe-guid"}])
+    relationships = Counted([{"target": {"id": str(1000 + number), "toolComponent": {"guid": "cwe-guid"}},
+                              "kinds": ["superset"]} for number in range(200)])
+    tags = Counted(["security", "CWE-78: OS Command Injection"])
+    log = minimal_log(results=[result_at("src/app.py", taxa=[{"id": "79", "toolComponent": {"index": 200}}])
+                               for _ in range(20)])
+    run = log["runs"][0]
+    run["taxonomies"] = taxonomies
+    rule = run["tool"]["driver"]["rules"][0]
+    rule["relationships"], rule["properties"]["tags"] = relationships, tags
+    conversion = convert_run(log)
+    assert len(conversion.claims) == 20 and conversion.losses == []
+    assert conversion.claims[0]["native_cwe"][:3] == ["CWE-1000", "CWE-1001", "CWE-1002"]
+    assert conversion.claims[0]["native_cwe"][-2:] == ["CWE-79", "CWE-78"]
+    assert (taxonomies.iterations, relationships.iterations, tags.iterations) == (1, 1, 1)
+
+
+def test_a_taxonomy_is_found_by_guid_then_index_then_name_and_failing_all_three_by_its_own_name():
+    log = minimal_log(results=[
+        result_at("src/app.py", taxa=[{"id": "79", "toolComponent": reference}])
+        for reference in ({"guid": "the-cwe"}, {"index": 1}, {"name": "CWE"}, {"guid": "no-such", "name": "CWE"},
+                          {"guid": "the-cwe", "index": 0}, {"guid": "other"}, {"index": 5}, {"index": 0},
+                          {"name": "cwe "})])
+    log["runs"][0]["taxonomies"] = ["not a taxonomy", {"name": "CWE", "guid": "the-cwe"},
+                                    {"name": "Other", "guid": "other"}, {"name": "CWE"}]
+    # The rule's own tag, CWE-78, follows whatever the taxon contributes.
+    cwe, no_cwe = ["CWE-79", "CWE-78"], ["CWE-78"]
+    assert [claim["native_cwe"] for claim in convert_run(log).claims] == [
+        cwe, cwe, cwe, cwe, cwe, no_cwe, no_cwe, no_cwe, cwe]
 
 
 def test_the_guid_is_the_native_id_and_fingerprints_are_provenance_only():

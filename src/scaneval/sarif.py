@@ -48,6 +48,11 @@ loss recorded against that claim, not a reason to drop the claim. A result whose
 it may bundle separate allegations (several primary locations, or code flows that start in
 different places) is flagged for bundle review rather than split or guessed at.
 
+What is bounded. ``--max-bytes`` bounds the bytes read, and the work after it is bounded too: a
+message, as written or once formatted, is at most :data:`MESSAGE_LIMIT` characters, and a rule's
+relationships and tags and the run's taxonomies are read once, not once per result. What is not
+bounded is a run's messages together: results that share one long string each hold a copy of it.
+
 What it never invents. A line range is read from a region's ``startLine`` and ``endLine`` or not
 at all: an offset-only region stays file-only. Execution success is the log's own report and is
 never verified; a log that reports no execution outcome is not a clean scan. Timing, cost, and
@@ -135,6 +140,11 @@ DIVERGENT_CODE_FLOWS = "divergent_code_flows"
 # rest is counted, recorded as an evidence loss, and kept in the raw artifact.
 FLOW_STEP_LIMIT = 256
 FLOW_TEXT_LIMIT = 65536
+# A message is at most this many characters, as written or once formatted. A tool's message is a
+# sentence or two, but formatting turns a few bytes of log into megabytes (one long argument under
+# thousands of placeholders, or one messageStrings entry shared by every result), and the import
+# keeps a copy of the message in every claim. A longer message is a loss; the raw artifact keeps it.
+MESSAGE_LIMIT = 65536
 
 # The most digits a log's number can have where this module reads one out of a string: a placeholder
 # index or a location id. int() refuses a string of more than 4300 digits (a limit an environment can
@@ -681,33 +691,52 @@ class _Place:
 # --- messages and rules ------------------------------------------------------------------
 
 
+def _too_long(label: str) -> _Unusable:
+    return _Unusable(f"{label} is longer than {MESSAGE_LIMIT} characters, as written or once formatted, so it "
+                     "is not read; the raw artifact keeps it")
+
+
 def _formatted(template: str, arguments: list[str], label: str) -> str:
     """*template* with ``{n}`` replaced by ``arguments[n]`` and ``{{``/``}}`` undoubled (SARIF 3.11.5).
 
     A placeholder past the end of *arguments*, one with more than :data:`_MAX_DIGITS` digits, or a
     single brace that is neither half of an escape nor part of a placeholder, leaves the message
-    unresolved rather than guessed at.
+    unresolved rather than guessed at. So does a template longer than :data:`MESSAGE_LIMIT`
+    characters, which is refused before it is scanned, and one that formats to more than that: the
+    text is built piece by piece and stops at the bound, so the work is bounded by it whatever the
+    log holds. That bounds one message, not a run: results that share a long string each hold a copy.
     """
+    if len(template) > MESSAGE_LIMIT:
+        raise _too_long(label)
     pieces: list[str] = []
+    size = 0
+
+    def emit(piece: str) -> None:
+        nonlocal size
+        size += len(piece)
+        if size > MESSAGE_LIMIT:
+            raise _too_long(label)
+        pieces.append(piece)
+
     position = 0
     for match in _TOKEN.finditer(template):
-        pieces.append(template[position:match.start()])
+        emit(template[position:match.start()])
         token = match.group(0)
         if token == "{{":
-            pieces.append("{")
+            emit("{")
         elif token == "}}":
-            pieces.append("}")
+            emit("}")
         elif match.group(1) is not None:
             index = _bounded_int(match.group(1))
             if index is None or index >= len(arguments):
                 raise _Unusable(f"{label} uses placeholder {_elided(token)}, and {len(arguments)} argument(s) "
                                 "are supplied (SARIF 3.11.11)")
-            pieces.append(arguments[index])
+            emit(arguments[index])
         else:
             raise _Unusable(f"{label} has a lone {token!r} that is neither a placeholder nor an "
                             "escaped brace (SARIF 3.11.5)")
         position = match.end()
-    pieces.append(template[position:])
+    emit(template[position:])
     return "".join(pieces)
 
 
@@ -718,7 +747,8 @@ def _message_text(message: Any, label: str, *, descriptor: dict | None, componen
     ``arguments``: a producer that uses no placeholders (Semgrep and CodeQL both) writes braces
     unescaped, and its text is the message as written. Without text, ``id`` is looked up in the
     rule's ``messageStrings`` and then in its component's ``globalMessageStrings``, and the string
-    found is formatted with the message's arguments. Markdown is never read.
+    found is formatted with the message's arguments. Markdown is never read. A message of more
+    than :data:`MESSAGE_LIMIT` characters, written or formatted, is refused.
     """
     if not isinstance(message, dict):
         raise _Unusable(f"{label} is a {type(message).__name__}, not a message object")
@@ -730,7 +760,11 @@ def _message_text(message: Any, label: str, *, descriptor: dict | None, componen
     if text is not None and not isinstance(text, str):
         raise _Unusable(f"{label}.text is a {type(text).__name__}, not a string")
     if text is not None and text.strip():
-        return _formatted(text, arguments, label) if arguments is not None else text
+        if arguments is not None:
+            return _formatted(text, arguments, label)
+        if len(text) > MESSAGE_LIMIT:
+            raise _too_long(label)
+        return text
     identifier = message.get("id")
     if identifier is None:
         state = "blank text and no id" if text is not None else "no text and no id"
@@ -893,6 +927,15 @@ class _RunReader:
         self._indexed: dict[int, str | _Unusable] = {}
         self._rule_ids: dict[str, dict[str, list[int]]] = {}
         self._notification_tables: dict[str, dict[str, dict[str, list[int]]]] = {}
+        # Each taxonomy is found by guid or by name from one table, built here once, because every
+        # relationship and taxon of every result asks; the first taxonomy carrying a value wins.
+        self._taxonomy_by: dict[str, dict[str, dict]] = {"guid": {}, "name": {}}
+        for taxonomy in self.taxonomies:
+            if isinstance(taxonomy, dict):
+                for key, table in self._taxonomy_by.items():
+                    if isinstance(taxonomy.get(key), str):
+                        table.setdefault(taxonomy[key], taxonomy)
+        self._descriptor_cwes: dict[str | None, tuple[list[str], list[str]]] = {}
 
     @staticmethod
     def _array(owner: dict, key: str, pointer: str) -> list:
@@ -1183,18 +1226,18 @@ class _RunReader:
         SARIF 3.54.2 locates components only among the driver and extensions, while its own
         taxonomy examples point into ``run.taxonomies``; a reference is read against
         ``run.taxonomies`` by guid, then index, then name, and failing all three by its own name.
+        A guid or name is a string, and is looked up in the table built once for the run.
         """
         if not isinstance(reference, dict):
             return False
-        candidates = [taxonomy for taxonomy in self.taxonomies if isinstance(taxonomy, dict)]
         found = None
         guid, index, name = reference.get("guid"), reference.get("index"), reference.get("name")
-        if guid is not None:
-            found = next((taxonomy for taxonomy in candidates if taxonomy.get("guid") == guid), None)
+        if isinstance(guid, str):
+            found = self._taxonomy_by["guid"].get(guid)
         if found is None and _is_int(index) and 0 <= index < len(self.taxonomies):
             found = self.taxonomies[index] if isinstance(self.taxonomies[index], dict) else None
         if found is None and isinstance(name, str):
-            found = next((taxonomy for taxonomy in candidates if taxonomy.get("name") == name), None)
+            found = self._taxonomy_by["name"].get(name)
         label = found.get("name") if found is not None else name
         return isinstance(label, str) and label.strip().upper() == "CWE"
 
@@ -1203,32 +1246,45 @@ class _RunReader:
             return None
         return _cwe_token(reference.get("id"))
 
-    def _cwes(self, descriptor: dict | None, result: dict) -> list[str]:
+    def _descriptor_cwe_ids(self, rule: _Rule) -> tuple[list[str], list[str]]:
+        """The CWE ids a descriptor gives every result of its rule: from its relationships, then its tags.
+
+        Read once per descriptor, however many results name it: what a descriptor lists does not
+        depend on the result, and a rule with thousands of relationships used by thousands of
+        results was read thousands of times over.
+        """
+        if rule.pointer not in self._descriptor_cwes:
+            descriptor = rule.descriptor
+            related: list[str | None] = []
+            relationships = descriptor.get("relationships") if descriptor else None
+            for relationship in relationships if isinstance(relationships, list) else []:
+                if not isinstance(relationship, dict):
+                    continue
+                kinds = relationship.get("kinds", ["relevant"])
+                if isinstance(kinds, list) and {"superset", "equal"} & {kind for kind in kinds if isinstance(kind, str)}:
+                    related.append(self._taxon_cwe(relationship.get("target")))
+            self._descriptor_cwes[rule.pointer] = (list(dict.fromkeys(cwe for cwe in related if cwe)),
+                                                   cwe_ids(_tags(descriptor)))
+        return self._descriptor_cwes[rule.pointer]
+
+    def _cwes(self, rule: _Rule, result: dict) -> list[str]:
         """CWE ids for one result: the rule's CWE relationships, the result's taxa, then tags.
 
         A rule relationship counts only when its kinds include ``superset`` or ``equal``, which
         SARIF 3.27.8 says place every result of the rule in the taxon; any narrower relationship
         applies to a result only through that result's own ``taxa``. Tags follow, rule then
         result, through :func:`scaneval.kinds.cwe_ids`, which reads ``CWE-89`` and
-        ``external/cwe/cwe-089`` alike. The order is the order :func:`kind_for_cwes` tries them in.
+        ``external/cwe/cwe-089`` alike. Each id is listed once, in the order found, which is the
+        order ``native_cwe`` keeps; :func:`scaneval.kinds.kind_for_cwes` reads them in its own order.
         """
-        found: list[str] = []
-        relationships = descriptor.get("relationships") if descriptor else None
-        for relationship in relationships if isinstance(relationships, list) else []:
-            if not isinstance(relationship, dict):
-                continue
-            kinds = relationship.get("kinds", ["relevant"])
-            if isinstance(kinds, list) and {"superset", "equal"} & {kind for kind in kinds if isinstance(kind, str)}:
-                found.append(self._taxon_cwe(relationship.get("target")))
+        related, tagged = self._descriptor_cwe_ids(rule)
+        found: list[str | None] = list(related)
         taxa = result.get("taxa")
         for reference in taxa if isinstance(taxa, list) else []:
             found.append(self._taxon_cwe(reference))
-        found.extend(cwe_ids(_tags(descriptor) + _tags(result)))
-        unique: list[str] = []
-        for cwe in found:
-            if cwe and cwe not in unique:
-                unique.append(cwe)
-        return unique
+        found.extend(tagged)
+        found.extend(cwe_ids(_tags(result)))
+        return list(dict.fromkeys(cwe for cwe in found if cwe))
 
     # -- one result ---------------------------------------------------------------------
 
@@ -1516,7 +1572,7 @@ class _RunReader:
             bundle_review.append(DIVERGENT_CODE_FLOWS)
         evidence_losses.extend(self._link_losses(allegation, result, pointer))
 
-        cwes = self._cwes(rule.descriptor, result)
+        cwes = self._cwes(rule, result)
         if rule.descriptor is None and rule.reference is not None:
             notes.append(f"no rule descriptor matches {rule.reference!r}; the level and CWE ids come from "
                          "the result alone")

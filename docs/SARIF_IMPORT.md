@@ -35,7 +35,7 @@ snapshot, the binding is the operator's declaration alone, and `import.json` say
 | `--source-root-uri URI` | The absolute `file` URI of the scanned tree's root on the machine that wrote the log. |
 | `--normalization FILE` | Recorded bundle-review decisions, described below. |
 | `--include-suppressed` | Import suppressed results as claims. Their suppression is recorded either way. |
-| `--max-bytes N` | Refuse a larger log. Default 64 MiB. |
+| `--max-bytes N` | Refuse a larger log. Default 64 MiB. A message is bounded on its own (65536 characters, written or formatted) and each taxonomy and rule is read once, so a small log cannot become a large allegation or a long run; results that share one long string still each carry a copy of it, up to that bound. |
 
 `--system-config` and `--normalization` files are read as strictly as the log, up to 1 MiB each.
 Exit codes: `2` when the log is refused whole or an option cannot be used, and then nothing is
@@ -93,7 +93,7 @@ property of the wrong JSON type, is refused too.
   `nosemgrep` match.
 - **Loss**, listed with its reason: a rule reference that conflicts with itself or names a
   descriptor ambiguously, a message that does not resolve (a placeholder index of more than nine
-  digits included), a primary location that is not a file in the scanned tree, malformed
+  digits, or a message of more than 65536 characters, included), a primary location that is not a file in the scanned tree, malformed
   coordinates, a value outside SARIF's enumerations, or anything else that raised a `ValueError`
   while the result was read, so that no one result can end the import. Any loss sets
   `bundles_resolved` false and turns an otherwise clean run into `partial` with error code
@@ -102,7 +102,7 @@ property of the wrong JSON type, is refused too.
 
 | Claim field | Where it comes from |
 |---|---|
-| `allegation` | The full resolved message: its `text`, else the rule's `messageStrings[id]`, else the component's `globalMessageStrings[id]`, formatted with `arguments` (`{n}`, and `{{`/`}}` for literal braces). A `text` is formatted only when it carries `arguments`, because producers that use none write braces unescaped. Markdown is never read. |
+| `allegation` | The full resolved message: its `text`, else the rule's `messageStrings[id]`, else the component's `globalMessageStrings[id]`, formatted with `arguments` (`{n}`, and `{{`/`}}` for literal braces). A `text` is formatted only when it carries `arguments`, because producers that use none write braces unescaped. Markdown is never read. A message of more than 65536 characters, as written or once formatted, is a loss. |
 | `native_rule_id` | The resolved descriptor's `id`, else the result's `ruleId` or `rule.id`. |
 | `native_severity` | The effective level (`result.level`, else the rule's `defaultConfiguration.level`, else `warning`), followed by `; security-severity N` when the rule has that GitHub property. For `review` and `open`, the kind. |
 | `native_cwe`, `kind` | CWE ids from the rule's `superset`/`equal` relationships to the CWE taxonomy, the result's `taxa`, then rule and result tags (`CWE-89: ...`, `external/cwe/cwe-089`), leaving out an id of more than nine digits, which is not a CWE; `kind` maps them through the versioned kind mapping, else `unmapped`. |

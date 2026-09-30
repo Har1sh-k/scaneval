@@ -38,7 +38,7 @@ def cwe_ids(values) -> list[str]:
         return []
     if isinstance(values, str):
         values = [values]
-    seen: list[str] = []
+    seen: dict[str, None] = {}
     for value in values:
         if not isinstance(value, str):
             continue
@@ -46,10 +46,8 @@ def cwe_ids(values) -> list[str]:
             digits = match.group(1).lstrip("0")
             if len(digits) > MAX_CWE_DIGITS:
                 continue
-            token = f"CWE-{int(digits) if digits else 0}"
-            if token not in seen:
-                seen.append(token)
-    return seen
+            seen.setdefault(f"CWE-{int(digits) if digits else 0}")
+    return list(seen)
 
 
 def kind_for_cwes(cwes: list[str]) -> str:
