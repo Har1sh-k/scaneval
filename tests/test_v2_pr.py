@@ -641,3 +641,42 @@ def test_an_adapter_declaration_the_run_cannot_read_is_a_skipped_system(tmp_path
     assert [(row["system_id"], row["status"]) for row in manifest["invocations"]] == [
         ("fake-a", "success"), ("odd-b", "skipped")]
     assert load_document(out / MANIFEST_NAME, "run-manifest") == manifest
+
+
+def test_a_history_git_reads_differently_from_the_export_fails_that_input_and_records_no_check(tmp_path):
+    """An in-tree .gitattributes that rewrites bytes on add makes git's diff not the recorded one.
+
+    The base tree holds a CRLF file beside ``* text=auto`` (the attribute was added after the file, so
+    the repository stores the CRLF bytes), and the head holds the same file with LF. The export records
+    a modification; ScanEval's own ``git add`` applies ``text=auto`` and stores one blob for both, so a
+    scanner's ``git diff`` would show nothing where the record scores a change. The input is refused
+    before any mechanical check is recorded, and no adapter is ever called for it.
+    """
+    repo = tmp_path / "upstream"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_bytes(SAFE.replace("\n", "\r\n").encode())
+    git("init", "-q", "-b", "main", cwd=repo)
+    git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=repo)
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "crlf bytes, no attributes yet", cwd=repo)
+    write(repo, ".gitattributes", "* text=auto\n")
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "base: attributes added, file untouched", cwd=repo)
+    base = git("rev-parse", "HEAD", cwd=repo)
+    (repo / "src" / "app.py").write_bytes(SAFE.encode())
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "head: the file is LF now", cwd=repo)
+    fixture = {"repo": repo, "base": base, "head": git("rev-parse", "HEAD", cwd=repo)}
+    adapter = PrAdapter()
+
+    manifest, out = run_pr(tmp_path, fixture, adapters={"fake": adapter})
+
+    [row] = manifest["inputs"]
+    assert row["preparation_failure"]["type"] == "MaterializationError"
+    assert "does not reproduce the recorded diff" in row["preparation_failure"]["message"]
+    assert "src/app.py" in row["preparation_failure"]["message"]
+    assert row["mechanical_checks"] == [] and adapter.calls == 0
+    frozen = cases.load_pack(out / "evaluator" / "pack.json")
+    assert all(case["validation"]["checks"] == [] for case in frozen["cases"]), \
+        "an input that could not be prepared leaves no check recorded"
+    assert manifest["invocations"][0]["status"] == "skipped"

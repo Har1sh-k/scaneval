@@ -477,11 +477,12 @@ def _prepare_pr_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: P
     trees a scanner is handed, and a change with nothing in it is refused as no change to review.
 
     The neutral synthetic history is computed here once, in a scratch copy, and verified against the
-    recorded diff (:func:`scaneval.materialize.compute_pr_history`); the two commit ids it yields are
-    what the request will name and what every invocation's workspace must reproduce. What lands in
-    :attr:`~scaneval.execution.PreparedInput.pr` is evaluator-side identity only, with no absolute
-    path: the change set, both trees, the diff and its digest, the two commits, and that the run
-    starts from a fresh state, since nothing is carried between invocations.
+    recorded diff (:func:`scaneval.materialize.compute_pr_history`) before any check is recorded;
+    the two commit ids it yields are what the request will name and what every invocation's
+    workspace must reproduce. What lands in :attr:`~scaneval.execution.PreparedInput.pr` is
+    evaluator-side identity only, with no absolute path: the change set, both trees, the diff and
+    its digest, the two commits, and that the run starts from a fresh state, since nothing is
+    carried between invocations.
 
     The row records this input's raw check outcomes, base snapshot first, and what a PR review
     cannot know until it has exported both trees is recorded only once it does.
@@ -509,13 +510,16 @@ def _prepare_pr_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: P
                 f"snapshot {snapshot['snapshot_id']} declares tree hash {declared} but the export produced "
                 f"{source_hash}")
         sides.append((snapshot, labelled_tree, source_hash))
+    diff = record["diff"]
+    head_source_hash = sides[1][2]
+    # Before any check is recorded, so an input refused for its history leaves the pack exactly as
+    # an input refused for its declared hash does: no check is recorded against an export whose
+    # input could not be prepared.
+    history = materialize.compute_pr_history(trial / "source", trial / materialize.PR_BASE_DIR / "source",
+                                             diff["changes"])
     outcomes = []
     for snapshot, labelled_tree, source_hash in sides:
         outcomes += cases.mechanical_checks(pack, snapshot["snapshot_id"], labelled_tree, source_hash, clock=clock)
-    diff = record["diff"]
-    head_source_hash = sides[1][2]
-    history = materialize.compute_pr_history(trial / "source", trial / materialize.PR_BASE_DIR / "source",
-                                             diff["changes"])
     pr = {"change_set_id": change_set["change_set_id"], "base_snapshot_id": base_snapshot["snapshot_id"],
           "head_snapshot_id": head_snapshot["snapshot_id"], "boundary": change_set["boundary"],
           "review_scope": change_set["review_scope"], "base_tree_hash": diff["base_tree_hash"],
