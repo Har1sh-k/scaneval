@@ -684,6 +684,26 @@ configuration, files a scanner reads as instructions (in any case), and every ot
 included, are refused. [Current capabilities](INITIAL_BUILD.md#metadata-blinding) lists every rule,
 and says what the lists do not cover.
 
+**A replacement cannot break the file it is written into.** A replacement goes into a file as plain
+text, so an edit of a `.json`, `.toml`, `.ini`, `.cfg`, `.yml`, or `.yaml` file is checked by parsing
+the file before and after: the result must be the original with only your replacements applied to its
+keys and strings, with the same keys in the same order, of the same types, nested the same way. A
+replacement holding a `"` that turns a JSON string into invalid JSON, one that injects or merges a
+key, one that changes a value's type, and an original that does not parse are refused before any
+tree is written, and `blinding check` says which and where.
+
+YAML is parsed only as a strict block subset: block mappings and sequences of one-line plain or
+quoted scalars, and comments. A YAML file with anything else (a flow list such as `[a, b]`, an
+anchor, alias, or tag, a `|` or `>` block, a value that runs onto the next line, a value that starts
+with `-` such as a negative number, a tab, a duplicate key, a second document) cannot be verified,
+so an edit of it is refused even when the replacement is harmless; leave that file out of the map.
+Inside the subset, a plain value that YAML reads as a boolean, null, number, or date (`true`, `yes`,
+`null`, `12`, `2019-01-01`) is not a string, so an edit that changes one is refused, as is a
+replacement that turns a string into one, puts `: ` or ` #` inside a plain value, or starts one with
+a YAML indicator such as `&`, `*`, `!`, `[`, `{`, `|`, `>`, or `-`. A single-quoted value takes any
+replacement without a `'`, and a double-quoted one any without a `"` or a backslash. Comments are
+never compared, and documentation files are not checked for structure.
+
 **Check it before anyone reviews it.** `blinding check` fetches each variant, applies the map in a
 temporary directory exactly as a run would, and reports approval instead of requiring it:
 
@@ -698,7 +718,7 @@ reporting-main: pass; original sha256:c267ead9104da0a1e104157b180244efa8aaf74faf
   readme-title README.md: Acme=2; changed line(s): 1, 3
   operations-title docs/operations.md: Acme=1; changed line(s): 1
   docs-site-name mkdocs.yml: Acme=1; changed line(s): 1
-  17 check(s) passed; retained identity cues: 1 token(s), 2 occurrence(s) in 2 file(s); instruction files: none
+  18 check(s) passed; retained identity cues: 1 token(s), 2 occurrence(s) in 2 file(s); instruction files: none
   retained in: LICENSE (1), app/handler.py (1)
 scaneval: blinding map is not approved; a run refuses it
 exit=1
