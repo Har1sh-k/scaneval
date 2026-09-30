@@ -32,6 +32,11 @@ A result the importer cannot turn into a claim is import loss, not a detail: it 
 and a count above zero degrades the outcome to ``partial`` with unresolved bundles and error
 code ``import_loss``, so a scan that reported a finding ScanEval could not read can earn
 neither completeness nor silence credit for it.
+
+Every file the adapter's processes wrote is read back without following a link and without
+blocking on a named pipe (:func:`~scaneval.execution.read_regular_file` and
+:func:`~scaneval.adapters.base.tail_text`), because the process that wrote the raw directory can
+leave anything at those names.
 """
 
 from __future__ import annotations
@@ -44,6 +49,7 @@ import shutil
 import sys
 from typing import Any, NamedTuple
 
+from ..execution import read_regular_file
 from ..kinds import cwe_ids, kind_for_cwes, mapping_version
 from ..materialize import MaterializationError, fetch_snapshot, sha256_file, tree_hash
 from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command, tail_text
@@ -169,7 +175,9 @@ def semgrep_version(binary: str, raw_dir: Path, timeout_seconds: float = 60) -> 
                                    f"{result.wall_seconds:.1f}s: {tail_text(result.stderr_path)}")
             if result.exit_code != 0:
                 raise AdapterError(f"semgrep --version failed: {tail_text(result.stderr_path)}")
-            text = stdout_path.read_text(encoding="utf-8", errors="replace")
+            # The one read of a file the probe could have replaced: a link is refused rather than
+            # followed to a file whose content would become the recorded version.
+            text = read_regular_file(stdout_path).decode("utf-8", errors="replace")
         except (OSError, UnicodeDecodeError) as exc:
             raise AdapterError(f"{what} could not be recorded: {exc}") from exc
     except AdapterError:
@@ -657,7 +665,9 @@ class SemgrepAdapter(Adapter):
             return NativeOutcome(status="timeout", exit_code=None, timed_out=True, error={"code": "timeout",
                                  "message": f"semgrep exceeded {timeout_seconds}s; output written at exit only"}, **base)
         try:
-            payload = json.loads(stdout.read_text(encoding="utf-8"))
+            # Read without following a link and without blocking on a pipe: the scan wrote this
+            # directory, and under an isolating backend a link planted here would name a host file.
+            payload = json.loads(read_regular_file(stdout).decode("utf-8"))
             ruleset_root = preparation.get("ruleset_root")
             # config_dirs stays as the fallback so a preparation recorded before ruleset_root
             # existed still keeps the cache path out of native_rule_id.

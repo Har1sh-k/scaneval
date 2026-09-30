@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import time
 from typing import Any
@@ -120,11 +121,32 @@ def run_command(
 
 
 def tail_text(path: Path, limit: int = 2000) -> str:
+    """The last *limit* bytes of *path* as text, or ``""`` when it cannot be read. Never raises.
+
+    The file is one a scanner wrote, and the scanner can replace it after its own descriptor
+    closed, so it is read the way :func:`~scaneval.execution.read_regular_file` reads:
+    ``O_NOFOLLOW`` refuses a symbolic link, ``O_NONBLOCK`` makes a named pipe fail at once instead
+    of waiting for a writer that never comes, and :func:`os.fstat` on the descriptor refuses
+    anything that is not a regular file. The read seeks to the last *limit* bytes, so the size of
+    the file does not decide how much memory this takes. A regular file gives exactly the text it
+    always gave. What changed is that a link planted where stderr belongs is no longer followed to
+    a file of the scanner's choosing, whose tail every failure message would then have quoted into
+    the record; under an isolating backend that was a host file carried across the boundary.
+    """
     try:
-        data = path.read_bytes()
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
     except OSError:
         return ""
-    return data[-limit:].decode("utf-8", errors="replace")
+    try:
+        with os.fdopen(descriptor, "rb") as stream:
+            status = os.fstat(stream.fileno())
+            if not stat.S_ISREG(status.st_mode):
+                return ""
+            if status.st_size > limit:
+                stream.seek(status.st_size - limit)
+            return stream.read(limit).decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return ""
 
 
 class Adapter(ABC):
