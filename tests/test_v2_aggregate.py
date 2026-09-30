@@ -1198,8 +1198,9 @@ def test_a_target_the_bundle_plan_holds_no_record_of_is_pending_in_the_random_or
     - Both records planned: measured, observation mass 1 and pending mass 0; nothing was accepted, so 0 at B = 1 and 5.
     - GHSA-1 absent, or CVE-1 and GHSA-1 both absent: observation mass 0 and pending mass 1, and no expectation.
     - A target of one record, absent: the same, so absence of any size is pending.
-    With every record absent the target is unscored and not assessable, and still a miss in recall (0). A scan that
-    timed out delivered no valid output to measure, so it is neither measured nor pending.
+    With every record absent the target is unscored and not assessable, and still a miss in recall (0). A partial scan
+    still delivers valid output, so it is pending like a successful one; a scan that timed out delivered none to
+    measure, so it is neither measured nor pending.
     """
     scanned = {"claims": 4, "ranking": "unranked"}
 
@@ -1215,6 +1216,8 @@ def test_a_target_the_bundle_plan_holds_no_record_of_is_pending_in_the_random_or
     neither = detected(alias_target_run(tmp_path, "run-random-neither", drop=("CVE-1", "GHSA-1"), **scanned))
     lone = detected(write_run(tmp_path, "run-random-lone", [planned("widget", targets=[target("T-1")])],
                               outcomes={("widget", "sys-a", 1): scan(drop=("T-1",), **scanned)}))
+    partial = detected(alias_target_run(tmp_path, "run-random-partial", drop=("CVE-1", "GHSA-1"), status="partial",
+                                        **scanned))
     stopped = detected(alias_target_run(tmp_path, "run-random-timeout", drop=("CVE-1", "GHSA-1"), status="timeout",
                                         resolved=False, **scanned))
 
@@ -1222,6 +1225,7 @@ def test_a_target_the_bundle_plan_holds_no_record_of_is_pending_in_the_random_or
     assert both["random_order_diagnostic"]["expected_recall"] == [{"budget": 1, "value": 0.0},
                                                                    {"budget": 5, "value": 0.0}]
     assert masses(one) == (0.0, 1.0) and masses(neither) == (0.0, 1.0) and masses(lone) == (0.0, 1.0)
+    assert masses(partial) == (0.0, 1.0)
     assert neither["random_order_diagnostic"]["expected_recall"] == [{"budget": 1, "value": None},
                                                                       {"budget": 5, "value": None}]
     assert neither["full_output_recall"]["value"] == 0.0
