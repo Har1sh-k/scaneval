@@ -108,6 +108,7 @@ from .kinds import mapping_version
 from .materialize import (
     Containment,
     MaterializationError,
+    prepare_pr_history,
     prepare_synthetic_history,
     sha256_file,
     tree_hash,
@@ -143,6 +144,11 @@ class PreparedInput:
     diff between them. ``source_tree_hash`` is the original export the labels refer to, which
     differs from ``tree_hash`` for a blinded input. ``blinding`` and ``pr`` carry the evaluator-side
     identities recorded in a 2.1 execution record; neither is ever handed to a scanner.
+
+    ``base_source_dir`` is the base tree of a PR input, the one the first commit of its synthetic
+    history is built from; it is read, never written, and never copied into a workspace. ``pr`` then
+    carries the neutral ``base_commit`` and ``head_commit`` the request names, which the history
+    built in each workspace must reproduce exactly.
     """
 
     input_id: str
@@ -156,6 +162,7 @@ class PreparedInput:
     source_tree_hash: str | None = None
     blinding: dict | None = None
     pr: dict | None = None
+    base_source_dir: Path | None = None
 
     @property
     def binding_hash(self) -> str:
@@ -271,6 +278,29 @@ def build_request(run_id: str, prepared: PreparedInput, spec: SystemSpec, *, tim
         "trace_mode": trace_mode,
     }
     return validate_document("scan-request", request)
+
+
+def _pr_history(source: Path, prepared: PreparedInput) -> dict:
+    """Build the two-commit history of a PR input in its workspace, and prove it is the recorded one.
+
+    The head is the workspace's own copy of the export and the base is read from the input's base
+    tree, so the history a scanner finds is exactly the one preparation computed in a scratch copy.
+    Equal trees give equal commit ids, so a difference is not noise: the workspace was not built
+    from the trees the input recorded, or git did not read them the way it did then, and the
+    request names commits that are not the ones the workspace holds. That is refused rather than
+    scanned.
+    """
+    try:
+        history = prepare_pr_history(source, Path(prepared.base_source_dir))
+    except MaterializationError as exc:
+        raise ExecutionError(f"the synthetic PR history could not be built in the workspace: {exc}") from exc
+    recorded = (prepared.pr["base_commit"], prepared.pr["head_commit"])
+    built = (history["base_commit"], history["head_commit"])
+    if built != recorded:
+        raise ExecutionError(
+            f"synthetic PR history is not reproducible: the workspace holds {built[0]}..{built[1]}, "
+            f"and the prepared input recorded {recorded[0]}..{recorded[1]}")
+    return history
 
 
 def _failure_message(exc: BaseException) -> str:
@@ -961,7 +991,11 @@ def run_invocation(
     is recorded as ``unsupported`` with error code ``unsupported_mode`` and the adapter's ``scan`` is
     never called, whatever it would have done: an adapter that cannot review a change is never run
     on the head instead, and the invocation stays in every denominator, as an unsupported language
-    does. A PR input that carries no synthetic commits is refused before the bundle exists.
+    does. For a PR input the workspace also holds the neutral two-commit history the request names
+    (:func:`_pr_history`): built from the head copy and the input's base tree, whether or not the
+    adapter asked for git, verified to be the commits the input recorded, and left out of the watched
+    tree like the single commit a git-dependent full scan gets. A PR input that carries no synthetic
+    commits or no base tree is refused before the bundle exists.
 
     ``result.json`` and ``execution.json`` are written only once both documents validate and
     encode, and they are renamed into place together, so a bundle never holds a successful
@@ -1082,6 +1116,8 @@ def run_invocation(
         if not (isinstance(base_commit, str) and base_commit and isinstance(head_commit, str) and head_commit):
             raise ExecutionError("a PR input must carry the synthetic base_commit and head_commit its "
                                  "request names")
+        if prepared.base_source_dir is None or not Path(prepared.base_source_dir).is_dir():
+            raise ExecutionError("a PR input must carry the base export its synthetic history is built from")
         request_pr = {"base": base_commit, "head": head_commit}
     # Decided from what the adapter declares and never from what its scan would do: an input whose
     # mode the adapter does not carry out is recorded as unsupported and scan() is never called.
@@ -1160,7 +1196,12 @@ def run_invocation(
                            "watched input tree counts and the exported hash does not")
             raise ExecutionError(f"workspace tree hash {actual} does not match prepared input "
                                  f"{prepared.tree_hash}{detail}")
-        if adapter.requires_git and not (source / ".git").exists():
+        if prepared.mode == "pr":
+            # A PR scanner reads a base and a head whether or not the adapter asked for git, and
+            # nothing is built for one that will not scan: the history exists to be reviewed.
+            if not mode_unsupported and not unsupported:
+                synthetic = _pr_history(source, prepared)
+        elif adapter.requires_git and not (source / ".git").exists():
             synthetic = prepare_synthetic_history(source)
         if mode_unsupported:
             outcome = NativeOutcome(status="unsupported", exit_code=None, command=[],
