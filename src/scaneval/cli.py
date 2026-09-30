@@ -33,13 +33,14 @@ status`` resolve the bundle path and report on the bundle it reaches, so a bundl
 a symlinked parent is read rather than refused. They write nothing into the bundle.
 
 No command writes inside a materialized trial directory: the output path of ``plan``, ``run``,
-``import sarif``, ``demo``, ``score``, ``replay`` and ``report``, the pack path of ``corpus
-init`` and of every corpus command that rewrites a pack, the map ``blinding review`` rewrites, the
-bundle argument of all four ``review`` subcommands, and the directory ``corpus validate`` exports a
-snapshot into, are each refused when a trial's ``provenance.json`` and ``source`` sit in them or
-above them. That keeps evaluator material out of the tree a scanner is handed; it is a check on the
-path, not an isolation boundary. ``review status`` is checked although it only reads, so the
-``review`` group is uniform; the other read-only commands read whatever path they are given.
+``import sarif``, ``demo``, ``score``, ``replay``, ``report``, ``aggregate`` and ``compare``, the
+pack path of ``corpus init`` and of every corpus command that rewrites a pack, the map ``blinding
+review`` rewrites, the bundle argument of all four ``review`` subcommands, and the directory
+``corpus validate`` exports a snapshot into, are each refused when a trial's ``provenance.json`` and
+``source`` sit in them or above them. That keeps evaluator material out of the tree a scanner is
+handed; it is a check on the path, not an isolation boundary. ``review status`` is checked although
+it only reads, so the ``review`` group is uniform; the other read-only commands read whatever path
+they are given.
 
 Exit codes. 2 means the command could not be carried out: a usage or contract error, a refused
 overwrite, a failed fetch or export, a SARIF log refused whole. 1 means the command ran and
@@ -58,6 +59,12 @@ directory, applies the map exactly as a run would, and prints what it changed, e
 passed, and the identity cues that remain; approval is reported rather than required, and an
 unapproved or refused map exits 1. ``blinding review`` records one review the caller names; the
 tool never supplies a reviewer.
+
+``aggregate`` and ``compare`` read run directories through :mod:`scaneval.aggregate` and write one
+new report each; they write nothing into a run directory or a bundle. Both exit 0 once the report is
+computed, whatever it says, and 2 when they refuse: a directory that is not a run with a frozen
+schedule, runs of different packs, or, for ``compare``, two systems that were not assigned the same
+frozen work.
 """
 
 import argparse
@@ -69,7 +76,7 @@ import tempfile
 from typing import Callable
 from urllib.parse import urlsplit
 
-from . import __version__, blinding, cases, materialize, review, runner, sarif
+from . import __version__, aggregate, blinding, cases, materialize, review, runner, sarif
 from .adapters.base import AdapterError
 # _is_stated is imported rather than re-implemented so a blank value is judged by one rule here,
 # in cases, and in review: a string made only of zero-width or control characters is not a value.
@@ -293,22 +300,22 @@ def _refuse_trial_path(output: Path) -> None:
     A trial holds the exported source a scanner is handed, so anything this tool writes inside
     one would put evaluator material where the scanned tree lives. Every command that names a
     path it may write checks it: ``plan``, ``run``, ``demo``, the bundle ``import sarif``
-    creates, the ``--output`` of ``score``, ``replay`` and ``report``, the pack ``corpus init``
-    creates, the pack every corpus command that rewrites one is given (``add-snapshot``,
-    ``import``, ``validate --snapshot-id``, ``approve``, ``admit``, ``disposition``, all through
-    :func:`_pack_for_change`), the map ``blinding review`` rewrites, the bundle ``review init``,
-    ``review record`` and ``review
-    approve`` write into, and the trial ``corpus validate`` is about to export into. ``review
-    status`` checks the bundle it reads as well, so every ``review`` subcommand refuses the same
-    paths. Commands that only read are otherwise not checked: a bundle handed to ``replay`` or
-    ``report``, a pack that is only summarized by ``corpus validate`` or read by ``plan`` and
-    ``review init``, a map ``blinding check`` reads, and a supplied artifact are read wherever
-    they sit. A trial is recognized by a ``provenance.json`` file beside a ``source`` directory;
-    any other directory is left alone. *output* itself is examined along with its parents, so a
-    bundle that is itself a trial root is refused as well as one sitting under one; a path that
-    does not exist yet carries no marker and is judged by its parents alone. The comparison
-    resolves symlinks in the path but follows no bind mount or hard link, so it catches the
-    obvious mistake and is not an isolation boundary.
+    creates, the ``--output`` of ``score``, ``replay``, ``report``, ``aggregate`` and
+    ``compare``, the pack ``corpus init`` creates, the pack every corpus command that rewrites one
+    is given (``add-snapshot``, ``import``, ``validate --snapshot-id``, ``approve``, ``admit``,
+    ``disposition``, all through :func:`_pack_for_change`), the map ``blinding review`` rewrites,
+    the bundle ``review init``, ``review record`` and ``review approve`` write into, and the trial
+    ``corpus validate`` is about to export into. ``review status`` checks the bundle it reads as
+    well, so every ``review`` subcommand refuses the same paths. Commands that only read are
+    otherwise not checked: a bundle handed to ``replay`` or ``report``, a run directory handed to
+    ``aggregate`` or ``compare``, a pack that is only summarized by ``corpus validate`` or read by
+    ``plan`` and ``review init``, a map ``blinding check`` reads, and a supplied artifact are read
+    wherever they sit. A trial is recognized by a ``provenance.json`` file beside a ``source``
+    directory; any other directory is left alone. *output* itself is examined along with its
+    parents, so a bundle that is itself a trial root is refused as well as one sitting under one; a
+    path that does not exist yet carries no marker and is judged by its parents alone. The
+    comparison resolves symlinks in the path but follows no bind mount or hard link, so it catches
+    the obvious mistake and is not an isolation boundary.
     """
     resolved = output.expanduser().resolve()
     for directory in (resolved, *resolved.parents):
@@ -803,6 +810,40 @@ def _diagnose(args: argparse.Namespace) -> int:
     return {"context-coverage": _diagnose_context_coverage}[args.diagnose_command](args)
 
 
+def _aggregate(args: argparse.Namespace) -> int:
+    """Aggregate run directories into one new report and print a one-line summary per system.
+
+    The report is computed in full before the output file is created, so a refused aggregation
+    leaves nothing behind. 0 means the report was computed; failed assignments, draft evidence, and
+    unavailable intervals are recorded in it rather than turned into an exit code.
+    """
+    _refuse_trial_path(args.output)
+    policy = aggregate.load_policy(args.policy) if args.policy else None
+    report = aggregate.aggregate(args.run_dirs, policy=policy)
+    _write_new(args.output, _json(report))
+    for line in aggregate.summary(report):
+        print(line)
+    print(f"Report: {args.output}")
+    return 0
+
+
+def _compare(args: argparse.Namespace) -> int:
+    """Compare two systems over run directories into one new report; refused unless their work matches.
+
+    Two systems whose frozen evaluation contracts differ are refused (2) before anything is written.
+    0 means the comparison was computed; it decides nothing about promotion.
+    """
+    _refuse_trial_path(args.output)
+    policy = aggregate.load_policy(args.policy) if args.policy else None
+    report = aggregate.compare(args.run_dirs, baseline=args.baseline, candidate=args.candidate,
+                               policy=policy)
+    _write_new(args.output, _json(report))
+    for line in aggregate.comparison_summary(report):
+        print(line)
+    print(f"Comparison: {args.output}")
+    return 0
+
+
 def _warn_unreviewed(state: str) -> None:
     """Say on stderr that a bundle carries no recorded review. The report itself is unchanged."""
     if state in UNREVIEWED_REVIEW_STATES:
@@ -996,6 +1037,37 @@ def _add_import_commands(sub: argparse._SubParsersAction) -> None:
                      help="refuse a log larger than this many bytes (default %(default)s)")
 
 
+def _add_aggregate_commands(sub: argparse._SubParsersAction) -> None:
+    run_dirs_help = "a run directory written by scaneval run (run manifest 2.1 and its frozen schedule)"
+    policy_help = ("aggregation-policy JSON; default: the built-in policy, which the report records in "
+                   "full with its hash")
+    output_help = "new JSON file, outside any trial directory"
+    aggregating = sub.add_parser(
+        "aggregate",
+        help="weight every scheduled assignment of saved runs into corpus metrics; no scan, no judge",
+        description="Read run directories and report, per (mode, profile) view, system, slice, and "
+                    "weighting, full-output and budgeted recall, control false-alarm rates and bounds, "
+                    "pair correctness, completion, claim volume, usage, and cluster-bootstrap intervals. "
+                    "Every scheduled assignment is an observation; a failed one stays in every "
+                    "denominator.")
+    aggregating.add_argument("run_dirs", nargs="+", type=Path, metavar="RUN_DIR", help=run_dirs_help)
+    aggregating.add_argument("--policy", type=Path, help=policy_help)
+    aggregating.add_argument("--output", required=True, type=Path, help=output_help)
+
+    comparing = sub.add_parser(
+        "compare",
+        help="compare a candidate with a baseline assigned the same frozen work; paired intervals",
+        description="Aggregate two systems over run directories and report candidate minus baseline "
+                    "with paired cluster-bootstrap intervals. Refused unless both were assigned exactly "
+                    "the same frozen work (inputs, plans, levels, budgets, repetitions, pairs, and "
+                    "pack). Decides no promotion.")
+    comparing.add_argument("run_dirs", nargs="+", type=Path, metavar="RUN_DIR", help=run_dirs_help)
+    comparing.add_argument("--baseline", required=True, help="system id of the baseline")
+    comparing.add_argument("--candidate", required=True, help="system id of the candidate")
+    comparing.add_argument("--policy", type=Path, help=policy_help)
+    comparing.add_argument("--output", required=True, type=Path, help=output_help)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--version", action="version", version=__version__)
@@ -1033,6 +1105,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help="input id to run (a 2.0 configuration's snapshot id); repeatable")
     running.add_argument("--workspace-root", type=Path)
     _add_import_commands(sub)
+    _add_aggregate_commands(sub)
     return parser
 
 
@@ -1044,9 +1117,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Valid {args.kind}: {args.path}")
         elif args.command == "demo":
             _demo(args.directory)
-        elif args.command in ("blinding", "corpus", "diagnose", "import", "plan", "review", "run"):
-            return {"blinding": _blinding, "corpus": _corpus, "diagnose": _diagnose, "import": _import,
-                    "plan": _plan, "review": _review, "run": _run}[args.command](args)
+        elif args.command in ("aggregate", "blinding", "compare", "corpus", "diagnose", "import", "plan",
+                              "review", "run"):
+            return {"aggregate": _aggregate, "blinding": _blinding, "compare": _compare, "corpus": _corpus,
+                    "diagnose": _diagnose, "import": _import, "plan": _plan, "review": _review,
+                    "run": _run}[args.command](args)
         else:
             if args.output:
                 _refuse_trial_path(args.output)

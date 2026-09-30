@@ -923,10 +923,10 @@ These are limits of the current implementation, not guarantees about your enviro
 - **No native PR mode through this path.** `plan --mode pr` only selects the pack's `pr` review
   budgets and records `"mode": "pr"`. A 2.1 run configuration can name a PR input, and the run
   refuses it when the configuration is read, so no PR invocation can be produced here.
-- **No corpus aggregation or cross-pack weighting.** The runner produces single-invocation numbers
-  only. Nothing combines inputs, systems, repetitions, or packs, and nothing weights families or
-  computes repeated-run uncertainty. Private and public results are separate because nothing
-  merges them, not because a weighting exists.
+- **No cross-pack weighting.** `scaneval aggregate` combines the inputs, systems, and repetitions
+  of saved runs of one pack into weighted corpus metrics ([aggregation](AGGREGATION.md)). It
+  refuses runs of different packs. Private and public results stay separate because aggregation
+  reads one frozen pack at a time, not because a cross-pack weighting exists.
 - **No promotion gate.** No command promotes a pack from `draft` to `reviewed` or `released`, and
   no command sets a case's `split` to `development` or `evaluation`; imports leave it `unassigned`.
   Freezing membership and promoting a version are hand edits to the pack file, reviewed in your own

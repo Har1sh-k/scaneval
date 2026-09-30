@@ -14,6 +14,7 @@ No benchmark results are published. Every case in the pilot pack carries mechani
 - Run three real adapters: pinned Semgrep OSS against a local rules checkout, the own harness through its own engine entry point with the observer wrapped around its default model runner, and the third-party DeepSec scanner run unchanged through its own CLI.
 - Draft review decisions by routing claims to planned targets, then record and approve them through explicit human steps.
 - Score one saved output against all assigned targets and controls for that input, reporting full-output recall, first-hit ranks, native review-budget recall, exact duplicates, unresolved findings, and conditional control bounds.
+- Aggregate saved run directories under a frozen policy into per-view corpus metrics: weighted recall, control rates and bounds, pair correctness, completion, claim volume, usage, run variability, and cluster-bootstrap intervals. Compare two systems that were assigned the same frozen work, with paired intervals. See [aggregation](AGGREGATION.md).
 - Import the records an agent CLI wrote for itself — Claude Code transcripts and `stream-json`, and `codex exec --json` — into trace events, so a harness that shells out to one becomes observable without being edited.
 - Report, from a saved bundle, whether each labeled target's code region was supplied to the model and in which invocation.
 - Replay the same saved records without models or network access, and generate a standalone HTML report.
@@ -149,9 +150,9 @@ An input that cannot be prepared (a failed fetch or export, a declared tree hash
 
 `evaluator/schedule.json` is written once, after `run-config.json` and before the first input is fetched, so nothing the run observes changes what it was assigned. It lists every assignment of a system to an input and a repetition under the invocation id its bundle will carry, including the assignments of an input that will fail preparation and of a system that will be skipped, so a failure cannot drop out of a denominator. Each input records the plan the pack gives it before execution, built from the tree hash its snapshot already declares, with each target's case, canonical id, kind, variant family, workload, component role, project, and level. A snapshot that declares no tree hash, or a pack that refuses to plan it, is recorded as `unavailable` with the reason, and that input's plan is first built when it runs. Vulnerable/fixed pairs are matched in advance: a target planned on one full-scan input with a fixed-target control of it planned on another full-scan input of the same profile, repetition by repetition. Systems record a digest of their configuration, their network policy, and the execution backend they declare.
 
-The schedule is a function of the configuration, the pack as supplied, and its creation time, and the manifest names it in `schedule_path`. It holds no outcome, and nothing reads it to aggregate yet.
+The schedule is a function of the configuration, the pack as supplied, and its creation time, and the manifest names it in `schedule_path`. It holds no outcome; `scaneval aggregate` reads it so every assignment stays in its denominators.
 
-The declared network policy is recorded, and enforced only for a system that runs under the `oci` execution backend. The runner computes single-invocation numbers only: no corpus weighting, repeated-run uncertainty, cross-system comparison, or promotion gate is computed anywhere.
+The declared network policy is recorded, and enforced only for a system that runs under the `oci` execution backend. The runner computes single-invocation numbers only. Corpus weighting, repeated-run variability, and cross-system comparison are computed afterwards from saved run directories by `scaneval aggregate` and `scaneval compare` ([aggregation](AGGREGATION.md)). No promotion gate is computed anywhere.
 
 ## Execution backends
 
@@ -275,6 +276,8 @@ A 2.1 configuration can also name each input with `input_id` (its directory and 
 | `run <config> --output <new dir>` | Execute one frozen run configuration. | depends on the configured systems |
 | `import sarif <log> --pack --snapshot-id --tree-hash --system-id --output` | Import one run of a saved SARIF 2.1.0 log into a new bundle; nothing the log names is fetched or opened. | none |
 | `diagnose context-coverage <bundle>` | Report whether each labeled target's code was supplied to the model. Writes nothing into the bundle. | none |
+| `aggregate <run dir>... --output` | Weight every scheduled assignment of saved runs into corpus metrics. | none |
+| `compare <run dir>... --baseline --candidate --output` | Compare two systems assigned the same frozen work, with paired intervals. | none |
 
 Exit codes: `2` means the command could not be carried out (a usage or contract error, a refused overwrite, a failed fetch or export, a SARIF log refused whole). `1` means it ran and reports a negative result (a mechanical check set failed, a run could not prepare some input or produced no usable scan from some system, an imported SARIF log holds none, or a blinding map is not approved or a variant refused it). `0` means it ran and reports nothing wrong, which is not a statement that any label or decision is correct.
 
@@ -341,7 +344,7 @@ Strict parsing rejects duplicate JSON keys, nonfinite numbers, escaping file pat
 - **Schedules:** the assignments are exactly every input under every system for every repetition, each named by its invocation id; a blinding identity appears exactly on blinded inputs; a pair joins a target and a fixed-target control of it on two full-scan inputs of one profile whose plans were frozen before execution.
 - **Blinding maps:** the pseudonym rules, one expectation per variant for every edit naming exactly the tokens it replaces, and a review chain with its recorded end. The contract checks a map against itself; approval and the fit to an export are asked when it is applied.
 
-Scores use equal target/control weights within one input. Do not average them as a release score: corpus weighting, repeated-run aggregation, repository clustering, and promotion gates are not implemented. Zero denominators are `null` in JSON and N/A in HTML.
+Scores use equal target/control weights within one input. Do not average them as a release score. `scaneval aggregate` applies corpus weights, averages repetitions, and clusters intervals by repository from the frozen schedules ([aggregation](AGGREGATION.md)). Promotion gates are not implemented. Zero denominators are `null` in JSON and N/A in HTML.
 
 ## Observer SDK
 
@@ -368,7 +371,7 @@ npm test
 - **Capture gaps are not absence.** An `unavailable` category establishes nothing about whether the underlying activity happened.
 - **Visibility depends on the build that was run, not only on this package.** The own-harness driver sees attempts, token usage, supplied-context spans and the candidate lifecycle only against a harness build that exports the hooks, and falls back for each surface it does not find. Tool dispatch on the claude route is unobserved either way. What a given run could see is recorded per run, not promised here.
 - **Nothing a collector or the DeepSec adapter reports was watched as it happened.** Both read records written after the fact, so their events are derived and say so; a record the CLI never wrote is a record nothing can recover.
-- **Single-invocation numbers only.** No corpus aggregation, pair aggregation, repeated-run uncertainty, precision sampling, promotion gate, trace viewer, exporter, or multi-model planner is implemented.
+- **No precision sampling or promotion gate.** Corpus aggregation, pair aggregation, run variability, and paired comparison run over saved runs ([aggregation](AGGREGATION.md)). Precision sampling, a promotion gate, a trace viewer, an exporter, and a multi-model planner are not implemented.
 - **Metadata blinding is partial.** It edits reviewed documentation and display metadata only; package names, imports, identifiers, paths, and recognizable code stay, and every blinded export counts the cues that remain. It is not anonymization and does not show that a scanner could not recognize the repository.
 - **Not implemented at all:** native PR mode through an adapter, import of saved vendor output other than SARIF 2.1.0, and semantic duplicate review. The collectors import an agent CLI's own trace records, and `import sarif` imports a saved SARIF log; no other scanner findings file produced outside a ScanEval invocation is imported.
 
