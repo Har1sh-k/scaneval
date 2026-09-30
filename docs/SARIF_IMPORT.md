@@ -64,8 +64,10 @@ so no review-budget recall is read from an import. The log's SHA-256 is recorded
 `request.json` or `execution.json`, because nothing ran; `import.json` records the import instead.
 
 Everything is built and validated before the directory exists, the output must not exist, every
-file is created exclusively, and a write that fails part way removes what the import created. An
-output path inside a trial directory, or inside `--source-dir`, is refused.
+file is created exclusively, and a write that fails part way removes what the import created,
+including any parent directory it had to make (one that was already there stays, and so does a
+directory that holds anything the import did not write). An output path inside a trial directory,
+or inside `--source-dir`, is refused.
 
 ## Refused whole
 

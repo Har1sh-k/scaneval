@@ -2000,8 +2000,9 @@ def import_sarif(sarif_path: Path, *, pack: dict, snapshot_id: str, tree_hash: s
     and no result was lost, are the bundles resolved.
 
     Everything is built and validated in memory first: a refused import, whatever refused it,
-    leaves no directory behind. *output* must not exist; it is resolved once, so every path written
-    is inside the same real directory. The run id defaults to :func:`default_run_id`. The review
+    leaves no directory behind. *output* must not exist, and the parents it lacks are created and
+    removed again if the write fails; it is resolved once, so every path written is inside the same
+    real directory. The run id defaults to :func:`default_run_id`. The review
     is a machine draft: every decision is ``unresolved`` and the record's state is ``draft``.
     """
     if not isinstance(tree_hash, str) or not _TREE_HASH.match(tree_hash):
@@ -2101,12 +2102,15 @@ def import_sarif(sarif_path: Path, *, pack: dict, snapshot_id: str, tree_hash: s
 
 def _write_bundle(bundle: Path, raw_path: str, data: bytes, *, result: dict, record: dict, plan: dict,
                   decisions: dict, review_record: dict, evaluation: dict, report_html: str) -> None:
-    """Create *bundle* and write every file into it exclusively, or leave nothing this call made.
+    """Create *bundle*, and any parent directory it lacks, and write every file into it exclusively,
+    or leave nothing this call made.
 
     Every payload is encoded before the directory is created, so text UTF-8 cannot encode is a
     refusal rather than a half-written bundle. The evaluator files go through
     :func:`scaneval.review.write_evaluator_records`, the one writer every bundle's review files
-    use. A failure part way removes the files and directories this call created and re-raises.
+    use. A failure part way, in making a directory as much as in writing a file, removes the files
+    and the directories this call created, the parents it made included, and re-raises. A parent
+    that was already there is never removed, and neither is a directory that holds anything else.
     """
     early = [(bundle / raw_path, data), (bundle / RESULT_FILE, _document(result)),
              (bundle / RECORD_FILE, _document(record))]
@@ -2114,15 +2118,28 @@ def _write_bundle(bundle: Path, raw_path: str, data: bytes, *, result: dict, rec
             (bundle / "report.html", _encoded(report_html, "the report"))]
     for value, label in ((plan, "the plan"), (decisions, "the decisions"), (review_record, "the review record")):
         _encoded(canonical_json(value), label)
-    bundle.parent.mkdir(parents=True, exist_ok=True)
-    bundle.mkdir()
-    directories = [bundle, bundle / RAW_DIR, bundle / review.EVALUATOR_DIR]
+    missing = [bundle]
+    for parent in bundle.parents:
+        if parent.exists():
+            break
+        missing.append(parent)
+    directories: list[Path] = []
     files: list[Path] = []
     try:
+        for directory in reversed(missing):
+            try:
+                directory.mkdir()
+            except FileExistsError:
+                if directory == bundle:
+                    raise
+                continue  # made by someone else since it was looked for: not this call's to remove
+            directories.append(directory)
         (bundle / RAW_DIR).mkdir()
+        directories.append(bundle / RAW_DIR)
         for path, payload in early:
             _write_new(path, payload)
             files.append(path)
+        directories.append(bundle / review.EVALUATOR_DIR)
         files.extend(review.write_evaluator_records(bundle, plan, decisions, review_record).values())
         for path, payload in late:
             _write_new(path, payload)

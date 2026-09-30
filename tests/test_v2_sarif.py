@@ -1694,6 +1694,50 @@ def test_a_write_that_fails_part_way_removes_what_the_import_created(workspace, 
     assert not (workspace["out"] / "bundle").exists()
 
 
+def test_a_failed_write_also_removes_the_parent_directories_the_import_made_and_only_those(workspace, monkeypatch):
+    """The output's parents are created for it, so a write that fails part way left `new/nested` behind."""
+
+    def refuse(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(review, "write_evaluator_records", refuse)
+    with pytest.raises(OSError, match="No space left on device"):
+        imported(workspace, name="new/nested/bundle")
+    assert not workspace["out"].exists()
+    # A parent that was already there stays, and stays empty: only what this call made is removed.
+    workspace["out"].mkdir()
+    (workspace["out"] / "kept").mkdir()
+    with pytest.raises(OSError, match="No space left on device"):
+        imported(workspace, name="kept/new/bundle")
+    assert [path.name for path in workspace["out"].iterdir()] == ["kept"]
+    assert list((workspace["out"] / "kept").iterdir()) == []
+    # A directory holding something this call did not write is not removed, nor are its parents.
+
+    def another_writer_then_no_space(bundle, *records):
+        Path(bundle, "raw", "other.txt").write_text("not written by the import", encoding="utf-8")
+        refuse()
+
+    monkeypatch.setattr(review, "write_evaluator_records", another_writer_then_no_space)
+    with pytest.raises(OSError, match="No space left on device"):
+        imported(workspace, name="shared/bundle")
+    assert sorted(path.relative_to(workspace["out"]).as_posix() for path in (workspace["out"] / "shared").rglob("*")) == [
+        "shared/bundle", "shared/bundle/raw", "shared/bundle/raw/other.txt"]
+
+
+def test_parents_are_removed_when_the_bundle_directory_itself_cannot_be_made(workspace, monkeypatch):
+    real_mkdir = Path.mkdir
+
+    def mkdir(self, *args, **kwargs):
+        if self.name == "bundle":
+            raise OSError(13, "Permission denied")
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    with pytest.raises(OSError, match="Permission denied"):
+        imported(workspace, name="new/nested/bundle")
+    assert not workspace["out"].exists()
+
+
 # --- the command line ------------------------------------------------------------------------
 
 
