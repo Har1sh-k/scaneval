@@ -909,3 +909,72 @@ def test_scaneval_run_on_a_blinded_input_then_replay_reproduces_the_evaluation(t
     replayed = tmp_path / "replayed.json"
     code, _, _ = cli(capsys, "replay", str(bundle), "--output", str(replayed))
     assert code == 0 and replayed.read_bytes() == (bundle / "evaluation.json").read_bytes()
+
+
+# --- the CLI: check a map against its variants, and record a review of it -----------------------
+
+
+def test_blinding_check_dry_runs_every_variant_and_writes_nothing_to_the_map(tmp_path, widget, capsys):
+    write_pack(tmp_path / "pack.json", widget)
+    path = tmp_path / "widget-map.json"
+    blinding.save_map(path, widget_map(widget))
+    before = path.read_bytes()
+    argv = ["blinding", "check", str(path), "--pack", str(tmp_path / "pack.json"), "--cache-root", str(widget["cache"])]
+
+    code, printed, err = cli(capsys, *argv)
+
+    assert code == 0 and err == "" and path.read_bytes() == before
+    assert f"approval: approved by {REVIEWER} (independent_reviewer)" in printed
+    assert "snap-a: pass" in printed and "snap-fixed: pass" in printed
+    assert "readme-brand README.md: AcmeCorp=1, Widget=2; changed line(s): 1, 3" in printed
+    assert "retained identity cues: 2 token(s), 6 occurrence(s) in 6 file(s); instruction files: CLAUDE.md" in printed
+
+    code, printed, _ = cli(capsys, *argv, "--snapshot-id", "snap-fixed")
+    assert code == 0 and "snap-a:" not in printed and "snap-fixed: pass" in printed
+    code, _, err = cli(capsys, *argv, "--snapshot-id", "snap-zzz")
+    assert code == 2 and "has no variant for snapshot snap-zzz" in err
+
+
+def test_blinding_check_exits_one_for_a_refused_or_unapproved_map(tmp_path, widget, capsys):
+    write_pack(tmp_path / "pack.json", widget)
+    path = tmp_path / "widget-map.json"
+    argv = ["blinding", "check", str(path), "--pack", str(tmp_path / "pack.json"), "--cache-root", str(widget["cache"])]
+
+    blinding.save_map(path, refused_map(widget, "stale-file-hash"))
+    code, printed, err = cli(capsys, *argv)
+    assert code == 1 and "snap-a: refused: stale map" in printed and "snap-fixed: pass" in printed
+    assert "refused for 1 variant(s): snap-a" in err
+
+    path.unlink()
+    blinding.save_map(path, widget_map(widget, approved=False))
+    code, printed, err = cli(capsys, *argv)
+    assert code == 1 and "approval: not approved:" in printed and "unreviewed" in printed
+    assert "snap-a: pass" in printed and "a run refuses it" in err
+
+
+def test_blinding_review_appends_one_chained_review_and_never_names_a_reviewer_itself(tmp_path, widget, capsys):
+    path = tmp_path / "widget-map.json"
+    blinding.save_map(path, widget_map(widget, approved=False))
+    before = path.read_bytes()
+
+    code, _, err = cli(capsys, "blinding", "review", str(path), "--reviewer", "  ", "--role", "curator",
+                       "--decision", "approve", "--note", "blank reviewer")
+    assert code == 2 and "must name its reviewer" in err and path.read_bytes() == before
+
+    code, printed, _ = cli(capsys, "blinding", "review", str(path), "--reviewer", REVIEWER,
+                           "--role", "independent_reviewer", "--decision", "approve", "--note", REVIEW_NOTE)
+    assert code == 0
+    recorded = json.loads(printed)
+    document = blinding.load_map(path)
+    assert document["reviews"] == [recorded] and document["reviews_sha256"] == recorded["chain_sha256"]
+    assert recorded["reviewer"] == REVIEWER and recorded["content_sha256"] == blinding.content_digest(document)
+    assert blinding.approval_gap(document) is None
+    assert not list(tmp_path.glob("widget-map.json.*.tmp"))
+
+    trial = tmp_path / "trial"
+    (trial / "source").mkdir(parents=True)
+    (trial / "provenance.json").write_text("{}\n", encoding="utf-8")
+    blinding.save_map(trial / "map.json", document)
+    code, _, err = cli(capsys, "blinding", "review", str(trial / "map.json"), "--reviewer", REVIEWER,
+                       "--role", "curator", "--decision", "reject", "--note", "inside a trial")
+    assert code == 2 and "inside the trial directory" in err

@@ -19,6 +19,8 @@ What each command writes:
   temporary file beside it and renames that over the pack, so a reader sees the whole old pack
   or the whole new one. The previous version is not kept, and a pack whose status is no longer
   ``draft`` is refused unless ``--new-version`` opens a new draft version of it.
+- A blinding map is rewritten in place the same way by ``blinding review``, which appends one
+  chained review and changes nothing else. ``blinding check`` only reads the map.
 - ``evaluator/review-record.json`` is replaced the same way by ``review record`` and
   ``review approve``, through the one replace function :mod:`scaneval.review` uses. Both
   refuse a bundle reached through a symlink before writing.
@@ -30,22 +32,29 @@ a symlinked parent is read rather than refused. They write nothing into the bund
 
 No command writes inside a materialized trial directory: the output path of ``plan``, ``run``,
 ``demo``, ``score``, ``replay`` and ``report``, the pack path of ``corpus init`` and of every
-corpus command that rewrites a pack, the bundle argument of all four ``review`` subcommands, and
-the directory ``corpus validate`` exports a snapshot into, are each refused when a trial's
-``provenance.json`` and ``source`` sit in them or above them. That keeps evaluator material out
-of the tree a scanner is handed; it is a check on the path, not an isolation boundary. ``review
-status`` is checked although it only reads, so the ``review`` group is uniform; the other
-read-only commands read whatever path they are given.
+corpus command that rewrites a pack, the map ``blinding review`` rewrites, the bundle argument of
+all four ``review`` subcommands, and the directory ``corpus validate`` exports a snapshot into,
+are each refused when a trial's ``provenance.json`` and ``source`` sit in them or above them.
+That keeps evaluator material out of the tree a scanner is handed; it is a check on the path, not
+an isolation boundary. ``review status`` is checked although it only reads, so the ``review``
+group is uniform; the other read-only commands read whatever path they are given.
 
 Exit codes. 2 means the command could not be carried out: a usage or contract error, a refused
 overwrite, a failed fetch or export. 1 means the command ran and reports a negative result: a
 mechanical check set failed, a run could not prepare some input or produced no usable scan from
-some system, or ``diagnose`` was given something that is not a bundle it can read. 0 means it ran
-and reports nothing wrong, which is not a statement that any label or decision is correct.
+some system, a blinding map is not approved or a variant refused it, or ``diagnose`` was given
+something that is not a bundle it can read. 0 means it ran and reports nothing wrong, which is
+not a statement that any label or decision is correct.
 
 ``diagnose`` reads a saved invocation bundle and writes a diagnostic document. It scores nothing,
 changes nothing in the bundle, and its answer never reaches a metric: a target whose code was
 never supplied to the model is still a target the scan did not detect.
+
+``blinding check`` fetches and exports each variant a blinding map covers into a temporary
+directory, applies the map exactly as a run would, and prints what it changed, every check it
+passed, and the identity cues that remain; approval is reported rather than required, and an
+unapproved or refused map exits 1. ``blinding review`` records one review the caller names; the
+tool never supplies a reviewer.
 """
 
 import argparse
@@ -54,9 +63,10 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from typing import Callable
 from urllib.parse import urlsplit
 
-from . import __version__, cases, materialize, review, runner
+from . import __version__, blinding, cases, materialize, review, runner
 from .adapters.base import AdapterError
 # _is_stated is imported rather than re-implemented so a blank value is judged by one rule here,
 # in cases, and in review: a string made only of zero-width or control characters is not a value.
@@ -146,19 +156,17 @@ def _create_pack(path: Path, pack: dict) -> None:
     cases.save_pack(path, pack)
 
 
-def _save_pack(path: Path, pack: dict) -> None:
-    """Validate *pack* and replace the pack file at *path* through a temporary file beside it.
+def _replace_file(path: Path, write: Callable[[Path], None]) -> None:
+    """Have *write* write the new document to a temporary file beside *path*, then rename it over *path*.
 
-    A pack is the one kind of document this module rewrites. The replacement is a rename, so a
-    concurrent reader sees the old pack or the new one and never a half-written file, and an
-    invalid pack raises before the old file is touched. The previous version is not kept here:
+    The replacement is a rename, so a concurrent reader sees the old document or the new one and
+    never a half-written file, and a *write* that raises (an invalid document, say) leaves the
+    old file untouched and no temporary file behind. The previous version is not kept here:
     version history belongs in the repository, not in a backup copy this command leaves behind.
     A symlink at *path* is replaced rather than written through, and the regular file that
     replaces it keeps the owner-only mode of the temporary file rather than the mode of the
     symlink's target: permissions are carried over by :func:`scaneval.review._keep_mode`, which
-    every replaced review record goes through as well. *path* is expected to already exist,
-    because every caller loads the pack from it first; :func:`_create_pack` is what writes a new
-    one.
+    every replaced review record goes through as well.
     """
     handle = tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", newline="\n", dir=str(path.parent),
@@ -167,12 +175,22 @@ def _save_pack(path: Path, pack: dict) -> None:
     handle.close()
     temporary = Path(handle.name)
     try:
-        cases.save_pack(temporary, pack)
+        write(temporary)
         _keep_mode(temporary, path)
         os.replace(temporary, path)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _save_pack(path: Path, pack: dict) -> None:
+    """Validate *pack* and replace the pack file at *path* through a temporary file beside it.
+
+    A pack is one of the two kinds of document this module rewrites, and it is replaced the one
+    way :func:`_replace_file` states. *path* is expected to already exist, because every caller
+    loads the pack from it first; :func:`_create_pack` is what writes a new one.
+    """
+    _replace_file(path, lambda temporary: cases.save_pack(temporary, pack))
 
 
 def _pack_for_change(args: argparse.Namespace) -> dict:
@@ -274,13 +292,14 @@ def _refuse_trial_path(output: Path) -> None:
     path it may write checks it: ``plan``, ``run``, ``demo``, the ``--output`` of ``score``,
     ``replay`` and ``report``, the pack ``corpus init`` creates, the pack every corpus command
     that rewrites one is given (``add-snapshot``, ``import``, ``validate --snapshot-id``,
-    ``approve``, ``admit``, ``disposition``, all through :func:`_pack_for_change`), the bundle
-    ``review init``, ``review record`` and ``review approve`` write into, and the trial ``corpus
-    validate`` is about to export into. ``review status`` checks the bundle it reads as well, so
-    every ``review`` subcommand refuses the same paths. Commands that only read are otherwise
-    not checked: a bundle handed to ``replay`` or ``report``, a pack that is only summarized by
-    ``corpus validate`` or read by ``plan`` and ``review init``, and a supplied artifact are read
-    wherever they sit. A trial is recognized by a ``provenance.json`` file beside a
+    ``approve``, ``admit``, ``disposition``, all through :func:`_pack_for_change`), the map
+    ``blinding review`` rewrites, the bundle ``review init``, ``review record`` and ``review
+    approve`` write into, and the trial ``corpus validate`` is about to export into. ``review
+    status`` checks the bundle it reads as well, so every ``review`` subcommand refuses the same
+    paths. Commands that only read are otherwise not checked: a bundle handed to ``replay`` or
+    ``report``, a pack that is only summarized by ``corpus validate`` or read by ``plan`` and
+    ``review init``, a map ``blinding check`` reads, and a supplied artifact are read wherever
+    they sit. A trial is recognized by a ``provenance.json`` file beside a
     ``source`` directory; any other directory is left alone. *output* itself is examined along
     with its parents, so a bundle that is itself a trial root is refused as well as one sitting
     under one; a path that does not exist yet carries no marker and is judged by its parents
@@ -588,6 +607,83 @@ def _run(args: argparse.Namespace) -> int:
     return 1 if unprepared or incomplete or manifest["status"] != "completed" else 0
 
 
+def _occurrences(counts: dict) -> str:
+    return ", ".join(f"{token}={count}" for token, count in sorted(counts.items())) or "none"
+
+
+def _blinding_check(args: argparse.Namespace) -> int:
+    """Dry-run a blinding map against every variant it covers, or one, and report what it would do.
+
+    Each variant is fetched into the source cache (default: ``.repos`` beside the pack) and
+    exported into a temporary directory that is removed afterwards; the map file is never written.
+    A fetch that fails means the check could not be carried out (2). A map that is not approved,
+    or that any checked variant refuses, is a negative result (1): a run would refuse it.
+    """
+    document = blinding.load_map(args.map)
+    pack = cases.load_pack(args.pack)
+    covered = [variant["snapshot_id"] for variant in document["variants"]]
+    if args.snapshot_id is not None:
+        if args.snapshot_id not in covered:
+            raise ContractError(f"map {document['map_id']} has no variant for snapshot {args.snapshot_id}; "
+                                f"it covers {', '.join(covered)}")
+        covered = [args.snapshot_id]
+    cache_root = args.cache_root or args.pack.parent / runner.DEFAULT_CACHE_ROOT
+    identity = blinding.map_identity(document)
+    print(f"Map {identity['map_id']} {identity['map_version']}: {identity['map_sha256']}; content "
+          f"{blinding.content_digest(document)}")
+    gap = blinding.approval_gap(document)
+    if gap is None:
+        approvers = ", ".join(f"{review['reviewer']} ({review['role']})"
+                              for review in blinding.approving_reviews(document))
+        print(f"approval: approved by {approvers}")
+    else:
+        print(f"approval: not approved: {gap}")
+    refused = []
+    with tempfile.TemporaryDirectory(prefix="scaneval-blinding-check-") as scratch:
+        for snapshot_id in covered:
+            snapshot = cases.snapshot_by_id(pack, snapshot_id)
+            cached = materialize.fetch_snapshot(snapshot["repository"]["url"], snapshot["commit"], cache_root)
+            try:
+                record = blinding.dry_run(document, cached, snapshot_id, Path(scratch) / snapshot_id)
+            except (MaterializationError, ContractError) as exc:
+                refused.append(snapshot_id)
+                print(f"{snapshot_id}: refused: {exc}")
+                continue
+            applied = record["blinding"]
+            print(f"{snapshot_id}: pass; original {applied['original_tree_hash']}, transformed "
+                  f"{applied['transformed_tree_hash']}")
+            for edit in applied["edits"]:
+                lines = ", ".join(str(line) for line in edit["changed_lines"]) or "none"
+                print(f"  {edit['edit_id']} {edit['path']}: {_occurrences(edit['occurrences'])}; "
+                      f"changed line(s): {lines}")
+            cues = applied["retained_identity_cues"]
+            print(f"  {len(applied['validation'])} check(s) passed; retained identity cues: "
+                  f"{cues['token_count']} token(s), {cues['total_occurrences']} occurrence(s) in "
+                  f"{cues['path_count']} file(s); instruction files: "
+                  f"{', '.join(cues['instruction_files']) or 'none'}")
+    if refused:
+        print(f"scaneval: blinding map refused for {len(refused)} variant(s): {', '.join(refused)}",
+              file=sys.stderr)
+    if gap is not None:
+        print("scaneval: blinding map is not approved; a run refuses it", file=sys.stderr)
+    return 1 if refused or gap is not None else 0
+
+
+def _blinding_review(args: argparse.Namespace) -> int:
+    """Record one review of a blinding map, by the reviewer the caller names, and replace the map."""
+    _refuse_trial_path(args.map)
+    document = blinding.load_map(args.map)
+    recorded = blinding.record_review(document, reviewer=args.reviewer, role=args.role,
+                                      decision=args.decision, note=args.note)
+    _replace_file(args.map, lambda temporary: blinding.save_map(temporary, document))
+    sys.stdout.write(cases.dump_json(recorded))
+    return 0
+
+
+def _blinding(args: argparse.Namespace) -> int:
+    return {"check": _blinding_check, "review": _blinding_review}[args.blinding_command](args)
+
+
 def _diagnose_context_coverage(args: argparse.Namespace) -> int:
     """Attribute each labeled target to the invocations that were supplied its code region.
 
@@ -726,6 +822,28 @@ def _add_diagnose_commands(sub: argparse._SubParsersAction) -> None:
     coverage.add_argument("--out", type=Path, help="new JSON file; default stdout")
 
 
+def _add_blinding_commands(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser("blinding", help="dry-run and review a metadata blinding map")
+    commands = parser.add_subparsers(dest="blinding_command", required=True)
+
+    checked = commands.add_parser(
+        "check", help="apply a map to each variant in a temporary directory and report the result; "
+                      "writes nothing to the map")
+    checked.add_argument("map", type=Path, help="the blinding map to apply; never written")
+    checked.add_argument("--pack", required=True, type=Path, help="the pack declaring the variants' snapshots")
+    checked.add_argument("--snapshot-id", help="check this variant only")
+    checked.add_argument("--cache-root", type=Path, help="source cache; default .repos beside the pack")
+
+    reviewed = commands.add_parser("review", help="record one review of the map as it stands")
+    reviewed.add_argument("map", type=Path, help="the blinding map; rewritten in place with the review appended")
+    reviewed.add_argument("--reviewer", required=True, help="the reviewer's own name; never supplied by the tool")
+    reviewed.add_argument("--role", required=True, choices=blinding.REVIEW_ROLES)
+    reviewed.add_argument("--decision", required=True, choices=blinding.REVIEW_DECISIONS,
+                          help="the latest review decides: a run applies the map only after an approve "
+                               "of its current content")
+    reviewed.add_argument("--note", required=True)
+
+
 def _add_review_commands(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("review", help="draft, record, approve, and inspect the review of one bundle")
     commands = parser.add_subparsers(dest="review_command", required=True)
@@ -777,6 +895,7 @@ def build_parser() -> argparse.ArgumentParser:
     planning.add_argument("--mode", choices=("full", "pr"), default="full")
     _add_review_commands(sub)
     _add_diagnose_commands(sub)
+    _add_blinding_commands(sub)
     running = sub.add_parser("run", help="execute one frozen run configuration into a new directory")
     running.add_argument("config", type=Path)
     running.add_argument("--output", required=True, type=Path, help="new directory, must not exist")
@@ -795,9 +914,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Valid {args.kind}: {args.path}")
         elif args.command == "demo":
             _demo(args.directory)
-        elif args.command in ("corpus", "diagnose", "plan", "review", "run"):
-            return {"corpus": _corpus, "diagnose": _diagnose, "plan": _plan, "review": _review,
-                    "run": _run}[args.command](args)
+        elif args.command in ("blinding", "corpus", "diagnose", "plan", "review", "run"):
+            return {"blinding": _blinding, "corpus": _corpus, "diagnose": _diagnose, "plan": _plan,
+                    "review": _review, "run": _run}[args.command](args)
         else:
             if args.output:
                 _refuse_trial_path(args.output)
