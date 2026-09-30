@@ -1658,6 +1658,15 @@ class DroppedPaths(NamedTuple):
         It is deliberately not narrowed by the ignore filter, which this adapter cannot see: a name
         the filter would have dropped anyway is counted too. The cost is credit withheld from a run
         that was complete after all; the alternative is quiet credit for a file nobody opened.
+
+        Checked against the bundle's own ``resolveFiles`` (see :func:`listing_trims`) over a git range
+        that adds one regular file for each of 1112 names: every printable ASCII character, and several
+        control and non-ASCII ones, at the start, in the middle and at the end of a file name and of a
+        directory name. With git's default configuration it resolved a name to itself exactly when
+        neither :func:`git_prints_quoted` nor :func:`listing_trims` held, so no other spelling is lost;
+        with ``core.quotePath=false`` it dropped no name they did not flag. What it drops for a reason
+        other than the spelling of the name (its ignore filter, an entry that is not a file) is not
+        counted here.
         """
         return tuple(path for path in self.dropped if git_prints_quoted(path) or listing_trims(path))
 
