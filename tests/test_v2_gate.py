@@ -2712,3 +2712,98 @@ def test_a_policy_reads_only_its_own_view_and_the_decision_says_which_others_it_
     assert ("The comparison also holds view(s) full/standard; this policy reads only full/metadata_blinded."
             in other["notes"])
     assert other["view"] == {"mode": "full", "profile": "metadata_blinded"}
+
+
+# --- thresholds are met at equality, and derived figures are exact -----------------------------------
+
+NEAR = 1e-9
+
+
+@pytest.mark.parametrize("system, requirement_id, build, value, past", [
+    ("improved", "primary.improvement", lambda x: {"primary": primary(minimum=x)}, 0.6, "above"),
+    ("improved", "burden.claims_per_assignment", lambda x: {"burden": {"max_claims_per_assignment": x}}, 1.0, "below"),
+    ("improved", "burden.increase_ratio", lambda x: {"burden": {"max_increase_ratio": x}}, 1.0, "below"),
+    ("duplicating", "burden.duplicate_share", lambda x: {"burden": {"max_duplicate_share": x}}, 0.95, "below"),
+    ("improved", "cost.per_assignment", lambda x: {"cost": {"max_per_assignment_usd": x}}, 0.15, "below"),
+    ("improved", "cost.increase_ratio", lambda x: {"cost": {"max_increase_ratio": x}}, 1.5, "below"),
+    ("flaky", "completion.min", lambda x: {"completion": {"min": x}}, 0.8, "above"),
+    ("flaky", "completion.max_decrease", lambda x: {"completion": {"max_decrease": x}}, 0.2, "below"),
+    ("flaky", "target_coverage.min_assessable_mass", lambda x: {"target_coverage": {"min_assessable_mass": x}}, 0.8,
+     "above"),
+    ("late", "regression.guard", lambda x: {"regressions": [regression("guard", kind="recall_at_budget", budget=1,
+                                                                        limit=x)]}, 0.2, "below"),
+])
+def test_a_figure_equal_to_its_threshold_meets_it_and_a_step_past_does_not(corpus, system, requirement_id, build,
+                                                                           value, past):
+    """Every requirement is met when its figure equals the tolerance and is not met one step past it.
+
+    The late system's recall@1 fell by exactly 0.2, the flaky system's completion fell by exactly 0.2 to 0.8, the
+    improved system's claims per assignment and claim ratio are exactly 1, its recall rose by exactly 0.6, its
+    cost is 0.15 against 0.1, and the duplicating system's duplicate share is 190/200.
+    """
+
+    def status(threshold: float) -> str:
+        decision = decide(corpus, gate_policy(**build(threshold)), system)
+        return requirement(decision, requirement_id)["status"]
+
+    stepped = value + NEAR if past == "above" else value - NEAR
+    assert status(value) == "pass", f"{requirement_id} at its threshold {value}"
+    assert status(stepped) != "pass", f"{requirement_id} one step past its threshold {stepped}"
+
+
+def test_precision_and_control_figures_are_met_at_equality_and_not_one_step_past(corpus, estimates, tmp_path):
+    """Resolved precision 0.8, F+ 0.4, and the assessable control mass 0.6 each sit exactly on their tolerance."""
+    def precision_status(**changes) -> str:
+        decision = decide(corpus, gate_policy(precision=precision_block(**changes)),
+                          precision_candidate=estimates["improved"])
+        return requirement(decision, "precision.min_value")["status"]
+
+    assert precision_status(min_value=0.8) == "pass" and precision_status(min_value=0.8 + NEAR) == "fail"
+    comparison = control_comparison(tmp_path, "run-edge", candidate_controls={1: "unresolved", 2: "unresolved"})
+
+    def control_statuses(**changes) -> dict[str, str]:
+        decision = gate.evaluate_gate(gate_policy(controls={"capability_safe": bounds(**changes)}), comparison)
+        return statuses(decision)
+
+    assert control_statuses(max_false_alarm_upper=0.4)["controls.capability_safe.false_alarm_upper"] == "pass"
+    assert control_statuses(max_false_alarm_upper=0.4 - NEAR)["controls.capability_safe.false_alarm_upper"] == "fail"
+    assert control_statuses(min_assessable_mass=0.6)["controls.capability_safe.assessable_mass"] == "pass"
+    assert control_statuses(min_assessable_mass=0.6 + NEAR)[
+        "controls.capability_safe.assessable_mass"] == "inconclusive"
+
+
+def test_a_figure_the_gate_derives_is_exact_so_binary_floats_never_move_it_across_its_threshold(corpus, estimates):
+    """0.9 - 0.7 is 0.20000000000000007 as floats and 0.07 / 0.05 is 1.4000000000000001; on paper both are exact.
+
+    A precision that fell from 0.9 to 0.7 fell by exactly 0.2, and a cost of 0.07 against 0.05 is exactly 1.4
+    times it, so each meets a tolerance of exactly that and fails one step short of it.
+    """
+    assert 0.9 - 0.7 > 0.2 and 0.07 / 0.05 > 1.4, "the float arithmetic this guards against"
+    baseline, candidate = deepcopy(estimates["baseline"]), deepcopy(estimates["improved"])
+    baseline["precision_resolved"], candidate["precision_resolved"] = 0.9, 0.7
+
+    def decrease(limit: float) -> str:
+        decision = decide(corpus, gate_policy(precision=precision_block(max_decrease_vs_baseline=limit)),
+                          precision_baseline=baseline, precision_candidate=candidate)
+        return requirement(decision, "precision.max_decrease")["status"]
+
+    assert decrease(0.2) == "pass" and decrease(0.2 - NEAR) == "fail"
+    assert requirement(decide(corpus, gate_policy(precision=precision_block(max_decrease_vs_baseline=0.2)),
+                              precision_baseline=baseline, precision_candidate=candidate),
+                       "precision.max_decrease")["observed"] == {"baseline": 0.9, "candidate": 0.7, "decrease": 0.2}
+
+    comparison = deepcopy(corpus["comparisons"]["improved"])
+    for side, spent in (("baseline", 0.05), ("candidate", 0.07)):
+        comparison["views"][0]["systems"][side]["slices"][0]["usage"]["cost_usd"] = {
+            "known_sum": spent, "known": 1, "unknown": 0, "coverage": 1.0}
+
+    def ratio(limit: float) -> str:
+        decision = gate.evaluate_gate(gate_policy(cost={"max_increase_ratio": limit}), comparison)
+        return requirement(decision, "cost.increase_ratio")["status"]
+
+    assert ratio(1.4) == "pass" and ratio(1.4 - NEAR) == "fail"
+    item = requirement(gate.evaluate_gate(gate_policy(cost={"max_increase_ratio": 1.4}), comparison),
+                       "cost.increase_ratio")
+    assert item["observed"] == {"baseline": 0.05, "candidate": 0.07, "ratio": 1.4}
+    assert item["explanation"] == ("the candidate's recorded cost per executed scan is 0.07 against the baseline's "
+                                   "0.05, a ratio of 1.4, within the allowed 1.4")

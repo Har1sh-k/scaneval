@@ -41,6 +41,7 @@ recorded; they are compared with the policy's thresholds as written, with no tol
 from __future__ import annotations
 
 from copy import deepcopy
+from fractions import Fraction
 from os import PathLike
 from typing import Any, Callable
 
@@ -133,6 +134,17 @@ def _slice_text(dimension: str, value: str | None) -> str:
 def _names(values: list[str], limit: int = 3) -> str:
     shown = ", ".join(values[:limit])
     return shown + (f" and {len(values) - limit} more" if len(values) > limit else "")
+
+
+def _exact(value: float | int) -> Fraction:
+    """A recorded or declared number read as the decimal it is written as: 0.15 is 3/20, not a binary float.
+
+    A figure a comparison reports was rounded once from an exact value, so it is compared with a
+    threshold as it stands. A figure the gate derives itself (a share, a ratio, a mean, or the difference
+    of two recorded figures) is computed exactly from the decimals recorded, so a value that equals its
+    threshold on paper never fails by a unit in the last place.
+    """
+    return Fraction(repr(value)) if isinstance(value, float) else Fraction(value)
 
 
 def _open(reason: str, threshold: Any = None, observed: Any = None) -> Result:
@@ -701,12 +713,13 @@ def _precision_decrease(ctx: _Context) -> Result:
     if None in figures.values():
         return _open(f"{label} is undefined for the {', '.join(side for side in SIDES if figures[side] is None)}: no "
                      "sampled claim was judged", threshold, figures)
-    observed = {**figures, "decrease": figures["baseline"] - figures["candidate"]}
+    decrease = _exact(figures["baseline"]) - _exact(figures["candidate"])
+    observed = {**figures, "decrease": float(decrease)}
     if weak:
         return _open(f"the {' and '.join(weak)} estimate is below the required {rule['min_evidence_grade']} grade, so "
                      "the change in precision is not established", threshold, observed)
     text = f"{label} went from {_n(figures['baseline'])} to {_n(figures['candidate'])}"
-    if observed["decrease"] <= limit:
+    if decrease <= _exact(limit):
         return PASS, observed, threshold, f"{text}, a decrease of at most the allowed {_n(limit)}"
     return (FAIL, observed, threshold,
             f"{text}, a decrease of {_n(observed['decrease'])}, more than the allowed {_n(limit)}")
@@ -842,29 +855,35 @@ def _target_coverage(ctx: _Context) -> Result:
 # --- review burden and cost ---------------------------------------------------------------------
 
 
-def _ratio_reading(candidate: float, baseline: float, noun: str) -> tuple[float | None, str]:
-    """The ratio of *candidate* to *baseline* (``None`` when unbounded) and how it reads.
+def _ratio_reading(candidate: Fraction, baseline: Fraction, noun: str) -> tuple[Fraction | None, str]:
+    """The exact ratio of *candidate* to *baseline* (``None`` when unbounded) and how it reads.
 
     A baseline of zero has no ratio: a candidate that is also zero has not increased, and any more is an
     unbounded increase, which is over every limit.
     """
     if baseline == 0:
         if candidate == 0:
-            return 1.0, f"the {noun} is zero for both systems, so there is no increase"
+            return Fraction(1), f"the {noun} is zero for both systems, so there is no increase"
         return None, f"the baseline's {noun} is zero, so any amount is an unbounded increase over it"
     ratio = candidate / baseline
-    return ratio, (f"the candidate's {noun} is {_n(candidate)} against the baseline's {_n(baseline)}, a ratio "
-                   f"of {_n(ratio)}")
+    return ratio, (f"the candidate's {noun} is {_n(float(candidate))} against the baseline's "
+                   f"{_n(float(baseline))}, a ratio of {_n(float(ratio))}")
 
 
-def _volume(ctx: _Context, side: str) -> dict:
-    """One system's whole-view claim volume as the burden requirements read it."""
+def _volume(ctx: _Context, side: str) -> tuple[dict, dict[str, Fraction | None]]:
+    """One system's whole-view claim volume as the burden requirements read it, and its exact shares.
+
+    The claim counts are integers, so claims per assignment and the duplicate share are exact fractions;
+    the first result records them as floats for the decision.
+    """
     claims = ctx.whole(side)["claims"]
     records, assignments = claims["records"], claims["assignments"]
-    return {"records": records, "unique": claims["unique"], "duplicate_copies": claims["duplicate_copies"],
+    exact = {"claims_per_assignment": Fraction(records, assignments) if assignments else None,
+             "duplicate_share": Fraction(claims["duplicate_copies"], records) if records else None}
+    seen = {"records": records, "unique": claims["unique"], "duplicate_copies": claims["duplicate_copies"],
             "assignments": assignments, "bundles": claims["bundles"],
-            "claims_per_assignment": records / assignments if assignments else None,
-            "duplicate_share": claims["duplicate_copies"] / records if records else None}
+            **{name: None if value is None else float(value) for name, value in exact.items()}}
+    return seen, exact
 
 
 def _burden(ctx: _Context, check: str) -> Result:
@@ -883,8 +902,11 @@ def _burden(ctx: _Context, check: str) -> Result:
     problem = ctx.missing_view()
     if problem is not None:
         return _open(problem, threshold)
-    volumes = {side: _volume(ctx, side) for side in SIDES}
+    read = {side: _volume(ctx, side) for side in SIDES}
+    volumes = {side: read[side][0] for side in SIDES}
+    exact = {side: read[side][1] for side in SIDES}
     mine = volumes["candidate"]
+    limit = _exact(burden[key])
     sides = SIDES if check == "increase_ratio" else ("candidate",)
     for side in sides:
         if volumes[side]["bundles"] == 0 or volumes[side]["assignments"] == 0:
@@ -893,7 +915,7 @@ def _burden(ctx: _Context, check: str) -> Result:
     if check == "claims_per_assignment":
         text = (f"the candidate delivered {mine['records']} claim record(s) over {mine['assignments']} "
                 f"assignment(s), {_n(mine['claims_per_assignment'])} per assignment")
-        if mine["claims_per_assignment"] <= burden[key]:
+        if exact["candidate"]["claims_per_assignment"] <= limit:
             return PASS, mine, threshold, f"{text}, within the allowed {_n(burden[key])}"
         return FAIL, mine, threshold, f"{text}, above the allowed {_n(burden[key])}"
     if check == "duplicate_share":
@@ -901,14 +923,14 @@ def _burden(ctx: _Context, check: str) -> Result:
             return PASS, mine, threshold, "the candidate delivered no claim record, so it delivered no duplicate copy"
         text = (f"{mine['duplicate_copies']} of the candidate's {mine['records']} delivered claim record(s) are exact "
                 f"duplicates of another record of the same scan, a share of {_n(mine['duplicate_share'])}")
-        if mine["duplicate_share"] <= burden[key]:
+        if exact["candidate"]["duplicate_share"] <= limit:
             return PASS, mine, threshold, f"{text}, within the allowed {_n(burden[key])}"
         return FAIL, mine, threshold, f"{text}, above the allowed {_n(burden[key])}"
-    ratio, reading = _ratio_reading(mine["claims_per_assignment"], volumes["baseline"]["claims_per_assignment"],
-                                    "claim volume per assignment")
+    ratio, reading = _ratio_reading(exact["candidate"]["claims_per_assignment"],
+                                    exact["baseline"]["claims_per_assignment"], "claim volume per assignment")
     observed = {side: volumes[side]["claims_per_assignment"] for side in SIDES}
-    observed["ratio"] = ratio
-    if ratio is not None and ratio <= burden[key]:
+    observed["ratio"] = None if ratio is None else float(ratio)
+    if ratio is not None and ratio <= limit:
         return PASS, observed, threshold, f"{reading}, within the allowed {_n(burden[key])}"
     return FAIL, observed, threshold, f"{reading}, above the allowed {_n(burden[key])}"
 
@@ -921,9 +943,16 @@ def _spend(ctx: _Context, side: str) -> dict:
     """
     usage = ctx.whole(side)["usage"]
     cost = usage["cost_usd"]
-    return {"coverage": cost["coverage"], "known": cost["known"], "unknown": cost["unknown"],
-            "scans": usage["bundles"], "known_sum": cost["known_sum"],
-            "mean": cost["known_sum"] / cost["known"] if cost["known"] else None}
+    spend = {"coverage": cost["coverage"], "known": cost["known"], "unknown": cost["unknown"],
+             "scans": usage["bundles"], "known_sum": cost["known_sum"], "mean": None}
+    mean = _mean(spend)
+    spend["mean"] = None if mean is None else float(mean)
+    return spend
+
+
+def _mean(spend: dict) -> Fraction | None:
+    """The exact mean cost of a scan whose cost is known: the recorded sum, read as a decimal, over their count."""
+    return _exact(spend["known_sum"]) / spend["known"] if spend["known"] else None
 
 
 def _cost_gap(ctx: _Context, sides: tuple[str, ...]) -> tuple[dict, str | None]:
@@ -974,7 +1003,7 @@ def _cost_per_assignment(ctx: _Context) -> Result:
     if gap is not None:
         return _open(f"the candidate's cost per scan is not established: {gap}", threshold, mine)
     text = f"the candidate's recorded cost is {_n(mine['mean'])} USD per executed scan, over {mine['known']} scan(s)"
-    if mine["mean"] <= limit:
+    if _mean(mine) <= _exact(limit):
         return PASS, mine, threshold, f"{text}, within the allowed {_n(limit)}"
     return FAIL, mine, threshold, f"{text}, above the allowed {_n(limit)}"
 
@@ -988,10 +1017,11 @@ def _cost_increase(ctx: _Context) -> Result:
     spends, gap = _cost_gap(ctx, SIDES)
     if gap is not None:
         return _open(f"the change in cost is not established: {gap}", threshold, spends)
-    ratio, reading = _ratio_reading(spends["candidate"]["mean"], spends["baseline"]["mean"],
+    ratio, reading = _ratio_reading(_mean(spends["candidate"]), _mean(spends["baseline"]),
                                     "recorded cost per executed scan")
-    observed = {"baseline": spends["baseline"]["mean"], "candidate": spends["candidate"]["mean"], "ratio": ratio}
-    if ratio is not None and ratio <= limit:
+    observed = {"baseline": spends["baseline"]["mean"], "candidate": spends["candidate"]["mean"],
+                "ratio": None if ratio is None else float(ratio)}
+    if ratio is not None and ratio <= _exact(limit):
         return PASS, observed, threshold, f"{reading}, within the allowed {_n(limit)}"
     return FAIL, observed, threshold, f"{reading}, above the allowed {_n(limit)}"
 
