@@ -35,10 +35,11 @@ The scorer reports known-target detection, recall within review budgets, reviewe
 | `scaneval corpus init\|add-snapshot\|import\|validate\|approve\|admit\|disposition` | Prepare case packs, run mechanical checks, and record explicit reviews and admissions. |
 | `scaneval plan --pack --snapshot-id --tree-hash --output` | Build an evaluation plan for one materialized input. |
 | `scaneval run <config> --output <new dir>` | Run a frozen configuration and save its artifacts. |
+| `scaneval blinding check\|review` | Dry-run a metadata blinding map against its snapshots, and record a named review of it. |
 | `scaneval review init\|record\|approve\|status` | Prepare and record the review of an invocation bundle. |
 | `scaneval diagnose context-coverage <bundle>` | Compare captured context spans with labeled targets. Does not change scores. |
 
-Run `scaneval <command> --help` for required arguments. Only `corpus validate --snapshot-id` and `run` reach the network; contacts depend on the configured sources and scanners. Exit code `2` means the command could not be carried out, `1` means it ran and reports a negative result, and `0` means it ran and reports nothing wrong. None certifies that a security label is correct.
+Run `scaneval <command> --help` for required arguments. Only `corpus validate --snapshot-id`, `blinding check`, and `run` reach the network; contacts depend on the configured sources and scanners. Exit code `2` means the command could not be carried out, `1` means it ran and reports a negative result, and `0` means it ran and reports nothing wrong. None certifies that a security label is correct.
 
 ## Scanners and visibility
 
@@ -61,7 +62,7 @@ Guides: [Observer SDK](docs/OBSERVER_SDK.md), [native CLI collectors](docs/COLLE
 
 - Full-scan execution, case packs, source export, review, scoring, replay, and reports are implemented.
 - Each run freezes its evaluation schedule (every assignment, pre-registered plan, and vulnerable/fixed pair) before it prepares an input. An input it cannot prepare is recorded with its skipped assignments, and the other inputs still run.
-- Only the `standard` input profile is supported. `metadata_blinded` is refused.
+- The `metadata_blinded` profile applies a reviewed per-repository map to documentation and display metadata only. It is partial blinding, not anonymization: package names, source, and paths are unchanged.
 - Native PR mode, SARIF import, corpus-level aggregation, precision sampling, promotion gates, and enforced isolation are not implemented.
 - The initial public workload is not selected. The pilot is an integration exercise, not a representative benchmark or scanner comparison.
 

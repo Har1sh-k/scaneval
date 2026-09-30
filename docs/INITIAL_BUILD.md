@@ -6,10 +6,11 @@ No benchmark results are published. Every case in the pilot pack carries mechani
 
 ## What works
 
-- Validate ten versioned JSON contract kinds: scan requests and results, evaluation plans, review decisions, execution records, case packs, review records, run configurations, run manifests, and evaluation schedules.
+- Validate eleven versioned JSON contract kinds: scan requests and results, evaluation plans, review decisions, execution records, case packs, review records, run configurations, run manifests, evaluation schedules, and blinding maps.
 - Build an evaluator-side case pack: pin snapshots, draft cases from supplied artifacts, run mechanical (L1) checks against an exported tree, record explicit human reviews, admissions, and dispositions.
 - Fetch a pinned commit into an immutable source cache and export it to an isolated trial directory with a recorded tree hash and preparation provenance.
 - Execute a frozen run configuration: freeze the evaluation schedule before any input exists, prepare every input, record an input that cannot be prepared against that input rather than stopping the run, freeze the pack, invoke each system once per input per repetition, and write one bundle per invocation plus a run manifest.
+- Blind selected identity cues in documentation and display metadata with a reviewed per-repository map (the `metadata_blinded` profile), all or nothing, keeping the original export evaluator-side.
 - Run three real adapters: pinned Semgrep OSS against a local rules checkout, the own harness through its own engine entry point with the observer wrapped around its default model runner, and the third-party DeepSec scanner run unchanged through its own CLI.
 - Draft review decisions by routing claims to planned targets, then record and approve them through explicit human steps.
 - Score one saved output against all assigned targets and controls for that input, reporting full-output recall, first-hit ranks, native review-budget recall, exact duplicates, unresolved findings, and conditional control bounds.
@@ -64,10 +65,11 @@ Schemas ship inside [`src/scaneval/schemas`](../src/scaneval/schemas) and are th
 | `run-config` | A frozen run: pack, inputs, systems, repetitions, timeout, trace mode, network policy. |
 | `run-manifest` | What ran, what was skipped, where every artifact landed, and each input's preparation outcome. |
 | `evaluation-schedule` | Every assignment, each input's pre-registered plan, and the vulnerable/fixed pairs of one run, frozen before any input is prepared. |
+| `blinding-map` | A reviewed per-repository replacement map for the `metadata_blinded` profile: pseudonyms, pinned variants, per-file edits with the hashes and counts they expect, and a chained review history. |
 
-A run configuration is read at 2.0 or 2.1, and every run writes a 2.1 manifest and a 2.1 schedule. A standard input named as its own snapshot keeps the 2.0 plan and 2.0 execution record it always had; a renamed input plans at 2.1. The schedule kind exists only at 2.1.
+A run configuration is read at 2.0 or 2.1, and every run writes a 2.1 manifest and a 2.1 schedule. A standard input named as its own snapshot keeps the 2.0 plan and 2.0 execution record it always had; a renamed or blinded input plans at 2.1, and a blinded input's execution record is 2.1 as well. The two new kinds exist only at 2.1.
 
-The preparation record written beside an exported tree (`provenance.json`) is versioned but has no JSON Schema of its own and is not a contract kind.
+The preparation record written beside an exported tree (`provenance.json`) is versioned but has no JSON Schema of its own and is not a contract kind. A standard export writes it at 2.0, exactly as before; a blinded export writes it at 2.1 with the original export and the transformation added.
 
 ## Materialization and the immutable cache
 
@@ -75,11 +77,36 @@ The preparation record written beside an exported tree (`provenance.json`) is ve
 
 Export copies the tracked regular files of that commit into `<trial>/source`. `.git`, `.securevibes`, `.scaneval`, and `.repos` are stripped; submodule gitlinks and symbolic links are not exported and are recorded as skipped with a reason. Files a scanner may read as project instructions (`CLAUDE.md`, `AGENTS.md`, `.claude/`, `.cursor/`, and similar) stay in the export under the `standard` profile and are recorded as retained identity cues.
 
-The tree hash is the canonical SHA-256 of the `{relative path: file content hash}` map. Only the `standard` profile is implemented. `metadata_blinded` is refused outright, with and without a supplied replacement map, rather than silently downgraded to `standard`.
+The tree hash is the canonical SHA-256 of the `{relative path: file content hash}` map. The `metadata_blinded` profile is described in the next section. Without an approved map that fits the export it is refused, never silently downgraded to `standard`.
 
 An adapter that requires git gets a single synthetic commit with a neutral identity created in the workspace copy. Original history is never exported.
 
 This is preparation and provenance, not a sandbox. Filesystem and network policy must be enforced outside this package.
+
+## Metadata blinding
+
+The `metadata_blinded` profile reduces selected identity cues in an exported snapshot: branding, documentation identifiers, and display metadata. It never renames a package, module, import, source identifier, or path, and never changes a dependency, executable logic, or build, CI, or security configuration. Package names and recognizable code can still reveal the repository, so it is partial blinding, not anonymization and not a defence against memorization.
+
+A blinding map (`blinding-map`) is evaluator-side and never enters a scanner workspace. One map covers every blinded snapshot of one repository, so a vulnerable and a fixed snapshot carry the same pseudonyms. It holds:
+
+- **Pseudonyms**, each an original token and its replacement. Neither side may be blank or hold a line break, originals and replacements are unique, and, ignoring case, no replacement contains an original and no original contains another pseudonym's replacement.
+- **Variants**, the snapshots it covers, each pinned by commit and by the tree hash of its original export.
+- **Edits**, one file each, with a role (`documentation_identifier`, `non_runtime_branding`, or `display_metadata`), a stated rationale, the originals replaced there, and for every variant either the exact file hash and the occurrence count of each original or that the file is absent. A `display_metadata` edit also states its `role_check`: why the field is not read at runtime.
+- **Reviews**, a chain whose end the map records. Each review binds the map's content digest, which is the map without its reviews.
+
+A map is applied only while its latest review approves the content as it stands. An unreviewed map, one whose latest review rejected it or reopened it (`unresolved`), and one edited after its latest approval are refused. The reviewer name is the caller's; the tool never supplies one, and a review records a claim of review, not a signature.
+
+Which files an edit may touch is decided from the path. Documentation (`.md`, `.markdown`, `.rst`, `.txt`, `.adoc`, `.asciidoc`, `.org`) may be edited under any role, and `.yml`, `.yaml`, `.toml`, `.json`, `.cfg`, and `.ini` only as `display_metadata` with a role check. Refused whatever the suffix: license, attribution, and security files (`LICENSE*`, `NOTICE*`, `AUTHORS*`, `SECURITY*`, and the like), dependency manifests and lockfiles, build, CI, and security configuration, anything under `.github/workflows/`, `.github/actions/`, `.circleci/`, or `.git/`, and the files a scanner reads as instructions, such as `CLAUDE.md`. Every other file, source and scripts included, is never edited, and neither is a file with no suffix such as `README`. The path rule is a guard; that a field is not read at runtime is the reviewer's stated judgment.
+
+Application is all or nothing. The original is exported to `<trial>/original/source`, and every check runs before the transformed tree exists: approval; the repository; the variant's commit and tree hash (otherwise the map is stale); each edit's path class; each expected file's presence or absence and exact hash; strict UTF-8; every occurrence of every original, refusing an original that overlaps itself or another (ambiguous or overlapping matches); the reviewed occurrence counts; and that no replacement forms an original again with the text beside it. Only then is the export copied to `<trial>/source` and the reviewed occurrences replaced. The result is verified rather than assumed: every file no edit names is byte-identical to the original, every file keeps its mode, and line *n* of an edited file is line *n* of the original with the reviewed tokens replaced. Claim locations therefore map to the original export as the identity, which is why labels written against the original score a blinded input.
+
+The 2.1 preparation record describes the transformed tree in its standard fields and adds `original` (the original export's tree hash, file count, and byte count) and `blinding`: the map id, version, and digest, the approving reviewers, both tree hashes, every edit with the lines it changed, its occurrence counts, and both file hashes, every check that passed, the identity cues that remain, and the location remapping (`identity` for lines and paths). Remaining cues are every original still found anywhere in the tree, counted ignoring ASCII case, with up to 50 files by count, and the instruction files, which blinding never edits.
+
+In a run, a blinded input needs a 2.1 configuration naming its map. Refused before the output directory exists: a map that cannot be loaded or does not validate, a blinded input of a 2.0 configuration, blinded inputs of one repository that name different maps (another id or another content digest), and a run id, or a system id, model id, model revision, or configuration, that names an original, ignoring case, because each of those reaches the scan. A map that is not approved or does not fit the export is that input's preparation failure. The snapshot's declared tree hash and the mechanical checks are asked of the original export, because that is what the labels describe; the request, the result, the plan's input hash, and the execution record bind to the transformed tree, and the plan and the 2.1 execution record name the map. A scanner is handed a copy of the transformed `source` only: never the map, `provenance.json`, the original export, or anything under `evaluator/`. The schedule names each blinded input's map, and pairs blinded inputs only with each other.
+
+`scaneval blinding check MAP --pack PACK` fetches and exports each variant into a temporary directory and applies the map exactly as a run would, reporting approval instead of requiring it, so a curator can check a draft before anyone reviews it. It prints each edit's counts and changed lines, the checks that passed, and the files that still carry an original, and it exits 1 when the map is not approved or any variant refuses it. It never writes the map. `scaneval blinding review MAP --reviewer --role --decision --note` appends one chained review and replaces the map through a temporary file, as a pack is replaced.
+
+It does not discover identity cues, parse source, or decide whether a field is read at runtime. The leak check is a substring test of the declared originals, so a spelling the map does not declare, such as a hyphenated product name, is not caught. Replacement is exact and case-sensitive, so each spelling to replace is its own pseudonym. The map itself is not copied into the run directory; the run records its identity and digest.
 
 ## The invocation runner and the bundle layout
 
@@ -95,7 +122,7 @@ This is preparation and provenance, not a sandbox. Filesystem and network policy
   invocations/<id>/        one bundle per input, system, and repetition
 ```
 
-An input is named by its input id: a 2.0 configuration's snapshot id, or a 2.1 configuration's `input_id`, which defaults to the snapshot id. Invocation ids are `<input id>__<system id>__r<repetition>`.
+An input is named by its input id: a 2.0 configuration's snapshot id, or a 2.1 configuration's `input_id`, which defaults to the snapshot id with `.blinded` appended for a blinded input. Invocation ids are `<input id>__<system id>__r<repetition>`. A blinded input's directory also keeps the original export under `original/source`, evaluator-side.
 
 Each invocation bundle holds:
 
@@ -115,7 +142,7 @@ Each invocation bundle holds:
 
 A scanner only ever sees a private workspace copy of one export. `raw/` and `trace/` are staged inside that workspace and moved into the bundle once the scan returns or raises, so no path handed to an adapter resolves inside the run directory. The source is hashed before and after the scan and `source_modified` records the comparison. An invocation that fails, times out, or hits an unsupported language keeps that status; it is never rewritten as an empty successful scan.
 
-An input that cannot be prepared (a failed fetch or export, a declared tree hash the export contradicts) is recorded against that input. Its manifest row carries the failure's type and message, each of its assignments is a skipped invocation naming it, no adapter is called for it, and the other inputs still run. A run whose every input failed still completes, and `scaneval run` exits 1 for it. Any other failure once the output directory exists, an interrupt included, writes a manifest with status `failed` before the exception leaves the runner.
+An input that cannot be prepared (a failed fetch or export, a declared tree hash the export contradicts, a blinding map that is not approved or does not fit) is recorded against that input. Its manifest row carries the failure's type and message, each of its assignments is a skipped invocation naming it, no adapter is called for it, and the other inputs still run. A run whose every input failed still completes, and `scaneval run` exits 1 for it. Any other failure once the output directory exists, an interrupt included, writes a manifest with status `failed` before the exception leaves the runner.
 
 ### The evaluation schedule
 
@@ -203,7 +230,7 @@ A human edits `evaluator/decisions.json`. `review record` then re-drafts the rev
 
 A run configuration is a frozen document naming the pack, the inputs, the systems, the repetition count, the timeout, the trace mode, and the network policy. The three pilot configurations are [`corpus/pilot/run-semgrep.json`](../corpus/pilot/run-semgrep.json), [`corpus/pilot/run-harness.json`](../corpus/pilot/run-harness.json), and [`corpus/pilot/run-deepsec.json`](../corpus/pilot/run-deepsec.json). The DeepSec one names an installed DeepSec workspace with a leading `~`, so it expands to whichever operator runs it rather than pinning one machine.
 
-A 2.1 configuration can also name each input with `input_id` (its directory and invocation name, never shown to a scanner) and give a system an `execution` backend. A native PR input (`mode: pr`) is refused when the configuration is read: this build cannot prepare one, and a full scan of the head never stands in for it. A system configured for a backend other than `local` is recorded as a skipped system with the reason rather than run without it.
+A 2.1 configuration can also name each input with `input_id` (its directory and invocation name, never shown to a scanner), choose its `profile`, name the reviewed `blinding_map` of a `metadata_blinded` input by a path relative to the configuration, and give a system an `execution` backend. A native PR input (`mode: pr`) is refused when the configuration is read: this build cannot prepare one, and a full scan of the head never stands in for it. A system configured for a backend other than `local` is recorded as a skipped system with the reason rather than run without it.
 
 `--only-input` (input ids) and `--only-system` narrow a run. Naming something the configuration does not contain is an error rather than a silently empty run, and what was narrowed away is recorded in the manifest and the schedule. `--workspace-root` chooses where the scanner's private workspace is created; a workspace inside the run output, the source cache, or an exported input is refused.
 
@@ -211,7 +238,7 @@ A 2.1 configuration can also name each input with `input_id` (its directory and 
 
 | Command | What it does | Network or model calls |
 |---|---|---|
-| `validate <kind> <path>` | Validate one of the ten contract kinds. | none |
+| `validate <kind> <path>` | Validate one of the eleven contract kinds. | none |
 | `score --plan --result --decisions` | Score separately stored records. | none |
 | `replay <bundle>` | Recompute a saved bundle offline. | none |
 | `report <bundle> --output` | Score a bundle and render standalone HTML. | none |
@@ -229,12 +256,14 @@ A 2.1 configuration can also name each input with `input_id` (its directory and 
 | `review record <bundle>` | Re-draft the review record after a human edited the decisions. | none |
 | `review approve <bundle> --reviewer --note` | Record one explicit human approval. | none |
 | `review status <bundle>` | Report missing, stale, draft, or human_approved. | none |
+| `blinding check <map> --pack` | Apply a blinding map to each variant in a temporary directory and report the result. Writes nothing to the map. | fetches the pinned commits |
+| `blinding review <map> --reviewer --role --decision --note` | Record one named review of a blinding map. | none |
 | `run <config> --output <new dir>` | Execute one frozen run configuration. | depends on the configured systems |
 | `diagnose context-coverage <bundle>` | Report whether each labeled target's code was supplied to the model. Writes nothing into the bundle. | none |
 
-Exit codes: `2` means the command could not be carried out (a usage or contract error, a refused overwrite, a failed fetch or export). `1` means it ran and reports a negative result (a mechanical check set failed, a run could not prepare some input or produced no usable scan from some system). `0` means it ran and reports nothing wrong, which is not a statement that any label or decision is correct.
+Exit codes: `2` means the command could not be carried out (a usage or contract error, a refused overwrite, a failed fetch or export). `1` means it ran and reports a negative result (a mechanical check set failed, a run could not prepare some input or produced no usable scan from some system, or a blinding map is not approved or a variant refused it). `0` means it ran and reports nothing wrong, which is not a statement that any label or decision is correct.
 
-No command writes inside a materialized trial directory, and every output path except a pack file and a review record is create-only.
+No command writes inside a materialized trial directory, and every output path except a pack file, a blinding map, and a review record is create-only.
 
 ## Bundle and replay
 
@@ -295,6 +324,7 @@ Strict parsing rejects duplicate JSON keys, nonfinite numbers, escaping file pat
 - **Packs:** a pack's self-consistency is checked, never its correctness. A pack that validates is consistent with itself: no check here reads source, a reviewer, or a scanner.
 - **Manifests:** an input with a recorded preparation failure has only skipped invocations, each with a reason and no bundle.
 - **Schedules:** the assignments are exactly every input under every system for every repetition, each named by its invocation id; a blinding identity appears exactly on blinded inputs; a pair joins a target and a fixed-target control of it on two full-scan inputs of one profile whose plans were frozen before execution.
+- **Blinding maps:** the pseudonym rules, one expectation per variant for every edit naming exactly the tokens it replaces, and a review chain with its recorded end. The contract checks a map against itself; approval and the fit to an export are asked when it is applied.
 
 Scores use equal target/control weights within one input. Do not average them as a release score: corpus weighting, repeated-run aggregation, repository clustering, and promotion gates are not implemented. Zero denominators are `null` in JSON and N/A in HTML.
 
@@ -324,7 +354,8 @@ npm test
 - **Visibility depends on the build that was run, not only on this package.** The own-harness driver sees attempts, token usage, supplied-context spans and the candidate lifecycle only against a harness build that exports the hooks, and falls back for each surface it does not find. Tool dispatch on the claude route is unobserved either way. What a given run could see is recorded per run, not promised here.
 - **Nothing a collector or the DeepSec adapter reports was watched as it happened.** Both read records written after the fact, so their events are derived and say so; a record the CLI never wrote is a record nothing can recover.
 - **Single-invocation numbers only.** No corpus aggregation, pair aggregation, repeated-run uncertainty, precision sampling, promotion gate, trace viewer, exporter, or multi-model planner is implemented.
-- **Not implemented at all:** native PR mode through an adapter, metadata blinding, SARIF or saved vendor output import, and semantic duplicate review. The collectors import an agent CLI's own trace records; nothing imports a scanner's saved findings file produced outside a ScanEval invocation.
+- **Metadata blinding is partial.** It edits reviewed documentation and display metadata only; package names, imports, identifiers, paths, and recognizable code stay, and every blinded export counts the cues that remain. It is not anonymization and does not show that a scanner could not recognize the repository.
+- **Not implemented at all:** native PR mode through an adapter, SARIF or saved vendor output import, and semantic duplicate review. The collectors import an agent CLI's own trace records; nothing imports a scanner's saved findings file produced outside a ScanEval invocation.
 
 ## Requirements for a reviewed comparison
 

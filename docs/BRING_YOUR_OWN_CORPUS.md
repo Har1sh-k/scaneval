@@ -435,7 +435,8 @@ admission before evaluation, enforce it by checking the pack, not by relying on 
 | `inputs[].snapshot_id` | yes | A snapshot the pack declares. Refused before anything is written otherwise. |
 | `inputs[].input_id` | no, 2.1 | Names the input's directory and invocations; never shown to a scanner. Defaults to the snapshot id, with `.blinded` appended for a blinded input. |
 | `inputs[].mode` | no, 2.1 | `full` (default). `pr` is refused when the configuration is read: this build cannot prepare a native PR input, and a full scan of the head never stands in for one. |
-| `inputs[].profile` | no | `standard` (default) or `metadata_blinded`. |
+| `inputs[].profile` | no | `standard` (default) or `metadata_blinded`, which needs a 2.1 configuration; see [a metadata-blinded input](#a-metadata-blinded-input). |
+| `inputs[].blinding_map` | 2.1 | Path to the reviewed blinding map, relative to the configuration file. Required exactly when `profile` is `metadata_blinded`. |
 | `systems[].system_id` | yes | Matches `^[A-Za-z0-9][A-Za-z0-9._-]*$`. |
 | `systems[].adapter` | yes | `semgrep`, `llm-harness`, or `deepsec` in this build. |
 | `systems[].config` | yes | Adapter configuration. For `semgrep` this pins a rules repository by url, commit, and paths; for `deepsec` it names the installed workspace and the model. See the [example configuration](../corpus/pilot/run-deepsec.json). |
@@ -611,6 +612,208 @@ $SB plan --pack "$BYOC/pack.json" --snapshot-id reporting-main --tree-hash "$TRE
 `--mode pr` changes exactly one thing today: the plan carries the pack's `pr` review budgets
 instead of its `full` budgets, and records `"mode": "pr"` in its provenance. See section 9.
 
+### A metadata-blinded input
+
+The `metadata_blinded` profile scans a copy of a snapshot in which reviewed identity tokens are
+replaced in documentation and display metadata only. It is for measuring whether those cues change
+a result, not for hiding a repository: package names, imports, identifiers, paths, and code are
+never changed, and every blinded export counts the cues that remain. It needs a blinding map, a
+JSON document you write, review, and keep beside the pack, never in the snapshot.
+
+The hashes in this subsection come from the snapshot it was verified against, a service whose
+README, operations guide, and documentation site name the product `Acme`.
+
+**Write the map from the export.** `corpus validate --snapshot-id` left the snapshot's export in
+the trial directory. Each edit names one file, its role, why nothing reads it at runtime, the
+tokens it replaces, and for every snapshot the map covers the file's hash and how often each token
+occurs in it. Count occurrences, not lines:
+
+```sh
+cd "$BYOC/trials/reporting-main/source"
+shasum -a 256 README.md docs/operations.md mkdocs.yml
+grep -o Acme README.md | wc -l
+```
+
+```json
+{
+  "schema_version": "2.1",
+  "map_id": "acme-reporting-service",
+  "map_version": "1",
+  "repository": {"url": "/private/tmp/byoc/reporting-service", "name": "acme/reporting-service"},
+  "pseudonyms": [{"original": "Acme", "replacement": "Example"}],
+  "variants": [{"snapshot_id": "reporting-main", "commit": "e17a377ddff4d3c518616a53e56eb0b5cba57c56",
+                "tree_hash": "sha256:c267ead9104da0a1e104157b180244efa8aaf74faf9e49c615456386759129bd"}],
+  "edits": [
+    {"edit_id": "readme-title", "path": "README.md", "role": "non_runtime_branding",
+     "rationale": "The README title and first paragraph name the product; nothing reads the README at runtime.",
+     "replacements": ["Acme"],
+     "expected": [{"snapshot_id": "reporting-main", "state": "present",
+                   "file_sha256": "sha256:f9a6a048580372be907b00e460f13b8ee08cd76129a5a3486732c3e08af81bf1",
+                   "occurrences": {"Acme": 2}}]},
+    {"edit_id": "operations-title", "path": "docs/operations.md", "role": "documentation_identifier",
+     "rationale": "The operations guide names the service in its heading.",
+     "replacements": ["Acme"],
+     "expected": [{"snapshot_id": "reporting-main", "state": "present",
+                   "file_sha256": "sha256:1108725d3d07885823d4f2ed8eec118b3bd0963264617de6155e6b1dc103bf12",
+                   "occurrences": {"Acme": 1}}]},
+    {"edit_id": "docs-site-name", "path": "mkdocs.yml", "role": "display_metadata",
+     "rationale": "site_name titles the rendered documentation site.",
+     "role_check": "mkdocs reads site_name only to title rendered pages; the service never reads mkdocs.yml.",
+     "replacements": ["Acme"],
+     "expected": [{"snapshot_id": "reporting-main", "state": "present",
+                   "file_sha256": "sha256:be7784f5e35e7585c64c00af5f4eea4f56f2ee287e964fa8c39b4e8e76ac95fe",
+                   "occurrences": {"Acme": 1}}]}
+  ],
+  "reviews": []
+}
+```
+
+`repository.url` must be the snapshot's URL exactly, and each variant's `tree_hash` is the tree
+hash the pack records for that snapshot. A map for a vulnerable and a fixed snapshot of one
+repository lists both as variants, and each edit then states an expectation for each, with
+`"state": "absent"` where the file does not exist; related snapshots in one run must be blinded
+with the same map. Documentation files may be edited under any role. `.yml`, `.yaml`, `.toml`,
+`.json`, `.cfg`, and `.ini` files may be edited only as `display_metadata` with a `role_check`.
+License and security files, dependency manifests, build, CI, and security configuration, files a
+scanner reads as instructions, and every other file, source included, are refused. [Current
+capabilities](INITIAL_BUILD.md#metadata-blinding) lists every rule.
+
+**Check it before anyone reviews it.** `blinding check` fetches each variant, applies the map in a
+temporary directory exactly as a run would, and reports approval instead of requiring it:
+
+```
+$ $SB validate blinding-map "$BYOC/reporting-map.json"
+Valid blinding-map: /private/tmp/byoc/reporting-map.json
+
+$ $SB blinding check "$BYOC/reporting-map.json" --pack "$BYOC/pack.json" --cache-root "$BYOC/.repos"
+Map acme-reporting-service 1: sha256:b315c4dad24b58ae933d84c0d953d0f0dee31d1a622dcfdbb8232592071c5463; content sha256:fc626885d14212555e2cb4873e53b0d04605c8340dd2b8618a15c1af273f3121
+approval: not approved: map acme-reporting-service 1 is unreviewed: no review is recorded
+reporting-main: pass; original sha256:c267ead9104da0a1e104157b180244efa8aaf74faf9e49c615456386759129bd, transformed sha256:87c31d4b42b1b3e634b36c82653998362e168d878b3fbf7bf4406b168b9bbe61
+  readme-title README.md: Acme=2; changed line(s): 1, 3
+  operations-title docs/operations.md: Acme=1; changed line(s): 1
+  docs-site-name mkdocs.yml: Acme=1; changed line(s): 1
+  17 check(s) passed; retained identity cues: 1 token(s), 2 occurrence(s) in 2 file(s); instruction files: none
+  retained in: LICENSE (1), app/handler.py (1)
+scaneval: blinding map is not approved; a run refuses it
+exit=1
+```
+
+The two retained cues are the copyright line and a header name in the handler. Neither can be
+edited, so both stay and are recorded. A wrong count or a file the rules refuse is reported per
+variant, and the map is never written:
+
+```
+reporting-main: refused: blinding map refused: edit readme-title: README.md: unexpected occurrence count in snapshot reporting-main: the map reviewed {'Acme': 1}, the file holds {'Acme': 2}
+reporting-main: refused: blinding map refused: edit license-holder: LICENSE is a license, attribution, or security file
+```
+
+**Record the review.** A run applies a map only while its latest review approves the map's content
+as it stands. `blinding review` appends one chained review naming the reviewer you supply, and
+refuses a blank one:
+
+```sh
+$SB blinding review "$BYOC/reporting-map.json" --reviewer "Example Reviewer (fictional)" \
+  --role independent_reviewer --decision approve \
+  --note "Read every edit against the export; the README, operations guide, and site name carry no runtime role."
+```
+
+```json
+{"at":"2026-09-30T01:19:25+00:00","chain_sha256":"sha256:f4a005311741501ad959168eb042acedb5899fcfba905bdfb71caebf3f111644",
+ "content_sha256":"sha256:fc626885d14212555e2cb4873e53b0d04605c8340dd2b8618a15c1af273f3121","decision":"approve",
+ "note":"Read every edit against the export; the README, operations guide, and site name carry no runtime role.",
+ "reviewer":"Example Reviewer (fictional)","role":"independent_reviewer"}
+```
+
+The review covers `content_sha256`, the map without its reviews. Any later edit to the map leaves it
+unapproved until someone reviews it again, and `--decision reject` or `unresolved` withdraws an
+approval explicitly. As with `corpus approve`, the name is recorded, not verified.
+
+**Run it.** A blinded input needs a 2.1 configuration that names its map, relative to the
+configuration file. It can sit beside the standard input of the same snapshot:
+
+```json
+{
+  "schema_version": "2.1",
+  "run_id": "internal-pilot-blinded-2026-09-29",
+  "pack": "pack.json",
+  "cache_root": ".repos",
+  "inputs": [{"snapshot_id": "reporting-main"},
+             {"snapshot_id": "reporting-main", "profile": "metadata_blinded",
+              "blinding_map": "reporting-map.json"}],
+  "systems": [
+    {"system_id": "semgrep-local-rules", "adapter": "semgrep",
+     "config": {"ruleset": {"url": "/private/tmp/byoc/rules",
+                            "commit": "01cb9aa62f15daead361b331b4befdd2503fff83",
+                            "paths": ["python"]},
+                "rule_timeout_seconds": 30, "jobs": 2},
+     "network_policy": "none"}
+  ],
+  "repetitions": 1,
+  "timeout_seconds": 600,
+  "trace_mode": "off",
+  "network_policy": "none",
+  "notes": ["Local rules checkout and local source mirror; no network fetch."]
+}
+```
+
+A scanner is told its run id, system id, model, and configuration, so a run in which any of them
+names an original token, ignoring case, is refused before anything is written. A run id like the
+one this guide used earlier, `acme-internal-pilot-2026-09-20`, names the company:
+
+```
+$ $SB run "$BYOC/run-leaky.json" --output "$BYOC/runs/leaky" --workspace-root "$BYOC/workspaces"
+scaneval: the run id names 'Acme', an original identity token of blinding map acme-reporting-service, which would reach the scan of blinded input reporting-main.blinded; rename it, or leave that input standard
+exit=2
+```
+
+With a neutral run id both inputs run:
+
+```
+$ $SB run "$BYOC/run-blinded.json" --output "$BYOC/runs/blinded" --workspace-root "$BYOC/workspaces"
+reporting-main__semgrep-local-rules__r1 status=success claims=1 plan=draft review=draft
+reporting-main.blinded__semgrep-local-rules__r1 status=success claims=1 plan=draft review=draft
+Manifest: /private/tmp/byoc/runs/blinded/run-manifest.json
+Schedule: /private/tmp/byoc/runs/blinded/evaluator/schedule.json
+```
+
+The blinded input's directory holds the original export under `original/source`, evaluator-side,
+and the transformed tree under `source`; a scanner is handed a copy of `source` only. The
+preparation record says what changed and what did not:
+
+```
+$ jq -c '.blinding | {edits: [.edits[] | {path, changed_lines, occurrences}], retained_identity_cues}' \
+    "$BYOC/runs/blinded/inputs/reporting-main.blinded/provenance.json"
+{"edits":[{"path":"README.md","changed_lines":[1,3],"occurrences":{"Acme":2}},{"path":"docs/operations.md","changed_lines":[1],"occurrences":{"Acme":1}},{"path":"mkdocs.yml","changed_lines":[1],"occurrences":{"Acme":1}}],"retained_identity_cues":{"instruction_files":[],"path_count":2,"paths":[{"count":1,"path":"LICENSE"},{"count":1,"path":"app/handler.py"}],"token_count":1,"total_occurrences":2}}
+```
+
+Lines and paths map to the original as the identity, so the labels written against
+`reporting-main` score the blinded input unchanged: the mechanical checks and the declared tree
+hash are asked of the original export, while the request, the result, and the plan's input hash
+bind to the transformed tree. The plan and the execution record name the map:
+
+```
+$ jq -c '{input_hash, provenance: {profile: .provenance.profile, source_tree_hash: .provenance.source_tree_hash, blinding: .provenance.blinding}}' \
+    "$BYOC/runs/blinded/invocations/reporting-main.blinded__semgrep-local-rules__r1/evaluator/plan.json"
+{"input_hash":"sha256:87c31d4b42b1b3e634b36c82653998362e168d878b3fbf7bf4406b168b9bbe61","provenance":{"profile":"metadata_blinded","source_tree_hash":"sha256:c267ead9104da0a1e104157b180244efa8aaf74faf9e49c615456386759129bd","blinding":{"map_id":"acme-reporting-service","map_sha256":"sha256:bdf1c85df1267444e70b124ae4775b444b1970e1ad7a13d4c634dc98da205a66","map_version":"1"}}}
+```
+
+A map that is not approved or no longer fits the export fails that input alone, before any scanner
+sees it. After the README edit's rationale is reworded without a new review, the same run reports:
+
+```
+reporting-main__semgrep-local-rules__r1 status=success claims=1 plan=draft review=draft
+reporting-main.blinded__semgrep-local-rules__r1 status=skipped claims=None plan=None review=None
+Manifest: /private/tmp/byoc/runs/edited/run-manifest.json
+Schedule: /private/tmp/byoc/runs/edited/evaluator/schedule.json
+scaneval: input reporting-main.blinded could not be prepared: MaterializationError: blinding map refused: map acme-reporting-service 1: the latest approval, by Example Reviewer (fictional) (independent_reviewer) at 2026-09-30T01:19:25+00:00, covers content sha256:fc626885d14212555e2cb4873e53b0d04605c8340dd2b8618a15c1af273f3121, but the map now hashes to sha256:87ca782566c26b6dba8d889e80f6c93040d242867b4fd5370d75e5ce1b0d4488; it was edited after it was approved
+scaneval: no usable scan from 1 invocation(s): reporting-main.blinded__semgrep-local-rules__r1
+exit=1
+```
+
+Report standard and blinded results separately: the schedule pairs vulnerable and fixed inputs only
+within one profile. A blinded result says the listed cues were absent from the scanned text, not
+that the scanner could not recognize the repository.
+
 ## 7. The human review loop on a bundle
 
 A bundle is a directory holding `result.json` and an `evaluator/` directory. The loop is four
@@ -710,7 +913,7 @@ These are limits of the current implementation, not guarantees about your enviro
 | Credentials | `--url`, `--historical-url`, and `--repo` refuse a URL whose authority carries userinfo, except the bare `git` user of an ssh clone URL. The run configuration has no credential field. Scanner subprocesses receive only `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR`, `TERM`, `USER`, `SHELL` unless the adapter adds more. | The check reads the URL authority only: a token in a path, a query, or an scp-style `git@host:path` address is not detected. The `llm-harness` adapter adds `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, and `XDG_CONFIG_HOME` to that passthrough, and `deepsec` adds `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, so provider keys in your environment do reach those scanner processes; neither is recorded. `NODE_OPTIONS` is deliberately passed by neither, because node executes what it names and a `--require` in your environment would run code inside the scanner while the record showed only a variable name. |
 | Traces | `trace_mode` is `off`, `metadata`, or `content`. Metadata mode omits content. Content mode stores a cloned, redacted copy of metadata and content, including the outgoing model request, in the bundle's `trace/` directory. | Content-mode traces therefore contain the source that was sent to the model. Treat a content-mode bundle as source material, with the same handling rules. The default redactor replaces common credential-looking keys; it is not a secret scanner. |
 | Directory separation | Evaluator files live in `evaluator/` and in the pack; the scanner receives a private workspace copy of one export. The trial-path check refuses writing evaluator material inside an exported tree, and the runner refuses a workspace inside evaluator storage. | These compare resolved paths. They follow no bind mount or hard link, and they are not a sandbox. Directory separation documents the evaluator boundary; it does not enforce it. |
-| Exported trees | The export carries tracked regular files only, strips `.git`, `.securevibes`, `.scaneval`, and `.repos`, records skipped submodules and symlinks, and records retained instruction files such as `CLAUDE.md` or `AGENTS.md` as identity cues. | It is not a sandbox, and instruction files stay in the tree under the `standard` profile. |
+| Exported trees | The export carries tracked regular files only, strips `.git`, `.securevibes`, `.scaneval`, and `.repos`, records skipped submodules and symlinks, and records retained instruction files such as `CLAUDE.md` or `AGENTS.md` as identity cues. A blinded export also keeps the original export evaluator-side and records every edit and every remaining cue. | It is not a sandbox, and instruction files stay in the tree under both profiles. Blinding never renames a package, import, identifier, or path, so a blinded tree is not anonymous. |
 | Pack edits | A pack is replaced atomically through a temporary file and a rename, keeping the previous permission bits. | No previous version is kept on disk. Keep the pack under version control if you need history or a correction trail. |
 
 ## 9. What is not implemented yet
@@ -729,11 +932,11 @@ These are limits of the current implementation, not guarantees about your enviro
   Freezing membership and promoting a version are hand edits to the pack file, reviewed in your own
   repository. The report states the same limit: "Single-input metrics only. Corpus weighting,
   precision estimates, promotion gates and a trace viewer are not implemented in this build."
-- **Metadata blinding is refused, not approximated.** `profile: "metadata_blinded"` fails with
-  `metadata blinding unavailable: no reviewed replacement map was supplied`. There is no CLI flag
-  that supplies a replacement map; the library call that accepts one refuses it as well, with
-  `metadata blinding is not implemented in this build; do not substitute standard`. The run records
-  the failure instead of silently scanning a `standard` export.
+- **Metadata blinding is partial, and nothing finds cues for you.** A map edits the documentation
+  and display metadata a reviewer listed and nothing else. Nothing discovers identity cues, reads
+  source, or decides whether a field is read at runtime, and the run's leak check matches only the
+  spellings the map declares. A blinded input is never replaced by a `standard` export: a map that
+  is not approved or does not fit fails that input instead.
 - **No case-authoring skill yet.** The design pairs this guide with a case-authoring `SKILL.md`.
   The CLI operations it would drive are the ones documented here.
 - **Admission is a record, not a gate,** and `extended_regression` is planned like any other
@@ -744,8 +947,8 @@ These are limits of the current implementation, not guarantees about your enviro
 Every command and every output in this guide was produced with `scaneval 2.0.0a1` on 2026-09-20,
 against a throwaway pack under `/private/tmp/byoc` whose snapshot source and whose Semgrep ruleset
 were both local `git init` repositories. Nothing in the transcript reached the network. The
-schedule and preparation-failure transcripts in section 6 were produced on 2026-09-29 the same way,
-against a pack of the same shape in another temporary directory, with paths shown under
+schedule, preparation-failure, and blinding transcripts in section 6 were produced on 2026-09-29
+the same way, against a pack of the same shape in another temporary directory, with paths shown under
 `/private/tmp/byoc`; the `Schedule:` line in the first run transcript is the line `run` has printed
 since then. Re-check these behaviors against the current checkout rather than treating this guide
 as a guarantee.
