@@ -2181,6 +2181,7 @@ def gate_requirement_ids(policy: dict[str, Any]) -> list[str]:
 def _gate_metric(metric: dict[str, Any], where: str) -> None:
     """Refuse a gate metric that is not measured known-target recall, naming a diagnostic as one."""
     kind = metric["kind"]
+    allowed = " or ".join(GATE_METRICS)
     if kind == "recall_at_budget":
         if "budget" not in metric:
             raise ContractError(f"{where}: recall_at_budget names the budget B it reads")
@@ -2190,12 +2191,11 @@ def _gate_metric(metric: dict[str, Any], where: str) -> None:
     elif "random" in kind.lower():
         raise ContractError(
             f"{where}: {kind!r} is a random-order expectation, a diagnostic over an order the system never "
-            "chose and never a promotion metric; use full_recall or recall_at_budget")
+            f"chose and never a promotion metric; use {allowed}")
     elif kind in _GATE_DIAGNOSTICS:
-        raise ContractError(
-            f"{where}: {kind!r} is a diagnostic, not a promotion metric; use full_recall or recall_at_budget")
+        raise ContractError(f"{where}: {kind!r} is a diagnostic, not a promotion metric; use {allowed}")
     else:
-        raise ContractError(f"{where}: {kind!r} is not a metric a gate reads; use full_recall or recall_at_budget")
+        raise ContractError(f"{where}: {kind!r} is not a metric a gate reads; use {allowed}")
 
 
 def _gate_slice(slice_: dict[str, Any], where: str, *, single: bool) -> None:
