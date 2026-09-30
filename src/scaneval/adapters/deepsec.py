@@ -1592,9 +1592,13 @@ def listing_trims(path: str) -> bool:
     holds names another path, or none. Git quotes every one of those characters but the space (a control character,
     and by default a non-ASCII one), and a quoted line starts and ends with a quote, which the trim leaves alone. So
     what is left is a space, which git prints as it is at the start or the end of a name. A space inside a name, or
-    at the end of a directory in it (``src /a.js``), is not at an end of the line and is not touched. Read from the
-    2.3.10 bundle, with the set of characters taken from Node's own ``trim`` and the unquoted spelling checked against
-    git's output for a leading and a trailing space; the real CLI was not run over such a name.
+    at the end of a directory in it (``src /a.js``), is not at an end of the line and is not touched.
+
+    Checked by running the 2.3.10 bundle's own ``resolveFiles`` (its ignore filter stubbed out, no agent) over a git
+    range: a name with a leading or a trailing space is dropped, or resolved to another file that exists (``src/a.js ``
+    to the untouched ``src/a.js``), and a name with a space inside it or at the end of a directory resolves. The
+    characters are the ones Node's own ``trim`` removes. The CLI was not run over such a name, since after the
+    listing it starts a model.
     """
     return path != path.strip(JS_TRIM)
 
