@@ -28,9 +28,11 @@ SCHEMA_VERSIONS: dict[str, tuple[str, ...]] = {
     "review-record": ("2.0",),
     "run-config": ("2.0", "2.1"),
     "run-manifest": ("2.0", "2.1"),
-    # The frozen evaluation schedule a run writes before it prepares any input. A kind first
-    # published at 2.1 has 2.1 as its only version, so its schema keeps the plain file name.
+    # Kinds first published at 2.1, one per feature: the frozen evaluation schedule a run writes
+    # before it prepares any input, and the reviewed map a metadata-blinded input is transformed
+    # with. 2.1 is each one's only version, so its schema keeps the plain file name.
     "evaluation-schedule": ("2.1",),
+    "blinding-map": ("2.1",),
 }
 CONTRACT_KINDS = frozenset(SCHEMA_VERSIONS)
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
@@ -1630,6 +1632,105 @@ def _validate_evaluation_schedule(document: dict[str, Any]) -> None:
             seen.add((left, right))
 
 
+# --- metadata blinding map ---------------------------------------------------------------------
+
+
+# Every character str.splitlines treats as a line break. A pseudonym holding one could move a line
+# and break the line-for-line mapping a blinded input's claim locations rely on.
+_LINE_BREAKS = frozenset("\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def _validate_blinding_map(document: dict[str, Any]) -> None:
+    """Check what a blinding map asserts about itself; whether it fits an export is asked when applied.
+
+    Pseudonyms: neither side blank or holding a line break, an original never its own replacement,
+    originals unique, replacements unique, and, ignoring case, no replacement containing any
+    original (a replaced file would still carry it) and no original containing another pseudonym's
+    replacement (a transformed file could not say which token it came from). Variants are unique by
+    snapshot. Edits are unique by id and by path, each path a normalized relative POSIX path, each
+    rationale stated, a ``display_metadata`` edit carrying a stated ``role_check``, each replaced
+    token a declared original, and exactly one expectation per variant, whose occurrence counts
+    name exactly the edit's replacements. The review history is a chain (kind ``blinding_review``)
+    whose end ``reviews_sha256`` records, present exactly when a review is, and every review names
+    its reviewer. Approval, path classes, and file hashes are not asked here:
+    :mod:`scaneval.blinding` asks them against the export, where a refusal is that input's own
+    preparation failure.
+    """
+    pseudonyms = document["pseudonyms"]
+    for index, pseudonym in enumerate(pseudonyms):
+        for side in ("original", "replacement"):
+            value = pseudonym[side]
+            if not is_stated(value):
+                raise ContractError(f"pseudonyms[{index}].{side} is blank")
+            if any(character in _LINE_BREAKS for character in value):
+                raise ContractError(f"pseudonyms[{index}].{side} holds a line break, which would move a line")
+        if pseudonym["original"] == pseudonym["replacement"]:
+            raise ContractError(f"pseudonyms[{index}] replaces {pseudonym['original']!r} with itself")
+    originals = [pseudonym["original"] for pseudonym in pseudonyms]
+    replacements = [pseudonym["replacement"] for pseudonym in pseudonyms]
+    _unique(originals, "pseudonyms.original")
+    _unique(replacements, "pseudonyms.replacement")
+    for index, replacement in enumerate(replacements):
+        for original in originals:
+            if original.casefold() in replacement.casefold():
+                raise ContractError(
+                    f"pseudonyms[{index}].replacement {replacement!r} contains the original {original!r}, "
+                    "so a replaced file would still carry it")
+    for index, original in enumerate(originals):
+        for other, replacement in enumerate(replacements):
+            if other != index and replacement.casefold() in original.casefold():
+                raise ContractError(
+                    f"pseudonyms[{index}].original {original!r} contains {replacement!r}, the replacement "
+                    f"in pseudonyms[{other}], so a transformed file could not say which token it came from")
+    variants = [variant["snapshot_id"] for variant in document["variants"]]
+    _unique(variants, "variants.snapshot_id")
+    edits = document["edits"]
+    _unique([edit["edit_id"] for edit in edits], "edits.edit_id")
+    _unique([edit["path"] for edit in edits], "edits.path")
+    for edit in edits:
+        label = f"edit {edit['edit_id']}"
+        path = edit["path"]
+        _require_relative_path(path, f"{label}.path")
+        if "\\" in path or any(part in ("", ".") for part in path.split("/")):
+            raise ContractError(f"{label}.path must be a normalized relative POSIX path, not {path!r}")
+        if not is_stated(edit["rationale"]):
+            raise ContractError(f"{label} must state its rationale")
+        if "role_check" in edit and not is_stated(edit["role_check"]):
+            raise ContractError(f"{label}.role_check is blank")
+        if edit["role"] == "display_metadata" and "role_check" not in edit:
+            raise ContractError(f"{label}: a display_metadata edit states its role_check, the reason the "
+                                "field is not read at runtime")
+        unknown = sorted(set(edit["replacements"]) - set(originals))
+        if unknown:
+            raise ContractError(f"{label} replaces tokens no pseudonym declares: {unknown}")
+        expected = [entry["snapshot_id"] for entry in edit["expected"]]
+        _unique(expected, f"{label} expected.snapshot_id")
+        if set(expected) != set(variants):
+            raise ContractError(f"{label} must state one expectation for every variant and no other: "
+                                f"it names {sorted(expected)}, the map covers {sorted(variants)}")
+        for entry in edit["expected"]:
+            if entry["state"] == "present" and set(entry["occurrences"]) != set(edit["replacements"]):
+                raise ContractError(f"{label}: the occurrence counts for {entry['snapshot_id']} must name "
+                                    "exactly the tokens the edit replaces")
+    reviews = document["reviews"]
+    for index, review in enumerate(reviews):
+        if not is_stated(review["reviewer"]):
+            raise ContractError(f"a recorded map review must name its reviewer; reviews[{index}].reviewer is blank")
+    gap, head = chain_link_gap(reviews, kind="blinding_review", label="reviews")
+    if gap:
+        raise ContractError(gap)
+    recorded = document.get("reviews_sha256")
+    if head is None and recorded is not None:
+        raise ContractError(f"reviews_sha256 records {recorded}, but no review is recorded; the history it "
+                            "names was deleted whole")
+    if head is not None and recorded is None:
+        raise ContractError("reviews_sha256 is missing, so nothing says where the review history ends and a "
+                            "review deleted from the end of it would leave no trace")
+    if head != recorded:
+        raise ContractError(f"reviews_sha256 records {recorded}, but the review history ends at {head}; a "
+                            "review was deleted from the end of it")
+
+
 _RUNTIME_VALIDATORS = {
     "case-pack": _validate_case_pack,
     "review-record": _validate_review_record,
@@ -1642,6 +1743,7 @@ _RUNTIME_VALIDATORS = {
     "run-manifest": _validate_run_manifest,
     # Kinds first published at 2.1, one per feature.
     "evaluation-schedule": _validate_evaluation_schedule,
+    "blinding-map": _validate_blinding_map,
 }
 
 
