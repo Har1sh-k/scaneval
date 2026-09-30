@@ -16,11 +16,20 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from scaneval import cases, contracts
-from scaneval.contracts import ContractError, input_identity, label_digest, validate_document
+from scaneval.contracts import (
+    ContractError,
+    canonical_sha256,
+    input_identity,
+    label_digest,
+    pr_diff_sha256,
+    pr_input_hash,
+    validate_document,
+)
 
 
 HASH = "sha256:" + "a" * 64
 OTHER = "sha256:" + "b" * 64
+DIGEST = "sha256:" + "e" * 64
 DIGEST_IMAGE = "ghcr.io/example/scanner@sha256:" + "c" * 64
 PROXY_IMAGE = "python@sha256:" + "d" * 64
 
@@ -273,3 +282,19 @@ def test_a_case_naming_no_change_set_keeps_the_label_digest_it_always_had():
     as_2_0["schema_version"] = "2.0"
     del as_2_0["change_sets"]
     assert label_digest(as_2_0, as_2_0["cases"][0]) == label_digest(pack, case)
+
+
+def test_the_pr_identity_hashes_are_canonical_and_move_with_every_part_of_the_trio():
+    changes = {"added": ["a.py"], "deleted": [], "modified": [], "renamed": [], "mode_changed": []}
+    digest = pr_diff_sha256(OTHER, HASH, changes)
+
+    assert digest == canonical_sha256({"base_tree_hash": OTHER, "head_tree_hash": HASH, "changes": changes})
+    assert pr_diff_sha256(OTHER, HASH, dict(reversed(list(changes.items())))) == digest
+    assert len({digest, pr_diff_sha256(HASH, OTHER, changes),
+                pr_diff_sha256(OTHER, HASH, {**changes, "added": ["b.py"]})}) == 3
+    identity = pr_input_hash(OTHER, HASH, digest)
+    assert identity == canonical_sha256({"mode": "pr", "base_tree_hash": OTHER, "head_tree_hash": HASH,
+                                         "diff_sha256": digest})
+    assert len({identity, pr_input_hash(HASH, OTHER, digest), pr_input_hash(OTHER, HASH, DIGEST),
+                pr_input_hash(OTHER, OTHER, digest)}) == 4
+    assert identity not in (OTHER, HASH, digest), "a PR input is never identified by one of its trees"

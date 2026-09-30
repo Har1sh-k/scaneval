@@ -1487,6 +1487,30 @@ def input_identity(entry: dict[str, Any]) -> str:
     return f"{base}{BLINDED_INPUT_SUFFIX}" if entry.get("profile") == "metadata_blinded" else base
 
 
+def pr_diff_sha256(base_tree_hash: str, head_tree_hash: str, changes: dict[str, Any]) -> str:
+    """The digest of a recorded PR diff: the two trees it is between and the changes it records.
+
+    *changes* is the diff record :func:`scaneval.materialize.diff_trees` writes, over the trees a
+    scanner is handed. Naming both tree hashes inside the digest is what makes it the digest of a
+    change between two things and not of a list of paths: the same paths changed between other
+    trees are a different diff. It is a canonical hash of what was recorded and nothing more.
+    """
+    return canonical_sha256({"base_tree_hash": base_tree_hash, "head_tree_hash": head_tree_hash,
+                             "changes": changes})
+
+
+def pr_input_hash(base_tree_hash: str, head_tree_hash: str, diff_sha256: str) -> str:
+    """The identity a native PR input binds its result, plan, and decisions to.
+
+    A full input is identified by its one tree; a PR input is identified by the base tree, the head
+    tree, and the diff between them, so a result cannot be read as the review of another change
+    that happens to share a head. The trees are the ones a scanner is handed, transformed ones
+    included, because that is what the result describes.
+    """
+    return canonical_sha256({"mode": "pr", "base_tree_hash": base_tree_hash,
+                             "head_tree_hash": head_tree_hash, "diff_sha256": diff_sha256})
+
+
 def _validate_run_config(document: dict[str, Any]) -> None:
     """Unique ids, and for 2.1 an input shape that says exactly one thing and a backend that can hold.
 
