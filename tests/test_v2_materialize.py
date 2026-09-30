@@ -18,12 +18,15 @@ from scaneval.materialize import (
     MaterializationError,
     cache_key,
     changed_paths,
+    check_pr_history,
+    compute_pr_history,
     diff_trees,
     export_pr,
     export_snapshot,
     fetch_snapshot,
     git_command,
     hash_exported_tree,
+    prepare_pr_history,
     prepare_synthetic_history,
     tree_hash,
     verify_cached_snapshot,
@@ -663,3 +666,126 @@ def test_export_pr_refuses_a_trial_that_already_holds_an_export(tmp_path, pull_r
 
     with pytest.raises(MaterializationError, match="already exists"):
         export_pr(pull_request["base"], pull_request["head"], trial, clock=CLOCK)
+
+
+def prepared_pr(tmp_path: Path, pull_request: dict, name: str = "trial") -> tuple[Path, Path, dict]:
+    trial = tmp_path / name
+    record = export_pr(pull_request["base"], pull_request["head"], trial, clock=CLOCK)
+    return trial / "source", trial / "base" / "source", record
+
+
+def test_the_two_commit_history_is_neutral_deterministic_and_the_recorded_change(tmp_path, pull_request):
+    head, base, record = prepared_pr(tmp_path, pull_request)
+    before = hash_exported_tree(head)
+
+    history = prepare_pr_history(head, base)
+
+    assert history["messages"] == {"base": "base", "head": "head"}
+    assert history["identity"] == "ScanEval <scaneval@localhost>" and history["date"] == "2000-01-01T00:00:00+00:00"
+    assert git("rev-parse", "HEAD", cwd=head) == history["head_commit"]
+    assert git("rev-parse", "HEAD~1", cwd=head) == history["base_commit"]
+    assert git("rev-list", "--count", "HEAD", cwd=head) == "2"
+    assert git("log", "--date=raw", "--format=%an <%ae>|%cn <%ce>|%ad|%cd|%s", cwd=head).splitlines() == [
+        "ScanEval <scaneval@localhost>|ScanEval <scaneval@localhost>|946684800 +0000|946684800 +0000|head",
+        "ScanEval <scaneval@localhost>|ScanEval <scaneval@localhost>|946684800 +0000|946684800 +0000|base"]
+    assert git("status", "--porcelain", "--untracked-files=all", cwd=head) == ""
+    assert hash_exported_tree(head) == before, "only .git was added to the head worktree"
+    hooks = head / ".git" / "hooks"
+    assert not hooks.exists() or not list(hooks.iterdir()), "no hook or template was copied into the repository"
+    # The base tree is read, never written.
+    assert not (base / ".git").exists() and hash_exported_tree(base)["tree_hash"] == record["base"]["trial"]["tree_hash"]
+    check_pr_history(head, history, record["diff"]["changes"])
+
+    # The same two trees give the same two commits somewhere else, which is what a workspace relies on.
+    again_head, again_base, _ = prepared_pr(tmp_path, pull_request, "again")
+    assert prepare_pr_history(again_head, again_base) == history
+
+
+def test_the_git_diff_between_the_synthetic_commits_is_the_recorded_diff(tmp_path, pull_request):
+    head, base, record = prepared_pr(tmp_path, pull_request)
+    history = prepare_pr_history(head, base)
+
+    lines = [line.split("\t") for line in
+             git("diff", "--name-status", history["base_commit"], history["head_commit"], cwd=head).splitlines()]
+
+    changes = record["diff"]["changes"]
+    assert sorted(lines) == sorted(
+        [["A", path] for path in changes["added"]] + [["D", path] for path in changes["deleted"]]
+        + [["M", path] for path in sorted(set(changes["modified"]) | set(changes["mode_changed"]))]
+        + [["R100", source, target] for source, target in changes["renamed"]])
+    assert git("diff", "--name-only", "-z", f"{history['base_commit']}..{history['head_commit']}",
+               cwd=head).split("\0")[:-1] == changed_paths(changes)
+
+
+def test_the_history_does_not_read_the_operator_environment(tmp_path, pull_request, monkeypatch):
+    head, base, _ = prepared_pr(tmp_path, pull_request)
+    expected = prepare_pr_history(head, base)
+    for name, value in (("GIT_AUTHOR_NAME", "Mallory"), ("GIT_AUTHOR_EMAIL", "m@evil.test"),
+                        ("GIT_COMMITTER_NAME", "Mallory"), ("GIT_AUTHOR_DATE", "1999-12-31T00:00:00+00:00"),
+                        ("GIT_COMMITTER_DATE", "1999-12-31T00:00:00+00:00"), ("GIT_DIR", str(tmp_path / "elsewhere")),
+                        ("GIT_WORK_TREE", str(tmp_path / "elsewhere")), ("GIT_INDEX_FILE", str(tmp_path / "idx"))):
+        monkeypatch.setenv(name, value)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".gitconfig").write_text("[user]\n    name = Mallory\n[diff]\n    renames = false\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    other_head, other_base, _ = prepared_pr(tmp_path, pull_request, "hostile")
+
+    assert prepare_pr_history(other_head, other_base) == expected
+    assert not (tmp_path / "elsewhere").exists() and not (tmp_path / "idx").exists()
+
+
+def test_the_history_refuses_a_head_that_already_has_git_and_a_base_that_is_not_there(tmp_path, pull_request):
+    head, base, _ = prepared_pr(tmp_path, pull_request)
+
+    with pytest.raises(MaterializationError, match="is not a directory"):
+        prepare_pr_history(head, tmp_path / "no-such-base")
+    assert not (head / ".git").exists()
+    prepare_pr_history(head, base)
+    with pytest.raises(MaterializationError, match="already has git history"):
+        prepare_pr_history(head, base)
+
+
+def test_a_history_git_reads_differently_from_the_export_is_refused_with_the_paths(tmp_path):
+    """An in-tree .gitattributes that rewrites bytes on add makes git's diff not the record's.
+
+    The base holds a CRLF file and the head an LF one; the export records a modification, and
+    ``* text=auto`` makes git store the same blob for both, so a scanner's ``git diff`` would show
+    nothing where the record scores a change. That input is refused rather than reviewed wrong.
+    """
+    base = tmp_path / "base"
+    head = tmp_path / "head"
+    (base).mkdir()
+    (head).mkdir()
+    (base / ".gitattributes").write_text("* text=auto\n", encoding="utf-8")
+    (head / ".gitattributes").write_text("* text=auto\n", encoding="utf-8")
+    (base / "notes.txt").write_bytes(b"one\r\ntwo\r\n")
+    (head / "notes.txt").write_bytes(b"one\ntwo\n")
+    changes = diff_trees(base, head)
+    assert changes["modified"] == ["notes.txt"]
+
+    with pytest.raises(MaterializationError, match="does not reproduce the recorded diff") as refused:
+        compute_pr_history(head, base, changes)
+
+    assert "notes.txt" in str(refused.value)
+    assert not (head / ".git").exists(), "the history was built in a scratch copy"
+
+
+def test_compute_pr_history_builds_in_a_scratch_copy_and_leaves_no_trace(tmp_path, pull_request, monkeypatch):
+    head, base, record = prepared_pr(tmp_path, pull_request)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    before = (hash_exported_tree(head), hash_exported_tree(base))
+
+    history = compute_pr_history(head, base, record["diff"]["changes"])
+
+    assert set(history) == {"base_commit", "head_commit", "messages", "identity", "date"}
+    assert (hash_exported_tree(head), hash_exported_tree(base)) == before
+    assert not (head / ".git").exists() and not (base / ".git").exists()
+    assert list(scratch.iterdir()) == [], "the scratch copy is removed"
+    other_head, other_base, _ = prepared_pr(tmp_path, pull_request, "second")
+    assert prepare_pr_history(other_head, other_base) == history

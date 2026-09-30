@@ -14,7 +14,10 @@ what is not.
 
 A native PR input is two exports, not one. :func:`export_pr` writes the head to ``source`` and the
 base to ``base/source`` beside it, records the diff between the two trees a scanner is handed
-(:func:`diff_trees`), and refuses a change with nothing in it.
+(:func:`diff_trees`), and refuses a change with nothing in it. The neutral two-commit history a
+git-dependent PR scanner is handed is built from those two trees by :func:`prepare_pr_history`, in
+a scratch copy when an input is prepared and again in each invocation's private workspace, and its
+commit ids must come out equal both times.
 
 :class:`Containment` is the one containment check this package has. Every path read or written
 after a scanner ran is a path the scanner could have replaced, and the final component is not the
@@ -37,6 +40,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 from typing import Callable
 
 from .contracts import ContractError, canonical_json, canonical_sha256, pr_diff_sha256, pr_input_hash
@@ -146,9 +150,15 @@ def git_command(args: list[str]) -> tuple[list[str], dict[str, str]]:
     return ["git", *_GIT_HARDENING, *args], env
 
 
-def _git(args: list[str], cwd: Path, *, timeout: float = 600) -> str:
-    """Run one hermetic git command in *cwd* and return its stdout. See :func:`git_command`."""
+def _git(args: list[str], cwd: Path, *, timeout: float = 600, extra_env: dict[str, str] | None = None) -> str:
+    """Run one hermetic git command in *cwd* and return its stdout. See :func:`git_command`.
+
+    *extra_env* is applied after :func:`git_command` has removed every ``GIT_*`` variable, which is
+    the one way to give a call a value such as a commit date without letting the operator's
+    environment supply one.
+    """
     argv, env = git_command(args)
+    env = {**env, **(extra_env or {})}
     try:
         completed = subprocess.run(
             argv, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, env=env,
@@ -573,8 +583,128 @@ def prepare_synthetic_history(source_dir: Path, *, message: str = "snapshot") ->
     return {"commit": commit, "message": message, "identity": "ScanEval <scaneval@localhost>"}
 
 
+# What the synthetic history of a PR input says about itself. Fixed, so the same two trees give the
+# same two commit ids on every machine and in every workspace, and neutral, so it says nothing
+# about where the change came from.
+PR_HISTORY_IDENTITY = "ScanEval <scaneval@localhost>"
+PR_HISTORY_DATE = "2000-01-01T00:00:00+00:00"
+PR_HISTORY_MESSAGES = {"base": "base", "head": "head"}
 # Where a PR input's base export sits beneath its trial directory: ``base/source``.
 PR_BASE_DIR = "base"
+
+
+def prepare_pr_history(source_dir: Path, base_dir: Path) -> dict:
+    """Create the two-commit history a PR scanner needs in *source_dir*, the head worktree, and return it.
+
+    The first commit holds *base_dir*, the tree a scanner is handed as the base, and the second
+    holds *source_dir* as it stands, so HEAD is the head and the worktree is clean, and
+    ``git diff base head`` is the change under review. Both trees are added with force, so an
+    upstream ``.gitignore`` cannot drop a file, and the second add stages additions, modifications,
+    deletions, and mode changes alike. Every git call is built by :func:`git_command`, so the
+    repository is the one in *source_dir* and nothing else, no hook or template exists in it, and
+    the operator's configuration is not read.
+
+    The history is deterministic. The identity is the local ``ScanEval <scaneval@localhost>``, both
+    dates are :data:`PR_HISTORY_DATE`, supplied explicitly after :func:`git_command` has removed
+    every ``GIT_*`` variable, the messages are :data:`PR_HISTORY_MESSAGES`, and the only inputs
+    left are the contents and executable bits of the two trees, so equal trees give equal commit ids
+    wherever this runs. That is what lets an input record them once at preparation and each
+    invocation rebuild them and prove it got the same ones.
+
+    Verified before it returns: HEAD is the second commit, its only parent is the first, and a
+    status of the worktree, untracked files included, is empty. What this does not establish is that
+    git reads the two trees the way the export did: paths that differ only in case on a
+    case-insensitive filesystem, or bytes an in-tree ``.gitattributes`` rewrites on add, are read
+    differently, and :func:`check_pr_history` is what says so. A history that cannot be built is a
+    :class:`MaterializationError`; the trees are never modified.
+    """
+    if (source_dir / ".git").exists():
+        raise MaterializationError(f"{source_dir} already has git history")
+    if not base_dir.is_dir():
+        raise MaterializationError(f"the base tree {base_dir} is not a directory")
+    dated = {"GIT_AUTHOR_DATE": PR_HISTORY_DATE, "GIT_COMMITTER_DATE": PR_HISTORY_DATE}
+    _git(["init", "-q"], source_dir)
+    # core.fileMode and diff.renames are pinned rather than probed or inherited: a filesystem that
+    # cannot hold an executable bit, or an operator who turned rename detection off, would
+    # otherwise change what the scanner's own ``git diff`` says about the same two commits.
+    for key, value in (
+        ("user.name", "ScanEval"), ("user.email", "scaneval@localhost"), ("commit.gpgsign", "false"),
+        ("core.autocrlf", "false"), ("core.fileMode", "true"), ("diff.renames", "true"), *_LFS_CONFIG,
+    ):
+        _git(["config", "--local", key, value], source_dir)
+    _git(["--work-tree", str(base_dir), "add", "-A", "-f", "."], source_dir)
+    _git(["commit", "-q", "--allow-empty", "--no-verify", "-m", PR_HISTORY_MESSAGES["base"]], source_dir,
+         extra_env=dated)
+    base_commit = _git(["rev-parse", "HEAD"], source_dir).strip()
+    _git(["add", "-A", "-f", "."], source_dir)
+    _git(["commit", "-q", "--allow-empty", "--no-verify", "-m", PR_HISTORY_MESSAGES["head"]], source_dir,
+         extra_env=dated)
+    head_commit = _git(["rev-parse", "HEAD"], source_dir).strip()
+    if _git(["rev-list", "--parents", "-n", "1", "HEAD"], source_dir).split() != [head_commit, base_commit]:
+        raise MaterializationError("the synthetic PR history is not two commits, the head on top of the base")
+    if _git(["status", "--porcelain", "--untracked-files=all"], source_dir).strip():
+        raise MaterializationError("the synthetic PR history left the head worktree with changes against "
+                                   "its own head commit")
+    return {"base_commit": base_commit, "head_commit": head_commit, "messages": dict(PR_HISTORY_MESSAGES),
+            "identity": PR_HISTORY_IDENTITY, "date": PR_HISTORY_DATE}
+
+
+def _git_view_of_changes(source_dir: Path, base_commit: str, head_commit: str) -> dict[str, set[str]]:
+    """The paths git lists as added, deleted, and modified between two commits, without rename detection."""
+    listing = _git(["diff", "--name-status", "-z", "--no-renames", base_commit, head_commit], source_dir)
+    fields = listing.split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()
+    if len(fields) % 2:
+        raise MaterializationError("git listed a change between the synthetic commits this could not read")
+    view: dict[str, set[str]] = {}
+    for status, path in zip(fields[0::2], fields[1::2]):
+        view.setdefault(status, set()).add(path)
+    return view
+
+
+def check_pr_history(source_dir: Path, history: dict, changes: dict) -> None:
+    """Refuse a synthetic history whose own diff is not the recorded one.
+
+    The record says what changed between two trees by reading the trees; git says what changed
+    between two commits by reading what it added. They agree unless git read a tree differently
+    from the way the export did, and then a scanner's ``git diff`` would review a different change
+    from the one the record scores against. Compared without rename detection, so a rename is the
+    delete and the add the record's ``renamed`` pairs stand for, and mode changes are the ``M`` git
+    reports for a file whose bytes did not change. A disagreement names the paths and is a
+    :class:`MaterializationError`. This reads git and the record; it writes nothing.
+    """
+    renamed_from = {source for source, _ in changes["renamed"]}
+    renamed_to = {target for _, target in changes["renamed"]}
+    expected = {"A": set(changes["added"]) | renamed_to, "D": set(changes["deleted"]) | renamed_from,
+                "M": (set(changes["modified"]) | set(changes["mode_changed"])) - renamed_to}
+    listed = _git_view_of_changes(source_dir, history["base_commit"], history["head_commit"])
+    for status in sorted(set(expected) | set(listed)):
+        if listed.get(status, set()) != expected.get(status, set()):
+            differing = sorted(listed.get(status, set()) ^ expected.get(status, set()))
+            raise MaterializationError(
+                "the synthetic PR history does not reproduce the recorded diff: git lists a different "
+                f"set of paths as {status} ({', '.join(differing[:5])}). Paths that differ only in case "
+                "on a case-insensitive filesystem, or bytes a .gitattributes rewrites when they are "
+                "added, are read by git differently from the export, so this change cannot be reviewed "
+                "as a PR")
+
+
+def compute_pr_history(source_dir: Path, base_dir: Path, changes: dict) -> dict:
+    """The synthetic history of a PR input, built once in a scratch copy and checked against *changes*.
+
+    This is what an input's preparation calls: the head export is copied, without following a
+    link, into a temporary directory that is removed on the way out, :func:`prepare_pr_history`
+    builds the history there, and :func:`check_pr_history` proves git's view of it is the recorded
+    diff. The returned record holds the two commit ids every workspace must reproduce. Neither
+    export is written to.
+    """
+    with tempfile.TemporaryDirectory(prefix="scaneval-pr-history-") as scratch:
+        head_copy = Path(scratch) / "source"
+        shutil.copytree(source_dir, head_copy, symlinks=True)
+        history = prepare_pr_history(head_copy, base_dir)
+        check_pr_history(head_copy, history, changes)
+    return history
 
 
 def _tree_state(root: Path) -> dict[str, tuple[str, bool]]:
@@ -656,7 +786,7 @@ def export_pr(base: CachedSnapshot, head: CachedSnapshot, trial_dir: Path, *, pr
     ``input_hash`` the input is identified by (:func:`scaneval.contracts.pr_input_hash`). A change
     with nothing in it, two exports that are identical, is refused before anything else is asked:
     there is no change to review, and a scan of it would be a scan of nothing recorded as a review.
-    The synthetic history a git-dependent scanner is handed is not built here.
+    The synthetic history is not built here; see :func:`compute_pr_history`.
     """
     if profile not in PROFILES:
         raise MaterializationError(f"unknown input profile {profile!r}; expected one of {PROFILES}")

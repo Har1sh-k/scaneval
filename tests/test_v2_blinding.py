@@ -1046,6 +1046,15 @@ def test_a_blinded_pr_records_the_diff_of_the_transformed_trees_and_none_of_the_
     assert record["diff"]["head_tree_hash"] == record["head"]["trial"]["tree_hash"]
     # The recorded diff names a path a scanner can see and quotes nothing of an original.
     assert "Widget" not in json.dumps(record["diff"]) and "AcmeCorp" not in json.dumps(record["diff"])
+    # The history a scanner is handed is built from the transformed trees, so an original token is
+    # in no blob of it, whatever the original exports hold.
+    history = materialize.prepare_pr_history(trial / "source", trial / "base" / "source")
+    assert git("rev-parse", "HEAD", cwd=trial / "source") == history["head_commit"]
+    for commit in (history["base_commit"], history["head_commit"]):
+        for path in ("README.md", "mkdocs.yml", "docs/guide.md"):
+            shown = subprocess.run(["git", "show", f"{commit}:{path}"], cwd=trial / "source", capture_output=True,
+                                   text=True)
+            assert shown.returncode in (0, 128) and "Widget" not in shown.stdout and "AcmeCorp" not in shown.stdout
 
 
 @pytest.mark.parametrize("name", ["unreviewed", "rejected", "stale-commit", "python-file"])
