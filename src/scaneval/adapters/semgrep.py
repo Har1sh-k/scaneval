@@ -32,6 +32,17 @@ A result the importer cannot turn into a claim is import loss, not a detail: it 
 and a count above zero degrades the outcome to ``partial`` with unresolved bundles and error
 code ``import_loss``, so a scan that reported a finding ScanEval could not read can earn
 neither completeness nor silence credit for it.
+
+Both processes the adapter starts, the version probe and the scan, go through ``run_command``,
+and both pass ``--disable-version-check``, so neither asks the network for a newer release or
+writes that answer under ``HOME``. Every file either of them wrote is read back without following
+a link and without blocking on a named pipe (:func:`~scaneval.execution.read_regular_file` and
+:func:`~scaneval.adapters.base.tail_text`), because the process that wrote the raw directory can
+leave anything at those names. That is what makes the adapter ``oci_compatible``: under the
+``oci`` backend both run in the configured image, the binary defaults to that image's own
+``semgrep`` rather than a host install, and the pinned rules checkout is declared as a read-only
+runtime mount at its own path, so the ``--config`` paths and the ``check_id`` prefixes they
+produce are the same inside the container as outside it.
 """
 
 from __future__ import annotations
@@ -44,9 +55,11 @@ import shutil
 import sys
 from typing import Any, NamedTuple
 
+from ..execution import read_regular_file
 from ..kinds import cwe_ids, kind_for_cwes, mapping_version
 from ..materialize import MaterializationError, fetch_snapshot, sha256_file, tree_hash
-from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command, tail_text
+from .base import (Adapter, AdapterError, NativeOutcome, SystemSpec, active_backend, build_env, run_command,
+                   tail_text)
 
 
 ARTIFACT_JSON = "semgrep-json"
@@ -118,6 +131,12 @@ def _discard_outputs(paths) -> None:
 
 
 def _binary(spec: SystemSpec) -> str:
+    """``config.binary`` when set; under the ``oci`` backend the image's own ``semgrep``; else a host install.
+
+    A host install is looked up only when commands run on the host: under ``oci`` the process
+    runs in the configured image, where a path to this machine's virtual environment names
+    nothing, so the default there is the ``semgrep`` on the image's own ``PATH``.
+    """
     configured = spec.config.get("binary")
     if configured:
         text = str(configured)
@@ -126,6 +145,8 @@ def _binary(spec: SystemSpec) -> str:
         if "\x00" in text:
             raise AdapterError("semgrep config.binary contains a NUL byte and cannot name an executable")
         return text
+    if getattr(active_backend(), "name", None) == "oci":
+        return "semgrep"
     sibling = Path(sys.executable).with_name("semgrep")
     if sibling.exists():
         return str(sibling)
@@ -152,6 +173,11 @@ def semgrep_version(binary: str, raw_dir: Path, timeout_seconds: float = 60) -> 
     the same raw directory fail on the create-only claim and report a file collision rather than
     the failure that actually stopped the first one. A file this call did not create is never
     removed: that one is an earlier attempt's evidence.
+
+    The probe passes ``--disable-version-check``. Without it Semgrep asks the network for its
+    latest release and caches the answer under ``HOME`` (``~/.cache/semgrep_version``), which is
+    a network call and a host write outside the scan, and fails outright where there is no
+    network. The flag leaves the reported version unchanged.
     """
     stdout_path = raw_dir / "semgrep-version.txt"
     stderr_path = raw_dir / "semgrep-version.stderr.txt"
@@ -162,14 +188,17 @@ def semgrep_version(binary: str, raw_dir: Path, timeout_seconds: float = 60) -> 
         _claim_output(stderr_path, what)
         created.append(stderr_path)
         try:
-            result = run_command([binary, "--version"], cwd=raw_dir, timeout_seconds=timeout_seconds,
-                                 env=build_env(), stdout_path=stdout_path, stderr_path=stderr_path)
+            result = run_command([binary, "--version", "--disable-version-check"], cwd=raw_dir,
+                                 timeout_seconds=timeout_seconds, env=build_env(), stdout_path=stdout_path,
+                                 stderr_path=stderr_path)
             if result.timed_out:
                 raise AdapterError(f"semgrep --version exceeded its {timeout_seconds}s limit and was killed after "
                                    f"{result.wall_seconds:.1f}s: {tail_text(result.stderr_path)}")
             if result.exit_code != 0:
                 raise AdapterError(f"semgrep --version failed: {tail_text(result.stderr_path)}")
-            text = stdout_path.read_text(encoding="utf-8", errors="replace")
+            # The one read of a file the probe could have replaced: a link is refused rather than
+            # followed to a file whose content would become the recorded version.
+            text = read_regular_file(stdout_path).decode("utf-8", errors="replace")
         except (OSError, UnicodeDecodeError) as exc:
             raise AdapterError(f"{what} could not be recorded: {exc}") from exc
     except AdapterError:
@@ -502,6 +531,24 @@ class SemgrepAdapter(Adapter):
     adapter_version = "2.0.0"
     requires_git = False
     supported_languages = frozenset({"python", "javascript", "typescript", "go", "rust"})
+    oci_compatible = True
+
+    def runtime_mounts(self, spec: SystemSpec, preparation: dict) -> tuple[str, ...]:
+        """The pinned rules checkout, which the scan reads through its ``--config`` directories.
+
+        The whole checkout rather than each configured directory, because ``prepare()`` accepts a
+        rule file that is a symbolic link to another file inside the checkout, and inside a
+        container that link resolves only if its target is mounted too: mounting the directories
+        alone would drop such a rule silently while the recorded ruleset hash still counted it.
+        The checkout is one pinned commit in the cache, never the cache itself. A preparation
+        recorded before ``ruleset_root`` existed falls back to the configured directories.
+        """
+        directories, _commit, _digest = _prepared_ruleset(preparation)
+        root = preparation.get("ruleset_root")
+        if isinstance(root, str) and root and "\x00" not in root and all(
+                directory == root or Path(directory).is_relative_to(root) for directory in directories):
+            return (root,)
+        return tuple(sorted(set(directories)))
 
     def prepare(self, spec: SystemSpec, cache_root: Path) -> dict[str, Any]:
         """Fetch the pinned rules commit and record an inventory of the rule files it holds.
@@ -657,7 +704,9 @@ class SemgrepAdapter(Adapter):
             return NativeOutcome(status="timeout", exit_code=None, timed_out=True, error={"code": "timeout",
                                  "message": f"semgrep exceeded {timeout_seconds}s; output written at exit only"}, **base)
         try:
-            payload = json.loads(stdout.read_text(encoding="utf-8"))
+            # Read without following a link and without blocking on a pipe: the scan wrote this
+            # directory, and under an isolating backend a link planted here would name a host file.
+            payload = json.loads(read_regular_file(stdout).decode("utf-8"))
             ruleset_root = preparation.get("ruleset_root")
             # config_dirs stays as the fallback so a preparation recorded before ruleset_root
             # existed still keeps the cache path out of native_rule_id.

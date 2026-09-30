@@ -40,9 +40,15 @@ or export, a declared tree hash the export contradicts, a blinding map that is n
 does not fit the export) is recorded against that input: its manifest row carries the failure,
 every one of its assignments is a skipped invocation carrying the reason, and the other inputs
 still run. Once the output directory exists, any other failure is recorded as well: a manifest
-with status ``failed`` is written before the exception leaves this module. It records the declared
-network policy without enforcing it, and it produces single-invocation numbers only: no corpus
-weighting, repeated-run uncertainty, promotion gate, or cross-system comparison is computed here.
+with status ``failed`` is written before the exception leaves this module.
+
+A system runs under the execution backend its 2.1 ``execution`` block names
+(:mod:`scaneval.isolation`): ``local`` records the declared network policy without enforcing it,
+and ``oci`` runs every scanner process in a container built for one invocation and torn down
+after it. A system whose backend refuses it outright is skipped with the reason, an invocation
+whose backend preflight fails is a recorded failed invocation, and neither is ever run under a
+weaker backend. The runner produces single-invocation numbers only: no corpus weighting,
+repeated-run uncertainty, promotion gate, or cross-system comparison is computed here.
 A failed invocation stays a failed invocation and is never rewritten as an empty successful scan,
 and an input that was never prepared is never rewritten as one that had nothing in it.
 """
@@ -54,7 +60,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import blinding, cases, execution, materialize, report, review, schedule, scoring
+from . import blinding, cases, execution, isolation, materialize, report, review, schedule, scoring
 from .adapters import get_adapter
 from .adapters.base import Adapter, AdapterError, SystemSpec
 from .contracts import (
@@ -101,7 +107,8 @@ class _PreparedSystem:
     """One configured system after adapter resolution and its preparation phase.
 
     ``skipped`` holds the failure's own message when resolution or preparation failed.
-    A skipped system is never invoked and never reported as a scan of any kind.
+    A skipped system is never invoked and never reported as a scan of any kind. ``execution`` is
+    the backend its invocations run under; ``None`` is the local one.
     """
 
     spec: SystemSpec
@@ -109,6 +116,7 @@ class _PreparedSystem:
     preparation: dict
     network_policy: str
     skipped: str | None
+    execution: isolation.ExecutionSettings | None = None
 
     def summary(self) -> dict:
         """What the manifest records about this system.
@@ -475,6 +483,11 @@ def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
     encode it, which names the offending type or the field holding it. None of this aborts the
     run, no invocation of a skipped system is attempted, and a skipped system never becomes an
     empty successful scan.
+
+    The system's ``execution`` block is resolved first, and an adapter the selected backend
+    refuses (under ``oci``, any adapter not declaring ``oci_compatible``, which today means
+    ``llm-harness`` and ``deepsec``) is skipped before its preparation runs, so a refused system
+    fetches nothing and is never run locally in its place.
     """
     spec = SystemSpec(entry["system_id"], entry["adapter"], dict(entry["config"]),
                       entry.get("model_id"), entry.get("model_revision"))
@@ -482,15 +495,10 @@ def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
     preparation: dict = {}
     skipped: str | None = None
     warnings: list[str] = []
-    backend = (entry.get("execution") or {"backend": "local"})["backend"]
-    if backend != "local":
-        # A system configured for an enforcing backend is not run without one: running it here
-        # would record an unenforced local scan for a configuration that asked for enforcement.
-        skipped = (f"execution backend {backend} is not available in this build; the system is not "
-                   "run rather than run without the enforcement its configuration declares")
-        warnings.append(f"{spec.system_id}: not invoked ({skipped})")
-        return _PreparedSystem(spec, None, {}, entry.get("network_policy", default_policy), skipped), warnings
+    policy = entry.get("network_policy", default_policy)
+    settings: isolation.ExecutionSettings | None = None
     try:
+        settings = isolation.resolve_execution(entry.get("execution"), policy)
         if adapters is not None and spec.adapter in adapters:
             adapter = adapters[spec.adapter]
         else:
@@ -498,6 +506,9 @@ def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
         # Checked before the preparation phase runs: a system this run cannot record is not one
         # to spend a checkout or a download on.
         _vet_adapter_identity(spec, adapter)
+        refusal = isolation.refusal_for(adapter, settings)
+        if refusal is not None:
+            raise isolation.IsolationError(refusal)
         prepared = adapter.prepare(spec, cache_root)
         if not isinstance(prepared, dict):
             raise AdapterError(
@@ -510,8 +521,43 @@ def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
         preparation = {}
         skipped = f"{type(exc).__name__}: {_message(exc)}"
         warnings.append(f"{spec.system_id}: not invoked ({skipped})")
-    policy = entry.get("network_policy", default_policy)
-    return _PreparedSystem(spec, adapter, preparation, policy, skipped), warnings
+    return _PreparedSystem(spec, adapter, preparation, policy, skipped,
+                           settings if settings is not None and settings.enforcing else None), warnings
+
+
+def _invoke(system: _PreparedSystem, prepared: execution.PreparedInput, repetition: int, *,
+            config: dict, out_dir: Path, cache_root: Path, workspace_root: Path | None,
+            clock: Callable[[], datetime] | None, warnings: list[str]) -> Path:
+    """Run one invocation under its system's execution backend and tear the backend down after it.
+
+    A local system runs exactly as it always has. An ``oci`` system gets a backend built for this
+    one invocation: its private scratch directory, inside which the invocation's workspace is
+    created, sits under *workspace_root*, no mount it makes may overlap the run directory, and a
+    runtime path the adapter declares must sit strictly inside the source cache. Its teardown runs
+    whatever the invocation did, and anything it could not remove is added to the run's warnings
+    rather than raised over the invocation's own outcome.
+    """
+    backend = None
+    if system.execution is not None:
+        backend = isolation.backend_for(
+            system.execution, adapter=system.adapter, spec=system.spec, preparation=system.preparation,
+            run_id=config["run_id"],
+            invocation_id=execution.invocation_id(prepared.input_id, system.spec.system_id, repetition),
+            scratch_root=workspace_root, protected=(out_dir,), runtime_roots=(cache_root,))
+    try:
+        return execution.run_invocation(
+            prepared=prepared, adapter=system.adapter, spec=system.spec,
+            preparation=system.preparation, out_dir=out_dir / "invocations",
+            run_id=config["run_id"], repetition=repetition,
+            timeout_seconds=config["timeout_seconds"], trace_mode=config["trace_mode"],
+            network_policy=system.network_policy,
+            workspace_root=backend.workspace_root if backend is not None else workspace_root,
+            clock=clock, backend=backend,
+        )
+    finally:
+        if backend is not None:
+            identifier = execution.invocation_id(prepared.input_id, system.spec.system_id, repetition)
+            warnings.extend(f"{identifier}: {problem}" for problem in backend.close())
 
 
 def _record_label_states(pack: dict, manifest_inputs: list[dict]) -> None:
@@ -656,8 +702,11 @@ def run_from_config(
     and the exception is re-raised; if writing that partial manifest itself fails, that error
     propagates with the original as its context.
 
-    This does not approve any label, does not retry or rerun a failed invocation, does not
-    aggregate across inputs or systems, and does not enforce the declared network policy.
+    This does not approve any label, does not retry or rerun a failed invocation, and does not
+    aggregate across inputs or systems. It enforces the declared network policy only for a system
+    whose 2.1 ``execution`` block selects the ``oci`` backend; for every other system the policy
+    is recorded, not enforced. Under ``oci`` the scanner's workspace is created inside a private
+    directory under ``workspace_root``, which must therefore be one the Docker daemon can see.
     """
     config_path = Path(config_path)
     # Resolved once, here: every path recorded, compared, or handed on below is built from this
@@ -754,13 +803,9 @@ def run_from_config(
                     if system.skipped is not None:
                         invocations.append(_skipped_invocation(row, system.skipped))
                         continue
-                    bundle = execution.run_invocation(
-                        prepared=prepared, adapter=system.adapter, spec=system_spec,
-                        preparation=system.preparation, out_dir=out_dir / "invocations",
-                        run_id=config["run_id"], repetition=repetition,
-                        timeout_seconds=config["timeout_seconds"], trace_mode=config["trace_mode"],
-                        network_policy=system.network_policy, workspace_root=workspace_root, clock=clock,
-                    )
+                    bundle = _invoke(system, prepared, repetition, config=config, out_dir=out_dir,
+                                     cache_root=cache_root, workspace_root=workspace_root, clock=clock,
+                                     warnings=warnings)
                     plan, record, evaluation, _notes = _evaluate_bundle(bundle, pack, spec, prepared, clock)
                     metrics = evaluation["metrics"]
                     invocations.append({**row, "status": evaluation["status"],

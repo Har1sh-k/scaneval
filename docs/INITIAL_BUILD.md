@@ -82,7 +82,7 @@ The tree hash is the canonical SHA-256 of the `{relative path: file content hash
 
 An adapter that requires git gets a single synthetic commit with a neutral identity created in the workspace copy. Original history is never exported.
 
-This is preparation and provenance, not a sandbox. Filesystem and network policy must be enforced outside this package.
+This is preparation and provenance, not a sandbox. Filesystem and network policy are enforced only for a system that runs under the `oci` execution backend (below); for every other system they must be enforced outside this package.
 
 ## Metadata blinding
 
@@ -151,13 +151,26 @@ An input that cannot be prepared (a failed fetch or export, a declared tree hash
 
 The schedule is a function of the configuration, the pack as supplied, and its creation time, and the manifest names it in `schedule_path`. It holds no outcome, and nothing reads it to aggregate yet.
 
-The declared network policy is recorded, never enforced. The runner computes single-invocation numbers only: no corpus weighting, repeated-run uncertainty, cross-system comparison, or promotion gate is computed anywhere.
+The declared network policy is recorded, and enforced only for a system that runs under the `oci` execution backend. The runner computes single-invocation numbers only: no corpus weighting, repeated-run uncertainty, cross-system comparison, or promotion gate is computed anywhere.
+
+## Execution backends
+
+A system runs under the `local` backend unless its entry in a 2.1 run configuration selects another:
+
+```json
+{"system_id": "semgrep-oci", "adapter": "semgrep", "config": {"ruleset": {"url": "...", "commit": "...", "paths": ["python"]}},
+ "execution": {"backend": "oci", "image": "semgrep/semgrep:1.177.0@sha256:acaac22ffc7b7cc5926de0751b223bce0b2491c33d18422fa72f632c78d81198"}}
+```
+
+`local` runs the scanner as the operator and records `isolation.enforced: false`. `oci` runs every scanner process in its own Docker container, created for that command and removed after it: read-only root filesystem, no capabilities, `no-new-privileges`, a non-root user, pids, memory, CPU, and file limits, a size-limited `noexec` `/tmp`, only the workspace, raw-output, and pinned-checkout mounts, and the network policy enforced. `none` means no network. `model_provider_only` needs `egress` (the exact host and port pairs) and a digest-pinned `proxy_image` that provides `python3`; the scanner then reaches only those pairs, through a CONNECT proxy that logs every decision. `unrestricted` is recorded as not enforced. Optional `limits`, `user`, and `credentials` (environment variable names, passed by name and never recorded) complete the block. Images are never pulled: `docker pull` the pinned reference first.
+
+Only an adapter declaring `oci_compatible` runs under `oci`. `semgrep` does, and uses the image's own `semgrep`. `llm-harness` and `deepsec` are refused, and the refusal is recorded as the system's skip reason. A preflight that fails, such as an unreachable engine, a missing image, a mount the daemon cannot see, or a scan network the engine did not isolate, is recorded as a failed invocation. A system is never run locally in its place. The daemon must see the workspace, so under Colima, which shares only the home directory, give the run a `--workspace-root` inside the home directory and keep the source cache there too. Each such execution record is 2.1 and carries an `isolation` block: the engine, the image identity, every setting, the mounts, the network, and each container's outcome. [The threat model](THREAT_MODEL.md) states what the backend guarantees and what it does not. Replay needs neither Docker nor the network.
 
 ## Adapters
 
 Three adapters are registered: `semgrep`, `llm-harness`, and `deepsec`. An adapter runs the real product once, preserves its raw output, and translates native findings into normalized claims. It never receives labels and never decides whether a claim is true.
 
-**`semgrep`** runs Semgrep OSS against a local git checkout of a rules repository pinned to one commit, with `--metrics=off` and no registry download. A `p/...` or `r/...` registry config is refused because it is not a pin. Preparation records the ruleset commit, the number of rule files Semgrep's own `--config <directory>` walk would select, and one aggregate hash over those files; a symlink anywhere under a configured ruleset directory is refused rather than followed. Native rule identity is recorded relative to the pinned checkout so the cache path does not leak into the rule id. A run that scanned no paths and reported nothing is an error, not a quiet negative result.
+**`semgrep`** runs Semgrep OSS against a local git checkout of a rules repository pinned to one commit, with `--metrics=off` and no registry download; both its version probe and its scan pass `--disable-version-check`, so neither asks the network for a newer release. A `p/...` or `r/...` registry config is refused because it is not a pin. Preparation records the ruleset commit, the number of rule files Semgrep's own `--config <directory>` walk would select, and one aggregate hash over those files; a symlink anywhere under a configured ruleset directory is refused rather than followed. Native rule identity is recorded relative to the pinned checkout so the cache path does not leak into the rule id. A run that scanned no paths and reported nothing is an error, not a quiet negative result.
 
 **`llm-harness`** runs the `securevibes-agent` and `fieldglass` engine family through its own engine entry point inside its own `tsx`. Presets exist for both; only `securevibes-agent` has been exercised against a live model. ScanEval injects only the harness's default model runner wrapped by the observer, a progress reporter, and — when the harness build exports one — an engine observer the harness already has a place for. Nothing else about the scan is supplied or altered. Findings are imported from the harness's own `findings/*.md` records; they are file-level, and this importer keeps them file-level and never invents line ranges. The harness plan, threat model, scan log, profile, and specialist records are copied into the staging directory so they survive as hashed raw artifacts, and the whole state directory is captured separately. Only `bootstrap` mode on a full scan is supported; native PR mode is not wired.
 
@@ -231,9 +244,9 @@ A human edits `evaluator/decisions.json`. `review record` then re-drafts the rev
 
 A run configuration is a frozen document naming the pack, the inputs, the systems, the repetition count, the timeout, the trace mode, and the network policy. The three pilot configurations are [`corpus/pilot/run-semgrep.json`](../corpus/pilot/run-semgrep.json), [`corpus/pilot/run-harness.json`](../corpus/pilot/run-harness.json), and [`corpus/pilot/run-deepsec.json`](../corpus/pilot/run-deepsec.json). The DeepSec one names an installed DeepSec workspace with a leading `~`, so it expands to whichever operator runs it rather than pinning one machine.
 
-A 2.1 configuration can also name each input with `input_id` (its directory and invocation name, never shown to a scanner), choose its `profile`, name the reviewed `blinding_map` of a `metadata_blinded` input by a path relative to the configuration, and give a system an `execution` backend. A native PR input (`mode: pr`) is refused when the configuration is read: this build cannot prepare one, and a full scan of the head never stands in for it. A system configured for a backend other than `local` is recorded as a skipped system with the reason rather than run without it.
+A 2.1 configuration can also name each input with `input_id` (its directory and invocation name, never shown to a scanner), choose its `profile`, name the reviewed `blinding_map` of a `metadata_blinded` input by a path relative to the configuration, and give a system an `execution` backend (`local`, or `oci` as described in the [threat model](THREAT_MODEL.md)). A native PR input (`mode: pr`) is refused when the configuration is read: this build cannot prepare one, and a full scan of the head never stands in for it.
 
-`--only-input` (input ids) and `--only-system` narrow a run. Naming something the configuration does not contain is an error rather than a silently empty run, and what was narrowed away is recorded in the manifest and the schedule. `--workspace-root` chooses where the scanner's private workspace is created; a workspace inside the run output, the source cache, or an exported input is refused.
+`--only-input` (input ids) and `--only-system` narrow a run. Naming something the configuration does not contain is an error rather than a silently empty run, and what was narrowed away is recorded in the manifest and the schedule. `--workspace-root` chooses where the scanner's private workspace is created; a workspace inside the run output, the source cache, or an exported input is refused. Under the `oci` backend it must be a directory the Docker daemon can see.
 
 ## CLI surface
 
@@ -350,7 +363,7 @@ npm test
 
 - **No detection result exists.** Every case carries mechanical checks only, every plan is draft scope, no matching decision has been approved, and confirmed detection is zero. Any recall figure printed today comes from decisions with no recorded human approval.
 - **No controls.** The pilot pack defines no negative controls, so control rates are N/A rather than zero, and no fixed-state snapshot has been prepared.
-- **Directory separation is not isolation.** The declared network policy is recorded, not enforced. Path checks refuse the obvious mistake and do not follow bind mounts or hard links.
+- **Directory separation is not isolation.** Outside the `oci` backend the declared network policy is recorded, not enforced. Path checks refuse the obvious mistake and do not follow bind mounts or hard links. The `oci` backend holds Semgrep only, trusts the engine, its kernel, and the image, and leaves writable mounts without a size bound; see [the threat model](THREAT_MODEL.md).
 - **Hashes identify documents.** They do not authenticate an author, verify a source snapshot, or prove that a reviewer read anything.
 - **Capture gaps are not absence.** An `unavailable` category establishes nothing about whether the underlying activity happened.
 - **Visibility depends on the build that was run, not only on this package.** The own-harness driver sees attempts, token usage, supplied-context spans and the candidate lifecycle only against a harness build that exports the hooks, and falls back for each surface it does not find. Tool dispatch on the claude route is unobserved either way. What a given run could see is recorded per run, not promised here.

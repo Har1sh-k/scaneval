@@ -430,8 +430,11 @@ def test_a_system_configured_for_an_enforcing_backend_is_skipped_rather_than_run
 
     manifest = run_from_config(tmp_path / "run.json", tmp_path / "out", clock=RUN_CLOCK, adapters={"fake": adapter})
 
+    # The oci backend exists now, and it refuses an adapter that has not declared itself safe to
+    # run in a container rather than running it anywhere weaker.
     reason = manifest["systems"][1]["skipped_reason"]
-    assert reason.startswith("execution backend oci is not available in this build")
+    assert reason.startswith("IsolationError: the oci execution backend refuses adapter 'fake'")
+    assert "not oci_compatible" in reason
     assert [(row["system_id"], row["status"]) for row in manifest["invocations"]] == [
         ("fake-a", "success"), ("fake-oci", "skipped")]
     assert adapter.calls == 1 and adapter.prepared == 1
