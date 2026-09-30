@@ -2281,6 +2281,9 @@ def test_a_pr_request_the_adapter_cannot_honour_is_refused_and_never_run_as_a_fu
         ({**base, "mode": "pr", "pr": {"base": "a" * 40}}, "must name the base and head commits"),
         ({**base, "mode": "pr", "pr": {"base": "", "head": "b" * 40}}, "must name the base and head commits"),
         ({**base, "mode": "batch"}, "carries out full, pr scans, not 'batch'"),
+        ({**base, "mode": "full", "pr": {"base": "a" * 40, "head": "b" * 40}},
+         "full-mode request that also carries input.pr"),
+        ({**base, "mode": "full", "pr": {}}, "full-mode request that also carries input.pr"),
     ):
         with pytest.raises(AdapterError, match=message):
             adapter.scan(request={"run_id": "r", "input": request_input}, **arguments)

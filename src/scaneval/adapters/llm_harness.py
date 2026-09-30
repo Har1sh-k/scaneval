@@ -6,11 +6,13 @@ and a progress reporter, then imports the finding records the engine wrote. Find
 are file-level; this importer keeps them file-level and never invents line ranges.
 
 Two request modes are carried out. A full request runs the harness's ``bootstrap`` mode over the
-whole exported tree. A PR request runs its ``pr`` mode over the change between the base and head
-commits the request names, which the runner has already made real in the workspace's git history:
-the two are handed to the engine as ``baseRef`` and ``headRef`` exactly as named, so the engine
-never falls back to ``origin/main`` or ``HEAD~1``, and the engine's own write policy is left
-alone, so its knowledge base is written into the workspace and imported like any bootstrap run's.
+whole exported tree, and one that also carries a ``pr`` is refused before anything runs, because
+bootstrap would ignore the change it names. A PR request runs its ``pr`` mode over the change
+between the base and head commits the request names, which the runner has already made real in the
+workspace's git history: the two are handed to the engine as ``baseRef`` and ``headRef`` exactly as
+named, so the engine never falls back to ``origin/main`` or ``HEAD~1``, and the engine's own write
+policy is left alone, so its knowledge base is written into the workspace and imported like any
+bootstrap run's.
 The run starts from a fresh state either way: an export strips the harness's state directory, so
 no earlier finding, decision, or context note reaches it, which is recorded in the run's notes.
 The consensus judge, the one stage that validates findings, runs only when consensus is
@@ -893,6 +895,11 @@ class LlmHarnessAdapter(Adapter):
             if not (isinstance(base_ref, str) and base_ref and isinstance(head_ref, str) and head_ref):
                 raise AdapterError("a PR request must name the base and head commits the review runs between")
             mode, refs = "pr", {"base_ref": base_ref, "head_ref": head_ref}
+        elif request["input"].get("pr") is not None:
+            # The refusal ``pr_range`` gives the other two adapters: this request would run bootstrap over
+            # the whole tree and drop the change it names. ``build_request`` never produces one.
+            raise AdapterError("llm-harness was given a full-mode request that also carries input.pr; it would "
+                               "ignore the change it names, so the request was refused")
         trace_path = (trace_dir / "events.jsonl") if trace_dir is not None else None
         config = {
             "harness_root": str(root), "engine_entry": preset["engine_entry"], "runner_entry": preset["runner_entry"],
