@@ -57,8 +57,9 @@ mode: ``process --diff <base>..<head>`` in place of the ``scan`` and ``process``
 ``export``. DeepSec itself lists the files that range changed (``git diff --name-only
 --diff-filter=AMRC``, so no deletion), drops any matching its default ignore filter, runs its regex
 scan over just those and investigates each. Which files it dropped is DeepSec's scope and not a
-failure. ``--limit`` has no effect in direct mode (2.3.10 never passes it on), so it is not passed
-and the run says so.
+failure, and this adapter says which: before the scanner starts it asks git for what changed, and
+afterwards names the changed paths that got no file record. ``--limit`` has no effect in direct
+mode (2.3.10 never passes it on), so it is not passed and the run says so.
 
 Direct mode exits 1 for three different reasons (a run that produced findings, a batch that
 errored, an exhausted quota) and also for a runtime failure such as an unresolvable range, so an
@@ -90,7 +91,7 @@ from ..kinds import kind_for_harness_class
 from ..observer import Observer, create_jsonl_sink
 from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command
 from .llm_harness import Enclosure, read_record
-from .pr import pr_range, workspace_changes
+from .pr import Change, pr_range, workspace_changes
 
 
 ARTIFACT_EXPORT = "deepsec-export"
@@ -1537,6 +1538,44 @@ def read_process_output(text: str) -> ProcessOutput:
                          nothing_to_process=bool(NOTHING_TO_PROCESS.search(plain)))
 
 
+def _listed(names: list[str], limit: int = 8) -> str:
+    """At most *limit* of *names* joined for a note, and how many more there were."""
+    return ", ".join(names[:limit]) + (f" and {len(names) - limit} more" if len(names) > limit else "")
+
+
+def unreviewed_note(changes: tuple[Change, ...], files: tuple[tuple[str, dict], ...]) -> str | None:
+    """The changed paths DeepSec created no file record for, as a note, or ``None`` when there are none.
+
+    *changes* is what git in the workspace says the two commits differ in, asked by this adapter
+    before DeepSec started; *files* is the file records DeepSec left. In direct mode DeepSec
+    creates a record for every file it selected and none for a file it did not, so a path present
+    at head with no record is one DeepSec's own selection dropped: it keeps only added, modified,
+    renamed and copied paths (a deletion never reaches it) and drops those matching its default
+    ignore filter (tests, docs, build output and similar). That is DeepSec's scope, not a failure
+    of the run, and the note says so, with the reminder that silence about such a path is not a
+    negative result. A file DeepSec did select but left in ``error`` or unfinished has a record and
+    is reported by the status logic, not here. The comparison is by path, so a path git spells
+    with escapes because it is not UTF-8 can never match a record and is listed.
+    """
+    recorded = {path for path, external in (record_path(name, record) for name, record in files) if not external}
+    present = sorted({change.path for change in changes if change.present})
+    dropped = [path for path in present if path not in recorded]
+    removed = sorted({change.path for change in changes if change.status == "D"}
+                     | {change.old_path for change in changes if change.status == "R" and change.old_path})
+    sentences = []
+    if dropped:
+        sentences.append(
+            f"DeepSec did not investigate {len(dropped)} of the {len(present)} path(s) this change leaves at head, "
+            f"because it created no file record for them ({_listed(dropped)}). Its --diff selection keeps only "
+            "added, modified, renamed and copied paths and drops those matching its default ignore filter "
+            "(tests, docs, build output and similar), so this is DeepSec's own scope and not a failure of the "
+            "run; silence about these paths is not a negative result.")
+    if removed:
+        sentences.append(f"The change also removed {len(removed)} path(s) ({_listed(removed)}); DeepSec never reads "
+                         "a path that no longer exists at head.")
+    return " ".join(sentences) or None
+
+
 class DeepsecAdapter(Adapter):
     name = "deepsec"
     adapter_version = "1.0.0"
@@ -1618,8 +1657,7 @@ class DeepsecAdapter(Adapter):
         if not config.binary.exists():
             raise AdapterError(f"deepsec executable not found at {config.binary}")
         # Read before DeepSec starts: its agent can run a shell in this workspace, ``.git`` included.
-        if pr is not None:
-            workspace_changes(Path(source_dir), pr)
+        changes = workspace_changes(Path(source_dir), pr) if pr is not None else ()
         project = project_id_for(request, config.project_id)
         # Captured before the first process starts: DeepSec writes into the raw directory while
         # it runs, so every read below is checked against a boundary it cannot move.
@@ -1836,6 +1874,14 @@ class DeepsecAdapter(Adapter):
                     f"{finding_records} finding(s), {len(statuses.errored)} file(s) in status 'error' and "
                     f"{unfinished_files} unfinished file(s). This run was classified from those records"
                     + (f"; DeepSec's own summary said {', '.join(said)}." if said else "."))
+            unreviewed = unreviewed_note(changes, records.files)
+            if unreviewed:
+                if records.failures:
+                    # A record this run could not read is missing from the comparison, so a path
+                    # listed as having none may have had one.
+                    unreviewed += (f" {len(records.failures)} DeepSec record(s) could not be read, so a path "
+                                   "listed here may have had one.")
+                notes.append(unreviewed)
         for failure_note in records.failures:
             notes.append(f"DeepSec record not read: {failure_note}")
         if errored_files:

@@ -49,9 +49,10 @@ from scaneval.adapters.deepsec import (
     read_process_output,
     sessions_from,
     settings,
+    unreviewed_note,
     workspace_config,
 )
-from scaneval.adapters.pr import PrRange
+from scaneval.adapters.pr import Change, PrRange
 from scaneval.contracts import load_document
 from scaneval.execution import PreparedInput, build_request, run_invocation
 from scaneval.materialize import hash_exported_tree
@@ -351,6 +352,8 @@ def do_direct(argv, settings):
     say("  " + paint("2", "%d candidate(s) across %d file(s)" % (2 * len(names), len(names))))
     say()
     result = investigate(argv, names, settings)
+    if settings.get("linked_directory"):
+        os.symlink(str(HERE), str(base / "files" / "linked"), target_is_directory=True)
     say(paint("32", "Processing complete.") + " Run: " + paint("1", "20260925120100-process"))
     say("  Analyses: %d" % result["analyses"])
     say("  Findings: %d" % result["findings"])
@@ -2585,6 +2588,10 @@ def test_a_change_deepsec_selects_nothing_from_is_a_completed_empty_review_and_s
     empty = next(note for note in outcome.notes if note.startswith("Empty review:"))
     assert f"from {pr.base}..{pr.head}" in empty and "it said \"Nothing to process\"" in empty
     assert "not a failure" in empty
+    unreviewed = next(note for note in outcome.notes if note.startswith("DeepSec did not investigate"))
+    assert "2 of the 2 path(s) this change leaves at head" in unreviewed
+    assert "(README.md, tests/server.test.js)" in unreviewed
+    assert "The change also removed 1 path(s) (src/db.js)" in unreviewed
     assert not (raw / "deepsec-workspace" / "data" / PR_PROJECT / "files").exists()
 
 
@@ -2605,6 +2612,76 @@ def test_nothing_to_process_is_not_a_completed_review_when_a_record_says_a_file_
     outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
     assert outcome.status == "error" and outcome.error["code"] == "deepsec_batches_failed"
     assert not any(note.startswith("Empty review:") for note in outcome.notes)
+
+
+# --- PR mode: the changed files DeepSec did not investigate -----------------------------
+
+
+def test_a_pr_run_names_the_changed_paths_deepsecs_own_filter_dropped(tmp_path):
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, {**CHANGED_SOURCE, "README.md": "# more\n", "tests/server.test.js": "t\n",
+                                            "src/db.js": None, "types/api.d.ts": "export {};\n"})
+
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+
+    assert outcome.status == "success"
+    note = next(note for note in outcome.notes if note.startswith("DeepSec did not investigate"))
+    assert note.startswith("DeepSec did not investigate 3 of the 5 path(s) this change leaves at head")
+    assert "(README.md, tests/server.test.js, types/api.d.ts)" in note
+    assert "keeps only added, modified, renamed and copied paths" in note
+    assert "DeepSec's own scope and not a failure of the run" in note
+    assert "silence about these paths is not a negative result" in note
+    assert "The change also removed 1 path(s) (src/db.js)" in note
+
+
+def test_a_record_the_run_could_not_read_is_said_to_possibly_belong_to_a_path_it_lists(tmp_path):
+    """A link where a record directory belongs hides whatever is behind it, so the comparison is short."""
+    root = fake_deepsec_root(tmp_path, linked_directory=True)
+    workspace, pr = pr_workspace(tmp_path, {**CHANGED_SOURCE, "README.md": "# more\n"})
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+    assert outcome.status == "partial" and outcome.error["code"] == "import_loss"
+    note = next(note for note in outcome.notes if note.startswith("DeepSec did not investigate"))
+    assert "(README.md)" in note
+    assert note.endswith("1 DeepSec record(s) could not be read, so a path listed here may have had one.")
+
+
+def test_a_pr_run_that_investigated_every_changed_path_has_no_such_note(tmp_path):
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+    assert not any("did not investigate" in note for note in outcome.notes)
+
+
+def test_a_renamed_file_is_investigated_under_its_new_name_and_its_old_name_is_a_removal(tmp_path):
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, {"src/db.js": None, "src/store.js": BASE_TREE["src/db.js"]})
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+    assert [claim["primary_location"]["path"] for claim in outcome.claims] == ["src/store.js"]
+    assert not any("did not investigate" in note and "src/store.js" in note for note in outcome.notes)
+    assert any(note == "The change also removed 1 path(s) (src/db.js); DeepSec never reads a path that no longer "
+                       "exists at head." for note in outcome.notes)
+
+
+def test_the_unreviewed_note_lists_a_bounded_number_of_paths_and_counts_the_rest():
+    changes = tuple(Change("A", f"docs/page-{index:02d}.md") for index in range(12)) + (Change("A", "src/a.js"),)
+    files = (("src/a.js.json", {}),)
+    note = unreviewed_note(changes, files)
+    assert note.startswith("DeepSec did not investigate 12 of the 13 path(s) this change leaves at head")
+    assert "docs/page-00.md, docs/page-01.md" in note and "docs/page-07.md and 4 more)" in note
+    assert "docs/page-08.md" not in note
+
+
+def test_the_unreviewed_note_is_none_when_every_present_path_has_a_record_and_nothing_was_removed():
+    changes = (Change("M", "src/a.js"), Change("A", "src/b.js"), Change("R", "src/c.js", "src/old.js"))
+    files = (("src/a.js.json", {}), ("src/b.js.json", {}), ("src/c.js.json", {}))
+    assert unreviewed_note(changes, files) == (
+        "The change also removed 1 path(s) (src/old.js); DeepSec never reads a path that no longer exists at head.")
+    assert unreviewed_note(changes[:2], files) is None
+
+
+def test_a_record_that_names_no_path_in_the_tree_cannot_hide_a_dropped_one():
+    changes = (Change("A", "src/a.js"),)
+    assert unreviewed_note(changes, (("/etc/passwd.json", {}), ("../escape.js.json", {}))) is not None
 
 
 # --- PR mode: what is refused before anything runs --------------------------------------
