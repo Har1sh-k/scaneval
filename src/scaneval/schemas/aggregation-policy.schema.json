@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/aggregation-policy.schema.json",
+  "title": "ScanEval aggregation policy",
+  "description": "The weights, views, and uncertainty settings a corpus aggregation runs under, frozen before any result is read and written whole into every report it produces. It holds no result and no label.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_id",
+    "policy_version",
+    "views",
+    "uncertainty"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.1"
+    },
+    "policy_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "policy_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "views": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "equal_target",
+          "equal_project",
+          "equal_family",
+          "explicit"
+        ]
+      },
+      "description": "Target weightings to report: equal weight per canonical target, per project, per variant family, or the explicit weights below. 'explicit' is listed exactly when target_weights is declared."
+    },
+    "target_weights": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "minProperties": 1,
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0
+      },
+      "description": "Explicit weight per canonical target id. Over a view's canonical targets the weights must cover every target and sum to 1, or that view's explicit weighting is refused; a slice renormalizes them."
+    },
+    "workload_weights": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "conventional_application": {
+          "type": "number",
+          "minimum": 0
+        },
+        "conventional_automation": {
+          "type": "number",
+          "minimum": 0
+        },
+        "ai_assisted_application": {
+          "type": "number",
+          "minimum": 0
+        },
+        "agentic_application": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "description": "Declared weight per workload, summing to 1. Without it, no summary crosses workloads: a slice spanning two or more workloads reports no pooled number."
+    },
+    "uncertainty": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "cluster_by",
+        "replicates",
+        "confidence",
+        "seed",
+        "min_clusters"
+      ],
+      "properties": {
+        "method": {
+          "const": "cluster_bootstrap"
+        },
+        "cluster_by": {
+          "enum": [
+            "project",
+            "family"
+          ]
+        },
+        "replicates": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "confidence": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "min_clusters": {
+          "type": "integer",
+          "minimum": 2
+        }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

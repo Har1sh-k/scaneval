@@ -27,6 +27,9 @@ What each command writes:
 - ``evaluator/review-record.json`` is replaced the same way by ``review record`` and
   ``review approve``, through the one replace function :mod:`scaneval.review` uses. Both
   refuse a bundle reached through a symlink before writing.
+- A precision reviews file only grows. ``precision record`` creates it with its first review
+  and appends each later one through that same replace function, after checking the recorded
+  chain and the sample it is bound to, so no earlier entry is changed or dropped.
 - Everything else is create-only: an existing output path is refused, never overwritten.
 
 The read-only bundle commands do not refuse a symlink: ``replay``, ``report`` and ``review
@@ -34,13 +37,16 @@ status`` resolve the bundle path and report on the bundle it reaches, so a bundl
 a symlinked parent is read rather than refused. They write nothing into the bundle.
 
 No command writes inside a materialized trial directory: the output path of ``plan``, ``run``,
-``import sarif``, ``demo``, ``score``, ``replay`` and ``report``, the pack path of ``corpus
-init`` and of every corpus command that rewrites a pack, the map ``blinding review`` rewrites, the
-bundle argument of all four ``review`` subcommands, and the directory ``corpus validate`` exports a
-snapshot into, are each refused when a trial's ``provenance.json`` and ``source`` sit in them or
-above them. That keeps evaluator material out of the tree a scanner is handed; it is a check on the
-path, not an isolation boundary. ``review status`` is checked although it only reads, so the
-``review`` group is uniform; the other read-only commands read whatever path they are given.
+``import sarif``, ``demo``, ``score``, ``replay``, ``report``, ``aggregate`` and ``compare``, the
+pack path of ``corpus init`` and of every corpus command that rewrites a pack, the map ``blinding
+review`` rewrites, the bundle argument of all four ``review`` subcommands, the output of
+``precision sample``, ``queue`` and ``estimate`` and the reviews file of ``precision record``, and
+the directory ``corpus validate`` exports a snapshot into, are each refused when a trial's
+``provenance.json`` and ``source`` sit in them or above them. That keeps evaluator material out of
+the tree a scanner is handed; it is a check on the path, not an isolation boundary. ``review
+status`` is checked although it only reads, so the ``review`` group is uniform; the other read-only
+commands read whatever path they are given. The output of ``gate`` is refused in the same places
+and inside a run directory too.
 
 Exit codes. 2 means the command could not be carried out: a usage or contract error, a refused
 overwrite, a failed fetch or export, a SARIF log refused whole. 1 means the command ran and
@@ -48,7 +54,7 @@ reports a negative result: a mechanical check set failed, a run could not prepar
 produced no usable scan from some system, an imported log holds no usable scan, a blinding map is
 not approved or a variant refused it, or ``diagnose`` was given something that is not a bundle it
 can read. 0 means it ran and reports nothing wrong, which is not a statement that any label or
-decision is correct.
+decision is correct. ``gate`` also exits 1 for a decision that is not a pass.
 
 ``diagnose`` reads a saved invocation bundle and writes a diagnostic document. It scores nothing,
 changes nothing in the bundle, and its answer never reaches a metric: a target whose code was
@@ -59,6 +65,27 @@ directory, applies the map exactly as a run would, and prints what it changed, e
 passed, and the identity cues that remain; approval is reported rather than required, and an
 unapproved or refused map exits 1. ``blinding review`` records one review the caller names; the
 tool never supplies a reviewer.
+
+``aggregate`` and ``compare`` read run directories through :mod:`scaneval.aggregate` and write one
+new report each; they write nothing into a run directory or a bundle. Both exit 0 once the report is
+computed, whatever it says, and 2 when they refuse: a directory that is not a run with a frozen
+schedule, runs of different packs, or, for ``compare``, two systems that were not assigned the same
+frozen work.
+
+``precision`` draws a seeded probability sample of delivered claims from saved run directories,
+exports it for human review with system identity blinded, records the reviews people state, and
+estimates reviewed precision from them (:mod:`scaneval.precision`, ``docs/PRECISION.md``). It reads
+runs and never writes into one: each of its outputs is refused inside a run directory as well as
+inside a trial. It supplies no reviewer and changes no decision, score, or detection credit. It
+exits 0 once its document is written, whatever the document reports, and 2 when refused.
+
+``gate`` holds one saved comparison, and optionally a precision estimate of each system, to a gate
+policy and writes the decision (:mod:`scaneval.gate`, ``docs/GATE.md``). It runs no scan, model, or
+judge, approves nothing, and promotes nothing: it reads documents and writes one new one, refused
+inside a trial or a run directory like every precision output. It prints the outcome and every failed
+or unresolved requirement with its reason, and exits 0 for a pass, 1 for a fail or an inconclusive
+decision, and 2 when it could not evaluate: a document that is not what it is named, a policy that is
+refused, or an output that cannot be written.
 """
 
 import argparse
@@ -70,7 +97,7 @@ import tempfile
 from typing import Callable
 from urllib.parse import urlsplit
 
-from . import __version__, blinding, cases, materialize, review, runner, sarif
+from . import __version__, aggregate, blinding, cases, gate, materialize, precision, review, runner, sarif
 from .adapters.base import AdapterError
 # _is_stated is imported rather than re-implemented so a blank value is judged by one rule here,
 # in cases, and in review: a string made only of zero-width or control characters is not a value.
@@ -294,23 +321,25 @@ def _refuse_trial_path(output: Path) -> None:
     A trial holds the exported source a scanner is handed, so anything this tool writes inside
     one would put evaluator material where the scanned tree lives. Every command that names a
     path it may write checks it: ``plan``, ``run``, ``demo``, the bundle ``import sarif``
-    creates, the ``--output`` of ``score``, ``replay`` and ``report``, the pack ``corpus init``
-    creates, the pack every corpus command that rewrites one is given (``add-snapshot``,
-    ``import``, ``validate --snapshot-id``, ``approve``, ``admit``, ``disposition``,
-    ``add-change-set``, ``pr-scope``, ``canonical``, all through
-    :func:`_pack_for_change`), the map ``blinding review`` rewrites, the bundle ``review init``,
-    ``review record`` and ``review
-    approve`` write into, and the trial ``corpus validate`` is about to export into. ``review
-    status`` checks the bundle it reads as well, so every ``review`` subcommand refuses the same
-    paths. Commands that only read are otherwise not checked: a bundle handed to ``replay`` or
-    ``report``, a pack that is only summarized by ``corpus validate`` or read by ``plan`` and
-    ``review init``, a map ``blinding check`` reads, and a supplied artifact are read wherever
-    they sit. A trial is recognized by a ``provenance.json`` file beside a ``source`` directory;
-    any other directory is left alone. *output* itself is examined along with its parents, so a
-    bundle that is itself a trial root is refused as well as one sitting under one; a path that
-    does not exist yet carries no marker and is judged by its parents alone. The comparison
-    resolves symlinks in the path but follows no bind mount or hard link, so it catches the
-    obvious mistake and is not an isolation boundary.
+    creates, the ``--output`` of ``score``, ``replay``, ``report``, ``aggregate`` and
+    ``compare``, the pack ``corpus init`` creates, the pack every corpus command that rewrites one
+    is given (``add-snapshot``, ``import``, ``validate --snapshot-id``, ``approve``, ``admit``,
+    ``disposition``, ``add-change-set``, ``pr-scope``, ``canonical``, all through
+    :func:`_pack_for_change`), the map ``blinding review`` rewrites,
+    the bundle ``review init``, ``review record`` and ``review approve`` write into, the output of
+    every ``precision`` command and the reviews file ``precision record`` appends to, and the trial
+    ``corpus validate`` is about to export into. ``review status`` checks the bundle it reads as
+    well, so every ``review`` subcommand refuses the same paths. Commands that only read are
+    otherwise not checked: a bundle handed to ``replay`` or ``report``, a run directory handed to
+    ``aggregate`` or ``compare``, a pack that is only summarized by ``corpus validate`` or read by
+    ``plan`` and ``review init``, a map ``blinding check`` reads, and a supplied artifact are read
+    wherever they sit. A trial is recognized by a ``provenance.json`` file beside a ``source``
+    directory; any other directory is left alone. *output* itself is examined along with its
+    parents, so a bundle that is itself a trial root is refused as well as one sitting under one; a
+    path that does not exist yet carries no marker and is judged by its parents alone. The
+    comparison resolves symlinks in the path but follows no bind mount or hard link, so it catches
+    the obvious mistake and is not an isolation boundary. The decision ``gate`` writes is checked
+    here too, and by :func:`_refuse_gate_path` against run directories.
     """
     resolved = output.expanduser().resolve()
     for directory in (resolved, *resolved.parents):
@@ -901,6 +930,223 @@ def _diagnose(args: argparse.Namespace) -> int:
     return {"context-coverage": _diagnose_context_coverage}[args.diagnose_command](args)
 
 
+def _aggregate(args: argparse.Namespace) -> int:
+    """Aggregate run directories into one new report and print a one-line summary per system.
+
+    The report is computed in full before the output file is created, so a refused aggregation
+    leaves nothing behind. 0 means the report was computed; failed assignments, draft evidence, and
+    unavailable intervals are recorded in it rather than turned into an exit code.
+    """
+    _refuse_trial_path(args.output)
+    policy = aggregate.load_policy(args.policy) if args.policy else None
+    report = aggregate.aggregate(args.run_dirs, policy=policy)
+    _write_new(args.output, _json(report))
+    for line in aggregate.summary(report):
+        print(line)
+    print(f"Report: {args.output}")
+    return 0
+
+
+def _compare(args: argparse.Namespace) -> int:
+    """Compare two systems over run directories into one new report; refused unless their work matches.
+
+    Two systems whose frozen evaluation contracts differ are refused (2) before anything is written.
+    0 means the comparison was computed; it decides nothing about promotion.
+    """
+    _refuse_trial_path(args.output)
+    policy = aggregate.load_policy(args.policy) if args.policy else None
+    report = aggregate.compare(args.run_dirs, baseline=args.baseline, candidate=args.candidate,
+                               policy=policy)
+    _write_new(args.output, _json(report))
+    for line in aggregate.comparison_summary(report):
+        print(line)
+    print(f"Comparison: {args.output}")
+    return 0
+
+
+def _figure(value: float | None) -> str:
+    """A ratio or total as printed in a summary line: four significant digits, or n/a when null."""
+    return "n/a" if value is None else f"{value:.4g}"
+
+
+def _refuse_precision_path(output: Path) -> None:
+    """Refuse a precision output inside a trial directory or inside a run directory.
+
+    A run directory is what a precision frame is read from and bound to by digest, so a sample,
+    queue, reviews file, or estimate written into one would change the run it describes. A run is
+    recognized by a ``run-manifest.json`` in *output* or in any of its parents. Like the trial
+    check, this compares resolved paths only: it is a check on the path, not an isolation boundary.
+    """
+    _refuse_trial_path(output)
+    resolved = output.expanduser().resolve()
+    for directory in (resolved, *resolved.parents):
+        if (directory / runner.MANIFEST_NAME).is_file():
+            raise ContractError(
+                f"refusing to write {output} inside the run directory {directory}; precision documents "
+                "stay outside the runs they are drawn from")
+
+
+def _precision_sample(args: argparse.Namespace) -> int:
+    """Build the frame from the run directories, draw the sample, and write it create-only.
+
+    Strata that drew no unit are named on stderr, because no estimate from this sample will say
+    anything about them; the sample is still written, and the command still exits 0.
+    """
+    _refuse_precision_path(args.output)
+    frame = precision.build_frame(args.runs, population=args.population, budget=args.budget,
+                                  systems=args.system, mode=args.mode, profile=args.profile)
+    sample = precision.draw_sample(frame, size=args.size, seed=args.seed, stratify_by=args.stratify_by,
+                                   allocation=args.allocation)
+    _write_new(args.output, _json(sample))
+    population = frame["population"]
+    budget = f" (B={population['budget']})" if population["budget"] is not None else ""
+    copies = sum(unit["population_copies"] for unit in frame["units"])
+    print(f"Frame: {population['name']}{budget} over {len(frame['runs'])} run(s), systems "
+          f"{', '.join(population['systems'])}: {len(frame['units'])} unit(s), {copies} copies inside it")
+    exclusions = frame["exclusions"]
+    if population["name"] == "first_b":
+        print(f"Left out: {exclusions['unranked']['invocations']} unranked invocation(s) "
+              f"({exclusions['unranked']['units']} unit(s)), {exclusions['bundle_unresolved']['invocations']} "
+              f"bundle-unresolved invocation(s) ({exclusions['bundle_unresolved']['units']} unit(s)), "
+              f"{exclusions['beyond_budget']['units']} unit(s) past B")
+    design = sample["design"]
+    stratified = (f" by {design['stratify_by']}, {design['allocation']} allocation"
+                  if design["stratify_by"] else "")
+    print(f"Design: {design['method']}{stratified}, size {design['size']}, seed {design['seed']} "
+          f"({design['algorithm']})")
+    for row in sample["strata"]:
+        print(f"Stratum {row['stratum']}: {row['sampled_units']} of {row['population_units']} unit(s), "
+              f"inclusion probability {_figure(row['inclusion_probability'])}")
+    if sample["uncovered_strata"]:
+        print(f"scaneval: warning: {len(sample['uncovered_strata'])} stratum/strata drew no unit "
+              f"({', '.join(sample['uncovered_strata'])}); no estimate from this sample represents them",
+              file=sys.stderr)
+    print(f"Sample: {args.output}")
+    return 0
+
+
+def _precision_queue(args: argparse.Namespace) -> int:
+    """Write the blinded review queue for reviewers; the sample itself stays with the evaluator."""
+    _refuse_precision_path(args.output)
+    sample = load_document(args.sample, precision.SAMPLE_KIND)
+    queue = precision.review_queue(sample)
+    _write_new(args.output, _readable_json(queue))
+    print(f"Wrote {len(queue['items'])} blinded review item(s): {args.output}")
+    return 0
+
+
+def _precision_record(args: argparse.Namespace) -> int:
+    """Append one stated human review to a reviews file, creating the file with the first one.
+
+    The reviewer is whoever ``--reviewer`` names; nothing here fills one in. An existing file is
+    verified (its chain, and the sample it is bound to) before anything is written, and replaced
+    whole through the one replace function review records use; a new file is created exclusively.
+    Appends are not locked, so record one review at a time.
+    """
+    _refuse_precision_path(args.reviews)
+    sample = load_document(args.sample, precision.SAMPLE_KIND)
+    unit_id = precision.unit_for_item(sample, args.item) if args.item is not None else args.unit
+    existing = None
+    if args.reviews.exists() or args.reviews.is_symlink():
+        existing = load_document(args.reviews, precision.REVIEWS_KIND)
+    updated = precision.record_review(sample, existing, unit_id=unit_id, reviewer=args.reviewer,
+                                      role=args.role, outcome=args.outcome, note=args.note)
+    if existing is None:
+        _write_new(args.reviews, _json(updated))
+    else:
+        _replace_document(args.reviews, updated)
+    named = args.item if args.item is not None else f"unit {unit_id}"
+    print(f"Recorded an {args.role} review of {named}: {args.outcome} "
+          f"({len(updated['reviews'])} review(s) in {args.reviews})")
+    return 0
+
+
+def _precision_estimate(args: argparse.Namespace) -> int:
+    """Estimate reviewed precision from a sample and its reviews, write it, and summarize it.
+
+    An incomplete review or a partly covered population is reported, not refused: the document
+    says so, and so does stderr. Without ``--reviews`` every sampled unit is nonresponse.
+    """
+    _refuse_precision_path(args.output)
+    sample = load_document(args.sample, precision.SAMPLE_KIND)
+    reviews = load_document(args.reviews, precision.REVIEWS_KIND) if args.reviews is not None else None
+    document = precision.estimate(sample, reviews, confidence=args.confidence)
+    _write_new(args.output, _json(document))
+    coverage = document["coverage"]
+    classes = document["sample"]["classes"]
+    bases = document["sample"]["bases"]
+    totals = document["totals"]
+    sensitivity = document["sensitivity"]
+    interval = document["interval"]
+    print(f"Sample: {document['sample']['selected_units']} unit(s) of {coverage['population_units']}; "
+          f"coverage {_figure(coverage['share'])}")
+    print(f"Reviewed: true {classes['true']}, false {classes['false']}, unresolved {classes['unresolved']} "
+          f"(disagreement {bases['disagreement']}, nonresponse {bases['nonresponse']}), "
+          f"out of scope {classes['out_of_scope']}")
+    print(f"Weighted totals: true {_figure(totals['true'])}, false {_figure(totals['false'])}, "
+          f"unresolved {_figure(totals['unresolved'])}, out of scope {_figure(totals['out_of_scope'])}")
+    print(f"Resolved precision {_figure(document['precision_resolved'])}; unresolved share "
+          f"{_figure(document['unresolved_share'])}; sensitivity range [{_figure(sensitivity['lower'])}, "
+          f"{_figure(sensitivity['upper'])}] (not a confidence interval)")
+    bounds = (f"[{_figure(interval['lower'])}, {_figure(interval['upper'])}]"
+              if interval["lower"] is not None else "no bounds")
+    print(f"Approximate {_figure(interval['confidence'])} interval: {bounds} ({interval['state']})")
+    burden = document["duplicate_burden"]
+    print(f"Duplicate burden: {burden['copies']} copies over {burden['units']} unit(s) "
+          f"({_figure(burden['copies_per_unit'])} per unit)")
+    print(f"Evidence grade: {document['evidence_grade']}")
+    if coverage["uncovered_strata"]:
+        print(f"scaneval: warning: the sample covers {coverage['covered_units']} of "
+              f"{coverage['population_units']} units; uncovered strata are not estimated", file=sys.stderr)
+    if document["evidence_grade"] == "incomplete":
+        print(f"scaneval: warning: the review is incomplete: {bases['nonresponse']} unit(s) unreviewed and "
+              f"{bases['disagreement']} in disagreement without adjudication", file=sys.stderr)
+    print(f"Estimate: {args.output}")
+    return 0
+
+
+def _precision(args: argparse.Namespace) -> int:
+    return {"sample": _precision_sample, "queue": _precision_queue, "record": _precision_record,
+            "estimate": _precision_estimate}[args.precision_command](args)
+
+
+def _refuse_gate_path(output: Path) -> None:
+    """Refuse a gate decision inside a trial directory or inside a run directory.
+
+    A decision binds by digest to the runs its comparison read, so one written into a run directory
+    would sit inside the evidence it judges. A run is recognized by a ``run-manifest.json`` in *output*
+    or in any of its parents. Like the trial check, this compares resolved paths only: it is a check on
+    the path, not an isolation boundary.
+    """
+    _refuse_trial_path(output)
+    resolved = output.expanduser().resolve()
+    for directory in (resolved, *resolved.parents):
+        if (directory / runner.MANIFEST_NAME).is_file():
+            raise ContractError(
+                f"refusing to write {output} inside the run directory {directory}; a gate decision binds to the "
+                "runs its comparison read and stays outside them")
+
+
+def _gate(args: argparse.Namespace) -> int:
+    """Hold a comparison to a policy, write the decision create-only, and say what did not pass.
+
+    The decision is computed in full before the output file is created, so a refusal leaves nothing
+    behind. 0 means the outcome is a pass; 1 means it is a fail or is inconclusive, and the summary
+    names every failed and every unresolved requirement with its reason; a refusal is 2.
+    """
+    _refuse_gate_path(args.output)
+    policy = gate.load_policy(args.policy)
+    comparison = load_document(args.comparison, gate.COMPARISON_KIND)
+    estimates = [load_document(path, gate.ESTIMATE_KIND) if path is not None else None
+                 for path in (args.precision_baseline, args.precision_candidate)]
+    decision = gate.evaluate_gate(policy, comparison, *estimates)
+    _write_new(args.output, _json(decision))
+    for line in gate.summary(decision):
+        print(line)
+    print(f"Decision: {args.output}")
+    return 0 if decision["outcome"] == gate.PASS else 1
+
+
 def _warn_unreviewed(state: str) -> None:
     """Say on stderr that a bundle carries no recorded review. The report itself is unchanged."""
     if state in UNREVIEWED_REVIEW_STATES:
@@ -1139,6 +1385,114 @@ def _add_import_commands(sub: argparse._SubParsersAction) -> None:
                      help="refuse a log larger than this many bytes (default %(default)s)")
 
 
+def _add_aggregate_commands(sub: argparse._SubParsersAction) -> None:
+    run_dirs_help = "a run directory written by scaneval run (run manifest 2.1 and its frozen schedule)"
+    policy_help = ("aggregation-policy JSON; default: the built-in policy, which the report records in "
+                   "full with its hash")
+    output_help = "new JSON file, outside any trial directory"
+    aggregating = sub.add_parser(
+        "aggregate",
+        help="weight every scheduled assignment of saved runs into corpus metrics; no scan, no judge",
+        description="Read run directories and report, per (mode, profile) view, system, slice, and "
+                    "weighting, full-output and budgeted recall, control false-alarm rates and bounds, "
+                    "pair correctness, completion, claim volume, usage, and cluster-bootstrap intervals. "
+                    "Every scheduled assignment is an observation; a failed one stays in every "
+                    "denominator.")
+    aggregating.add_argument("run_dirs", nargs="+", type=Path, metavar="RUN_DIR", help=run_dirs_help)
+    aggregating.add_argument("--policy", type=Path, help=policy_help)
+    aggregating.add_argument("--output", required=True, type=Path, help=output_help)
+
+    comparing = sub.add_parser(
+        "compare",
+        help="compare a candidate with a baseline assigned the same frozen work; paired intervals",
+        description="Aggregate two systems over run directories and report candidate minus baseline "
+                    "with paired cluster-bootstrap intervals. Refused unless both were assigned exactly "
+                    "the same frozen work (inputs, plans, levels, budgets, repetitions, pairs, and "
+                    "pack). Decides no promotion.")
+    comparing.add_argument("run_dirs", nargs="+", type=Path, metavar="RUN_DIR", help=run_dirs_help)
+    comparing.add_argument("--baseline", required=True, help="system id of the baseline")
+    comparing.add_argument("--candidate", required=True, help="system id of the candidate")
+    comparing.add_argument("--policy", type=Path, help=policy_help)
+    comparing.add_argument("--output", required=True, type=Path, help=output_help)
+
+
+def _add_precision_commands(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser(
+        "precision", help="sample delivered claims for human review and estimate reviewed precision; "
+                          "no decision or score changes")
+    commands = parser.add_subparsers(dest="precision_command", required=True)
+
+    sampled = commands.add_parser(
+        "sample", help="list a claim population from run directories and draw a seeded probability sample")
+    sampled.add_argument("runs", nargs="+", type=Path, metavar="RUN_DIR",
+                         help="run directory written by 'scaneval run' (2.1 manifest and schedule)")
+    sampled.add_argument("--output", required=True, type=Path, help="new JSON file, outside any trial directory")
+    sampled.add_argument("--population", required=True, choices=precision.POPULATIONS,
+                         help="first_b: unique claims with a copy in the first --budget native positions; "
+                              "full: every unique delivered claim")
+    sampled.add_argument("--budget", type=int, help="B, required for first_b")
+    sampled.add_argument("--size", required=True, type=int, help="number of units to draw")
+    sampled.add_argument("--seed", required=True, type=int,
+                         help="non-negative integer, stated before the draw and recorded in the sample")
+    sampled.add_argument("--system", action="append",
+                         help="system id whose claims to sample; repeatable; default every scheduled system")
+    sampled.add_argument("--mode", choices=precision.MODES, default="full")
+    sampled.add_argument("--profile", choices=precision.PROFILES, default="standard")
+    sampled.add_argument("--stratify-by", choices=precision.STRATIFICATIONS)
+    sampled.add_argument("--allocation", choices=precision.ALLOCATIONS,
+                         help="stratum sizes for --stratify-by; default proportional")
+
+    queued = commands.add_parser(
+        "queue", help="export the sampled claims for reviewers, each system shown only by an alias")
+    queued.add_argument("sample", type=Path)
+    queued.add_argument("--output", required=True, type=Path, help="new JSON file")
+
+    recorded = commands.add_parser(
+        "record", help="append one human review of a sampled claim to a chained reviews file")
+    recorded.add_argument("reviews", type=Path, help="reviews file; the first review creates it")
+    recorded.add_argument("--sample", required=True, type=Path)
+    target = recorded.add_mutually_exclusive_group(required=True)
+    target.add_argument("--item", help="item id from the review queue")
+    target.add_argument("--unit", help="unit id from the sample")
+    recorded.add_argument("--reviewer", required=True, help="the reviewer's own name; never supplied by the tool")
+    recorded.add_argument("--role", required=True, choices=precision.ROLES)
+    recorded.add_argument("--outcome", required=True, choices=precision.OUTCOMES)
+    recorded.add_argument("--note", default="")
+
+    estimated = commands.add_parser(
+        "estimate", help="estimate reviewed precision from a sample and its recorded reviews")
+    estimated.add_argument("sample", type=Path)
+    estimated.add_argument("--reviews", type=Path, help="reviews file; without one every sampled unit is "
+                                                        "unreviewed")
+    estimated.add_argument("--output", required=True, type=Path, help="new JSON file")
+    estimated.add_argument("--confidence", type=float, default=precision.DEFAULT_CONFIDENCE,
+                           help="confidence of the approximate interval; default 0.95")
+
+
+def _add_gate_commands(sub: argparse._SubParsersAction) -> None:
+    gating = sub.add_parser(
+        "gate",
+        help="hold a comparison to a gate policy and write a decision; promotes nothing",
+        description="Hold a saved comparison of a candidate against a baseline, and optionally a reviewed-precision "
+                    "estimate of each system, to a gate policy, and write the decision: pass only when every "
+                    "requirement the policy declares holds, fail when any fails, inconclusive when none fails and "
+                    "any could not be settled. Every failed or unresolved requirement is named on stdout with its "
+                    "reason. Exit 0 for a pass, 1 for a fail or an inconclusive decision, 2 when it could not "
+                    "evaluate. No scan, model, or judge runs, and nothing is approved or promoted.")
+    gating.add_argument("--policy", required=True, type=Path,
+                        help="gate-policy JSON, frozen before any result is read")
+    gating.add_argument("--comparison", required=True, type=Path,
+                        help="comparison-report JSON written by 'scaneval compare'")
+    gating.add_argument("--precision-baseline", type=Path,
+                        help="precision-estimate JSON of the baseline system; needed only when the policy bounds a "
+                             "decrease in precision from it")
+    gating.add_argument("--precision-candidate", type=Path,
+                        help="precision-estimate JSON of the candidate system alone; needed when the policy "
+                             "declares precision")
+    gating.add_argument("--output", required=True, type=Path,
+                        help="new JSON file, outside any trial or run directory")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--version", action="version", version=__version__)
@@ -1179,6 +1533,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_review_commands(sub)
     _add_diagnose_commands(sub)
     _add_blinding_commands(sub)
+    _add_precision_commands(sub)
     running = sub.add_parser("run", help="execute one frozen run configuration into a new directory")
     running.add_argument("config", type=Path)
     running.add_argument("--output", required=True, type=Path, help="new directory, must not exist")
@@ -1187,6 +1542,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="input id to run (a 2.0 configuration's snapshot id); repeatable")
     running.add_argument("--workspace-root", type=Path)
     _add_import_commands(sub)
+    _add_aggregate_commands(sub)
+    _add_gate_commands(sub)
     return parser
 
 
@@ -1196,11 +1553,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "validate":
             load_document(args.path, args.kind)
             print(f"Valid {args.kind}: {args.path}")
+        elif args.command == "precision":
+            return _precision(args)
+        elif args.command == "gate":
+            return _gate(args)
         elif args.command == "demo":
             _demo(args.directory)
-        elif args.command in ("blinding", "corpus", "diagnose", "import", "plan", "review", "run"):
-            return {"blinding": _blinding, "corpus": _corpus, "diagnose": _diagnose, "import": _import,
-                    "plan": _plan, "review": _review, "run": _run}[args.command](args)
+        elif args.command in ("aggregate", "blinding", "compare", "corpus", "diagnose", "import", "plan",
+                              "review", "run"):
+            return {"aggregate": _aggregate, "blinding": _blinding, "compare": _compare, "corpus": _corpus,
+                    "diagnose": _diagnose, "import": _import, "plan": _plan, "review": _review,
+                    "run": _run}[args.command](args)
         else:
             if args.output:
                 _refuse_trial_path(args.output)

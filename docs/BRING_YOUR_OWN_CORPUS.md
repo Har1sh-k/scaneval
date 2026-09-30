@@ -1131,15 +1131,15 @@ These are limits of the current implementation, not guarantees about your enviro
   PR input with their own diff workflow; an adapter without a PR mode is recorded `unsupported`, and a
   full scan of the head never stands in for it. Every PR run starts from a fresh state: a
   prepared-state run is not implemented, and no vulnerable/fixed pair of PR inputs is defined.
-- **No corpus aggregation or cross-pack weighting.** The runner produces single-invocation numbers
-  only. Nothing combines inputs, systems, repetitions, or packs, and nothing weights families or
-  computes repeated-run uncertainty. Private and public results are separate because nothing
-  merges them, not because a weighting exists.
+- **No cross-pack weighting.** `scaneval aggregate` combines the inputs, systems, and repetitions
+  of saved runs of one pack into weighted corpus metrics ([aggregation](AGGREGATION.md)). It
+  refuses runs of different packs. Private and public results stay separate because aggregation
+  reads one frozen pack at a time, not because a cross-pack weighting exists.
 - **No promotion gate.** No command promotes a pack from `draft` to `reviewed` or `released`, and
   no command sets a case's `split` to `development` or `evaluation`; imports leave it `unassigned`.
   Freezing membership and promoting a version are hand edits to the pack file, reviewed in your own
-  repository. The report states the same limit: "Single-input metrics only. Corpus weighting,
-  precision estimates, promotion gates and a trace viewer are not implemented in this build."
+  repository. `scaneval gate` judges a saved comparison against a policy and promotes nothing, a
+  pack version included ([gate](GATE.md)).
 - **Metadata blinding is partial, and nothing finds cues for you.** A map edits the documentation
   and display metadata a reviewer listed and nothing else. Nothing discovers identity cues, reads
   source, or decides whether a field is read at runtime, and the run's leak check matches only the

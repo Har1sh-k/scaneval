@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/precision-reviews.schema.json",
+  "title": "ScanEval precision reviews",
+  "description": "The append-only history of human reviews of one precision sample's units, bound to that sample by its canonical digest. Entries form a chain whose end reviews_sha256 records, so an edited, reordered, or deleted entry is refused. It is not a signature and says nothing about who typed an entry or whether they read the claim.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "sample_sha256",
+    "reviews",
+    "reviews_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.1"
+    },
+    "sample_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "canonical_sha256 of the precision sample these reviews judge."
+    },
+    "reviews": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/review"
+      }
+    },
+    "reviews_sha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Chain value of the last entry; null exactly when there is none."
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unit_id",
+        "reviewer",
+        "role",
+        "outcome",
+        "note",
+        "at",
+        "chain_sha256"
+      ],
+      "description": "One human judgement of one sampled unit. A later entry by the same reviewer revises an earlier one; nothing is removed.",
+      "properties": {
+        "unit_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reviewer": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The name the reviewer stated. The tool never supplies one."
+        },
+        "role": {
+          "enum": [
+            "independent",
+            "adjudicator"
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "true",
+            "false",
+            "unresolved",
+            "out_of_scope"
+          ]
+        },
+        "note": {
+          "type": "string"
+        },
+        "at": {
+          "type": "string",
+          "minLength": 1,
+          "description": "When the entry was recorded. Informational: order is chain order."
+        },
+        "chain_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "chain_digest(previous chain value, this entry, 'precision_review')."
+        }
+      }
+    }
+  }
+}
