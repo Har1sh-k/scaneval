@@ -33,6 +33,7 @@ WORKLOAD = "conventional_application"
 PACK = {"namespace": "org.example", "pack_id": "aggregate-fixture", "version": "1.0.0",
         "sha256": "sha256:" + "a" * 64}
 NO_SELECTION = {"only_inputs": None, "only_systems": None, "excluded_inputs": [], "excluded_systems": []}
+EXAMPLE_POLICY = Path(__file__).resolve().parents[1] / "examples" / "aggregation-policy.json"
 
 
 def digest(label: str) -> str:
@@ -947,6 +948,13 @@ def test_the_default_policy_is_complete_and_written_into_every_report(tmp_path):
     partial = {key: value for key, value in aggregate.DEFAULT_POLICY.items()
                if key not in ("target_weights", "workload_weights", "notes")}
     assert aggregate.resolve_policy(partial) == {**aggregate.DEFAULT_POLICY, "notes": []}
+
+
+def test_the_example_policy_is_valid_and_labelled_as_example_values():
+    loaded = aggregate.load_policy(EXAMPLE_POLICY)
+
+    assert loaded["policy_id"].startswith("example")
+    assert any("example" in note.lower() and "fixture" in note.lower() for note in loaded["notes"])
 
 
 def test_resampling_clusters_can_be_families(tmp_path):
