@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import time
 from typing import Callable
 
 import pytest
@@ -360,7 +361,9 @@ def test_a_blinded_export_replaces_exactly_the_reviewed_occurrences_and_records_
     assert all(check["result"] == "pass" for check in applied["validation"])
     assert {check["check"] for check in applied["validation"]} == {
         "map_contract", "approval", "repository", "variant_commit", "edit_path_class", "variant_tree",
-        "edit_file_hash", "edit_occurrences", "edit_line_structure", "unedited_files_unchanged"}
+        "edit_file_hash", "edit_occurrences", "edit_line_structure", "edit_structure", "unedited_files_unchanged"}
+    assert [check["detail"][:len("site-name: parsed as the YAML block subset")] for check in applied["validation"]
+            if check["check"] == "edit_structure"] == ["site-name: parsed as the YAML block subset"]
     assert applied["location_remapping"] == {"lines": "identity", "paths": "identity",
                                              "verified_paths": ["README.md", "docs/guide.md", "mkdocs.yml"]}
     # What stays: the package name the README must keep, source, license, manifest, CI, instructions.
@@ -1019,9 +1022,478 @@ def test_an_ini_edit_that_would_change_the_structure_or_cannot_be_verified_is_re
     assert reason in refusal(tmp_path, "display.ini", content, pseudonyms)
 
 
+# --- a display file keeps its structure: YAML ---------------------------------------------------
+#
+# A YAML edit is verified only within a strict block subset (``blinding._parse_yaml``): block mappings and sequences
+# of one-line plain and quoted scalars, and comments. A file outside it cannot be verified, so its edit is refused. A
+# plain scalar is a string there only if neither YAML 1.1 nor YAML 1.2 reads it as a boolean, a null, a number, or a
+# date, so a replacement that turns a string into one of those, or opens a flow collection, an anchor, a tag, a block
+# scalar, or a comment, changes what the file reads as and is refused.
+
+
+DISPLAY_YAML = 'Widget:\n  title: "Widget Docs"\n  tags:\n    - Widget\n    - docs\ncount: 3\n'
+BOM = "\N{BYTE ORDER MARK}"
+W = {"Widget": "Sprocket"}
+BAD_ENTRY = "a line that is not a 'key: value' entry (a scalar on its own line, or a key without ':')"
+BAD_INDENT = "a line more indented than the entries before it (a multi-line scalar, or misaligned indentation)"
+NOT_CLOSED = "a quoted scalar that does not close on its line (a multi-line scalar)"
+SAME_KEY = "which a reader may read as the same key as another in its mapping"
+UNLOADABLE = "which readers take for a number or a date and cannot load"
+MERGE_OR_VALUE = "a YAML 1.1 merge or value indicator"
+
+
+def plain(text: str) -> blinding._NonString:
+    """What the subset keeps of a plain scalar that a YAML reader may read as something other than a string."""
+    return blinding._NonString(text)
+
+
+def tree(node):
+    """A parsed YAML file as Python values: a mapping as a dict (in the file's order), a scalar as the subset keeps
+    it."""
+    if isinstance(node, blinding._Pairs):
+        return {key: tree(value) for key, value in node}
+    if isinstance(node, list):
+        return [tree(item) for item in node]
+    return node
+
+
+YAML_READS = {
+    "a-mapping": ("a: b\nc: d e\n", {"a": "b", "c": "d e"}),
+    "nested-mappings": ("a:\n  b:\n    c: d\n  e: f\ng: h\n", {"a": {"b": {"c": "d"}, "e": "f"}, "g": "h"}),
+    "sequences-indented-and-indentless": ("a:\n  - b\n  - c\nd:\n- e\n- f\ng: h\n",
+                                          {"a": ["b", "c"], "d": ["e", "f"], "g": "h"}),
+    "a-sequence-at-the-top": ("- a\n-\n- 'b'\n-   c\n", ["a", plain(""), "b", "c"]),
+    "compact-entries": ("- a: 1\n  b:\n  - x\n  - p: z\n    w: v\n-   c: d\n    e: f\n",
+                        [{"a": plain("1"), "b": ["x", {"p": "z", "w": "v"}]}, {"c": "d", "e": "f"}]),
+    "a-block-node-under-a-dash": ("-\n  a: b\n-\n  - c\n", [{"a": "b"}, ["c"]]),
+    "an-indent-of-one-space": ("a:\n b: c\n d:\n  - e\n", {"a": {"b": "c", "d": ["e"]}}),
+    "an-empty-value-before-the-next-entry-of-an-outer-sequence": ("- a:\n- b\n", [{"a": plain("")}, "b"]),
+    "an-empty-value": ("a:\nb: # c\nd: e\n", {"a": plain(""), "b": plain(""), "d": "e"}),
+    "plain-scalars-that-may-not-be-strings": (
+        "k1: true\nk2: No\nk3: ~\nk4: null\nk5: 12\nk6: 0x1F\nk7: 0o17\nk8: 1e3\nk9: 2019-01-01\nk10: 1_0.5\n"
+        "k11: 1:30\nk12: .inf\nk13: y\nk14: 007\nk15: +1\nk16: .5\nk17: 2001-12-14t21:59:43.10-05:00\n",
+        {"k1": plain("true"), "k2": plain("No"), "k3": plain("~"), "k4": plain("null"), "k5": plain("12"),
+         "k6": plain("0x1F"), "k7": plain("0o17"), "k8": plain("1e3"), "k9": plain("2019-01-01"),
+         "k10": plain("1_0.5"), "k11": plain("1:30"), "k12": plain(".inf"), "k13": plain("y"), "k14": plain("007"),
+         "k15": plain("+1"), "k16": plain(".5"), "k17": plain("2001-12-14t21:59:43.10-05:00")}),
+    "plain-scalars-that-are-strings": (
+        "a: tru\nb: 1.2.3\nc: 0xZZ\nd: 12 months\ne: v1.0\nf: a:b\ng: a #b\nh: a#b\ni: yes please\nj: 1,000\nk: .\n",
+        {"a": "tru", "b": "1.2.3", "c": "0xZZ", "d": "12 months", "e": "v1.0", "f": "a:b", "g": "a", "h": "a#b",
+         "i": "yes please", "j": "1,000", "k": "."}),
+    "unicode-spaces-are-not-spaces": ("a: \xa0b\N{IDEOGRAPHIC SPACE}\nc: d\N{EM SPACE}e\n",
+                                      {"a": "\xa0b\N{IDEOGRAPHIC SPACE}", "c": "d\N{EM SPACE}e"}),
+    "quoted-scalars-are-strings": (
+        "a: 'true'\nb: \"12\"\nc: '~'\nd: 'it''s'\ne: \"say \\\"hi\\\"\"\nf: ''\ng: \"\"\nh: '\\n'\ni: \"a # b: c\"\n",
+        {"a": "true", "b": "12", "c": "~", "d": "it's", "e": 'say "hi"', "f": "", "g": "", "h": "\\n",
+         "i": "a # b: c"}),
+    "escapes": ('a: "\\0\\a\\b\\t\\n\\v\\f\\r\\e\\ \\"\\/\\\\\\N\\_\\L\\P"\nb: "\\x41\\xe9\\u00e9\\U0001F600"\n',
+                {"a": "\0\a\b\t\n\v\f\r\x1b \"/\\\x85\xa0\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}",
+                 "b": "A\xe9\xe9\N{GRINNING FACE}"}),
+    "quoted-keys": ("\"a b\": 1\n'c: d': 2\n\"\": 3\n\"e\\tf\": 4\n",
+                    {"a b": plain("1"), "c: d": plain("2"), "": plain("3"), "e\tf": plain("4")}),
+    "keys-that-are-not-strings": ("200: ok\n404: missing\n", {plain("200"): "ok", plain("404"): "missing"}),
+    "a-key-that-is-a-boolean": ("true: a\n", {plain("true"): "a"}),
+    "spaces-before-the-colon": ("a : b\n\"c\"  : d\n", {"a": "b", "c": "d"}),
+    "comments": ("# a\na: b # c\n\n   # d\ne: # f\n  - g #h\n#i\n  - 'j' # k\n", {"a": "b", "e": ["g", "j"]}),
+    "a-document-start-marker": ("# a\n---   # b\n\na: b\n", {"a": "b"}),
+    "a-byte-order-mark": (BOM + "a: b\n", {"a": "b"}),
+    "carriage-returns-before-line-feeds": ("a: b\r\nc:\r\n  - d\r\n", {"a": "b", "c": ["d"]}),
+    "no-line-feed-at-the-end": ("a: b", {"a": "b"}),
+}
+
+
+@pytest.mark.parametrize("name", sorted(YAML_READS))
+def test_the_yaml_subset_reads_block_collections_and_scalars_as_yaml_does(name):
+    text, expected = YAML_READS[name]
+
+    parsed = blinding._parse_yaml(text)
+
+    assert tree(parsed) == expected
+    if isinstance(expected, dict):
+        assert [key for key, _ in parsed] == list(expected), "the keys stay in the order the file wrote them"
+
+
+@pytest.mark.parametrize("text", ["", "\n", "# a comment\n", "   \n\n", "---\n", "--- # a comment\n# another\n", BOM])
+def test_an_empty_yaml_document_reads_as_null(text):
+    assert blinding._parse_yaml(text) == plain("")
+
+
+# Each edit here keeps the file's structure: Widget becomes Sprocket unless the case says otherwise.
+YAML_ACCEPTED = {
+    "the-mkdocs-site-name": (MKDOCS, W),
+    "nested-mappings": ("Widget:\n  title: Widget Docs\n  theme:\n    name: Widget\n    palette:\n"
+                        "      primary: indigo\n", W),
+    "sequences-indented-and-indentless": ("nav:\n  - Widget: index.md\n  - Guide: guide.md\n"
+                                          "extra:\n- Widget\n- docs\n", W),
+    "a-sequence-at-the-top": ("- Widget\n- docs\n-\n- 'Widget'\n", W),
+    "compact-entries": ("- name: Widget\n  tags:\n  - Widget\n  - docs\n-   title: Widget Docs\n    weight: 3\n", W),
+    "quoted-values-and-escapes": ("single: 'Widget it''s'\n"
+                                  "double: \"Widget \\\"quoted\\\" \\x41 \\u00e9 \\\\ \\/ \\t\"\nempty: ''\n", W),
+    "quoted-keys": ("\"Widget\": 1\n'Widget two': 2\n", W),
+    "full-line-and-trailing-comments": ("# Widget\nsite_name: Widget Docs # the Widget\n\n   # indented Widget\n"
+                                        "nav:  # Widget\n  - a\n", W),
+    "a-replacement-in-a-comment-that-holds-a-quotation-mark": ("# the Widget docs\nsite_name: Docs # Widget\n",
+                                                               {"Widget": 'Sprock"et: {a, [b]} #c'}),
+    "a-quotation-mark-in-a-plain-value": ("title: The Widget Docs\n", {"Widget": 'Sprock"et'}),
+    "a-quotation-mark-in-a-single-quoted-value": ("title: 'The Widget Docs'\n", {"Widget": 'Sprock"et'}),
+    "an-apostrophe-in-a-double-quoted-value": ('title: "The Widget Docs"\n', {"Widget": "Sprocket's"}),
+    "a-colon-and-a-hash-in-a-quoted-value": ('title: "The Widget Docs"\n', {"Widget": "Sprocket: Inc #1"}),
+    "values-that-are-not-strings-stay-as-they-are": ("year: 2019\nflag: true\nnothing:\nratio: 1.5\nwhen: 2019-01-01\n"
+                                                     "title: Widget Docs\n", W),
+    "keys-that-are-not-strings-stay-as-they-are": ("200: Widget ok\n404: missing\n", W),
+    "a-single-key-that-is-a-boolean": ("true: Widget\n", W),
+    "a-null-value-and-a-null-item": ("Widget:\nnav:\n-\n- Widget\n", W),
+    "a-document-start-marker": ("# Widget\n---  # Widget\nsite_name: Widget\n", W),
+    "a-byte-order-mark": (BOM + "site_name: Widget Docs\n", W),
+    "carriage-return-line-feeds": ("site_name: Widget Docs\r\nnav:\r\n  - Widget\r\n", W),
+    "no-final-line-feed": ("site_name: Widget Docs", W),
+    "an-empty-file": ("", W),
+    "a-key-of-the-longest-length-readers-allow": ("k" * 1024 + ": Widget\n", W),
+    "a-quoted-key-of-the-longest-length-readers-allow": ('"' + "k" * 1022 + '": Widget\n', W),
+    "unicode-spaces-at-the-ends-of-a-plain-value": ("title: \xa0Widget\N{IDEOGRAPHIC SPACE}\n", W),
+    "non-ascii-text": ("title: Widget \xe9 \N{GRINNING FACE}\n", {"Widget": "Spr\xf6cket \N{GRINNING FACE}"}),
+    "a-replacement-that-is-a-string-to-every-version": ("title: Widget\n", {"Widget": "Sprocket 12 months"}),
+    "a-replacement-that-is-almost-a-number": ("title: Widget Docs\n", {"Widget": "1.2.3"}),
+    "a-replacement-ending-a-plain-value-with-a-dash": ("title: The Widget\n", {"Widget": "Sprocket -"}),
+    "a-backslash-in-a-single-quoted-value": ("title: 'Widget Docs'\n", {"Widget": "Sprocket\\n"}),
+    "several-pseudonyms": ("Widget: AcmeCorp\nnav:\n  - Widget\n  - 'AcmeCorp Widget'\n",
+                           {"Widget": "Sprocket", "AcmeCorp": "ExampleCo"}),
+}
+
+
+def replaced(text: str, pseudonyms: dict[str, str]) -> str:
+    for original, replacement in pseudonyms.items():
+        text = text.replace(original, replacement)
+    return text
+
+
+@pytest.mark.parametrize("name", sorted(YAML_ACCEPTED))
+@pytest.mark.parametrize("path", ["display.yml", "display.yaml"])
+def test_a_yaml_edit_that_keeps_the_structure_is_accepted(tmp_path, name, path):
+    content, pseudonyms = YAML_ACCEPTED[name]
+
+    edit = display_edit(tmp_path, path, content, pseudonyms)
+
+    assert edit.structure_check == "yaml" and edit.data.decode("utf-8") == replaced(content, pseudonyms)
+
+
+OUTSIDE = "is outside the YAML subset read here"
+
+
+def transformed_outside(line: int, what: str) -> str:
+    """The refusal when the transformed file leaves the subset at *line*, for the reason *what*."""
+    return (f" the transformed file is not valid YAML within the subset this module reads (line {line}: {what} "
+            f"{OUTSIDE})")
+
+
+def retyped(text: str) -> str:
+    """The refusal when the title, a string, becomes the plain scalar *text*, which is not one."""
+    return f"{KEEP}($['title'] is a plain scalar {text!r} (read as a non-string), expected a string {text!r})"
+
+
+YAML_REFUSED = {
+    # The reviewer's reproduction, for each way of writing a value: a replacement is written in without quoting.
+    "a-quotation-mark-in-a-double-quoted-value": ('title: "Widget Docs"\n', {"Widget": 'Sprock"et'},
+                                                  transformed_outside(1, "text after a quoted scalar")),
+    "an-apostrophe-in-a-single-quoted-value": ("title: 'Widget Docs'\n", {"Widget": "Sprocket's"},
+                                               transformed_outside(1, "text after a quoted scalar")),
+    "a-doubled-apostrophe-in-a-single-quoted-value": (
+        "title: 'The Widget Docs'\n", {"Widget": "Sprocket''s"},
+        "$['title'] is \"The Sprocket's Docs\", expected \"The Sprocket''s Docs\""),
+    "a-quotation-mark-that-ends-a-quoted-key-and-starts-a-comment": (
+        '"Widget": 1\n', {"Widget": 'a": 2 #'}, "$ holds the keys ['a'], expected ['a\": 2 #']"),
+    "a-colon-and-a-space-in-a-plain-value": (
+        "title: Widget Docs\n", {"Widget": "Sprocket: Inc"},
+        transformed_outside(1, "a ':' in a value (a mapping on the line of another key)")),
+    "a-colon-that-ends-a-plain-value": (
+        "title: Widget\n", {"Widget": "Sprocket:"},
+        transformed_outside(1, "a ':' in a value (a mapping on the line of another key)")),
+    "a-colon-that-makes-a-list-item-a-mapping": ("- Widget\n- docs\n", {"Widget": "a: b"},
+                                                 "$[0] is a mapping (('a', 'b'),), expected a string 'a: b'"),
+    "a-space-and-a-hash-that-start-a-comment": ("title: Widget Docs\n", {"Widget": "Sprocket #1"},
+                                                "$['title'] is 'Sprocket', expected 'Sprocket #1 Docs'"),
+    "a-hash-that-starts-the-value": (
+        "title: Widget Docs\n", {"Widget": "#a"},
+        "$['title'] is a plain scalar '' (read as a non-string), expected a string '#a Docs'"),
+    "an-anchor": ("title: Widget Docs\n", {"Widget": "&anchor"}, transformed_outside(1, "an anchor ('&')")),
+    "an-alias": ("title: Widget Docs\n", {"Widget": "*alias"}, transformed_outside(1, "an alias ('*')")),
+    "a-tag": ("title: Widget Docs\n", {"Widget": "!!int"}, transformed_outside(1, "a tag ('!')")),
+    "a-flow-sequence": ("title: Widget Docs\n", {"Widget": "[a, b]"},
+                        transformed_outside(1, "a flow collection ('[')")),
+    "a-flow-mapping": ("title: Widget Docs\n", {"Widget": "{a: b}"},
+                       transformed_outside(1, "a flow collection ('{')")),
+    "a-literal-block-scalar": ("title: Widget Docs\n", {"Widget": "|"}, transformed_outside(1, "a block scalar ('|')")),
+    "a-folded-block-scalar": ("title: Widget Docs\n", {"Widget": ">"}, transformed_outside(1, "a block scalar ('>')")),
+    "a-dash-that-starts-the-value": ("title: Widget Docs\n", {"Widget": "- a"},
+                                     transformed_outside(1, "a scalar starting with '-'")),
+    "a-question-mark-that-starts-the-value": (
+        "title: Widget Docs\n", {"Widget": "? a"},
+        transformed_outside(1, "an explicit key, or a scalar starting with '?'")),
+    "a-percent-sign-that-starts-the-value": ("title: Widget Docs\n", {"Widget": "%a"},
+                                             transformed_outside(1, "a reserved indicator ('%')")),
+    "an-at-sign-that-starts-the-value": ("title: Widget Docs\n", {"Widget": "@a"},
+                                         transformed_outside(1, "a reserved indicator ('@')")),
+    "a-tab": ("title: Widget Docs\n", {"Widget": "a\tb"}, transformed_outside(1, "a tab outside a comment")),
+    "a-control-character": (
+        "title: Widget Docs\n", {"Widget": "a\x01b"},
+        transformed_outside(1, "the character U+0001, which readers disagree on or refuse")),
+    # A replacement that makes a whole plain scalar something other than a string.
+    "a-boolean": ("title: Widget\n", {"Widget": "true"}, retyped("true")),
+    "a-boolean-by-its-yaml-1-1-name": ("title: Widget\n", {"Widget": "yes"}, retyped("yes")),
+    "a-boolean-by-another-name": ("title: Widget\n", {"Widget": "on"}, retyped("on")),
+    "a-yaml-1-1-boolean-letter": ("title: Widget\n", {"Widget": "n"}, retyped("n")),
+    "null": ("title: Widget\n", {"Widget": "null"}, retyped("null")),
+    "a-tilde": ("title: Widget\n", {"Widget": "~"}, retyped("~")),
+    "an-integer": ("title: Widget\n", {"Widget": "12"}, retyped("12")),
+    "a-hexadecimal-integer": ("title: Widget\n", {"Widget": "0x1F"}, retyped("0x1F")),
+    "an-octal-integer": ("title: Widget\n", {"Widget": "0o17"}, retyped("0o17")),
+    "a-float-with-an-exponent": ("title: Widget\n", {"Widget": "1e3"}, retyped("1e3")),
+    "a-float-with-an-underscore": ("title: Widget\n", {"Widget": "1_0.5"}, retyped("1_0.5")),
+    "a-base-60-number": ("title: Widget\n", {"Widget": "1:30"}, retyped("1:30")),
+    "a-date": ("title: Widget\n", {"Widget": "2019-01-01"}, retyped("2019-01-01")),
+    "a-date-and-time": ("title: Widget\n", {"Widget": "2019-01-01 10:00:00"}, retyped("2019-01-01 10:00:00")),
+    "a-date-and-time-with-an-offset": ("title: Widget\n", {"Widget": "2001-12-14t21:59:43.10-05:00"},
+                                       retyped("2001-12-14t21:59:43.10-05:00")),
+    "infinity": ("title: Widget\n", {"Widget": ".inf"}, retyped(".inf")),
+    "a-boolean-in-a-list": ("- Widget\n", {"Widget": "true"}, "$[0] is a plain scalar 'true'"),
+    "a-boolean-below-a-key-that-is-not-a-string": ("200:\n  title: Widget\n", {"Widget": "true"},
+                                                   "$['200']['title'] is a plain scalar 'true'"),
+    "a-boolean-as-a-key": ("Widget: 1\nb: 2\n", {"Widget": "true"},
+                           "$ holds the keys ['true' (read as a non-string), 'b'], expected ['true', 'b']"),
+    # A scalar that was not a string is not one a replacement may touch.
+    "a-non-string-that-is-replaced": (
+        'year: 2019\ntitle: "2019"\n', {"2019": "2020"},
+        "$['year'] is '2020' (read as a non-string), expected '2019' (read as a non-string)"),
+    "a-non-string-key-that-is-replaced": (
+        "200: a\n", {"200": "300"},
+        "$ holds the keys ['300' (read as a non-string)], expected ['200' (read as a non-string)]"),
+    # Keys the replacements make the same key, or another kind of key.
+    "two-keys-made-one": ("Widget: 1\nSprocket: 2\n", W,
+                          ": the replacements make the keys 'Widget' and 'Sprocket' of the mapping at $ the same key "
+                          "'Sprocket', a duplicate that would merge two entries"),
+    "two-keys-made-one-below": ("a:\n  - Widget: 1\n    Sprocket: 2\n", W,
+                                "of the mapping at $['a'][0] the same key 'Sprocket'"),
+    "a-quoted-key-and-a-plain-key-made-one": ('"Widget": 1\nSprocket: 2\n', W, "the same key 'Sprocket'"),
+    "a-key-made-the-merge-key": ("Widget: 1\n", {"Widget": "<<"},
+                                 transformed_outside(1, f"the scalar '<<', {MERGE_OR_VALUE}")),
+    "a-key-made-the-value-indicator": ("Widget: 1\n", {"Widget": "="},
+                                       transformed_outside(1, f"the scalar '=', {MERGE_OR_VALUE}")),
+    "a-key-made-one-that-yaml-1-2-reads-as-a-string": ('on: 1\n"Widget": 2\n', {"Widget": "on"},
+                                                      transformed_outside(2, f"the key 'on', {SAME_KEY}")),
+    "a-key-made-a-second-key-that-is-not-a-string": ("true: 1\nWidget: 2\n", {"Widget": "1"},
+                                                     transformed_outside(2, f"the key '1', {SAME_KEY}")),
+    # A backslash inside a double-quoted value is an escape, so what the file then holds is not what the map replaced.
+    "an-escape-that-decodes-to-another-character": (
+        'title: "Widget Docs"\n', {"Widget": "Sprocket\\n"},
+        f"{KEEP}($['title'] is 'Sprocket\\n Docs', expected 'Sprocket\\\\n Docs')"),
+    "an-escaped-backslash": ('title: "Widget Docs"\n', {"Widget": "Sprocket\\\\"},
+                             "$['title'] is 'Sprocket\\\\ Docs', expected 'Sprocket\\\\\\\\ Docs'"),
+    "an-escaped-quotation-mark": ('title: "Widget Docs"\n', {"Widget": 'Sprocket\\"'},
+                                  "$['title'] is 'Sprocket\" Docs', expected 'Sprocket\\\\\" Docs'"),
+    "an-escaped-space": ('title: "Widget Docs"\n', {"Widget": "Sprocket\\"},
+                         "$['title'] is 'Sprocket Docs', expected 'Sprocket\\\\ Docs'"),
+    "an-escaped-code-point": ('title: "Widget Docs"\n', {"Widget": "Sprocket\\u0021"},
+                              "$['title'] is 'Sprocket! Docs', expected 'Sprocket\\\\u0021 Docs'"),
+    "an-escape-yaml-does-not-have": ('title: "Widget Docs"\n', {"Widget": "Sprocket\\q"},
+                                     transformed_outside(1, "the escape '\\q'")),
+    "an-escape-with-too-few-digits": ('title: "Widget Docs"\n', {"Widget": "Sprocket\\x4"},
+                                      transformed_outside(1, "the escape '\\x' without 2 hexadecimal digits")),
+    "an-escape-that-is-not-a-character": (
+        'title: "Widget Docs"\n', {"Widget": "Sprocket\\uD800"},
+        transformed_outside(1, "the escape '\\uD800', which is not a Unicode scalar value")),
+    "a-backslash-that-escapes-the-closing-quotation-mark": ('title: "Widget"\n', {"Widget": "Sprocket\\"},
+                                                            transformed_outside(1, NOT_CLOSED)),
+    "a-token-spelled-with-an-escape": ('title: "Wid\\x67et Docs"\n', W,
+                                       "$['title'] is 'Widget Docs', expected 'Sprocket Docs'"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(YAML_REFUSED))
+def test_a_yaml_edit_that_would_change_the_structure_is_refused_with_its_reason(tmp_path, name):
+    content, pseudonyms, reason = YAML_REFUSED[name]
+
+    assert reason in refusal(tmp_path, "display.yml", content, pseudonyms)
+
+
+NOT_IN_THE_SUBSET = (" is not in the YAML subset this module reads (block mappings and sequences of one-line plain or "
+                     "quoted scalars, and comments), so an edit of it cannot be verified to keep its structure "
+                     "(line {line}: {what} " + OUTSIDE + ")")
+# An original outside the subset cannot be verified, so even a harmless replacement is refused, naming the line and
+# the construct.
+YAML_OUTSIDE = {
+    "a-flow-sequence": ("a: [Widget]\n", 1, "a flow collection ('[')"),
+    "a-flow-mapping": ("a: {k: Widget}\n", 1, "a flow collection ('{')"),
+    "an-anchor": ("a: &x Widget\nb: *x\n", 1, "an anchor ('&')"),
+    "an-alias": ("a: Widget\nb: *x\n", 2, "an alias ('*')"),
+    "a-tag": ("a: !!str Widget\n", 1, "a tag ('!')"),
+    "a-literal-block-scalar": ("a: |\n  Widget\n", 1, "a block scalar ('|')"),
+    "a-folded-block-scalar": ("a: >\n  Widget\n", 1, "a block scalar ('>')"),
+    "a-multi-line-plain-scalar": ("a: Widget\n  and more\n", 2, BAD_INDENT),
+    "a-multi-line-plain-scalar-in-a-list": ("- Widget\n  and more\n", 2, BAD_INDENT),
+    "a-multi-line-double-quoted-scalar": ('a: "Widget\n  more"\n', 1, NOT_CLOSED),
+    "a-multi-line-single-quoted-scalar": ("a: 'Widget\n  more'\n", 1, NOT_CLOSED),
+    "an-escaped-line-break": ('a: "Widget\\\n  more"\n', 1, "a backslash at the end of a line (a multi-line scalar)"),
+    "a-directive": ("%YAML 1.1\n---\na: Widget\n", 1, "a directive ('%')"),
+    "a-document-end-marker": ("a: Widget\n...\n", 2, "a line starting with '...' (a document end marker)"),
+    "a-second-document": ("a: Widget\n---\nb: 2\n", 2, "a second '---' (a document start marker)"),
+    "content-after-the-document-start-marker": ("--- a: Widget\n", 1, "content after '---' on its line"),
+    "a-tab-before-a-value": ("a:\tWidget\n", 1, "a tab outside a comment"),
+    "a-tab-in-the-indentation": ("a:\n\tb: Widget\n", 2, "a tab outside a comment"),
+    "a-tab-before-a-comment": ("a: Widget\t# note\n", 1, "a tab outside a comment"),
+    "a-tab-in-a-quoted-scalar": ('a: "Widget\t"\n', 1, "a tab outside a comment"),
+    "a-lone-carriage-return": ("a: Widget\rb: 1\n", 1, "a carriage return that does not end a line"),
+    "a-next-line-character": ("a: Widget\x85\n", 1, "the character U+0085, which readers disagree on or refuse"),
+    "a-line-separator": ("a: Widget\N{LINE SEPARATOR}\n", 1,
+                         "the character U+2028, which readers disagree on or refuse"),
+    "a-control-character": ("a: Wid\x07get\n", 1, "the character U+0007, which readers disagree on or refuse"),
+    "a-second-byte-order-mark": (BOM + BOM + "a: Widget\n", 1, "a byte-order mark inside the text"),
+    "a-byte-order-mark-after-the-first-line": ("a: Widget\n" + BOM + "b: 1\n", 2, "a byte-order mark inside the text"),
+    "a-duplicate-key": ("a: Widget\na: 2\n", 2, "the duplicate key 'a'"),
+    "a-duplicate-key-once-quoted": ("a: Widget\n'a': 2\n", 2, "the duplicate key 'a'"),
+    "keys-that-one-reader-reads-as-one": ("yes: Widget\ntrue: 2\n", 2, f"the key 'true', {SAME_KEY}"),
+    "a-plain-key-and-a-quoted-one-that-one-reader-reads-as-one": ('"no": Widget\nno: 2\n', 2,
+                                                                 f"the key 'no', {SAME_KEY}"),
+    "a-merge-key": ("<<: Widget\n", 1, f"the scalar '<<', {MERGE_OR_VALUE}"),
+    "a-merge-indicator-as-a-value": ("a: <<\nb: Widget\n", 1, f"the scalar '<<', {MERGE_OR_VALUE}"),
+    "a-value-indicator": ("a: =\nb: Widget\n", 1, f"the scalar '=', {MERGE_OR_VALUE}"),
+    "an-explicit-key": ("? a\n: Widget\n", 1, "an explicit key, or a scalar starting with '?'"),
+    "a-sequence-on-the-line-of-its-entry": ("- - Widget\n", 1, "a sequence on the line of its entry ('- -')"),
+    "a-scalar-document": ("Widget\n", 1, BAD_ENTRY),
+    "a-quoted-scalar-document": ('"Widget"\n', 1, BAD_ENTRY),
+    "a-line-without-a-colon": ("a: 1\nWidget\n", 2, BAD_ENTRY),
+    "a-scalar-on-the-line-after-a-key": ("a:\n  Widget\n", 2, BAD_ENTRY),
+    "a-line-indented-to-no-collection": ("a:\n    b: Widget\n  c: 1\n", 3, BAD_INDENT),
+    "a-line-that-continues-no-collection": ("  a: Widget\nb: 1\n", 2,
+                                            "a line that continues no collection (misaligned indentation)"),
+    "a-sequence-entry-among-mapping-entries": ("a: 1\n- Widget\n", 2, "a sequence entry among mapping entries"),
+    "a-number-written-with-only-underscores": ("a: +_\nb: Widget\n", 1, f"the scalar '+_', {UNLOADABLE}"),
+    "a-date-that-does-not-exist": ("a: 2019-02-30\nb: Widget\n", 1, f"the scalar '2019-02-30', {UNLOADABLE}"),
+    "a-key-longer-than-readers-allow": ("k" * 1025 + ": Widget\n", 1, "a key longer than 1024 characters"),
+    "a-scalar-starting-with-a-dash": ("a: -1\nb: Widget\n", 1, "a scalar starting with '-'"),
+    "a-key-starting-with-a-dash": ("-a: Widget\n", 1, "a scalar starting with '-'"),
+    "a-scalar-starting-with-a-colon": ("a: :b\nb: Widget\n", 1, "a scalar starting with ':'"),
+    "a-closing-bracket": ("a: ]\nb: Widget\n", 1, "a flow indicator (']')"),
+    "a-closing-brace": ("a: }\nb: Widget\n", 1, "a flow indicator ('}')"),
+    "a-comma": ("a: , Widget\n", 1, "a flow indicator (',')"),
+    "a-percent-sign-after-the-first-line": ("a: 1\n%b: Widget\n", 2, "a directive ('%')"),
+    "an-at-sign": ("a: @Widget\n", 1, "a reserved indicator ('@')"),
+    "a-backtick": ("a: `Widget`\n", 1, "a reserved indicator ('`')"),
+    "text-after-a-quoted-scalar": ('a: "Widget" x\n', 1, "text after a quoted scalar"),
+    "a-comment-against-a-quoted-scalar": ('a: "Widget"# note\n', 1, "text after a quoted scalar"),
+    "an-escape-yaml-does-not-have": ('a: "Widget\\q"\n', 1, "the escape '\\q'"),
+    "an-escape-that-is-cut-short": ('a: "Widget\\u00"\n', 1, "the escape '\\u' without 4 hexadecimal digits"),
+    "an-unterminated-quoted-key": ("'Widget: 1\n", 1, NOT_CLOSED),
+}
+
+
+@pytest.mark.parametrize("name", sorted(YAML_OUTSIDE))
+def test_a_yaml_file_outside_the_subset_cannot_be_verified_so_even_a_harmless_edit_of_it_is_refused(tmp_path, name):
+    content, line, what = YAML_OUTSIDE[name]
+
+    assert refusal(tmp_path, "display.yml", content) == NOT_IN_THE_SUBSET.format(line=line, what=what)
+
+
+def nested(levels: int, dash: bool = False) -> str:
+    """*levels* collections one inside the other, one space deeper each, around one value holding Widget."""
+    lines = [" " * level + ("-" if dash else "a:") for level in range(levels - 1)]
+    return "\n".join(lines + [" " * (levels - 1) + ("- Widget" if dash else "a: Widget")]) + "\n"
+
+
+@pytest.mark.parametrize("dash", [False, True], ids=["mappings", "sequences"])
+def test_nesting_to_the_limit_is_read_and_nesting_beyond_it_is_refused(tmp_path, dash):
+    assert blinding._YAML_DEPTH == 64
+    edit = display_edit(tmp_path, "display.yml", nested(64, dash))
+    assert edit.structure_check == "yaml" and "Sprocket" in edit.data.decode("utf-8")
+
+    for levels in (65, 2000):
+        assert refusal(tmp_path, "display.yml", nested(levels, dash)) == NOT_IN_THE_SUBSET.format(
+            line=65, what="nesting deeper than 64 levels")
+
+
+def test_a_large_yaml_file_is_read_in_time_linear_in_its_size():
+    """A rescan of earlier lines, or of earlier keys, would make these minutes; the bound is ten seconds."""
+    count = 40_000
+    texts = ["".join(f"key{index}: value {index} # note\n" for index in range(count)),
+             "".join(f"- item {index}\n" for index in range(count)),
+             "".join(f"{index}: value\n" for index in range(count)),
+             "".join(f"- k{index}: v\n  n{index}:\n  - x\n  - 'y'\n" for index in range(count // 4)),
+             "a: " + "x:" * 1_500_000 + "\n",
+             "a: " + "1" * 1_000_000 + "x\n",
+             "a: 2019-01-01" + " " * 1_000_000 + "x\n",
+             "a: '" + "''" * 500_000 + "'\n",
+             'a: "' + "\\n" * 500_000 + '"\n']
+    started = time.perf_counter()
+
+    for text in texts:
+        try:
+            blinding._parse_yaml(text)
+        except ValueError:
+            pass
+
+    assert time.perf_counter() - started < 10
+
+
+def test_pyyaml_and_ruamel_read_every_accepted_edit_as_the_original_with_only_the_reviewed_replacements(tmp_path):
+    """The subset's claim, checked against the libraries whose reading it claims: same keys, order, nesting, types."""
+    yaml = pytest.importorskip("yaml")
+    ruamel = pytest.importorskip("ruamel.yaml")
+    readers = {"PyYAML": yaml.safe_load, "ruamel.yaml (YAML 1.2)": lambda text: ruamel.YAML(typ="safe").load(text)}
+
+    def rewritten(value, pseudonyms):
+        if isinstance(value, dict):
+            return {rewritten(key, pseudonyms): rewritten(item, pseudonyms) for key, item in value.items()}
+        if isinstance(value, list):
+            return [rewritten(item, pseudonyms) for item in value]
+        return replaced(value, pseudonyms) if isinstance(value, str) else value
+
+    def typed(value):
+        if isinstance(value, dict):
+            return ("mapping", [(typed(key), typed(item)) for key, item in value.items()])
+        if isinstance(value, list):
+            return ("sequence", [typed(item) for item in value])
+        return (type(value), value)
+
+    for name, (content, pseudonyms) in sorted(YAML_ACCEPTED.items()):
+        transformed = display_edit(tmp_path / name, "display.yml", content, pseudonyms).data.decode("utf-8")
+        for reader, load in readers.items():
+            assert typed(load(transformed)) == typed(rewritten(load(content), pseudonyms)), (name, reader)
+
+
+def test_a_yaml_display_file_is_verified_as_the_block_subset_and_the_check_is_recorded(tmp_path, display):
+    widget = display("display.yml", DISPLAY_YAML)
+
+    record = export_blinded(widget, display_map(widget, "display.yml", "Sprocket"), tmp_path / "trial")
+
+    transformed = (tmp_path / "trial" / "source" / "display.yml").read_text(encoding="utf-8")
+    assert transformed == DISPLAY_YAML.replace("Widget", "Sprocket")
+    assert [check["detail"] for check in record["blinding"]["validation"] if check["check"] == "edit_structure"] == [
+        "display: parsed as the YAML block subset before and after; the result is the original with only the reviewed "
+        "replacements applied to its keys and strings, and every replaced plain scalar still reads as a string under "
+        "YAML 1.1 and 1.2"]
+    assert all(check["result"] == "pass" for check in record["blinding"]["validation"])
+
+
+def test_a_replacement_that_breaks_a_yaml_display_file_is_refused_before_a_transformed_tree_exists(tmp_path, display):
+    """The reviewer's reproduction, for YAML: a quotation mark in an approved replacement, in a double-quoted value."""
+    widget = display("display.yml", DISPLAY_YAML)
+    trial = tmp_path / "trial"
+
+    with pytest.raises(MaterializationError, match=r"blinding map refused: edit display: display\.yml: the transformed "
+                                                    r"file is not valid YAML within the subset this module reads "
+                                                    r"\(line 2: text after a quoted scalar is outside the YAML subset "
+                                                    r"read here\)"):
+        export_blinded(widget, display_map(widget, "display.yml", 'Sprock"et'), trial)
+
+    assert not (trial / "source").exists(), "nothing is transformed unless every check passes"
+    record = export_blinded(widget, display_map(widget, "display.yml", "Sprocket"), tmp_path / "plain")
+    written = (tmp_path / "plain" / "source" / "display.yml").read_text(encoding="utf-8")
+    assert written == DISPLAY_YAML.replace("Widget", "Sprocket")
+    assert "edit_structure" in {check["check"] for check in record["blinding"]["validation"]}
+
+
 def test_a_display_suffix_is_read_without_regard_to_case():
-    paths = ("a/b.json", "c.TOML", "d.Ini", "e.CFG")
-    assert [blinding._structure_check_for(path) for path in paths] == ["json", "toml", "ini", "ini"]
+    paths = ("a/b.json", "c.TOML", "d.Ini", "e.CFG", "f.YML", "g/h.Yaml")
+    assert [blinding._structure_check_for(path) for path in paths] == ["json", "toml", "ini", "ini", "yaml", "yaml"]
     assert [blinding._structure_check_for(path) for path in ("README.md", "docs/guide.rst", "CHANGES", "a.json.bak")
             ] == [None, None, None, None]
 
@@ -1164,21 +1636,27 @@ def test_a_refused_map_is_a_preparation_failure_and_no_scanner_ever_sees_that_in
         "snap-a__fake-a__r1", "snap-a.blinded__fake-a__r1"], "the refused input's assignment stays scheduled"
 
 
+@pytest.mark.parametrize(("path", "text", "refusal"), [
+    ("display.json", DISPLAY_JSON, "blinding map refused: edit display: display.json: the transformed file is not "
+                                   "valid JSON ("),
+    ("display.yml", DISPLAY_YAML, "blinding map refused: edit display: display.yml: the transformed file is not valid "
+                                  "YAML within the subset this module reads (line 2: text after a quoted scalar is "
+                                  "outside the YAML subset read here)"),
+], ids=["json", "yaml"])
 def test_a_replacement_that_breaks_a_display_file_is_a_preparation_failure_and_no_scanner_ever_sees_that_input(
-        tmp_path, display):
+        tmp_path, display, path, text, refusal):
     """The reviewer's reproduction, through a run: the input is not prepared, and the other input still runs."""
-    widget = display("display.json", DISPLAY_JSON)
+    widget = display(path, text)
     adapter = FakeAdapter()
 
-    manifest, out = blinded_run(tmp_path, widget, display_map(widget, "display.json", 'Sprock"et'),
+    manifest, out = blinded_run(tmp_path, widget, display_map(widget, path, 'Sprock"et'),
                                 [{"snapshot_id": "snap-a"}, BLINDED], adapter)
 
     assert manifest["status"] == "completed"
     standard, blinded = manifest["inputs"]
     failure = blinded["preparation_failure"]
     assert blinded["input_id"] == "snap-a.blinded" and failure["type"] == "MaterializationError"
-    assert failure["message"].startswith("blinding map refused: edit display: display.json: the transformed file is "
-                                         "not valid JSON (")
+    assert failure["message"].startswith(refusal)
     assert (blinded["tree_hash"], blinded["input_hash"], blinded["mechanical_checks"]) == (None, None, [])
     rows = {row["input_id"]: row for row in manifest["invocations"]}
     assert rows["snap-a.blinded"]["status"] == "skipped"

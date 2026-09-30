@@ -39,16 +39,21 @@ replaced. Claim locations therefore map back to the original export as the ident
 lets labels written against the original score a blinded run.
 
 Structure. A replacement is written into a file as text, without quoting, so an edit of a JSON,
-TOML, or INI display file (``.json``, ``.toml``, ``.ini``, ``.cfg``) is verified against the file's
-own syntax before it is accepted: the file is parsed before and after, and the result must parse to
-the original's value with the reviewed replacements applied to its keys and strings and nothing
-else, the same keys in the same order, of the same types, nested the same way
-(:func:`_check_parsed`). JSON must be strict, an original that does not parse cannot be verified,
+TOML, INI, or YAML display file (``.json``, ``.toml``, ``.ini``, ``.cfg``, ``.yml``, ``.yaml``) is
+verified against the file's own syntax before it is accepted: the file is parsed before and after,
+and the result must parse to the original's value with the reviewed replacements applied to its keys
+and strings and nothing else, the same keys in the same order, of the same types, nested the same
+way (:func:`_check_parsed`). JSON must be strict, an original that does not parse cannot be verified,
 and a replacement that makes two distinct keys equal is refused. An INI file is also read the ways
 Python's ``configparser`` reads one (option names folded to lower case, ``[DEFAULT]`` merged into
 each section, ``%`` and ``${}`` interpolation) and must read under each way that can read the
-original as the original does (:func:`_check_ini_readings`). Documentation is not asked for
-structure, and no other display file is verified.
+original as the original does (:func:`_check_ini_readings`). YAML is verified only within a strict
+block subset: block mappings and sequences of one-line plain and quoted scalars, and comments.
+:func:`_parse_yaml` reads it as PyYAML and ruamel.yaml (YAML 1.2 and 1.1) do, and keeps a plain scalar
+that either YAML version reads as a boolean, a null, a number, or a date as the text it was written
+as, so a replacement that turns a string into one is refused. A YAML file outside the subset, valid
+YAML or not, cannot be verified, and its edit is refused. Documentation is not asked for structure,
+and no other display file is verified.
 
 What this does not do: parse source, discover identity cues on its own, decide whether a field is
 read at runtime (a ``display_metadata`` edit carries the reviewer's stated ``role_check`` for that),
@@ -61,12 +66,13 @@ from __future__ import annotations
 import configparser
 import copy
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fnmatch
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import stat
 import tomllib
@@ -427,8 +433,8 @@ def _replaced(text: str, spans: list[tuple[int, int, str]], replacement_of: dict
 class _Edit:
     """One edit as it applies to one variant, computed and verified before anything is written.
 
-    *structure_check* names how a display file's structure was verified (``json``, ``toml``, or
-    ``ini``), and is ``None`` for a file that is not verified by parsing.
+    *structure_check* names how a display file's structure was verified (``json``, ``toml``,
+    ``ini``, or ``yaml``), and is ``None`` for a file that is not verified by parsing.
     """
 
     edit_id: str
@@ -462,12 +468,13 @@ def _variant(document: dict, snapshot_id: str, commit: str) -> dict:
 # A replacement is written into a file as text, with no quoting and no escaping, so one that holds a
 # quotation mark, a backslash, a colon, or a bracket can turn valid configuration into invalid or
 # different configuration, and the hash, occurrence, and line checks cannot see it. Every edit of a
-# JSON, TOML, or INI file is therefore verified by parsing the file before and after.
+# JSON, TOML, INI, or YAML file is therefore verified by parsing the file before and after.
 
 
 # The check an edit of each suffix gets, as the preparation record names it. Suffixes are read without
 # regard to case, as :func:`path_class_gap` reads them.
-_STRUCTURE_CHECKS = {".json": "json", ".toml": "toml", ".ini": "ini", ".cfg": "ini"}
+_STRUCTURE_CHECKS = {".json": "json", ".toml": "toml", ".ini": "ini", ".cfg": "ini", ".yml": "yaml",
+                     ".yaml": "yaml"}
 # What the preparation record says each check verified, on one line.
 _STRUCTURE_DETAILS = {
     "json": "parsed as strict JSON before and after; the result is the original with only the reviewed "
@@ -477,6 +484,9 @@ _STRUCTURE_DETAILS = {
     "ini": "parsed as INI before and after, as written and as Python's configparser reads it (option names folded "
            "to lower case, [DEFAULT] merged into each section, % and ${} interpolation); the result is the original "
            "with only the reviewed replacements applied to its section names, option names, and values",
+    "yaml": "parsed as the YAML block subset before and after; the result is the original with only the reviewed "
+            "replacements applied to its keys and strings, and every replaced plain scalar still reads as a string "
+            "under YAML 1.1 and 1.2",
 }
 
 
@@ -547,10 +557,415 @@ def _parse_ini(text: str, prefixes: tuple[str, ...] | None = None) -> Any:
                   for name in parser.sections())
 
 
+# YAML is read through a strict block subset rather than checked by lexical rules. A replacement written into a YAML
+# file unquoted can open a flow collection, an anchor, a tag, or a block scalar, end a value at a comment, or turn a
+# string into a boolean, a null, a number, or a date, and no list of characters finds every way to do that without
+# also refusing the common safe ones (a copyright line holding HTML, a description holding ``*`` or a backtick). So a
+# YAML edit is verified like the others, by parsing before and after, but only for text the parser below reads
+# exactly: for every text it accepts, PyYAML (YAML 1.1) and ruamel.yaml (YAML 1.2, and its 1.1 mode) load the same
+# keys, in the same order, nested the same way, with the same strings. A file outside the subset is refused, however
+# valid YAML it is, because nothing can then be said of how an edit of it reads.
+
+
+# Nesting of collections deeper than this is outside the subset.
+_YAML_DEPTH = 64
+# The longest a key may run, from its first character to its colon: readers refuse an implicit key that is longer.
+_YAML_KEY_LENGTH = 1024
+# The longest a scalar that readers resolve as a number or date may be: they refuse an integer of more than 4300 digits.
+_YAML_NUMBER_LENGTH = 4000
+# What a line may not hold anywhere: a control character, a line break other than LF (a CR is one, unless it ends the
+# line before the LF), a surrogate, a non-character, and a byte-order mark after the first character. YAML 1.1 and
+# 1.2 disagree about several of these, and readers refuse or strip the others.
+_YAML_FORBIDDEN = re.compile("[\x00-\x08\x0a-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff\ufeff\ufffe\uffff]")
+# A key's colon: one followed by a space or the end of the line.
+_YAML_KEY_COLON = re.compile(r":(?= |\Z)")
+# What may not start a scalar of this subset, and what it would be.
+_YAML_INDICATORS = {
+    "[": "a flow collection ('[')", "{": "a flow collection ('{')", "]": "a flow indicator (']')",
+    "}": "a flow indicator ('}')", ",": "a flow indicator (',')", "&": "an anchor ('&')", "*": "an alias ('*')",
+    "!": "a tag ('!')", "|": "a block scalar ('|')", ">": "a block scalar ('>')",
+    "%": "a reserved indicator ('%')", "@": "a reserved indicator ('@')",
+    "`": "a reserved indicator ('`')", "?": "an explicit key, or a scalar starting with '?'",
+    "-": "a scalar starting with '-'", ":": "a scalar starting with ':'",
+}
+# The escapes of a double-quoted scalar, and the lengths of those that hold a code point.
+_YAML_ESCAPES = {"0": "\0", "a": "\a", "b": "\b", "t": "\t", "n": "\n", "v": "\v", "f": "\f", "r": "\r", "e": "\x1b",
+                 " ": " ", '"': '"', "/": "/", "\\": "\\", "N": "\x85", "_": "\xa0", "L": "\u2028", "P": "\u2029"}
+_YAML_CODE_ESCAPES = {"x": 2, "u": 4, "U": 8}
+_YAML_QUOTE = re.compile(r'["\\]')
+
+# Timestamps as readers resolve them: a date, or a date and a time with a fraction and an offset.
+_YAML_DATE = re.compile("([0-9]{4})-([0-9]{2})-([0-9]{2})")
+_YAML_DATETIME = re.compile("([0-9]{4})-([0-9]{1,2})-([0-9]{1,2})(?:[Tt]| +)([0-9]{1,2}):([0-9]{2}):([0-9]{2})"
+                            "(?:\\.([0-9]*))?(?: *(?:Z|([-+])([0-9]{1,2})(?::([0-9]{2}))?))?")
+# Every plain scalar that YAML 1.1 (PyYAML, ruamel.yaml's 1.1 mode) or the YAML 1.2 core schema (ruamel.yaml) reads as
+# something other than a string: null, the booleans (1.1 adds y, n, yes, no, on, off), integers (binary, octal,
+# hexadecimal, underscores, and 1.1's base 60), floats (an exponent, underscores, .inf, .nan, base 60), and timestamps.
+# A scalar is a string only if neither reads it as anything else, so this is the union of both.
+_YAML_NON_STRING = re.compile("|".join((
+    "~|null|Null|NULL",
+    "[yYnN]|yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF",
+    "[-+]?0b[01_]+|[-+]?0o[0-7_]+|[-+]?0x[0-9a-fA-F_]+|[0-9][0-9_]*|[-+][0-9_]+",
+    "[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+",
+    "[-+]?[0-9][0-9_]*\\.[0-9_]*(?:[eE][-+]?[0-9]+)?|[-+]?[0-9][0-9_]*[eE][-+]?[0-9]+",
+    "[-+]?\\.[0-9_]+(?:[eE][-+][0-9]+)?|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\\.[0-9_]*",
+    "[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN)",
+    _YAML_DATE.pattern, _YAML_DATETIME.pattern)))
+# A number those readers resolve but have no digit to build: a sign, a base, or a dot and then only underscores.
+_YAML_NO_DIGITS = re.compile("[-+]?(?:0[box])?_+|[-+]?\\._+(?:[eE][-+]?[0-9]+)?")
+# A plain decimal number: no sign, leading zero, or underscore, so no reader reads it as another key's number.
+_YAML_DECIMAL = re.compile("0|[1-9][0-9]*")
+
+
+class _OutsideYaml(ValueError):
+    """Text the YAML subset does not read; the message names the line and the construct that is outside it."""
+
+    def __init__(self, number: int, what: str) -> None:
+        super().__init__(f"line {number}: {what} is outside the YAML subset read here")
+
+
+class _NonString:
+    """A plain YAML scalar that some reader reads as something other than a string, held as the text it was written as.
+
+    Null (an empty value too), a boolean, a number, or a date, which of them depending on the YAML version, so the text
+    is what is kept. Never a ``str``, so no reviewed replacement is applied to it, and :func:`_difference` compares the
+    type and the text.
+    """
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def __eq__(self, other: object) -> bool:
+        return type(other) is _NonString and other.text == self.text
+
+    def __hash__(self) -> int:
+        return hash((_NonString, self.text))
+
+    def __repr__(self) -> str:
+        return f"{self.text!r} (read as a non-string)"
+
+
+def _real_timestamp(text: str) -> bool:
+    """Whether *text*, if it is shaped like a timestamp, is a date, time, and offset a reader can build."""
+    match = _YAML_DATE.fullmatch(text) or _YAML_DATETIME.fullmatch(text)
+    if match is None:
+        return True
+    groups = match.groups()
+    try:
+        datetime(*(int(part) for part in groups[:6]))
+        if len(groups) > 7 and groups[7]:
+            offset = timedelta(hours=int(groups[8]), minutes=int(groups[9] or 0))
+            timezone(-offset if groups[7] == "-" else offset)
+    except ValueError:
+        return False
+    return True
+
+
+def _yaml_plain(number: int, text: str) -> str | _NonString:
+    """A plain scalar's value: *text* itself when every reader reads it as a string, else a :class:`_NonString`.
+
+    Outside the subset: a tab, the YAML 1.1 merge and value indicators (``<<`` and ``=``, which most readers cannot load
+    as a value), and a scalar that readers resolve as a number or date and then cannot build one from.
+    """
+    if "\t" in text:
+        raise _OutsideYaml(number, "a tab outside a comment")
+    if text in ("<<", "="):
+        raise _OutsideYaml(number, f"the scalar {text!r}, a YAML 1.1 merge or value indicator")
+    if not _YAML_NON_STRING.fullmatch(text):
+        return text
+    if len(text) > _YAML_NUMBER_LENGTH or _YAML_NO_DIGITS.fullmatch(text) or not _real_timestamp(text):
+        raise _OutsideYaml(number, f"the scalar {text[:40]!r}, which readers take for a number or a date and cannot "
+                                   "load")
+    return _NonString(text)
+
+
+def _yaml_single(number: int, content: str) -> tuple[str, int]:
+    """The single-quoted scalar at the start of *content*, and the offset after its closing quote; ``''`` is a quote."""
+    pieces, at = [], 1
+    while True:
+        end = content.find("'", at)
+        if end == -1:
+            raise _OutsideYaml(number, "a quoted scalar that does not close on its line (a multi-line scalar)")
+        if content.startswith("'", end + 1):
+            pieces.append(content[at:end + 1])
+            at = end + 2
+        else:
+            pieces.append(content[at:end])
+            return "".join(pieces), end + 1
+
+
+def _yaml_double(number: int, content: str) -> tuple[str, int]:
+    """The double-quoted scalar at the start of *content* with its escapes decoded, and the offset after its quote."""
+    pieces, at = [], 1
+    while True:
+        found = _YAML_QUOTE.search(content, at)
+        if found is None:
+            raise _OutsideYaml(number, "a quoted scalar that does not close on its line (a multi-line scalar)")
+        pieces.append(content[at:found.start()])
+        if found.group() == '"':
+            return "".join(pieces), found.end()
+        letter = content[found.end():found.end() + 1]
+        at = found.end() + 1
+        if not letter:
+            raise _OutsideYaml(number, "a backslash at the end of a line (a multi-line scalar)")
+        if letter in _YAML_ESCAPES:
+            pieces.append(_YAML_ESCAPES[letter])
+        elif letter in _YAML_CODE_ESCAPES:
+            width = _YAML_CODE_ESCAPES[letter]
+            digits = content[at:at + width]
+            if len(digits) != width or any(digit not in "0123456789abcdefABCDEF" for digit in digits):
+                raise _OutsideYaml(number, f"the escape '\\{letter}' without {width} hexadecimal digits")
+            code = int(digits, 16)
+            if 0xD800 <= code <= 0xDFFF or code > 0x10FFFF:
+                raise _OutsideYaml(number, f"the escape '\\{letter}{digits}', which is not a Unicode scalar value")
+            pieces.append(chr(code))
+            at += width
+        else:
+            raise _OutsideYaml(number, f"the escape '\\{letter}'")
+
+
+def _yaml_start(number: int, content: str) -> tuple[str, str | _NonString, str]:
+    """Read the scalar at the start of *content*, which does not start with a space.
+
+    Returns ``("key", key, after)`` when *content* starts ``KEY:`` and then holds the end of its line or a space,
+    *after* being what follows the colon, and ``("scalar", value, rest)`` otherwise, *rest* being what follows the
+    scalar on its line, which is its comment. Text after a quoted scalar that is not a comment or a key's colon is
+    refused here.
+    """
+    first = content[0]
+    if first in "\"'":
+        value, end = (_yaml_double if first == '"' else _yaml_single)(number, content)
+        if "\t" in content[:end]:
+            raise _OutsideYaml(number, "a tab outside a comment")
+        tail = content[end:]
+        bare = tail.lstrip(" ")
+        if bare.startswith(":") and (len(bare) == 1 or bare[1] == " "):
+            return "key", value, bare[1:]
+        if tail and not (tail[0] == " " and (not bare or bare[0] == "#")):
+            raise _OutsideYaml(number, "text after a quoted scalar")
+        return "scalar", value, tail
+    if first in _YAML_INDICATORS:
+        raise _OutsideYaml(number, _YAML_INDICATORS[first])
+    colon, comment = _YAML_KEY_COLON.search(content), content.find(" #")
+    if colon is not None and (comment == -1 or colon.start() < comment):
+        return "key", _yaml_plain(number, content[:colon.start()].rstrip(" ")), content[colon.end():]
+    text = (content if comment == -1 else content[:comment]).rstrip(" ")
+    return "scalar", _yaml_plain(number, text), "" if comment == -1 else content[comment:]
+
+
+def _yaml_dash(content: str) -> bool:
+    """Whether *content* starts a block sequence entry: a dash that ends the line or is followed by a space."""
+    return content[0] == "-" and (len(content) == 1 or content[1] == " ")
+
+
+def _yaml_character(character: str) -> str:
+    if character == "\r":
+        return "a carriage return that does not end a line"
+    if character == "\ufeff":
+        return "a byte-order mark inside the text"
+    return f"the character U+{ord(character):04X}, which readers disagree on or refuse"
+
+
+def _yaml_lines(text: str) -> list[list]:
+    """The lines of *text* that hold more than spaces and a comment, each as ``[number, indent, content]``.
+
+    A byte-order mark at the start is dropped, and a carriage return before a line feed is part of the break. The
+    ``---`` that may start the document, alone on its line, is dropped too; a second one, and ``...``, are refused.
+    """
+    lines: list[list] = []
+    started = False
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    for number, raw in enumerate(text.split("\n"), 1):
+        line = raw[:-1] if raw.endswith("\r") else raw
+        bad = _YAML_FORBIDDEN.search(line)
+        if bad:
+            raise _OutsideYaml(number, _yaml_character(bad.group()))
+        content = line.lstrip(" ")
+        if not content or content[0] == "#":
+            continue
+        indent = len(line) - len(content)
+        if indent == 0 and content[0] == "%":
+            raise _OutsideYaml(number, "a directive ('%')")
+        if indent == 0 and content[:3] in ("---", "..."):
+            if content[:3] == "...":
+                raise _OutsideYaml(number, "a line starting with '...' (a document end marker)")
+            if started:
+                raise _OutsideYaml(number, "a second '---' (a document start marker)")
+            rest = content[3:]
+            if rest[:1] not in ("", " ") or rest.lstrip(" ")[:1] not in ("", "#"):
+                raise _OutsideYaml(number, "content after '---' on its line")
+            started = True
+            continue
+        started = True
+        lines.append([number, indent, content])
+    return lines
+
+
+class _YamlKeys:
+    """The keys of one mapping as they are read, refusing a key that a reader may read as one already there.
+
+    Two strings are one key when they are equal. A plain scalar that is not a string is one key with another, or with a
+    string, when some reader reads them alike: ``yes`` and ``true`` are both true to YAML 1.1, ``1`` and ``0x1`` are one
+    number, and ``no`` is the string ``no`` to YAML 1.2. So such a key is accepted only alone in its mapping, or among
+    plain decimal numbers, which no reader reads as any other key.
+    """
+
+    def __init__(self) -> None:
+        self.strings: set[str] = set()
+        self.plain: set[str] = set()
+        self.numbers = True
+
+    def add(self, number: int, key: str | _NonString) -> None:
+        text = key if isinstance(key, str) else key.text
+        decimal = _YAML_DECIMAL.fullmatch(text) is not None
+        if isinstance(key, str):
+            duplicate = text in self.strings
+            clash = text in self.plain and not decimal
+            self.strings.add(text)
+        else:
+            self.numbers = self.numbers and decimal
+            duplicate = text in self.plain
+            clash = (text in self.strings and not decimal) or (bool(self.plain) and not self.numbers)
+            self.plain.add(text)
+        if duplicate:
+            raise _OutsideYaml(number, f"the duplicate key {text!r}")
+        if clash:
+            raise _OutsideYaml(number, f"the key {text!r}, which a reader may read as the same key as another in its "
+                                       "mapping")
+
+
+class _YamlReader:
+    """The block collections of a document's lines, read in one pass; each line is handled once."""
+
+    def __init__(self, lines: list[list]) -> None:
+        self.lines = lines
+        self.at = 0
+
+    def line(self) -> list | None:
+        return self.lines[self.at] if self.at < len(self.lines) else None
+
+    def node(self, column: int, depth: int) -> Any:
+        """The collection that starts at the current line, which is at *column*: a sequence if it is an entry."""
+        return (self.sequence if _yaml_dash(self.lines[self.at][2]) else self.mapping)(column, depth)
+
+    def mapping(self, column: int, depth: int) -> _Pairs:
+        """The block mapping whose keys are at *column*, from the current line to the first line outside it."""
+        if depth > _YAML_DEPTH:
+            raise _OutsideYaml(self.lines[self.at][0], f"nesting deeper than {_YAML_DEPTH} levels")
+        pairs: list[tuple[Any, Any]] = []
+        keys = _YamlKeys()
+        while True:
+            line = self.line()
+            if line is None or line[1] < column:
+                break
+            number, indent, content = line
+            if indent > column:
+                raise _OutsideYaml(number, "a line more indented than the entries before it (a multi-line scalar, "
+                                           "or misaligned indentation)")
+            if _yaml_dash(content):
+                raise _OutsideYaml(number, "a sequence entry among mapping entries")
+            kind, key, after = _yaml_start(number, content)
+            if kind != "key":
+                raise _OutsideYaml(number, "a line that is not a 'key: value' entry (a scalar on its own line, or a "
+                                           "key without ':')")
+            if len(content) - len(after) - 1 > _YAML_KEY_LENGTH:   # where the colon is, counted from the key's start
+                raise _OutsideYaml(number, f"a key longer than {_YAML_KEY_LENGTH} characters")
+            keys.add(number, key)
+            pairs.append((key, self.value(number, column, after, depth)))
+        return _Pairs(pairs)
+
+    def value(self, number: int, column: int, after: str, depth: int) -> Any:
+        """The value of the key just read, whose line holds *after* beyond its colon, and whose key is at *column*."""
+        body = after.lstrip(" ")
+        if body and body[0] != "#":
+            kind, scalar, _ = _yaml_start(number, body)
+            if kind == "key":
+                raise _OutsideYaml(number, "a ':' in a value (a mapping on the line of another key)")
+            self.at += 1
+            return scalar
+        self.at += 1
+        following = self.line()
+        if following is not None:
+            if following[1] > column:
+                return self.node(following[1], depth + 1)
+            if following[1] == column and _yaml_dash(following[2]):
+                return self.sequence(column, depth + 1)   # a sequence level with its key is that key's value
+        return _NonString("")
+
+    def sequence(self, column: int, depth: int) -> list:
+        """The block sequence whose dashes are at *column*, from the current line to the first line outside it."""
+        if depth > _YAML_DEPTH:
+            raise _OutsideYaml(self.lines[self.at][0], f"nesting deeper than {_YAML_DEPTH} levels")
+        items = []
+        while True:
+            line = self.line()
+            if line is None or line[1] < column:
+                break
+            number, indent, content = line
+            if indent > column:
+                raise _OutsideYaml(number, "a line more indented than the entries before it (a multi-line scalar, "
+                                           "or misaligned indentation)")
+            if not _yaml_dash(content):
+                break
+            items.append(self.item(line, column, depth))
+        return items
+
+    def item(self, line: list, column: int, depth: int) -> Any:
+        """The value of the sequence entry on *line*, whose dash is at *column*."""
+        number, _, content = line
+        body = content[1:].lstrip(" ")
+        if not body or body[0] == "#":
+            self.at += 1
+            following = self.line()
+            if following is not None and following[1] > column:
+                return self.node(following[1], depth + 1)
+            return _NonString("")
+        if _yaml_dash(body):
+            raise _OutsideYaml(number, "a sequence on the line of its entry ('- -')")
+        # What follows the dash is a line of its own, at its own column: a key that starts a mapping whose other keys
+        # are at that column, or a scalar.
+        line[1], line[2] = column + len(content) - len(body), body
+        kind, scalar, _ = _yaml_start(number, body)
+        if kind == "key":
+            return self.mapping(line[1], depth + 1)
+        self.at += 1
+        return scalar
+
+
+def _parse_yaml(text: str) -> Any:
+    """*text* as the YAML subset this module reads: block mappings and sequences of one-line plain or quoted scalars.
+
+    A mapping is :class:`_Pairs` of its keys and values in order, a sequence a list, a quoted scalar a string, a plain
+    scalar a string when no reader reads it as anything else, and otherwise a :class:`_NonString` of its text. A key
+    with nothing after it, and an empty document, are the empty :class:`_NonString`, null. Anything else raises
+    :class:`_OutsideYaml` naming the line and the construct: a flow collection, an anchor, an alias, a tag, a block
+    scalar, a directive, a second document, an explicit key, a merge key, a duplicate key, a scalar that goes on to
+    the next line, a tab, a control character, a nesting deeper than 64 levels, and whatever else the subset leaves
+    out, which includes valid YAML. Guaranteed for what this returns: PyYAML, and ruamel.yaml in YAML 1.2 and in 1.1,
+    load the same keys, in order, nested the same way, and the same strings, and a scalar they read as other than a
+    string is a :class:`_NonString`. Not guaranteed: anything about a text this refuses, or about how a YAML reader
+    other than those two reads a text it returns. The work is linear in the size of *text*.
+    """
+    lines = _yaml_lines(text)
+    if not lines:
+        return _NonString("")
+    reader = _YamlReader(lines)
+    root = reader.node(lines[0][1], 1)
+    if reader.at < len(lines):
+        raise _OutsideYaml(lines[reader.at][0], "a line that continues no collection (misaligned indentation)")
+    return root
+
+
 # For each parsed check: what the refusal calls the format, what the original must be, and how to read it.
 _PARSERS = {"json": ("JSON", "strict JSON", _parse_json),
             "toml": ("TOML", "valid TOML", _parse_toml),
-            "ini": ("INI", "a valid INI file", _parse_ini)}
+            "ini": ("INI", "a valid INI file", _parse_ini),
+            "yaml": ("YAML within the subset this module reads",
+                     "in the YAML subset this module reads (block mappings and sequences of one-line plain or quoted "
+                     "scalars, and comments)", _parse_yaml)}
 # What a parser raises for text it cannot read: its own error, or a nesting deeper than Python recurses.
 _PARSE_ERRORS = (ValueError, configparser.Error, RecursionError)
 
@@ -570,20 +985,21 @@ def _shown(value: Any, limit: int = 80) -> str:
 
 def _kind(value: Any) -> str:
     named = {_Defaults: "the defaults section", _Pairs: "a mapping", list: "a list", str: "a string",
-             bool: "a boolean", int: "an integer", float: "a float", type(None): "null"}
+             bool: "a boolean", int: "an integer", float: "a float", type(None): "null", _NonString: "a plain scalar"}
     return named.get(type(value)) or f"a {type(value).__name__} value"
 
 
 def _at(path: tuple) -> str:
     """Where in a parsed file: ``$`` is the whole, ``$['a'][0]`` the first item of the value at the key ``a``."""
-    return "$" + "".join(f"[{part!r}]" for part in path)
+    return "$" + "".join(f"[{(part.text if isinstance(part, _NonString) else part)!r}]" for part in path)
 
 
 def _rewritten(value: Any, rewrite: Callable[[str], str], where: str, path: tuple = ()) -> Any:
     """*value* with *rewrite* applied to every string it holds, keys included, as the raw edit did to the text.
 
-    Refused where two keys of one mapping that differ become the same key: a reader would keep one
-    of the two entries or merge them, which no reviewed replacement said.
+    A value or key that is not a string is left as it is. Refused where two keys of one mapping that
+    differ become the same key: a reader would keep one of the two entries or merge them, which no
+    reviewed replacement said.
     """
     if isinstance(value, str):
         return rewrite(value)
@@ -591,10 +1007,10 @@ def _rewritten(value: Any, rewrite: Callable[[str], str], where: str, path: tupl
         return [_rewritten(item, rewrite, where, path + (index,)) for index, item in enumerate(value)]
     if not isinstance(value, _Pairs):
         return value
-    kept: dict[str, str] = {}
+    kept: dict[Any, Any] = {}
     pairs = []
     for key, item in value:
-        new = rewrite(key)
+        new = rewrite(key) if isinstance(key, str) else key
         if kept.setdefault(new, key) != key:
             raise _refused(f"{where}: the replacements make the keys {kept[new]!r} and {key!r} of the mapping at "
                            f"{_at(path)} the same key {new!r}, a duplicate that would merge two entries")
@@ -629,7 +1045,7 @@ def _difference(expected: Any, found: Any, path: tuple = ()) -> str | None:
                 return inner
         return None
     # Floats and dates compare by what they print, which keeps NaN, the sign of a zero, and an offset.
-    if isinstance(expected, (str, int)) or expected is None:
+    if isinstance(expected, (str, int, _NonString)) or expected is None:
         same = expected == found
     else:
         same = repr(expected) == repr(found)
@@ -850,8 +1266,8 @@ def _edit_for(document: dict, edit: dict, snapshot_id: str, source: Path, hashes
             or len(text.splitlines()) != len(new_text.splitlines())):
         raise _refused(f"{where}: the replacement would move a line, so claim locations could not be "
                        "mapped back to the original export")
-    # A JSON, TOML, or INI display file must also keep its structure, as a parser reads it. Anything
-    # else is not asked.
+    # A JSON, TOML, INI, or YAML display file must also keep its structure, as a parser reads it.
+    # Anything else is not asked.
     check = _structure_check_for(path)
     if check is not None:
         _check_parsed(check, where, text, new_text, originals, listed, replacement_of)
@@ -873,8 +1289,9 @@ BLINDED_LIMITS = [
     "and may still reveal the repository. It is not anonymization.",
     "Instruction files are never edited by blinding and are recorded as retained identity cues.",
     "The original export under original/source is evaluator-side and is never handed to a scanner.",
-    "JSON, TOML, and INI display files are verified by parsing them before and after the edit; nothing else a "
-    "scanner may read is re-validated.",
+    "JSON, TOML, INI, and YAML display files within the block subset read here are verified by parsing them before "
+    "and after the edit, and a YAML file outside that subset is refused; nothing else a scanner may read is "
+    "re-validated.",
 ]
 
 
