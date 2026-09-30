@@ -424,21 +424,24 @@ admission before evaluation, enforce it by checking the pack, not by relying on 
 ### The run configuration
 
 `scaneval run CONFIG --output DIR` executes one frozen configuration. The contract is
-`src/scaneval/schemas/run-config.schema.json`.
+`src/scaneval/schemas/run-config.schema.json` at 2.0 and `run-config-2.1.schema.json` at 2.1.
 
 | Field | Required | Meaning |
 |---|---|---|
-| `schema_version` | yes | `"2.0"`. |
+| `schema_version` | yes | `"2.0"` or `"2.1"`. Fields marked 2.1 below need `"2.1"`. |
 | `run_id` | yes | Matches `^[A-Za-z0-9][A-Za-z0-9._-]*$`. |
 | `pack` | yes | Path to the case pack, relative to the configuration file. |
 | `cache_root` | no | Immutable source cache, relative to the configuration file. Default `.repos`. |
 | `inputs[].snapshot_id` | yes | A snapshot the pack declares. Refused before anything is written otherwise. |
+| `inputs[].input_id` | no, 2.1 | Names the input's directory and invocations; never shown to a scanner. Defaults to the snapshot id, with `.blinded` appended for a blinded input. |
+| `inputs[].mode` | no, 2.1 | `full` (default). `pr` is refused when the configuration is read: this build cannot prepare a native PR input, and a full scan of the head never stands in for one. |
 | `inputs[].profile` | no | `standard` (default) or `metadata_blinded`. |
 | `systems[].system_id` | yes | Matches `^[A-Za-z0-9][A-Za-z0-9._-]*$`. |
 | `systems[].adapter` | yes | `semgrep`, `llm-harness`, or `deepsec` in this build. |
 | `systems[].config` | yes | Adapter configuration. For `semgrep` this pins a rules repository by url, commit, and paths; for `deepsec` it names the installed workspace and the model. See the [example configuration](../corpus/pilot/run-deepsec.json). |
 | `systems[].model_id`, `model_revision` | no | Recorded in the scan request and the execution record. |
 | `systems[].network_policy` | no | Overrides the run-level policy for this system. |
+| `systems[].execution` | no, 2.1 | `{"backend": "local"}` by default. A system configured for another backend is recorded as skipped, with the reason, rather than run without it. |
 | `repetitions` | yes | Integer of at least 1. |
 | `timeout_seconds` | yes | Number greater than 0. |
 | `trace_mode` | yes | `off`, `metadata`, or `content`. |
@@ -479,15 +482,18 @@ $SB run "$BYOC/run-local.json" --output "$BYOC/runs/2026-09-20" --workspace-root
 ```
 reporting-main__semgrep-local-rules__r1 status=success claims=1 plan=reviewed review=draft
 Manifest: /private/tmp/byoc/runs/2026-09-20/run-manifest.json
+Schedule: /private/tmp/byoc/runs/2026-09-20/evaluator/schedule.json
 ```
 
 `--output` must not exist. `--workspace-root` must exist and must resolve outside the run output,
 the source cache, and every exported input; a workspace root that does not exist fails the run.
-`--only-input` and `--only-system` narrow the run and are refused when they name something the
-configuration does not contain. What was narrowed away is recorded in the manifest's `selection`.
+`--only-input` (input ids) and `--only-system` narrow the run and are refused when they name
+something the configuration does not contain. What was narrowed away is recorded in the manifest's
+`selection` and in the schedule's notes.
 
-`run` exits `1`, not `0`, when any invocation ended in `error`, `timeout`, or `skipped`, or when
-the manifest status is not `completed`. The bundles it did produce are still there.
+`run` exits `1`, not `0`, when any input could not be prepared, when any invocation ended in
+`error`, `timeout`, or `skipped`, or when the manifest status is not `completed`. The bundles it
+did produce are still there.
 
 ### The run directory
 
@@ -495,6 +501,7 @@ the manifest status is not `completed`. The bundles it did produce are still the
 runs/2026-09-20/
   run-config.json                      canonical copy of the configuration that was executed
   run-manifest.json                    what ran, what was skipped, where every artifact landed
+  evaluator/schedule.json              every assignment, pre-registered plan, and pair, frozen first
   evaluator/pack.json                  the pack copy this run froze, with its check results
   inputs/reporting-main/provenance.json
   inputs/reporting-main/source/        the exported tree
@@ -510,9 +517,10 @@ runs/2026-09-20/
     evaluator/review-record.json
 ```
 
-`trace/` appears in the bundle as well when `trace_mode` is not `off`. The invocation id is
-`<input>__<system>__r<repetition>`; a configuration whose ids would collide is refused before the
-output directory is created.
+`trace/` appears in the bundle as well when `trace_mode` is not `off`. An input's directory is
+named by its input id, which for a 2.0 configuration is its snapshot id. The invocation id is
+`<input id>__<system>__r<repetition>`; a configuration whose ids would collide is refused before
+the output directory is created.
 
 A bundle that carries a trace answers one question the scores do not. `scaneval diagnose
 context-coverage <bundle>` reports, per labeled target, whether that target's code region was
@@ -527,17 +535,37 @@ copy at `evaluator/pack.json`, which is written once, after every input is prepa
 first invocation. That frozen copy is the pack a later `review init` must be given, because the
 re-run checks give the frozen copy a different hash from the pack file on disk.
 
-Once the output directory exists, every later failure is recorded there. A run refused for an
-unimplemented input profile still leaves a manifest:
+`evaluator/schedule.json` is written before the first input is fetched, so nothing the run
+observes can change what it was assigned. It lists every assignment under the invocation id its
+bundle will carry, the plan the pack gives each input before execution when the snapshot already
+declares its tree hash, and the vulnerable/fixed pairs matched in advance. An assignment that later
+fails stays in it, and in every denominator built from it.
+
+An input that cannot be prepared is recorded against that input, and the run goes on without it:
+its assignments become skipped invocations naming the failure, no scanner is called for it, and
+`run` exits `1`. Here a second snapshot pins a commit the mirror no longer has:
 
 ```
-$ $SB run "$BYOC/run-blinded.json" --output "$BYOC/runs/blinded" --workspace-root "$BYOC/workspaces"
-scaneval: metadata blinding unavailable: no reviewed replacement map was supplied
-exit=2
+$ $SB run "$BYOC/run-gone.json" --output "$BYOC/runs/gone" --workspace-root "$BYOC/workspaces"
+reporting-main__semgrep-local-rules__r1 status=success claims=1 plan=draft review=draft
+reporting-gone__semgrep-local-rules__r1 status=skipped claims=None plan=None review=None
+Manifest: /private/tmp/byoc/runs/gone/run-manifest.json
+Schedule: /private/tmp/byoc/runs/gone/evaluator/schedule.json
+scaneval: input reporting-gone could not be prepared: MaterializationError: git checkout -q --detach 0000000000000000000000000000000000000001 failed (128): fatal: unable to read tree (0000000000000000000000000000000000000001)
+scaneval: no usable scan from 1 invocation(s): reporting-gone__semgrep-local-rules__r1
+exit=1
 
-$ jq -c '{status, failure}' "$BYOC/runs/blinded/run-manifest.json"
-{"status":"failed","failure":{"message":"metadata blinding unavailable: no reviewed replacement map was supplied","type":"MaterializationError"}}
+$ jq -c '{status, schedule_path}' "$BYOC/runs/gone/run-manifest.json"
+{"status":"completed","schedule_path":"evaluator/schedule.json"}
+
+$ jq -c '[.assignments[].assignment_id]' "$BYOC/runs/gone/evaluator/schedule.json"
+["reporting-gone__semgrep-local-rules__r1","reporting-main__semgrep-local-rules__r1"]
 ```
+
+The manifest's row for `reporting-gone` carries `preparation_failure` with that type and message,
+and null tree and input hashes. Its plan in the schedule is `unavailable`, because the snapshot
+declared no tree hash before the run. Any other failure once the output directory exists, an
+interrupt included, leaves a manifest with status `failed`.
 
 ### Draft scope
 
@@ -690,8 +718,8 @@ These are limits of the current implementation, not guarantees about your enviro
 - **No Jev intake assistance.** There is no Jev code in `src/`. No command suggests
   classifications, evidence gaps, duplicates, or fix candidates. Drafting and review are manual.
 - **No native PR mode through this path.** `plan --mode pr` only selects the pack's `pr` review
-  budgets and records `"mode": "pr"`. The runner always plans in `full` mode, and no run
-  configuration field asks an adapter for a diff review, so no PR invocation can be produced here.
+  budgets and records `"mode": "pr"`. A 2.1 run configuration can name a PR input, and the run
+  refuses it when the configuration is read, so no PR invocation can be produced here.
 - **No corpus aggregation or cross-pack weighting.** The runner produces single-invocation numbers
   only. Nothing combines inputs, systems, repetitions, or packs, and nothing weights families or
   computes repeated-run uncertainty. Private and public results are separate because nothing
@@ -715,5 +743,9 @@ These are limits of the current implementation, not guarantees about your enviro
 
 Every command and every output in this guide was produced with `scaneval 2.0.0a1` on 2026-09-20,
 against a throwaway pack under `/private/tmp/byoc` whose snapshot source and whose Semgrep ruleset
-were both local `git init` repositories. Nothing in the transcript reached the network. Re-check
-these behaviors against the current checkout rather than treating this guide as a guarantee.
+were both local `git init` repositories. Nothing in the transcript reached the network. The
+schedule and preparation-failure transcripts in section 6 were produced on 2026-09-29 the same way,
+against a pack of the same shape in another temporary directory, with paths shown under
+`/private/tmp/byoc`; the `Schedule:` line in the first run transcript is the line `run` has printed
+since then. Re-check these behaviors against the current checkout rather than treating this guide
+as a guarantee.

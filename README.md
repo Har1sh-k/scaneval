@@ -60,6 +60,7 @@ Guides: [Observer SDK](docs/OBSERVER_SDK.md), [native CLI collectors](docs/COLLE
 ## Current limits
 
 - Full-scan execution, case packs, source export, review, scoring, replay, and reports are implemented.
+- Each run freezes its evaluation schedule (every assignment, pre-registered plan, and vulnerable/fixed pair) before it prepares an input. An input it cannot prepare is recorded with its skipped assignments, and the other inputs still run.
 - Only the `standard` input profile is supported. `metadata_blinded` is refused.
 - Native PR mode, SARIF import, corpus-level aggregation, precision sampling, promotion gates, and enforced isolation are not implemented.
 - The initial public workload is not selected. The pilot is an integration exercise, not a representative benchmark or scanner comparison.

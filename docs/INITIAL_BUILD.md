@@ -6,10 +6,10 @@ No benchmark results are published. Every case in the pilot pack carries mechani
 
 ## What works
 
-- Validate nine versioned JSON contracts: scan requests and results, evaluation plans, review decisions, execution records, case packs, review records, run configurations, and run manifests.
+- Validate ten versioned JSON contract kinds: scan requests and results, evaluation plans, review decisions, execution records, case packs, review records, run configurations, run manifests, and evaluation schedules.
 - Build an evaluator-side case pack: pin snapshots, draft cases from supplied artifacts, run mechanical (L1) checks against an exported tree, record explicit human reviews, admissions, and dispositions.
 - Fetch a pinned commit into an immutable source cache and export it to an isolated trial directory with a recorded tree hash and preparation provenance.
-- Execute a frozen run configuration: prepare every input, freeze the pack, invoke each system once per input per repetition, and write one bundle per invocation plus a run manifest.
+- Execute a frozen run configuration: freeze the evaluation schedule before any input exists, prepare every input, record an input that cannot be prepared against that input rather than stopping the run, freeze the pack, invoke each system once per input per repetition, and write one bundle per invocation plus a run manifest.
 - Run three real adapters: pinned Semgrep OSS against a local rules checkout, the own harness through its own engine entry point with the observer wrapped around its default model runner, and the third-party DeepSec scanner run unchanged through its own CLI.
 - Draft review decisions by routing claims to planned targets, then record and approve them through explicit human steps.
 - Score one saved output against all assigned targets and controls for that input, reporting full-output recall, first-hit ranks, native review-budget recall, exact duplicates, unresolved findings, and conditional control bounds.
@@ -62,9 +62,12 @@ Schemas ship inside [`src/scaneval/schemas`](../src/scaneval/schemas) and are th
 | `review-record` | Who produced a decisions file, its state, and the hashes it binds to. |
 | `case-pack` | Snapshots, cases, evidence, controls, check results, reviews, and admissions. |
 | `run-config` | A frozen run: pack, inputs, systems, repetitions, timeout, trace mode, network policy. |
-| `run-manifest` | What ran, what was skipped, and where every artifact landed. |
+| `run-manifest` | What ran, what was skipped, where every artifact landed, and each input's preparation outcome. |
+| `evaluation-schedule` | Every assignment, each input's pre-registered plan, and the vulnerable/fixed pairs of one run, frozen before any input is prepared. |
 
-The preparation record written beside an exported tree (`provenance.json`) is versioned but has no JSON Schema of its own and is not one of the nine kinds.
+A run configuration is read at 2.0 or 2.1, and every run writes a 2.1 manifest and a 2.1 schedule. A standard input named as its own snapshot keeps the 2.0 plan and 2.0 execution record it always had; a renamed input plans at 2.1. The schedule kind exists only at 2.1.
+
+The preparation record written beside an exported tree (`provenance.json`) is versioned but has no JSON Schema of its own and is not a contract kind.
 
 ## Materialization and the immutable cache
 
@@ -86,10 +89,13 @@ This is preparation and provenance, not a sandbox. Filesystem and network policy
 <out>/
   run-config.json          canonical copy of the configuration that was executed
   run-manifest.json        what ran, what was skipped, and where every artifact landed
+  evaluator/schedule.json  every assignment, pre-registered plan, and pair, written before any input
   evaluator/pack.json      the pack copy this run froze, with its mechanical check results
-  inputs/<snapshot>/       exported source tree plus preparation provenance beside it
+  inputs/<input id>/       exported source tree plus preparation provenance beside it
   invocations/<id>/        one bundle per input, system, and repetition
 ```
+
+An input is named by its input id: a 2.0 configuration's snapshot id, or a 2.1 configuration's `input_id`, which defaults to the snapshot id. Invocation ids are `<input id>__<system id>__r<repetition>`.
 
 Each invocation bundle holds:
 
@@ -107,7 +113,15 @@ Each invocation bundle holds:
   report.html              local report
 ```
 
-A scanner only ever sees a private workspace copy of one export. `raw/` and `trace/` are staged inside that workspace and moved into the bundle once the scan returns or raises, so no path handed to an adapter resolves inside the run directory. The source is hashed before and after the scan and `source_modified` records the comparison. An invocation that fails, times out, or hits an unsupported language keeps that status; it is never rewritten as an empty successful scan. Once the output directory exists, any later failure writes a manifest with status `failed` before the exception leaves the runner.
+A scanner only ever sees a private workspace copy of one export. `raw/` and `trace/` are staged inside that workspace and moved into the bundle once the scan returns or raises, so no path handed to an adapter resolves inside the run directory. The source is hashed before and after the scan and `source_modified` records the comparison. An invocation that fails, times out, or hits an unsupported language keeps that status; it is never rewritten as an empty successful scan.
+
+An input that cannot be prepared (a failed fetch or export, a declared tree hash the export contradicts) is recorded against that input. Its manifest row carries the failure's type and message, each of its assignments is a skipped invocation naming it, no adapter is called for it, and the other inputs still run. A run whose every input failed still completes, and `scaneval run` exits 1 for it. Any other failure once the output directory exists, an interrupt included, writes a manifest with status `failed` before the exception leaves the runner.
+
+### The evaluation schedule
+
+`evaluator/schedule.json` is written once, after `run-config.json` and before the first input is fetched, so nothing the run observes changes what it was assigned. It lists every assignment of a system to an input and a repetition under the invocation id its bundle will carry, including the assignments of an input that will fail preparation and of a system that will be skipped, so a failure cannot drop out of a denominator. Each input records the plan the pack gives it before execution, built from the tree hash its snapshot already declares, with each target's case, canonical id, kind, variant family, workload, component role, project, and level. A snapshot that declares no tree hash, or a pack that refuses to plan it, is recorded as `unavailable` with the reason, and that input's plan is first built when it runs. Vulnerable/fixed pairs are matched in advance: a target planned on one full-scan input with a fixed-target control of it planned on another full-scan input of the same profile, repetition by repetition. Systems record a digest of their configuration, their network policy, and the execution backend they declare.
+
+The schedule is a function of the configuration, the pack as supplied, and its creation time, and the manifest names it in `schedule_path`. It holds no outcome, and nothing reads it to aggregate yet.
 
 The declared network policy is recorded, never enforced. The runner computes single-invocation numbers only: no corpus weighting, repeated-run uncertainty, cross-system comparison, or promotion gate is computed anywhere.
 
@@ -189,13 +203,15 @@ A human edits `evaluator/decisions.json`. `review record` then re-drafts the rev
 
 A run configuration is a frozen document naming the pack, the inputs, the systems, the repetition count, the timeout, the trace mode, and the network policy. The three pilot configurations are [`corpus/pilot/run-semgrep.json`](../corpus/pilot/run-semgrep.json), [`corpus/pilot/run-harness.json`](../corpus/pilot/run-harness.json), and [`corpus/pilot/run-deepsec.json`](../corpus/pilot/run-deepsec.json). The DeepSec one names an installed DeepSec workspace with a leading `~`, so it expands to whichever operator runs it rather than pinning one machine.
 
-`--only-input` and `--only-system` narrow a run. Naming something the configuration does not contain is an error rather than a silently empty run, and what was narrowed away is recorded in the manifest. `--workspace-root` chooses where the scanner's private workspace is created; a workspace inside the run output, the source cache, or an exported input is refused.
+A 2.1 configuration can also name each input with `input_id` (its directory and invocation name, never shown to a scanner) and give a system an `execution` backend. A native PR input (`mode: pr`) is refused when the configuration is read: this build cannot prepare one, and a full scan of the head never stands in for it. A system configured for a backend other than `local` is recorded as a skipped system with the reason rather than run without it.
+
+`--only-input` (input ids) and `--only-system` narrow a run. Naming something the configuration does not contain is an error rather than a silently empty run, and what was narrowed away is recorded in the manifest and the schedule. `--workspace-root` chooses where the scanner's private workspace is created; a workspace inside the run output, the source cache, or an exported input is refused.
 
 ## CLI surface
 
 | Command | What it does | Network or model calls |
 |---|---|---|
-| `validate <kind> <path>` | Validate one of the nine contract kinds. | none |
+| `validate <kind> <path>` | Validate one of the ten contract kinds. | none |
 | `score --plan --result --decisions` | Score separately stored records. | none |
 | `replay <bundle>` | Recompute a saved bundle offline. | none |
 | `report <bundle> --output` | Score a bundle and render standalone HTML. | none |
@@ -216,7 +232,7 @@ A run configuration is a frozen document naming the pack, the inputs, the system
 | `run <config> --output <new dir>` | Execute one frozen run configuration. | depends on the configured systems |
 | `diagnose context-coverage <bundle>` | Report whether each labeled target's code was supplied to the model. Writes nothing into the bundle. | none |
 
-Exit codes: `2` means the command could not be carried out (a usage or contract error, a refused overwrite, a failed fetch or export). `1` means it ran and reports a negative result (a mechanical check set failed, or a run produced no usable scan from some system). `0` means it ran and reports nothing wrong, which is not a statement that any label or decision is correct.
+Exit codes: `2` means the command could not be carried out (a usage or contract error, a refused overwrite, a failed fetch or export). `1` means it ran and reports a negative result (a mechanical check set failed, a run could not prepare some input or produced no usable scan from some system). `0` means it ran and reports nothing wrong, which is not a statement that any label or decision is correct.
 
 No command writes inside a materialized trial directory, and every output path except a pack file and a review record is create-only.
 
@@ -277,6 +293,8 @@ Strict parsing rejects duplicate JSON keys, nonfinite numbers, escaping file pat
 - **Unknowns:** unmatched claims are not automatically false positives. This build does not estimate overall precision.
 - **Labels:** `diagnostic` plans allow only fixture labels; `reviewed` plans require declared L3/L4 labels; `draft` plans keep each item's real level and say in their scope that the plan as a whole is not reviewed evidence. Checking the field does not verify independent review.
 - **Packs:** a pack's self-consistency is checked, never its correctness. A pack that validates is consistent with itself: no check here reads source, a reviewer, or a scanner.
+- **Manifests:** an input with a recorded preparation failure has only skipped invocations, each with a reason and no bundle.
+- **Schedules:** the assignments are exactly every input under every system for every repetition, each named by its invocation id; a blinding identity appears exactly on blinded inputs; a pair joins a target and a fixed-target control of it on two full-scan inputs of one profile whose plans were frozen before execution.
 
 Scores use equal target/control weights within one input. Do not average them as a release score: corpus weighting, repeated-run aggregation, repository clustering, and promotion gates are not implemented. Zero denominators are `null` in JSON and N/A in HTML.
 
