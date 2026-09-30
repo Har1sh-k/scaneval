@@ -991,7 +991,9 @@ $ jq -c '.provenance.pr | {change_set_id, boundary, review_scope, diff_sha256, c
 Inside the scanner's workspace `git diff --name-status` between those two commits lists the same
 files: `A app/export.py`, `D app/legacy.py`, `M app/report.py`, `R100 lib/fmt.py lib/format.py`, and
 `M scripts/export.sh`. A rename is recorded only when the bytes are identical, and only when exactly
-one deleted path and one added path hold them. The commit ids are computed once in preparation and
+one deleted path and one added path hold them. A file moved and edited in the same change is
+recorded as a deletion and an addition; git's own rename detection may still pair the two, so the
+record matches `git diff --name-status --no-renames`, which lists every path either side touches. The commit ids are computed once in preparation and
 every workspace must reproduce them, or the invocation is refused before the scanner runs. Neither
 commit is a commit of your repository: the history holds the two trees, the identity
 `ScanEval <scaneval@localhost>`, and one fixed date.
