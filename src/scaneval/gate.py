@@ -1,0 +1,628 @@
+"""Deterministic promotion-gate decisions over a saved paired comparison.
+
+:func:`evaluate_gate` holds one comparison of a candidate against a baseline
+(:func:`scaneval.aggregate.compare`), and optionally a reviewed-precision estimate of each system
+(:func:`scaneval.precision.estimate`), to one gate policy, and returns a decision: an outcome and one
+record per requirement the policy declares. ``docs/GATE.md`` is the guide; this docstring states what
+is guaranteed and what is not.
+
+How the outcome is reached. A requirement is ``pass``, ``fail``, or ``inconclusive``, and reports
+``{id, status, observed, threshold, explanation}``. The outcome is ``fail`` when any requirement
+fails, else ``inconclusive`` when any is inconclusive, else ``pass``. Requirements are never weighed
+against one another: detection cannot compensate for noise, false alarms, burden, cost, or failed
+scans, and a strong figure on one requirement never turns another's failure into a pass. A requirement
+is inconclusive, never a pass, when what it needs is missing or cannot be trusted: an unavailable or
+unmeasurable metric, an interval that is not ``ok``, an aborted run, a difference the policy did not
+intend to measure, or evidence below the scope the policy requires. No absent figure is read as a
+perfect one.
+
+What is decided from what. Only the documents passed in: the policy, the comparison report, and the
+precision estimates. The decision is a function of them and of the evaluator version, so the same
+inputs give the same document byte for byte under :func:`scaneval.contracts.canonical_json`. Nothing
+here reads a clock, the network, a filesystem path, or an unseeded random source, and no model or
+judge is consulted. The comparison is read as recorded: nothing is recomputed from run directories,
+so the decision is exactly as trustworthy as the comparison it names, and it says which by digest.
+
+What the decision binds. Its policy is recorded whole beside its digest. The comparison, and each
+precision estimate that was supplied, are recorded by digest, with the digests of the manifest,
+schedule, and evidence of every run the comparison read and the evaluator versions involved. A
+digest identifies a document; it authenticates no author and proves no reviewer read anything.
+
+What this is not. It promotes nothing, edits no harness, and opens no change: the external workflow
+that owns the harness owns any promotion. A ``pass`` says every requirement the policy declares held
+on this comparison, not that the requirements were well chosen, that the corpus represents other
+software, or that a label is right. A requirement the policy leaves out is not evaluated, and the
+decision says which. The figures a requirement reads are whatever the comparison and the estimates
+recorded; they are compared with the policy's thresholds as written, with no tolerance of their own.
+"""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from os import PathLike
+from typing import Any, Callable
+
+from . import __version__
+from .contracts import (
+    GATE_BLOCKS,
+    ContractError,
+    canonical_json,
+    canonical_sha256,
+    gate_declared_blocks,
+    gate_requirement_ids,
+    load_document,
+    validate_document,
+)
+
+
+POLICY_KIND = "gate-policy"
+DECISION_KIND = "gate-decision"
+COMPARISON_KIND = "comparison-report"
+ESTIMATE_KIND = "precision-estimate"
+SCHEMA_VERSION = "2.1"
+
+PASS, FAIL, INCONCLUSIVE = "pass", "fail", "inconclusive"
+SIDES = ("baseline", "candidate")
+WHOLE_VIEW = {"dimension": "all"}
+# Evidence scopes, strongest first: a requirement for one scope is met by any scope before it.
+SCOPE_RANK = {"reviewed": 2, "draft": 1, "diagnostic": 0}
+# What a paired interval's state means for a requirement that needs one; only "ok" carries bounds.
+INTERVAL_STATES = {
+    "insufficient_clusters": "too few clusters carry the metric to resample it",
+    "degenerate": "every replicate agreed, which is not certainty",
+    "unstable": "some replicate drew no cluster carrying the metric",
+    "unavailable": "the metric is undefined",
+}
+
+Result = tuple[str, Any, Any, str]
+
+
+# --- policy -------------------------------------------------------------------------------------
+
+
+def resolve_policy(policy: dict) -> dict:
+    """The complete policy a decision is made under: *policy* with its optional fields filled in.
+
+    The policy is validated as written and again once completed, and the result is a new document:
+    *policy* is not modified. The only fields filled are the required evidence scope (``reviewed``)
+    and the notes (none), so the decision records the scope it was held to and never depends on a
+    default it does not show. No threshold is ever filled in. A policy whose primary metric is a
+    random-order expectation or any other diagnostic is refused by validation, here and wherever a
+    ``gate-policy`` is read.
+    """
+    validate_document(POLICY_KIND, policy)
+    completed = {"required_scope": "reviewed", "notes": [], **deepcopy(policy)}
+    return validate_document(POLICY_KIND, completed)
+
+
+def load_policy(path: str | PathLike[str]) -> dict:
+    """Load a gate-policy file and return it completed by :func:`resolve_policy`."""
+    return resolve_policy(load_document(path, POLICY_KIND))
+
+
+# --- formatting ---------------------------------------------------------------------------------
+
+
+def _n(value: float | int | None) -> str:
+    """A number as the explanations print it: six significant digits, or ``n/a`` when absent."""
+    return "n/a" if value is None else format(value, ".6g")
+
+
+def _signed(value: float | int | None) -> str:
+    return "n/a" if value is None else format(value, "+.6g")
+
+
+def _interval_text(interval: dict) -> str:
+    return f"[{_n(interval['lower'])}, {_n(interval['upper'])}]"
+
+
+def _metric_text(metric: dict) -> str:
+    return "full-output recall" if metric["kind"] == "full_recall" else f"recall@{metric['budget']}"
+
+
+def _slice_text(dimension: str, value: str | None) -> str:
+    return "the whole view" if dimension == "all" else f"{dimension} {value}"
+
+
+def _names(values: list[str], limit: int = 3) -> str:
+    shown = ", ".join(values[:limit])
+    return shown + (f" and {len(values) - limit} more" if len(values) > limit else "")
+
+
+def _open(reason: str, threshold: Any = None, observed: Any = None) -> Result:
+    """An inconclusive result: the requirement's evidence is missing or cannot be trusted."""
+    return INCONCLUSIVE, observed, threshold, reason
+
+
+# --- what a decision reads of a comparison ------------------------------------------------------
+
+
+class _Context:
+    """One evaluation: the policy, the comparison, the estimates, and the policy's view of the comparison.
+
+    ``view`` is the comparison's view for the policy's (mode, profile), ``None`` when it has none.
+    ``slices`` maps each system side to its slice blocks keyed by (dimension, value), and
+    ``differences`` maps the same keys to the comparison's candidate-minus-baseline blocks.
+    """
+
+    def __init__(self, policy: dict, comparison: dict, estimates: dict[str, dict | None]) -> None:
+        self.policy = policy
+        self.comparison = comparison
+        self.estimates = estimates
+        self.names = {side: comparison[side]["system_id"] for side in SIDES}
+        wanted = policy["view"]
+        self.view_name = f"{wanted['mode']}/{wanted['profile']}"
+        self.view = next((view for view in comparison["views"]
+                          if (view["mode"], view["profile"]) == (wanted["mode"], wanted["profile"])), None)
+        self.slices: dict[str, dict[tuple[str, str | None], dict]] = {side: {} for side in SIDES}
+        self.differences: dict[tuple[str, str | None], dict] = {}
+        if self.view is not None:
+            for side in SIDES:
+                self.slices[side] = {(block["slice"]["dimension"], block["slice"]["value"]): block
+                                     for block in self.view["systems"][side]["slices"]}
+            self.differences = {(block["slice"]["dimension"], block["slice"]["value"]): block
+                                for block in self.view["differences"]}
+        self.regressions = {entry["id"]: entry for entry in policy.get("regressions", [])}
+
+    def missing_view(self) -> str | None:
+        """Why nothing can be read from the policy's view, or ``None`` when the comparison has it."""
+        return None if self.view is not None else f"the comparison has no {self.view_name} view"
+
+
+def _reading(ctx: _Context, metric: dict, weighting: str, dimension: str,
+             value: str | None) -> tuple[dict | None, str | None]:
+    """Both systems' figure for one recall metric in one slice, their difference, and its paired interval.
+
+    Returns ``(reading, None)`` with ``baseline``, ``candidate``, ``difference``, and ``interval``, or
+    ``(None, reason)`` when the comparison cannot supply the figure: no such view, slice, weighting,
+    or budget; a detection block that is unavailable; or a recall@B that is unmeasurable for either
+    system, which happens when its output is unranked or its bundles are unresolved and no native
+    position is known. A random-order expectation is never substituted for a position nobody measured.
+    """
+    problem = ctx.missing_view()
+    if problem is not None:
+        return None, problem
+    where = f"{_slice_text(dimension, value)} of {ctx.view_name}"
+    difference = ctx.differences.get((dimension, value))
+    if difference is None:
+        return None, f"the comparison has no {where}"
+    weightings = ctx.comparison["policy"]["views"]
+    if weighting not in weightings:
+        return None, (f"the comparison's aggregation policy reports no {weighting} weighting "
+                      f"(it reports {', '.join(weightings)})")
+    blocks = {side: next(block for block in ctx.slices[side][(dimension, value)]["detection"]
+                         if block["weighting"] == weighting) for side in SIDES}
+    changed = next(block for block in difference["detection"] if block["weighting"] == weighting)
+    for block in (changed, *blocks.values()):
+        if block["state"] != "ok":
+            return None, f"{weighting} detection is unavailable for {where}: {block['reason']}"
+    if metric["kind"] == "full_recall":
+        figures = {side: blocks[side]["full_output_recall"]["value"] for side in SIDES}
+        paired = changed["full_output_recall"]
+    else:
+        budget = metric["budget"]
+        rows = {side: next((row for row in blocks[side]["recall_at_budget"] if row["budget"] == budget), None)
+                for side in SIDES}
+        paired = next((row for row in changed["recall_at_budget"] if row["budget"] == budget), None)
+        if paired is None or None in rows.values():
+            reported = [str(row["budget"]) for row in blocks["baseline"]["recall_at_budget"]]
+            return None, f"the comparison reports no recall@{budget} for {where} (its budgets are {', '.join(reported)})"
+        unmeasured = [ctx.names[side] for side in SIDES if rows[side]["value"] is None]
+        if unmeasured:
+            return None, (f"recall@{budget} cannot be measured for {', '.join(unmeasured)}: its output is "
+                          "unranked or its bundles are unresolved, so no native position is known, and a "
+                          "random-order expectation is never substituted for one")
+        figures = {side: rows[side]["value"] for side in SIDES}
+    if paired["value"] is None or None in figures.values():
+        return None, f"{_metric_text(metric)} is undefined for {where}"
+    return {**figures, "difference": paired["value"], "interval": paired["interval"]}, None
+
+
+# --- the frozen contract and its bindings -------------------------------------------------------
+
+
+def _contract_violations(comparison: dict) -> list[str]:
+    """Every way a comparison's own records contradict a shared frozen contract or its bindings.
+
+    :func:`scaneval.aggregate.compare` refuses systems that were not assigned the same frozen work, so
+    a comparison it wrote holds none of these. This reads the comparison again, as a document that
+    may have been edited or produced elsewhere: the contract must cover an input, the aggregation
+    policy must hash to its digest, each system must be scheduled by runs the comparison lists, those
+    runs must have frozen one pack, and in every view the two systems must record the same structure
+    (assignments, inputs, canonical targets and controls, clusters, target observations, and pairs),
+    because what is frozen before execution cannot differ between systems that share a contract.
+    """
+    found: list[str] = []
+    if comparison["contract"]["inputs"] < 1:
+        found.append("the contract covers no input")
+    if canonical_sha256(comparison["policy"]) != comparison["policy_sha256"]:
+        found.append("policy_sha256 does not hash the aggregation policy the comparison carries")
+    runs = {run["run_id"]: run for run in comparison["runs"]}
+    for side in SIDES:
+        system = comparison[side]
+        if not system["runs"]:
+            found.append(f"the {side} {system['system_id']} names no run")
+        for run_id in system["runs"]:
+            run = runs.get(run_id)
+            if run is None:
+                found.append(f"the {side} names run {run_id}, which the comparison does not list")
+            elif system["system_id"] not in run["systems"]:
+                found.append(f"run {run_id} does not schedule the {side} {system['system_id']}")
+    if len({canonical_json(run["pack"]) for run in comparison["runs"]}) > 1:
+        found.append("the compared runs froze different packs")
+    for view in comparison["views"]:
+        left, right = view["systems"]["baseline"], view["systems"]["candidate"]
+        label = f"view {view['mode']}/{view['profile']}"
+        for side, block in (("baseline", left), ("candidate", right)):
+            if block["system_id"] != comparison[side]["system_id"]:
+                found.append(f"{label} records {block['system_id']} as the {side}, not "
+                             f"{comparison[side]['system_id']}")
+        if left["observations"]["assignments"] != right["observations"]["assignments"]:
+            found.append(f"{label}: the systems were assigned {left['observations']['assignments']} and "
+                         f"{right['observations']['assignments']} scans")
+        for mine, theirs in zip(left["slices"], right["slices"]):
+            name = f"{label}, {_slice_text(mine['slice']['dimension'], mine['slice']['value'])}"
+            for key in ("inputs", "canonical_targets", "canonical_controls", "clusters"):
+                if mine[key] != theirs[key]:
+                    found.append(f"{name}: {key} differ ({canonical_json(mine[key])} and "
+                                 f"{canonical_json(theirs[key])})")
+            for key in ("inputs", "assignments"):
+                if mine["completion"][key] != theirs["completion"][key]:
+                    found.append(f"{name}: completion {key} differ ({mine['completion'][key]} and "
+                                 f"{theirs['completion'][key]})")
+            if mine["claims"]["assignments"] != theirs["claims"]["assignments"]:
+                found.append(f"{name}: the claim volumes cover {mine['claims']['assignments']} and "
+                             f"{theirs['claims']['assignments']} assignments")
+            for first, second in zip(mine["detection"], theirs["detection"]):
+                if (first["coverage"] is None) != (second["coverage"] is None):
+                    found.append(f"{name}: {first['weighting']} target coverage exists for one system only")
+                elif first["coverage"] is not None:
+                    if first["coverage"]["target_observations"] != second["coverage"]["target_observations"]:
+                        found.append(f"{name}: {first['weighting']} target observations differ "
+                                     f"({first['coverage']['target_observations']} and "
+                                     f"{second['coverage']['target_observations']})")
+                    if first["pairs"]["repetition_pairs"] != second["pairs"]["repetition_pairs"]:
+                        found.append(f"{name}: {first['weighting']} repetition pairs differ")
+            for control_class in mine["controls"]:
+                for key in ("canonical_controls", "observations"):
+                    if mine["controls"][control_class][key] != theirs["controls"][control_class][key]:
+                        found.append(f"{name}: {control_class} {key} differ")
+    return found
+
+
+def _contract_shared(ctx: _Context) -> Result:
+    comparison = ctx.comparison
+    threshold = "one frozen contract for both systems, every recorded count agreeing, every binding named"
+    violations = _contract_violations(comparison)
+    if violations:
+        return (FAIL, {"violations": violations}, threshold,
+                "the comparison's own records show the two systems were not assigned the same frozen work, "
+                f"or do not bind to the runs they name: {_names(violations)}")
+    contract = comparison["contract"]
+    return (PASS, {"contract_sha256": contract["structure_sha256"], "inputs": contract["inputs"],
+                   "pairs": contract["pairs"], "views": len(comparison["views"])}, threshold,
+            f"{ctx.names['baseline']} and {ctx.names['candidate']} share one frozen contract of "
+            f"{contract['inputs']} input(s) and {contract['pairs']} pair(s), and every count the comparison "
+            f"records for them agrees in each of its {len(comparison['views'])} view(s)")
+
+
+def _runs_completed(ctx: _Context) -> Result:
+    runs = ctx.comparison["runs"]
+    threshold = "every compared run finished (manifest status completed)"
+    observed = {run["run_id"]: run["status"] for run in runs}
+    unfinished = [run["run_id"] for run in runs if run["status"] != "completed"]
+    if unfinished:
+        return (INCONCLUSIVE, observed, threshold,
+                f"run {_names(unfinished)} did not finish, so assignments it never recorded stand as failures "
+                "for whichever system they belonged to and the comparison rests on part of what was scheduled")
+    return PASS, observed, threshold, f"all {len(runs)} compared run(s) finished"
+
+
+def _configuration_differences(ctx: _Context) -> Result:
+    allowed = ctx.policy["configuration"]["allowed_differences"]
+    keys = [row["key"] for row in ctx.comparison["configuration_differences"]]
+    unexpected = [key for key in keys if not any(key == name or key.startswith(f"{name}.") for name in allowed)]
+    observed = {"differences": keys, "not_allowed": unexpected}
+    threshold = {"allowed_differences": allowed}
+    if unexpected:
+        return (INCONCLUSIVE, observed, threshold,
+                f"the systems also differ in {_names(unexpected)}, which the policy does not intend to "
+                "measure, so the comparison does not isolate the intended change")
+    if not keys:
+        return PASS, observed, threshold, "the two systems are configured identically"
+    return (PASS, observed, threshold,
+            f"every configuration difference ({_names(keys)}) is one the policy intends to measure")
+
+
+def _evidence_scope(ctx: _Context) -> Result:
+    required = ctx.policy["required_scope"]
+    threshold = {"required_scope": required}
+    problem = ctx.missing_view()
+    if problem is not None:
+        return _open(problem, threshold)
+    scopes = ctx.view["evidence_scope"]
+    observed = {side: scopes[side] for side in SIDES}
+    short = [side for side in SIDES if SCOPE_RANK[scopes[side]] < SCOPE_RANK[required]]
+    if not short:
+        if required == "draft":
+            return (PASS, observed, threshold,
+                    f"the evidence is {scopes['baseline']} for the baseline and {scopes['candidate']} for the "
+                    "candidate, which meets the policy's draft scope; this is a development decision, not a "
+                    "reviewed recommendation")
+        return PASS, observed, threshold, "the evidence is reviewed for both systems"
+    reasons = []
+    for side in short:
+        if scopes[side] == "diagnostic":
+            reasons.append(f"the {side} evidence is diagnostic fixture evidence, which supports no recommendation")
+        else:
+            reasons.append(f"the {side} evidence is draft, not reviewed: labels or matches without a recorded "
+                           "human approval are pipeline diagnostics, so no reviewed recommendation can rest on them")
+    return _open("; ".join(reasons), threshold, observed)
+
+
+# --- the primary metric and regressions ---------------------------------------------------------
+
+
+def _primary_improvement(ctx: _Context) -> Result:
+    primary = ctx.policy["primary"]
+    slice_ = primary.get("slice", WHOLE_VIEW)
+    minimum = primary["min_improvement"]
+    threshold = {"metric": primary["metric"], "weighting": primary["weighting"], "slice": slice_,
+                 "min_improvement": minimum}
+    reading, problem = _reading(ctx, primary["metric"], primary["weighting"], slice_["dimension"],
+                                slice_.get("value"))
+    if reading is None:
+        return _open(problem, threshold)
+    observed = {"baseline": reading["baseline"], "candidate": reading["candidate"],
+                "difference": reading["difference"]}
+    text = (f"{_metric_text(primary['metric'])} ({primary['weighting']}, "
+            f"{_slice_text(slice_['dimension'], slice_.get('value'))}) went from {_n(reading['baseline'])} to "
+            f"{_n(reading['candidate'])}, {_signed(reading['difference'])}")
+    if reading["difference"] >= minimum:
+        return PASS, observed, threshold, f"{text}, at least the required {_signed(minimum)}"
+    return FAIL, observed, threshold, f"{text}, below the required {_signed(minimum)}"
+
+
+def _primary_uncertainty(ctx: _Context) -> Result:
+    primary = ctx.policy["primary"]
+    rule = primary["uncertainty"]
+    slice_ = primary.get("slice", WHOLE_VIEW)
+    threshold = dict(rule)
+    reading, problem = _reading(ctx, primary["metric"], primary["weighting"], slice_["dimension"],
+                                slice_.get("value"))
+    if reading is None:
+        return _open(problem, threshold)
+    interval = reading["interval"]
+    confidence = ctx.comparison["policy"]["uncertainty"]["confidence"]
+    observed = {"interval": interval, "confidence": confidence}
+    if interval["state"] != "ok":
+        return _open(f"the paired interval is {interval['state']} ({INTERVAL_STATES[interval['state']]}), so it "
+                     "cannot show that the improvement is real", threshold, observed)
+    if "min_confidence" in rule and confidence < rule["min_confidence"]:
+        return _open(f"the comparison's interval is at {_n(confidence)} confidence and the policy requires at "
+                     f"least {_n(rule['min_confidence'])}", threshold, observed)
+    if "min_clusters" in rule and interval["clusters"] < rule["min_clusters"]:
+        return _open(f"the interval rests on {interval['clusters']} cluster(s) and the policy requires at "
+                     f"least {rule['min_clusters']}", threshold, observed)
+    bound = rule["lower_bound_above"]
+    text = f"the paired interval {_interval_text(interval)} at {_n(confidence)} confidence"
+    if interval["lower"] > bound:
+        return PASS, observed, threshold, f"{text} has its lower bound above {_n(bound)}"
+    if interval["upper"] <= bound:
+        return (FAIL, observed, threshold,
+                f"{text} lies wholly at or below {_n(bound)}, so the change is shown not to improve enough")
+    return (INCONCLUSIVE, observed, threshold,
+            f"{text} includes values at or below {_n(bound)}, so the improvement is not established at the "
+            "comparison's confidence")
+
+
+def _regression(ctx: _Context, entry: dict) -> Result:
+    """One protected detection metric: it may not fall by more than the entry allows in any slice it covers.
+
+    A slice with no value covers every project or workload the comparison holds that carries targets.
+    The point difference decides pass or fail. With ``check_interval`` the lower bound of the paired
+    interval must also stay within the allowed decrease: an interval wholly below it fails, one that
+    straddles it is inconclusive, and one that is not ``ok`` is inconclusive.
+    """
+    metric, weighting = entry["metric"], entry["weighting"]
+    slice_ = entry.get("slice", WHOLE_VIEW)
+    dimension, value = slice_["dimension"], slice_.get("value")
+    limit = entry["max_decrease"]
+    threshold = {"metric": metric, "weighting": weighting, "slice": slice_, "max_decrease": limit,
+                 "check_interval": entry.get("check_interval", False)}
+    problem = ctx.missing_view()
+    if problem is not None:
+        return _open(problem, threshold)
+    if value is None and dimension != "all":
+        values = sorted(name for (kind, name) in ctx.differences if kind == dimension and name is not None
+                        and ctx.slices["baseline"][(kind, name)]["canonical_targets"] > 0)
+        if not values:
+            return _open(f"the comparison has no {dimension} slice carrying targets in {ctx.view_name}", threshold)
+    else:
+        values = [value]
+    rows, failures, unresolved = [], [], []
+    for name in values:
+        label = _slice_text(dimension, name)
+        reading, problem = _reading(ctx, metric, weighting, dimension, name)
+        if reading is None:
+            unresolved.append(f"{label}: {problem}")
+            rows.append({"slice": name, "difference": None})
+            continue
+        rows.append({"slice": name, "baseline": reading["baseline"], "candidate": reading["candidate"],
+                     "difference": reading["difference"]})
+        if -reading["difference"] > limit:
+            failures.append(f"{label} fell from {_n(reading['baseline'])} to {_n(reading['candidate'])}, "
+                            f"{_signed(reading['difference'])}")
+        if entry.get("check_interval"):
+            interval = reading["interval"]
+            if interval["state"] != "ok":
+                unresolved.append(f"{label}: the paired interval is {interval['state']} "
+                                  f"({INTERVAL_STATES[interval['state']]})")
+            elif interval["upper"] < -limit:
+                failures.append(f"{label}: the whole paired interval {_interval_text(interval)} lies below "
+                                f"{_signed(-limit)}")
+            elif interval["lower"] < -limit:
+                unresolved.append(f"{label}: the paired interval {_interval_text(interval)} allows a decrease "
+                                  f"larger than {_n(limit)}")
+    observed = {"slices": rows}
+    where = _slice_text(dimension, value) if value is not None or dimension == "all" else f"each {dimension}"
+    what = f"{_metric_text(metric)} ({weighting}) in {where}"
+    if failures:
+        return FAIL, observed, threshold, f"{what} may not fall by more than {_n(limit)}, but {_names(failures)}"
+    if unresolved:
+        return INCONCLUSIVE, observed, threshold, f"{what} could not be settled: {_names(unresolved)}"
+    worst = max(-row["difference"] for row in rows)
+    return (PASS, observed, threshold,
+            f"{what} fell by at most {_n(max(worst, 0))} across {len(rows)} slice(s), within the allowed {_n(limit)}")
+
+
+# --- evaluation ---------------------------------------------------------------------------------
+
+
+_FIXED: dict[str, Callable[[_Context], Result]] = {
+    "contract.shared": _contract_shared,
+    "contract.runs_completed": _runs_completed,
+    "configuration.allowed_differences": _configuration_differences,
+    "evidence.scope": _evidence_scope,
+    "primary.improvement": _primary_improvement,
+    "primary.uncertainty": _primary_uncertainty,
+}
+
+
+def _requirement(requirement_id: str, ctx: _Context) -> Result:
+    """Evaluate one requirement by its id; an id nothing evaluates is an internal error, not a pass."""
+    fixed = _FIXED.get(requirement_id)
+    if fixed is not None:
+        return fixed(ctx)
+    family, _, rest = requirement_id.partition(".")
+    if family == "regression" and rest in ctx.regressions:
+        return _regression(ctx, ctx.regressions[rest])
+    raise ContractError(f"this build has no evaluator for the requirement {requirement_id}")
+
+
+def _estimate_record(estimate: dict | None) -> dict | None:
+    """What a decision binds of one precision estimate: its digest, version, and the digests it names."""
+    if estimate is None:
+        return None
+    return {"sha256": canonical_sha256(estimate), "evaluator_version": estimate["evaluator_version"],
+            "sample_sha256": estimate["sample_sha256"], "frame_sha256": estimate["frame_sha256"],
+            "reviews_sha256": estimate["reviews_sha256"]}
+
+
+def _comparison_record(comparison: dict) -> dict:
+    """What a decision binds of the comparison: its digest, the systems, and the runs it read."""
+    fields = ("run_id", "status", "manifest_sha256", "schedule_sha256", "config_sha256", "evidence_sha256")
+    return {"sha256": canonical_sha256(comparison), "evaluator_version": comparison["evaluator_version"],
+            "policy_sha256": comparison["policy_sha256"],
+            "contract_sha256": comparison["contract"]["structure_sha256"],
+            "baseline": {key: comparison["baseline"][key] for key in ("system_id", "config_sha256")},
+            "candidate": {key: comparison["candidate"][key] for key in ("system_id", "config_sha256")},
+            "runs": [{key: run[key] for key in fields} for run in comparison["runs"]]}
+
+
+def _notes(ctx: _Context, declared: list[str]) -> list[str]:
+    """The statements every decision carries about what it is and is not, and what it did not read."""
+    notes = [
+        "This decision holds one candidate to one policy over one saved comparison. It approves, promotes, and "
+        "deploys nothing; the external workflow that owns the harness owns any promotion.",
+        "No requirement is weighed against another: any failure fails the decision, so detection cannot "
+        "compensate for noise, false alarms, review burden, cost, or failed scans.",
+        "An absent figure is never a perfect one: a requirement whose evidence is missing, unmeasurable, or "
+        "below the required scope is inconclusive, not passed.",
+    ]
+    undeclared = [name for name in GATE_BLOCKS if name not in declared]
+    if undeclared:
+        notes.append(f"The policy declares no {', '.join(undeclared)} block, so those requirements are not part "
+                     "of it and were not evaluated.")
+    comparison = ctx.comparison
+    if comparison["evaluator_version"] != __version__:
+        notes.append(f"The comparison was computed by evaluator {comparison['evaluator_version']} and this "
+                     f"decision by {__version__}.")
+    others = [f"{view['mode']}/{view['profile']}" for view in comparison["views"]
+              if f"{view['mode']}/{view['profile']}" != ctx.view_name]
+    if others:
+        notes.append(f"The comparison also holds view(s) {', '.join(others)}; this policy reads only "
+                     f"{ctx.view_name}.")
+    return notes
+
+
+def evaluate_gate(policy: dict, comparison: dict, precision_baseline: dict | None = None,
+                  precision_candidate: dict | None = None) -> dict:
+    """The validated gate decision of *comparison* under *policy*, with the optional precision estimates.
+
+    *policy* is validated and completed (:func:`resolve_policy`); *comparison* is a ``comparison-report``
+    and each estimate a ``precision-estimate``, all validated first. Nothing is modified and nothing is
+    written. Every requirement the policy declares is evaluated (:func:`scaneval.contracts.
+    gate_requirement_ids` names them, in order) and the outcome follows from their statuses: fail if any
+    failed, else inconclusive if any is inconclusive, else pass. The recommendation scope says what the
+    decision can support: ``reviewed`` when the policy requires reviewed evidence and the evidence was
+    reviewed, ``development`` when the policy itself declares draft scope and the evidence met it, and
+    ``none`` when the evidence did not meet the policy's scope. The decision binds its policy, comparison,
+    estimates, evaluator version, and the runs and schedules the comparison read by digest, so the same
+    inputs give the same bytes; there is no clock, network, randomness, or model here.
+
+    Refused with :class:`ContractError` before anything is decided: a document that is not what it is
+    named, and a policy whose primary metric is a random-order expectation or any other diagnostic. A
+    comparison that contradicts itself is not refused: it fails ``contract.shared``.
+    """
+    policy = resolve_policy(policy)
+    validate_document(COMPARISON_KIND, comparison)
+    estimates = {"baseline": precision_baseline, "candidate": precision_candidate}
+    for estimate in estimates.values():
+        if estimate is not None:
+            validate_document(ESTIMATE_KIND, estimate)
+    ctx = _Context(policy, comparison, estimates)
+    requirements = []
+    for requirement_id in gate_requirement_ids(policy):
+        status, observed, threshold, explanation = _requirement(requirement_id, ctx)
+        requirements.append({"id": requirement_id, "status": status, "observed": observed,
+                             "threshold": threshold, "explanation": explanation})
+    statuses = [requirement["status"] for requirement in requirements]
+    outcome = FAIL if FAIL in statuses else INCONCLUSIVE if INCONCLUSIVE in statuses else PASS
+    evidence = next(requirement for requirement in requirements if requirement["id"] == "evidence.scope")
+    scope = ("none" if evidence["status"] != PASS else
+             "reviewed" if policy["required_scope"] == "reviewed" else "development")
+    declared = gate_declared_blocks(policy)
+    decision = {
+        "schema_version": SCHEMA_VERSION, "evaluator_version": __version__,
+        "outcome": outcome, "recommendation_scope": scope,
+        "policy": policy, "policy_sha256": canonical_sha256(policy),
+        "blocks": {"declared": declared, "not_declared": [name for name in GATE_BLOCKS if name not in declared]},
+        "view": deepcopy(policy["view"]),
+        "comparison": _comparison_record(comparison),
+        "precision": {side: _estimate_record(estimate) for side, estimate in estimates.items()},
+        "requirements": requirements,
+        "summary": {"requirements": len(requirements), "passed": statuses.count(PASS),
+                    "failed": statuses.count(FAIL), "inconclusive": statuses.count(INCONCLUSIVE)},
+        "failed": [item["id"] for item in requirements if item["status"] == FAIL],
+        "unresolved": [item["id"] for item in requirements if item["status"] == INCONCLUSIVE],
+        "notes": _notes(ctx, declared),
+    }
+    return validate_document(DECISION_KIND, decision)
+
+
+# --- summary for the command line ---------------------------------------------------------------
+
+
+def summary(decision: dict) -> list[str]:
+    """The lines a person needs: the outcome and its scope, and every failed or unresolved requirement."""
+    comparison = decision["comparison"]
+    view = decision["view"]
+    counts = decision["summary"]
+    lines = [
+        f"Gate {decision['outcome']}: baseline={comparison['baseline']['system_id']} "
+        f"candidate={comparison['candidate']['system_id']} view={view['mode']}/{view['profile']} "
+        f"recommendation_scope={decision['recommendation_scope']}",
+        f"Policy {decision['policy']['policy_id']} {decision['policy']['policy_version']} "
+        f"({decision['policy_sha256']})",
+        f"Requirements: {counts['requirements']} evaluated, {counts['passed']} passed, {counts['failed']} "
+        f"failed, {counts['inconclusive']} inconclusive",
+    ]
+    by_id = {requirement["id"]: requirement for requirement in decision["requirements"]}
+    for requirement_id in decision["failed"]:
+        lines.append(f"FAIL {requirement_id}: {by_id[requirement_id]['explanation']}")
+    for requirement_id in decision["unresolved"]:
+        lines.append(f"INCONCLUSIVE {requirement_id}: {by_id[requirement_id]['explanation']}")
+    if decision["blocks"]["not_declared"]:
+        lines.append("Not part of this policy, so not evaluated: " + ", ".join(decision["blocks"]["not_declared"]))
+    return lines
