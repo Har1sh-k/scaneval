@@ -1,9 +1,9 @@
 """The evaluation schedule a run freezes before it prepares any input.
 
 Every assignment is listed, including the ones a failed input or a skipped system will never run;
-each input carries the plan the pack gave it before execution, or says why it had none; and the
-vulnerable/fixed pairs are matched in advance. The same configuration, pack, and moment always give
-the same document. Runner-level checks that the schedule is written before preparation live in
+each input carries the plan the pack gave it before execution, or says why it had none, and a
+blinded input names the map it is transformed with; and the vulnerable/fixed pairs are matched in
+advance. The same configuration, pack, and moment always give the same document. Runner-level checks that the schedule is written before preparation live in
 ``test_v2_runner_inputs.py``.
 """
 
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from scaneval import cases
+from scaneval import blinding, cases
 from scaneval.contracts import ContractError, canonical_json, canonical_sha256, validate_document
 from scaneval.schedule import SCHEDULE_PATH, build_schedule
 
@@ -89,10 +89,27 @@ def config(**changes) -> dict:
     return validate_document("run-config", document)
 
 
+def blinding_map() -> dict:
+    """A map the contract accepts. The schedule records which map it is and never applies it."""
+    return validate_document("blinding-map", {
+        "schema_version": "2.1", "map_id": "widget-metadata", "map_version": "1",
+        "repository": {"url": SNAPSHOT["repository"]["url"], "name": "acme/widget"},
+        "pseudonyms": [{"original": "Widget", "replacement": "Sprocket"}],
+        "variants": [{"snapshot_id": "widget-abc", "commit": "a" * 40, "tree_hash": HASH},
+                     {"snapshot_id": "widget-fixed", "commit": "e" * 40, "tree_hash": FIXED_HASH}],
+        "edits": [{"edit_id": "readme", "path": "README.md", "role": "non_runtime_branding",
+                   "rationale": "The README names the project in prose.", "replacements": ["Widget"],
+                   "expected": [{"snapshot_id": "widget-abc", "state": "present", "file_sha256": HASH,
+                                 "occurrences": {"Widget": 1}},
+                                {"snapshot_id": "widget-fixed", "state": "absent"}]}],
+        "reviews": [],
+    })
+
+
 def test_every_assignment_is_listed_sorted_and_named_by_its_invocation_id(tmp_path):
     pack = two_snapshot_pack(tmp_path)
 
-    schedule = build_schedule(config(), pack, created_at=CREATED_AT)
+    schedule = build_schedule(config(), pack, base_dir=tmp_path, created_at=CREATED_AT)
 
     assert validate_document("evaluation-schedule", schedule) is schedule
     assert SCHEDULE_PATH == "evaluator/schedule.json"
@@ -112,8 +129,8 @@ def test_every_assignment_is_listed_sorted_and_named_by_its_invocation_id(tmp_pa
 def test_identical_arguments_give_a_byte_identical_schedule(tmp_path):
     pack = two_snapshot_pack(tmp_path)
 
-    first = build_schedule(config(), pack, created_at=CREATED_AT)
-    second = build_schedule(deepcopy(config()), deepcopy(pack), created_at=CREATED_AT)
+    first = build_schedule(config(), pack, base_dir=tmp_path, created_at=CREATED_AT)
+    second = build_schedule(deepcopy(config()), deepcopy(pack), base_dir=tmp_path, created_at=CREATED_AT)
 
     assert canonical_json(first) == canonical_json(second)
 
@@ -121,7 +138,7 @@ def test_identical_arguments_give_a_byte_identical_schedule(tmp_path):
 def test_a_declared_export_freezes_each_inputs_plan_with_its_case_facts(tmp_path):
     pack = two_snapshot_pack(tmp_path)
 
-    schedule = build_schedule(config(), pack, created_at=CREATED_AT)
+    schedule = build_schedule(config(), pack, base_dir=tmp_path, created_at=CREATED_AT)
 
     vulnerable, fixed = schedule["inputs"]
     assert {key: vulnerable[key] for key in ("input_id", "mode", "profile", "snapshot_id", "change_set_id",
@@ -147,20 +164,20 @@ def test_a_declared_export_freezes_each_inputs_plan_with_its_case_facts(tmp_path
 def test_vulnerable_and_fixed_observations_are_paired_before_execution(tmp_path):
     pack = two_snapshot_pack(tmp_path)
 
-    schedule = build_schedule(config(), pack, created_at=CREATED_AT)
+    schedule = build_schedule(config(), pack, base_dir=tmp_path, created_at=CREATED_AT)
 
     assert schedule["pairs"] == [{"target_id": "T-widget-shell", "canonical_id": "T-widget-shell",
                                   "vulnerable_input_id": "widget-abc", "control_id": "C-widget-shell-fixed",
                                   "fixed_input_id": "widget-fixed", "repetition_pairs": [[1, 1], [2, 2]]}]
     # Without the fixed input in the run there is nothing to pair the target with.
-    alone = build_schedule(config(inputs=[{"snapshot_id": "widget-abc"}]), pack, created_at=CREATED_AT)
+    alone = build_schedule(config(inputs=[{"snapshot_id": "widget-abc"}]), pack, base_dir=tmp_path, created_at=CREATED_AT)
     assert alone["pairs"] == []
 
 
 def test_a_snapshot_that_declares_no_export_has_no_pre_registered_plan(tmp_path):
     pack = two_snapshot_pack(tmp_path, check=False)
 
-    schedule = build_schedule(config(), pack, created_at=CREATED_AT)
+    schedule = build_schedule(config(), pack, base_dir=tmp_path, created_at=CREATED_AT)
 
     for row in schedule["inputs"]:
         assert row["declared_tree_hash"] is None
@@ -174,7 +191,7 @@ def test_a_pack_that_refuses_to_plan_an_input_is_recorded_rather_than_raised(tmp
     pack = two_snapshot_pack(tmp_path)
     pack["cases"][0]["disposition"]["reason"] = "edited by hand without a new anchor"
 
-    schedule = build_schedule(config(), pack, created_at=CREATED_AT)
+    schedule = build_schedule(config(), pack, base_dir=tmp_path, created_at=CREATED_AT)
 
     reasons = [row["plan"]["reason"] for row in schedule["inputs"]]
     assert all(reason.startswith("the pack does not plan this input: this pack does not load") for reason in reasons)
@@ -187,7 +204,7 @@ def test_systems_record_their_configuration_digest_policy_and_declared_backend(t
                {"system_id": "sys-oci", "adapter": "semgrep", "config": {},
                 "execution": {"backend": "oci", "image": DIGEST_IMAGE}}]
 
-    schedule = build_schedule(config(systems=systems), pack, created_at=CREATED_AT)
+    schedule = build_schedule(config(systems=systems), pack, base_dir=tmp_path, created_at=CREATED_AT)
 
     assert schedule["systems"] == [
         {"system_id": "sys-a", "adapter": "fake", "model_id": None, "model_revision": None,
@@ -202,7 +219,7 @@ def test_a_narrowed_run_schedules_only_what_it_covers_and_says_so(tmp_path):
     pack = two_snapshot_pack(tmp_path)
     document = config()
 
-    schedule = build_schedule(document, pack, created_at=CREATED_AT, inputs=document["inputs"][:1],
+    schedule = build_schedule(document, pack, base_dir=tmp_path, created_at=CREATED_AT, inputs=document["inputs"][:1],
                               systems=document["systems"][1:])
 
     assert [row["assignment_id"] for row in schedule["assignments"]] == [
@@ -216,13 +233,41 @@ def test_an_input_this_build_cannot_prepare_is_refused_rather_than_scheduled(tmp
     pack = two_snapshot_pack(tmp_path)
 
     with pytest.raises(ContractError, match="unknown snapshot 'widget-zzz'"):
-        build_schedule(config(inputs=[{"snapshot_id": "widget-zzz"}]), pack, created_at=CREATED_AT)
+        build_schedule(config(inputs=[{"snapshot_id": "widget-zzz"}]), pack, base_dir=tmp_path, created_at=CREATED_AT)
     with pytest.raises(ContractError, match="native PR input"):
-        build_schedule(config(inputs=[{"mode": "pr", "change_set_id": "cs-1"}]), pack, created_at=CREATED_AT)
+        build_schedule(config(inputs=[{"mode": "pr", "change_set_id": "cs-1"}]), pack, base_dir=tmp_path, created_at=CREATED_AT)
+
+
+def test_a_blinded_input_is_scheduled_with_the_identity_of_its_map(tmp_path):
+    """The map is named by id, version, and digest; whether it fits the export is asked later."""
+    pack = two_snapshot_pack(tmp_path)
+    document = blinding_map()
+    (tmp_path / "widget-map.json").write_text(canonical_json(document) + "\n", encoding="utf-8")
+    inputs = [{"snapshot_id": snapshot_id, "profile": "metadata_blinded", "blinding_map": "widget-map.json"}
+              for snapshot_id in ("widget-abc", "widget-fixed")]
+
+    schedule = build_schedule(config(inputs=inputs), pack, base_dir=tmp_path, created_at=CREATED_AT)
+
+    identity = blinding.map_identity(document)
+    assert identity["map_sha256"] == canonical_sha256(document)
+    assert [(row["input_id"], row["profile"], row["blinding"]) for row in schedule["inputs"]] == [
+        ("widget-abc.blinded", "metadata_blinded", identity), ("widget-fixed.blinded", "metadata_blinded", identity)]
+    assert [(pair["vulnerable_input_id"], pair["fixed_input_id"]) for pair in schedule["pairs"]] == [
+        ("widget-abc.blinded", "widget-fixed.blinded")]
+    assert any(note.startswith("A blinded input names the map it is transformed with.") for note in schedule["notes"])
+    # A map the caller already loaded is the map recorded: the runner schedules what it applies.
+    loaded = {row["input_id"]: document for row in schedule["inputs"]}
+    assert build_schedule(config(inputs=inputs), pack, base_dir=tmp_path / "elsewhere", created_at=CREATED_AT,
+                          maps=loaded) == schedule
+    with pytest.raises(ContractError, match="could not load .*widget-map.json"):
+        build_schedule(config(inputs=inputs), pack, base_dir=tmp_path / "elsewhere", created_at=CREATED_AT)
+    unnamed = config(schema_version="2.0", inputs=[{"snapshot_id": "widget-abc", "profile": "metadata_blinded"}])
+    with pytest.raises(ContractError, match="widget-abc.blinded is metadata_blinded but names no blinding map"):
+        build_schedule(unnamed, pack, base_dir=tmp_path, created_at=CREATED_AT)
 
 
 def test_the_contract_refuses_a_schedule_that_leaves_out_or_misnames_an_assignment(tmp_path):
-    schedule = build_schedule(config(), two_snapshot_pack(tmp_path), created_at=CREATED_AT)
+    schedule = build_schedule(config(), two_snapshot_pack(tmp_path), base_dir=tmp_path, created_at=CREATED_AT)
 
     missing = deepcopy(schedule)
     missing["assignments"].pop()
@@ -239,7 +284,7 @@ def test_the_contract_refuses_a_schedule_that_leaves_out_or_misnames_an_assignme
 
 
 def test_the_contract_refuses_a_pair_the_frozen_plans_do_not_support(tmp_path):
-    schedule = build_schedule(config(), two_snapshot_pack(tmp_path), created_at=CREATED_AT)
+    schedule = build_schedule(config(), two_snapshot_pack(tmp_path), base_dir=tmp_path, created_at=CREATED_AT)
 
     same_input = deepcopy(schedule)
     same_input["pairs"][0]["fixed_input_id"] = "widget-abc"
@@ -260,7 +305,7 @@ def test_the_contract_refuses_a_pair_the_frozen_plans_do_not_support(tmp_path):
 
 
 def test_the_contract_ties_a_blinding_identity_to_the_blinded_profile(tmp_path):
-    schedule = build_schedule(config(), two_snapshot_pack(tmp_path), created_at=CREATED_AT)
+    schedule = build_schedule(config(), two_snapshot_pack(tmp_path), base_dir=tmp_path, created_at=CREATED_AT)
 
     named = deepcopy(schedule)
     named["inputs"][0]["blinding"] = {"map_id": "m", "map_version": "1", "map_sha256": HASH}

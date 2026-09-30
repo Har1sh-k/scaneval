@@ -26,7 +26,9 @@ so two runs of one configuration against one pack at one moment schedule byte-id
 
 from __future__ import annotations
 
-from . import cases
+from pathlib import Path
+
+from . import blinding, cases
 from .contracts import ContractError, canonical_sha256, input_identity, validate_document
 from .execution import invocation_id
 
@@ -89,24 +91,31 @@ def _frozen_plan(pack: dict, snapshot: dict, mode: str) -> dict:
             "controls": _planned_controls(pack, plan), "notes": notes}
 
 
-def _input_row(entry: dict, pack: dict) -> dict:
+def _input_row(entry: dict, pack: dict, base_dir: Path, maps: dict[str, dict]) -> dict:
     """One configured input as the schedule records it.
 
-    Only a full, standard input can be scheduled by this build: a native PR input and a
-    metadata-blinded input are refused here as they are refused by the runner, rather than
-    scheduled as something they are not.
+    A metadata-blinded input records the identity of its map: the document in *maps* under its
+    input id when the caller loaded it already, which is what makes the schedule name the map the
+    run actually applies, and otherwise the map its entry names under *base_dir*. A native PR input
+    is refused here as the runner refuses it, rather than scheduled as something it is not.
     """
     input_id = input_identity(entry)
     mode = entry.get("mode", "full")
     profile = entry.get("profile", "standard")
     if mode != "full":
         raise ContractError(f"input {input_id} is a native PR input, which this build cannot schedule")
-    if profile != "standard":
-        raise ContractError(f"input {input_id} is {profile}, which this build cannot schedule")
     snapshot = cases.snapshot_by_id(pack, entry["snapshot_id"])
+    identity = None
+    if profile == "metadata_blinded":
+        document = maps.get(input_id)
+        if document is None:
+            if "blinding_map" not in entry:
+                raise ContractError(f"input {input_id} is metadata_blinded but names no blinding map")
+            document = blinding.load_map(base_dir / entry["blinding_map"])
+        identity = blinding.map_identity(document)
     return {"input_id": input_id, "mode": mode, "profile": profile,
             "snapshot_id": snapshot["snapshot_id"], "change_set_id": None, "change_set": None,
-            "blinding": None, "project": snapshot["repository"]["name"],
+            "blinding": identity, "project": snapshot["repository"]["name"],
             "workload": snapshot["workload"], "component_role": snapshot["component_role"],
             "declared_tree_hash": snapshot.get("tree_hash"),
             "plan": _frozen_plan(pack, snapshot, mode)}
@@ -156,25 +165,29 @@ def _pairs(rows: list[dict], repetitions: int) -> list[dict]:
                                            pair["vulnerable_input_id"], pair["fixed_input_id"]))
 
 
-def build_schedule(config: dict, pack: dict, *, created_at: str,
-                   inputs: list[dict] | None = None, systems: list[dict] | None = None) -> dict:
+def build_schedule(config: dict, pack: dict, *, base_dir: Path, created_at: str,
+                   inputs: list[dict] | None = None, systems: list[dict] | None = None,
+                   maps: dict[str, dict] | None = None) -> dict:
     """The validated schedule of one run: every assignment, each input's frozen plan, and the pairs.
 
     *config* is the run configuration as loaded, and ``config_sha256`` hashes the whole of it, as
     the run manifest does. *pack* is the pack as it was supplied, before any mechanical check ran
-    against an export; its digest is recorded as that. *inputs* and *systems* are the entries
+    against an export; its digest is recorded as that. *base_dir* is the directory the
+    configuration's relative paths resolve against, which is where a blinded input's map is read
+    from unless *maps* already holds it under the input's id. *inputs* and *systems* are the entries
     this run actually covers when ``--only-input`` or ``--only-system`` narrowed it, in
     configuration order; left out, every configured entry is scheduled, and a narrowed schedule
     says in its notes what it left out. Inputs and systems keep configuration order, and
     assignments and pairs are sorted, so identical arguments give an identical document.
 
-    An input whose snapshot the pack does not declare is refused, as the runner refuses it before
-    anything is written. Nothing here creates a file.
+    An input whose snapshot the pack does not declare, and a blinded input whose map cannot be
+    loaded, are refused, as the runner refuses them before anything is written. Nothing here
+    creates a file.
     """
     selected_inputs = list(config["inputs"] if inputs is None else inputs)
     selected_systems = list(config["systems"] if systems is None else systems)
     repetitions = config["repetitions"]
-    rows = [_input_row(entry, pack) for entry in selected_inputs]
+    rows = [_input_row(entry, pack, Path(base_dir), maps or {}) for entry in selected_inputs]
     system_rows = [_system_row(entry, config["network_policy"]) for entry in selected_systems]
     assignments = sorted(
         ({"assignment_id": invocation_id(row["input_id"], system["system_id"], repetition),
@@ -186,6 +199,10 @@ def build_schedule(config: dict, pack: dict, *, created_at: str,
     if any(row["plan"]["state"] == "unavailable" for row in rows):
         notes.append("An input whose plan is unavailable here is planned from the checked pack when "
                      "its invocations run; that plan was not pre-registered in this schedule.")
+    if any(row["blinding"] is not None for row in rows):
+        notes.append("A blinded input names the map it is transformed with. Whether that map is approved and "
+                     "fits the export is asked when the input is prepared; a refusal is that input's "
+                     "preparation failure, and its assignments stay here.")
     left_out_inputs = len(config["inputs"]) - len(selected_inputs)
     left_out_systems = len(config["systems"]) - len(selected_systems)
     if left_out_inputs or left_out_systems:

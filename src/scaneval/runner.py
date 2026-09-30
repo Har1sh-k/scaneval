@@ -610,7 +610,7 @@ def run_from_config(
     }
     # Built from the pack as it was supplied, before any check has run against an export, and
     # before anything is written: a schedule that cannot be built refuses the run here.
-    frozen_schedule = schedule.build_schedule(config, pack, created_at=_now(clock),
+    frozen_schedule = schedule.build_schedule(config, pack, base_dir=base, created_at=_now(clock),
                                               inputs=[spec.entry for spec in inputs], systems=systems)
 
     out_dir.mkdir(parents=True, exist_ok=False)
