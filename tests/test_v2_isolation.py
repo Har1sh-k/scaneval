@@ -194,3 +194,19 @@ def test_an_adapter_is_not_oci_compatible_and_mounts_nothing_unless_it_says_so()
 
     assert Plain.oci_compatible is False
     assert Plain().runtime_mounts(SystemSpec("plain", "plain", {}), {}) == ()
+
+
+# --- semgrep's version probe ------------------------------------------------------------------
+
+
+def test_semgrep_probes_its_version_without_asking_the_network_for_a_newer_one(tmp_path):
+    recorded = tmp_path / "argv.json"
+    binary = tmp_path / "fake-semgrep"
+    binary.write_text(f"#!{sys.executable}\nimport json, sys\n"
+                      f"open({str(recorded)!r}, 'w').write(json.dumps(sys.argv[1:]))\nprint('9.9.9')\n",
+                      encoding="utf-8")
+    binary.chmod(0o755)
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    assert semgrep_version(str(binary), raw) == "9.9.9"
+    assert json.loads(recorded.read_text(encoding="utf-8")) == ["--version", "--disable-version-check"]

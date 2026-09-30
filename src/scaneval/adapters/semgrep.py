@@ -33,8 +33,10 @@ and a count above zero degrades the outcome to ``partial`` with unresolved bundl
 code ``import_loss``, so a scan that reported a finding ScanEval could not read can earn
 neither completeness nor silence credit for it.
 
-Every file the adapter's processes wrote is read back without following a link and without
-blocking on a named pipe (:func:`~scaneval.execution.read_regular_file` and
+Both processes the adapter starts, the version probe and the scan, pass
+``--disable-version-check``, so neither asks the network for a newer release or writes that
+answer under ``HOME``. Every file either of them wrote is read back without following a link and
+without blocking on a named pipe (:func:`~scaneval.execution.read_regular_file` and
 :func:`~scaneval.adapters.base.tail_text`), because the process that wrote the raw directory can
 leave anything at those names.
 """
@@ -158,6 +160,11 @@ def semgrep_version(binary: str, raw_dir: Path, timeout_seconds: float = 60) -> 
     the same raw directory fail on the create-only claim and report a file collision rather than
     the failure that actually stopped the first one. A file this call did not create is never
     removed: that one is an earlier attempt's evidence.
+
+    The probe passes ``--disable-version-check``. Without it Semgrep asks the network for its
+    latest release and caches the answer under ``HOME`` (``~/.cache/semgrep_version``), which is
+    a network call and a host write outside the scan, and fails outright where there is no
+    network. The flag leaves the reported version unchanged.
     """
     stdout_path = raw_dir / "semgrep-version.txt"
     stderr_path = raw_dir / "semgrep-version.stderr.txt"
@@ -168,8 +175,9 @@ def semgrep_version(binary: str, raw_dir: Path, timeout_seconds: float = 60) -> 
         _claim_output(stderr_path, what)
         created.append(stderr_path)
         try:
-            result = run_command([binary, "--version"], cwd=raw_dir, timeout_seconds=timeout_seconds,
-                                 env=build_env(), stdout_path=stdout_path, stderr_path=stderr_path)
+            result = run_command([binary, "--version", "--disable-version-check"], cwd=raw_dir,
+                                 timeout_seconds=timeout_seconds, env=build_env(), stdout_path=stdout_path,
+                                 stderr_path=stderr_path)
             if result.timed_out:
                 raise AdapterError(f"semgrep --version exceeded its {timeout_seconds}s limit and was killed after "
                                    f"{result.wall_seconds:.1f}s: {tail_text(result.stderr_path)}")
