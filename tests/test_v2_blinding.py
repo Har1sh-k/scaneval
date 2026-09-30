@@ -750,6 +750,24 @@ def test_toml_and_ini_display_files_are_verified_by_parsing_too(tmp_path, displa
     assert structure["result"] == "pass" and structure["detail"].startswith(f"display: {verified} before and after")
 
 
+def test_a_percent_sign_that_the_default_ini_reader_cannot_interpolate_is_refused_before_a_transformed_tree_exists(
+        tmp_path, display):
+    """Read as written the file keeps its structure; the default reader cannot read the value the replacement makes."""
+    widget = display("display.ini", "[site]\nname = Widget Docs\n")
+    trial = tmp_path / "trial"
+
+    with pytest.raises(MaterializationError, match=r"blinding map refused: edit display: display\.ini: read with "
+                                                    r"Python's default INI reader .*\(\[site\] name cannot be "
+                                                    r"interpolated \(InterpolationSyntaxError\)"):
+        export_blinded(widget, display_map(widget, "display.ini", "Sprocket 100%"), trial)
+
+    assert not (trial / "source").exists()
+    record = export_blinded(widget, display_map(widget, "display.ini", "Sprocket"), tmp_path / "plain")
+    assert (tmp_path / "plain" / "source" / "display.ini").read_text(encoding="utf-8") == (
+        "[site]\nname = Sprocket Docs\n")
+    assert "edit_structure" in {check["check"] for check in record["blinding"]["validation"]}
+
+
 def test_documentation_is_not_asked_for_structure_and_takes_any_reviewed_replacement(tmp_path, widget):
     document = widget_map(widget, approved=False)
     document["pseudonyms"][0]["replacement"] = 'Sprock"et: {a, [b]} #c'
@@ -903,6 +921,13 @@ INI_ACCEPTED = {
                              "[Widget]\nWidget name: x\n", "Sprocket"),
     "defaults": ("[DEFAULT]\nbrand = Widget\n[site]\nname = Widget\n", "Sprocket"),
     "percent-signs-are-not-interpolated": ("[site]\nname = 100%% Widget %(x)s ${y}\n", "Sprocket"),
+    # Read the ways Python's configparser reads it, each of these reads as the original does with Widget replaced.
+    "an-interpolated-reference-stays-consistent": ("[site]\nname = Widget Docs\nfull = %(name)s Guide\n", "Sprocket"),
+    "an-option-that-overrides-a-default-keeps-overriding": ("[DEFAULT]\nname = x\n[site]\nname = Widget\n",
+                                                            "Sprocket"),
+    "a-value-no-interpolating-reader-could-read-was-never-asked-to": ("[site]\nname = Widget 100%\n", "Sprocket"),
+    "names-that-differ-in-case-stay-apart-for-a-reader-that-keeps-case": (
+        "[site]\nWidget Name = 1\nwidget name = 2\n", "Sprocket"),
 }
 
 
@@ -934,6 +959,43 @@ INI_REFUSED = {
                           " is not a valid INI file, so an edit of it cannot be verified to keep its structure ("),
     "duplicate-option": ("[site]\na = Widget\na = 2\n", {"Widget": "Sprocket"},
                          " is not a valid INI file, so an edit of it cannot be verified to keep its structure ("),
+    # Each of these keeps its structure as written, and breaks or changes when Python's configparser reads it.
+    "a-percent-sign-the-default-reader-cannot-interpolate": (
+        "[site]\nname = Widget Docs\n", {"Widget": "Sprocket 100%"},
+        ": read with Python's default INI reader (option names folded to lower case, [DEFAULT] merged into each "
+        "section, % interpolation), the transformed file does not read as the original with only the reviewed "
+        "replacements applied to its names and values ([site] name cannot be interpolated "
+        "(InterpolationSyntaxError), expected 'Sprocket 100% Docs')"),
+    "a-replacement-that-interpolates-another-option": (
+        "[site]\nname = Widget Docs\nsecret = s3cr3t\n", {"Widget": "%(secret)s"},
+        "[site] name reads as 's3cr3t Docs', expected '%(secret)s Docs')"),
+    "a-replacement-that-interpolates-in-the-extended-syntax": (
+        "[site]\nname = Widget\nother = x\n", {"Widget": "${other}"},
+        "read with option names folded to lower case, [DEFAULT] merged into each section, ${} interpolation, the "
+        "transformed file does not read as the original"),
+    "a-reference-left-pointing-at-a-renamed-option": (
+        "[site]\nWidget = 1\nb = %(widget)s\n", {"Widget": "Sprocket"},
+        "[site] b cannot be interpolated (InterpolationMissingOptionError), expected '1')"),
+    "two-options-that-differ-only-in-case-once-one-is-renamed": (
+        "[site]\nWidget = 1\nsprocket = 2\n", {"Widget": "Sprocket"},
+        ": read with Python's default INI reader (option names folded to lower case, [DEFAULT] merged into each "
+        "section, % interpolation), the original reads but the transformed file does not (While reading from "
+        "'<string>' [line 3]: option 'sprocket' in section 'site' already exists)"),
+    "a-section-option-that-starts-hiding-a-default": (
+        "[DEFAULT]\nSprocket = 1\n[site]\nWidget = 2\n", {"Widget": "Sprocket"},
+        ": read with Python's default INI reader (option names folded to lower case, [DEFAULT] merged into each "
+        "section, % interpolation), the replacements make the options 'Sprocket' and 'Widget' of [site] the same "
+        "option 'sprocket', so one would hide the other"),
+    "a-default-that-starts-hiding-a-section-option": (
+        "[DEFAULT]\nWidget = 1\n[site]\nSprocket = 2\n", {"Widget": "Sprocket"},
+        "the replacements make the options 'Widget' and 'Sprocket' of [site] the same option 'sprocket', so one "
+        "would hide the other"),
+    "an-escaped-percent-sign-reads-as-one-by-the-default-reader": (
+        "[site]\nname = Widget Docs\n", {"Widget": "Sprocket 100%%"},
+        "[site] name reads as 'Sprocket 100% Docs', expected 'Sprocket 100%% Docs')"),
+    "a-percent-sign-in-the-one-value-the-original-could-be-read-with": (
+        "[site]\nrate = 100%\nname = Widget\n", {"Widget": "Sprocket 5%"},
+        "[site] name cannot be interpolated (InterpolationSyntaxError), expected 'Sprocket 5%')"),
 }
 
 

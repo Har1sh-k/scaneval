@@ -44,7 +44,10 @@ own syntax before it is accepted: the file is parsed before and after, and the r
 the original's value with the reviewed replacements applied to its keys and strings and nothing
 else, the same keys in the same order, of the same types, nested the same way
 (:func:`_check_parsed`). JSON must be strict, an original that does not parse cannot be verified,
-and a replacement that makes two distinct keys equal is refused. Documentation is not asked for
+and a replacement that makes two distinct keys equal is refused. An INI file is also read the ways
+Python's ``configparser`` reads one (option names folded to lower case, ``[DEFAULT]`` merged into
+each section, ``%`` and ``${}`` interpolation) and must read under each way that can read the
+original as the original does (:func:`_check_ini_readings`). Documentation is not asked for
 structure, and no other display file is verified.
 
 What this does not do: parse source, discover identity cues on its own, decide whether a field is
@@ -471,8 +474,9 @@ _STRUCTURE_DETAILS = {
             "replacements applied to its keys and strings",
     "toml": "parsed as TOML before and after; the result is the original with only the reviewed "
             "replacements applied to its keys and strings",
-    "ini": "parsed as INI before and after; the result is the original with only the reviewed replacements "
-           "applied to its section names, option names, and values",
+    "ini": "parsed as INI before and after, as written and as Python's configparser reads it (option names folded "
+           "to lower case, [DEFAULT] merged into each section, % and ${} interpolation); the result is the original "
+           "with only the reviewed replacements applied to its section names, option names, and values",
 }
 
 
@@ -628,6 +632,114 @@ def _difference(expected: Any, found: Any, path: tuple = ()) -> str | None:
     return None if same else f"{_at(path)} is {_shown(found)}, expected {_shown(expected)}"
 
 
+# An INI file that keeps its structure as written can still read differently. Python's ``configparser`` folds
+# option names to lower case unless it is told not to, so two options that differ only in case become one; it
+# merges the ``[DEFAULT]`` section's options into every section, so a section's option can start to hide a
+# default or be hidden by one; and its default reader interpolates ``%(name)s`` in every value, as
+# ``ExtendedInterpolation`` does ``${name}``, so a ``%`` or ``$`` in a replacement can fail to interpolate or
+# read as another option's value. The transformed file is therefore also compared with the original under each of
+# these readers that can read the original, the default reader first.
+def _ini_label(names: str, how: str) -> str:
+    label = f"option names {names}, [DEFAULT] merged into each section, {how}"
+    default = (names, how) == ("folded to lower case", "% interpolation")
+    return f"Python's default INI reader ({label})" if default else label
+
+
+_INI_READERS = tuple((_ini_label(names, how), fold, interpolation) for names, fold, how, interpolation in (
+    ("folded to lower case", str.lower, "% interpolation", configparser.BasicInterpolation),
+    ("folded to lower case", str.lower, "no interpolation", lambda: None),
+    ("folded to lower case", str.lower, "${} interpolation", configparser.ExtendedInterpolation),
+    ("as written", str, "no interpolation", lambda: None),
+    ("as written", str, "% interpolation", configparser.BasicInterpolation),
+    ("as written", str, "${} interpolation", configparser.ExtendedInterpolation)))
+
+
+class _Unreadable:
+    """An INI value a reader cannot return because interpolating it raised; *reason* names the error."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+
+def _ini_reading(text: str, fold: Callable[[str], str], interpolation: Callable[[], Any]) -> dict[str, dict[str, Any]]:
+    """Each section's options as a reader that folds names by *fold* and interpolates as *interpolation* returns them.
+
+    A section's options are the ``[DEFAULT]`` section's, then its own, keyed by the name *fold* gives them; a value
+    the reader cannot interpolate is an :class:`_Unreadable`. Raises what ``configparser`` raises for a file the
+    reader cannot read at all.
+    """
+    parser = configparser.ConfigParser(interpolation=interpolation(), strict=True)
+    parser.optionxform = fold
+    parser.read_string(text)
+    defaults = list(parser.defaults())
+    reading: dict[str, dict[str, Any]] = {}
+    for section in parser.sections():
+        options: dict[str, Any] = {}
+        for option in defaults + [name for name in parser.options(section) if name not in parser.defaults()]:
+            try:
+                options[option] = parser.get(section, option)
+            except configparser.Error as exc:
+                options[option] = _Unreadable(type(exc).__name__)
+        reading[section] = options
+    return reading
+
+
+def _check_ini_readings(where: str, text: str, new_text: str, before: Any, rewrite: Callable[[str], str]) -> None:
+    """Refuse unless each reader of :data:`_INI_READERS` that reads the original reads the transformed file as it does.
+
+    The expectation is the original as that reader reads it, with every name and value rewritten as the raw edit
+    rewrote the text: the same sections, the same options under the names the replaced names fold to, and the
+    same values, which a reader that interpolates has already resolved. A reader that cannot read the original
+    (an option it folds twice, a value it cannot interpolate) is asked nothing it never did, so such a value is
+    not compared. *before* is the original as written, as :func:`_parse_ini` returns it.
+    """
+    defaults = [option for _, pairs in before if isinstance(pairs, _Defaults) for option, _ in pairs]
+    own = {name: [option for option, _ in pairs] for name, pairs in before if not isinstance(pairs, _Defaults)}
+    for label, fold, interpolation in _INI_READERS:
+        try:
+            old = _ini_reading(text, fold, interpolation)
+        except _PARSE_ERRORS:
+            continue
+        try:
+            new = _ini_reading(new_text, fold, interpolation)
+        except _PARSE_ERRORS as exc:
+            raise _refused(f"{where}: read with {label}, the original reads but the transformed file does not "
+                           f"({_reason(exc)}); a replacement is written into the file as it is, so one that repeats "
+                           "another option's name in another case can break how it reads") from exc
+        sections = [rewrite(section) for section in old]
+        if list(new) != sections:
+            raise _refused(f"{where}: read with {label}, the transformed file does not read as the original with only "
+                           f"the reviewed replacements applied to its names and values (it holds the sections "
+                           f"{_shown(list(new))}, expected {_shown(sections)})")
+        for section, options in old.items():
+            written = {fold(option): option for option in defaults + own[section]}
+            named: dict[str, str] = {}
+            expected: dict[str, Any] = {}
+            for option, value in options.items():
+                renamed = fold(rewrite(written[option]))
+                if named.setdefault(renamed, option) != option:
+                    raise _refused(f"{where}: read with {label}, the replacements make the options "
+                                   f"{written[named[renamed]]!r} and {written[option]!r} of [{section}] the same "
+                                   f"option {renamed!r}, so one would hide the other")
+                expected[renamed] = value if isinstance(value, _Unreadable) else rewrite(value)
+            found = new[rewrite(section)]
+            difference = None
+            if list(found) != list(expected):
+                difference = f"[{section}] holds the options {_shown(list(found))}, expected {_shown(list(expected))}"
+            for option, want in expected.items():
+                got = found.get(option)
+                if difference or isinstance(want, _Unreadable):
+                    continue
+                if isinstance(got, _Unreadable):
+                    difference = (f"[{section}] {option} cannot be interpolated ({got.reason}), "
+                                  f"expected {_shown(want)}")
+                elif got != want:
+                    difference = f"[{section}] {option} reads as {_shown(got)}, expected {_shown(want)}"
+            if difference:
+                raise _refused(f"{where}: read with {label}, the transformed file does not read as the original with "
+                               f"only the reviewed replacements applied to its names and values ({difference})")
+
+
 def _check_parsed(kind: str, where: str, text: str, new_text: str, originals: list[str], listed: set[str],
                   replacement_of: dict[str, str]) -> None:
     """Refuse unless the transformed *kind* file is the original with the reviewed replacements applied.
@@ -666,6 +778,8 @@ def _check_parsed(kind: str, where: str, text: str, new_text: str, originals: li
     if difference:
         raise _refused(f"{where}: the transformed file does not keep the original's structure: it is not the "
                        f"original with only the reviewed replacements applied to its keys and strings ({difference})")
+    if kind == "ini":
+        _check_ini_readings(where, text, new_text, before, rewrite)
 
 
 def _edit_for(document: dict, edit: dict, snapshot_id: str, source: Path, hashes: dict[str, str]) -> _Edit:
