@@ -1106,3 +1106,178 @@ def test_repeating_a_blinded_pr_gives_byte_identical_trees_and_records(tmp_path,
     assert canonical_json(first) == canonical_json(second)
     for tree in ("source", "base/source", "original/source", "original/base/source"):
         assert file_map(tmp_path / "first" / tree) == file_map(tmp_path / "second" / tree)
+
+
+# --- a blinded PR through the runner: one map, both variants, a scanner that sees no original ---------
+
+
+BLINDED_PR = {"mode": "pr", "change_set_id": "cs-fix", "profile": "metadata_blinded",
+              "blinding_map": "widget-map.json"}
+
+
+def write_pr_pack(path: Path, widget: dict) -> dict:
+    """The blinding fixture's pack plus the change set from the vulnerable snapshot to the fixed one."""
+    pack = write_pack(path, widget)
+    cases.add_change_set(pack, {"change_set_id": "cs-fix", "base_snapshot_id": "snap-a",
+                                "head_snapshot_id": "snap-fixed", "boundary": "repair",
+                                "review_scope": "changed_files",
+                                "description": "The pull request that repairs the shell call."})
+    cases.set_pr_eligibility(pack, "case-a", "cs-fix", "repaired", "changed", control_id="C-case-a-fixed")
+    cases.save_pack(path, pack)
+    return pack
+
+
+class InspectingPrAdapter(FakeAdapter):
+    """Reads every blob of both synthetic commits and the workspace, the way a curious PR scanner would."""
+
+    scan_modes = frozenset({"full", "pr"})
+
+    def __init__(self):
+        super().__init__()
+        self.seen: dict = {}
+
+    def scan(self, *, request, source_dir, raw_dir, **kwargs):
+        pr = request["input"]["pr"]
+        blobs = {}
+        for commit in (pr["base"], pr["head"]):
+            names = subprocess_git(source_dir, "ls-tree", "-r", "--name-only", commit).splitlines()
+            blobs[commit] = {name: subprocess_git(source_dir, "show", f"{commit}:{name}") for name in names}
+        workspace = source_dir.parent
+        every_name = {part for path in workspace.rglob("*")
+                      if ".git" not in path.relative_to(workspace).parts
+                      for part in path.relative_to(workspace).parts}
+        self.seen = {
+            "tokens_in_edited": sorted({(name, token) for commit in blobs.values()
+                                        for name, text in commit.items() if name in EDITED
+                                        for token in PSEUDONYMS if token in text}),
+            "tokens_in_request": [token for token in PSEUDONYMS if token.casefold() in json.dumps(request).casefold()],
+            "replaced_in_base": [name for name, text in blobs[pr["base"]].items() if "Sprocket" in text],
+            "replaced_in_head": [name for name, text in blobs[pr["head"]].items() if "Sprocket" in text],
+            "paths": {"base": sorted(blobs[pr["base"]]), "head": sorted(blobs[pr["head"]])},
+            "leaked_names": sorted(every_name & {"widget-map.json", "provenance.json", "original", "evaluator",
+                                                 "pack.json", "schedule.json"}),
+            "name_status": subprocess_git(source_dir, "diff", "--name-status", pr["base"], pr["head"]),
+        }
+        return super().scan(request=request, source_dir=source_dir, raw_dir=raw_dir, **kwargs)
+
+
+def subprocess_git(workspace: Path, *args: str) -> str:
+    argv, env = materialize.git_command(list(args))
+    return subprocess.run(argv, cwd=str(workspace), env=env, capture_output=True, text=True, check=True).stdout
+
+
+def blinded_pr_run(tmp_path: Path, widget: dict, document: dict, adapter: Adapter) -> tuple[dict, Path]:
+    write_pr_pack(tmp_path / "pack.json", widget)
+    blinding.save_map(tmp_path / "widget-map.json", document)
+    write_config(tmp_path / "run.json", [BLINDED_PR])
+    out = tmp_path / "out"
+    return run_from_config(tmp_path / "run.json", out, clock=CLOCK, adapters={"fake": adapter}), out
+
+
+def test_a_blinded_pr_input_is_blinded_with_one_map_for_the_base_and_the_head(tmp_path, widget):
+    document = widget_map(widget)
+    adapter = InspectingPrAdapter()
+
+    manifest, out = blinded_pr_run(tmp_path, widget, document, adapter)
+
+    [row] = manifest["inputs"]
+    assert manifest["status"] == "completed" and manifest["invocations"][0]["status"] == "success"
+    assert (row["input_id"], row["mode"], row["profile"], row["change_set_id"]) == (
+        "cs-fix.blinded", "pr", "metadata_blinded", "cs-fix")
+    assert row["preparation_failure"] is None and adapter.calls == 1
+    # The scanner reads the transformed trees, in the head and, through git, in the base: no original
+    # token in any file the map edited, in either commit, and the same pseudonym where the same
+    # original was. Files the map leaves alone keep what they hold, as in a full blinded input.
+    assert adapter.seen["tokens_in_edited"] == [] and adapter.seen["tokens_in_request"] == []
+    assert adapter.seen["replaced_in_base"] == ["README.md", "docs/guide.md", "mkdocs.yml"]
+    assert adapter.seen["replaced_in_head"] == ["README.md", "mkdocs.yml"], "the fixed head deletes the guide"
+    assert adapter.seen["leaked_names"] == []
+    assert sorted(line.split("\t")[0] + " " + line.split("\t")[1] for line in adapter.seen["name_status"].splitlines()
+                  ) == ["D docs/guide.md", "M README.md", "M src/app.py"]
+
+    execution = load_document(out / "invocations" / "cs-fix.blinded__fake-a__r1" / "execution.json",
+                              "execution-record")
+    provenance = execution["provenance"]
+    original_head = materialize.tree_hash(widget["exports"]["snap-fixed"].hashes)
+    original_base = materialize.tree_hash(widget["exports"]["snap-a"].hashes)
+    head = materialize.hash_exported_tree(out / "inputs" / "cs-fix.blinded" / "source")["tree_hash"]
+    base = materialize.hash_exported_tree(out / "inputs" / "cs-fix.blinded" / "base" / "source")["tree_hash"]
+    assert row["tree_hash"] == provenance["tree_hash"] == head and provenance["profile"] == "metadata_blinded"
+    assert {head, base}.isdisjoint({original_head, original_base}), "what is hashed is what a scanner saw"
+    assert provenance["blinding"] == {
+        **blinding.map_identity(document), "original_tree_hash": original_head, "transformed_tree_hash": head,
+        "base_original_tree_hash": original_base, "base_transformed_tree_hash": base}
+    assert provenance["pr"]["base_tree_hash"] == base and provenance["pr"]["head_tree_hash"] == head
+    assert provenance["pr"]["changes"] == {"added": [], "deleted": ["docs/guide.md"],
+                                            "modified": ["README.md", "src/app.py"], "renamed": [], "mode_changed": []}
+    # One map, recorded once per variant in the preparation record, with the same identity.
+    record = json.loads((out / "inputs" / "cs-fix.blinded" / "provenance.json").read_text(encoding="utf-8"))
+    assert record["head"]["blinding"]["map_sha256"] == record["base"]["blinding"]["map_sha256"] == \
+        blinding.map_sha256(document)
+    assert (out / "inputs" / "cs-fix.blinded" / "original" / "source" / "README.md").read_text(
+        encoding="utf-8") == README_FIXED, "the originals stay evaluator-side"
+    assert (out / "inputs" / "cs-fix.blinded" / "original" / "base" / "source" / "README.md").read_text(
+        encoding="utf-8") == README_VULNERABLE
+    assert not (out / "inputs" / "cs-fix.blinded" / "base" / "original").exists()
+
+
+def test_a_blinded_pr_plan_names_the_map_binds_to_the_transformed_trees_and_refers_labels_to_the_original(tmp_path,
+                                                                                                        widget):
+    document = widget_map(widget)
+
+    manifest, out = blinded_pr_run(tmp_path, widget, document, InspectingPrAdapter())
+
+    bundle = out / "invocations" / "cs-fix.blinded__fake-a__r1"
+    execution = load_document(bundle / "execution.json", "execution-record")
+    plan = load_document(bundle / "evaluator" / "plan.json", "evaluation-plan")
+    original_head = materialize.tree_hash(widget["exports"]["snap-fixed"].hashes)
+    assert plan["schema_version"] == "2.1" and plan["input_hash"] == execution["provenance"]["input_hash"]
+    assert plan["provenance"]["source_tree_hash"] == original_head, "the labels refer to the original head export"
+    assert plan["provenance"]["blinding"] == blinding.map_identity(document)
+    assert plan["provenance"]["input_id"] == "cs-fix.blinded" and plan["provenance"]["profile"] == "metadata_blinded"
+    assert plan["provenance"]["pr"]["head_tree_hash"] == execution["provenance"]["tree_hash"] != original_head
+    assert [(c["control_id"], c["pr_scope"]) for c in plan["controls"]] == [
+        ("C-case-a-fixed", {"relation": "repaired", "code_scope": "changed"})]
+    assert plan["targets"] == [], "the target is on the base, and a PR review reads the head"
+    frozen = cases.load_pack(out / "evaluator" / "pack.json")
+    for snapshot_id in ("snap-a", "snap-fixed"):
+        assert cases.snapshot_by_id(frozen, snapshot_id)["tree_hash"] == materialize.tree_hash(
+            widget["exports"][snapshot_id].hashes), "both declared hashes are the originals'"
+    outcomes = [(outcome["case_id"], outcome["passed"]) for outcome in manifest["inputs"][0]["mechanical_checks"]]
+    assert outcomes == [("case-a", True), ("case-a", True)], "the case is checked against both original exports"
+    assert main(["replay", str(bundle), "--output", str(tmp_path / "replayed.json")]) == 0
+    assert (tmp_path / "replayed.json").read_bytes() == (bundle / "evaluation.json").read_bytes()
+
+
+def test_a_map_that_does_not_cover_the_base_fails_the_pr_input_and_no_scanner_sees_it(tmp_path, widget):
+    document = widget_map(widget, approved=False)
+    document["variants"] = [_variant(document, "snap-fixed")]
+    for edit in document["edits"]:
+        edit["expected"] = [_expected(edit, "snap-fixed")]
+    approve(document)
+    adapter = InspectingPrAdapter()
+
+    manifest, out = blinded_pr_run(tmp_path, widget, document, adapter)
+
+    [row] = manifest["inputs"]
+    assert row["preparation_failure"]["type"] == "MaterializationError"
+    assert "has no variant for snapshot snap-a" in row["preparation_failure"]["message"]
+    assert (row["tree_hash"], row["input_hash"]) == (None, None) and adapter.calls == 0
+    assert manifest["invocations"][0]["status"] == "skipped"
+    assert not (out / "inputs" / "cs-fix.blinded").exists(), "nothing was exported: no half-blinded input"
+
+
+def test_a_blinded_pr_run_is_refused_when_related_inputs_name_different_maps(tmp_path, widget):
+    document = widget_map(widget)
+    write_pr_pack(tmp_path / "pack.json", widget)
+    blinding.save_map(tmp_path / "widget-map.json", document)
+    other = deepcopy(document)
+    other["map_id"] = "another-map"
+    reapproved(other)
+    blinding.save_map(tmp_path / "another-map.json", other)
+    write_config(tmp_path / "run.json", [BLINDED_PR, {"snapshot_id": "snap-a", "profile": "metadata_blinded",
+                                                       "blinding_map": "another-map.json"}])
+
+    with pytest.raises(ContractError, match="are blinded snapshots of one repository .* but name different maps"):
+        run_from_config(tmp_path / "run.json", tmp_path / "out", clock=CLOCK, adapters={"fake": FakeAdapter()})
+    assert not (tmp_path / "out").exists()

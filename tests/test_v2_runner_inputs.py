@@ -401,15 +401,19 @@ def test_a_narrowed_run_selects_by_input_id(tmp_path, upstream):
                for note in frozen["notes"])
 
 
-def test_a_native_pr_input_is_refused_before_the_output_exists(tmp_path, upstream):
-    """This build cannot prepare a PR input, and a full scan of the head is never its stand-in."""
+def test_a_pr_input_naming_a_change_set_the_pack_does_not_declare_is_refused_before_the_output_exists(
+        tmp_path, upstream):
+    """Changed deliberately: this pinned the phase-1 refusal of every native PR input. A PR input is
+    prepared now (``test_v2_pr.py``), so what is refused is the one whose change set the pack does not
+    declare, and a full scan of the head is still never its stand-in."""
     repo, commit = upstream
     write_pack(tmp_path / "pack.json", repo, {"snap-a": commit})
     write_config(tmp_path / "run.json", inputs=[{"snapshot_id": "snap-a"}, {"mode": "pr", "change_set_id": "cs-1"}])
     adapter = FakeAdapter()
     out = tmp_path / "out"
 
-    with pytest.raises(ContractError, match=r"inputs\[1\] \(cs-1\) is a native PR input"):
+    with pytest.raises(ContractError, match=r"inputs\[1\] \(cs-1\) is a native PR input that cannot be run: "
+                                            r"unknown change set 'cs-1'"):
         run_from_config(tmp_path / "run.json", out, clock=RUN_CLOCK, adapters={"fake": adapter})
     assert not out.exists() and adapter.prepared == 0
 
