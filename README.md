@@ -61,7 +61,8 @@ Guides: [Observer SDK](docs/OBSERVER_SDK.md), [native CLI collectors](docs/COLLE
 
 - Full-scan execution, case packs, source export, review, scoring, replay, and reports are implemented.
 - Only the `standard` input profile is supported. `metadata_blinded` is refused.
-- Native PR mode, SARIF import, corpus-level aggregation, precision sampling, promotion gates, and enforced isolation are not implemented.
+- Enforced isolation exists for Semgrep only: a system whose 2.1 run configuration selects the `oci` execution backend runs each scanner process in a locked-down Docker container from a digest-pinned image, with its network policy enforced. `llm-harness` and `deepsec` are refused under it. Every other system runs as the operator, unenforced. See [the threat model](docs/THREAT_MODEL.md).
+- Native PR mode, SARIF import, corpus-level aggregation, precision sampling, and promotion gates are not implemented.
 - The initial public workload is not selected. The pilot is an integration exercise, not a representative benchmark or scanner comparison.
 
 [Current capabilities](docs/INITIAL_BUILD.md) describes the implementation. [Design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) describe the broader contract and planned work.
