@@ -54,9 +54,10 @@ from scaneval.adapters.deepsec import (
     workspace_config,
 )
 from scaneval.adapters.pr import Change, PrRange
-from scaneval.contracts import load_document
+from scaneval.contracts import canonical_sha256, load_document, pr_diff_sha256, pr_input_hash
 from scaneval.execution import PreparedInput, build_request, run_invocation
-from scaneval.materialize import hash_exported_tree
+from scaneval.materialize import compute_pr_history, diff_trees, hash_exported_tree
+from scaneval.scoring import observe, score
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2748,6 +2749,74 @@ def test_a_quoted_name_deepsec_did_investigate_is_not_an_omission(tmp_path):
     assert sorted(claim["primary_location"]["path"] for claim in outcome.claims) == ["src/caf\u00e9.js",
                                                                                   "src/routes.js"]
     assert not any("did not investigate" in note for note in outcome.notes)
+
+
+def pr_prepared_input(tmp_path: Path, head: dict) -> PreparedInput:
+    """A PR input as preparation records one, for :func:`run_invocation`, which builds the history its request names.
+
+    The base tree is :data:`BASE_TREE` and the head is that tree with *head* applied to it. Everything a 2.1 record
+    binds to is computed from the two trees the way the runner's own tests compute it.
+    """
+    base_dir, head_dir = tmp_path / "trial" / "base" / "source", tmp_path / "trial" / "source"
+    for directory, files in ((base_dir, BASE_TREE), (head_dir, {**BASE_TREE, **head})):
+        for relative, content in files.items():
+            (directory / relative).parent.mkdir(parents=True, exist_ok=True)
+            (directory / relative).write_text(content, encoding="utf-8")
+    base_hash, head_hash = hash_exported_tree(base_dir)["tree_hash"], hash_exported_tree(head_dir)["tree_hash"]
+    changes = diff_trees(base_dir, head_dir)
+    digest = pr_diff_sha256(base_hash, head_hash, changes)
+    history = compute_pr_history(head_dir, base_dir, changes)
+    pr = {"change_set_id": "cs-1", "base_snapshot_id": "snap-base", "head_snapshot_id": "snap-head",
+          "boundary": "introducing", "review_scope": "changed_files", "base_tree_hash": base_hash,
+          "head_tree_hash": head_hash, "diff_sha256": digest, "changes": changes,
+          "base_commit": history["base_commit"], "head_commit": history["head_commit"],
+          "history": {key: history[key] for key in ("messages", "identity", "date")}, "prepared_state": "fresh"}
+    return PreparedInput("pr-fixture", head_dir, head_hash, ("javascript",), {"source": {"commit": "fixture"}},
+                         mode="pr", input_hash=pr_input_hash(base_hash, head_hash, digest), pr=pr,
+                         base_source_dir=base_dir)
+
+
+def test_a_quiet_assessment_of_a_control_on_a_quoted_name_earns_no_credit_for_a_review_that_never_read_it(tmp_path):
+    """The reviewer's case through the runner and the scorer, not only through the adapter's outcome.
+
+    A change that adds only src/café.js ends DeepSec's own run with "Nothing to process" and exit 0. It was saved as
+    a ``success`` with resolved bundles, so the control planned on that file was completed and the reviewer's quiet
+    assessment resolved it: a safe capability the scanner had been given and left alone, counted in the false-alarm
+    rate's denominator. No model ever opened the file.
+    """
+    root = fake_deepsec_root(tmp_path)
+    prepared = pr_prepared_input(tmp_path, {"src/caf\u00e9.js": "module.exports = 2;\n"})
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+
+    bundle = run_invocation(prepared=prepared, adapter=adapter, spec=spec,
+                            preparation=adapter.prepare(spec, tmp_path / "cache"), out_dir=tmp_path / "out",
+                            run_id="run-deepsec-pr", timeout_seconds=300, trace_mode="off",
+                            network_policy="model_provider_only", clock=CLOCK)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    plan = {"schema_version": "2.0", "input_hash": result["input_hash"], "scope": "diagnostic",
+            "targets": [{"target_id": "T1", "description": "the planted root cause in src/server.js",
+                         "validation_level": "fixture"}],
+            "controls": [{"control_id": "C1", "description": "the safe handler in src/caf\u00e9.js",
+                          "type": "capability_safe", "validation_level": "fixture"}],
+            "review_budgets": [3]}
+    decisions = {"schema_version": "2.0", "run_id": result["run_id"], "input_hash": result["input_hash"],
+                 "result_sha256": canonical_sha256(result), "claim_matches": [],
+                 "control_assessments": [{"control_id": "C1", "decision": "quiet", "claim_ids": [],
+                                          "reason": "the scanner said nothing about the safe handler"}]}
+
+    control = observe(plan, result, decisions)["controls"][0]
+    assert (control["decision"], control["completed"], control["resolved"]) == ("quiet", False, False)
+    controls = score(plan, result, decisions)["metrics"]["controls"]["capability_safe"]
+    assert (controls["assigned"], controls["completed"], controls["resolved"]) == (1, 0, 0)
+    assert controls["assessable_mass"] == 0.0
+    # Why: the saved result says the change was not read, which is the one thing the scorer reads.
+    assert result["status"] == "error" and result["error"]["code"] == "scope_incomplete"
+    assert result["claims"] == [] and result["bundles_resolved"] is False and result["location_basis"] == "pr_head"
+    assert "src/caf\u00e9.js" in result["error"]["message"]
+    assert not any(note.startswith("Empty review:")
+                   for note in load_document(bundle / "execution.json", "execution-record")["notes"])
 
 
 @pytest.mark.parametrize("path, quoted", [
