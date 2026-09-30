@@ -331,6 +331,19 @@ def test_a_log_is_read_only_as_a_regular_file_within_the_size_bound(tmp_path):
         read_artifact(log, max_bytes=0)
 
 
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                    reason="root reads a file whatever its permission bits say")
+def test_a_log_the_operator_may_not_read_is_refused(tmp_path):
+    log = tmp_path / "scan.sarif"
+    log.write_bytes(encoded(minimal_log()))
+    log.chmod(0)
+    try:
+        with pytest.raises(SarifImportError, match="could not open the SARIF file .*Permission denied"):
+            read_artifact(log)
+    finally:
+        log.chmod(0o600)
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
 def test_a_fifo_named_as_the_log_is_refused_without_blocking(tmp_path):
     fifo = tmp_path / "scan.sarif"
@@ -350,6 +363,8 @@ def test_a_fifo_named_as_the_log_is_refused_without_blocking(tmp_path):
     (b'{"version": "2.1.0", "runs": [{"rank": 1e999}]}', "overflows to infinity"),
     (b'{"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "\\udc80"}}}]}', "lone UTF-16 surrogate"),
     (b'{"version": "2.1.0", "\\ud800": 1}', "lone UTF-16 surrogate"),
+    # Longer than the interpreter's limit on digits in an integer literal (4300 by default).
+    (b'{"version": "2.1.0", "runs": [{"rank": ' + b"9" * 5000 + b"}]}", "not valid JSON: Exceeds the limit"),
     (b'["2.1.0"]', "not a SARIF log object"),
     (b'{"a":' * 200000 + b"1" + b"}" * 200000, "recursion limit"),
 ])
