@@ -570,11 +570,19 @@ def _retained_cues(document: dict, source: Path, paths: list[str], instruction_f
 
 
 def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapshot_id: str | None,
-           clock: Callable[[], datetime] | None, approval_required: bool) -> dict:
-    """Export the original, check the map against it, write the transformed tree, and record it all."""
+           clock: Callable[[], datetime] | None, approval_required: bool, variant_dir: str = "") -> dict:
+    """Export the original, check the map against it, write the transformed tree, and record it all.
+
+    *variant_dir* names where this snapshot's trees sit beneath the trial directory: ``""`` for the
+    input's own snapshot, the transformed tree at ``source`` and the original at
+    ``original/source``, and for the base of a PR input ``"base"``, the transformed tree at
+    ``base/source`` and the original at ``original/base/source``. The original stays under
+    ``original`` in both, which is the one place nothing is ever handed to a scanner from.
+    """
     variant, validation = _preflight(document, snapshot_id, snapshot, approval_required=approval_required)
-    source = trial_dir / "source"
-    original_source = trial_dir / ORIGINAL_ROOT
+    source = trial_dir / variant_dir / "source"
+    original_root = str(PurePosixPath("original") / variant_dir / "source")
+    original_source = trial_dir / original_root
     for directory in (source, original_source):
         if directory.exists() or directory.is_symlink():
             raise MaterializationError(f"trial source directory already exists: {directory}")
@@ -605,7 +613,9 @@ def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapsho
     record = provenance_record(snapshot, "metadata_blinded", transformed, clock=clock)
     record["schema_version"] = SCHEMA_VERSION
     record["limits"] = list(BLINDED_LIMITS)
-    record["original"] = {"root": ORIGINAL_ROOT, "tree_hash": original_hash,
+    if variant_dir:
+        record["trial"]["root"] = str(PurePosixPath(variant_dir) / "source")
+    record["original"] = {"root": original_root, "tree_hash": original_hash,
                           "file_count": len(original.hashes), "byte_count": original.byte_count}
     record["blinding"] = {
         **map_identity(document),
@@ -625,9 +635,28 @@ def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapsho
     return record
 
 
+def preflight(document: dict, snapshot_id: str | None, snapshot: CachedSnapshot) -> None:
+    """Ask *document* every question about one snapshot that needs no export, refusing as a run would.
+
+    The contract, approval, repository, variant commit, and edit path classes: everything
+    :func:`export_blinded` checks before it writes a tree. An input made of two snapshots, the base
+    and the head of a PR, asks it of both before either is exported, so a map that is unapproved,
+    for another repository, or stale for either snapshot leaves no half-blinded input behind. What
+    needs an export, the tree hash and each expected file, is still asked of each variant as it is
+    exported. Writes nothing.
+    """
+    _preflight(document, snapshot_id, snapshot, approval_required=True)
+
+
 def export_blinded(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *,
-                   snapshot_id: str | None, clock: Callable[[], datetime] | None = None) -> dict:
+                   snapshot_id: str | None, clock: Callable[[], datetime] | None = None,
+                   variant_dir: str = "") -> dict:
     """Export *snapshot* blinded by *document*: the original to ``original/source``, the result to ``source``.
+
+    A PR input blinds its base with the map that blinded its head, so the same function writes the
+    base under *variant_dir* ``"base"``: the transformed tree to ``base/source`` and the original to
+    ``original/base/source``. Every check below is asked of each variant on its own, and the map
+    must cover both snapshots.
 
     Returns the preparation record (``schema_version`` 2.1): the standard fields describe the
     transformed tree a scanner is handed, ``original`` describes the original export the labels
@@ -638,7 +667,7 @@ def export_blinded(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *,
     list. The map must be approved: :func:`dry_run` is the one path that reports approval instead.
     """
     return _blind(snapshot, Path(trial_dir), document, snapshot_id=snapshot_id, clock=clock,
-                  approval_required=True)
+                  approval_required=True, variant_dir=variant_dir)
 
 
 def dry_run(document: dict, snapshot: CachedSnapshot, snapshot_id: str, workdir: Path, *,

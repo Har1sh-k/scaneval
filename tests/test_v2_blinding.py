@@ -991,3 +991,109 @@ def test_blinding_review_appends_one_chained_review_and_never_names_a_reviewer_i
     code, _, err = cli(capsys, "blinding", "review", str(trial / "map.json"), "--reviewer", REVIEWER,
                        "--role", "curator", "--decision", "reject", "--note", "inside a trial")
     assert code == 2 and "inside the trial directory" in err
+
+
+# --- a blinded PR: one map, both snapshots, originals kept evaluator-side ---------------------------
+
+
+def export_blinded_pr(widget: dict, document: dict, trial: Path, *, base: str = "snap-a",
+                      head: str = "snap-fixed") -> dict:
+    return materialize.export_pr(cached(widget, base), cached(widget, head), trial, profile="metadata_blinded",
+                                 blinding_map=document, base_snapshot_id=base, head_snapshot_id=head, clock=CLOCK)
+
+
+def test_a_blinded_pr_transforms_the_base_and_the_head_with_one_map(tmp_path, widget):
+    document = widget_map(widget)
+    trial = tmp_path / "trial"
+
+    record = export_blinded_pr(widget, document, trial)
+
+    # Where everything sits: what a scanner may be given, and the originals that are never given.
+    assert {path.relative_to(trial).as_posix() for path in (trial.glob("*"))} == {"source", "base", "original"}
+    assert (trial / "base" / "source" / "README.md").is_file() and (trial / "source" / "README.md").is_file()
+    assert (trial / "original" / "source" / "README.md").is_file()
+    assert (trial / "original" / "base" / "source" / "README.md").is_file()
+    assert not (trial / "base" / "original").exists(), "an original never sits beside what a scanner may see"
+    head, base = record["head"], record["base"]
+    assert (head["trial"]["root"], base["trial"]["root"]) == ("source", "base/source")
+    assert (head["original"]["root"], base["original"]["root"]) == ("original/source", "original/base/source")
+    # One map: the same identity, the same reviewers, the same pseudonyms in both trees.
+    assert {key: head["blinding"][key] for key in ("map_id", "map_version", "map_sha256")} == \
+        {key: base["blinding"][key] for key in ("map_id", "map_version", "map_sha256")} == \
+        blinding.map_identity(document)
+    assert head["blinding"]["reviewers"] == base["blinding"]["reviewers"]
+    assert (trial / "base" / "source" / "README.md").read_text(encoding="utf-8") == blinded_text(README_VULNERABLE)
+    assert (trial / "source" / "README.md").read_text(encoding="utf-8") == blinded_text(README_FIXED)
+    # The originals are the exports the labels and checks refer to, and the transformed trees are what is hashed.
+    assert base["original"]["tree_hash"] == materialize.tree_hash(widget["exports"]["snap-a"].hashes)
+    assert head["original"]["tree_hash"] == materialize.tree_hash(widget["exports"]["snap-fixed"].hashes)
+    assert base["trial"]["tree_hash"] == materialize.hash_exported_tree(trial / "base" / "source")["tree_hash"]
+    assert head["trial"]["tree_hash"] == materialize.hash_exported_tree(trial / "source")["tree_hash"]
+    assert base["blinding"]["transformed_tree_hash"] == base["trial"]["tree_hash"]
+    assert {base["trial"]["tree_hash"], head["trial"]["tree_hash"]}.isdisjoint(
+        {base["original"]["tree_hash"], head["original"]["tree_hash"]})
+
+
+def test_a_blinded_pr_records_the_diff_of_the_transformed_trees_and_none_of_the_originals(tmp_path, widget):
+    trial = tmp_path / "trial"
+
+    record = export_blinded_pr(widget, widget_map(widget), trial)
+
+    changes = record["diff"]["changes"]
+    assert changes == {"added": [], "deleted": ["docs/guide.md"], "modified": ["README.md", "src/app.py"],
+                       "renamed": [], "mode_changed": []}
+    assert record["diff"]["base_tree_hash"] == record["base"]["trial"]["tree_hash"]
+    assert record["diff"]["head_tree_hash"] == record["head"]["trial"]["tree_hash"]
+    # The recorded diff names a path a scanner can see and quotes nothing of an original.
+    assert "Widget" not in json.dumps(record["diff"]) and "AcmeCorp" not in json.dumps(record["diff"])
+
+
+@pytest.mark.parametrize("name", ["unreviewed", "rejected", "stale-commit", "python-file"])
+def test_a_map_that_does_not_fit_either_snapshot_leaves_no_blinded_pr_behind(tmp_path, widget, name):
+    """Every check that needs no export is asked of both snapshots before either is exported."""
+    document = refused_map(widget, name)
+    trial = tmp_path / "trial"
+
+    with pytest.raises(MaterializationError, match=REFUSALS[name][2]):
+        export_blinded_pr(widget, document, trial)
+
+    assert not trial.exists(), "no half-blinded input: neither tree was written"
+
+
+def test_a_map_that_does_not_cover_the_base_refuses_the_pr_and_is_never_replaced_by_standard(tmp_path, widget):
+    document = widget_map(widget, approved=False)
+    document["variants"] = [_variant(document, "snap-fixed")]
+    for edit in document["edits"]:
+        edit["expected"] = [_expected(edit, "snap-fixed")]
+    approve(document)
+    trial = tmp_path / "trial"
+
+    with pytest.raises(MaterializationError, match="stale map: map widget-metadata 1 has no variant for snapshot snap-a"):
+        export_blinded_pr(widget, document, trial)
+
+    assert not trial.exists()
+    with pytest.raises(MaterializationError, match="blinding unavailable"):
+        materialize.export_pr(cached(widget, "snap-a"), cached(widget, "snap-fixed"), tmp_path / "other",
+                              profile="metadata_blinded")
+    assert not (tmp_path / "other").exists()
+
+
+def test_a_blinded_pr_refuses_a_base_whose_files_are_not_the_ones_the_map_reviewed(tmp_path, widget):
+    """The checks that need the export are asked of the base too, after the head was exported."""
+    document = widget_map(widget, approved=False)
+    _expected(_edit(document, "readme-brand"), "snap-a")["occurrences"]["Widget"] = 3
+    approve(document)
+
+    with pytest.raises(MaterializationError, match="unexpected occurrence count in snapshot snap-a"):
+        export_blinded_pr(widget, document, tmp_path / "trial")
+
+
+def test_repeating_a_blinded_pr_gives_byte_identical_trees_and_records(tmp_path, widget):
+    document = widget_map(widget)
+
+    first = export_blinded_pr(widget, deepcopy(document), tmp_path / "first")
+    second = export_blinded_pr(widget, deepcopy(document), tmp_path / "second")
+
+    assert canonical_json(first) == canonical_json(second)
+    for tree in ("source", "base/source", "original/source", "original/base/source"):
+        assert file_map(tmp_path / "first" / tree) == file_map(tmp_path / "second" / tree)

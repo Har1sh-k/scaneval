@@ -10,13 +10,16 @@ import subprocess
 
 import pytest
 
-from scaneval.contracts import ContractError, canonical_sha256
+from scaneval.contracts import ContractError, canonical_sha256, pr_diff_sha256, pr_input_hash
 from scaneval.materialize import (
     HARNESS_STATE_DIRS,
     STRIPPED_TOP_LEVEL,
     Containment,
     MaterializationError,
     cache_key,
+    changed_paths,
+    diff_trees,
+    export_pr,
     export_snapshot,
     fetch_snapshot,
     git_command,
@@ -513,3 +516,150 @@ def test_containment_reports_a_path_it_cannot_resolve_the_same_way_as_one_that_e
         # No captured path means nothing can be proved inside it, so this is refused where it
         # happens rather than returning None from a check made after a scanner has run.
         Containment.capture(Path("base\x00with-a-nul"))
+
+
+# --- native PR inputs: two exports, the diff between them, and the neutral history a scanner is given ---
+
+
+def write_tree(root: Path, files: dict[str, str | tuple[str, int]]) -> Path:
+    """Write *files* under *root*; a value is the text, or the text and the mode to give the file."""
+    for relative, value in files.items():
+        text, mode = (value, 0o644) if isinstance(value, str) else value
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        path.chmod(mode)
+    return root
+
+
+UNCHANGED = "print('unchanged')\n"
+MOVED = "def helper():\n    return 'shared by the rename'\n"
+BASE_FILES = {
+    "README.md": "# widget\n", "src/unchanged.py": UNCHANGED, "src/app.py": "print('v1')\n",
+    "src/old_only.py": "print('only in the base')\n", "lib/util.py": MOVED,
+    "bin/run.sh": ("#!/bin/sh\necho run\n", 0o644),
+}
+HEAD_FILES = {
+    "README.md": "# widget\n", "src/unchanged.py": UNCHANGED, "src/app.py": "print('v2')\n",
+    "src/new_only.py": "print('added in the head')\n", "lib/helpers.py": MOVED,
+    "bin/run.sh": ("#!/bin/sh\necho run\n", 0o755),
+}
+
+
+def test_diff_trees_records_added_deleted_modified_renamed_and_mode_changed_files(tmp_path):
+    base = write_tree(tmp_path / "base", BASE_FILES)
+    head = write_tree(tmp_path / "head", HEAD_FILES)
+
+    changes = diff_trees(base, head)
+
+    assert changes == {"added": ["src/new_only.py"], "deleted": ["src/old_only.py"],
+                       "modified": ["src/app.py"], "renamed": [["lib/util.py", "lib/helpers.py"]],
+                       "mode_changed": ["bin/run.sh"]}
+    assert changed_paths(changes) == ["bin/run.sh", "lib/helpers.py", "src/app.py", "src/new_only.py",
+                                      "src/old_only.py"], "a rename is named by its new path, as git names it"
+    assert diff_trees(base, base) == {"added": [], "deleted": [], "modified": [], "renamed": [], "mode_changed": []}
+
+
+def test_diff_trees_pairs_only_an_unambiguous_exact_rename_and_never_a_similar_file(tmp_path):
+    base = write_tree(tmp_path / "base", {
+        "a/one.txt": "same bytes\n", "a/two.txt": "same bytes\n", "b/moved.py": "x = 1\ny = 2\n",
+        "c/edited.py": "keep\nkeep\nkeep\nold\n", "e/empty": "", "s/script.sh": ("echo\n", 0o644)})
+    head = write_tree(tmp_path / "head", {
+        "z/one.txt": "same bytes\n", "z/two.txt": "same bytes\n", "b2/moved.py": "x = 1\ny = 2\n",
+        "c/edited2.py": "keep\nkeep\nkeep\nnew\n", "e2/empty": "", "s2/script.sh": ("echo\n", 0o755)})
+
+    changes = diff_trees(base, head)
+
+    assert changes["renamed"] == [["b/moved.py", "b2/moved.py"], ["e/empty", "e2/empty"],
+                                  ["s/script.sh", "s2/script.sh"]]
+    assert changes["added"] == ["c/edited2.py", "z/one.txt", "z/two.txt"], \
+        "two identical files on each side name no pairing, and an edited move is an add and a delete"
+    assert changes["deleted"] == ["a/one.txt", "a/two.txt", "c/edited.py"]
+    assert changes["modified"] == [] and changes["mode_changed"] == ["s2/script.sh"], \
+        "the renamed file whose executable bit differs from its source's says so under its new name"
+
+
+def test_diff_trees_reports_a_file_whose_bytes_and_mode_both_changed_under_both_headings(tmp_path):
+    base = write_tree(tmp_path / "base", {"tool.sh": ("echo one\n", 0o644)})
+    head = write_tree(tmp_path / "head", {"tool.sh": ("echo two\n", 0o755)})
+
+    assert diff_trees(base, head) == {"added": [], "deleted": [], "modified": ["tool.sh"], "renamed": [],
+                                      "mode_changed": ["tool.sh"]}
+
+
+def test_diff_trees_reads_the_trees_as_they_lie_and_leaves_out_links_and_the_git_directory(tmp_path):
+    base = write_tree(tmp_path / "base", {"a.py": "1\n"})
+    head = write_tree(tmp_path / "head", {"a.py": "1\n", ".git/config": "[core]\n"})
+    os.symlink("a.py", head / "link.py")
+
+    assert diff_trees(base, head) == {"added": [], "deleted": [], "modified": [], "renamed": [],
+                                      "mode_changed": []}
+
+
+@pytest.fixture
+def pull_request(tmp_path: Path) -> dict:
+    """A repository with a base commit and a head commit one pull request apart, both fetched."""
+    repo = tmp_path / "upstream"
+    write_tree(repo, {**BASE_FILES, ".securevibes/state.md": "controller state\n",
+                      "CLAUDE.md": "project instructions\n"})
+    git("init", "-q", "-b", "main", cwd=repo)
+    git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=repo)
+    git("add", "-A", "-f", ".", cwd=repo)
+    git("commit", "-q", "-m", "base", cwd=repo)
+    base = git("rev-parse", "HEAD", cwd=repo)
+    (repo / "src" / "old_only.py").unlink()
+    (repo / "lib" / "util.py").rename(repo / "lib" / "helpers.py")
+    write_tree(repo, {name: HEAD_FILES[name] for name in ("src/new_only.py", "src/app.py", "bin/run.sh")})
+    git("add", "-A", "-f", ".", cwd=repo)
+    git("commit", "-q", "-m", "head", cwd=repo)
+    head = git("rev-parse", "HEAD", cwd=repo)
+    cache = tmp_path / "cache"
+    return {"repo": repo, "base": fetch_snapshot(str(repo), base, cache), "head": fetch_snapshot(str(repo), head, cache),
+            "cache": cache}
+
+
+CLOCK = lambda: datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)  # noqa: E731
+
+
+def test_export_pr_writes_the_head_and_the_base_and_records_the_change_between_them(tmp_path, pull_request):
+    trial = tmp_path / "trial"
+
+    record = export_pr(pull_request["base"], pull_request["head"], trial, clock=CLOCK)
+
+    assert record["schema_version"] == "2.1" and record["mode"] == "pr" and record["profile"] == "standard"
+    assert (trial / "source" / "src" / "new_only.py").is_file()
+    assert (trial / "base" / "source" / "src" / "old_only.py").is_file()
+    assert not (trial / "source" / ".securevibes").exists() and not (trial / "base" / "source" / ".securevibes").exists()
+    assert (record["head"]["trial"]["root"], record["base"]["trial"]["root"]) == ("source", "base/source")
+    assert record["head"]["source"]["commit"] == pull_request["head"].commit
+    assert record["base"]["source"]["commit"] == pull_request["base"].commit
+    for side, root in (("head", trial / "source"), ("base", trial / "base" / "source")):
+        assert record[side]["trial"]["tree_hash"] == hash_exported_tree(root)["tree_hash"]
+        assert record[side]["profile"] == "standard" and record[side]["synthetic_history"] is None
+    changes = {"added": ["src/new_only.py"], "deleted": ["src/old_only.py"], "modified": ["src/app.py"],
+               "renamed": [["lib/util.py", "lib/helpers.py"]], "mode_changed": ["bin/run.sh"]}
+    base_hash, head_hash = record["base"]["trial"]["tree_hash"], record["head"]["trial"]["tree_hash"]
+    assert base_hash != head_hash
+    assert record["diff"] == {"base_tree_hash": base_hash, "head_tree_hash": head_hash, "changes": changes,
+                              "diff_sha256": pr_diff_sha256(base_hash, head_hash, changes)}
+    assert record["input_hash"] == pr_input_hash(base_hash, head_hash, record["diff"]["diff_sha256"])
+    assert write_provenance(trial, record).is_file(), "the record is a document the trial can carry"
+    assert (trial / "provenance.json").is_file() and (trial / "source").is_dir(), "and a trial the CLI recognizes"
+
+
+def test_export_pr_refuses_a_change_with_nothing_in_it(tmp_path, pull_request):
+    with pytest.raises(MaterializationError, match="no change to review"):
+        export_pr(pull_request["head"], pull_request["head"], tmp_path / "trial", clock=CLOCK)
+    with pytest.raises(MaterializationError, match="unknown input profile"):
+        export_pr(pull_request["base"], pull_request["head"], tmp_path / "other", profile="anonymized")
+    with pytest.raises(MaterializationError, match="blinding unavailable"):
+        export_pr(pull_request["base"], pull_request["head"], tmp_path / "other", profile="metadata_blinded")
+    assert not (tmp_path / "other").exists()
+
+
+def test_export_pr_refuses_a_trial_that_already_holds_an_export(tmp_path, pull_request):
+    trial = tmp_path / "trial"
+    export_pr(pull_request["base"], pull_request["head"], trial, clock=CLOCK)
+
+    with pytest.raises(MaterializationError, match="already exists"):
+        export_pr(pull_request["base"], pull_request["head"], trial, clock=CLOCK)

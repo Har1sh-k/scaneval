@@ -12,6 +12,10 @@ Every git invocation this package makes is built by :func:`git_command`, so a gi
 on nothing outside the directory it is given: see that function for what is neutralized and
 what is not.
 
+A native PR input is two exports, not one. :func:`export_pr` writes the head to ``source`` and the
+base to ``base/source`` beside it, records the diff between the two trees a scanner is handed
+(:func:`diff_trees`), and refuses a change with nothing in it.
+
 :class:`Containment` is the one containment check this package has. Every path read or written
 after a scanner ran is a path the scanner could have replaced, and the final component is not the
 only one that can be a link, so the rule is stated once here and every such path is resolved
@@ -35,7 +39,7 @@ import shutil
 import subprocess
 from typing import Callable
 
-from .contracts import ContractError, canonical_json, canonical_sha256
+from .contracts import ContractError, canonical_json, canonical_sha256, pr_diff_sha256, pr_input_hash
 
 
 SCHEMA_VERSION = "2.0"
@@ -567,6 +571,134 @@ def prepare_synthetic_history(source_dir: Path, *, message: str = "snapshot") ->
     _git(["commit", "-q", "--allow-empty", "--no-verify", "-m", message], source_dir)
     commit = _git(["rev-parse", "HEAD"], source_dir).strip()
     return {"commit": commit, "message": message, "identity": "ScanEval <scaneval@localhost>"}
+
+
+# Where a PR input's base export sits beneath its trial directory: ``base/source``.
+PR_BASE_DIR = "base"
+
+
+def _tree_state(root: Path) -> dict[str, tuple[str, bool]]:
+    """``{relative path: (content hash, executable)}`` for every regular file under *root*."""
+    return {relative: (sha256_file(path)[0], bool(os.stat(path).st_mode & 0o100))
+            for relative, path in sorted(walk_regular_files(root).items())}
+
+
+def diff_trees(base_root: Path, head_root: Path) -> dict:
+    """The changes between two exported trees, as file-level facts about what a scanner is handed.
+
+    ``added`` and ``deleted`` are paths in only one tree. ``modified`` are paths in both whose bytes
+    differ, and ``mode_changed`` paths whose executable bit differs, whether or not their bytes do.
+    ``renamed`` is ``[from, to]`` for a file deleted from one path and added at another with the
+    same bytes: exact content only, so a file that moved and was also edited is an addition and a
+    deletion, and only when exactly one deleted path and exactly one added path hold those bytes,
+    because among several identical files nothing says which one went where and no pairing is
+    invented. A renamed pair is in neither ``added`` nor ``deleted``, and its ``to`` is also in
+    ``mode_changed`` when its executable bit differs from its source's. Every list is sorted, so
+    the record is canonical.
+
+    The trees are read as they lie on disk, through :func:`walk_regular_files`, so this is the
+    diff of the trees a scanner is handed, transformed ones included, and never of the originals.
+    Symbolic links have no content and are in neither tree. It compares bytes and one mode bit; it
+    does not read source, follow moved code, or say whether a change matters.
+    """
+    base, head = _tree_state(base_root), _tree_state(head_root)
+    added, deleted = sorted(set(head) - set(base)), sorted(set(base) - set(head))
+    common = sorted(set(base) & set(head))
+    modified = [path for path in common if base[path][0] != head[path][0]]
+    mode_changed = [path for path in common if base[path][1] != head[path][1]]
+    deleted_by_content: dict[str, list[str]] = {}
+    added_by_content: dict[str, list[str]] = {}
+    for path in deleted:
+        deleted_by_content.setdefault(base[path][0], []).append(path)
+    for path in added:
+        added_by_content.setdefault(head[path][0], []).append(path)
+    renamed = sorted([sources[0], added_by_content[digest][0]]
+                     for digest, sources in deleted_by_content.items()
+                     if len(sources) == 1 and len(added_by_content.get(digest, [])) == 1)
+    moved_from, moved_to = {source for source, _ in renamed}, {target for _, target in renamed}
+    mode_changed += [target for source, target in renamed if base[source][1] != head[target][1]]
+    return {"added": [path for path in added if path not in moved_to],
+            "deleted": [path for path in deleted if path not in moved_from],
+            "modified": modified, "renamed": renamed, "mode_changed": sorted(mode_changed)}
+
+
+def changed_paths(changes: dict) -> list[str]:
+    """Every path ``git diff --name-only`` names between the two synthetic commits, sorted.
+
+    The added, modified, mode-changed, and deleted paths, and the new name of each rename, because
+    git names a detected rename by its new path alone. This is the list a scanner that asks git
+    which files changed is told, which is why a test can hold a scanner's own reading of the change
+    to the record.
+    """
+    paths = (set(changes["added"]) | set(changes["deleted"]) | set(changes["modified"])
+             | set(changes["mode_changed"]) | {target for _, target in changes["renamed"]})
+    return sorted(paths)
+
+
+def export_pr(base: CachedSnapshot, head: CachedSnapshot, trial_dir: Path, *, profile: str = "standard",
+              blinding_map: dict | None = None, base_snapshot_id: str | None = None,
+              head_snapshot_id: str | None = None, clock: Callable[[], datetime] | None = None) -> dict:
+    """Export the two snapshots of a change set into one trial and record the change between them.
+
+    The head goes to ``trial_dir/source``, exactly where a full input's export goes, and the base
+    to ``trial_dir/base/source``. Under ``metadata_blinded`` both are transformed with the one
+    reviewed map, so its variants must cover both snapshots and a base and a head carry one set of
+    pseudonyms, and the originals stay evaluator-side under ``original/source`` and
+    ``original/base/source``; the labels and mechanical checks refer to those, and a scanner is
+    handed only the transformed trees. A map that is unapproved, or does not fit either export,
+    refuses the whole input with its reason: neither snapshot is ever exported standard in its
+    place.
+
+    The record returned is the preparation record of the input, ``schema_version`` 2.1: the
+    ``head`` and ``base`` records exactly as :func:`export_snapshot` writes them (each with its
+    ``trial.root``), the ``diff`` between the trees a scanner is handed (:func:`diff_trees` over
+    them, the two tree hashes, and :func:`scaneval.contracts.pr_diff_sha256` of all three), and the
+    ``input_hash`` the input is identified by (:func:`scaneval.contracts.pr_input_hash`). A change
+    with nothing in it, two exports that are identical, is refused before anything else is asked:
+    there is no change to review, and a scan of it would be a scan of nothing recorded as a review.
+    The synthetic history a git-dependent scanner is handed is not built here.
+    """
+    if profile not in PROFILES:
+        raise MaterializationError(f"unknown input profile {profile!r}; expected one of {PROFILES}")
+    base_source = trial_dir / PR_BASE_DIR / "source"
+    if base_source.exists() or base_source.is_symlink():
+        raise MaterializationError(f"trial source directory already exists: {base_source}")
+    if profile == "metadata_blinded":
+        if blinding_map is None:
+            raise MaterializationError("metadata blinding unavailable: no reviewed replacement map was supplied")
+        # Both snapshots are asked everything that needs no export before either is exported, so a map
+        # that does not fit one of them leaves no half-blinded input behind.
+        from .blinding import preflight
+        for snapshot, snapshot_id in ((head, head_snapshot_id), (base, base_snapshot_id)):
+            preflight(blinding_map, snapshot_id, snapshot)
+    head_record = export_snapshot(head, trial_dir, profile=profile, blinding_map=blinding_map,
+                                  snapshot_id=head_snapshot_id, clock=clock)
+    if profile == "metadata_blinded":
+        from .blinding import export_blinded
+        base_record = export_blinded(base, trial_dir, blinding_map, snapshot_id=base_snapshot_id,
+                                     clock=clock, variant_dir=PR_BASE_DIR)
+    else:
+        base_record = provenance_record(base, profile, export_tree(base, base_source), clock=clock)
+        base_record["trial"]["root"] = f"{PR_BASE_DIR}/source"
+    changes = diff_trees(base_source, trial_dir / "source")
+    if not any(changes.values()):
+        raise MaterializationError(
+            "no change to review: the base and head exports of this change set hold the same files "
+            "with the same bytes and modes")
+    base_hash, head_hash = base_record["trial"]["tree_hash"], head_record["trial"]["tree_hash"]
+    digest = pr_diff_sha256(base_hash, head_hash, changes)
+    return {
+        "schema_version": "2.1", "mode": "pr", "profile": profile, "head": head_record, "base": base_record,
+        "diff": {"base_tree_hash": base_hash, "head_tree_hash": head_hash, "changes": changes,
+                 "diff_sha256": digest},
+        "input_hash": pr_input_hash(base_hash, head_hash, digest),
+        "limits": [
+            "The diff is over the trees a scanner is handed, file by file: bytes and the executable bit. "
+            "A rename is recorded only when the bytes are identical.",
+            "The base sits beside the head under base/source and reaches a scanner only as the first "
+            "commit of the synthetic history; the original exports of a blinded input never do.",
+        ],
+    }
 
 
 def write_provenance(trial_dir: Path, record: dict) -> Path:
