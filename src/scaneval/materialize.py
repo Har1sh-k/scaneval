@@ -589,6 +589,14 @@ def prepare_synthetic_history(source_dir: Path, *, message: str = "snapshot") ->
 PR_HISTORY_IDENTITY = "ScanEval <scaneval@localhost>"
 PR_HISTORY_DATE = "2000-01-01T00:00:00+00:00"
 PR_HISTORY_MESSAGES = {"base": "base", "head": "head"}
+# What ``.git/info/attributes`` holds in the synthetic history of a PR input: every conversion git
+# applies to content, unset for every path. ``text`` covers ``text=auto`` and the legacy ``crlf``
+# attribute, ``eol`` the line ending a checkout writes, ``ident`` the ``$Id$`` keyword, ``filter``
+# any clean or smudge filter (LFS included), and ``working-tree-encoding`` re-encoding. The file
+# outranks every ``.gitattributes`` in a tree and every attributes file a configuration names, and
+# that is why it is the one place this is said: an in-tree ``* text=auto`` or an operator's
+# ``~/.config/git/attributes`` cannot switch a conversion back on for a path it matches.
+PR_HISTORY_ATTRIBUTES = "* -text -eol -ident -filter -working-tree-encoding\n"
 # Where a PR input's base export sits beneath its trial directory: ``base/source``.
 PR_BASE_DIR = "base"
 
@@ -611,12 +619,31 @@ def prepare_pr_history(source_dir: Path, base_dir: Path) -> dict:
     wherever this runs. That is what lets an input record them once at preparation and each
     invocation rebuild them and prove it got the same ones.
 
+    The blobs are the exported bytes. Git converts content when it adds a file and again when it
+    checks one out: line endings (``text``, ``text=auto``, ``eol``), ``$Id$`` keywords, filters, and
+    re-encoding, asked for by an in-tree ``.gitattributes`` or by an attributes file in the
+    operator's home directory. A scanner's own git restores the tree from these blobs (Semgrep's
+    baseline scan resets it to the base commit and back to the head, in place), so a blob that was
+    not the exported bytes made the restore rewrite files the scanner had been handed, and the run
+    was recorded as one that modified its source. :data:`PR_HISTORY_ATTRIBUTES` is therefore written
+    to ``.git/info/attributes`` before anything is added, which unsets every conversion for every
+    path and outranks both sources. The repository's own configuration pins three more settings, because
+    a scanner's git reads that file and the operator's global configuration as well, which the calls
+    made here never do: ``core.attributesFile`` and ``core.hooksPath`` point at :data:`os.devnull`, so
+    the operator's attributes file and hooks are not found, and ``core.fsmonitor`` is false, so no
+    monitor program or daemon is started for the workspace.
+
     Verified before it returns: HEAD is the second commit, its only parent is the first, and a
     status of the worktree, untracked files included, is empty. What this does not establish is that
-    git reads the two trees the way the export did: paths that differ only in case on a
-    case-insensitive filesystem, or bytes an in-tree ``.gitattributes`` rewrites on add, are read
-    differently, and :func:`check_pr_history` is what says so. A history that cannot be built is a
-    :class:`MaterializationError`; the trees are never modified.
+    git read the two trees the way the export did: paths that differ only in case on a
+    case-insensitive filesystem are read differently, and :func:`check_pr_history` is what says so,
+    for those and for any blob that is not the exported file's bytes. What is not guaranteed is what
+    a scanner does afterwards. It can write its own attributes or configuration, or run git with
+    ``-c`` settings of its own, and convert anyway; the modification check records that as a
+    modification. Only conversion of content is switched off: a ``diff`` driver an in-tree
+    ``.gitattributes`` names still applies to a scanner's ``git diff`` if the operator's configuration
+    defines it. A history that cannot be built is a :class:`MaterializationError`; the trees are
+    never modified.
     """
     if (source_dir / ".git").exists():
         raise MaterializationError(f"{source_dir} already has git history")
@@ -624,12 +651,22 @@ def prepare_pr_history(source_dir: Path, base_dir: Path) -> dict:
         raise MaterializationError(f"the base tree {base_dir} is not a directory")
     dated = {"GIT_AUTHOR_DATE": PR_HISTORY_DATE, "GIT_COMMITTER_DATE": PR_HISTORY_DATE}
     _git(["init", "-q"], source_dir)
+    # Before anything is added, so not one blob is written under a conversion. The directory is made
+    # here because an empty ``init.templateDir`` leaves the new repository without one.
+    info = source_dir / ".git" / "info"
+    info.mkdir(exist_ok=True)
+    (info / "attributes").write_text(PR_HISTORY_ATTRIBUTES, encoding="utf-8")
     # core.fileMode and diff.renames are pinned rather than probed or inherited: a filesystem that
     # cannot hold an executable bit, or an operator who turned rename detection off, would
     # otherwise change what the scanner's own ``git diff`` says about the same two commits.
+    # core.attributesFile, core.hooksPath, and core.fsmonitor are pinned for the scanner's own git,
+    # which reads this file and the operator's global configuration too: left alone it would take an
+    # attributes file, a hooks directory, and a file monitor from the operator's home.
     for key, value in (
         ("user.name", "ScanEval"), ("user.email", "scaneval@localhost"), ("commit.gpgsign", "false"),
-        ("core.autocrlf", "false"), ("core.fileMode", "true"), ("diff.renames", "true"), *_LFS_CONFIG,
+        ("core.autocrlf", "false"), ("core.fileMode", "true"), ("diff.renames", "true"),
+        ("core.attributesFile", os.devnull), ("core.hooksPath", os.devnull), ("core.fsmonitor", "false"),
+        *_LFS_CONFIG,
     ):
         _git(["config", "--local", key, value], source_dir)
     _git(["--work-tree", str(base_dir), "add", "-A", "-f", "."], source_dir)
@@ -663,17 +700,88 @@ def _git_view_of_changes(source_dir: Path, base_commit: str, head_commit: str) -
     return view
 
 
-def check_pr_history(source_dir: Path, history: dict, changes: dict) -> None:
-    """Refuse a synthetic history whose own diff is not the recorded one.
+# How many exported files one ``git hash-object`` call is given, and how many bytes of path
+# arguments, so a large tree never reaches the limit on a command line.
+_HASH_BATCH_PATHS = 500
+_HASH_BATCH_BYTES = 60_000
 
-    The record says what changed between two trees by reading the trees; git says what changed
-    between two commits by reading what it added. They agree unless git read a tree differently
-    from the way the export did, and then a scanner's ``git diff`` would review a different change
-    from the one the record scores against. Compared without rename detection, so a rename is the
-    delete and the add the record's ``renamed`` pairs stand for, and mode changes are the ``M`` git
-    reports for a file whose bytes did not change. A disagreement names the paths and is a
-    :class:`MaterializationError`. This reads git and the record; it writes nothing.
+
+def _committed_blobs(source_dir: Path, commit: str) -> dict[str, str]:
+    """``{path: object id}`` for every entry in *commit*'s tree, as ``git ls-tree -r`` lists them."""
+    listing = _git(["ls-tree", "-r", "-z", "--full-tree", commit], source_dir)
+    blobs: dict[str, str] = {}
+    for record in listing.split("\0"):
+        if not record:
+            continue
+        header, tab, path = record.partition("\t")
+        fields = header.split(" ")
+        if not tab or len(fields) != 3:
+            raise MaterializationError("git listed a tree entry of the synthetic commits this could not read")
+        blobs[path] = fields[2]
+    return blobs
+
+
+def _paths_not_stored_as_exported(source_dir: Path, commit: str, exported_root: Path) -> list[str]:
+    """The paths in *commit*'s tree whose blob is not the bytes of the file at that path under *exported_root*.
+
+    The exported file's object id is what ``git hash-object --no-filters`` says it is, so no
+    attribute and no configuration takes part in it. A path the tree lists and *exported_root* holds
+    no regular file for is one of them. The list is sorted; nothing is written.
     """
+    committed = _committed_blobs(source_dir, commit)
+    differing = [path for path in committed if (exported_root / path).is_symlink()
+                 or not (exported_root / path).is_file()]
+    present = sorted(set(committed) - set(differing))
+    start = 0
+    while start < len(present):
+        batch: list[str] = []
+        size = 0
+        while start < len(present) and len(batch) < _HASH_BATCH_PATHS and size < _HASH_BATCH_BYTES:
+            batch.append(present[start])
+            size += len(str(exported_root / present[start])) + 1
+            start += 1
+        printed = _git(["hash-object", "--no-filters", "--", *(str(exported_root / path) for path in batch)],
+                       source_dir).split()
+        if len(printed) != len(batch):
+            raise MaterializationError("git hash-object did not name an object for every exported file it was given")
+        differing += [path for path, blob in zip(batch, printed) if blob != committed[path]]
+    return sorted(differing)
+
+
+def check_pr_history(source_dir: Path, history: dict, changes: dict, base_dir: Path | None = None) -> None:
+    """Refuse a synthetic history that does not hold the exported bytes, or whose own diff is not the recorded one.
+
+    Two comparisons, the bytes first. Every blob the head commit lists is compared with what
+    ``git hash-object --no-filters`` says the file at that path in *source_dir* is, so no attribute
+    and no configuration takes part in the comparison, and a conversion git applied anyway, or a
+    committed path the export has no file for, is named. A comparison of path lists cannot see that:
+    two trees that changed the same file agree on which paths differ whatever bytes git stored for
+    them, and a scanner's own checkout restores the tree from those bytes. *base_dir*, the tree the
+    base commit was built from, gives the base commit the same comparison; without it only the head
+    is compared, because the head worktree is the only export this can see.
+
+    Then the diff. The record says what changed between two trees by reading the trees; git says what
+    changed between two commits by reading what it added. They agree unless git read a tree
+    differently from the way the export did, and then a scanner's ``git diff`` would review a
+    different change from the one the record scores against. Compared without rename detection, so a
+    rename is the delete and the add the record's ``renamed`` pairs stand for, and mode changes are
+    the ``M`` git reports for a file whose bytes did not change. The record pairs only exact
+    renames and git's own detection pairs more (see :func:`diff_trees`), so this is the comparison
+    under which the two can agree. A disagreement in either comparison names the paths and is a
+    :class:`MaterializationError`. This reads git and the exported files; it writes nothing.
+    """
+    stored_differently = [
+        f"{path} ({side})" for side, commit, root in (("base", history["base_commit"], base_dir),
+                                                      ("head", history["head_commit"], source_dir))
+        if root is not None for path in _paths_not_stored_as_exported(source_dir, commit, root)]
+    if stored_differently:
+        more = f" and {len(stored_differently) - 5} more" if len(stored_differently) > 5 else ""
+        raise MaterializationError(
+            "the synthetic PR history does not hold the exported bytes: git stored "
+            f"{', '.join(stored_differently[:5])}{more} as something other than what the export wrote. A "
+            "conversion git applies when it adds a file (line endings, keywords, a filter, re-encoding), or "
+            "paths that differ only in case on a case-insensitive filesystem, are the usual cause, and a "
+            "scanner's own git restores the tree from those blobs, so this change cannot be reviewed as a PR")
     renamed_from = {source for source, _ in changes["renamed"]}
     renamed_to = {target for _, target in changes["renamed"]}
     expected = {"A": set(changes["added"]) | renamed_to, "D": set(changes["deleted"]) | renamed_from,
@@ -685,9 +793,8 @@ def check_pr_history(source_dir: Path, history: dict, changes: dict) -> None:
             raise MaterializationError(
                 "the synthetic PR history does not reproduce the recorded diff: git lists a different "
                 f"set of paths as {status} ({', '.join(differing[:5])}). Paths that differ only in case "
-                "on a case-insensitive filesystem, or bytes a .gitattributes rewrites when they are "
-                "added, are read by git differently from the export, so this change cannot be reviewed "
-                "as a PR")
+                "on a case-insensitive filesystem are the usual cause: git reads them as one path and the "
+                "export as two, so this change cannot be reviewed as a PR")
 
 
 def compute_pr_history(source_dir: Path, base_dir: Path, changes: dict) -> dict:
@@ -695,15 +802,15 @@ def compute_pr_history(source_dir: Path, base_dir: Path, changes: dict) -> dict:
 
     This is what an input's preparation calls: the head export is copied, without following a
     link, into a temporary directory that is removed on the way out, :func:`prepare_pr_history`
-    builds the history there, and :func:`check_pr_history` proves git's view of it is the recorded
-    diff. The returned record holds the two commit ids every workspace must reproduce. Neither
-    export is written to.
+    builds the history there, and :func:`check_pr_history` proves that both commits hold the bytes
+    of the two exports and that git's view of them is the recorded diff. The returned record holds
+    the two commit ids every workspace must reproduce. Neither export is written to.
     """
     with tempfile.TemporaryDirectory(prefix="scaneval-pr-history-") as scratch:
         head_copy = Path(scratch) / "source"
         shutil.copytree(source_dir, head_copy, symlinks=True)
         history = prepare_pr_history(head_copy, base_dir)
-        check_pr_history(head_copy, history, changes)
+        check_pr_history(head_copy, history, changes, base_dir)
     return history
 
 
@@ -725,6 +832,16 @@ def diff_trees(base_root: Path, head_root: Path) -> dict:
     invented. A renamed pair is in neither ``added`` nor ``deleted``, and its ``to`` is also in
     ``mode_changed`` when its executable bit differs from its source's. Every list is sorted, so
     the record is canonical.
+
+    The record is what git says about the two synthetic commits when git is asked not to detect
+    renames (``git diff --no-renames``), and only then: a renamed pair stands for the deletion of its
+    source and the addition of its target, and every other path is listed as git lists it. Rename
+    detection is on in the workspace (``diff.renames`` is pinned true, so a scanner's plain
+    ``git diff`` runs it), and it pairs more than this does: a file that moved and was edited while
+    at least half of it stayed the same, which is git's similarity threshold, and one of several
+    identical files. A scanner is told those as renames, and the record lists each as an addition
+    and a deletion, which is why :func:`changed_paths` and :func:`check_pr_history` hold the record
+    to git without rename detection.
 
     The trees are read as they lie on disk, through :func:`walk_regular_files`, so this is the
     diff of the trees a scanner is handed, transformed ones included, and never of the originals.
@@ -753,15 +870,18 @@ def diff_trees(base_root: Path, head_root: Path) -> dict:
 
 
 def changed_paths(changes: dict) -> list[str]:
-    """Every path ``git diff --name-only`` names between the two synthetic commits, sorted.
+    """Every path ``git diff --name-only --no-renames`` names between the two synthetic commits, sorted.
 
-    The added, modified, mode-changed, and deleted paths, and the new name of each rename, because
-    git names a detected rename by its new path alone. This is the list a scanner that asks git
-    which files changed is told, which is why a test can hold a scanner's own reading of the change
-    to the record.
+    The added, deleted, modified, and mode-changed paths, and both paths of every recorded rename,
+    because git, when it is not asked to pair anything, names a moved file twice: its old path as
+    deleted and its new one as added. This is the list the record can be held to. A scanner that
+    asks git which files changed with rename detection on, as a plain ``git diff`` in the workspace
+    does, is told a detected rename by its new path alone, and may be told of renames the record
+    does not pair (see :func:`diff_trees`), so what it lists is this list less the old path of every
+    rename git detected.
     """
     paths = (set(changes["added"]) | set(changes["deleted"]) | set(changes["modified"])
-             | set(changes["mode_changed"]) | {target for _, target in changes["renamed"]})
+             | set(changes["mode_changed"]) | {path for pair in changes["renamed"] for path in pair})
     return sorted(paths)
 
 

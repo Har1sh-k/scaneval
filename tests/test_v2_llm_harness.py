@@ -2281,6 +2281,9 @@ def test_a_pr_request_the_adapter_cannot_honour_is_refused_and_never_run_as_a_fu
         ({**base, "mode": "pr", "pr": {"base": "a" * 40}}, "must name the base and head commits"),
         ({**base, "mode": "pr", "pr": {"base": "", "head": "b" * 40}}, "must name the base and head commits"),
         ({**base, "mode": "batch"}, "carries out full, pr scans, not 'batch'"),
+        ({**base, "mode": "full", "pr": {"base": "a" * 40, "head": "b" * 40}},
+         "full-mode request that also carries input.pr"),
+        ({**base, "mode": "full", "pr": {}}, "full-mode request that also carries input.pr"),
     ):
         with pytest.raises(AdapterError, match=message):
             adapter.scan(request={"run_id": "r", "input": request_input}, **arguments)
@@ -2338,8 +2341,11 @@ def test_the_real_engine_reviews_the_synthetic_change_in_pr_mode(tmp_path):
     assert output["mode"] == "pr" and output["runner"] == "mock"
     assert (summary["baseRef"], summary["headRef"]) == (prepared.pr["base_commit"], prepared.pr["head_commit"]), \
         "the engine resolved the two refs the request named, and not origin/main or HEAD~1"
-    assert sorted(summary["changedFiles"]) == changed_paths(prepared.pr["changes"]), \
-        "the files the engine reviews are the recorded diff's, read by git from the same two commits"
+    renamed_from = {source for source, _ in prepared.pr["changes"]["renamed"]}
+    assert sorted(summary["changedFiles"]) == [path for path in changed_paths(prepared.pr["changes"])
+                                               if path not in renamed_from], \
+        ("the files the engine reviews are the recorded diff's, read by git from the same two commits; the engine's "
+         "git detects renames, so it names a rename by its new path alone")
     assert result["status"] in ("success", "partial"), execution["error"]
     assert execution["provenance"]["mode"] == "pr" and execution["provenance"]["source_modified"] is False
     assert execution["provenance"]["synthetic_history"]["head_commit"] == prepared.pr["head_commit"]

@@ -643,14 +643,11 @@ def test_an_adapter_declaration_the_run_cannot_read_is_a_skipped_system(tmp_path
     assert load_document(out / MANIFEST_NAME, "run-manifest") == manifest
 
 
-def test_a_history_git_reads_differently_from_the_export_fails_that_input_and_records_no_check(tmp_path):
-    """An in-tree .gitattributes that rewrites bytes on add makes git's diff not the recorded one.
+def crlf_base_under_text_auto(tmp_path: Path) -> dict:
+    """An upstream whose base holds a CRLF file beside ``* text=auto`` and whose head holds it as LF.
 
-    The base tree holds a CRLF file beside ``* text=auto`` (the attribute was added after the file, so
-    the repository stores the CRLF bytes), and the head holds the same file with LF. The export records
-    a modification; ScanEval's own ``git add`` applies ``text=auto`` and stores one blob for both, so a
-    scanner's ``git diff`` would show nothing where the record scores a change. The input is refused
-    before any mechanical check is recorded, and no adapter is ever called for it.
+    The attribute was added after the file, so the repository stores the CRLF bytes, and the export
+    writes them as they are. The change records one modification of ``src/app.py``.
     """
     repo = tmp_path / "upstream"
     (repo / "src").mkdir(parents=True)
@@ -666,14 +663,51 @@ def test_a_history_git_reads_differently_from_the_export_fails_that_input_and_re
     (repo / "src" / "app.py").write_bytes(SAFE.encode())
     git("add", "-A", cwd=repo)
     git("commit", "-q", "-m", "head: the file is LF now", cwd=repo)
-    fixture = {"repo": repo, "base": base, "head": git("rev-parse", "HEAD", cwd=repo)}
+    return {"repo": repo, "base": base, "head": git("rev-parse", "HEAD", cwd=repo)}
+
+
+def test_an_upstream_whose_attributes_would_have_made_git_read_a_different_change_is_reviewed_exactly(tmp_path):
+    """The upstream below used to be refused; the history now stores the bytes that were exported.
+
+    ``* text=auto`` made ScanEval's own ``git add`` store one blob for the CRLF base file and the LF
+    head file, so a scanner's ``git diff`` would have shown nothing where the record scores a change.
+    Conversion is off in the history now: the change is prepared, the workspace's git names the file
+    as modified, and the workspace holds the head file's own bytes.
+    """
+    fixture = crlf_base_under_text_auto(tmp_path)
+    adapter = PrAdapter()
+
+    manifest, out = run_pr(tmp_path, fixture, adapters={"fake": adapter})
+
+    [row] = manifest["inputs"]
+    assert not row.get("preparation_failure") and adapter.calls == 1
+    assert manifest["invocations"][0]["status"] == "success"
+    seen = adapter.seen[0]
+    assert seen["name_status"].splitlines() == ["M\tsrc/app.py"]
+    assert seen["tree"]["src/app.py"] == SAFE and seen["status"] == ""
+    execution = load_document(bundle_of(out, "cs-1__fake-a__r1") / "execution.json", "execution-record")
+    assert execution["provenance"]["pr"]["changes"]["modified"] == ["src/app.py"]
+    assert execution["provenance"]["source_modified"] is False
+
+
+def test_a_history_git_reads_differently_from_the_export_fails_that_input_and_records_no_check(tmp_path, monkeypatch):
+    """A conversion that survives the history's own override refuses the input before any check is recorded.
+
+    The upstream is the one above, and the override that switches conversion off is replaced by a
+    comment, which is what a git that did not honor it would amount to. ``* text=auto`` then makes
+    ScanEval's own ``git add`` store LF for the base file the export wrote with CRLF; the blob is not
+    the exported bytes, and the input is refused before any mechanical check is recorded, so no adapter
+    is ever called for it.
+    """
+    monkeypatch.setattr(materialize, "PR_HISTORY_ATTRIBUTES", "# nothing is overridden\n")
+    fixture = crlf_base_under_text_auto(tmp_path)
     adapter = PrAdapter()
 
     manifest, out = run_pr(tmp_path, fixture, adapters={"fake": adapter})
 
     [row] = manifest["inputs"]
     assert row["preparation_failure"]["type"] == "MaterializationError"
-    assert "does not reproduce the recorded diff" in row["preparation_failure"]["message"]
+    assert "does not hold the exported bytes" in row["preparation_failure"]["message"]
     assert "src/app.py" in row["preparation_failure"]["message"]
     assert row["mechanical_checks"] == [] and adapter.calls == 0
     frozen = cases.load_pack(out / "evaluator" / "pack.json")

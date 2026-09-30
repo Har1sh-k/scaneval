@@ -10,6 +10,7 @@ import subprocess
 
 import pytest
 
+from scaneval import materialize as materialize_module
 from scaneval.contracts import ContractError, canonical_sha256, pr_diff_sha256, pr_input_hash
 from scaneval.materialize import (
     HARNESS_STATE_DIRS,
@@ -558,8 +559,8 @@ def test_diff_trees_records_added_deleted_modified_renamed_and_mode_changed_file
     assert changes == {"added": ["src/new_only.py"], "deleted": ["src/old_only.py"],
                        "modified": ["src/app.py"], "renamed": [["lib/util.py", "lib/helpers.py"]],
                        "mode_changed": ["bin/run.sh"]}
-    assert changed_paths(changes) == ["bin/run.sh", "lib/helpers.py", "src/app.py", "src/new_only.py",
-                                      "src/old_only.py"], "a rename is named by its new path, as git names it"
+    assert changed_paths(changes) == ["bin/run.sh", "lib/helpers.py", "lib/util.py", "src/app.py", "src/new_only.py",
+                                      "src/old_only.py"], "a rename is named by both its paths, as git names it without rename detection"
     assert diff_trees(base, base) == {"added": [], "deleted": [], "modified": [], "renamed": [], "mode_changed": []}
 
 
@@ -702,19 +703,67 @@ def test_the_two_commit_history_is_neutral_deterministic_and_the_recorded_change
 
 
 def test_the_git_diff_between_the_synthetic_commits_is_the_recorded_diff(tmp_path, pull_request):
+    """The record and git agree without rename detection; with it, git's own pairing of an exact rename is R100."""
     head, base, record = prepared_pr(tmp_path, pull_request)
     history = prepare_pr_history(head, base)
-
-    lines = [line.split("\t") for line in
-             git("diff", "--name-status", history["base_commit"], history["head_commit"], cwd=head).splitlines()]
-
+    commits = (history["base_commit"], history["head_commit"])
     changes = record["diff"]["changes"]
-    assert sorted(lines) == sorted(
-        [["A", path] for path in changes["added"]] + [["D", path] for path in changes["deleted"]]
-        + [["M", path] for path in sorted(set(changes["modified"]) | set(changes["mode_changed"]))]
-        + [["R100", source, target] for source, target in changes["renamed"]])
-    assert git("diff", "--name-only", "-z", f"{history['base_commit']}..{history['head_commit']}",
+    renamed_from = [source for source, _ in changes["renamed"]]
+    renamed_to = [target for _, target in changes["renamed"]]
+
+    def name_status(*options: str) -> list[list[str]]:
+        return sorted(line.split("\t") for line in git("diff", "--name-status", *options, *commits, cwd=head).splitlines())
+
+    modified = [["M", path] for path in sorted(set(changes["modified"]) | set(changes["mode_changed"]))]
+    assert name_status("--no-renames") == sorted(
+        [["A", path] for path in changes["added"] + renamed_to] + [["D", path] for path in changes["deleted"] + renamed_from]
+        + modified), "a renamed pair is the deletion of its source and the addition of its target"
+    assert git("diff", "--name-only", "--no-renames", "-z", f"{commits[0]}..{commits[1]}",
                cwd=head).split("\0")[:-1] == changed_paths(changes)
+    # The workspace leaves rename detection on for a scanner's own plain ``git diff``, which pairs the exact rename.
+    assert name_status() == sorted(
+        [["A", path] for path in changes["added"]] + [["D", path] for path in changes["deleted"]] + modified
+        + [["R100", source, target] for source, target in changes["renamed"]])
+    assert git("diff", "--name-only", "-z", f"{commits[0]}..{commits[1]}", cwd=head).split("\0")[:-1] == \
+        [path for path in changed_paths(changes) if path not in renamed_from], \
+        "with rename detection a rename is named by its new path alone"
+
+
+EDITED = "def helper():\n    a = 1\n    b = 2\n    c = 3\n    d = 4\n    return a + b + c + d\n"
+
+
+@pytest.mark.parametrize(("base_files", "head_files", "recorded"), [
+    ({"lib/util.py": EDITED, "keep.py": "x\n"}, {"lib/helpers.py": EDITED.replace("d = 4", "d = 5"), "keep.py": "x\n"},
+     {"added": ["lib/helpers.py"], "deleted": ["lib/util.py"], "modified": [], "renamed": [], "mode_changed": []}),
+    ({"a.py": "same\n", "b.py": "same\n", "keep.py": "x\n"}, {"c.py": "same\n", "keep.py": "x\n"},
+     {"added": ["c.py"], "deleted": ["a.py", "b.py"], "modified": [], "renamed": [], "mode_changed": []}),
+], ids=["moved-and-edited", "one-of-several-identical-files"])
+def test_a_move_the_record_does_not_pair_is_an_addition_and_a_deletion_to_git_unless_it_detects_renames(
+        tmp_path, base_files, head_files, recorded):
+    """The record pairs a rename only when the bytes are identical and one path holds them on each side.
+
+    A moved file that was edited, and one of several identical files that moved, are an addition and a
+    deletion in the record. Git's own rename detection, which the workspace leaves on for a scanner's
+    plain ``git diff``, pairs both; compared without it, the record is exactly what git lists.
+    """
+    base = write_tree(tmp_path / "base", base_files)
+    head = write_tree(tmp_path / "head", head_files)
+    changes = diff_trees(base, head)
+    assert changes == recorded
+
+    compute_pr_history(head, base, changes)
+    history = prepare_pr_history(head, base)
+    commits = (history["base_commit"], history["head_commit"])
+
+    listed = sorted(line.split("\t") for line in
+                    git("diff", "--name-status", "--no-renames", *commits, cwd=head).splitlines())
+    assert listed == sorted([["A", path] for path in changes["added"]] + [["D", path] for path in changes["deleted"]])
+    assert git("diff", "--name-only", "--no-renames", "-z", *commits, cwd=head).split("\0")[:-1] == changed_paths(changes)
+    paired = [line.split("\t") for line in git("diff", "--name-status", *commits, cwd=head).splitlines()
+              if line.startswith("R")]
+    assert len(paired) == 1 and paired[0][1] in changes["deleted"] and paired[0][2] in changes["added"], \
+        "git's own rename detection pairs a deletion with an addition here, and the record does not"
+    assert set(git("diff", "--name-only", *commits, cwd=head).splitlines()) < set(changed_paths(changes))
 
 
 def test_the_history_does_not_read_the_operator_environment(tmp_path, pull_request, monkeypatch):
@@ -746,29 +795,321 @@ def test_the_history_refuses_a_head_that_already_has_git_and_a_base_that_is_not_
         prepare_pr_history(head, base)
 
 
-def test_a_history_git_reads_differently_from_the_export_is_refused_with_the_paths(tmp_path):
-    """An in-tree .gitattributes that rewrites bytes on add makes git's diff not the record's.
+def write_bytes_tree(root: Path, files: dict[str, bytes]) -> Path:
+    """Write *files* under *root* byte for byte: :func:`write_tree` writes text, which cannot hold a CRLF."""
+    root.mkdir(parents=True, exist_ok=True)
+    for relative, data in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    return root
 
-    The base holds a CRLF file and the head an LF one; the export records a modification, and
-    ``* text=auto`` makes git store the same blob for both, so a scanner's ``git diff`` would show
-    nothing where the record scores a change. That input is refused rather than reviewed wrong.
+
+def git_bytes(*args: str, cwd: Path) -> bytes:
+    """What git prints, byte for byte: :func:`git` decodes and strips, which hides a line-ending rewrite."""
+    return subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True,
+                          env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"}).stdout
+
+
+def read_tree_bytes(root: Path) -> dict[str, bytes]:
+    """Every regular file under *root* outside ``.git`` and its bytes."""
+    return {relative: path.read_bytes() for relative, path in sorted(walk_regular_files(root).items())}
+
+
+def operator_git(home: Path, cwd: Path, *args: str) -> str:
+    """Git as a scanner's own process runs it: the operator's HOME and global configuration, and none of
+    the hermetic settings this package gives its own git calls."""
+    env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_") and name != "XDG_CONFIG_HOME"}
+    env.update({"HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1"})
+    return subprocess.run(["git", *args], cwd=str(cwd), env=env, capture_output=True, text=True, check=True).stdout
+
+
+def history_built_by_a_plain_git(head: Path, base: Path) -> dict:
+    """The two commits of a PR history as an unhardened ``git add`` writes them: no attribute override."""
+    git("init", "-q", cwd=head)
+    git("config", "core.autocrlf", "false", cwd=head)
+    git("--work-tree", str(base), "add", "-A", "-f", ".", cwd=head)
+    git("commit", "-q", "--allow-empty", "--no-verify", "-m", "base", cwd=head)
+    base_commit = git("rev-parse", "HEAD", cwd=head)
+    git("add", "-A", "-f", ".", cwd=head)
+    git("commit", "-q", "--allow-empty", "--no-verify", "-m", "head", cwd=head)
+    return {"base_commit": base_commit, "head_commit": git("rev-parse", "HEAD", cwd=head)}
+
+
+@pytest.mark.parametrize(("attributes", "name", "base_bytes", "head_bytes"), [
+    (b"* text=auto\n", "crlf.py", b"import os\r\nprint(os)\r\n", b"import os\r\nprint(os.sep)\r\n"),
+    (b"* text\n", "crlf.py", b"import os\r\nprint(os)\r\n", b"import os\r\nprint(os.sep)\r\n"),
+    (b"*.txt ident\n", "keyword.txt", b"revision $Id: 3f2a$\n", b"revision $Id: 9c1b$\n"),
+    (b"*.enc working-tree-encoding=UTF-16\n", "wide.enc", "caf\u00e9\n".encode(), "caf\u00e9 au lait\n".encode()),
+], ids=["text-auto", "text", "ident", "working-tree-encoding"])
+def test_the_history_stores_the_exported_bytes_whatever_an_in_tree_gitattributes_asks_git_to_convert(
+        tmp_path, attributes, name, base_bytes, head_bytes):
+    """Each attribute here made ``git add`` store other bytes than the export held, or refuse the file.
+
+    A scanner's own git restores the tree from those blobs, so what it wrote back was not the tree it
+    was handed. The history is built with git's content conversion switched off, and every committed
+    blob, in the base commit and in the head commit, is the bytes of the file the export wrote.
     """
-    base = tmp_path / "base"
-    head = tmp_path / "head"
-    (base).mkdir()
-    (head).mkdir()
-    (base / ".gitattributes").write_text("* text=auto\n", encoding="utf-8")
-    (head / ".gitattributes").write_text("* text=auto\n", encoding="utf-8")
-    (base / "notes.txt").write_bytes(b"one\r\ntwo\r\n")
-    (head / "notes.txt").write_bytes(b"one\ntwo\n")
+    base = write_bytes_tree(tmp_path / "base", {".gitattributes": attributes, name: base_bytes, "keep.md": b"keep\n"})
+    head = write_bytes_tree(tmp_path / "head", {".gitattributes": attributes, name: head_bytes, "keep.md": b"keep\n"})
+    changes = diff_trees(base, head)
+    assert changes["modified"] == [name]
+
+    history = prepare_pr_history(head, base)
+
+    for commit, root in ((history["base_commit"], base), (history["head_commit"], head)):
+        assert git_bytes("cat-file", "blob", f"{commit}:{name}", cwd=head) == (root / name).read_bytes()
+    assert git("diff", "--name-only", "--no-renames", history["base_commit"], history["head_commit"], cwd=head) == name
+    check_pr_history(head, history, changes, base)
+
+
+def operator_home(tmp_path: Path) -> Path:
+    """A HOME whose git configuration rewrites content: attributes, a filter, CRLF conversion, and a diff driver."""
+    home = tmp_path / "operator-home"
+    (home / ".config" / "git").mkdir(parents=True)
+    (home / ".config" / "git" / "attributes").write_text(
+        "*.py text eol=crlf diff=shout\n*.md filter=shout\n", encoding="utf-8")
+    (home / ".gitconfig").write_text(
+        "[core]\n\tautocrlf = true\n\teol = crlf\n[filter \"shout\"]\n\tsmudge = tr a-z A-Z\n\tclean = cat\n"
+        "[diff \"shout\"]\n\ttextconv = tr a-z A-Z <\n", encoding="utf-8")
+    return home
+
+
+def test_a_scanners_own_git_restores_the_exported_bytes_under_in_tree_and_operator_attributes(tmp_path):
+    """Semgrep's baseline scan resets the workspace to the base commit and back to the head, a checkout.
+
+    Whatever git converts on checkout was written into the tree the scanner had been handed: the
+    in-tree attributes here ask for CRLF on a shell script, the operator's own attributes file asks
+    for CRLF on Python and runs a filter over Markdown, and the operator's global configuration turns
+    autocrlf on. None of it reaches the workspace's repository, and the tree is byte for byte what
+    the export wrote once both commits have been checked out and restored.
+    """
+    files = {".gitattributes": b"* text=auto\n*.sh text eol=crlf\n", "run.sh": b"#!/bin/sh\necho run\n",
+             "app.py": b"import os\nprint(os)\n", "notes.md": b"lower case\n", "crlf.txt": b"one\r\ntwo\r\n"}
+    base = write_bytes_tree(tmp_path / "base", files)
+    head = write_bytes_tree(tmp_path / "head", {**files, "app.py": b"import os\nprint(os.sep)\n"})
+    history = prepare_pr_history(head, base)
+    home = operator_home(tmp_path)
+    exported = read_tree_bytes(head)
+
+    for command in (["reset", "-q", "--hard", history["base_commit"]], ["reset", "-q", "--hard", history["head_commit"]],
+                    ["checkout", "-q", "--detach", history["base_commit"]],
+                    ["checkout", "-q", "--detach", history["head_commit"]]):
+        operator_git(home, head, *command)
+
+    assert read_tree_bytes(head) == exported
+    assert operator_git(home, head, "status", "--porcelain", "--untracked-files=all") == ""
+
+
+def test_a_scanners_git_diff_in_the_workspace_reads_no_attribute_from_the_operators_attributes_file(tmp_path):
+    """The override unsets conversion of content, and the pinned ``core.attributesFile`` keeps out the rest.
+
+    The operator's attributes file names a ``diff`` driver for Python files, and its configuration
+    defines that driver as a program that upper-cases what it is shown. A scanner's ``git diff`` in the
+    workspace shows the change as it is; the same command in an ordinary repository under the same
+    home shows it upper-cased, which is what makes the first result mean something.
+    """
+    base = write_tree(tmp_path / "base", {"app.py": "print('one')\n"})
+    head = write_tree(tmp_path / "head", {"app.py": "print('two')\n"})
+    history = prepare_pr_history(head, base)
+    home = operator_home(tmp_path)
+
+    control = tmp_path / "control"
+    control.mkdir()
+    operator_git(home, control, "init", "-q")
+    for name, content in (("app.py", "print('one')\n"), ("app.py", "print('two')\n")):
+        (control / name).write_text(content, encoding="utf-8")
+        operator_git(home, control, "add", "-A")
+        operator_git(home, control, "-c", "user.name=u", "-c", "user.email=u@x", "commit", "-q", "-m", "c")
+    if "PRINT('TWO')" not in operator_git(home, control, "diff", "HEAD~1", "HEAD"):
+        pytest.skip("this git does not run the operator's diff driver in an ordinary repository")
+
+    shown = operator_git(home, head, "diff", history["base_commit"], history["head_commit"])
+
+    assert "+print('two')" in shown and "PRINT" not in shown
+
+
+def test_a_scanners_own_git_in_the_workspace_runs_no_hook_and_no_monitor_program_the_operator_configured(tmp_path):
+    base = write_tree(tmp_path / "base", {"a.py": "1\n"})
+    head = write_tree(tmp_path / "head", {"a.py": "2\n"})
+    history = prepare_pr_history(head, base)
+    home = tmp_path / "operator-home"
+    home.mkdir()
+    hooks, ran = tmp_path / "operator-hooks", tmp_path / "ran"
+    hooks.mkdir()
+    ran.mkdir()
+    for program in ("post-checkout", "monitor"):
+        (hooks / program).write_text(f"#!/bin/sh\necho ran >> '{ran / program}'\n", encoding="utf-8")
+        (hooks / program).chmod(0o755)
+    (home / ".gitconfig").write_text(f"[core]\n\thooksPath = {hooks}\n\tfsmonitor = {hooks / 'monitor'}\n",
+                                     encoding="utf-8")
+
+    def scanner_reads_the_repository(repository: Path, commit: str) -> list[str]:
+        operator_git(home, repository, "checkout", "-q", "--detach", commit)
+        operator_git(home, repository, "status", "--porcelain")
+        found = sorted(path.name for path in ran.iterdir())
+        for path in ran.iterdir():
+            path.unlink()
+        return found
+
+    control = tmp_path / "control"
+    control.mkdir()
+    operator_git(home, control, "init", "-q")
+    (control / "a.py").write_text("1\n", encoding="utf-8")
+    operator_git(home, control, "-c", "user.name=u", "-c", "user.email=u@x", "-c", "core.hooksPath=/dev/null",
+                 "-c", "core.fsmonitor=false", "add", "-A")
+    operator_git(home, control, "-c", "user.name=u", "-c", "user.email=u@x", "-c", "core.hooksPath=/dev/null",
+                 "-c", "core.fsmonitor=false", "commit", "-q", "-m", "one")
+    if scanner_reads_the_repository(control, "HEAD") != ["monitor", "post-checkout"]:
+        pytest.skip("this git does not run the operator's hook and monitor program in an ordinary repository")
+
+    assert scanner_reads_the_repository(head, history["base_commit"]) == []
+
+
+def test_the_history_pins_the_settings_a_scanners_own_git_would_otherwise_take_from_the_operator(tmp_path):
+    base = write_tree(tmp_path / "base", {"a.py": "1\n"})
+    head = write_tree(tmp_path / "head", {"a.py": "2\n"})
+
+    prepare_pr_history(head, base)
+
+    assert (head / ".git" / "info" / "attributes").read_text(encoding="utf-8") == \
+        "* -text -eol -ident -filter -working-tree-encoding\n"
+    for key, value in (("core.attributesFile", os.devnull), ("core.hooksPath", os.devnull), ("core.fsmonitor", "false"),
+                       ("core.autocrlf", "false"), ("core.fileMode", "true"), ("diff.renames", "true")):
+        assert git("config", "--local", "--get", key, cwd=head) == value
+
+
+def test_an_in_tree_gitattributes_no_longer_makes_git_read_a_different_change_from_the_export(tmp_path):
+    """A base CRLF file and a head LF one under ``* text=auto`` used to be refused; it is now reviewed exactly.
+
+    The export records a modification. With git's conversion on, ``* text=auto`` made ``git add`` store
+    one blob for both, so a scanner's ``git diff`` would have shown nothing where the record scores a
+    change, and the input was refused. The blobs are now the two files' own bytes, git's diff names
+    the file, and the history is the recorded one.
+    """
+    base = write_bytes_tree(tmp_path / "base", {".gitattributes": b"* text=auto\n", "notes.txt": b"one\r\ntwo\r\n"})
+    head = write_bytes_tree(tmp_path / "head", {".gitattributes": b"* text=auto\n", "notes.txt": b"one\ntwo\n"})
     changes = diff_trees(base, head)
     assert changes["modified"] == ["notes.txt"]
+
+    history = compute_pr_history(head, base, changes)
+
+    assert not (head / ".git").exists(), "the history was built in a scratch copy"
+    assert prepare_pr_history(head, base) == history
+    assert git_bytes("cat-file", "blob", f"{history['base_commit']}:notes.txt", cwd=head) == b"one\r\ntwo\r\n"
+    assert git_bytes("cat-file", "blob", f"{history['head_commit']}:notes.txt", cwd=head) == b"one\ntwo\n"
+    assert git("diff", "--name-status", history["base_commit"], history["head_commit"], cwd=head) == "M\tnotes.txt"
+
+
+def test_a_history_whose_blobs_are_not_the_exported_bytes_is_refused_with_the_paths(tmp_path):
+    """The path lists agree here, so only the bytes can say the history is not the export's.
+
+    A plain ``git add`` under ``* text=auto`` stores LF for files the export wrote with CRLF, in both
+    commits, and the two commits still differ in exactly the file the record says changed. The head's
+    blobs are compared whether or not the base tree is named; naming it compares the base commit too.
+    """
+    files = {".gitattributes": b"* text=auto\n", "notes.txt": b"one\r\ntwo\r\n", "keep.md": b"keep\n"}
+    base = write_bytes_tree(tmp_path / "base", files)
+    head = write_bytes_tree(tmp_path / "head", {**files, "notes.txt": b"one\r\ntwo\r\nthree\r\n"})
+    changes = diff_trees(base, head)
+    history = history_built_by_a_plain_git(head, base)
+    assert git("diff", "--name-only", history["base_commit"], history["head_commit"], cwd=head) == "notes.txt"
+
+    with pytest.raises(MaterializationError, match="does not hold the exported bytes") as head_only:
+        check_pr_history(head, history, changes)
+    with pytest.raises(MaterializationError, match="does not hold the exported bytes") as both:
+        check_pr_history(head, history, changes, base)
+
+    assert "notes.txt (head)" in str(head_only.value) and "(base)" not in str(head_only.value)
+    assert "notes.txt (base)" in str(both.value) and "notes.txt (head)" in str(both.value)
+
+
+def test_the_base_commit_is_compared_with_the_base_tree_when_it_is_named(tmp_path):
+    """A CRLF base beside an LF head under ``* text=auto``: only the base blob is other than exported.
+
+    Without the base tree the head's blobs are fine and the disagreement is found later, as a diff
+    that is not the recorded one; with it, the check says which commit holds bytes nobody exported.
+    """
+    base = write_bytes_tree(tmp_path / "base", {".gitattributes": b"* text=auto\n", "notes.txt": b"one\r\ntwo\r\n"})
+    head = write_bytes_tree(tmp_path / "head", {".gitattributes": b"* text=auto\n", "notes.txt": b"one\ntwo\n"})
+    changes = diff_trees(base, head)
+    history = history_built_by_a_plain_git(head, base)
+
+    with pytest.raises(MaterializationError, match="does not reproduce the recorded diff"):
+        check_pr_history(head, history, changes)
+    with pytest.raises(MaterializationError, match="does not hold the exported bytes") as refused:
+        check_pr_history(head, history, changes, base)
+
+    assert "notes.txt (base)" in str(refused.value) and "(head)" not in str(refused.value)
+
+
+@pytest.mark.parametrize(("base_bytes", "head_bytes", "named"), [
+    (b"one\r\ntwo\r\n", b"one\r\ntwo\r\nthree\r\n", "notes.txt (base), notes.txt (head)"),
+    (b"one\r\ntwo\r\n", b"one\ntwo\n", "notes.txt (base)"),
+    (b"one\ntwo\n", b"one\r\ntwo\r\n", "notes.txt (head)"),
+], ids=["both-commits", "base-only", "head-only"])
+def test_a_conversion_that_survives_the_history_override_is_a_preparation_failure_naming_the_paths(
+        tmp_path, monkeypatch, base_bytes, head_bytes, named):
+    """The blob comparison is the second line: if git converted anyway, the input is refused, not reviewed.
+
+    The override is replaced by a comment, which is what a git that did not honor it would amount to,
+    and ``* text=auto`` then stores LF for every CRLF file the export wrote. Which commit holds the
+    other bytes is named, so the base tree has to reach the comparison as well as the head.
+    """
+    monkeypatch.setattr(materialize_module, "PR_HISTORY_ATTRIBUTES", "# nothing is overridden\n")
+    base = write_bytes_tree(tmp_path / "base", {".gitattributes": b"* text=auto\n", "notes.txt": base_bytes})
+    head = write_bytes_tree(tmp_path / "head", {".gitattributes": b"* text=auto\n", "notes.txt": head_bytes})
+    changes = diff_trees(base, head)
+
+    with pytest.raises(MaterializationError, match="does not hold the exported bytes") as refused:
+        compute_pr_history(head, base, changes)
+
+    assert f"git stored {named} as something other than what the export wrote" in str(refused.value)
+    assert not (head / ".git").exists(), "the history was built in a scratch copy"
+
+
+@pytest.mark.parametrize("squeezed", ["_HASH_BATCH_PATHS", "_HASH_BATCH_BYTES"])
+def test_the_blob_comparison_reads_every_batch_of_a_tree_too_large_for_one_git_call(tmp_path, monkeypatch, squeezed):
+    """A mismatch in the last of several batches is found, and a tree is never compared in part."""
+    monkeypatch.setattr(materialize_module, squeezed, 2 if squeezed == "_HASH_BATCH_PATHS" else 1)
+    files = {f"src/file{index}.txt": f"line {index}\n".encode() for index in range(5)}
+    base = write_bytes_tree(tmp_path / "base", {**files, ".gitattributes": b"zzz.txt text=auto\n"})
+    head = write_bytes_tree(tmp_path / "head", {**files, ".gitattributes": b"zzz.txt text=auto\n",
+                                               "zzz.txt": b"crlf\r\n"})
+    changes = diff_trees(base, head)
+    history = history_built_by_a_plain_git(head, base)
+
+    with pytest.raises(MaterializationError, match="does not hold the exported bytes") as refused:
+        check_pr_history(head, history, changes, base)
+
+    assert "git stored zzz.txt (head) as something other" in str(refused.value)
+
+
+def test_a_history_whose_diff_is_not_the_recorded_one_is_refused_with_the_paths(tmp_path):
+    base = write_tree(tmp_path / "base", {"a.py": "1\n", "b.py": "1\n"})
+    head = write_tree(tmp_path / "head", {"a.py": "2\n", "b.py": "1\n"})
+    history = prepare_pr_history(head, base)
+    stale = diff_trees(base, write_tree(tmp_path / "other", {"a.py": "1\n", "b.py": "2\n"}))
+    assert stale["modified"] == ["b.py"]
+
+    with pytest.raises(MaterializationError, match="does not reproduce the recorded diff") as refused:
+        check_pr_history(head, history, stale, base)
+
+    assert "a.py" in str(refused.value) and "b.py" in str(refused.value)
+
+
+def test_a_case_only_rename_on_a_case_insensitive_filesystem_is_refused_as_a_preparation_failure(tmp_path):
+    (tmp_path / "Probe").write_text("x", encoding="utf-8")
+    if not (tmp_path / "probe").exists():
+        pytest.skip("this filesystem is case-sensitive, so a case-only rename is two paths to git as well")
+    base = write_tree(tmp_path / "base", {"Readme.md": "hello\n", "a.py": "1\n"})
+    head = write_tree(tmp_path / "head", {"README.md": "hello\n", "a.py": "2\n"})
+    changes = diff_trees(base, head)
 
     with pytest.raises(MaterializationError, match="does not reproduce the recorded diff") as refused:
         compute_pr_history(head, base, changes)
 
-    assert "notes.txt" in str(refused.value)
-    assert not (head / ".git").exists(), "the history was built in a scratch copy"
+    assert "README.md" in str(refused.value) or "Readme.md" in str(refused.value)
 
 
 def test_compute_pr_history_builds_in_a_scratch_copy_and_leaves_no_trace(tmp_path, pull_request, monkeypatch):

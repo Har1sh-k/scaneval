@@ -3093,6 +3093,100 @@ def test_a_pr_input_without_a_base_tree_is_refused_before_a_bundle_exists(tmp_pa
     assert not (tmp_path / "out").exists()
 
 
+# --- a PR run with the real Semgrep binary over trees git would convert -------------------------------
+#
+# Semgrep's baseline scan resets the workspace to the base commit and back to the head with its own
+# git, in place. What that git writes comes from the blobs of the runner's history and from whatever
+# attributes and configuration it finds, so a history that stored anything but the exported bytes, or
+# an operator's attributes file, made the restore rewrite files the scan had been handed.
+
+SAFE_PY = b"import subprocess\ndef run(cmd):\n    return subprocess.run(cmd)\n"
+SHELL_PY = b"import subprocess\ndef run(cmd):\n    return subprocess.run(cmd, shell=True)\n"
+
+
+def crlf(data: bytes) -> bytes:
+    return data.replace(b"\n", b"\r\n")
+
+
+def pr_input_over(tmp_path: Path, base_files: dict[str, bytes], head_files: dict[str, bytes]) -> PreparedInput:
+    """A PR input over two trees written byte for byte, with the synthetic commits preparation computes."""
+    trial = tmp_path / "trial"
+    head_dir, base_dir = trial / "source", trial / "base" / "source"
+    for root, files in ((base_dir, base_files), (head_dir, head_files)):
+        for relative, data in files.items():
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (root / relative).write_bytes(data)
+    head_hash, base_hash = hash_exported_tree(head_dir)["tree_hash"], hash_exported_tree(base_dir)["tree_hash"]
+    changes = diff_trees(base_dir, head_dir)
+    diff = pr_diff_sha256(base_hash, head_hash, changes)
+    history = compute_pr_history(head_dir, base_dir, changes)
+    pr = {"change_set_id": "cs-1", "base_snapshot_id": "snap-base", "head_snapshot_id": "snap-head",
+          "boundary": "introducing", "review_scope": "changed_files", "base_tree_hash": base_hash,
+          "head_tree_hash": head_hash, "diff_sha256": diff, "changes": changes,
+          "base_commit": history["base_commit"], "head_commit": history["head_commit"],
+          "history": {key: history[key] for key in ("messages", "identity", "date")}, "prepared_state": "fresh"}
+    return PreparedInput("input-pr", head_dir, head_hash, ("python",), {"source": {"commit": "x"}}, mode="pr",
+                         input_hash=pr_input_hash(base_hash, head_hash, diff), pr=pr, base_source_dir=base_dir)
+
+
+def semgrep_pr_run(tmp_path: Path, base_files: dict[str, bytes], head_files: dict[str, bytes]) -> tuple[dict, dict]:
+    """One PR invocation of the real Semgrep binary over the two trees: ``(result, execution record)``."""
+    rules, commit = pinned_rules_repo(tmp_path)
+    adapter = get_adapter("semgrep")
+    spec = SystemSpec("semgrep-pr", "semgrep", {"ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}})
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    bundle = run_invocation(prepared=pr_input_over(tmp_path, base_files, head_files), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out", run_id="run-semgrep-pr",
+                            timeout_seconds=300, clock=CLOCK)
+    return (load_document(bundle / "result.json", "scan-result"),
+            load_document(bundle / "execution.json", "execution-record"))
+
+
+def assert_a_clean_review_of_the_added_finding(result: dict, execution: dict, path: str) -> None:
+    assert execution["provenance"]["source_modified"] is False and execution["provenance"]["modified_paths"] == []
+    assert result["status"] == "success" and result["bundles_resolved"] is True and "error" not in result
+    assert [claim["primary_location"] for claim in result["claims"]] == [
+        {"path": path, "start_line": 3, "end_line": 3}], "the change adds one finding, and it is reported"
+
+
+@semgrep_required
+def test_a_semgrep_pr_run_is_not_a_source_modification_when_an_in_tree_text_auto_meets_crlf_files(tmp_path):
+    """The trees hold CRLF bytes beside ``* text=auto``, as a repository does once the attribute is added.
+
+    The history used to store LF for them, so Semgrep's restore wrote LF over the CRLF files the scan
+    was handed: the run was recorded as a modified source, ``partial`` with unresolved bundles.
+    """
+    base_files = {".gitattributes": b"* text=auto\n", "src/app.py": crlf(SAFE_PY), "README.md": b"docs\n"}
+    head_files = {**base_files, "src/app.py": crlf(SHELL_PY)}
+
+    result, execution = semgrep_pr_run(tmp_path, base_files, head_files)
+
+    assert_a_clean_review_of_the_added_finding(result, execution, "src/app.py")
+
+
+@semgrep_required
+@pytest.mark.parametrize("operator_attributes", [True, False], ids=["operator-attributes", "control-none"])
+def test_a_semgrep_pr_run_is_not_a_source_modification_under_the_operators_own_git_attributes(
+        tmp_path, monkeypatch, operator_attributes):
+    """``~/.config/git/attributes`` reaches Semgrep's own git, whatever the runner's history says.
+
+    The operator asks for CRLF on Python files. The control runs the same trees under the same HOME
+    without that file, which shows the run itself is sound and only the attributes differ.
+    """
+    home = tmp_path / "operator-home"
+    (home / ".config" / "git").mkdir(parents=True)
+    if operator_attributes:
+        (home / ".config" / "git" / "attributes").write_text("*.py text eol=crlf\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    base_files = {"src/app.py": SAFE_PY, "README.md": b"docs\n"}
+    head_files = {**base_files, "src/app.py": SHELL_PY}
+
+    result, execution = semgrep_pr_run(tmp_path, base_files, head_files)
+
+    assert_a_clean_review_of_the_added_finding(result, execution, "src/app.py")
+
+
 def test_a_backend_is_active_around_the_scan_and_its_isolation_record_is_written(tmp_path):
     from contextlib import contextmanager
 
