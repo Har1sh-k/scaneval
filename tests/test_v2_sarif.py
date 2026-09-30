@@ -1295,7 +1295,7 @@ def test_a_refused_import_writes_nothing(workspace, change, error, message):
     assert not workspace["out"].exists()
 
 
-def test_an_existing_or_symlinked_output_is_refused_and_left_alone(workspace):
+def test_an_existing_or_symlinked_output_is_refused_and_left_alone(workspace, monkeypatch):
     workspace["out"].mkdir()
     existing = workspace["out"] / "bundle"
     existing.mkdir()
@@ -1306,6 +1306,11 @@ def test_an_existing_or_symlinked_output_is_refused_and_left_alone(workspace):
     link.symlink_to(workspace["tmp"] / "elsewhere")
     with pytest.raises(SarifImportError, match="refusing to write through the symbolic link"):
         imported(workspace, name="link")
+    # The same link named through the home directory is the same link.
+    monkeypatch.setenv("HOME", str(workspace["out"]))
+    with pytest.raises(SarifImportError, match="refusing to write through the symbolic link ~/link"):
+        import_sarif(FIXTURES / "codeql.sarif", pack=workspace["pack"], snapshot_id="snap-a",
+                     tree_hash=workspace["tree_hash"], system_id="codeql-fixture", output=Path("~/link"), clock=CLOCK)
     assert not (workspace["tmp"] / "elsewhere").exists()
 
 

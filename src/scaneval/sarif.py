@@ -1793,9 +1793,10 @@ def import_sarif(sarif_path: Path, *, pack: dict, snapshot_id: str, tree_hash: s
         raise SarifImportError("a run id, when given, must not be blank")
     if system_config is not None and not isinstance(system_config, dict):
         raise SarifImportError("the system configuration must be a JSON object")
-    if Path(output).is_symlink():
+    named = Path(output).expanduser()
+    if named.is_symlink():
         raise SarifImportError(f"refusing to write through the symbolic link {output}")
-    bundle = Path(output).expanduser().resolve()
+    bundle = named.resolve()
     if bundle.exists():
         raise SarifImportError(f"{bundle} already exists; an import writes a new bundle directory")
     settings = UriSettings(uri_bases, source_root_uri)
