@@ -30,7 +30,7 @@ from scaneval.adapters import get_adapter
 from scaneval.adapters import base as base_module
 from scaneval.adapters.base import (Adapter, AdapterError, CommandResult, NativeOutcome, SystemSpec, build_env,
                                     run_command, tail_text)
-from scaneval.adapters.semgrep import SemgrepAdapter, semgrep_version
+from scaneval.adapters.semgrep import SemgrepAdapter, _binary, semgrep_version
 from scaneval.contracts import validate_document
 from scaneval.execution import PreparedInput, run_invocation
 from scaneval.isolation import IsolationError, backend_for, refusal_for, resolve_execution
@@ -1113,3 +1113,24 @@ def test_backend_for_builds_nothing_for_local_and_refuses_what_refusal_for_refus
                        invocation_id="i", scratch_root=tmp_path)
     assert isinstance(held, OciBackend) and held.workspace_root.is_dir()
     assert held.close() == [] and list(tmp_path.iterdir()) == []
+
+
+# --- semgrep under oci -----------------------------------------------------------------------
+
+
+def test_semgrep_takes_the_images_own_binary_under_oci_and_mounts_its_pinned_checkout(tmp_path):
+    assert SemgrepAdapter.oci_compatible is True and refusal_for(SemgrepAdapter(), settings()) is None
+    spec = SystemSpec("semgrep", "semgrep", {})
+    held = RecordingBackend()
+    held.name = "oci"
+    with base_module.routed_through(held):
+        assert _binary(spec) == "semgrep"
+        assert _binary(SystemSpec("semgrep", "semgrep", {"binary": "/opt/semgrep"})) == "/opt/semgrep"
+    root = tmp_path / "cache" / "rules__abc"
+    preparation = {"ruleset": {"commit": "a" * 40, "tree_hash": "sha256:" + "b" * 64},
+                   "config_dirs": [str(root / "python"), str(root / "go")], "ruleset_root": str(root)}
+    assert SemgrepAdapter().runtime_mounts(spec, preparation) == (str(root),)
+    legacy = {key: value for key, value in preparation.items() if key != "ruleset_root"}
+    assert SemgrepAdapter().runtime_mounts(spec, legacy) == (str(root / "go"), str(root / "python"))
+    with pytest.raises(AdapterError, match="run prepare"):
+        SemgrepAdapter().runtime_mounts(spec, {})
