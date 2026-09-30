@@ -55,12 +55,12 @@ writable. Under the ``oci`` backend, which mounts it read-only, a PR request is 
 ``unsupported`` with the reason recorded and nothing is run. A kill between the two resets leaves
 the tree at the base commit, which the invocation's own source check then reports.
 
-A diff scan over a change that touches only deleted paths and files outside the supported
-languages scans nothing and reports nothing, which in a full scan is the ``nothing_scanned``
-error. In a PR review it is a success with a note (an empty baseline review), and only when
-Semgrep exited 0 with no diagnostic of any level, no result was lost in the import, and git, run
-by this adapter before Semgrep starts, shows that no path present at head has the extension of a
-supported language. Anything else stays the error, with the reason added. That extension test is
+A diff scan over a change that touches only deleted paths and files no rule applies to
+(documentation, say) scans nothing and reports nothing, which in a full scan is the
+``nothing_scanned`` error. In a PR review it is a success with a note (an empty baseline review),
+and only when Semgrep exited 0 with no diagnostic of any level, no result was lost in the import,
+and git, run by this adapter before Semgrep starts, shows that no path present at head has the
+extension of a supported language. Anything else stays the error, with the reason added. That extension test is
 this adapter's own approximation of what Semgrep would scan, not Semgrep's target selection, and
 it errs toward the error. Import-loss accounting and every other outcome rule below are the
 full-scan ones, unchanged.
