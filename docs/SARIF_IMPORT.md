@@ -35,7 +35,7 @@ snapshot, the binding is the operator's declaration alone, and `import.json` say
 | `--source-root-uri URI` | The absolute `file` URI of the scanned tree's root on the machine that wrote the log. |
 | `--normalization FILE` | Recorded bundle-review decisions, described below. |
 | `--include-suppressed` | Import suppressed results as claims. Their suppression is recorded either way. |
-| `--max-bytes N` | Refuse a larger log. Default 64 MiB. A message is bounded on its own (65536 characters, written or formatted) and each taxonomy and rule is read once, so a small log cannot become a large allegation or a long run; results that share one long string still each carry a copy of it, up to that bound. |
+| `--max-bytes N` | Refuse a larger log. Default 64 MiB. What follows the read is bounded only in part: one message is at most 65536 characters, written or formatted, and the taxonomies and each rule's relationships and tags are read once, not once per result. A run's messages together are not bounded, so results that share one long string each carry a copy of it, up to that bound, and a rule that lists many CWE ids gives each of its claims a copy of the list. |
 
 `--system-config` and `--normalization` files are read as strictly as the log, up to 1 MiB each.
 Exit codes: `2` when the log is refused whole or an option cannot be used, and then nothing is

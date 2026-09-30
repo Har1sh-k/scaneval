@@ -48,10 +48,13 @@ loss recorded against that claim, not a reason to drop the claim. A result whose
 it may bundle separate allegations (several primary locations, or code flows that start in
 different places) is flagged for bundle review rather than split or guessed at.
 
-What is bounded. ``--max-bytes`` bounds the bytes read, and the work after it is bounded too: a
-message, as written or once formatted, is at most :data:`MESSAGE_LIMIT` characters, and a rule's
-relationships and tags and the run's taxonomies are read once, not once per result. What is not
-bounded is a run's messages together: results that share one long string each hold a copy of it.
+What is bounded, and what is not. ``--max-bytes`` bounds the bytes read. After that, one message,
+as written or once formatted, is at most :data:`MESSAGE_LIMIT` characters, and a rule's
+relationships and tags and the run's taxonomies are read once, not once per result. Not bounded: a
+run's messages together (results that share one long string each hold a copy of it), the CWE ids a
+rule lists (each of its claims holds a copy), and the search for a rule or a component named by
+guid, which reads the list each time. So the size bound of a log is not a bound on the memory or
+the time an import takes.
 
 What it never invents. A line range is read from a region's ``startLine`` and ``endLine`` or not
 at all: an offset-only region stays file-only. Execution success is the log's own report and is
