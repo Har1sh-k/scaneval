@@ -42,6 +42,7 @@ The scorer reports known-target detection, recall within review budgets, and fal
 | `scaneval aggregate <run dir>... --output` | Weight every scheduled assignment of saved runs into corpus metrics with cluster-bootstrap intervals. |
 | `scaneval compare <run dir>... --baseline --candidate --output` | Compare two systems assigned the same frozen work, with paired intervals. Decides no promotion. |
 | `scaneval precision sample\|queue\|record\|estimate` | Sample delivered claims from saved runs, record human reviews, and estimate reviewed precision. Does not change scores. |
+| `scaneval gate --policy --comparison --output` | Hold a comparison, and optionally precision estimates, to a gate policy and write a pass, fail, or inconclusive decision with every requirement explained. Promotes nothing. |
 
 Run `scaneval <command> --help` for required arguments. Only `corpus validate --snapshot-id`, `blinding check`, and `run` reach the network; contacts depend on the configured sources and scanners. Exit code `2` means the command could not be carried out, `1` means it ran and reports a negative result, and `0` means it ran and reports nothing wrong. None certifies that a security label is correct.
 
@@ -71,7 +72,8 @@ Guides: [Observer SDK](docs/OBSERVER_SDK.md), [native CLI collectors](docs/COLLE
 - Enforced isolation exists for Semgrep only: a system whose 2.1 run configuration selects the `oci` execution backend runs each scanner process in a locked-down Docker container from a digest-pinned image, with its network policy enforced. `llm-harness` and `deepsec` are refused under it. Every other system runs as the operator, unenforced. See [the threat model](docs/THREAT_MODEL.md).
 - Corpus aggregation and paired comparison read saved, frozen run directories ([aggregation](docs/AGGREGATION.md)). They compute no reviewed precision and decide no promotion.
 - Reviewed precision comes only from people reviewing a seeded probability sample of delivered claims ([precision guide](docs/PRECISION.md)). It is not a repository false-positive rate.
-- Native PR mode and promotion gates are not implemented.
+- A gate decision holds a saved comparison to a policy you write and says whether its requirements held ([gate guide](docs/GATE.md)). It promotes nothing: the workflow that owns the harness decides.
+- Native PR mode is not implemented.
 - The initial public workload is not selected. The pilot is an integration exercise, not a representative benchmark or scanner comparison.
 
 [Current capabilities](docs/INITIAL_BUILD.md) describes the implementation. [Design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) describe the broader contract and planned work.
