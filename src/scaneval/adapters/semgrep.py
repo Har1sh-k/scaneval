@@ -647,7 +647,7 @@ def _pr_review_notes(payload: dict, changes: tuple[Change, ...], scanned: list) 
 
 class SemgrepAdapter(Adapter):
     name = "semgrep"
-    adapter_version = "2.0.0"
+    adapter_version = "2.1.0"
     requires_git = False
     supported_languages = frozenset({"python", "javascript", "typescript", "go", "rust"})
     scan_modes = frozenset({"full", "pr"})

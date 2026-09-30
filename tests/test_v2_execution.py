@@ -201,7 +201,9 @@ def test_successful_invocation_writes_validated_bundle_and_captures_state(tmp_pa
     assert execution["network_policy"] == {"declared": "none", "enforced": False,
                                            "note": "Policy is recorded, not enforced by this runner; enforce it in the execution environment."}
     assert "declared artifact missing: missing" in execution["notes"]
-    assert execution["system_config"] == {"knob": 1} and execution["versions"]["kind_mapping"] == "1.0.0"
+    # 1.1.0: a claim with several mapped CWE ids takes the kind of the lowest-numbered one, so the
+    # SARIF import and the Semgrep adapter agree; changed deliberately from the 1.0.0 this pinned.
+    assert execution["system_config"] == {"knob": 1} and execution["versions"]["kind_mapping"] == "1.1.0"
     assert not list(Path(tmp_path).glob("scaneval-trial-*"))
     with pytest.raises(FileExistsError):
         run(tmp_path, adapter)

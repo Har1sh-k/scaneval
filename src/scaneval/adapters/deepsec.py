@@ -1603,7 +1603,7 @@ def unreviewed_note(changes: tuple[Change, ...], files: tuple[tuple[str, dict], 
 
 class DeepsecAdapter(Adapter):
     name = "deepsec"
-    adapter_version = "1.0.0"
+    adapter_version = "1.1.0"
     requires_git = False
     supported_languages = frozenset({"python", "javascript", "typescript", "go", "rust"})
     scan_modes = frozenset({"full", "pr"})
