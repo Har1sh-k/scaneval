@@ -2440,3 +2440,31 @@ def test_cli_help_describes_the_gate_command(capsys):
     assert "--policy POLICY" in text and "--comparison COMPARISON" in text and "--output OUTPUT" in text
     assert "--precision-baseline PRECISION_BASELINE" in text and "--precision-candidate PRECISION_CANDIDATE" in text
     assert "nothing is approved or promoted" in text
+
+
+# --- the example policy -----------------------------------------------------------------------------
+
+EXAMPLE_POLICY = Path(__file__).resolve().parents[1] / "examples" / "gate-policy.json"
+
+
+def test_the_example_policy_is_valid_declares_every_block_and_is_labelled_as_example_values():
+    document = json.loads(EXAMPLE_POLICY.read_text(encoding="utf-8"))
+
+    assert validate_document("gate-policy", document) is document
+    assert gate_declared_blocks(document) == list(ALL_BLOCKS)
+    assert "example" in document["policy_id"] and document["policy_version"].endswith("-example")
+    notes = " ".join(document["notes"])
+    assert "Example values for a fixture or a first try only" in notes
+    assert "not recommended, reviewed, or validated tolerances" in notes
+    assert "Freeze your own thresholds before any result is read" in notes
+    assert gate.load_policy(EXAMPLE_POLICY)["required_scope"] == "reviewed"
+
+
+def test_the_example_policy_evaluates_a_real_comparison_and_promises_nothing(corpus):
+    """It is a template with its own example tolerances, not tuned to any run: it does not pass the fixture."""
+    decision = gate.evaluate_gate(gate.load_policy(EXAMPLE_POLICY), corpus["comparisons"]["improved"])
+
+    assert validate_document("gate-decision", decision) is decision
+    assert decision["outcome"] != "pass" and decision["blocks"]["not_declared"] == []
+    assert requirement(decision, "configuration.allowed_differences")["status"] == "inconclusive"
+    assert requirement(decision, "precision.binding")["status"] == "inconclusive"
