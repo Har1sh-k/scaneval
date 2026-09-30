@@ -2663,6 +2663,7 @@ def test_a_changed_path_git_prints_quoted_makes_the_review_partial_and_is_named_
     outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
 
     assert outcome.status == "partial" and outcome.error["code"] == "scope_incomplete"
+    assert outcome.bundles_resolved is False, "the claims about the rest are a part delivered; no budget reads off it"
     message = outcome.error["message"]
     assert message.startswith("1 changed path(s) (src/caf\u00e9.js) have a name git prints quoted (a non-ASCII name")
     assert ("cannot resolve a quoted name to a file, so it never investigated them, whatever its ignore filter says"
@@ -2693,7 +2694,7 @@ def test_a_change_that_touches_only_a_quoted_name_is_an_error_and_never_an_empty
 
     assert "Nothing to process" in ANSI.sub("", (raw / "deepsec-process.stdout.txt").read_text(encoding="utf-8"))
     assert outcome.exit_code == 0, "DeepSec itself ran to the end; it is the change it read that was short"
-    assert outcome.status == "error" and outcome.claims == []
+    assert outcome.status == "error" and outcome.claims == [] and outcome.bundles_resolved is False
     assert outcome.error["code"] == "scope_incomplete"
     assert outcome.error["message"].startswith("1 changed path(s) (src/caf\u00e9.js) have a name git prints quoted")
     assert outcome.error["message"].endswith("no file reached a verdict, so none of the change was observed")

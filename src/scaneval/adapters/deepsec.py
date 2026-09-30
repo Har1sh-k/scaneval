@@ -68,8 +68,10 @@ whatever its ignore filter says: the entry DeepSec holds is the quoted spelling,
 nothing. Such a path with no file record is a known omission of part of the change, so the run is
 ``partial`` with code ``scope_incomplete``, or an ``error`` when no file reached a verdict, and never
 a ``success``, the only status that lets the scoring contract complete a control and grant it quiet
-credit. The error and the note name the path from one list (:class:`DroppedPaths`), and the run says
-nothing about it. A path that only the ignore filter dropped stays a note: that is DeepSec's own scope.
+credit. Its bundles are unresolved, as when a file is left in ``error``: the claims about the rest
+are a part delivered, and no claim budget is read off a part. The error and the note name the path
+from one list (:class:`DroppedPaths`), and the run says nothing about it. A path that only the
+ignore filter dropped stays a note: that is DeepSec's own scope.
 
 Direct mode exits 1 for three different reasons (a run that produced findings, a batch that
 errored, an exhausted quota) and also for a runtime failure such as an unresolvable range, so an
@@ -1829,7 +1831,7 @@ class DeepsecAdapter(Adapter):
         batches_failed = len(errored_files) + len(records.debug) + refusals
         suspect_durations = [session.call_id for session in sessions if session.duration_suspect]
         # The changed paths DeepSec's plain listing could not resolve, so that no model was ever given them. Read
-        # once, here, for the status below; the note is made from the same helper.
+        # once, here, for the bundle flag and the status below; the note is made from the same helper.
         omitted = dropped_paths(changes, records.files).quoted if pr is not None else ()
 
         exported: Any = None
@@ -2018,9 +2020,11 @@ class DeepsecAdapter(Adapter):
                     # quiet credit for a file no model opened. In a PR review a file left in
                     # ``error`` is the same case, and the ordinary one: direct mode exits 1 and
                     # the run goes on, so the claims of the batches that finished are all there is.
+                    # So is a changed path DeepSec never listed: the claims about the rest are a
+                    # part delivered, and a budget read off a part reads as one read off the whole.
                     bundles_resolved=(imported.lost == 0 and not records.failures
                                       and statuses.incomplete == 0
-                                      and (pr is None or not statuses.errored)))
+                                      and (pr is None or not (statuses.errored or omitted))))
         exit_code = None
         for step in ("export", "process", "scan"):
             result = results.get(step)
