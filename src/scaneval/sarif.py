@@ -4,7 +4,9 @@
 else, at some other time, and never runs anything to produce one.
 
 What it reads. The SARIF file the operator names, read once, as bytes, up to a stated bound, and
-only when it is a regular file. Nothing a log names is ever fetched or opened: not ``$schema``,
+only when it is a regular file, and beside it the operator's own small JSON files (a system
+configuration, a normalization file), read the same strict way. Nothing a log names is ever
+fetched or opened: not ``$schema``,
 not a rule's ``helpUri``, and not a path in a location, which is a string to map into the scanned
 tree or to refuse, never a file to read. The one tree it may open files in is an exported source
 tree the operator supplies to check locations against, and only after that tree hashes to the
@@ -158,6 +160,41 @@ def _text(value: Any) -> str | None:
 # --- reading the artifact ---------------------------------------------------------------
 
 
+def _read_bounded(path: Path, max_bytes: int, what: str, hint: str = "") -> bytes:
+    """The bytes of the regular file at *path*, read once and never past *max_bytes*.
+
+    *what* names the file in every refusal ("the SARIF file", "the --normalization file"), and
+    *hint* is appended to the refusal of a file above the bound.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except OSError as exc:
+        raise SarifImportError(f"could not open {what} {path}: {exc}") from exc
+    chunks: list[bytes] = []
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise SarifImportError(f"{what} {path} is not a regular file, so it is not read")
+        if info.st_size > max_bytes:
+            raise SarifImportError(f"{what} {path} holds {info.st_size} bytes, more than the "
+                                   f"{max_bytes}-byte bound{hint}")
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(_READ_CHUNK, max_bytes + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                raise SarifImportError(f"{what} {path} grew past the {max_bytes}-byte bound while it was "
+                                       "read; it is not read in part")
+    except OSError as exc:
+        raise SarifImportError(f"could not read {what} {path}: {exc}") from exc
+    finally:
+        os.close(descriptor)
+    return b"".join(chunks)
+
+
 def read_artifact(path: Path, max_bytes: int = DEFAULT_MAX_BYTES) -> bytes:
     """The bytes of the SARIF file at *path*, read at most once and never past *max_bytes*.
 
@@ -170,55 +207,26 @@ def read_artifact(path: Path, max_bytes: int = DEFAULT_MAX_BYTES) -> bytes:
     """
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1:
         raise SarifImportError(f"the size bound must be a positive number of bytes, not {max_bytes!r}")
-    try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
-    except OSError as exc:
-        raise SarifImportError(f"could not open the SARIF file {path}: {exc}") from exc
-    chunks: list[bytes] = []
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise SarifImportError(f"{path} is not a regular file, so it is not read as a SARIF log")
-        if info.st_size > max_bytes:
-            raise SarifImportError(
-                f"{path} holds {info.st_size} bytes, more than the {max_bytes}-byte bound; raise "
-                "--max-bytes to import a larger log")
-        total = 0
-        while True:
-            chunk = os.read(descriptor, min(_READ_CHUNK, max_bytes + 1 - total))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > max_bytes:
-                raise SarifImportError(
-                    f"{path} grew past the {max_bytes}-byte bound while it was read; it is not "
-                    "imported in part")
-    except OSError as exc:
-        raise SarifImportError(f"could not read the SARIF file {path}: {exc}") from exc
-    finally:
-        os.close(descriptor)
-    return b"".join(chunks)
+    return _read_bounded(path, max_bytes, "the SARIF file", "; raise --max-bytes to import a larger log")
 
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise SarifImportError(f"the log repeats the object key {key!r}; which value was meant "
-                                   "cannot be told")
+            raise SarifImportError(f"repeats the object key {key!r}; which value was meant cannot be told")
         result[key] = value
     return result
 
 
 def _reject_constant(value: str) -> Any:
-    raise SarifImportError(f"the log carries the non-finite JSON number {value}, which JSON does not allow")
+    raise SarifImportError(f"carries the non-finite JSON number {value}, which JSON does not allow")
 
 
 def _finite_float(text: str) -> float:
     value = float(text)
     if not math.isfinite(value):
-        raise SarifImportError(f"the log carries the number {text}, which overflows to infinity")
+        raise SarifImportError(f"carries the number {text}, which overflows to infinity")
     return value
 
 
@@ -232,16 +240,57 @@ def _refuse_non_text(document: Any) -> None:
         value = pending.pop()
         if isinstance(value, str):
             if _SURROGATE.search(value):
-                raise SarifImportError("the log holds a string with a lone UTF-16 surrogate escape, "
-                                       "which is not Unicode text")
+                raise SarifImportError("holds a string with a lone UTF-16 surrogate escape, which is not "
+                                       "Unicode text")
         elif isinstance(value, dict):
             for key, item in value.items():
                 if _SURROGATE.search(key):
-                    raise SarifImportError("the log holds an object key with a lone UTF-16 surrogate "
-                                           "escape, which is not Unicode text")
+                    raise SarifImportError("holds an object key with a lone UTF-16 surrogate escape, which "
+                                           "is not Unicode text")
                 pending.append(item)
         elif isinstance(value, list):
             pending.extend(value)
+
+
+def _strict_json(text: str, subject: str) -> Any:
+    """Parse *text* strictly, naming *subject* in every refusal."""
+    try:
+        value = json.loads(text, object_pairs_hook=_strict_object, parse_constant=_reject_constant,
+                           parse_float=_finite_float)
+        _refuse_non_text(value)
+    except SarifImportError as exc:
+        raise SarifImportError(f"{subject} {exc}") from None
+    except RecursionError as exc:
+        raise SarifImportError(f"{subject} nests deeper than the JSON parser's recursion limit") from exc
+    except ValueError as exc:
+        raise SarifImportError(f"{subject} is not valid JSON: {exc}") from exc
+    return value
+
+
+# An operator-supplied JSON object (a system configuration, a normalization file) is small; one
+# larger than this is refused rather than read.
+_OPERATOR_FILE_BOUND = 1024 * 1024
+
+
+def load_json_object(path: Path, label: str) -> dict:
+    """The JSON object in an operator-supplied file, read with the same strictness as a log.
+
+    For the files an operator hands an import beside the log (``--system-config``,
+    ``--normalization``): a regular file of at most 1 MiB, UTF-8, JSON without repeated keys,
+    non-finite numbers, or text that is not Unicode, holding one object. *label* names the option
+    the file came from, and every refusal names that option and the file. Nothing in the file is
+    followed: a path or URI it holds is a string like any other.
+    """
+    what = f"the {label} file"
+    data = _read_bounded(Path(path), _OPERATOR_FILE_BOUND, what)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SarifImportError(f"{what} {path} is not UTF-8 text: {exc}") from exc
+    value = _strict_json(text, f"{what} {path}")
+    if not isinstance(value, dict):
+        raise SarifImportError(f"{what} {path} is not a JSON object")
+    return value
 
 
 def parse_log(data: bytes) -> tuple[dict, list[str]]:
@@ -264,16 +313,7 @@ def parse_log(data: bytes) -> tuple[dict, list[str]]:
         text = text[1:]
         notes.append("A leading UTF-8 byte order mark was ignored (RFC 8259 section 8.1); the "
                      "artifact hash covers the bytes as supplied.")
-    try:
-        document = json.loads(text, object_pairs_hook=_strict_object, parse_constant=_reject_constant,
-                              parse_float=_finite_float)
-    except SarifImportError:
-        raise
-    except RecursionError as exc:
-        raise SarifImportError("the log nests deeper than the JSON parser's recursion limit") from exc
-    except ValueError as exc:
-        raise SarifImportError(f"the log is not valid JSON: {exc}") from exc
-    _refuse_non_text(document)
+    document = _strict_json(text, "the log")
     if not isinstance(document, dict):
         raise SarifImportError(f"the log is a JSON {type(document).__name__}, not a SARIF log object")
     return document, notes

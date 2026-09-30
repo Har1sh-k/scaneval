@@ -36,6 +36,7 @@ from scaneval.sarif import (
     convert_run,
     default_run_id,
     import_sarif,
+    load_json_object,
     parse_log,
     read_artifact,
     select_run,
@@ -347,6 +348,37 @@ def test_a_fifo_named_as_the_log_is_refused_without_blocking(tmp_path):
 def test_bytes_that_are_not_a_strict_json_object_are_refused_whole(data, message):
     with pytest.raises(SarifImportError, match=message):
         parse_log(data)
+
+
+@pytest.mark.parametrize("data,message", [
+    (b'{"threads": 4, "threads": 8}', "repeats the object key 'threads'"),
+    (b'{"threads": NaN}', "non-finite JSON number NaN"),
+    (b'{"threads": 1e999}', "overflows to infinity"),
+    (b'{"name": "\\udc80"}', "lone UTF-16 surrogate"),
+    (b"\xff{}", "is not UTF-8 text"),
+    (b'{"threads":', "is not valid JSON"),
+    (b"[4]", "is not a JSON object"),
+])
+def test_an_operator_json_file_is_read_as_strictly_as_a_log(tmp_path, data, message):
+    path = tmp_path / "system.json"
+    path.write_bytes(b'{"threads": 4}')
+    assert load_json_object(path, "--system-config") == {"threads": 4}
+    path.write_bytes(data)
+    with pytest.raises(SarifImportError, match=message) as refused:
+        load_json_object(path, "--system-config")
+    # Every refusal names the option the file came from and the file itself.
+    assert str(refused.value).startswith(f"the --system-config file {path}")
+
+
+def test_an_operator_json_file_is_bounded_and_must_be_a_readable_regular_file(tmp_path):
+    large = tmp_path / "large.json"
+    large.write_bytes(b'{"note": "' + b"x" * (1024 * 1024) + b'"}')
+    with pytest.raises(SarifImportError, match="more than the 1048576-byte bound"):
+        load_json_object(large, "--normalization")
+    with pytest.raises(SarifImportError, match="could not open the --normalization file"):
+        load_json_object(tmp_path / "missing.json", "--normalization")
+    with pytest.raises(SarifImportError, match="the --normalization file .* is not a regular file, so it is not read"):
+        load_json_object(tmp_path, "--normalization")
 
 
 def test_a_leading_byte_order_mark_is_the_one_thing_tolerated_and_it_is_noted():
