@@ -2817,14 +2817,16 @@ def test_a_name_with_a_space_at_an_end_beside_a_reviewed_file_makes_the_review_p
     assert f"1 of them ({shown}) begin or end with a space" in note
 
 
-def test_a_trailing_space_beside_an_untouched_file_it_trims_to_is_not_a_review_of_the_change(tmp_path):
+@pytest.mark.parametrize("name", ["src/server.js ", " src/server.js"], ids=["trailing", "leading"])
+def test_a_name_with_a_space_at_an_end_beside_an_untouched_file_it_trims_to_is_not_a_review_of_the_change(tmp_path,
+                                                                                                          name):
     """DeepSec trims ``src/server.js `` to ``src/server.js``, which exists and which this change does not touch.
 
     So DeepSec reviewed a file outside the change and none of the change itself, and the run was recorded as a
     ``success`` with claims about the untouched file.
     """
     root = fake_deepsec_root(tmp_path)
-    workspace, pr = pr_workspace(tmp_path, {"src/server.js ": "module.exports = 2;\n"})
+    workspace, pr = pr_workspace(tmp_path, {name: "module.exports = 2;\n"})
 
     outcome, raw, _ = scan_pr(tmp_path, root, workspace, pr)
 
@@ -2832,13 +2834,30 @@ def test_a_trailing_space_beside_an_untouched_file_it_trims_to_is_not_a_review_o
     assert (records / "server.js.json").is_file(), "DeepSec reviewed the file the trim resolved to"
     assert outcome.status == "partial" and outcome.error["code"] == "scope_incomplete"
     assert outcome.bundles_resolved is False
-    assert outcome.error["message"].startswith('1 changed path(s) ("src/server.js ") begin or end with a space')
+    shown = json.dumps(name)
+    assert outcome.error["message"].startswith(f"1 changed path(s) ({shown}) begin or end with a space")
     assert "the entry it holds then names another path, or none" in outcome.error["message"]
     # What DeepSec produced is kept, as in every partial run. It is about the file the trim resolved to, which this
     # change does not touch, and the message says the entry named another path.
     assert [claim["primary_location"]["path"] for claim in outcome.claims] == ["src/server.js"]
     note = next(note for note in outcome.notes if note.startswith("DeepSec did not investigate"))
-    assert '1 of the 1 path(s) this change leaves at head' in note and '("src/server.js ")' in note
+    assert "1 of the 1 path(s) this change leaves at head" in note and f"({shown})" in note
+
+
+def test_a_name_with_a_space_at_an_end_beside_the_changed_file_it_trims_to_is_still_an_omission(tmp_path):
+    """The file the trim resolves to is in the change and is reviewed, which does not make the spaced path reviewed."""
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, {"src/server.js": "module.exports = 3;\n",
+                                            "src/server.js ": "module.exports = 2;\n"})
+
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+
+    assert outcome.status == "partial" and outcome.error["code"] == "scope_incomplete"
+    assert outcome.bundles_resolved is False
+    assert outcome.error["message"].startswith('1 changed path(s) ("src/server.js ") begin or end with a space')
+    assert [claim["primary_location"]["path"] for claim in outcome.claims] == ["src/server.js"]
+    note = next(note for note in outcome.notes if note.startswith("DeepSec did not investigate"))
+    assert '1 of the 2 path(s) this change leaves at head' in note and '("src/server.js ")' in note
 
 
 def test_a_space_inside_a_name_or_at_the_end_of_a_directory_is_not_at_an_end_of_the_line_and_is_no_omission(tmp_path):
