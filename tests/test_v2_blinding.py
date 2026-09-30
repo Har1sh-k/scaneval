@@ -2,13 +2,15 @@
 
 The fixture is one local repository with a vulnerable and a fixed commit and one map covering both.
 Every approval here is recorded by "Fixture Reviewer (fictional)": no test records, implies, or
-stands in for a real person's review. Nothing touches the network, calls a model, or sleeps.
+stands in for a real person's review. The scanners are fake adapters; nothing touches the network,
+calls a model, or sleeps.
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import re
@@ -18,9 +20,13 @@ from typing import Callable
 
 import pytest
 
-from scaneval import blinding, materialize
-from scaneval.contracts import ContractError, canonical_json, chain_digest, validate_document
+from scaneval import blinding, cases, materialize
+from scaneval.adapters.base import Adapter, NativeOutcome
+from scaneval.cli import main
+from scaneval.contracts import ContractError, canonical_json, chain_digest, load_document, validate_document
+from scaneval.execution import LOCAL_ISOLATION
 from scaneval.materialize import MaterializationError
+from scaneval.runner import run_from_config
 
 
 CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
@@ -42,6 +48,10 @@ FILES = {"README.md": README_VULNERABLE, "docs/guide.md": GUIDE, "mkdocs.yml": M
 PSEUDONYMS = {"Widget": "Sprocket", "AcmeCorp": "ExampleCo"}
 EDITED = ("README.md", "docs/guide.md", "mkdocs.yml")
 ROLE_CHECK = "mkdocs reads site_name only to title rendered pages; the application never reads mkdocs.yml."
+REPRESENTS = ("This case tests caller-controlled shell command construction under a trusted-argument "
+              "assumption, and adds a single-file Python sink for the blinding tests.")
+BLINDED = {"snapshot_id": "snap-a", "profile": "metadata_blinded", "blinding_map": "widget-map.json"}
+BLINDED_FIXED = {"snapshot_id": "snap-fixed", "profile": "metadata_blinded", "blinding_map": "widget-map.json"}
 
 
 def git(*args: str, cwd: Path) -> str:
@@ -606,3 +616,296 @@ def test_only_documentation_and_reviewed_display_metadata_may_be_edited(path, ro
         assert gap is None
     else:
         assert gap is not None and reason in gap
+
+
+# --- the runner: refusals are preparation failures; nothing reaches a scanner ------------------
+
+
+def write_pack(path: Path, widget: dict, *, checked: bool = False) -> dict:
+    """The vulnerable snapshot's target and its fixed-target control on the repaired snapshot."""
+    pack = cases.new_pack("test", "blinding", "Local fixture pack for the blinding tests.")
+    base = {"repository": {"url": str(widget["repo"]), "name": "widget"},
+            "reference": "Commit chosen by the test fixture; no advisory is claimed.",
+            "languages": ["python"], "workload": "conventional_application", "component_role": "application",
+            "license": {"spdx": None, "verified": False, "note": "Local fixture repository."}}
+    cases.add_snapshot(pack, {**base, "snapshot_id": "snap-a", "commit": widget["commits"]["snap-a"]})
+    cases.add_snapshot(pack, {**base, "snapshot_id": "snap-fixed", "commit": widget["commits"]["snap-fixed"],
+                              "role": "fixed"})
+    case = cases.draft_case(
+        "case-a", snapshot_id="snap-a", kind="command_injection",
+        description="Caller-controlled command string reaches subprocess with shell=True.",
+        represents=REPRESENTS, workload="conventional_application", component_role="application", aliases=[],
+        evidence=[cases.evidence("source", origin="research_note", kind="source_inspection",
+                                 reference="src/app.py", note="Fixture inspection, not an advisory.")],
+        accepted_locations=[{"path": "src/app.py", "start_line": 6, "end_line": 6, "role": "sink", "note": ""}])
+    case["controls"].append({
+        "control_id": "C-case-a-fixed", "snapshot_id": "snap-fixed", "type": "fixed_target",
+        "target_id": "T-case-a", "description": "The repaired call passes an argument list.",
+        "property": "No shell string is built at this call site.",
+        "allowed_actors_inputs": "The same callers as the vulnerable snapshot.",
+        "assumptions": ["Default deployment."],
+        "ruled_out_allegation": "Caller-controlled shell interpolation at this call site.",
+        "locations": [{"path": "src/app.py", "start_line": 6, "end_line": 6, "role": "operation", "note": ""}],
+        "evidence_ids": ["source"],
+    })
+    cases.add_case(pack, case)
+    if checked:
+        for snapshot_id in ("snap-a", "snap-fixed"):
+            cases.mechanical_checks(pack, snapshot_id, widget["probes"][snapshot_id],
+                                    materialize.tree_hash(widget["exports"][snapshot_id].hashes), clock=CLOCK)
+    cases.save_pack(path, pack)
+    return pack
+
+
+def write_config(path: Path, inputs: list[dict], *, systems: list[dict] | None = None,
+                 run_id: str = "run-blind") -> dict:
+    config = {"schema_version": "2.1", "run_id": run_id, "pack": "pack.json", "cache_root": "cache",
+              "inputs": inputs, "systems": systems or [{"system_id": "fake-a", "adapter": "fake", "config": {}}],
+              "repetitions": 1, "timeout_seconds": 60, "trace_mode": "off", "network_policy": "none"}
+    path.write_text(canonical_json(config) + "\n", encoding="utf-8")
+    return config
+
+
+class FakeAdapter(Adapter):
+    """Returns one claim on the target's sink and records which trees it was handed."""
+
+    name = "fake"
+    adapter_version = "1.0.0"
+    supported_languages = frozenset({"python"})
+
+    def __init__(self):
+        self.calls = 0
+        self.scanned: list[str] = []
+
+    def prepare(self, spec, cache_root):
+        return {"system": spec.system_id}
+
+    def scan(self, *, request, source_dir, raw_dir, spec, preparation, timeout_seconds, trace_mode, trace_dir):
+        self.calls += 1
+        self.scanned.append(request["input"]["tree_hash"])
+        native = raw_dir / "native.json"
+        native.write_text('{"findings": [{"file": "src/app.py"}]}\n', encoding="utf-8")
+        claims = [{"claim_id": "c1", "allegation": "shell=True with a caller-controlled command",
+                   "kind": "command_injection", "native_rule_id": "fake.shell", "raw_artifact_id": "native",
+                   "primary_location": {"path": "src/app.py", "start_line": 6, "end_line": 6}}]
+        return NativeOutcome(status="success", exit_code=0, command=["fake", "scan"], claims=claims,
+                             artifacts=[{"id": "native", "path": native}], tool_versions={"fake": "1.0.0"},
+                             capture={"model_requests": "not_applicable"}, notes=["fake run"])
+
+
+class InspectingAdapter(FakeAdapter):
+    """Looks through everything it was handed before it scans, the way a curious scanner would."""
+
+    def __init__(self):
+        super().__init__()
+        self.seen: dict = {}
+
+    def scan(self, *, request, source_dir, raw_dir, **kwargs):
+        workspace = source_dir.parent
+        files = [path for path in workspace.rglob("*") if path.is_file()]
+        every_name = {part for path in workspace.rglob("*") for part in path.relative_to(workspace).parts}
+        self.seen = {
+            "map_files": [path.name for path in files
+                          if path.name == "widget-map.json" or b'"pseudonyms"' in path.read_bytes()],
+            "provenance": "provenance.json" in every_name,
+            "evaluator": sorted(every_name & {"evaluator", "pack.json", "schedule.json", "plan.json",
+                                             "decisions.json", "original"}),
+            "tokens_in_edited": {relative: [token for token in PSEUDONYMS
+                                            if token in (source_dir / relative).read_text(encoding="utf-8")]
+                                 for relative in EDITED},
+            "tokens_in_request": [token for token in PSEUDONYMS
+                                  if token.casefold() in json.dumps(request).casefold()],
+            "profile": request["input"]["profile"],
+        }
+        return super().scan(request=request, source_dir=source_dir, raw_dir=raw_dir, **kwargs)
+
+
+def blinded_run(tmp_path: Path, widget: dict, document: dict, inputs: list[dict], adapter: Adapter, *,
+                checked: bool = False, **config_changes) -> tuple[dict, Path]:
+    write_pack(tmp_path / "pack.json", widget, checked=checked)
+    blinding.save_map(tmp_path / "widget-map.json", document)
+    write_config(tmp_path / "run.json", inputs, **config_changes)
+    out = tmp_path / "out"
+    manifest = run_from_config(tmp_path / "run.json", out, clock=CLOCK, adapters={"fake": adapter})
+    return manifest, out
+
+
+@pytest.mark.parametrize("name", sorted(REFUSALS))
+def test_a_refused_map_is_a_preparation_failure_and_no_scanner_ever_sees_that_input(tmp_path, widget, name):
+    adapter = FakeAdapter()
+
+    manifest, out = blinded_run(tmp_path, widget, refused_map(widget, name),
+                                [{"snapshot_id": "snap-a"}, BLINDED], adapter)
+
+    assert manifest["status"] == "completed"
+    standard, blinded = manifest["inputs"]
+    assert standard["preparation_failure"] is None
+    failure = blinded["preparation_failure"]
+    assert blinded["input_id"] == "snap-a.blinded" and failure["type"] == "MaterializationError"
+    assert re.search(REFUSALS[name][2], failure["message"])
+    assert (blinded["tree_hash"], blinded["input_hash"], blinded["mechanical_checks"]) == (None, None, [])
+    rows = {row["input_id"]: row for row in manifest["invocations"]}
+    assert rows["snap-a.blinded"]["status"] == "skipped"
+    assert rows["snap-a.blinded"]["skipped_reason"].startswith(
+        "input snap-a.blinded could not be prepared: MaterializationError: ")
+    assert rows["snap-a"]["status"] == "success", "the other input still ran"
+    assert adapter.calls == 1 and adapter.scanned == [standard["tree_hash"]], "the refused input reached no scanner"
+    assert not (out / "inputs" / "snap-a.blinded" / "source").exists()
+    frozen = load_document(out / manifest["schedule_path"], "evaluation-schedule")
+    assert [row["assignment_id"] for row in frozen["assignments"]] == [
+        "snap-a__fake-a__r1", "snap-a.blinded__fake-a__r1"], "the refused input's assignment stays scheduled"
+
+
+def test_a_scanner_handed_a_blinded_input_finds_no_map_no_provenance_and_no_original_token(tmp_path, widget):
+    adapter = InspectingAdapter()
+
+    manifest, _out = blinded_run(tmp_path, widget, widget_map(widget), [BLINDED], adapter)
+
+    assert manifest["invocations"][0]["status"] == "success" and adapter.calls == 1
+    assert adapter.seen == {"map_files": [], "provenance": False, "evaluator": [],
+                            "tokens_in_edited": {relative: [] for relative in EDITED},
+                            "tokens_in_request": [], "profile": "metadata_blinded"}
+
+
+def test_a_blinded_run_binds_results_to_the_transformed_tree_and_labels_to_the_original(tmp_path, widget):
+    document = widget_map(widget)
+    adapter = FakeAdapter()
+
+    manifest, out = blinded_run(tmp_path, widget, document, [BLINDED, BLINDED_FIXED], adapter)
+
+    rows = {row["input_id"]: row for row in manifest["inputs"]}
+    blinded = rows["snap-a.blinded"]
+    original_hash = materialize.tree_hash(widget["exports"]["snap-a"].hashes)
+    transformed = materialize.hash_exported_tree(out / "inputs" / "snap-a.blinded" / "source")["tree_hash"]
+    assert blinded["tree_hash"] == blinded["input_hash"] == transformed != original_hash
+    assert blinded["provenance_path"] == "inputs/snap-a.blinded/provenance.json"
+    assert [(outcome["case_id"], outcome["passed"]) for outcome in blinded["mechanical_checks"]] == [("case-a", True)]
+    frozen = cases.load_pack(out / "evaluator" / "pack.json")
+    assert cases.snapshot_by_id(frozen, "snap-a")["tree_hash"] == original_hash, "labels refer to the original"
+    assert adapter.scanned == [transformed, rows["snap-fixed.blinded"]["tree_hash"]]
+
+    bundle = out / "invocations" / "snap-a.blinded__fake-a__r1"
+    request = load_document(bundle / "request.json", "scan-request")
+    assert request["input"]["tree_hash"] == transformed and request["input"]["profile"] == "metadata_blinded"
+    assert load_document(bundle / "result.json", "scan-result")["input_hash"] == transformed
+    plan = load_document(bundle / "evaluator" / "plan.json", "evaluation-plan")
+    assert plan["schema_version"] == "2.1" and plan["input_hash"] == transformed
+    assert plan["provenance"]["source_tree_hash"] == original_hash
+    assert plan["provenance"]["blinding"] == blinding.map_identity(document)
+    assert [(target["target_id"], target["canonical_id"]) for target in plan["targets"]] == [("T-case-a", "T-case-a")]
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["schema_version"] == "2.1" and execution["isolation"] == LOCAL_ISOLATION
+    provenance = execution["provenance"]
+    assert (provenance["tree_hash"], provenance["input_hash"], provenance["mode"], provenance["pr"]) == (
+        transformed, transformed, "full", None)
+    assert provenance["blinding"] == {**blinding.map_identity(document), "original_tree_hash": original_hash,
+                                      "transformed_tree_hash": transformed}
+    fixed = load_document(out / "invocations" / "snap-fixed.blinded__fake-a__r1" / "execution.json",
+                          "execution-record")
+    assert fixed["provenance"]["blinding"]["map_sha256"] == provenance["blinding"]["map_sha256"], "one map"
+    evaluation = json.loads((bundle / "evaluation.json").read_text(encoding="utf-8"))
+    assert evaluation["input_hash"] == transformed and evaluation["metrics"]["targets_assigned"] == 1
+
+
+def test_the_schedule_names_each_blinded_map_and_pairs_only_within_one_profile(tmp_path, widget):
+    document = widget_map(widget)
+    inputs = [{"snapshot_id": "snap-a"}, {"snapshot_id": "snap-fixed"}, BLINDED, BLINDED_FIXED]
+
+    manifest, out = blinded_run(tmp_path, widget, document, inputs, FakeAdapter(), checked=True)
+
+    frozen = load_document(out / manifest["schedule_path"], "evaluation-schedule")
+    identities = {row["input_id"]: row["blinding"] for row in frozen["inputs"]}
+    assert identities == {"snap-a": None, "snap-fixed": None, "snap-a.blinded": blinding.map_identity(document),
+                          "snap-fixed.blinded": blinding.map_identity(document)}
+    assert [(pair["vulnerable_input_id"], pair["fixed_input_id"]) for pair in frozen["pairs"]] == [
+        ("snap-a", "snap-fixed"), ("snap-a.blinded", "snap-fixed.blinded")]
+    assert all(pair["repetition_pairs"] == [[1, 1]] for pair in frozen["pairs"])
+
+
+LEAKS = {
+    "run-id": {"run_id": "widget-nightly"},
+    "system-id": {"systems": [{"system_id": "widget-scanner", "adapter": "fake", "config": {}}]},
+    "model-id": {"systems": [{"system_id": "fake-a", "adapter": "fake", "config": {},
+                              "model_id": "vendor/acmecorp-tuned"}]},
+    "model-revision": {"systems": [{"system_id": "fake-a", "adapter": "fake", "config": {},
+                                    "model_revision": "Widget-2026"}]},
+    "config-value": {"systems": [{"system_id": "fake-a", "adapter": "fake",
+                                  "config": {"prompts": ["Review the WIDGET service."]}}]},
+    "config-key": {"systems": [{"system_id": "fake-a", "adapter": "fake", "config": {"widget": {"depth": 2}}}]},
+}
+
+
+@pytest.mark.parametrize("name", sorted(LEAKS))
+def test_a_run_that_would_carry_an_original_token_to_a_blinded_scan_is_refused(tmp_path, widget, name):
+    adapter = FakeAdapter()
+    write_pack(tmp_path / "pack.json", widget)
+    blinding.save_map(tmp_path / "widget-map.json", widget_map(widget))
+    write_config(tmp_path / "run.json", [{"snapshot_id": "snap-a"}, BLINDED], **LEAKS[name])
+    out = tmp_path / "out"
+
+    with pytest.raises(ContractError, match="an original identity token of blinding map widget-metadata"):
+        run_from_config(tmp_path / "run.json", out, clock=CLOCK, adapters={"fake": adapter})
+
+    assert not out.exists() and adapter.calls == 0
+
+
+def test_a_leak_check_reads_keys_and_values_and_ignores_case(widget):
+    document = widget_map(widget)
+
+    assert blinding.leaked_originals(document, {"a": ["x", {"acmecorp": 1}], "b": "the WIDGET way"}) == [
+        "AcmeCorp", "Widget"]
+    assert blinding.leaked_originals(document, {"a": [1, 2.0, None, True], "b": "sprocket"}) == []
+
+
+def test_related_blinded_inputs_are_blinded_with_one_map(tmp_path, widget):
+    document = widget_map(widget)
+    other = deepcopy(document)
+    other["pseudonyms"][0]["replacement"] = "Gizmo"
+    reapproved(other)
+    write_pack(tmp_path / "pack.json", widget)
+    blinding.save_map(tmp_path / "widget-map.json", document)
+    blinding.save_map(tmp_path / "other-map.json", other)
+    write_config(tmp_path / "run.json", [BLINDED, {**BLINDED_FIXED, "blinding_map": "other-map.json"}])
+    out = tmp_path / "out"
+
+    with pytest.raises(ContractError, match="blinded snapshots of one repository .* name different maps"):
+        run_from_config(tmp_path / "run.json", out, clock=CLOCK, adapters={"fake": FakeAdapter()})
+    assert not out.exists()
+
+
+def test_a_map_that_cannot_be_loaded_is_refused_before_the_output_exists(tmp_path, widget):
+    write_pack(tmp_path / "pack.json", widget)
+    write_config(tmp_path / "run.json", [BLINDED])
+    out = tmp_path / "out"
+    with pytest.raises(ContractError, match=r"inputs\[0\] \(snap-a.blinded\): the blinding map .* cannot be used"):
+        run_from_config(tmp_path / "run.json", out, clock=CLOCK, adapters={"fake": FakeAdapter()})
+
+    document = widget_map(widget)
+    document["pseudonyms"][0]["replacement"] = "Widget"
+    (tmp_path / "widget-map.json").write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(ContractError, match="replaces 'Widget' with itself"):
+        run_from_config(tmp_path / "run.json", out, clock=CLOCK, adapters={"fake": FakeAdapter()})
+    assert not out.exists()
+
+
+def cli(capsys, *argv: str) -> tuple[int, str, str]:
+    code = main(list(argv))
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def test_scaneval_run_on_a_blinded_input_then_replay_reproduces_the_evaluation(tmp_path, widget, capsys,
+                                                                                monkeypatch):
+    write_pack(tmp_path / "pack.json", widget)
+    blinding.save_map(tmp_path / "widget-map.json", widget_map(widget))
+    write_config(tmp_path / "run.json", [BLINDED])
+    monkeypatch.setattr("scaneval.runner.get_adapter", lambda name: FakeAdapter())
+    out = tmp_path / "out"
+
+    code, printed, _ = cli(capsys, "run", str(tmp_path / "run.json"), "--output", str(out))
+    assert code == 0 and "snap-a.blinded__fake-a__r1 status=success claims=1" in printed
+
+    bundle = out / "invocations" / "snap-a.blinded__fake-a__r1"
+    replayed = tmp_path / "replayed.json"
+    code, _, _ = cli(capsys, "replay", str(bundle), "--output", str(replayed))
+    assert code == 0 and replayed.read_bytes() == (bundle / "evaluation.json").read_bytes()

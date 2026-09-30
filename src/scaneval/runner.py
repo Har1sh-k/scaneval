@@ -12,7 +12,9 @@ Layout, all evaluator-side; a scanner only ever sees a private workspace copy of
 
 Inputs are named by their input id (:func:`scaneval.contracts.input_identity`): a 2.0
 configuration's snapshot id, or a 2.1 configuration's ``input_id`` or its default. Invocation
-ids join that id, the system id, and the repetition.
+ids join that id, the system id, and the repetition. A metadata-blinded input's directory also
+keeps the original export under ``original/source``; it is evaluator-side like everything else
+here, and only the transformed ``source`` is ever copied into a scanner workspace.
 
 A scanner is handed a private workspace copy of one export and writes its raw output and any
 trace into staging directories inside that workspace; :mod:`scaneval.execution` moves them
@@ -30,17 +32,19 @@ which means a pack carrying independent reviews yields a reviewed plan and a fre
 yields a draft plan.
 
 What fails where. A configuration this run cannot honour (an input the pack does not declare,
-colliding invocation ids, a cache or workspace inside evaluator storage, a native PR input) is
-refused before the output directory exists, so nothing is written. An input that cannot be
-prepared (a failed fetch or export, a declared tree hash the export contradicts) is recorded
-against that input: its manifest row carries the failure, every one of its assignments is a
-skipped invocation carrying the reason, and the other inputs still run. Once the output
-directory exists, any other failure is recorded as well: a manifest with status ``failed`` is
-written before the exception leaves this module. It records the declared network policy without
-enforcing it, and it produces single-invocation numbers only: no corpus weighting,
-repeated-run uncertainty, promotion gate, or cross-system comparison is computed here. A failed
-invocation stays a failed invocation and is never rewritten as an empty successful scan, and an
-input that was never prepared is never rewritten as one that had nothing in it.
+colliding invocation ids, a cache or workspace inside evaluator storage, a native PR input, a
+blinding map that cannot be loaded, blinded inputs of one repository naming different maps, a
+run or system that names an original token of a blinded input's map) is refused before the
+output directory exists, so nothing is written. An input that cannot be prepared (a failed fetch
+or export, a declared tree hash the export contradicts, a blinding map that is not approved or
+does not fit the export) is recorded against that input: its manifest row carries the failure,
+every one of its assignments is a skipped invocation carrying the reason, and the other inputs
+still run. Once the output directory exists, any other failure is recorded as well: a manifest
+with status ``failed`` is written before the exception leaves this module. It records the declared
+network policy without enforcing it, and it produces single-invocation numbers only: no corpus
+weighting, repeated-run uncertainty, promotion gate, or cross-system comparison is computed here.
+A failed invocation stays a failed invocation and is never rewritten as an empty successful scan,
+and an input that was never prepared is never rewritten as one that had nothing in it.
 """
 
 from __future__ import annotations
@@ -50,7 +54,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import cases, execution, materialize, report, review, schedule, scoring
+from . import blinding, cases, execution, materialize, report, review, schedule, scoring
 from .adapters import get_adapter
 from .adapters.base import Adapter, AdapterError, SystemSpec
 from .contracts import (
@@ -78,7 +82,8 @@ class _InputSpec:
     ``input_id`` names the input's directory, its invocations, and its manifest row; ``entry`` is
     the configuration entry it was resolved from. A native PR input never becomes one of these: it
     is refused at load, because this build cannot prepare it and a PR input is never replaced by a
-    full scan of its head.
+    full scan of its head. A metadata-blinded one carries its loaded map; whether that map is
+    approved and fits the export is asked when the input is prepared.
     """
 
     input_id: str
@@ -86,6 +91,9 @@ class _InputSpec:
     mode: str
     profile: str
     entry: dict = field(compare=False, repr=False)
+    # The reviewed map of a metadata-blinded input, loaded once at configuration time so the
+    # schedule, the checks below, and the preparation all read the same document.
+    blinding_map: dict | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -194,7 +202,7 @@ def _selected(items: list[dict], key: str, only: set[str] | None, label: str) ->
     return [item for item in items if item[key] in only]
 
 
-def _input_specs(config: dict, only: set[str] | None) -> tuple[list[_InputSpec], list[str]]:
+def _input_specs(config: dict, only: set[str] | None, base: Path) -> tuple[list[_InputSpec], list[str]]:
     """The configured inputs this run covers, resolved, and the ids of those narrowed away.
 
     Inputs are selected by input id, which for a 2.0 configuration is the snapshot id. Naming an
@@ -202,9 +210,10 @@ def _input_specs(config: dict, only: set[str] | None) -> tuple[list[_InputSpec],
 
     A covered native PR input is refused here, before anything is written, rather than prepared
     as a full scan of its head: a synthesized full scan is never a silent PR fallback. A covered
-    metadata-blinded input is refused the same way, because this build has no reviewed-map
-    transformation to apply and substituting the standard export would publish standard results
-    under a blinded label. An input narrowed away is not prepared, so it is not refused.
+    metadata-blinded input has its map loaded here, from the path its entry names relative to the
+    configuration (*base*); a map that cannot be read or does not validate is refused here too, and
+    so is a blinded input of a 2.0 configuration, which has no way to name one. Only a 2.1
+    configuration can. An input narrowed away is not prepared, so none of this is asked of it.
     """
     identified = [(index, input_identity(entry), entry) for index, entry in enumerate(config["inputs"])]
     if only is not None:
@@ -219,16 +228,67 @@ def _input_specs(config: dict, only: set[str] | None) -> tuple[list[_InputSpec],
             continue
         mode = entry.get("mode", "full")
         profile = entry.get("profile", "standard")
+        label = f"inputs[{index}] ({input_id})"
         if mode != "full":
             raise ContractError(
-                f"inputs[{index}] ({input_id}) is a native PR input, which this build cannot prepare; "
-                "the run is refused rather than run as a full scan of the head")
-        if profile != "standard":
-            raise ContractError(
-                f"inputs[{index}] ({input_id}) asks for {profile}, which this build cannot prepare; "
-                "the run is refused rather than run on the standard export")
-        specs.append(_InputSpec(input_id, entry["snapshot_id"], mode, profile, entry))
+                f"{label} is a native PR input, which this build cannot prepare; the run is refused "
+                "rather than run as a full scan of the head")
+        document = None
+        if profile == "metadata_blinded":
+            if "blinding_map" not in entry:
+                raise ContractError(
+                    f"{label} asks for metadata_blinded, but a {config['schema_version']} run "
+                    "configuration cannot name the reviewed blinding map it needs; write it at "
+                    "schema_version 2.1 with blinding_map, since blinding is never replaced by the "
+                    "standard export")
+            path = base / entry["blinding_map"]
+            try:
+                document = blinding.load_map(path)
+            except ContractError as exc:
+                raise ContractError(f"{label}: the blinding map {path} cannot be used: {exc}") from exc
+        specs.append(_InputSpec(input_id, entry["snapshot_id"], mode, profile, entry, document))
     return specs, excluded
+
+
+def _check_blinding(config: dict, pack: dict, inputs: list[_InputSpec], systems: list[dict]) -> None:
+    """Refuse blinded inputs that disagree about their map, or that a system would unblind.
+
+    Related inputs, those whose snapshots are fetched from one repository, are blinded with one
+    map: the same map id and the same content digest, so a vulnerable and a fixed snapshot, or a
+    base and a head, carry the same pseudonyms and a comparison between them compares one
+    transformation. A map's own fit to each export is asked when the input is prepared.
+
+    A scanner is told the run id, and a system's id, model id, model revision, and configuration
+    reach its request or its adapter, so any of them naming an original token of a blinded input's
+    map would carry the identity the map removes straight into the scan. Such a run is refused,
+    ignoring case and reading every key and value of the configuration. Both checks run before
+    the output directory exists.
+    """
+    blinded = [spec for spec in inputs if spec.blinding_map is not None]
+    by_repository: dict[str, _InputSpec] = {}
+    for spec in blinded:
+        url = cases.snapshot_by_id(pack, spec.snapshot_id)["repository"]["url"]
+        first = by_repository.setdefault(url, spec)
+        if (first.blinding_map["map_id"], blinding.content_digest(first.blinding_map)) != (
+                spec.blinding_map["map_id"], blinding.content_digest(spec.blinding_map)):
+            raise ContractError(
+                f"inputs {first.input_id} and {spec.input_id} are blinded snapshots of one repository "
+                f"({url}) but name different maps ({first.blinding_map['map_id']} and "
+                f"{spec.blinding_map['map_id']}, or one map's content in two versions); related inputs "
+                "are blinded with one map")
+    for spec in blinded:
+        fields = [("the run id", config["run_id"])]
+        for system in systems:
+            fields += [(f"system {system['system_id']}'s {name}", system.get(key))
+                       for name, key in (("id", "system_id"), ("model_id", "model_id"),
+                                         ("model_revision", "model_revision"), ("configuration", "config"))]
+        for where, value in fields:
+            leaked = blinding.leaked_originals(spec.blinding_map, value)
+            if leaked:
+                raise ContractError(
+                    f"{where} names {leaked[0]!r}, an original identity token of blinding map "
+                    f"{spec.blinding_map['map_id']}, which would reach the scan of blinded input "
+                    f"{spec.input_id}; rename it, or leave that input standard")
 
 
 def _check_invocation_ids(inputs: list[_InputSpec], systems: list[dict], repetitions: int) -> None:
@@ -318,6 +378,12 @@ def _prepare_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: Path
     even when the export it describes was then refused. The tree hash and the checks are recorded
     only once they stand.
 
+    A metadata-blinded input is exported twice over by :func:`scaneval.blinding.export_blinded`:
+    the original to ``original/source``, which stays evaluator-side, and the transformed copy to
+    ``source``, which is what a scanner is handed and what the result binds to. The labels were
+    written against the original, so the declared tree hash is compared with the original and the
+    mechanical checks run against it; every refusal of the map is raised before ``source`` exists.
+
     The row records this input's raw check outcomes and nothing that depends on the other
     inputs. A case spanning two snapshots is only fully checked once every configured input has
     been prepared, so its label state and its planning notes are derived later, by
@@ -327,19 +393,27 @@ def _prepare_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: Path
     languages = tuple(snapshot["languages"])
     cached = materialize.fetch_snapshot(snapshot["repository"]["url"], snapshot["commit"], cache_root)
     trial = out_dir / "inputs" / spec.input_id
-    record = materialize.export_snapshot(cached, trial, profile=spec.profile, clock=clock)
+    record = materialize.export_snapshot(cached, trial, profile=spec.profile, blinding_map=spec.blinding_map,
+                                         snapshot_id=spec.snapshot_id, clock=clock)
     provenance_path = materialize.write_provenance(trial, record)
     row["provenance_path"] = _relative(provenance_path, out_dir)
     tree_hash = record["trial"]["tree_hash"]
+    blinded = spec.blinding_map is not None
+    source_tree_hash = record["original"]["tree_hash"] if blinded else tree_hash
+    labelled_tree = trial / blinding.ORIGINAL_ROOT if blinded else trial / "source"
     declared = snapshot.get("tree_hash")
-    if declared and declared != tree_hash:
+    if declared and declared != source_tree_hash:
         raise ContractError(
-            f"snapshot {spec.snapshot_id} declares tree hash {declared} but the export produced {tree_hash}"
+            f"snapshot {spec.snapshot_id} declares tree hash {declared} but the export produced {source_tree_hash}"
         )
-    outcomes = cases.mechanical_checks(pack, spec.snapshot_id, trial / "source", tree_hash, clock=clock)
+    outcomes = cases.mechanical_checks(pack, spec.snapshot_id, labelled_tree, source_tree_hash, clock=clock)
+    identity = None
+    if blinded:
+        identity = {**blinding.map_identity(spec.blinding_map), "original_tree_hash": source_tree_hash,
+                    "transformed_tree_hash": tree_hash}
     prepared = execution.PreparedInput(
         spec.input_id, trial / "source", tree_hash, languages, record, spec.profile, spec.mode,
-        input_hash=tree_hash, source_tree_hash=tree_hash,
+        input_hash=tree_hash, source_tree_hash=source_tree_hash, blinding=identity,
     )
     row.update({"tree_hash": tree_hash, "input_hash": prepared.binding_hash,
                 "mechanical_checks": [{"case_id": outcome["case_id"], "passed": outcome["passed"],
@@ -563,16 +637,19 @@ def run_from_config(
     invocations then plan against.
 
     Refused before the output directory is created, so a refused run writes nothing at all: an
-    input the pack does not declare, a native PR input or an input profile this build cannot
-    prepare, colliding invocation ids, a cache root that overlaps the output directory, and a
-    workspace inside evaluator storage.
+    input the pack does not declare, a native PR input, a metadata-blinded input of a 2.0
+    configuration (which cannot name a map) or one whose map cannot be loaded, blinded inputs of
+    one repository naming different maps, a run id or a system id, model, revision, or
+    configuration naming an original token of a blinded input's map, colliding invocation ids, a
+    cache root that overlaps the output directory, and a workspace inside evaluator storage.
 
     An input whose preparation raises (a failed fetch or export, a declared tree hash the export
-    contradicts) is recorded, not raised: its manifest row carries the failure's type and
-    message, every one of its assignments becomes a skipped invocation naming it, no adapter is
-    ever called for it, and the remaining inputs still run. A run in which every input failed is
-    still a completed run, because the loop finished; its invocations are all skipped. A system
-    whose adapter cannot be resolved or prepared is recorded as a skipped system the same way.
+    contradicts, a blinding map that is not approved or does not fit the export) is recorded, not
+    raised: its manifest row carries the failure's type and message, every one of its assignments
+    becomes a skipped invocation naming it, no adapter is ever called for it, and the remaining
+    inputs still run. A run in which every input failed is still a completed run, because the
+    loop finished; its invocations are all skipped. A system whose adapter cannot be resolved or
+    prepared is recorded as a skipped system the same way.
     Any other failure once the output directory exists (writing the schedule or the frozen pack,
     recording an invocation, or an interrupt such as ``KeyboardInterrupt`` at any point,
     preparation included) writes a manifest with status ``failed`` recording what had finished,
@@ -592,10 +669,11 @@ def run_from_config(
     cache_root = base / config.get("cache_root", DEFAULT_CACHE_ROOT)
     pack = cases.load_pack(pack_path)
 
-    inputs, excluded_inputs = _input_specs(config, only_inputs)
+    inputs, excluded_inputs = _input_specs(config, only_inputs, base)
     systems = _selected(config["systems"], "system_id", only_systems, "systems")
     _check_invocation_ids(inputs, systems, config["repetitions"])
     _check_input_snapshots(pack, inputs)
+    _check_blinding(config, pack, inputs, systems)
     _check_cache_root(cache_root, out_dir)
     _check_workspace_root(workspace_root, out_dir, cache_root,
                           [out_dir / "inputs" / spec.input_id for spec in inputs])
@@ -610,8 +688,9 @@ def run_from_config(
     }
     # Built from the pack as it was supplied, before any check has run against an export, and
     # before anything is written: a schedule that cannot be built refuses the run here.
-    frozen_schedule = schedule.build_schedule(config, pack, base_dir=base, created_at=_now(clock),
-                                              inputs=[spec.entry for spec in inputs], systems=systems)
+    frozen_schedule = schedule.build_schedule(
+        config, pack, base_dir=base, created_at=_now(clock), inputs=[spec.entry for spec in inputs],
+        systems=systems, maps={spec.input_id: spec.blinding_map for spec in inputs if spec.blinding_map})
 
     out_dir.mkdir(parents=True, exist_ok=False)
 

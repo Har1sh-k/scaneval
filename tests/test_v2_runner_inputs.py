@@ -437,8 +437,12 @@ def test_a_system_configured_for_an_enforcing_backend_is_skipped_rather_than_run
     assert adapter.calls == 1 and adapter.prepared == 1
 
 
-def test_a_metadata_blinded_input_is_refused_before_the_output_exists(tmp_path, upstream):
-    """A blinded input this build cannot transform is refused, never run on the standard export."""
+def test_a_metadata_blinded_input_of_a_2_0_configuration_is_refused_before_the_output_exists(tmp_path, upstream):
+    """A 2.0 configuration cannot name the reviewed map, so its blinded input is never run standard.
+
+    Renamed deliberately: this build blinds a 2.1 input that names its map (``test_v2_blinding.py``),
+    so the refusal left here is the one for a configuration with no way to name one.
+    """
     repo, commit = upstream
     write_pack(tmp_path / "pack.json", repo, {"snap-a": commit})
     write_config(tmp_path / "run.json", inputs=[{"snapshot_id": "snap-a", "profile": "metadata_blinded"}],

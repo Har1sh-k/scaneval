@@ -55,7 +55,7 @@ import os
 from pathlib import Path, PurePosixPath
 import shutil
 import stat
-from typing import Callable
+from typing import Any, Callable
 
 from .contracts import (
     ContractError,
@@ -226,6 +226,28 @@ def record_review(document: dict, *, reviewer: str, role: str, decision: str, no
     document.clear()
     document.update(candidate)
     return entry
+
+
+def leaked_originals(document: dict, value: Any) -> list[str]:
+    """Every original token of *document* that occurs, ignoring case, in any string of *value*.
+
+    Dictionary keys and values and list items are walked; anything else is not a string and is
+    not read. A run refuses to hand a blinded input to a system whose identity or configuration
+    names an original, because the request and the adapter would carry it into the scan.
+    """
+    strings: list[str] = []
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            strings.append(item.casefold())
+        elif isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
+    return sorted({pseudonym["original"] for pseudonym in document["pseudonyms"]
+                   if any(pseudonym["original"].casefold() in text for text in strings)})
 
 
 # --- which paths an edit may touch -------------------------------------------------------------
