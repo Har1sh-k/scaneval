@@ -8,7 +8,7 @@ scaneval gate --policy my-policy.json --comparison results/compare.json \
     --precision-candidate results/precision-candidate.json --output results/gate.json
 ```
 
-Exit `0` is a pass, `1` is a fail or an inconclusive decision, and `2` means the command could not evaluate: a document that is not what it is named, a refused policy, or an unwritable output. The decision is written for a fail or inconclusive outcome too. Stdout names every failed and every unresolved requirement with its reason. The output is create-only and refused inside a trial or a run directory.
+Exit `0` is a pass, `1` is a fail or an inconclusive decision, and `2` means the command could not evaluate: a document that is not what it is named, a refused policy, or an unwritable output. The decision is written for a fail or inconclusive outcome too. Stdout names every failed and every unresolved requirement with its reason, then notes the blocks the policy left out and any estimate it was given and did not read. The output is create-only and refused inside a trial or a run directory.
 
 ## The policy
 

@@ -1602,6 +1602,18 @@ def test_a_run_of_the_compared_system_that_the_estimate_leaves_out_does_not_bind
         "run-second is not among the estimate's runs")
 
 
+def partially_reviewed(corpus: dict) -> dict:
+    """The improved system's ten first-5 claims, sampled whole, of which six are reviewed by two reviewers each.
+
+    By unit id the first six are p10, p1, p2, p3, p4, and p5: five true and one false. The other four have no
+    review, so the unresolved share is 4/10, resolved precision 5/6, and the sensitivity lower bound 5/10.
+    """
+    frame = precision.build_frame([corpus["run"]], population="first_b", budget=5, systems=["improved"])
+    sample = precision.draw_sample(frame, size=10, seed=11)
+    reviewed = {entry["unit_id"] for entry in sample["selected"][:6]}
+    return precision.estimate(sample, review_units(sample, verdict_for("improved"), only=reviewed))
+
+
 def test_unresolved_or_unreviewed_claims_leave_the_requirements_inconclusive_not_failed(corpus):
     """Six of ten sampled claims are reviewed, by two reviewers each; the other four have no review at all.
 
@@ -1610,10 +1622,7 @@ def test_unresolved_or_unreviewed_claims_leave_the_requirements_inconclusive_not
     the reviewed claims. The share and the grade are unmet, which is unresolved evidence and not a finding
     that the claims are false; the sensitivity lower bound, which counts them false, is 5/10 and falls below 0.6.
     """
-    frame = precision.build_frame([corpus["run"]], population="first_b", budget=5, systems=["improved"])
-    sample = precision.draw_sample(frame, size=10, seed=11)
-    reviewed = {entry["unit_id"] for entry in sample["selected"][:6]}
-    partial = precision.estimate(sample, review_units(sample, verdict_for("improved"), only=reviewed))
+    partial = partially_reviewed(corpus)
     assert partial["unresolved_share"] == 0.4 and partial["evidence_grade"] == "incomplete"
     assert partial["precision_resolved"] == 5 / 6 and partial["sensitivity"]["lower"] == 0.5
 
@@ -2783,6 +2792,20 @@ def test_precision_and_control_figures_are_met_at_equality_and_not_one_step_past
     assert control_statuses(min_assessable_mass=0.6)["controls.capability_safe.assessable_mass"] == "pass"
     assert control_statuses(min_assessable_mass=0.6 + NEAR)[
         "controls.capability_safe.assessable_mass"] == "inconclusive"
+
+    def estimate_status(requirement_id: str, estimate: dict, **changes) -> str:
+        decision = decide(corpus, gate_policy(precision=precision_block(**changes)), precision_candidate=estimate)
+        return requirement(decision, requirement_id)["status"]
+
+    partial = partially_reviewed(corpus)
+    for share, expected in ((0.4, "pass"), (0.4 - NEAR, "inconclusive")):
+        assert estimate_status("precision.max_unresolved_share", partial, max_unresolved_share=share) == expected
+    half = estimate_for(corpus["run"], "improved", size=5, stratify_by="input")
+    for share, expected in ((0.5, "pass"), (0.5 + NEAR, "inconclusive")):
+        assert estimate_status("precision.min_coverage", half, min_coverage=share) == expected
+    for bound, expected in ((0.8, "pass"), (0.8 + NEAR, "fail")):
+        assert estimate_status("precision.interval", estimates["improved"],
+                               min_interval_lower_bound=bound) == expected
 
 
 def test_a_figure_the_gate_derives_is_exact_so_binary_floats_never_move_it_across_its_threshold(corpus, estimates):
