@@ -1189,6 +1189,48 @@ def test_an_unplanned_alias_leaves_the_random_order_diagnostic_unmeasured_like_a
     assert block["coverage"]["assessable_mass"] == 1.0
 
 
+def test_a_target_the_bundle_plan_holds_no_record_of_is_pending_in_the_random_order_diagnostic(tmp_path):
+    """An unranked scan delivers 4 claims and none was accepted; the plan holds both records, one, or neither.
+
+    A record the plan lacks was never scored, so the accepted claims are only a lower bound and no expectation is
+    read for it, whether one record is absent or all of them are: the observation leaves the observation mass and
+    counts in the pending mass. Every unranked valid output is measured or pending, so the two masses add to 1.
+    - Both records planned: measured, observation mass 1 and pending mass 0; nothing was accepted, so 0 at B = 1 and 5.
+    - GHSA-1 absent, or CVE-1 and GHSA-1 both absent: observation mass 0 and pending mass 1, and no expectation.
+    - A target of one record, absent: the same, so absence of any size is pending.
+    With every record absent the target is unscored and not assessable, and still a miss in recall (0). A scan that
+    timed out delivered no valid output to measure, so it is neither measured nor pending.
+    """
+    scanned = {"claims": 4, "ranking": "unranked"}
+
+    def detected(run: Path) -> dict:
+        return detection(slice_of(system(view(aggregate.aggregate([run], policy=policy())))))
+
+    def masses(block: dict) -> tuple[float, float]:
+        diagnostic = block["random_order_diagnostic"]
+        return diagnostic["observation_mass"], diagnostic["pending_mass"]
+
+    both = detected(alias_target_run(tmp_path, "run-random-both", **scanned))
+    one = detected(alias_target_run(tmp_path, "run-random-one", drop=("GHSA-1",), **scanned))
+    neither = detected(alias_target_run(tmp_path, "run-random-neither", drop=("CVE-1", "GHSA-1"), **scanned))
+    lone = detected(write_run(tmp_path, "run-random-lone", [planned("widget", targets=[target("T-1")])],
+                              outcomes={("widget", "sys-a", 1): scan(drop=("T-1",), **scanned)}))
+    stopped = detected(alias_target_run(tmp_path, "run-random-timeout", drop=("CVE-1", "GHSA-1"), status="timeout",
+                                        resolved=False, **scanned))
+
+    assert masses(both) == (1.0, 0.0)
+    assert both["random_order_diagnostic"]["expected_recall"] == [{"budget": 1, "value": 0.0},
+                                                                   {"budget": 5, "value": 0.0}]
+    assert masses(one) == (0.0, 1.0) and masses(neither) == (0.0, 1.0) and masses(lone) == (0.0, 1.0)
+    assert neither["random_order_diagnostic"]["expected_recall"] == [{"budget": 1, "value": None},
+                                                                      {"budget": 5, "value": None}]
+    assert neither["full_output_recall"]["value"] == 0.0
+    coverage = neither["coverage"]
+    assert (coverage["unscored"], coverage["assessable"]) == (1, 0)
+    assert coverage["unscored_mass"] == 1.0 and coverage["assessable_mass"] == 0.0
+    assert masses(stopped) == (0.0, 0.0)
+
+
 def test_a_pair_is_resolved_through_an_alias_only_by_a_hit_while_another_alias_is_unplanned(tmp_path):
     """The vulnerable input freezes CVE-1 and GHSA-1 (one root cause, X); the fixed input a control of CVE-1, quiet.
 

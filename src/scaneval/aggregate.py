@@ -724,19 +724,20 @@ def _target_outcome(observation: _Observation, target_ids: tuple[str, ...], budg
     """What one observation establishes about one canonical target planned on its input.
 
     The target ids are the input's planned records of that canonical target, and the bundle's plan may hold
-    only some of them; a hit on any record it holds is the target detected, at the earliest measured rank.
-    A record the plan lacks was never scored, so the observation is ``unscored`` when any record is absent,
-    not only when all are, and the record is treated like a pending match: it may hold accepted claims
-    nobody counted, so a miss on the records present is not resolved. A failure detects nothing and
-    completes nothing but has a known position under every budget (none). A valid output whose native
-    order or bundles are unresolved leaves every budget of the observation unmeasurable, as scoring does;
-    an output that is not valid cannot hit within any budget, so it stays measurable. ``assessable`` is a
-    completed scan with a resolved outcome for the target: a confirmed hit, or no hit with every record
-    scored, no pending match, and resolved bundles. ``random`` is the random-order expectation per budget
-    for an unranked valid output with resolved bundles and no pending match or absent record on the
-    target, and ``random_pending`` marks one whose bundles are unresolved or whose target has a pending
-    match or an absent record: the accepted claims are then only a lower bound, so its expectation is not
-    measured.
+    only some of them, or none. A hit on any record it holds is the target detected, at the earliest measured
+    rank. A record the plan lacks was never scored, so the observation is ``unscored`` when any record is
+    absent, not only when all are, and the record is treated like a pending match: it may hold accepted claims
+    nobody counted, so a miss on the records present is not resolved. A failure, and a target with every
+    record absent, detect nothing and complete nothing but have a known position under every budget (none).
+    A valid output whose native order or bundles are unresolved leaves every budget of the observation
+    unmeasurable, as scoring does; an output that is not valid cannot hit within any budget, so it stays
+    measurable. ``assessable`` is a completed scan with a resolved outcome for the target: a confirmed hit, or
+    no hit with every record scored, no pending match, and resolved bundles. ``random`` is the random-order
+    expectation per budget for an unranked valid output with resolved bundles and no pending match or absent
+    record on the target. Every other unranked valid output is ``random_pending``: its bundles are unresolved
+    or its target has a pending match or an absent record (every record of it, for a target the plan holds
+    none of). The accepted claims are then only a lower bound, so the expectation is not measured, and an
+    unranked valid output is measured or pending, never neither.
     """
     observed = observation.observed
     failure = {"detected": False, "rank": None, "measurable": True, "completed": False, "assessable": False,
@@ -746,11 +747,12 @@ def _target_outcome(observation: _Observation, target_ids: tuple[str, ...], budg
     rows = {row["target_id"]: row for row in observed["targets"]}
     missing = any(target_id not in rows for target_id in target_ids)
     scored = [rows[target_id] for target_id in target_ids if target_id in rows]
+    valid = observed["valid_positive_output"]
+    valid_unranked = valid and observed["ranking"] == "unranked"
     if not scored:
-        return {**failure, "unscored": True}
+        return {**failure, "unscored": True, "random_pending": valid_unranked}
     detected = any(row["detected"] for row in scored)
     ranks = [row["first_hit_rank"] for row in scored if row["first_hit_rank"] is not None]
-    valid = observed["valid_positive_output"]
     pending = missing or any(row["unresolved_match"] for row in scored)
     random = None
     if valid and observed["random_order"] is not None and not pending:
@@ -762,7 +764,7 @@ def _target_outcome(observation: _Observation, target_ids: tuple[str, ...], budg
             "measurable": not valid or observed["budget_measurable"], "completed": completed,
             "assessable": completed and (detected or (not pending and resolved)),
             "unscored": missing, "random": random,
-            "random_pending": valid and observed["ranking"] == "unranked" and (not resolved or pending)}
+            "random_pending": valid_unranked and (not resolved or pending)}
 
 
 def _control_outcome(observation: _Observation, control_ids: tuple[str, ...]) -> dict:
