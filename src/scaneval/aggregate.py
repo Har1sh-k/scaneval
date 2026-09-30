@@ -37,11 +37,11 @@ assignments still count toward completion, claims, and usage. Observations are k
 so one input scanned by two runs is two positive inputs of its targets, each averaged over its own
 repetitions.
 
-Pairs. A vulnerable/fixed pair is scored on the same items, not on the one record it names: its
-vulnerable side is the whole canonical target, and its fixed state the whole canonical control of
-the pair's control on the fixed input. A record of that control the fixed plan lacks, or one left
-unresolved, leaves the pair unresolved however quiet the others were, and a confirmed false
-allegation on any record flags the fixed state.
+Pairs. A vulnerable/fixed pair is scored on whole canonical items, not on the one record it names:
+its vulnerable side is the whole canonical target, and its fixed state the whole canonical control
+its control record belongs to, every fixed-target record of it that the fixed input froze. A record
+of that control absent from the fixed bundle's plan, or left unresolved, leaves the pair unresolved
+however quiet the others were, and a confirmed false allegation on any record flags the fixed state.
 
 Evidence scope. An observation is reviewed evidence only when its bundle's plan is reviewed and its
 review record is human-approved; a failure takes the scope of the plan its schedule froze. A view that
