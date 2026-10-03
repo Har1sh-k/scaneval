@@ -61,6 +61,29 @@ failure, and this adapter says which: before the scanner starts it asks git for 
 afterwards names the changed paths that got no file record. ``--limit`` has no effect in direct
 mode (2.3.10 never passes it on), so it is not passed and the run says so.
 
+Two kinds of drop are not DeepSec's scope, and both come from its listing and not from the files.
+The listing is git's plain one (no ``-z``); DeepSec trims each line of it and keeps only the
+entries that name an existing file. So a path whose name git prints quoted (a non-ASCII name, or
+one holding a quote, a backslash or a control character) is never investigated, whatever its
+ignore filter says: the entry DeepSec holds is the quoted spelling, which names nothing. Nor is a
+path whose name begins or ends with a space, which git prints as it is and the trim then removes:
+the entry names another path, or none. Such a path with no file record is a known omission of part
+of the change, so the run is never a ``success``, the only status that lets the scoring contract
+complete a control and grant it quiet credit. Its bundles are unresolved, as when a file is left in
+``error``: the claims about the rest are a part delivered, and no claim budget is read off a part.
+The note names the path from one list (:class:`DroppedPaths`) in every such run, and the run says
+nothing about it.
+
+Whether the error names it too depends on whether another failure ends the run first: a timeout, a
+step that failed, an export that could not be read, a record or a finding that could not be
+imported, an exhausted quota, an errored batch, a record status DeepSec does not declare, or a file
+left unfinished. If none does, the run is ``partial`` with code ``scope_incomplete``, or an
+``error`` when no file reached a verdict, and the error names the path from the same list as the
+note. If one does, the run keeps that failure's own status, code and error, and only the note names
+the path. A file left unfinished also ends ``scope_incomplete``, so the code alone does not say
+which of the two errors the run carries. A path that only the ignore filter dropped stays a note:
+that is DeepSec's own scope.
+
 Direct mode exits 1 for three different reasons (a run that produced findings, a batch that
 errored, an exhausted quota) and also for a runtime failure such as an unresolvable range, so an
 exit 1 is not fatal here and is not innocent either. The run goes on to export, and what an exit 1
@@ -68,10 +91,11 @@ means is read from DeepSec's own records: findings, files left in ``error`` or u
 parse-failure dump. An exit 1 that none of those explains is an ``error`` naming the step. What
 DeepSec prints is used to name the reason, never to decide the status, because text an agent's
 output can reach must not be able to turn a failure into a success. A run stopped by an exhausted
-quota, or with an errored batch, is ``partial`` when some file still reached a verdict and an
-``error`` when none did. "Nothing to process" is a completed empty review only with exit 0, no
-file record, and DeepSec's own statement that it found nothing to do; the same silence without
-that statement is an error.
+quota, with an errored batch, or with a changed path DeepSec could not list (above) is ``partial``
+when some file still reached a verdict and an ``error`` when none did. "Nothing to process" is a
+completed empty review only with exit 0, no file record, no changed path DeepSec could not list,
+and DeepSec's own statement that it found nothing to do; the same silence without that statement
+is an error.
 """
 
 from __future__ import annotations
@@ -83,7 +107,7 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import subprocess
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Sequence
 
 from ..collectors import EXTERNAL_PREFIX, relocate_paths, workspace_path
 from ..execution import list_directory
@@ -1538,9 +1562,14 @@ def read_process_output(text: str) -> ProcessOutput:
                          nothing_to_process=bool(NOTHING_TO_PROCESS.search(plain)))
 
 
-def _listed(names: list[str], limit: int = 8) -> str:
-    """At most *limit* of *names* joined for a note, and how many more there were."""
-    return ", ".join(names[:limit]) + (f" and {len(names) - limit} more" if len(names) > limit else "")
+def _listed(names: Sequence[str], limit: int = 8) -> str:
+    """At most *limit* of *names* joined for a note, and how many more there were.
+
+    A name DeepSec would trim (:func:`listing_trims`) is written as a JSON string. The space at its end is the
+    reason it is listed at all, and a space there cannot be seen in a list.
+    """
+    shown = [json.dumps(name) if listing_trims(name) else name for name in names[:limit]]
+    return ", ".join(shown) + (f" and {len(names) - limit} more" if len(names) > limit else "")
 
 
 def git_prints_quoted(path: str) -> bool:
@@ -1551,50 +1580,197 @@ def git_prints_quoted(path: str) -> bool:
     keeps only entries that name an existing file, so it never selects such a path: the entry it
     holds is the quoted spelling, which names nothing. Checked against the real CLI with a
     non-ASCII name; the other characters are quoted by the same git rule and are not checked.
+    :func:`listing_trims` is the other way a name is lost to that listing.
     """
     return any(ord(char) < 0x20 or ord(char) >= 0x7F or char in '"\\' for char in path)
+
+
+# What JavaScript's ``String.prototype.trim`` takes off both ends of a string (ECMAScript's WhiteSpace and
+# LineTerminator), as Node reports it. It is spelled out because Python's ``str.strip`` is not the same set: it also
+# removes U+001C to U+001F and U+0085, which JavaScript keeps, and keeps U+FEFF, which JavaScript removes.
+JS_TRIM = ("\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+           "\u2028\u2029\u202f\u205f\u3000\ufeff")
+
+
+def listing_trims(path: str) -> bool:
+    """Whether DeepSec 2.3.10 looks for something other than *path*, because it trims each line of its listing first.
+
+    ``resolveFiles`` runs ``entry.trim()`` on every line of ``git diff --name-only`` before it looks for the file. A
+    name that begins or ends with a character in :data:`JS_TRIM` is therefore looked for without it, and the entry it
+    holds names another path, or none. Git quotes every one of those characters but the space (a control character,
+    and by default a non-ASCII one), and a quoted line starts and ends with a quote, which the trim leaves alone. So
+    what is left is a space, which git prints as it is at the start or the end of a name. A space inside a name, or
+    at the end of a directory in it (``src /a.js``), is not at an end of the line and is not touched.
+
+    Checked by running the 2.3.10 bundle's own ``resolveFiles`` (its ignore filter stubbed out, no agent) over a git
+    range: a name with a leading or a trailing space is dropped, or resolved to another file that exists (``src/a.js ``
+    to the untouched ``src/a.js``), and a name with a space inside it or at the end of a directory resolves. The
+    characters are the ones Node's own ``trim`` removes. The CLI was not run over such a name, since after the
+    listing it starts a model.
+    """
+    return path != path.strip(JS_TRIM)
+
+
+class DroppedPaths(NamedTuple):
+    """The paths a change leaves at head, and which of them DeepSec created no file record for.
+
+    Both lists are sorted, hold each path once, and come from one comparison by path of what git says
+    the change touches against the file records DeepSec left, so everything this adapter says about a
+    path DeepSec did not investigate, in the notes and in the status, is read from here. In direct
+    mode DeepSec creates a record for every file it selected and none for a file it did not:
+    ``present`` is every path that exists at head (everything but a deletion, which DeepSec never
+    reads) and ``dropped`` those of them with no record. A record whose name cannot be expressed as a
+    path inside the tree (:func:`record_path` calls it external) is the record of no path here, and a
+    path git spells with escapes because it is not UTF-8 can never match a record, so it is dropped.
+
+    ``dropped`` says which paths have no record and never why. The one reason this adapter can state
+    is a limit of the listing DeepSec reads, and there are two: a name git prints quoted
+    (:attr:`quoted`) and a name that begins or ends with a space (:attr:`trimmed`). Together they are
+    :attr:`unlistable`, the known omissions.
+    """
+
+    present: tuple[str, ...]
+    dropped: tuple[str, ...]
+
+    @property
+    def quoted(self) -> tuple[str, ...]:
+        """The dropped paths whose name git prints quoted (:func:`git_prints_quoted`).
+
+        DeepSec 2.3.10 reads the plain listing of ``git diff --name-only`` and keeps only the entries
+        that name an existing file. For a path git prints quoted, the entry it holds is the quoted
+        spelling, which names nothing, so it never selects that path, whatever its ignore filter would
+        have said, and never investigates it.
+        """
+        return tuple(path for path in self.dropped if git_prints_quoted(path))
+
+    @property
+    def trimmed(self) -> tuple[str, ...]:
+        """The dropped paths git prints as they are and DeepSec's trim of its listing changes.
+
+        That is a name that begins or ends with a space (:func:`listing_trims`). The entry DeepSec
+        holds is the name without it, which names no file, or another one, and DeepSec may then have
+        reviewed that one in place of the changed path. A name git prints quoted is not counted here
+        as well: the trim leaves a quoted line alone, so the quoting is what drops it.
+        """
+        return tuple(path for path in self.dropped if not git_prints_quoted(path) and listing_trims(path))
+
+    @property
+    def unlistable(self) -> tuple[str, ...]:
+        """The dropped paths DeepSec's listing cannot resolve to themselves: the known omissions.
+
+        Each is a limit of the listing DeepSec reads and not a choice of scope, so a run over a change
+        that leaves such a path is not a review of all of it. It is :attr:`quoted` and :attr:`trimmed`
+        in one list, each path once, and the note that names these paths, the bundle flag and the
+        refusal to call the run a ``success`` are all made from it, so they cannot disagree. The error
+        that names them is made from it too, but a run carries that error only when no earlier failure
+        ends the run first (see the module docstring).
+
+        It is deliberately not narrowed by the ignore filter, which this adapter cannot see: a name
+        the filter would have dropped anyway is counted too. The cost is credit withheld from a run
+        that was complete after all; the alternative is quiet credit for a file nobody opened.
+
+        Checked against the bundle's own ``resolveFiles`` (see :func:`listing_trims`) over a git range
+        that adds one regular file for each of 1112 names: every printable ASCII character, and several
+        control and non-ASCII ones, at the start, in the middle and at the end of a file name and of a
+        directory name. With git's default configuration it resolved a name to itself exactly when
+        neither :func:`git_prints_quoted` nor :func:`listing_trims` held, so no other spelling is lost;
+        with ``core.quotePath=false`` it dropped no name they did not flag. What it drops for a reason
+        other than the spelling of the name (its ignore filter, an entry that is not a file) is not
+        counted here.
+        """
+        return tuple(path for path in self.dropped if git_prints_quoted(path) or listing_trims(path))
+
+
+def dropped_paths(changes: tuple[Change, ...], files: tuple[tuple[str, dict], ...]) -> DroppedPaths:
+    """What git says the change leaves at head, set against the file records DeepSec left.
+
+    *changes* is what git in the workspace says the two commits differ in, asked by this adapter
+    before DeepSec started; *files* is the file records DeepSec left. This says which paths have no
+    record and never why; :attr:`DroppedPaths.unlistable` is the reason this adapter can state.
+    """
+    recorded = {path for path, external in (record_path(name, record) for name, record in files) if not external}
+    present = sorted({change.path for change in changes if change.present})
+    return DroppedPaths(tuple(present), tuple(path for path in present if path not in recorded))
+
+
+def listing_limits(paths: DroppedPaths, subject: str) -> list[str]:
+    """One clause for each limit of DeepSec's listing that *paths* met: which of them, and what the limit is.
+
+    The error that ends the run and the note both say this, in these words, from the same lists.
+    *subject* is what they count: ``changed path(s)`` in the error and ``of them`` in the note.
+    """
+    clauses = []
+    if paths.quoted:
+        clauses.append(
+            f"{len(paths.quoted)} {subject} ({_listed(paths.quoted)}) have a name git prints quoted by default (a "
+            "non-ASCII name, or one holding a quote, a backslash or a control character): DeepSec reads git's plain "
+            "listing and cannot resolve a quoted name to a file")
+    if paths.trimmed:
+        clauses.append(
+            f"{len(paths.trimmed)} {subject} ({_listed(paths.trimmed)}) begin or end with a space: DeepSec trims "
+            "every line of git's plain listing before it looks for the file, and the entry it holds then names "
+            "another path, or none")
+    return clauses
+
+
+def unlistable_error(paths: DroppedPaths) -> str:
+    """The ``scope_incomplete`` error of a run that ends on a path DeepSec's listing cannot resolve.
+
+    The status logic gives a run this error only when no failure it tests earlier ends the run first; a
+    run one of them ends keeps that failure's own code and error, and only the note names the paths (see
+    the module docstring).
+    """
+    return ("; ".join(listing_limits(paths, "changed path(s)"))
+            + ", so it never investigated them, whatever its ignore filter says. This run therefore observed only "
+              "part of the change (or none of it) and says nothing about them")
 
 
 def unreviewed_note(changes: tuple[Change, ...], files: tuple[tuple[str, dict], ...]) -> str | None:
     """The changed paths DeepSec created no file record for, as a note, or ``None`` when there are none.
 
-    *changes* is what git in the workspace says the two commits differ in, asked by this adapter
-    before DeepSec started; *files* is the file records DeepSec left. In direct mode DeepSec
-    creates a record for every file it selected and none for a file it did not, so a path present
-    at head with no record is one DeepSec's own selection dropped: it keeps only added, modified,
-    renamed and copied paths (a deletion never reaches it) and drops those matching its default
-    ignore filter (tests, docs, build output and similar). That is DeepSec's scope, not a failure
-    of the run, and the note says so, with the reminder that silence about such a path is not a
-    negative result. A file DeepSec did select but left in ``error`` or unfinished has a record and
-    is reported by the status logic, not here. The comparison is by path, so a path git spells
-    with escapes because it is not UTF-8 can never match a record and is listed.
+    *changes* and *files* are as for :func:`dropped_paths`, and the note is written from what it
+    returns. A path present at head with no record is one DeepSec's own selection dropped: it
+    keeps only added, modified, renamed and copied paths (a deletion never reaches it) and drops those
+    matching its default ignore filter (tests, docs, build output and similar). That is DeepSec's
+    scope, not a failure of the run, and the note says so, with the reminder that silence about such a
+    path is not a negative result. A file DeepSec did select but left in ``error`` or unfinished has a
+    record and is reported by the status logic, not here.
 
     Not every path listed was dropped by the ignore filter. One whose name git prints quoted
-    (:func:`git_prints_quoted`) is dropped by DeepSec whatever the filter says, because it cannot
-    resolve the quoted spelling to a file; the note names those separately, since for them the
-    omission is a limit of DeepSec's own listing and not a scoping choice. This adapter cannot
-    tell the other paths apart by reason and does not try to.
+    (:attr:`DroppedPaths.quoted`) is dropped by DeepSec whatever the filter says, because it cannot
+    resolve the quoted spelling to a file, and so is one that begins or ends with a space
+    (:attr:`DroppedPaths.trimmed`), because DeepSec trims each line of its listing and looks for another
+    path. The note names those separately, each with the limit it met: the omission is a limit of
+    DeepSec's own listing and not a scoping choice, so the run observed nothing about them and cannot
+    stand as a complete or quiet observation of the change. The status logic reads the same list, so
+    the note and the status cannot disagree: a run whose note names such a path is never a ``success``
+    and its bundles are unresolved. The note is written whatever ends the run. The error names these
+    paths, in the same words, only when none of the failures the status logic tests before the omission
+    ends the run first (a timeout, a step that failed, an export that could not be read, a record or a
+    finding that could not be imported, an exhausted quota, an errored batch, a record status DeepSec
+    does not declare, a file left unfinished), and the run then ends ``scope_incomplete``. A run one of
+    those ends keeps that failure's own code and error, and only this note names the paths. This adapter
+    cannot tell the other paths apart by reason and does not try to.
     """
-    recorded = {path for path, external in (record_path(name, record) for name, record in files) if not external}
-    present = sorted({change.path for change in changes if change.present})
-    dropped = [path for path in present if path not in recorded]
+    paths = dropped_paths(changes, files)
+    omitted = paths.unlistable
     removed = sorted({change.path for change in changes if change.status == "D"}
                      | {change.old_path for change in changes if change.status == "R" and change.old_path})
     sentences = []
-    if dropped:
+    if paths.dropped:
+        apart = f", except for the {len(omitted)} named next" if omitted else ""
         sentences.append(
-            f"DeepSec did not investigate {len(dropped)} of the {len(present)} path(s) this change leaves at head, "
-            f"because it created no file record for them ({_listed(dropped)}). Its --diff selection keeps only "
-            "added, modified, renamed and copied paths and drops those matching its default ignore filter "
-            "(tests, docs, build output and similar), so this is DeepSec's own scope and not a failure of the "
-            "run; silence about these paths is not a negative result.")
-        quoted = [path for path in dropped if git_prints_quoted(path)]
-        if quoted:
+            f"DeepSec did not investigate {len(paths.dropped)} of the {len(paths.present)} path(s) this change "
+            f"leaves at head, because it created no file record for them ({_listed(paths.dropped)}). Its --diff "
+            "selection keeps only added, modified, renamed and copied paths and drops those matching its default "
+            "ignore filter (tests, docs, build output and similar), so this is DeepSec's own scope and not a "
+            f"failure of the run{apart}; silence about these paths is not a negative result.")
+        if omitted:
+            sentences.append(". ".join(listing_limits(paths, "of them")) + ".")
             sentences.append(
-                f"{len(quoted)} of them ({_listed(quoted)}) have a name git prints quoted by default (a non-ASCII "
-                "name, or one holding a quote, a backslash or a control character). DeepSec reads git's plain "
-                "listing and cannot resolve a quoted name to a file, so it drops such a path whatever its ignore "
-                "filter says; for these the omission is a limit of DeepSec's own listing, not a choice of scope.")
+                "DeepSec drops such a path whatever its ignore filter says; for these the omission is a limit of "
+                "DeepSec's own listing, not a choice of scope, so this run observed nothing about them and does not "
+                "stand as a complete or quiet observation of the change.")
     if removed:
         sentences.append(f"The change also removed {len(removed)} path(s) ({_listed(removed)}); DeepSec never reads "
                          "a path that no longer exists at head.")
@@ -1770,6 +1946,11 @@ class DeepsecAdapter(Adapter):
         refusals = sum(len(session.refusals) for session in sessions)
         batches_failed = len(errored_files) + len(records.debug) + refusals
         suspect_durations = [session.call_id for session in sessions if session.duration_suspect]
+        # The changed paths DeepSec's listing could not resolve (a name git quotes, a name it trims), so that no model
+        # was ever given them. Read once, here, for the bundle flag and the status below; the note is made from the
+        # same helper.
+        dropped = dropped_paths(changes, records.files) if pr is not None else DroppedPaths((), ())
+        omitted = dropped.unlistable
 
         exported: Any = None
         export_failure = None
@@ -1957,9 +2138,11 @@ class DeepsecAdapter(Adapter):
                     # quiet credit for a file no model opened. In a PR review a file left in
                     # ``error`` is the same case, and the ordinary one: direct mode exits 1 and
                     # the run goes on, so the claims of the batches that finished are all there is.
+                    # So is a changed path DeepSec never listed: the claims about the rest are a
+                    # part delivered, and a budget read off a part reads as one read off the whole.
                     bundles_resolved=(imported.lost == 0 and not records.failures
                                       and statuses.incomplete == 0
-                                      and (pr is None or not statuses.errored)))
+                                      and (pr is None or not (statuses.errored or omitted))))
         exit_code = None
         for step in ("export", "process", "scan"):
             result = results.get(step)
@@ -2078,6 +2261,14 @@ class DeepsecAdapter(Adapter):
                            "reached no verdict on them, so this run observed "
                            f"part of the {subject} and says nothing about the "
                            "rest")
+        if omitted:
+            # Known omissions of the change: DeepSec's listing cannot resolve these names (git quotes them, or
+            # DeepSec trims the space at an end of them), so it never selected them and no model was given them.
+            # Left to the empty-review block below, a change that touches only such paths would be a ``success``
+            # with resolved bundles, the scoring contract would complete every control planned on one of them, and
+            # a quiet assessment would be granted credit for a file nobody opened. It is the same case as a file
+            # left unfinished, so it ends the same way.
+            return stopped("scope_incomplete", unlistable_error(dropped))
         if pr is not None and not records.files:
             # No file record at all. DeepSec says so itself when its diff selects nothing, and that
             # statement is what makes this an empty review: without it the same silence could be a
