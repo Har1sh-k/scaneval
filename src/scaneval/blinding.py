@@ -768,14 +768,16 @@ def _yaml_character(character: str) -> str:
     return f"the character U+{ord(character):04X}, which readers disagree on or refuse"
 
 
-def _yaml_lines(text: str) -> list[list]:
-    """The lines of *text* that hold more than spaces and a comment, each as ``[number, indent, content]``.
+def _yaml_lines(text: str) -> tuple[list[list], bool]:
+    """The lines of *text* that hold more than spaces and a comment, each as ``[number, indent, content]``, and
+    whether the document opens with an explicit ``---``.
 
     A byte-order mark at the start is dropped, and a carriage return before a line feed is part of the break. The
-    ``---`` that may start the document, alone on its line, is dropped too; a second one, and ``...``, are refused.
+    ``---`` that may start the document, alone on its line, is dropped from the lines and reported instead; a second
+    one, and ``...``, are refused.
     """
     lines: list[list] = []
-    started = False
+    started = marked = False
     if text.startswith("\ufeff"):
         text = text[1:]
     for number, raw in enumerate(text.split("\n"), 1):
@@ -797,11 +799,11 @@ def _yaml_lines(text: str) -> list[list]:
             rest = content[3:]
             if rest[:1] not in ("", " ") or rest.lstrip(" ")[:1] not in ("", "#"):
                 raise _OutsideYaml(number, "content after '---' on its line")
-            started = True
+            started = marked = True
             continue
         started = True
         lines.append([number, indent, content])
-    return lines
+    return lines, marked
 
 
 class _YamlKeys:
@@ -943,13 +945,13 @@ def _parse_yaml(text: str) -> Any:
     with nothing after it, and an empty document, are the empty :class:`_NonString`, null. Anything else raises
     :class:`_OutsideYaml` naming the line and the construct: a flow collection, an anchor, an alias, a tag, a block
     scalar, a directive, a second document, an explicit key, a merge key, a duplicate key, a scalar that goes on to
-    the next line, a tab, a control character, a nesting deeper than 64 levels, and whatever else the subset leaves
+    the next line, a tab outside a comment, a control character, a nesting deeper than 64 levels, and whatever else the subset leaves
     out, which includes valid YAML. Guaranteed for what this returns: PyYAML, and ruamel.yaml in YAML 1.2 and in 1.1,
     load the same keys, in order, nested the same way, and the same strings, and a scalar they read as other than a
     string is a :class:`_NonString`. Not guaranteed: anything about a text this refuses, or about how a YAML reader
     other than those two reads a text it returns. The work is linear in the size of *text*.
     """
-    lines = _yaml_lines(text)
+    lines, _marked = _yaml_lines(text)
     if not lines:
         return _NonString("")
     reader = _YamlReader(lines)
@@ -1182,7 +1184,8 @@ def _check_parsed(kind: str, where: str, text: str, new_text: str, originals: li
     keys in the same order, of the same types, nested the same way, so a replacement that breaks the
     syntax, injects or merges a key, or changes what a value means is refused. An original that does
     not parse cannot be verified and is refused too. Only what the parser reads is compared: a
-    comment, or the whitespace between values, is not.
+    comment, or the whitespace between values, is not. For YAML the ``---`` that may start the
+    document is compared as well (:func:`_check_yaml_marker`).
     """
     name, phrase, parse = _PARSERS[kind]
     label = f"{where} (a parsed string)"
@@ -1212,6 +1215,23 @@ def _check_parsed(kind: str, where: str, text: str, new_text: str, originals: li
                        f"original with only the reviewed replacements applied to its keys and strings ({difference})")
     if kind == "ini":
         _check_ini_readings(where, text, new_text, rewrite)
+    if kind == "yaml":
+        _check_yaml_marker(where, text, new_text)
+
+
+def _check_yaml_marker(where: str, text: str, new_text: str) -> None:
+    """Refuse a YAML edit that adds or removes the ``---`` that starts the document.
+
+    The marker is not part of the parsed value, but it is not inert: ruamel.yaml, asked to read YAML 1.1, reads a
+    document that opens with an explicit ``---`` and no ``%YAML`` directive as YAML 1.2, so adding or removing one
+    changes how that reader reads values the edit never touched (``no``, ``yes``, ``0777``, ``1:30``). Both texts
+    have already been read as the subset, so neither raises here.
+    """
+    before, after = _yaml_lines(text)[1], _yaml_lines(new_text)[1]
+    if before != after:
+        raise _refused(f"{where}: the replacements {'add' if after else 'remove'} the '---' that starts the document, "
+                       "which ruamel.yaml reading YAML 1.1 takes as a switch to YAML 1.2, so values the edit does not "
+                       "touch would read differently")
 
 
 def _edit_for(document: dict, edit: dict, snapshot_id: str, source: Path, hashes: dict[str, str]) -> _Edit:

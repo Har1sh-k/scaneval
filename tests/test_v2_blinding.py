@@ -1336,6 +1336,15 @@ YAML_REFUSED = {
                                                             transformed_outside(1, NOT_CLOSED)),
     "a-token-spelled-with-an-escape": ('title: "Wid\\x67et Docs"\n', W,
                                        "$['title'] is 'Widget Docs', expected 'Sprocket Docs'"),
+    # The parsed values match, but ruamel.yaml reading YAML 1.1 takes an explicit '---' as a switch to 1.2, so the
+    # untouched 'no' and 'yes' would read as strings after the first edit and as booleans after the second.
+    "a-replacement-that-adds-the-document-start-marker": (
+        "#Widget documentation site\nsite_name: Docs\nuse_directory_urls: no\nstrict: yes\n",
+        {"#Widget": "--- #Sprocket"}, "the replacements add the '---' that starts the document, which ruamel.yaml "
+                                      "reading YAML 1.1 takes as a switch to YAML 1.2"),
+    "a-replacement-that-removes-the-document-start-marker": (
+        "---\nsite_name: Widget Docs\nuse_directory_urls: no\n", {"---": "#"},
+        "the replacements remove the '---' that starts the document"),
 }
 
 
