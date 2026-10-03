@@ -30,31 +30,52 @@ another commit or export tree (a stale map); an edit names a path outside docume
 display configuration, or a forbidden one; an expected file is missing, present when it should be
 absent, or holds other bytes (stale); a file is not strict UTF-8; an original overlaps itself or
 another original (ambiguous or overlapping matches); an occurrence count differs from the one
-reviewed; a replacement would form an original again with the text beside it; or a line would move.
-Only then is the original export copied and the reviewed occurrences replaced, and the result is
-verified: every file the map does not edit is byte-identical to the original export, every file
-keeps its mode, every edited file keeps its line structure, and line ``n`` of an edited file is
-line ``n`` of the original with the reviewed tokens replaced. Claim locations therefore map back
-to the original export as the identity, which is what lets labels written against the original
-score a blinded run.
+reviewed; a replacement would form an original again with the text beside it; a line would move;
+or a display file would not keep its structure. Only then is the original export copied and the
+reviewed occurrences replaced, and the result is verified: every file the map does not edit is
+byte-identical to the original export, every file keeps its mode, every edited file keeps its line
+structure, and line ``n`` of an edited file is line ``n`` of the original with the reviewed tokens
+replaced. Claim locations therefore map back to the original export as the identity, which is what
+lets labels written against the original score a blinded run.
+
+Structure. A replacement is written into a file as text, without quoting, so an edit of a JSON,
+TOML, INI, or YAML display file (``.json``, ``.toml``, ``.ini``, ``.cfg``, ``.yml``, ``.yaml``) is
+verified against the file's own syntax before it is accepted: the file is parsed before and after,
+and the result must parse to the original's value with the reviewed replacements applied to its keys
+and strings and nothing else, the same keys in the same order, of the same types, nested the same
+way (:func:`_check_parsed`). JSON must be strict, an original that does not parse cannot be verified,
+and a replacement that makes two distinct keys equal is refused. An INI file is also read the ways
+Python's ``configparser`` reads one (option names folded to lower case, ``[DEFAULT]`` merged into
+each section, ``%`` and ``${}`` interpolation) and must read under each way that can read the
+original as the original does (:func:`_check_ini_readings`). YAML is verified only within a strict
+block subset: block mappings and sequences of one-line plain and quoted scalars, and comments.
+:func:`_parse_yaml` reads it as PyYAML and ruamel.yaml (YAML 1.2 and 1.1) do, and keeps a plain scalar
+that either YAML version reads as a boolean, a null, a number, or a date as the text it was written
+as, so a replacement that turns a string into one is refused. A YAML file outside the subset, valid
+YAML or not, cannot be verified, and its edit is refused. Documentation is not asked for structure,
+and no other display file is verified.
 
 What this does not do: parse source, discover identity cues on its own, decide whether a field is
 read at runtime (a ``display_metadata`` edit carries the reviewer's stated ``role_check`` for that),
-or establish that a scanner cannot recognize the repository.
+verify a structure it does not read (a comment, the whitespace between values), or establish that a
+scanner cannot recognize the repository.
 """
 
 from __future__ import annotations
 
+import configparser
 import copy
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fnmatch
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import stat
+import tomllib
 from typing import Any, Callable
 
 from .contracts import (
@@ -410,7 +431,11 @@ def _replaced(text: str, spans: list[tuple[int, int, str]], replacement_of: dict
 
 @dataclass(frozen=True)
 class _Edit:
-    """One edit as it applies to one variant, computed and verified before anything is written."""
+    """One edit as it applies to one variant, computed and verified before anything is written.
+
+    *structure_check* names how a display file's structure was verified (``json``, ``toml``,
+    ``ini``, or ``yaml``), and is ``None`` for a file that is not verified by parsing.
+    """
 
     edit_id: str
     path: str
@@ -421,6 +446,7 @@ class _Edit:
     occurrences: dict | None = None
     changed_lines: tuple[int, ...] = ()
     line_count: int = 0
+    structure_check: str | None = None
 
 
 def _variant(document: dict, snapshot_id: str, commit: str) -> dict:
@@ -435,6 +461,777 @@ def _variant(document: dict, snapshot_id: str, commit: str) -> dict:
     known = ", ".join(variant["snapshot_id"] for variant in document["variants"])
     raise MaterializationError(
         f"stale map: {_named(document)} has no variant for snapshot {snapshot_id}; it covers {known}")
+
+
+# --- a display file keeps its structure ---------------------------------------------------------
+#
+# A replacement is written into a file as text, with no quoting and no escaping, so one that holds a
+# quotation mark, a backslash, a colon, or a bracket can turn valid configuration into invalid or
+# different configuration, and the hash, occurrence, and line checks cannot see it. Every edit of a
+# JSON, TOML, INI, or YAML file is therefore verified by parsing the file before and after.
+
+
+# The check an edit of each suffix gets, as the preparation record names it. Suffixes are read without
+# regard to case, as :func:`path_class_gap` reads them.
+_STRUCTURE_CHECKS = {".json": "json", ".toml": "toml", ".ini": "ini", ".cfg": "ini", ".yml": "yaml",
+                     ".yaml": "yaml"}
+# What the preparation record says each check verified, on one line.
+_STRUCTURE_DETAILS = {
+    "json": "parsed as strict JSON before and after; the result is the original with only the reviewed "
+            "replacements applied to its keys and strings",
+    "toml": "parsed as TOML before and after; the result is the original with only the reviewed "
+            "replacements applied to its keys and strings",
+    "ini": "parsed as INI before and after, as written and as Python's configparser reads it (option names folded "
+           "to lower case, [DEFAULT] merged into each section, % and ${} interpolation); the result is the original "
+           "with only the reviewed replacements applied to its section names, option names, and values",
+    "yaml": "parsed as the YAML block subset before and after; the result is the original with only the reviewed "
+            "replacements applied to its keys and strings, and every replaced plain scalar still reads as a string "
+            "under YAML 1.1 and 1.2",
+}
+
+
+def _structure_check_for(path: str) -> str | None:
+    """The check an edit of *path* gets, or ``None`` for a file this module does not verify by parsing."""
+    return _STRUCTURE_CHECKS.get(PurePosixPath(path).suffix.casefold())
+
+
+class _Pairs(tuple):
+    """An object, table, or section as its ordered ``(key, value)`` pairs.
+
+    A tuple, so it is never the same type as a list, and pairs rather than a dict, so the order of
+    the keys, and a key that occurs twice, are part of what :func:`_difference` compares.
+    """
+
+    __slots__ = ()
+
+
+class _Defaults(_Pairs):
+    """An INI file's ``[DEFAULT]`` section, which a reader merges into every other section.
+
+    A type of its own, so a replacement that renames a section to or from ``DEFAULT``, which changes
+    what the file means, is a difference like any other.
+    """
+
+    __slots__ = ()
+
+
+def _refuse_constant(name: str) -> None:
+    raise ValueError(f"{name} is not JSON")
+
+
+def _parse_json(text: str) -> Any:
+    """Strict JSON after one leading byte-order mark: objects are :class:`_Pairs`, NaN and Infinity are refused."""
+    return json.loads(text[1:] if text.startswith("\ufeff") else text, object_pairs_hook=_Pairs,
+                      parse_constant=_refuse_constant)
+
+
+def _tomlish(value: Any) -> Any:
+    """A parsed TOML value with each table, in the order the file wrote it, as :class:`_Pairs`."""
+    if isinstance(value, dict):
+        return _Pairs((key, _tomlish(item)) for key, item in value.items())
+    if isinstance(value, list):
+        return [_tomlish(item) for item in value]
+    return value
+
+
+def _parse_toml(text: str) -> Any:
+    return _tomlish(tomllib.loads(text))
+
+
+# A default section no header line can spell, so configparser reads ``[DEFAULT]`` as the ordinary
+# section it is written as and never merges one section's options into another's: what it returns is
+# the file's own sections, and :class:`_Defaults` marks the one a reader treats differently.
+_NO_DEFAULT_SECTION = "\n"
+
+
+def _parse_ini(text: str, prefixes: tuple[str, ...] | None = None) -> Any:
+    """Each section in order, with its own options in order; no interpolation, and any duplicate is refused.
+
+    *prefixes* are the inline comment prefixes a reader is told to honour (the check as written has none).
+    """
+    parser = configparser.ConfigParser(interpolation=None, strict=True, default_section=_NO_DEFAULT_SECTION,
+                                       inline_comment_prefixes=prefixes)
+    parser.optionxform = str
+    parser.read_string(text)
+    return _Pairs((name, (_Defaults if name == configparser.DEFAULTSECT else _Pairs)(parser.items(name, raw=True)))
+                  for name in parser.sections())
+
+
+# YAML is read through a strict block subset rather than checked by lexical rules. A replacement written into a YAML
+# file unquoted can open a flow collection, an anchor, a tag, or a block scalar, end a value at a comment, or turn a
+# string into a boolean, a null, a number, or a date, and no list of characters finds every way to do that without
+# also refusing the common safe ones (a copyright line holding HTML, a description holding ``*`` or a backtick). So a
+# YAML edit is verified like the others, by parsing before and after, but only for text the parser below reads
+# exactly: for every text it accepts, PyYAML (YAML 1.1) and ruamel.yaml (YAML 1.2, and its 1.1 mode) load the same
+# keys, in the same order, nested the same way, with the same strings. A file outside the subset is refused, however
+# valid YAML it is, because nothing can then be said of how an edit of it reads.
+
+
+# Nesting of collections deeper than this is outside the subset.
+_YAML_DEPTH = 64
+# The longest a key may run, from its first character to its colon: readers refuse an implicit key that is longer.
+_YAML_KEY_LENGTH = 1024
+# The longest a scalar that readers resolve as a number or date may be: they refuse an integer of more than 4300 digits.
+_YAML_NUMBER_LENGTH = 4000
+# What a line may not hold anywhere: a control character, a line break other than LF (a CR is one, unless it ends the
+# line before the LF), a surrogate, a non-character, and a byte-order mark after the first character. YAML 1.1 and
+# 1.2 disagree about several of these, and readers refuse or strip the others.
+_YAML_FORBIDDEN = re.compile("[\x00-\x08\x0a-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff\ufeff\ufffe\uffff]")
+# A key's colon: one followed by a space or the end of the line.
+_YAML_KEY_COLON = re.compile(r":(?= |\Z)")
+# What may not start a scalar of this subset, and what it would be.
+_YAML_INDICATORS = {
+    "[": "a flow collection ('[')", "{": "a flow collection ('{')", "]": "a flow indicator (']')",
+    "}": "a flow indicator ('}')", ",": "a flow indicator (',')", "&": "an anchor ('&')", "*": "an alias ('*')",
+    "!": "a tag ('!')", "|": "a block scalar ('|')", ">": "a block scalar ('>')",
+    "%": "a reserved indicator ('%')", "@": "a reserved indicator ('@')",
+    "`": "a reserved indicator ('`')", "?": "an explicit key, or a scalar starting with '?'",
+    "-": "a scalar starting with '-'", ":": "a scalar starting with ':'",
+}
+# The escapes of a double-quoted scalar, and the lengths of those that hold a code point.
+_YAML_ESCAPES = {"0": "\0", "a": "\a", "b": "\b", "t": "\t", "n": "\n", "v": "\v", "f": "\f", "r": "\r", "e": "\x1b",
+                 " ": " ", '"': '"', "/": "/", "\\": "\\", "N": "\x85", "_": "\xa0", "L": "\u2028", "P": "\u2029"}
+_YAML_CODE_ESCAPES = {"x": 2, "u": 4, "U": 8}
+_YAML_QUOTE = re.compile(r'["\\]')
+
+# Timestamps as readers resolve them: a date, or a date and a time with a fraction and an offset.
+_YAML_DATE = re.compile("([0-9]{4})-([0-9]{2})-([0-9]{2})")
+_YAML_DATETIME = re.compile("([0-9]{4})-([0-9]{1,2})-([0-9]{1,2})(?:[Tt]| +)([0-9]{1,2}):([0-9]{2}):([0-9]{2})"
+                            "(?:\\.([0-9]*))?(?: *(?:Z|([-+])([0-9]{1,2})(?::([0-9]{2}))?))?")
+# Every plain scalar that YAML 1.1 (PyYAML, ruamel.yaml's 1.1 mode) or the YAML 1.2 core schema (ruamel.yaml) reads as
+# something other than a string: null, the booleans (1.1 adds y, n, yes, no, on, off), integers (binary, octal,
+# hexadecimal, underscores, and 1.1's base 60), floats (an exponent, underscores, .inf, .nan, base 60), and timestamps.
+# A scalar is a string only if neither reads it as anything else, so this is the union of both.
+_YAML_NON_STRING = re.compile("|".join((
+    "~|null|Null|NULL",
+    "[yYnN]|yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF",
+    "[-+]?0b[01_]+|[-+]?0o[0-7_]+|[-+]?0x[0-9a-fA-F_]+|[0-9][0-9_]*|[-+][0-9_]+",
+    "[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+",
+    "[-+]?[0-9][0-9_]*\\.[0-9_]*(?:[eE][-+]?[0-9]+)?|[-+]?[0-9][0-9_]*[eE][-+]?[0-9]+",
+    "[-+]?\\.[0-9_]+(?:[eE][-+][0-9]+)?|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\\.[0-9_]*",
+    "[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN)",
+    _YAML_DATE.pattern, _YAML_DATETIME.pattern)))
+# A number those readers resolve but have no digit to build: a sign, a base, or a dot and then only underscores.
+_YAML_NO_DIGITS = re.compile("[-+]?(?:0[box])?_+|[-+]?\\._+(?:[eE][-+]?[0-9]+)?")
+# A plain decimal number: no sign, leading zero, or underscore, so no reader reads it as another key's number.
+_YAML_DECIMAL = re.compile("0|[1-9][0-9]*")
+
+
+class _OutsideYaml(ValueError):
+    """Text the YAML subset does not read; the message names the line and the construct that is outside it."""
+
+    def __init__(self, number: int, what: str) -> None:
+        super().__init__(f"line {number}: {what} is outside the YAML subset read here")
+
+
+class _NonString:
+    """A plain YAML scalar that some reader reads as something other than a string, held as the text it was written as.
+
+    Null (an empty value too), a boolean, a number, or a date, which of them depending on the YAML version, so the text
+    is what is kept. Never a ``str``, so no reviewed replacement is applied to it, and :func:`_difference` compares the
+    type and the text.
+    """
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def __eq__(self, other: object) -> bool:
+        return type(other) is _NonString and other.text == self.text
+
+    def __hash__(self) -> int:
+        return hash((_NonString, self.text))
+
+    def __repr__(self) -> str:
+        return f"{self.text!r} (read as a non-string)"
+
+
+def _real_timestamp(text: str) -> bool:
+    """Whether *text*, if it is shaped like a timestamp, is a date, time, and offset a reader can build."""
+    match = _YAML_DATE.fullmatch(text) or _YAML_DATETIME.fullmatch(text)
+    if match is None:
+        return True
+    groups = match.groups()
+    try:
+        datetime(*(int(part) for part in groups[:6]))
+        if len(groups) > 7 and groups[7]:
+            offset = timedelta(hours=int(groups[8]), minutes=int(groups[9] or 0))
+            timezone(-offset if groups[7] == "-" else offset)
+    except ValueError:
+        return False
+    return True
+
+
+def _yaml_plain(number: int, text: str) -> str | _NonString:
+    """A plain scalar's value: *text* itself when every reader reads it as a string, else a :class:`_NonString`.
+
+    Outside the subset: a tab, the YAML 1.1 merge and value indicators (``<<`` and ``=``, which most readers cannot load
+    as a value), and a scalar that readers resolve as a number or date and then cannot build one from.
+    """
+    if "\t" in text:
+        raise _OutsideYaml(number, "a tab outside a comment")
+    if text in ("<<", "="):
+        raise _OutsideYaml(number, f"the scalar {text!r}, a YAML 1.1 merge or value indicator")
+    if not _YAML_NON_STRING.fullmatch(text):
+        return text
+    if len(text) > _YAML_NUMBER_LENGTH or _YAML_NO_DIGITS.fullmatch(text) or not _real_timestamp(text):
+        raise _OutsideYaml(number, f"the scalar {text[:40]!r}, which readers take for a number or a date and cannot "
+                                   "load")
+    return _NonString(text)
+
+
+def _yaml_single(number: int, content: str) -> tuple[str, int]:
+    """The single-quoted scalar at the start of *content*, and the offset after its closing quote; ``''`` is a quote."""
+    pieces, at = [], 1
+    while True:
+        end = content.find("'", at)
+        if end == -1:
+            raise _OutsideYaml(number, "a quoted scalar that does not close on its line (a multi-line scalar)")
+        if content.startswith("'", end + 1):
+            pieces.append(content[at:end + 1])
+            at = end + 2
+        else:
+            pieces.append(content[at:end])
+            return "".join(pieces), end + 1
+
+
+def _yaml_double(number: int, content: str) -> tuple[str, int]:
+    """The double-quoted scalar at the start of *content* with its escapes decoded, and the offset after its quote."""
+    pieces, at = [], 1
+    while True:
+        found = _YAML_QUOTE.search(content, at)
+        if found is None:
+            raise _OutsideYaml(number, "a quoted scalar that does not close on its line (a multi-line scalar)")
+        pieces.append(content[at:found.start()])
+        if found.group() == '"':
+            return "".join(pieces), found.end()
+        letter = content[found.end():found.end() + 1]
+        at = found.end() + 1
+        if not letter:
+            raise _OutsideYaml(number, "a backslash at the end of a line (a multi-line scalar)")
+        if letter in _YAML_ESCAPES:
+            pieces.append(_YAML_ESCAPES[letter])
+        elif letter in _YAML_CODE_ESCAPES:
+            width = _YAML_CODE_ESCAPES[letter]
+            digits = content[at:at + width]
+            if len(digits) != width or any(digit not in "0123456789abcdefABCDEF" for digit in digits):
+                raise _OutsideYaml(number, f"the escape '\\{letter}' without {width} hexadecimal digits")
+            code = int(digits, 16)
+            if 0xD800 <= code <= 0xDFFF or code > 0x10FFFF:
+                raise _OutsideYaml(number, f"the escape '\\{letter}{digits}', which is not a Unicode scalar value")
+            pieces.append(chr(code))
+            at += width
+        else:
+            raise _OutsideYaml(number, f"the escape '\\{letter}'")
+
+
+def _yaml_start(number: int, content: str) -> tuple[str, str | _NonString, str]:
+    """Read the scalar at the start of *content*, which does not start with a space.
+
+    Returns ``("key", key, after)`` when *content* starts ``KEY:`` and then holds the end of its line or a space,
+    *after* being what follows the colon, and ``("scalar", value, rest)`` otherwise, *rest* being what follows the
+    scalar on its line, which is its comment. Text after a quoted scalar that is not a comment or a key's colon is
+    refused here.
+    """
+    first = content[0]
+    if first in "\"'":
+        value, end = (_yaml_double if first == '"' else _yaml_single)(number, content)
+        if "\t" in content[:end]:
+            raise _OutsideYaml(number, "a tab outside a comment")
+        tail = content[end:]
+        bare = tail.lstrip(" ")
+        if bare.startswith(":") and (len(bare) == 1 or bare[1] == " "):
+            return "key", value, bare[1:]
+        if tail and not (tail[0] == " " and (not bare or bare[0] == "#")):
+            raise _OutsideYaml(number, "text after a quoted scalar")
+        return "scalar", value, tail
+    if first in _YAML_INDICATORS:
+        raise _OutsideYaml(number, _YAML_INDICATORS[first])
+    colon, comment = _YAML_KEY_COLON.search(content), content.find(" #")
+    if colon is not None and (comment == -1 or colon.start() < comment):
+        return "key", _yaml_plain(number, content[:colon.start()].rstrip(" ")), content[colon.end():]
+    text = (content if comment == -1 else content[:comment]).rstrip(" ")
+    return "scalar", _yaml_plain(number, text), "" if comment == -1 else content[comment:]
+
+
+def _yaml_dash(content: str) -> bool:
+    """Whether *content* starts a block sequence entry: a dash that ends the line or is followed by a space."""
+    return content[0] == "-" and (len(content) == 1 or content[1] == " ")
+
+
+def _yaml_character(character: str) -> str:
+    if character == "\r":
+        return "a carriage return that does not end a line"
+    if character == "\ufeff":
+        return "a byte-order mark inside the text"
+    return f"the character U+{ord(character):04X}, which readers disagree on or refuse"
+
+
+def _yaml_lines(text: str) -> tuple[list[list], bool]:
+    """The lines of *text* that hold more than spaces and a comment, each as ``[number, indent, content]``, and
+    whether the document opens with an explicit ``---``.
+
+    A byte-order mark at the start is dropped, and a carriage return before a line feed is part of the break. The
+    ``---`` that may start the document, alone on its line, is dropped from the lines and reported instead; a second
+    one, and ``...``, are refused.
+    """
+    lines: list[list] = []
+    started = marked = False
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    for number, raw in enumerate(text.split("\n"), 1):
+        line = raw[:-1] if raw.endswith("\r") else raw
+        bad = _YAML_FORBIDDEN.search(line)
+        if bad:
+            raise _OutsideYaml(number, _yaml_character(bad.group()))
+        content = line.lstrip(" ")
+        if not content or content[0] == "#":
+            continue
+        indent = len(line) - len(content)
+        if indent == 0 and content[0] == "%":
+            raise _OutsideYaml(number, "a directive ('%')")
+        if indent == 0 and content[:3] in ("---", "..."):
+            if content[:3] == "...":
+                raise _OutsideYaml(number, "a line starting with '...' (a document end marker)")
+            if started:
+                raise _OutsideYaml(number, "a second '---' (a document start marker)")
+            rest = content[3:]
+            if rest[:1] not in ("", " ") or rest.lstrip(" ")[:1] not in ("", "#"):
+                raise _OutsideYaml(number, "content after '---' on its line")
+            started = marked = True
+            continue
+        started = True
+        lines.append([number, indent, content])
+    return lines, marked
+
+
+class _YamlKeys:
+    """The keys of one mapping as they are read, refusing a key that a reader may read as one already there.
+
+    Two strings are one key when they are equal. A plain scalar that is not a string is one key with another, or with a
+    string, when some reader reads them alike: ``yes`` and ``true`` are both true to YAML 1.1, ``1`` and ``0x1`` are one
+    number, and ``no`` is the string ``no`` to YAML 1.2. So such a key is accepted only alone in its mapping, or among
+    plain decimal numbers, which no reader reads as any other key.
+    """
+
+    def __init__(self) -> None:
+        self.strings: set[str] = set()
+        self.plain: set[str] = set()
+        self.numbers = True
+
+    def add(self, number: int, key: str | _NonString) -> None:
+        text = key if isinstance(key, str) else key.text
+        decimal = _YAML_DECIMAL.fullmatch(text) is not None
+        if isinstance(key, str):
+            duplicate = text in self.strings
+            clash = text in self.plain and not decimal
+            self.strings.add(text)
+        else:
+            self.numbers = self.numbers and decimal
+            duplicate = text in self.plain
+            clash = (text in self.strings and not decimal) or (bool(self.plain) and not self.numbers)
+            self.plain.add(text)
+        if duplicate:
+            raise _OutsideYaml(number, f"the duplicate key {text!r}")
+        if clash:
+            raise _OutsideYaml(number, f"the key {text!r}, which a reader may read as the same key as another in its "
+                                       "mapping")
+
+
+class _YamlReader:
+    """The block collections of a document's lines, read in one pass; each line is handled once."""
+
+    def __init__(self, lines: list[list]) -> None:
+        self.lines = lines
+        self.at = 0
+
+    def line(self) -> list | None:
+        return self.lines[self.at] if self.at < len(self.lines) else None
+
+    def node(self, column: int, depth: int) -> Any:
+        """The collection that starts at the current line, which is at *column*: a sequence if it is an entry."""
+        return (self.sequence if _yaml_dash(self.lines[self.at][2]) else self.mapping)(column, depth)
+
+    def mapping(self, column: int, depth: int) -> _Pairs:
+        """The block mapping whose keys are at *column*, from the current line to the first line outside it."""
+        if depth > _YAML_DEPTH:
+            raise _OutsideYaml(self.lines[self.at][0], f"nesting deeper than {_YAML_DEPTH} levels")
+        pairs: list[tuple[Any, Any]] = []
+        keys = _YamlKeys()
+        while True:
+            line = self.line()
+            if line is None or line[1] < column:
+                break
+            number, indent, content = line
+            if indent > column:
+                raise _OutsideYaml(number, "a line more indented than the entries before it (a multi-line scalar, "
+                                           "or misaligned indentation)")
+            if _yaml_dash(content):
+                raise _OutsideYaml(number, "a sequence entry among mapping entries")
+            kind, key, after = _yaml_start(number, content)
+            if kind != "key":
+                raise _OutsideYaml(number, "a line that is not a 'key: value' entry (a scalar on its own line, or a "
+                                           "key without ':')")
+            if len(content) - len(after) - 1 > _YAML_KEY_LENGTH:   # where the colon is, counted from the key's start
+                raise _OutsideYaml(number, f"a key longer than {_YAML_KEY_LENGTH} characters")
+            keys.add(number, key)
+            pairs.append((key, self.value(number, column, after, depth)))
+        return _Pairs(pairs)
+
+    def value(self, number: int, column: int, after: str, depth: int) -> Any:
+        """The value of the key just read, whose line holds *after* beyond its colon, and whose key is at *column*."""
+        body = after.lstrip(" ")
+        if body and body[0] != "#":
+            kind, scalar, _ = _yaml_start(number, body)
+            if kind == "key":
+                raise _OutsideYaml(number, "a ':' in a value (a mapping on the line of another key)")
+            self.at += 1
+            return scalar
+        self.at += 1
+        following = self.line()
+        if following is not None:
+            if following[1] > column:
+                return self.node(following[1], depth + 1)
+            if following[1] == column and _yaml_dash(following[2]):
+                return self.sequence(column, depth + 1)   # a sequence level with its key is that key's value
+        return _NonString("")
+
+    def sequence(self, column: int, depth: int) -> list:
+        """The block sequence whose dashes are at *column*, from the current line to the first line outside it."""
+        if depth > _YAML_DEPTH:
+            raise _OutsideYaml(self.lines[self.at][0], f"nesting deeper than {_YAML_DEPTH} levels")
+        items = []
+        while True:
+            line = self.line()
+            if line is None or line[1] < column:
+                break
+            number, indent, content = line
+            if indent > column:
+                raise _OutsideYaml(number, "a line more indented than the entries before it (a multi-line scalar, "
+                                           "or misaligned indentation)")
+            if not _yaml_dash(content):
+                break
+            items.append(self.item(line, column, depth))
+        return items
+
+    def item(self, line: list, column: int, depth: int) -> Any:
+        """The value of the sequence entry on *line*, whose dash is at *column*."""
+        number, _, content = line
+        body = content[1:].lstrip(" ")
+        if not body or body[0] == "#":
+            self.at += 1
+            following = self.line()
+            if following is not None and following[1] > column:
+                return self.node(following[1], depth + 1)
+            return _NonString("")
+        if _yaml_dash(body):
+            raise _OutsideYaml(number, "a sequence on the line of its entry ('- -')")
+        # What follows the dash is a line of its own, at its own column: a key that starts a mapping whose other keys
+        # are at that column, or a scalar.
+        line[1], line[2] = column + len(content) - len(body), body
+        kind, scalar, _ = _yaml_start(number, body)
+        if kind == "key":
+            return self.mapping(line[1], depth + 1)
+        self.at += 1
+        return scalar
+
+
+def _parse_yaml(text: str) -> Any:
+    """*text* as the YAML subset this module reads: block mappings and sequences of one-line plain or quoted scalars.
+
+    A mapping is :class:`_Pairs` of its keys and values in order, a sequence a list, a quoted scalar a string, a plain
+    scalar a string when no reader reads it as anything else, and otherwise a :class:`_NonString` of its text. A key
+    with nothing after it, and an empty document, are the empty :class:`_NonString`, null. Anything else raises
+    :class:`_OutsideYaml` naming the line and the construct: a flow collection, an anchor, an alias, a tag, a block
+    scalar, a directive, a second document, an explicit key, a merge key, a duplicate key, a scalar that goes on to
+    the next line, a tab outside a comment, a control character, a nesting deeper than 64 levels, and whatever else the subset leaves
+    out, which includes valid YAML. Guaranteed for what this returns: PyYAML, and ruamel.yaml in YAML 1.2 and in 1.1,
+    load the same keys, in order, nested the same way, and the same strings, and a scalar they read as other than a
+    string is a :class:`_NonString`. Not guaranteed: anything about a text this refuses, or about how a YAML reader
+    other than those two reads a text it returns. The work is linear in the size of *text*.
+    """
+    lines, _marked = _yaml_lines(text)
+    if not lines:
+        return _NonString("")
+    reader = _YamlReader(lines)
+    root = reader.node(lines[0][1], 1)
+    if reader.at < len(lines):
+        raise _OutsideYaml(lines[reader.at][0], "a line that continues no collection (misaligned indentation)")
+    return root
+
+
+# For each parsed check: what the refusal calls the format, what the original must be, and how to read it.
+_PARSERS = {"json": ("JSON", "strict JSON", _parse_json),
+            "toml": ("TOML", "valid TOML", _parse_toml),
+            "ini": ("INI", "a valid INI file", _parse_ini),
+            "yaml": ("YAML within the subset this module reads",
+                     "in the YAML subset this module reads (block mappings and sequences of one-line plain or quoted "
+                     "scalars, and comments)", _parse_yaml)}
+# What a parser raises for text it cannot read: its own error, or a nesting deeper than Python recurses.
+_PARSE_ERRORS = (ValueError, configparser.Error, RecursionError)
+
+
+def _reason(exc: BaseException) -> str:
+    """A parser's own words on one line, at most 200 characters; a runaway nesting is named as such."""
+    if isinstance(exc, RecursionError):
+        return "nested too deeply to read"
+    text = " ".join(str(exc).split())
+    return text if len(text) <= 200 else text[:197] + "..."
+
+
+def _shown(value: Any, limit: int = 80) -> str:
+    text = repr(value)
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def _kind(value: Any) -> str:
+    named = {_Defaults: "the defaults section", _Pairs: "a mapping", list: "a list", str: "a string",
+             bool: "a boolean", int: "an integer", float: "a float", type(None): "null", _NonString: "a plain scalar"}
+    return named.get(type(value)) or f"a {type(value).__name__} value"
+
+
+def _at(path: tuple) -> str:
+    """Where in a parsed file: ``$`` is the whole, ``$['a'][0]`` the first item of the value at the key ``a``."""
+    return "$" + "".join(f"[{(part.text if isinstance(part, _NonString) else part)!r}]" for part in path)
+
+
+def _rewritten(value: Any, rewrite: Callable[[str], str], where: str, path: tuple = ()) -> Any:
+    """*value* with *rewrite* applied to every string it holds, keys included, as the raw edit did to the text.
+
+    A value or key that is not a string is left as it is. Refused where two keys of one mapping that
+    differ become the same key: a reader would keep one of the two entries or merge them, which no
+    reviewed replacement said.
+    """
+    if isinstance(value, str):
+        return rewrite(value)
+    if isinstance(value, list):
+        return [_rewritten(item, rewrite, where, path + (index,)) for index, item in enumerate(value)]
+    if not isinstance(value, _Pairs):
+        return value
+    kept: dict[Any, Any] = {}
+    pairs = []
+    for key, item in value:
+        new = rewrite(key) if isinstance(key, str) else key
+        if kept.setdefault(new, key) != key:
+            raise _refused(f"{where}: the replacements make the keys {kept[new]!r} and {key!r} of the mapping at "
+                           f"{_at(path)} the same key {new!r}, a duplicate that would merge two entries")
+        pairs.append((new, _rewritten(item, rewrite, where, path + (key,))))
+    return type(value)(pairs)
+
+
+def _difference(expected: Any, found: Any, path: tuple = ()) -> str | None:
+    """Where *found* is not *expected*, in words, or ``None`` when they are the same.
+
+    Strict: a value of another type differs (``1``, ``1.0``, and ``true`` are three values), the keys
+    of a mapping are compared in order and with any duplicate, and NaN is the same as NaN, so no key,
+    type, nesting, or non-string value can change unseen.
+    """
+    if type(expected) is not type(found):
+        return f"{_at(path)} is {_kind(found)} {_shown(found)}, expected {_kind(expected)} {_shown(expected)}"
+    if isinstance(expected, _Pairs):
+        expected_keys, found_keys = [key for key, _ in expected], [key for key, _ in found]
+        if expected_keys != found_keys:
+            return f"{_at(path)} holds the keys {_shown(found_keys)}, expected {_shown(expected_keys)}"
+        for (key, want), (_, got) in zip(expected, found):
+            inner = _difference(want, got, path + (key,))
+            if inner:
+                return inner
+        return None
+    if isinstance(expected, list):
+        if len(expected) != len(found):
+            return f"{_at(path)} holds {len(found)} item(s), expected {len(expected)}"
+        for index, (want, got) in enumerate(zip(expected, found)):
+            inner = _difference(want, got, path + (index,))
+            if inner:
+                return inner
+        return None
+    # Floats and dates compare by what they print, which keeps NaN, the sign of a zero, and an offset.
+    if isinstance(expected, (str, int, _NonString)) or expected is None:
+        same = expected == found
+    else:
+        same = repr(expected) == repr(found)
+    return None if same else f"{_at(path)} is {_shown(found)}, expected {_shown(expected)}"
+
+
+# An INI file that keeps its structure as written can still read differently. Python's ``configparser`` folds
+# option names to lower case unless it is told not to, so two options that differ only in case become one; it
+# merges the ``[DEFAULT]`` section's options into every section, so a section's option can start to hide a
+# default or be hidden by one; its default reader interpolates ``%(name)s`` in every value, as
+# ``ExtendedInterpolation`` does ``${name}``, so a ``%`` or ``$`` in a replacement can fail to interpolate or
+# read as another option's value; and a reader told to may end a line at a ``#`` or ``;`` that follows
+# whitespace, so a replacement that holds one cuts what follows it from the value. The transformed file is
+# therefore also compared with the original under each of these readers that can read the original, the default
+# reader first.
+def _ini_label(names: str, how: str, inline: str) -> str:
+    label = f"option names {names}, [DEFAULT] merged into each section, {how}" + (f", {inline}" if inline else "")
+    default = (names, how, inline) == ("folded to lower case", "% interpolation", "")
+    return f"Python's default INI reader ({label})" if default else label
+
+
+_INI_READERS = tuple((_ini_label(names, how, inline), fold, interpolation, prefixes)
+                     for inline, prefixes in (("", None), ("# and ; inline comments", ("#", ";")))
+                     for names, fold, how, interpolation in (
+    ("folded to lower case", str.lower, "% interpolation", configparser.BasicInterpolation),
+    ("folded to lower case", str.lower, "no interpolation", lambda: None),
+    ("folded to lower case", str.lower, "${} interpolation", configparser.ExtendedInterpolation),
+    ("as written", str, "no interpolation", lambda: None),
+    ("as written", str, "% interpolation", configparser.BasicInterpolation),
+    ("as written", str, "${} interpolation", configparser.ExtendedInterpolation)))
+
+
+class _Unreadable:
+    """An INI value a reader cannot return because interpolating it raised; *reason* names the error."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+
+def _ini_reading(text: str, fold: Callable[[str], str], interpolation: Callable[[], Any],
+                 prefixes: tuple[str, ...] | None) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, str]]]:
+    """Each section's options as a reader that folds names by *fold*, interpolates as *interpolation*, and ends a line
+    at an inline comment beginning with one of *prefixes*, returns them, with the names as they are written.
+
+    A section's options are the ``[DEFAULT]`` section's, then its own, keyed by the name *fold* gives them; a value
+    the reader cannot interpolate is an :class:`_Unreadable`. The second result gives, for each section, the name
+    as written of each option the first holds, read the same way but with names kept and nothing interpolated, so
+    that it names the sections that reader sees (an inline comment can end a header earlier). Raises what
+    ``configparser`` raises for a file the reader cannot read at all.
+    """
+    parser = configparser.ConfigParser(interpolation=interpolation(), strict=True, inline_comment_prefixes=prefixes)
+    parser.optionxform = fold
+    parser.read_string(text)
+    structure = _parse_ini(text, prefixes)
+    shared = [option for _, pairs in structure if isinstance(pairs, _Defaults) for option, _ in pairs]
+    own = {section: [option for option, _ in pairs] for section, pairs in structure
+           if not isinstance(pairs, _Defaults)}
+    defaults = list(parser.defaults())
+    reading: dict[str, dict[str, Any]] = {}
+    names: dict[str, dict[str, str]] = {}
+    for section in parser.sections():
+        options: dict[str, Any] = {}
+        for option in defaults + [name for name in parser.options(section) if name not in parser.defaults()]:
+            try:
+                options[option] = parser.get(section, option)
+            except configparser.Error as exc:
+                options[option] = _Unreadable(type(exc).__name__)
+        reading[section] = options
+        names[section] = {fold(option): option for option in shared + own[section]}
+    return reading, names
+
+
+def _check_ini_readings(where: str, text: str, new_text: str, rewrite: Callable[[str], str]) -> None:
+    """Refuse unless each reader of :data:`_INI_READERS` that reads the original reads the transformed file as it does.
+
+    The expectation is the original as that reader reads it, with every name and value rewritten as the raw edit
+    rewrote the text: the same sections, the same options under the names the replaced names fold to, and the
+    same values, which a reader that interpolates has already resolved. A reader that cannot read the original
+    (an option it folds twice, a value it cannot interpolate) is asked nothing it never did, so such a value is
+    not compared.
+    """
+    for label, fold, interpolation, prefixes in _INI_READERS:
+        try:
+            old, written = _ini_reading(text, fold, interpolation, prefixes)
+        except _PARSE_ERRORS:
+            continue
+        try:
+            new, _ = _ini_reading(new_text, fold, interpolation, prefixes)
+        except _PARSE_ERRORS as exc:
+            raise _refused(f"{where}: read with {label}, the original reads but the transformed file does not "
+                           f"({_reason(exc)}); a replacement is written into the file as it is, so one that repeats "
+                           "another option's name in another case can break how it reads") from exc
+        sections = [rewrite(section) for section in old]
+        if list(new) != sections:
+            raise _refused(f"{where}: read with {label}, the transformed file does not read as the original with only "
+                           f"the reviewed replacements applied to its names and values (it holds the sections "
+                           f"{_shown(list(new))}, expected {_shown(sections)})")
+        for section, options in old.items():
+            named: dict[str, str] = {}
+            expected: dict[str, Any] = {}
+            for option, value in options.items():
+                renamed = fold(rewrite(written[section].get(option, option)))
+                if named.setdefault(renamed, option) != option:
+                    raise _refused(f"{where}: read with {label}, the replacements make the options "
+                                   f"{written[section].get(named[renamed], named[renamed])!r} and "
+                                   f"{written[section].get(option, option)!r} of [{section}] the same "
+                                   f"option {renamed!r}, so one would hide the other")
+                expected[renamed] = value if isinstance(value, _Unreadable) else rewrite(value)
+            found = new[rewrite(section)]
+            difference = None
+            if list(found) != list(expected):
+                difference = f"[{section}] holds the options {_shown(list(found))}, expected {_shown(list(expected))}"
+            for option, want in expected.items():
+                got = found.get(option)
+                if difference or isinstance(want, _Unreadable):
+                    continue
+                if isinstance(got, _Unreadable):
+                    difference = (f"[{section}] {option} cannot be interpolated ({got.reason}), "
+                                  f"expected {_shown(want)}")
+                elif got != want:
+                    difference = f"[{section}] {option} reads as {_shown(got)}, expected {_shown(want)}"
+            if difference:
+                raise _refused(f"{where}: read with {label}, the transformed file does not read as the original with "
+                               f"only the reviewed replacements applied to its names and values ({difference})")
+
+
+def _check_parsed(kind: str, where: str, text: str, new_text: str, originals: list[str], listed: set[str],
+                  replacement_of: dict[str, str]) -> None:
+    """Refuse unless the transformed *kind* file is the original with the reviewed replacements applied.
+
+    Both files are parsed. The value expected of the result is the original's, with every string in
+    it, keys and section and option names included, rewritten by the same reviewed replacements the
+    raw edit applied to the text, and the result must equal it under :func:`_difference`: the same
+    keys in the same order, of the same types, nested the same way, so a replacement that breaks the
+    syntax, injects or merges a key, or changes what a value means is refused. An original that does
+    not parse cannot be verified and is refused too. Only what the parser reads is compared: a
+    comment, or the whitespace between values, is not. For YAML the ``---`` that may start the
+    document is compared as well (:func:`_check_yaml_marker`).
+    """
+    name, phrase, parse = _PARSERS[kind]
+    label = f"{where} (a parsed string)"
+
+    def rewrite(string: str) -> str:
+        return _replaced(string, [span for span in _spans(string, originals, label) if span[2] in listed],
+                         replacement_of)
+
+    try:
+        before = parse(text)
+    except _PARSE_ERRORS as exc:
+        raise _refused(f"{where} is not {phrase}, so an edit of it cannot be verified to keep its structure "
+                       f"({_reason(exc)})") from exc
+    try:
+        expected = _rewritten(before, rewrite, where)
+        try:
+            after = parse(new_text)
+        except _PARSE_ERRORS as exc:
+            raise _refused(f"{where}: the transformed file is not valid {name} ({_reason(exc)}); replacements are "
+                           "written into the file as they are, without quoting or escaping, so one holding a "
+                           "quotation mark, a backslash, or another delimiter can break it") from exc
+        difference = _difference(expected, after)
+    except RecursionError:
+        raise _refused(f"{where} is nested too deeply for its structure to be compared") from None
+    if difference:
+        raise _refused(f"{where}: the transformed file does not keep the original's structure: it is not the "
+                       f"original with only the reviewed replacements applied to its keys and strings ({difference})")
+    if kind == "ini":
+        _check_ini_readings(where, text, new_text, rewrite)
+    if kind == "yaml":
+        _check_yaml_marker(where, text, new_text)
+
+
+def _check_yaml_marker(where: str, text: str, new_text: str) -> None:
+    """Refuse a YAML edit that adds or removes the ``---`` that starts the document.
+
+    The marker is not part of the parsed value, but it is not inert: ruamel.yaml, asked to read YAML 1.1, reads a
+    document that opens with an explicit ``---`` and no ``%YAML`` directive as YAML 1.2, so adding or removing one
+    changes how that reader reads values the edit never touched (``no``, ``yes``, ``0777``, ``1:30``). Both texts
+    have already been read as the subset, so neither raises here.
+    """
+    before, after = _yaml_lines(text)[1], _yaml_lines(new_text)[1]
+    if before != after:
+        raise _refused(f"{where}: the replacements {'add' if after else 'remove'} the '---' that starts the document, "
+                       "which ruamel.yaml reading YAML 1.1 takes as a switch to YAML 1.2, so values the edit does not "
+                       "touch would read differently")
 
 
 def _edit_for(document: dict, edit: dict, snapshot_id: str, source: Path, hashes: dict[str, str]) -> _Edit:
@@ -489,10 +1286,15 @@ def _edit_for(document: dict, edit: dict, snapshot_id: str, source: Path, hashes
             or len(text.splitlines()) != len(new_text.splitlines())):
         raise _refused(f"{where}: the replacement would move a line, so claim locations could not be "
                        "mapped back to the original export")
+    # A JSON, TOML, INI, or YAML display file must also keep its structure, as a parser reads it.
+    # Anything else is not asked.
+    check = _structure_check_for(path)
+    if check is not None:
+        _check_parsed(check, where, text, new_text, originals, listed, replacement_of)
     data = new_text.encode("utf-8")
     changed = tuple(index + 1 for index, (old, new) in enumerate(zip(old_lines, new_lines)) if old != new)
     return _Edit(edit["edit_id"], path, True, hashes[path], data,
-                 f"sha256:{hashlib.sha256(data).hexdigest()}", counts, changed, _line_count(text))
+                 f"sha256:{hashlib.sha256(data).hexdigest()}", counts, changed, _line_count(text), check)
 
 
 # --- the blinded export --------------------------------------------------------------------------
@@ -507,6 +1309,9 @@ BLINDED_LIMITS = [
     "and may still reveal the repository. It is not anonymization.",
     "Instruction files are never edited by blinding and are recorded as retained identity cues.",
     "The original export under original/source is evaluator-side and is never handed to a scanner.",
+    "JSON, TOML, INI, and YAML display files within the block subset read here are verified by parsing them before "
+    "and after the edit, and a YAML file outside that subset is refused; nothing else a scanner may read is "
+    "re-validated.",
 ]
 
 
@@ -659,6 +1464,9 @@ def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapsho
             _passed("edit_line_structure", f"{edit.edit_id}: {edit.line_count} line(s) before and after; "
                                            "each line maps to the same line"),
         ]
+        if edit.structure_check is not None:
+            detail = _STRUCTURE_DETAILS[edit.structure_check]
+            validation.append(_passed("edit_structure", f"{edit.edit_id}: {detail}"))
     transformed = _write_transformed(original_source, source, original, edits)
     unedited = len(original.hashes) - sum(1 for edit in edits if edit.present)
     validation.append(_passed("unedited_files_unchanged",
