@@ -695,14 +695,15 @@ tree is written, and `blinding check` says which and where.
 YAML is parsed only as a strict block subset: block mappings and sequences of one-line plain or
 quoted scalars, and comments. A YAML file with anything else (a flow list such as `[a, b]`, an
 anchor, alias, or tag, a `|` or `>` block, a value that runs onto the next line, a value that starts
-with `-` such as a negative number, a tab, a duplicate key, a second document) cannot be verified,
-so an edit of it is refused even when the replacement is harmless; leave that file out of the map.
-Inside the subset, a plain value that YAML reads as a boolean, null, number, or date (`true`, `yes`,
-`null`, `12`, `2019-01-01`) is not a string, so an edit that changes one is refused, as is a
-replacement that turns a string into one, puts `: ` or ` #` inside a plain value, or starts one with
-a YAML indicator such as `&`, `*`, `!`, `[`, `{`, `|`, `>`, or `-`. A single-quoted value takes any
-replacement without a `'`, and a double-quoted one any without a `"` or a backslash. Comments are
-never compared, and documentation files are not checked for structure.
+with `-` such as a negative number, a tab outside a comment, a duplicate key, a second document)
+cannot be verified, so an edit of it is refused even when the replacement is harmless; leave that
+file out of the map. Inside the subset, a plain value that YAML reads as a boolean, null, number, or
+date (`true`, `yes`, `null`, `12`, `2019-01-01`) is not a string, so an edit that changes one is
+refused, as is a replacement that turns a string into one, puts `: ` or ` #` inside a plain value,
+starts one with a YAML indicator such as `&`, `*`, `!`, `[`, `{`, `|`, `>`, or `-`, or adds or
+removes a `---` at the top. A single-quoted value takes any replacement without a `'`, and a
+double-quoted one any without a `"` or a backslash, as long as it holds no tab or control character.
+Comments are never compared, and documentation files are not checked for structure.
 
 **Check it before anyone reviews it.** `blinding check` fetches each variant, applies the map in a
 temporary directory exactly as a run would, and reports approval instead of requiring it:
