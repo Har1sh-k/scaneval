@@ -24,10 +24,24 @@ What is scored against what. An input is scored on the targets and controls its 
 the run. An item frozen there but absent from the bundle's plan is a miss (``unscored``): a target is
 not detected, and a control on a scan that completed is a completed observation with no resolved
 assessment, which the false-alarm bound counts as unresolved. An item a bundle's plan adds is ignored.
-An input whose schedule froze no plan takes no part in any target or control metric and is listed as
-such; its assignments still count toward completion, claims, and usage. Observations are keyed by run
-and input, so one input scanned by two runs is two positive inputs of its targets, each averaged over
-its own repetitions.
+A canonical target or control an input froze as several records (a CVE and a GHSA record of one root
+cause, say) is one item, ``unscored`` when any of its records is absent from the plan, not only when
+all are. The records present still count for what they establish: a hit on any of them detects the
+target, and a confirmed false allegation on any of them is a false allegation on the control. Nothing
+stands in for a record that was never assessed. A target with a record absent is treated as under a
+pending match: its accepted claims are only a lower bound, so it has no random-order expectation and,
+when no record present detected it, is not assessable. A control is resolved quiet only when every one
+of its records was assessed and quiet, so quiet assessments of the others leave it unresolved. An input
+whose schedule froze no plan takes no part in any target or control metric and is listed as such; its
+assignments still count toward completion, claims, and usage. Observations are keyed by run and input,
+so one input scanned by two runs is two positive inputs of its targets, each averaged over its own
+repetitions.
+
+Pairs. A vulnerable/fixed pair is scored on whole canonical items, not on the one record it names:
+its vulnerable side is the whole canonical target, and its fixed state the whole canonical control
+its control record belongs to, every fixed-target record of it that the fixed input froze. A record
+of that control absent from the fixed bundle's plan, or left unresolved, leaves the pair unresolved
+however quiet the others were, and a confirmed false allegation on any record flags the fixed state.
 
 Evidence scope. An observation is reviewed evidence only when its bundle's plan is reviewed and its
 review record is human-approved; a failure takes the scope of the plan its schedule froze. A view that
@@ -709,16 +723,21 @@ def _random_order_expectation(delivered: int, hits: int, budget: int) -> Fractio
 def _target_outcome(observation: _Observation, target_ids: tuple[str, ...], budgets: list[int]) -> dict:
     """What one observation establishes about one canonical target planned on its input.
 
-    The target ids are the input's planned records of that canonical target; any of them detected is
-    the target detected, at the earliest measured rank. A failure detects nothing and completes
-    nothing but has a known position under every budget (none). A valid output whose native order or
-    bundles are unresolved leaves every budget of the observation unmeasurable, as scoring does; an
-    output that is not valid cannot hit within any budget, so it stays measurable. ``assessable`` is a
-    completed scan with a resolved outcome for the target: a confirmed hit, or no hit with no pending
-    match and resolved bundles. ``random`` is the random-order expectation per budget for an unranked
-    valid output with resolved bundles and no pending match on the target, and ``random_pending`` marks
-    one whose bundles are unresolved or whose match on the target is pending: the accepted claims are
-    then only a lower bound, so its expectation is not measured.
+    The target ids are the input's planned records of that canonical target, and the bundle's plan may hold
+    only some of them, or none. A hit on any record it holds is the target detected, at the earliest measured
+    rank. A record the plan lacks was never scored, so the observation is ``unscored`` when any record is
+    absent, not only when all are, and the record is treated like a pending match: it may hold accepted claims
+    nobody counted, so a miss on the records present is not resolved. A failure, and a target with every
+    record absent, detect nothing and complete nothing but have a known position under every budget (none).
+    A valid output whose native order or bundles are unresolved leaves every budget of the observation
+    unmeasurable, as scoring does; an output that is not valid cannot hit within any budget, so it stays
+    measurable. ``assessable`` is a completed scan with a resolved outcome for the target: a confirmed hit, or
+    no hit with every record scored, no pending match, and resolved bundles. ``random`` is the random-order
+    expectation per budget for an unranked valid output with resolved bundles and no pending match or absent
+    record on the target. Every other unranked valid output is ``random_pending``: its bundles are unresolved
+    or its target has a pending match or an absent record (every record of it, for a target the plan holds
+    none of). The accepted claims are then only a lower bound, so the expectation is not measured, and an
+    unranked valid output is measured or pending, never neither.
     """
     observed = observation.observed
     failure = {"detected": False, "rank": None, "measurable": True, "completed": False, "assessable": False,
@@ -726,13 +745,15 @@ def _target_outcome(observation: _Observation, target_ids: tuple[str, ...], budg
     if observed is None:
         return failure
     rows = {row["target_id"]: row for row in observed["targets"]}
+    missing = any(target_id not in rows for target_id in target_ids)
     scored = [rows[target_id] for target_id in target_ids if target_id in rows]
+    valid = observed["valid_positive_output"]
+    valid_unranked = valid and observed["ranking"] == "unranked"
     if not scored:
-        return {**failure, "unscored": True}
+        return {**failure, "unscored": True, "random_pending": valid_unranked}
     detected = any(row["detected"] for row in scored)
     ranks = [row["first_hit_rank"] for row in scored if row["first_hit_rank"] is not None]
-    valid = observed["valid_positive_output"]
-    pending = any(row["unresolved_match"] for row in scored)
+    pending = missing or any(row["unresolved_match"] for row in scored)
     random = None
     if valid and observed["random_order"] is not None and not pending:
         delivered = observed["claims"]["records"]
@@ -742,20 +763,23 @@ def _target_outcome(observation: _Observation, target_ids: tuple[str, ...], budg
     return {"detected": detected, "rank": min(ranks) if ranks else None,
             "measurable": not valid or observed["budget_measurable"], "completed": completed,
             "assessable": completed and (detected or (not pending and resolved)),
-            "unscored": False, "random": random,
-            "random_pending": valid and observed["ranking"] == "unranked" and (not resolved or pending)}
+            "unscored": missing, "random": random,
+            "random_pending": valid_unranked and (not resolved or pending)}
 
 
 def _control_outcome(observation: _Observation, control_ids: tuple[str, ...]) -> dict:
     """What one observation establishes about one canonical control planned on its input.
 
-    A confirmed false allegation about any of the input's records of the control is one; the control
-    is resolved quiet only when every record of it is. Completion and resolution follow
+    The control ids are the input's frozen records of that canonical control, and the bundle's plan may
+    hold only some of them. A confirmed false allegation about any record the plan holds is one, whether
+    or not another record is absent: the control is resolved, and false. Otherwise the control is
+    resolved quiet only when every frozen record of it is in the plan and resolved. A record the plan
+    lacks was never assessed, so quiet assessments of the others do not resolve the control; it is
+    ``unscored`` when any record is absent, not only when all are. Completion and resolution follow
     :func:`scaneval.scoring.observe`: only a successful scan completes, and a failure resolves nothing.
-    A control frozen in the schedule that the bundle's plan lacks was never assessed, but the scan still
-    completed in the frozen scope: on a successful scan it is a completed, unresolved observation
-    (``unscored``), which the false-alarm bound counts as a false allegation rather than dropping from
-    the completed mass.
+    A control with a record the plan lacks was still in a scan that completed in the frozen scope: on a
+    successful scan it is a completed observation, and while it is unresolved the false-alarm bound counts
+    it as a false allegation rather than dropping it from the completed mass.
     """
     observed = observation.observed
     empty = {"completed": False, "resolved": False, "false_allegation": False,
@@ -763,14 +787,16 @@ def _control_outcome(observation: _Observation, control_ids: tuple[str, ...]) ->
     if observed is None:
         return empty
     rows = {row["control_id"]: row for row in observed["controls"]}
+    missing = any(control_id not in rows for control_id in control_ids)
     scored = [rows[control_id] for control_id in control_ids if control_id in rows]
     if not scored:
         return {**empty, "completed": observed["completed"], "unscored": True}
     false = any(row["false_allegation"] for row in scored)
-    return {"completed": observed["completed"], "resolved": false or all(row["resolved"] for row in scored),
+    return {"completed": observed["completed"],
+            "resolved": false or (not missing and all(row["resolved"] for row in scored)),
             "false_allegation": false,
             "observed_false_allegation": any(row["observed_false_allegation"] for row in scored),
-            "unscored": False}
+            "unscored": missing}
 
 
 # --- one system in one view ---------------------------------------------------------------------
@@ -1254,19 +1280,29 @@ def _pair_outcomes(frame: _Frame, observation: Callable[[Key, int], _Observation
     """For each canonical target, the outcome of every repetition pair of every frozen pair it has.
 
     A pair is resolved when the vulnerable observation has a resolved outcome for the target and the
-    fixed observation a resolved assessment of the control; only a resolved pair has an outcome.
+    fixed observation a resolved assessment of the control; only a resolved pair has an outcome. Each side
+    reads its whole canonical item, as the target and control blocks do, and not only the record the pair
+    names: the vulnerable side every planned record of the canonical target, and the fixed side every
+    planned fixed-target record of the pair control's canonical control on the fixed input. So a fixed-state
+    control with a record its bundle's plan lacks, or one left unresolved, is not resolved however quiet its
+    other records were, and a confirmed false allegation on any record flags the fixed state, whatever the
+    pair's own record says. A pair earns no credit for a control the ``fixed_target`` block counts as
+    unresolved.
     """
+    fixed_records = {(key, record): ids for found in frame.controls["fixed_target"].values()
+                     for key, ids in found for record in ids}
     pair_units: dict[str, list[list[dict]]] = {}
     for canonical, entries in frame.pairs.items():
         pair_units[canonical] = []
         for run_id, pair in entries:
             vulnerable = (run_id, pair["vulnerable_input_id"])
+            fixed_input = (run_id, pair["fixed_input_id"])
             target_ids = next(ids for key, ids in frame.targets[canonical] if key == vulnerable)
+            control_ids = fixed_records[(fixed_input, pair["control_id"])]
             outcomes = []
             for left, right in pair["repetition_pairs"]:
                 hit = _target_outcome(observation(vulnerable, left), target_ids, budgets)
-                fixed = _control_outcome(observation((run_id, pair["fixed_input_id"]), right),
-                                         (pair["control_id"],))
+                fixed = _control_outcome(observation(fixed_input, right), control_ids)
                 resolved = hit["assessable"] and fixed["resolved"]
                 outcome = None
                 if resolved:

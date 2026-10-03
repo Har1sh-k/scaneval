@@ -374,10 +374,16 @@ def target(target_id: str, *, project: str, family: str, canonical: str | None =
 
 
 def control(control_id: str, *, kind: str = "capability_safe", target_id: str | None = None,
-            level: str = "L3") -> dict:
-    """One planned control as a schedule freezes it."""
-    return {"control_id": control_id, "case_id": f"case-{target_id or control_id}", "canonical_id": control_id,
-            "type": kind, "target_id": target_id, "validation_level": level}
+            level: str = "L3", canonical: str | None = None, case: str | None = None) -> dict:
+    """One planned control as a schedule freezes it.
+
+    *canonical* makes it a record of another control's canonical control, and *case* names the case record it
+    belongs to: a canonical control is registered under one family, so the records of one that guard no target
+    must share a case.
+    """
+    return {"control_id": control_id, "case_id": case or f"case-{target_id or control_id}",
+            "canonical_id": canonical or control_id, "type": kind, "target_id": target_id,
+            "validation_level": level}
 
 
 def planned(input_id: str, *, targets=(), controls=(), project: str, workload: str = WORKLOAD,
@@ -1941,17 +1947,28 @@ def bounds(**changes) -> dict:
 
 
 def control_run(root: Path, run_id: str, *, kind: str | None = "capability_safe", candidate_controls=None,
-                baseline_pending=()) -> Path:
+                baseline_pending=(), aliased: bool = False, unplanned_aliases: bool = False) -> Path:
     """Five projects, one target and (unless *kind* is None) one control each.
 
     The baseline detects T-p1 and T-p2, the second only as an unresolved match when *baseline_pending* names
     it; the candidate detects T-p1 to T-p4 with one claim per scan. *candidate_controls* maps a project number
-    to the candidate's assessment of its control.
+    to the candidate's assessment of its control. With *aliased*, each control is frozen as two records of one
+    canonical control, C-p1 and C-p1-alias for the first, and *unplanned_aliases* leaves every second record out
+    of the candidate's bundle plans, which then hold the first only.
     """
+    def controls_of(index: int) -> list[dict]:
+        if kind is None:
+            return []
+        guarded = f"T-p{index}" if kind != "capability_safe" else None
+        records = [control(f"C-p{index}", kind=kind, target_id=guarded)]
+        if aliased:
+            records.append(control(f"C-p{index}-alias", kind=kind, target_id=guarded, canonical=f"C-p{index}",
+                                   case=records[0]["case_id"]))
+        return records
+
     inputs = [planned(f"p{index}", project=f"acme/p{index}",
                       targets=[target(f"T-p{index}", project=f"acme/p{index}", family=f"family-{index}")],
-                      controls=[] if kind is None else [control(f"C-p{index}", kind=kind, target_id=f"T-p{index}"
-                                                                if kind != "capability_safe" else None)])
+                      controls=controls_of(index))
               for index in range(1, 6)]
     outcomes = {}
     for index in range(1, 6):
@@ -1960,7 +1977,8 @@ def control_run(root: Path, run_id: str, *, kind: str | None = "capability_safe"
                                                       claims=1)
         outcomes[(f"p{index}", "candidate", 1)] = scan(
             hits={f"T-p{index}": 1} if index <= 4 else {}, claims=1,
-            controls={f"C-p{index}": (candidate_controls or {}).get(index, "quiet")} if kind else {})
+            controls={f"C-p{index}": (candidate_controls or {}).get(index, "quiet")} if kind else {},
+            drop=(f"C-p{index}-alias",) if unplanned_aliases else ())
     return write_run(root, run_id, inputs, systems=("baseline", "candidate"), outcomes=outcomes,
                      configs={"candidate": {"config": {"knob": 2}}})
 
@@ -2110,6 +2128,38 @@ def test_a_frozen_control_missing_from_a_completed_scans_plan_still_counts_towar
     assert (counts["completed"], counts["resolved"], counts["unresolved"]) == (10, 7, 3)
     assert statuses(decision)["controls.capability_safe.completed_mass"] == "pass"
     assert statuses(decision)["controls.capability_safe.assessable_mass"] == "pass"
+
+
+def test_a_partly_planned_control_cannot_pass_the_false_alarm_bound_on_a_quiet_assessment_of_the_rest(tmp_path):
+    """Five safe controls, each frozen as two records of one canonical control; the candidate is quiet on those planned.
+
+    Every scan completed, so C = 1. When the candidate's bundle plans hold both records of each control, all five are
+    resolved quiet: A = 1, E = 0 and F+ = 0, and the decision passes. When they hold the first record only, nothing
+    assessed the second, however quiet the first was, so no control is resolved and no confirmed rate exists: A = 0
+    and F+ = (0 + 1 - 0)/1 = 1, which fails the 0.1 tolerance, and the assessable mass 0 is short of 0.9. Crediting
+    the one quiet record made A = 1 and F+ = 0, and the decision passed on evidence that assessed half of each control.
+    """
+    policy = gate_policy(controls={"capability_safe": bounds()})
+    planned_whole = control_comparison(tmp_path, "run-aliases-planned", aliased=True)
+    planned_in_part = control_comparison(tmp_path, "run-aliases-half-planned", aliased=True, unplanned_aliases=True)
+
+    whole = gate.evaluate_gate(policy, planned_whole)
+    assert whole["outcome"] == "pass"
+    assert requirement(whole, "controls.capability_safe.false_alarm_upper")["observed"]["false_alarm_upper"] == 0.0
+
+    decision = gate.evaluate_gate(policy, planned_in_part)
+    assert decision["outcome"] != "pass"
+    assert decision["outcome"] == "fail" and decision["failed"] == ["controls.capability_safe.false_alarm_upper"]
+    upper = requirement(decision, "controls.capability_safe.false_alarm_upper")
+    assert upper["observed"]["false_alarm_upper"] == 1.0 and upper["observed"]["resolved_rate"] is None
+    assert upper["observed"]["completed_lower"] == 0.0
+    assert (upper["observed"]["observations"], upper["observed"]["completed"], upper["observed"]["resolved"],
+            upper["observed"]["unresolved"]) == (5, 5, 0, 5)
+    assert upper["explanation"] == (
+        "the capability_safe false-alarm upper bound F+ is 1 (confirmed rate n/a on resolved controls; 5 unresolved "
+        "assessment(s) counted as false allegations), above the allowed 0.1")
+    assert decision["unresolved"] == ["controls.capability_safe.assessable_mass"]
+    assert statuses(decision)["controls.capability_safe.completed_mass"] == "pass"
 
 
 def test_a_control_of_both_types_is_read_in_each_class(tmp_path):

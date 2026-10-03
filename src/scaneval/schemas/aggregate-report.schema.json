@@ -598,7 +598,7 @@
         "assessable_mass",
         "unscored_mass"
       ],
-      "description": "Assigned target observations and the weighted share that completed, that has a resolved outcome, and that was frozen in the schedule but absent from the bundle's plan (scored as a miss).",
+      "description": "Assigned target observations and the weighted share that completed, that has a resolved outcome, and that is unscored: at least one record of the target was frozen in the schedule but is absent from the bundle's plan. An unscored observation detects only through the records present and, when none of them hit, is not assessable.",
       "properties": {
         "target_observations": {
           "type": "integer",

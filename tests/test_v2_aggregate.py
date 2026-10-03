@@ -55,9 +55,13 @@ def target(target_id: str, *, canonical: str | None = None, project: str = "acme
 
 
 def control(control_id: str, *, kind: str = "capability_safe", target_id: str | None = None,
-            canonical: str | None = None, level: str = "L3") -> dict:
-    """One planned control as a schedule freezes it; a fixed-target control names its target."""
-    return {"control_id": control_id, "case_id": f"case-{target_id or control_id}",
+            canonical: str | None = None, level: str = "L3", case: str | None = None) -> dict:
+    """One planned control as a schedule freezes it; a fixed-target control names its target.
+
+    ``case`` names the case record the control belongs to. A canonical control is registered under one family,
+    so the records of one that guard no target must share a case.
+    """
+    return {"control_id": control_id, "case_id": case or f"case-{target_id or control_id}",
             "canonical_id": canonical or control_id, "type": kind, "target_id": target_id,
             "validation_level": level}
 
@@ -814,6 +818,88 @@ def test_a_frozen_control_missing_from_a_completed_scans_plan_is_completed_and_u
     assert block["completed_lower"] == 0.0 and block["completed_upper"]["value"] == 0.3
 
 
+def alias_control_run(root: Path, run_id: str, **choices) -> Path:
+    """One input freezes two records, C-1 and C-2, of one canonical safe control; one system scans it once.
+
+    The records belong to one case, so the canonical control has one family. *choices* are the arguments of
+    :func:`scan`: the scan succeeds with resolved bundles unless they say otherwise, and ``drop`` leaves a
+    record out of the bundle's plan.
+    """
+    records = [control(name, canonical="C", case="case-C") for name in ("C-1", "C-2")]
+    return write_run(root, run_id, [planned("safe", controls=records)],
+                     outcomes={("safe", "sys-a", 1): scan(**choices)})
+
+
+def safe_controls(report: dict) -> dict:
+    """The capability-safe control block of a report's whole view, for its one system."""
+    return slice_of(system(view(report)))["controls"]["capability_safe"]
+
+
+def test_a_quiet_assessment_of_one_alias_of_a_control_leaves_it_unresolved_while_another_alias_is_unplanned(tmp_path):
+    """Two frozen records of one safe control, C-1 and C-2; the bundle's plan holds C-1 only, assessed quiet.
+
+    The scan succeeded with resolved bundles, so the control was observed in the frozen scope (c = 1); C-2 was
+    never assessed, so the control has no resolved assessment (b = 0) however quiet C-1 was.
+    - C = 1 and A = 0, and nothing is confirmed false, so E = 0 and the resolved rate E/A is undefined.
+    - The completed bounds [E/C, (E + C - A)/C] are [0, 1]: the control counts as false in F+.
+    - Counts: 1 observation, completed, unresolved, and unscored; the schedule froze one item the plan lacks.
+    Crediting C-1's quiet to the control made A = 1, a resolved rate of 0, and F+ = 0.
+    """
+    run = alias_control_run(tmp_path, "run-alias-quiet", drop=("C-2",))
+
+    report = aggregate.aggregate([run], policy=policy())
+
+    block = safe_controls(report)
+    assert block["canonical_controls"] == 1
+    assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (1, 1, 0, 1)
+    assert block["unscored"] == 1 and block["false_allegations"] == 0
+    assert block["completed_mass"] == 1.0 and block["assessable_mass"] == 0.0
+    assert block["resolved_rate"]["value"] is None
+    assert block["completed_lower"] == 0.0 and block["completed_upper"]["value"] == 1.0
+    assert system(view(report))["observations"]["unscored_items"] == 1
+
+
+def test_a_false_allegation_on_one_alias_of_a_control_stands_while_another_alias_is_unplanned(tmp_path):
+    """The same two records and a plan holding C-1 only, but the reviewer confirmed a false allegation on C-1.
+
+    A false allegation about the control is evidence of a false alarm whether or not C-2 was ever assessed, so
+    the control is resolved, and false: c = b = 1 and e = 1.
+    - C = A = 1 and E = 1: the resolved rate E/A is 1 and the completed bounds are [1, (1 + 1 - 1)/1] = [1, 1].
+    - Counts: 1 observation, completed, resolved, and false; it is still unscored, for the record C-2 lacks.
+    """
+    run = alias_control_run(tmp_path, "run-alias-false", drop=("C-2",), controls={"C-1": ("false_allegation", 1)})
+
+    block = safe_controls(aggregate.aggregate([run], policy=policy()))
+
+    assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (1, 1, 1, 0)
+    assert block["false_allegations"] == 1 and block["observed_false_allegations"] == 1
+    assert block["unscored"] == 1
+    assert block["completed_mass"] == 1.0 and block["assessable_mass"] == 1.0
+    assert block["resolved_rate"]["value"] == 1.0
+    assert block["completed_lower"] == 1.0 and block["completed_upper"]["value"] == 1.0
+
+
+def test_a_control_is_resolved_quiet_when_every_alias_the_schedule_froze_was_assessed_quiet(tmp_path):
+    """The same two records, both in the bundle's plan: the credit an unplanned alias withholds is granted here.
+
+    Both quiet: c = b = 1, so C = A = 1 and E = 0, the resolved rate is 0, and the completed bounds are
+    [0, (0 + 1 - 1)/1] = [0, 0]. Counts: 1 observation, completed, and resolved; nothing is unscored.
+    With the reviewer leaving C-2 unresolved instead, one record of the control is unsettled, as it is when C-2 is
+    absent from the plan: b = 0, so A = 0, the resolved rate is undefined, and F+ = (0 + 1 - 0)/1 = 1.
+    """
+    quiet = safe_controls(aggregate.aggregate([alias_control_run(tmp_path, "run-alias-both")], policy=policy()))
+    unsettled = safe_controls(aggregate.aggregate(
+        [alias_control_run(tmp_path, "run-alias-unsettled", controls={"C-2": "unresolved"})], policy=policy()))
+
+    assert (quiet["observations"], quiet["completed"], quiet["resolved"], quiet["unresolved"]) == (1, 1, 1, 0)
+    assert quiet["unscored"] == 0 and quiet["false_allegations"] == 0
+    assert quiet["assessable_mass"] == 1.0 and quiet["resolved_rate"]["value"] == 0.0
+    assert quiet["completed_lower"] == 0.0 and quiet["completed_upper"]["value"] == 0.0
+    assert (unsettled["completed"], unsettled["resolved"], unsettled["unresolved"]) == (1, 0, 1)
+    assert unsettled["unscored"] == 0 and unsettled["assessable_mass"] == 0.0
+    assert unsettled["resolved_rate"]["value"] is None and unsettled["completed_upper"]["value"] == 1.0
+
+
 def test_a_control_on_a_failed_scan_is_neither_completed_nor_resolved(tmp_path):
     """One control observed once, by a scan that timed out: C = A = 0, so every rate is null.
 
@@ -1017,6 +1103,304 @@ def test_items_frozen_but_absent_from_a_bundle_plan_are_misses_and_added_items_a
     observations = system(view(report))["observations"]
     assert observations["unscored_items"] == 1 and observations["unregistered_items"] == 1
     assert view(report)["canonical_targets"] == 2
+
+
+def alias_target_run(root: Path, run_id: str, **choices) -> Path:
+    """One input freezes two records, CVE-1 and GHSA-1, of one canonical target; one system scans it once.
+
+    *choices* are the arguments of :func:`scan`: the scan succeeds with native-ranked, resolved bundles unless
+    they say otherwise, and ``drop`` leaves a record out of the bundle's plan.
+    """
+    records = [target("CVE-1", canonical="X"), target("GHSA-1", canonical="X")]
+    return write_run(root, run_id, [planned("widget", targets=records)],
+                     outcomes={("widget", "sys-a", 1): scan(**choices)})
+
+
+def test_a_target_hit_through_one_alias_is_detected_and_assessable_while_another_alias_is_unplanned(tmp_path):
+    """CVE-1 and GHSA-1 are two records of one root cause; the bundle's plan holds CVE-1 only, and claim 1 hit it.
+
+    A hit on any record detects the canonical target, and the record the plan lacks cannot undo it: recall is 1, the
+    first hit is at rank 1, and the observation is completed and assessable (a confirmed hit is a resolved outcome).
+    It is still unscored, for the record the plan lacks: the one target observation is completed, assessable,
+    detected, and unscored, so the assessable mass and the unscored mass are both 1.
+    """
+    run = alias_target_run(tmp_path, "run-alias-hit", hits={"CVE-1": 1}, drop=("GHSA-1",))
+
+    report = aggregate.aggregate([run], policy=policy())
+
+    block = detection(slice_of(system(view(report))))
+    assert block["full_output_recall"]["value"] == 1.0 and budget(block, 1)["value"] == 1.0
+    coverage = block["coverage"]
+    assert (coverage["target_observations"], coverage["completed"], coverage["assessable"],
+            coverage["detected"], coverage["unscored"]) == (1, 1, 1, 1, 1)
+    assert coverage["assessable_mass"] == 1.0 and coverage["unscored_mass"] == 1.0
+    assert system(view(report))["first_hit_ranks"]["ranks"] == [{"rank": 1, "target_observations": 1}]
+
+
+def test_a_miss_on_one_alias_of_a_target_is_not_assessable_while_another_alias_is_unplanned(tmp_path):
+    """The same two records and a plan holding CVE-1 only, but no claim hit it.
+
+    The scan completed with resolved bundles, yet GHSA-1 was never scored and may have been hit, so the miss on CVE-1
+    is no resolved outcome for the root cause. The observation stays in the denominators as a miss, and it is unscored.
+    - Recall is 0, and the one target observation is completed and unscored, neither detected nor assessable.
+    - The completed mass is 1 and the unscored mass 1, but the assessable mass is 0: crediting the miss as resolved
+      made it 1.
+    With both records in the plan the same scan is a resolved miss: assessable, nothing unscored.
+    """
+    partial = aggregate.aggregate([alias_target_run(tmp_path, "run-alias-miss", drop=("GHSA-1",))],
+                                  policy=policy())
+    whole = aggregate.aggregate([alias_target_run(tmp_path, "run-alias-both-miss")], policy=policy())
+
+    block = detection(slice_of(system(view(partial))))
+    assert block["full_output_recall"]["value"] == 0.0
+    coverage = block["coverage"]
+    assert (coverage["target_observations"], coverage["completed"], coverage["assessable"],
+            coverage["detected"], coverage["unscored"]) == (1, 1, 0, 0, 1)
+    assert coverage["completed_mass"] == 1.0 and coverage["unscored_mass"] == 1.0
+    assert coverage["assessable_mass"] == 0.0
+    assert system(view(partial))["first_hit_ranks"]["not_detected"] == 1
+    resolved = detection(slice_of(system(view(whole))))["coverage"]
+    assert (resolved["completed"], resolved["assessable"], resolved["unscored"]) == (1, 1, 0)
+    assert resolved["assessable_mass"] == 1.0 and resolved["unscored_mass"] == 0.0
+
+
+def test_an_unplanned_alias_leaves_the_random_order_diagnostic_unmeasured_like_a_pending_match(tmp_path):
+    """An unranked scan delivers 4 claims and a reviewer accepted the second for CVE-1; GHSA-1 is planned or not.
+
+    With both records in the plan the observation is measured: one accepted claim among 4, so at B = 1 the expectation
+    is 1 - C(3,1)/C(4,1) = 1/4 and at B = 5, b = min(5, 4) = 4 and it is 1; the observation mass is 1, the pending 0.
+    With GHSA-1 absent the accepted claims are only a lower bound, as under a pending match: the observation leaves
+    the observation mass and counts in the pending mass, and no expectation is reported for it. Recall is the same
+    either way, because CVE-1's hit detects the target.
+    """
+    scanned = {"hits": {"CVE-1": 2}, "claims": 4, "ranking": "unranked"}
+    partial = aggregate.aggregate([alias_target_run(tmp_path, "run-alias-random", drop=("GHSA-1",), **scanned)],
+                                  policy=policy())
+    whole = aggregate.aggregate([alias_target_run(tmp_path, "run-alias-random-both", **scanned)], policy=policy())
+
+    measured = detection(slice_of(system(view(whole))))["random_order_diagnostic"]
+    assert measured["observation_mass"] == 1.0 and measured["pending_mass"] == 0.0
+    assert measured["expected_recall"] == [{"budget": 1, "value": 0.25}, {"budget": 5, "value": 1.0}]
+    block = detection(slice_of(system(view(partial))))
+    unmeasured = block["random_order_diagnostic"]
+    assert unmeasured["observation_mass"] == 0.0 and unmeasured["pending_mass"] == 1.0
+    assert unmeasured["expected_recall"] == [{"budget": 1, "value": None}, {"budget": 5, "value": None}]
+    assert block["full_output_recall"]["value"] == 1.0
+    assert block["coverage"]["assessable_mass"] == 1.0
+
+
+def test_a_target_the_bundle_plan_holds_no_record_of_is_pending_in_the_random_order_diagnostic(tmp_path):
+    """An unranked scan delivers 4 claims and none was accepted; the plan holds both records, one, or neither.
+
+    A record the plan lacks was never scored, so the accepted claims are only a lower bound and no expectation is
+    read for it, whether one record is absent or all of them are: the observation leaves the observation mass and
+    counts in the pending mass. Every unranked valid output is measured or pending, so the two masses add to 1.
+    - Both records planned: measured, observation mass 1 and pending mass 0; nothing was accepted, so 0 at B = 1 and 5.
+    - GHSA-1 absent, or CVE-1 and GHSA-1 both absent: observation mass 0 and pending mass 1, and no expectation.
+    - A target of one record, absent: the same, so absence of any size is pending.
+    With every record absent the target is unscored and not assessable, and still a miss in recall (0). A partial scan
+    still delivers valid output, so it is pending like a successful one; a scan that timed out delivered none to
+    measure, so it is neither measured nor pending.
+    """
+    scanned = {"claims": 4, "ranking": "unranked"}
+
+    def detected(run: Path) -> dict:
+        return detection(slice_of(system(view(aggregate.aggregate([run], policy=policy())))))
+
+    def masses(block: dict) -> tuple[float, float]:
+        diagnostic = block["random_order_diagnostic"]
+        return diagnostic["observation_mass"], diagnostic["pending_mass"]
+
+    both = detected(alias_target_run(tmp_path, "run-random-both", **scanned))
+    one = detected(alias_target_run(tmp_path, "run-random-one", drop=("GHSA-1",), **scanned))
+    neither = detected(alias_target_run(tmp_path, "run-random-neither", drop=("CVE-1", "GHSA-1"), **scanned))
+    lone = detected(write_run(tmp_path, "run-random-lone", [planned("widget", targets=[target("T-1")])],
+                              outcomes={("widget", "sys-a", 1): scan(drop=("T-1",), **scanned)}))
+    partial = detected(alias_target_run(tmp_path, "run-random-partial", drop=("CVE-1", "GHSA-1"), status="partial",
+                                        **scanned))
+    stopped = detected(alias_target_run(tmp_path, "run-random-timeout", drop=("CVE-1", "GHSA-1"), status="timeout",
+                                        resolved=False, **scanned))
+
+    assert masses(both) == (1.0, 0.0)
+    assert both["random_order_diagnostic"]["expected_recall"] == [{"budget": 1, "value": 0.0},
+                                                                   {"budget": 5, "value": 0.0}]
+    assert masses(one) == (0.0, 1.0) and masses(neither) == (0.0, 1.0) and masses(lone) == (0.0, 1.0)
+    assert masses(partial) == (0.0, 1.0)
+    assert neither["random_order_diagnostic"]["expected_recall"] == [{"budget": 1, "value": None},
+                                                                      {"budget": 5, "value": None}]
+    assert neither["full_output_recall"]["value"] == 0.0
+    coverage = neither["coverage"]
+    assert (coverage["unscored"], coverage["assessable"]) == (1, 0)
+    assert coverage["unscored_mass"] == 1.0 and coverage["assessable_mass"] == 0.0
+    assert masses(stopped) == (0.0, 0.0)
+
+
+def test_a_pair_is_resolved_through_an_alias_only_by_a_hit_while_another_alias_is_unplanned(tmp_path):
+    """The vulnerable input freezes CVE-1 and GHSA-1 (one root cause, X); the fixed input a control of CVE-1, quiet.
+
+    In both runs the vulnerable bundle's plan holds CVE-1 only.
+    - No claim hit CVE-1: GHSA-1 was never scored, so the vulnerable side is not assessable and the pair is
+      unresolved: it has no outcome, the resolved pairs and the assessable mass are 0, and Q = 0. Crediting the miss
+      as resolved made the pair 'both silent'.
+    - Claim 1 hit CVE-1: the hit is a resolved outcome whatever GHSA-1 would have said, so the pair is resolved and
+      correct: Q = 1, with one resolved pair.
+    """
+    inputs = [planned("vulnerable", targets=[target("CVE-1", canonical="X"), target("GHSA-1", canonical="X")]),
+              planned("fixed", controls=[control("C-fixed", kind="fixed_target", target_id="CVE-1")])]
+    missed = write_run(tmp_path, "run-pair-miss", inputs,
+                       outcomes={("vulnerable", "sys-a", 1): scan(drop=("GHSA-1",))})
+    hit = write_run(tmp_path, "run-pair-hit", inputs,
+                    outcomes={("vulnerable", "sys-a", 1): scan(hits={"CVE-1": 1}, drop=("GHSA-1",))})
+
+    unresolved = detection(slice_of(system(view(aggregate.aggregate([missed], policy=policy())))))["pairs"]
+    correct = detection(slice_of(system(view(aggregate.aggregate([hit], policy=policy())))))["pairs"]
+
+    assert (unresolved["pairable_targets"], unresolved["repetition_pairs"], unresolved["resolved_pairs"]) == (1, 1, 0)
+    assert unresolved["assessable_mass"] == 0.0 and unresolved["value"] == 0.0
+    assert all(item["pairs"] == 0 for item in unresolved["outcomes"].values())
+    assert (correct["repetition_pairs"], correct["resolved_pairs"]) == (1, 1)
+    assert correct["assessable_mass"] == 1.0 and correct["value"] == 1.0
+    assert correct["outcomes"]["correct"]["pairs"] == 1
+
+
+def alias_pair_run(root: Path, run_id: str, *, canonical=("K", "K"), **fixed) -> Path:
+    """Two frozen pairs whose fixed states are two records of one control; one system scans each input once.
+
+    The vulnerable input freezes T-CVE and T-GHSA, two records of one root cause X, and the fixed input a fixed-target
+    control of each: C-CVE of T-CVE and C-GHSA of T-GHSA, whose canonical ids are the two in *canonical* (both K by
+    default, so one control). The schedule freezes the pairs (T-CVE, C-CVE) and (T-GHSA, C-GHSA), and the vulnerable
+    scan accepts claim 1 for T-CVE, so the vulnerable side of both is a resolved hit whatever the fixed side says.
+    *fixed* are the arguments of :func:`scan` for the fixed input, which succeeds with resolved bundles by default.
+    """
+    vulnerable = planned("vulnerable", targets=[target("T-CVE", canonical="X"), target("T-GHSA", canonical="X")])
+    fixed_input = planned("fixed", controls=[
+        control("C-CVE", kind="fixed_target", target_id="T-CVE", canonical=canonical[0]),
+        control("C-GHSA", kind="fixed_target", target_id="T-GHSA", canonical=canonical[1])])
+    return write_run(root, run_id, [vulnerable, fixed_input], outcomes={
+        ("vulnerable", "sys-a", 1): scan(hits={"T-CVE": 1}), ("fixed", "sys-a", 1): scan(**fixed)})
+
+
+def pair_block(report: dict) -> dict:
+    """The pair correctness block of a report's whole view, for its one system."""
+    return detection(slice_of(system(view(report))))["pairs"]
+
+
+def fixed_controls(report: dict) -> dict:
+    """The fixed-target control block of a report's whole view, for its one system."""
+    return slice_of(system(view(report)))["controls"]["fixed_target"]
+
+
+def test_a_pair_is_unresolved_while_an_alias_of_its_fixed_state_control_is_unplanned_or_unresolved(tmp_path):
+    """C-CVE and C-GHSA are two records of one control K; C-CVE is assessed quiet and C-GHSA is absent or unsettled.
+
+    K was never fully assessed, so the fixed_target block counts it completed and unresolved (F+ = 1): it is unscored
+    when the bundle's plan drops C-GHSA, and not when the reviewer leaves C-GHSA unresolved. A pair earns no credit for
+    a control that block counts as unresolved, and the vulnerable side (a hit on T-CVE) is a resolved hit in both pairs.
+    - Neither pair is resolved: no outcome, resolved pairs 0, assessable mass 0, and Q = 0 over the two pairs.
+    Reading each pair's own record alone resolved (T-CVE, C-CVE) as correct: one resolved pair of two, so the
+    assessable mass and Q were 1/2, beside a fixed_target block that counted the control unresolved.
+    """
+    dropped = aggregate.aggregate([alias_pair_run(tmp_path, "run-pair-alias-dropped", drop=("C-GHSA",))],
+                                  policy=policy())
+    unsettled = aggregate.aggregate(
+        [alias_pair_run(tmp_path, "run-pair-alias-unsettled", controls={"C-GHSA": "unresolved"})], policy=policy())
+
+    for report, unscored in ((dropped, 1), (unsettled, 0)):
+        pairs = pair_block(report)
+        assert (pairs["pairable_targets"], pairs["repetition_pairs"], pairs["resolved_pairs"]) == (1, 2, 0)
+        assert pairs["assessable_mass"] == 0.0 and pairs["value"] == 0.0
+        assert all(item["pairs"] == 0 and item["mass"] == 0.0 for item in pairs["outcomes"].values())
+        fixed = fixed_controls(report)
+        assert (fixed["observations"], fixed["completed"], fixed["resolved"], fixed["unresolved"]) == (1, 1, 0, 1)
+        assert fixed["unscored"] == unscored and fixed["completed_upper"]["value"] == 1.0
+
+
+def test_a_false_allegation_on_an_alias_of_a_fixed_state_control_flags_every_pair_through_it(tmp_path):
+    """The same two pairs; both records are planned, C-CVE is quiet, and a false allegation was confirmed on C-GHSA.
+
+    A false allegation about any record of K is one about K, so the fixed_target block counts K resolved and false
+    (E = A = C = 1, and F+ = 1). The fixed state of both pairs is flagged, and with the hit on T-CVE both are 'both
+    flagged': two resolved pairs, assessable mass 1, no correct pair, so Q = 0 and the outcome has mass 2/2 = 1.
+    Reading each pair's own record alone made (T-CVE, C-CVE) correct: one correct and one both flagged, Q = 1/2.
+    The allegation stands the same when the pair's own record is absent: with C-CVE dropped from the plan both pairs
+    are still both flagged, since K is resolved by the allegation whatever C-CVE would have said.
+    """
+    planned_both = aggregate.aggregate(
+        [alias_pair_run(tmp_path, "run-pair-alias-false", controls={"C-GHSA": ("false_allegation", 1)})],
+        policy=policy())
+    own_absent = aggregate.aggregate(
+        [alias_pair_run(tmp_path, "run-pair-alias-false-own-absent", drop=("C-CVE",),
+                        controls={"C-GHSA": ("false_allegation", 1)})], policy=policy())
+
+    for report in (planned_both, own_absent):
+        pairs = pair_block(report)
+        assert (pairs["pairable_targets"], pairs["repetition_pairs"], pairs["resolved_pairs"]) == (1, 2, 2)
+        assert pairs["assessable_mass"] == 1.0 and pairs["value"] == 0.0
+        assert (pairs["outcomes"]["both_flagged"]["pairs"], pairs["outcomes"]["both_flagged"]["mass"]) == (2, 1.0)
+        assert pairs["outcomes"]["correct"]["pairs"] == 0 and pairs["outcomes"]["correct"]["mass"] == 0.0
+        fixed = fixed_controls(report)
+        assert (fixed["observations"], fixed["completed"], fixed["resolved"]) == (1, 1, 1)
+        assert fixed["false_allegations"] == 1
+        assert fixed["resolved_rate"]["value"] == 1.0 and fixed["completed_upper"]["value"] == 1.0
+    assert fixed_controls(planned_both)["unscored"] == 0 and fixed_controls(own_absent)["unscored"] == 1
+
+
+def test_a_pair_is_credited_when_every_alias_of_its_fixed_state_control_was_assessed_quiet(tmp_path):
+    """The credit an unplanned or unsettled alias withholds is granted once every record of K was assessed quiet.
+
+    Both records planned and quiet: K is resolved quiet, both pairs are correct, and Q = assessable mass = 1.
+    A record of another control takes no part: with C-CVE and C-GHSA the only records of two controls, K-CVE and K-GHSA,
+    and C-GHSA absent from the plan, (T-CVE, C-CVE) stays correct on K-CVE alone and only (T-GHSA, C-GHSA) is
+    unresolved: one resolved pair of two, so Q = assessable mass = 1/2, and the fixed_target block counts two controls
+    of which one is resolved.
+    """
+    quiet = aggregate.aggregate([alias_pair_run(tmp_path, "run-pair-alias-quiet")], policy=policy())
+    apart = aggregate.aggregate([alias_pair_run(tmp_path, "run-pair-controls-apart", canonical=("K-CVE", "K-GHSA"),
+                                                drop=("C-GHSA",))], policy=policy())
+
+    pairs = pair_block(quiet)
+    assert (pairs["repetition_pairs"], pairs["resolved_pairs"]) == (2, 2)
+    assert pairs["assessable_mass"] == 1.0 and pairs["value"] == 1.0 and pairs["outcomes"]["correct"]["pairs"] == 2
+    fixed = fixed_controls(quiet)
+    assert (fixed["observations"], fixed["resolved"], fixed["unscored"]) == (1, 1, 0)
+    assert fixed["resolved_rate"]["value"] == 0.0 and fixed["completed_upper"]["value"] == 0.0
+    pairs = pair_block(apart)
+    assert (pairs["repetition_pairs"], pairs["resolved_pairs"]) == (2, 1)
+    assert pairs["assessable_mass"] == 0.5 and pairs["value"] == 0.5
+    assert pairs["outcomes"]["correct"]["pairs"] == 1 and pairs["outcomes"]["correct"]["mass"] == 0.5
+    fixed = fixed_controls(apart)
+    assert (fixed["canonical_controls"], fixed["observations"], fixed["resolved"], fixed["unresolved"]) == (2, 2, 1, 1)
+
+
+def test_a_pair_is_unresolved_only_in_the_repetition_whose_fixed_bundle_lacks_an_alias(tmp_path):
+    """The same two pairs run twice: repetition 1's fixed bundle plans C-CVE and C-GHSA, repetition 2's only C-CVE.
+
+    Every repetition pair reads the fixed bundle of its own repetition, so 2 pairs x 2 repetitions are 4 repetition
+    pairs, and the two of repetition 1 are resolved and correct (a hit on T-CVE, K quiet) while the two of repetition
+    2 are unresolved: K was never fully assessed there.
+    - Resolved pairs 2 of 4, so the assessable mass and Q are 2/4 = 1/2, and the correct outcome has mass 1/2.
+    - The fixed_target block has 2 observations of K, one per repetition: 1 resolved and 1 unresolved and unscored, so
+      A = 1/2, C = 1, and F+ = (0 + 1 - 1/2)/1 = 1/2.
+    Reading each pair's own record alone resolved (T-CVE, C-CVE) in repetition 2 as well: 3 of 4, and Q = 3/4.
+    """
+    vulnerable = planned("vulnerable", targets=[target("T-CVE", canonical="X"), target("T-GHSA", canonical="X")])
+    fixed_input = planned("fixed", controls=[
+        control("C-CVE", kind="fixed_target", target_id="T-CVE", canonical="K"),
+        control("C-GHSA", kind="fixed_target", target_id="T-GHSA", canonical="K")])
+    run = write_run(tmp_path, "run-pair-alias-repeated", [vulnerable, fixed_input], repetitions=2, outcomes={
+        ("vulnerable", "sys-a", 1): scan(hits={"T-CVE": 1}), ("vulnerable", "sys-a", 2): scan(hits={"T-CVE": 1}),
+        ("fixed", "sys-a", 2): scan(drop=("C-GHSA",))})
+
+    report = aggregate.aggregate([run], policy=policy())
+
+    pairs = pair_block(report)
+    assert (pairs["pairable_targets"], pairs["repetition_pairs"], pairs["resolved_pairs"]) == (1, 4, 2)
+    assert pairs["assessable_mass"] == 0.5 and pairs["value"] == 0.5
+    assert pairs["outcomes"]["correct"]["pairs"] == 2 and pairs["outcomes"]["correct"]["mass"] == 0.5
+    fixed = fixed_controls(report)
+    assert (fixed["observations"], fixed["completed"], fixed["resolved"], fixed["unresolved"]) == (2, 2, 1, 1)
+    assert fixed["unscored"] == 1 and fixed["assessable_mass"] == 0.5 and fixed["completed_mass"] == 1.0
+    assert fixed["completed_upper"]["value"] == 0.5
 
 
 def test_an_input_without_a_frozen_plan_is_listed_and_left_out_of_target_metrics(tmp_path):
