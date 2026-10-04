@@ -939,8 +939,8 @@ approval would no longer cover it, `pr-scope` would say so on stderr, and nothin
 approval across. `corpus canonical` is the same kind of write for a canonical root cause or property.
 
 That is also how a scope exclusion is declared: before the run, by leaving the item out of the plan. A
-scanner's own omission is never one. Every control in a PR plan carries `paths`, the paths of its pack
-locations, and a PR result may list `omitted_paths`, the paths the change touches that the scanner did
+scanner's own omission is never one. A control in a PR plan carries `paths`, the paths of its pack
+locations (a control with no location carries none), and a PR result may list `omitted_paths`, the paths the change touches that the scanner did
 not examine: Semgrep lists those not among its `paths.scanned`, and DeepSec the changed paths it made no
 file record for, its own ignore filter's drops among them. A quiet assessment of a control on a listed
 path, or of one whose plan gives it no paths while the result lists any, resolves nothing. The control
