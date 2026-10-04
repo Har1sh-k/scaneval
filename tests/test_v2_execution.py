@@ -382,9 +382,11 @@ def _with(outcome: NativeOutcome, **fields) -> NativeOutcome:
         (lambda outcome: _with(outcome, omitted_paths="src/app.py"), "omitted_paths must be a list or None, not str"),
         (lambda outcome: _with(outcome, omitted_paths=["src/a.py", 7]), "omitted_paths[1] must be a string, not int"),
         (lambda outcome: _with(outcome, omitted_paths=[None]), "omitted_paths[0] must be a string, not NoneType"),
+        (lambda outcome: _with(outcome, examined_nothing="yes"), "examined_nothing must be a bool or None, not str"),
+        (lambda outcome: _with(outcome, examined_nothing=1), "examined_nothing must be a bool or None, not int"),
     ],
     ids=["float-version", "path-in-command", "dict-outcome", "artifact-id", "usage-string", "note-object",
-         "omitted-string", "omitted-number", "omitted-none"],
+         "omitted-string", "omitted-number", "omitted-none", "examined-text", "examined-number"],
 )
 def test_an_outcome_that_breaks_the_adapter_contract_is_a_recorded_error(tmp_path, mutate, fragment):
     """An outcome this module cannot read is an error bundle, never a success with fields dropped."""
@@ -3015,6 +3017,56 @@ def test_an_omitted_path_utf8_cannot_encode_is_rendered_and_the_list_is_still_so
     execution = load_document(bundle / "execution.json", "execution-record")
     assert result["status"] == "success" and result["omitted_paths"] == ["a\\ud800", "a~", "b.py"]
     assert any("bytes UTF-8 cannot encode" in note for note in execution["notes"])
+
+
+def test_a_result_says_nothing_about_examination_unless_the_adapter_reported_it(tmp_path):
+    result = load_document(run(tmp_path, PrAdapter(), pr_input(tmp_path)) / "result.json", "scan-result")
+
+    assert result["schema_version"] == "2.1" and "examined_nothing" not in result, \
+        "an adapter that does not report it says nothing about whether the scanner read any of the change"
+
+
+@pytest.mark.parametrize("examined_nothing", [True, False], ids=["nothing", "some"])
+def test_an_adapter_that_reports_whether_it_examined_nothing_has_it_written_as_it_said(tmp_path, examined_nothing):
+    adapter = PrOutcomeAdapter(lambda outcome: _with(outcome, omitted_paths=["README.md"],
+                                                     examined_nothing=examined_nothing))
+
+    bundle = run(tmp_path, adapter, pr_input(tmp_path))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    assert result["examined_nothing"] is examined_nothing and result["omitted_paths"] == ["README.md"]
+    assert result["schema_version"] == "2.1" and result["location_basis"] == "pr_head"
+    assert result["status"] == "success" and result["bundles_resolved"] is True and result["claims"], \
+        "it is the adapter's account of the scan and changes neither its status nor its claims"
+
+
+def test_examined_nothing_alone_is_written_without_a_list_of_omitted_paths(tmp_path):
+    adapter = PrOutcomeAdapter(lambda outcome: _with(outcome, examined_nothing=True))
+
+    result = load_document(run(tmp_path, adapter, pr_input(tmp_path)) / "result.json", "scan-result")
+
+    assert result["examined_nothing"] is True and "omitted_paths" not in result
+
+
+def test_a_scan_that_is_not_a_review_of_a_change_records_examined_nothing_in_a_2_1_result_too(tmp_path):
+    """The version moves for the field, whatever the mode: a 2.0 result has nowhere to put it."""
+    adapter = OutcomeAdapter(lambda outcome: _with(outcome, examined_nothing=True))
+
+    result = load_document(run(tmp_path, adapter) / "result.json", "scan-result")
+
+    assert result["schema_version"] == "2.1" and result["examined_nothing"] is True
+    assert "location_basis" not in result and "omitted_paths" not in result
+
+
+def test_a_result_the_contract_refused_carries_neither_the_list_nor_the_flag(tmp_path):
+    """The error recorded in place of it is built from known-good fields, so nothing the adapter said survives."""
+    adapter = PrOutcomeAdapter(lambda outcome: _with(outcome, omitted_paths=["../outside.py"],
+                                                     examined_nothing=True))
+
+    result = load_document(run(tmp_path, adapter, pr_input(tmp_path)) / "result.json", "scan-result")
+
+    assert result["status"] == "error" and result["error"]["code"] == "import_contract_violation"
+    assert "omitted_paths" not in result and "examined_nothing" not in result
 
 
 def test_the_workspace_git_diff_between_the_synthetic_commits_is_the_recorded_diff(tmp_path):

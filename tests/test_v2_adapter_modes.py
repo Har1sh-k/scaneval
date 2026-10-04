@@ -95,6 +95,13 @@ def test_an_outcome_reports_no_omitted_paths_until_an_adapter_says_which():
     assert NativeOutcome(status="success", exit_code=0, command=[], omitted_paths=[]).omitted_paths == []
 
 
+def test_an_outcome_says_nothing_about_having_examined_nothing_until_an_adapter_says_so():
+    """``None`` is an adapter that does not report it; ``False`` is one that saw some of the input examined."""
+    assert NativeOutcome(status="success", exit_code=0, command=[]).examined_nothing is None
+    assert NativeOutcome(status="success", exit_code=0, command=[], examined_nothing=False).examined_nothing is False
+    assert NativeOutcome(status="success", exit_code=0, command=[], examined_nothing=True).examined_nothing is True
+
+
 # --- reading the request ----------------------------------------------------------------
 
 
