@@ -44,17 +44,39 @@ def _ratio(numerator: int, denominator: int) -> float | None:
     return numerator / denominator if denominator else None
 
 
+def _unexamined_controls(plan: dict, result: dict) -> set[str]:
+    """The ids of the planned controls the saved scan is known not to have examined.
+
+    A result may list ``omitted_paths``: paths of its input the adapter observed the scanner did not
+    examine. A control is unexamined when it sits on one of them, or when the plan does not say where
+    it is (it has no ``paths``) while the result lists any, because a control the plan does not place
+    cannot be shown to lie outside an omission. A result that lists none leaves every control as
+    examined as this can tell. Both lists are another party's statement, the pack's for the plan and
+    the adapter's for the result, and this checks neither. It reads only the paths a result lists, so
+    a control on a path the listing never names is not here, whether or not the scanner read it.
+    """
+    omitted = set(result.get("omitted_paths") or ())
+    if not omitted:
+        return set()
+    return {control["control_id"] for control in plan["controls"]
+            if not control.get("paths") or not omitted.isdisjoint(control["paths"])}
+
+
 def _control_observations(plan: dict, result: dict, decisions: dict, claim_ids: set) -> dict:
     """Per control, what this one saved scan establishes about it, in plan order.
 
     ``completed`` is the scan's own claim to a valid complete observation, which only ``success``
     makes. ``resolved`` needs that completion and a resolved assessment: a confirmed false
     allegation, or a quiet assessment over output whose bundles are resolved, because silence
-    about a claim nobody has split is not silence. ``false_allegation`` is the completed-only
-    numerator, and ``observed_false_allegation`` keeps a reviewed failure from incomplete output
-    visible without letting that output into the rate.
+    about a claim nobody has split is not silence. A quiet assessment also resolves nothing for a
+    control the scan is known not to have examined (:func:`_unexamined_controls`), because a scanner
+    that never read a path says nothing about what is on it; the control stays a completed
+    observation that is unresolved, and a confirmed false allegation about it still resolves it.
+    ``false_allegation`` is the completed-only numerator, and ``observed_false_allegation`` keeps a
+    reviewed failure from incomplete output visible without letting that output into the rate.
     """
     controls = {x["control_id"]: x for x in plan["controls"]}
+    unexamined = _unexamined_controls(plan, result)
     assessments = {}
     for assessment in decisions["control_assessments"]:
         control_id = assessment["control_id"]
@@ -71,7 +93,7 @@ def _control_observations(plan: dict, result: dict, decisions: dict, claim_ids: 
         # A confirmed allegation is enough for failure, but quietness
         # requires assessable full output, including unresolved bundles.
         confirmed_false = decision == "false_allegation"
-        quiet = decision == "quiet" and result["bundles_resolved"]
+        quiet = decision == "quiet" and result["bundles_resolved"] and control_id not in unexamined
         observations[control_id] = {
             "type": control["type"],
             "decision": decision,
@@ -103,9 +125,12 @@ def observe(plan: dict, result: dict, decisions: dict) -> dict:
     both read the same decisions the same way: bindings are checked first, one claim or exact
     duplicate group can hit at most one target, a duplicate earns no second hit, an unresolved
     match earns nothing and is counted as pending, and only ``success`` output can make a control
-    observation complete. A target's ``first_hit_rank`` is measured only for native order over
-    resolved bundles; ``budget_measurable`` says whether a finite budget can be read off this scan
-    at all, which is a different fact from a measured miss.
+    observation complete. A quiet assessment resolves a control only when the scan is not known to
+    have left it unexamined, which a result's ``omitted_paths`` and a plan control's ``paths`` say;
+    the observation is complete and unresolved otherwise, so it is counted and never dropped. A
+    target's ``first_hit_rank`` is measured only for native order over resolved bundles;
+    ``budget_measurable`` says whether a finite budget can be read off this scan at all, which is a
+    different fact from a measured miss.
 
     Inputs are immutable, and nothing here reads a clock, the network, or a random source.
     """
@@ -287,6 +312,16 @@ clock, randomness or LLM calls are used.
         warnings.append("Random-order expectation is not native prioritization or a promotion metric.")
     if result["status"] != "success":
         warnings.append("Incomplete or failed execution cannot establish a successful negative control.")
+    unexamined = _unexamined_controls(plan, result)
+    # Counted from the observation, so it names exactly the quiet assessments that would have resolved a control
+    # but for the omission, and never one that something else already left unresolved.
+    withheld = sum(1 for row in observation["controls"]
+                   if row["decision"] == "quiet" and row["completed"] and result["bundles_resolved"]
+                   and row["control_id"] in unexamined)
+    if withheld:
+        warnings.append(
+            f"{withheld} quiet control assessment(s) earn no credit: the scan lists paths it did not examine, and each "
+            "of these controls is on one of them or is placed by no path, so its silence says nothing about it.")
 
     return {
         "schema_version": "2.0",

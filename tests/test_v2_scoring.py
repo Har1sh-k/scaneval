@@ -394,3 +394,169 @@ def test_observe_marks_a_budget_unmeasurable_rather_than_missed():
         bundled, matches=[("c1", "T1", "accepted", "specific root cause")]))
     assert observed["budget_measurable"] is False and observed["random_order"] is None
     assert observed["claims"]["delivered"] is None
+
+
+# --- a control on a path the scan did not examine ----------------------------------------------------------
+#
+# A change that touches only tests/server.test.js is a success when the scanner's own filter drops that file,
+# though nothing was inspected, and a quiet assessment of the control planned there used to resolve it. A result
+# may now list the paths its scanner did not examine and a plan control may say where it is.
+
+SERVER_TEST = "tests/server.test.js"
+QUIET = [("C1", "quiet", [], "the scanner said nothing about the control")]
+
+
+def placed(control_id: str, paths: list[str] | None = None, *, kind: str = "capability_safe") -> dict:
+    """A plan control; with *paths* the plan says where it is, and without them it places it nowhere."""
+    control = {"control_id": control_id, "description": f"control {control_id}", "type": kind,
+               "validation_level": "fixture"}
+    if paths is not None:
+        control["paths"] = paths
+    return control
+
+
+def omission_fixture(controls: list[dict], omitted: list[str] | None, assessments, *, claims=(), **result_fields):
+    """``(plan, result, decisions)``: a 2.1 plan of *controls* and a 2.1 result that lists *omitted*, if it lists any."""
+    plan = {**make_plan(controls=controls), "schema_version": "2.1"}
+    result = {**make_result(list(claims), **result_fields), "schema_version": "2.1"}
+    if omitted is not None:
+        result["omitted_paths"] = omitted
+    return plan, result, make_decisions(result, controls=assessments)
+
+
+def withheld_warnings(record: dict) -> list[str]:
+    return [warning for warning in record["warnings"] if "quiet control assessment(s) earn no credit" in warning]
+
+
+def test_a_quiet_assessment_of_a_control_on_a_path_the_scan_did_not_examine_resolves_nothing():
+    """The case the review found: the scan completed, and the control it never read was resolved quiet.
+
+    The control stays a completed observation, as it was, and is no longer resolved. So the false-alarm bound counts
+    it as unresolved, which is what the aggregate does for a control the plan lacks, and it is never dropped.
+    """
+    from scaneval.scoring import observe
+
+    plan, result, decisions = omission_fixture([placed("C1", [SERVER_TEST])], [SERVER_TEST], QUIET)
+
+    assert observe(plan, result, decisions)["controls"] == [
+        {"control_id": "C1", "type": "capability_safe", "decision": "quiet", "completed": True,
+         "resolved": False, "false_allegation": False, "observed_false_allegation": False}]
+    record = score(plan, result, decisions)
+    safe = record["metrics"]["controls"]["capability_safe"]
+    assert (safe["assigned"], safe["completed"], safe["resolved"], safe["false_allegations"]) == (1, 1, 0, 0)
+    assert safe["completion_mass"] == 1.0 and safe["assessable_mass"] == 0.0
+    assert safe["resolved_false_alarm_rate"] is None
+    assert safe["sensitivity_lower"] == 0.0 and safe["sensitivity_upper"] == 1.0
+    [warning] = withheld_warnings(record)
+    assert warning.startswith("1 quiet control assessment(s) earn no credit: the scan lists paths it did not examine")
+    assert record["warnings"][-1] == warning
+
+
+def test_a_control_on_an_examined_path_in_the_same_result_keeps_its_quiet_credit():
+    from scaneval.scoring import observe
+
+    plan, result, decisions = omission_fixture(
+        [placed("C1", [SERVER_TEST]), placed("C2", ["src/app.py"])], [SERVER_TEST],
+        [("C1", "quiet", [], "no claim"), ("C2", "quiet", [], "no claim")])
+
+    rows = {row["control_id"]: row for row in observe(plan, result, decisions)["controls"]}
+    assert (rows["C1"]["completed"], rows["C1"]["resolved"]) == (True, False)
+    assert (rows["C2"]["completed"], rows["C2"]["resolved"]) == (True, True)
+    record = score(plan, result, decisions)
+    safe = record["metrics"]["controls"]["capability_safe"]
+    assert (safe["assigned"], safe["completed"], safe["resolved"]) == (2, 2, 1)
+    assert safe["resolved_false_alarm_rate"] == 0.0 and safe["sensitivity_upper"] == 0.5
+    assert len(withheld_warnings(record)) == 1 and withheld_warnings(record)[0].startswith("1 quiet control")
+
+
+def test_a_confirmed_false_allegation_on_an_omitted_path_still_counts():
+    """A control is still failed by an allegation a reviewer confirmed: only silence is withheld."""
+    from scaneval.scoring import observe
+
+    alleged = claim("c1", "the handler runs the request body as a command", rank=1, path=SERVER_TEST)
+    plan, result, decisions = omission_fixture(
+        [placed("C1", [SERVER_TEST])], [SERVER_TEST], [("C1", "false_allegation", ["c1"], "confirmed")],
+        claims=[alleged])
+
+    row = observe(plan, result, decisions)["controls"][0]
+    assert (row["completed"], row["resolved"], row["false_allegation"], row["observed_false_allegation"]) == (
+        True, True, True, True)
+    record = score(plan, result, decisions)
+    safe = record["metrics"]["controls"]["capability_safe"]
+    assert (safe["resolved"], safe["false_allegations"], safe["resolved_false_alarm_rate"]) == (1, 1, 1.0)
+    assert withheld_warnings(record) == [], "nothing was withheld: the control was resolved by the allegation"
+
+
+@pytest.mark.parametrize("omitted, resolved", [(["README.md"], False), ([], True), (None, True)],
+                         ids=["lists-one", "lists-none", "no-listing"])
+def test_a_control_the_plan_places_nowhere_earns_no_quiet_credit_when_the_result_lists_any_omission(omitted, resolved):
+    """It cannot be shown to lie outside an omission, so it is counted as inside; with no omission it is not."""
+    from scaneval.scoring import observe
+
+    plan, result, decisions = omission_fixture([placed("C1")], omitted, QUIET)
+
+    row = observe(plan, result, decisions)["controls"][0]
+    assert (row["completed"], row["resolved"]) == (True, resolved)
+    assert bool(withheld_warnings(score(plan, result, decisions))) is (not resolved)
+
+
+@pytest.mark.parametrize("omitted, resolved", [
+    (["lib/b.py"], False), (["lib/a.py", "lib/b.py"], False), (["lib/a.py", "lib/z.py"], False),
+    (["lib/c.py"], True), (["lib"], True), (["Lib/a.py"], True), ([], True),
+], ids=["second", "both", "first", "other-file", "its-directory", "another-case", "none"])
+def test_a_control_is_unexamined_when_any_one_of_its_paths_is_omitted_and_paths_match_exactly(omitted, resolved):
+    from scaneval.scoring import observe
+
+    plan, result, decisions = omission_fixture([placed("C1", ["lib/a.py", "lib/b.py"])], omitted, QUIET)
+
+    assert observe(plan, result, decisions)["controls"][0]["resolved"] is resolved
+
+
+def test_a_control_of_both_classes_is_withheld_once_and_stays_completed_in_each():
+    plan, result, decisions = omission_fixture([placed("C1", [SERVER_TEST], kind="both")], [SERVER_TEST], QUIET)
+
+    record = score(plan, result, decisions)
+
+    for name in ("capability_safe", "fixed_target"):
+        control = record["metrics"]["controls"][name]
+        assert (control["assigned"], control["completed"], control["resolved"]) == (1, 1, 0)
+    assert withheld_warnings(record)[0].startswith("1 quiet control assessment(s)")
+
+
+@pytest.mark.parametrize("fields", [{"status": "partial"}, {"status": "error"}, {"bundles_resolved": False}],
+                         ids=["partial", "error", "unresolved-bundles"])
+def test_the_warning_is_only_for_a_quiet_assessment_the_omission_alone_left_unresolved(fields):
+    """A scan that did not complete, or whose bundles are unresolved, earned the control nothing for that reason."""
+    from scaneval.scoring import observe
+
+    plan, result, decisions = omission_fixture([placed("C1", [SERVER_TEST])], [SERVER_TEST], QUIET, **fields)
+
+    assert observe(plan, result, decisions)["controls"][0]["resolved"] is False
+    assert withheld_warnings(score(plan, result, decisions)) == []
+
+
+def test_a_result_that_lists_no_omission_scores_exactly_as_it_did_and_the_new_fields_add_no_key():
+    """The plan's paths and an empty list are inert, and nothing new reaches the record or the observation rows."""
+    from scaneval.scoring import observe
+
+    old_plan = make_plan(controls=[placed("C1")])
+    old_result = make_result([claim("c1", "T1 specific root cause", rank=1)])
+    old_decisions = make_decisions(old_result, matches=[("c1", "T1", "accepted", "specific root cause")],
+                                   controls=QUIET)
+    new_plan, new_result, new_decisions = omission_fixture(
+        [placed("C1", ["src/app.py"])], [], QUIET, claims=[claim("c1", "T1 specific root cause", rank=1)])
+    new_decisions["claim_matches"] = old_decisions["claim_matches"]
+
+    old, new = score(old_plan, old_result, old_decisions), score(new_plan, new_result, new_decisions)
+
+    digests = ("result_sha256", "plan_sha256", "decisions_sha256")
+    assert {key: value for key, value in new.items() if key not in digests} == {
+        key: value for key, value in old.items() if key not in digests}
+    assert withheld_warnings(old) == [] and withheld_warnings(new) == []
+    assert set(old["metrics"]["controls"]["capability_safe"]) == {
+        "assigned", "completed", "resolved", "false_allegations", "observed_false_allegations",
+        "resolved_false_alarm_rate", "sensitivity_lower", "sensitivity_upper", "completion_mass", "assessable_mass"}
+    assert set(observe(new_plan, new_result, new_decisions)) == set(observe(old_plan, old_result, old_decisions)) == {
+        "result_sha256", "plan_sha256", "decisions_sha256", "status", "ranking", "bundles_resolved", "completed",
+        "valid_positive_output", "budget_measurable", "review_budgets", "targets", "controls", "random_order",
+        "claims", "duplicate_groups", "usage"}

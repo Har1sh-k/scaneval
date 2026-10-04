@@ -31,6 +31,7 @@ from scaneval.contracts import (
     pr_input_hash,
 )
 from scaneval.runner import MANIFEST_NAME, run_from_config
+from scaneval.scoring import score
 
 
 CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
@@ -409,6 +410,42 @@ def test_an_eligible_control_still_needs_a_completed_run_and_the_out_of_scope_on
         "an eligible control needs a completed run, so an error earns it nothing"
     assert errored["metrics"]["completed"] is False and completed["metrics"]["targets_detected"] == 0, \
         "the machine-drafted decisions confirm nothing"
+
+
+class OmittingAdapter(PrAdapter):
+    """Reviews the change but leaves ``src/app.py`` unexamined, as a scanner's own filter would, and says so."""
+
+    def scan(self, **kwargs):
+        outcome = super().scan(**kwargs)
+        outcome.omitted_paths = ["src/app.py"]
+        return outcome
+
+
+def quiet_control_score(bundle: Path) -> dict:
+    """The control block of *bundle*'s score once a reviewer has assessed its one eligible control quiet."""
+    plan = load_document(bundle / "evaluator" / "plan.json", "evaluation-plan")
+    result = load_document(bundle / "result.json", "scan-result")
+    decisions = load_document(bundle / "evaluator" / "decisions.json", "review-decisions")
+    [assessment] = decisions["control_assessments"]
+    assessment["decision"] = "quiet"
+    return score(plan, result, decisions)["metrics"]["controls"]["capability_safe"]
+
+
+def test_a_quiet_control_on_a_path_the_adapter_reported_omitted_earns_nothing_through_a_whole_run(tmp_path,
+                                                                                               pull_request):
+    """The plan places the control, the adapter says what its scanner left out, and the scorer reads both off the bundle."""
+    _, kept = run_pr(tmp_path / "kept", pull_request)
+    _, omitted = run_pr(tmp_path / "omitted", pull_request, adapters={"fake": OmittingAdapter()})
+    kept_bundle, omitted_bundle = bundle_of(kept, "cs-1__fake-a__r1"), bundle_of(omitted, "cs-1__fake-a__r1")
+
+    plan = load_document(omitted_bundle / "evaluator" / "plan.json", "evaluation-plan")
+    assert [(c["control_id"], c["paths"]) for c in plan["controls"]] == [("C-eligible", ["src/app.py"])]
+    result = load_document(omitted_bundle / "result.json", "scan-result")
+    assert result["status"] == "success" and result["omitted_paths"] == ["src/app.py"]
+    assert "omitted_paths" not in load_document(kept_bundle / "result.json", "scan-result")
+    for bundle, resolved in ((kept_bundle, 1), (omitted_bundle, 0)):
+        control = quiet_control_score(bundle)
+        assert (control["assigned"], control["completed"], control["resolved"]) == (1, 1, resolved)
 
 
 def schedule_seen_before_the_first_fetch(monkeypatch, out: Path) -> list[dict]:
