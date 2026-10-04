@@ -1,6 +1,6 @@
 # ScanEval evaluation math
 
-Companion to [the design decisions](DESIGN_DECISIONS.md). Updated 2026-09-18. Metric specification; implementation pending.
+Companion to [the design decisions](DESIGN_DECISIONS.md). Updated 2026-09-18. Metric specification. `scaneval aggregate` and `scaneval compare` compute sections 1, 2, 4, and 5 over saved runs ([aggregation](AGGREGATION.md)), except mixed-intent correctness, review-time and cost-provenance reporting, and the planning approximations. `scaneval precision` computes the section 3 estimators from a sampled human review ([precision](PRECISION.md)), except review-time estimation. Sections 6 to 8 are not implemented.
 
 Sections 1 through 6 define core reporting and planning. Sections 7 and 8 cover annotation-dependent diagnostics and optional research. These formulas use reviewed labels and recorded outcomes, not an LLM judge. Zero denominators mean N/A unless a convention explicitly states otherwise.
 
@@ -72,7 +72,7 @@ Label this random-order expected recall, not native recall@B or measured priorit
 
 A control $j$ is a validated security property, not an entire safe repository. Let $\mathcal O_j$ be its preassigned input/repetition observations, with weights $\lambda_{jo}$ summing to one. For each separately reported control class $\mathcal C$, freeze weights $u_j\geq0$, $\sum_{j\in\mathcal C}u_j=1$, independently of how many snapshots contain that control.
 
-For observation $o$, let $c_{sjo}=1$ when execution validly completes in the declared scope, and $b_{sjo}=1$ only when it also has a resolved control assessment, so $b_{sjo}\leq c_{sjo}$. On resolved observations, $z_{sjo}=1$ means a false allegation about that property and $z_{sjo}=0$ means no such allegation. An unrelated true issue is not $z=1$. Assess full output, not only the first $B$ claims.
+For observation $o$, let $c_{sjo}=1$ when execution validly completes in the declared scope, and $b_{sjo}=1$ only when it also has a resolved control assessment, so $b_{sjo}\leq c_{sjo}$. A quiet assessment resolves a control only when the scan is not known to have left it unexamined. A result may list `omitted_paths`, the paths of its input the scanner did not examine; a control on one of them, or one the plan places on no path while the result lists any, has $b_{sjo}=0$ however quiet the assessment, while $c_{sjo}$ stays 1, and a confirmed false allegation about it still resolves it. A result may also say `examined_nothing`, that no part of its input is shown to have been examined, which in a pull-request review is every path the change touches; then a quiet assessment resolves no control of it, one on a file the change leaves alone included, so $b_{sjo}=0$ for each unless a confirmed false allegation resolves it, because a scan that read none of what it was given reached none of them. A scan that examined some of the change leaves a control on an unchanged file as it was. A scanner's own selection is never a declaration of scope: a legitimate exclusion is made before the run, by leaving the item out of the plan, and an item left out is not an observation at all. On resolved observations, $z_{sjo}=1$ means a false allegation about that property and $z_{sjo}=0$ means no such allegation. An unrelated true issue is not $z=1$. Assess full output, not only the first $B$ claims.
 
 $$
 \widehat F_{\mathcal C,s}

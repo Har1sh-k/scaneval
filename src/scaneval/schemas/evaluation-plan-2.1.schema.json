@@ -1,0 +1,328 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/evaluation-plan-2.1.schema.json",
+  "title": "ScanEval evaluation plan (2.1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "input_hash",
+    "scope",
+    "targets",
+    "controls",
+    "review_budgets"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.1"
+    },
+    "input_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "scope": {
+      "enum": [
+        "diagnostic",
+        "draft",
+        "reviewed"
+      ],
+      "description": "Whether the plan's labels are diagnostic fixtures, drafts, or independently reviewed. Scope alone carries draft status: a draft plan may carry L1, L2, L3, or L4 items and keeps each item's real level, a reviewed plan may carry only L3 and L4, and a diagnostic plan only fixtures."
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "namespace",
+        "pack_id",
+        "pack_version",
+        "pack_sha256",
+        "snapshot_id",
+        "mode"
+      ],
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pack_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pack_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pack_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mode": {
+          "enum": [
+            "full",
+            "pr"
+          ]
+        },
+        "case_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "input_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "enum": [
+            "standard",
+            "metadata_blinded"
+          ]
+        },
+        "source_tree_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "The original export the labels and mechanical checks refer to. Differs from input_hash for a blinded or PR input."
+        },
+        "blinding": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "map_id",
+            "map_version",
+            "map_sha256"
+          ],
+          "properties": {
+            "map_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "map_version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "map_sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        },
+        "pr": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "change_set_id",
+            "base_snapshot_id",
+            "head_snapshot_id",
+            "base_tree_hash",
+            "head_tree_hash",
+            "diff_sha256",
+            "boundary",
+            "review_scope",
+            "location_basis"
+          ],
+          "properties": {
+            "change_set_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "base_snapshot_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "head_snapshot_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "base_tree_hash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "head_tree_hash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "diff_sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "boundary": {
+              "enum": [
+                "introducing",
+                "repair",
+                "ordinary"
+              ]
+            },
+            "review_scope": {
+              "enum": [
+                "changed_files",
+                "change_affected_flow"
+              ]
+            },
+            "location_basis": {
+              "const": "pr_head"
+            }
+          }
+        }
+      }
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/target"
+      }
+    },
+    "controls": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/control"
+      }
+    },
+    "review_budgets": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    }
+  },
+  "$defs": {
+    "validation_level": {
+      "enum": [
+        "fixture",
+        "L1",
+        "L2",
+        "L3",
+        "L4"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_id",
+        "description",
+        "validation_level"
+      ],
+      "properties": {
+        "target_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "validation_level": {
+          "$ref": "#/$defs/validation_level"
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonical_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pr_scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "relation",
+            "code_scope"
+          ],
+          "properties": {
+            "relation": {
+              "enum": [
+                "introduced",
+                "affected",
+                "repaired"
+              ]
+            },
+            "code_scope": {
+              "enum": [
+                "changed",
+                "context"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_id",
+        "description",
+        "type",
+        "validation_level"
+      ],
+      "properties": {
+        "control_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "enum": [
+            "capability_safe",
+            "fixed_target",
+            "both"
+          ]
+        },
+        "validation_level": {
+          "$ref": "#/$defs/validation_level"
+        },
+        "target_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonical_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pr_scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "relation",
+            "code_scope"
+          ],
+          "properties": {
+            "relation": {
+              "enum": [
+                "introduced",
+                "affected",
+                "repaired"
+              ]
+            },
+            "code_scope": {
+              "enum": [
+                "changed",
+                "context"
+              ]
+            }
+          }
+        },
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "The paths of the control's locations in the case pack: sorted, each once, and each a relative POSIX path with no leading '/' and no empty, '.', or '..' segment. Evaluator-side, never handed to a scanner, and read only to withhold quiet credit from a control on a path the scan result lists in omitted_paths. Absent means the plan does not say where the control is."
+        }
+      }
+    }
+  }
+}

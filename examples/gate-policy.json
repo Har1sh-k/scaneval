@@ -1,0 +1,70 @@
+{
+  "schema_version": "2.1",
+  "policy_id": "example-fixture-gate-policy",
+  "policy_version": "0.1.0-example",
+  "required_scope": "reviewed",
+  "view": {"mode": "full", "profile": "standard"},
+  "primary": {
+    "metric": {"kind": "recall_at_budget", "budget": 10},
+    "weighting": "equal_target",
+    "slice": {"dimension": "all"},
+    "min_improvement": 0.05,
+    "uncertainty": {"lower_bound_above": 0.0, "min_confidence": 0.95, "min_clusters": 5}
+  },
+  "regressions": [
+    {
+      "id": "full-recall",
+      "metric": {"kind": "full_recall"},
+      "weighting": "equal_target",
+      "slice": {"dimension": "all"},
+      "max_decrease": 0.02
+    },
+    {
+      "id": "recall-at-5",
+      "metric": {"kind": "recall_at_budget", "budget": 5},
+      "weighting": "equal_target",
+      "slice": {"dimension": "all"},
+      "max_decrease": 0.02
+    },
+    {
+      "id": "each-project",
+      "metric": {"kind": "full_recall"},
+      "weighting": "equal_target",
+      "slice": {"dimension": "project"},
+      "max_decrease": 0.10
+    },
+    {
+      "id": "agentic-workload",
+      "metric": {"kind": "full_recall"},
+      "weighting": "equal_target",
+      "slice": {"dimension": "workload", "value": "agentic_application"},
+      "max_decrease": 0.05,
+      "check_interval": true
+    }
+  ],
+  "precision": {
+    "basis": "resolved",
+    "population": {"name": "first_b", "budget": 10},
+    "min_value": 0.5,
+    "max_unresolved_share": 0.2,
+    "min_evidence_grade": "double_review_or_adjudicated",
+    "min_coverage": 0.9,
+    "min_interval_lower_bound": 0.4,
+    "max_decrease_vs_baseline": 0.05
+  },
+  "controls": {
+    "capability_safe": {"max_false_alarm_upper": 0.10, "min_completed_mass": 0.9, "min_assessable_mass": 0.9},
+    "fixed_target": {"max_false_alarm_upper": 0.10, "min_completed_mass": 0.9, "min_assessable_mass": 0.9}
+  },
+  "completion": {"min": 0.9, "max_decrease": 0.02},
+  "target_coverage": {"min_assessable_mass": 0.9},
+  "burden": {"max_claims_per_assignment": 20, "max_duplicate_share": 0.10, "max_increase_ratio": 2.0},
+  "cost": {"min_coverage": 1.0, "max_per_assignment_usd": 5.0, "max_increase_ratio": 2.0},
+  "configuration": {"allowed_differences": ["config.model"]},
+  "notes": [
+    "Example values for a fixture or a first try only; these are not recommended, reviewed, or validated tolerances.",
+    "Freeze your own thresholds before any result is read; choosing them after seeing results defeats the gate. A block you leave out is a requirement you do not make, and the decision says so.",
+    "This template declares every block so each field is shown. Delete the blocks you do not want; only primary, view, and configuration are required.",
+    "allowed_differences names the dotted configuration keys the comparison is meant to measure, as 'scaneval compare' lists them, and every key beneath one. Any other difference leaves the decision inconclusive."
+  ]
+}

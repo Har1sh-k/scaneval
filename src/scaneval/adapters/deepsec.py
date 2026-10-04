@@ -50,6 +50,68 @@ adapter cannot read is an error and never an empty successful scan. A run whose 
 report a file left in ``status: "error"``, a parse-failure dump under ``debug/``, or an
 agent refusal is ``partial`` with code ``deepsec_batches_failed``: part of the input
 reached no verdict, so the scan cannot stand as a complete or quiet observation of it.
+
+PR mode. A request whose ``input.mode`` is ``pr`` is a review of the change between two commits
+of the workspace's own history (:mod:`scaneval.adapters.pr`), run through DeepSec's own direct
+mode: ``process --diff <base>..<head>`` in place of the ``scan`` and ``process`` pair, then
+``export``. DeepSec itself lists the files that range changed (``git diff --name-only
+--diff-filter=AMRC``, so no deletion), drops any matching its default ignore filter, runs its regex
+scan over just those and investigates each. Which files it dropped is DeepSec's scope and not a
+failure, and this adapter says which: before the scanner starts it asks git for what changed, and
+afterwards names the changed paths that got no file record. ``--limit`` has no effect in direct
+mode (2.3.10 never passes it on), so it is not passed and the run says so.
+
+Two kinds of drop are not DeepSec's scope, and both come from its listing and not from the files.
+The listing is git's plain one (no ``-z``); DeepSec trims each line of it and keeps only the
+entries that name an existing file. So a path whose name git prints quoted (a non-ASCII name, or
+one holding a quote, a backslash or a control character) is never investigated, whatever its
+ignore filter says: the entry DeepSec holds is the quoted spelling, which names nothing. Nor is a
+path whose name begins or ends with a space, which git prints as it is and the trim then removes:
+the entry names another path, or none. Such a path with no file record is a known omission of part
+of the change, so the run is never a ``success``, the only status that lets the scoring contract
+complete a control and grant it quiet credit. Its bundles are unresolved, as when a file is left in
+``error``: the claims about the rest are a part delivered, and no claim budget is read off a part.
+The note names the path from one list (:class:`DroppedPaths`) in every such run, and the run says
+nothing about it.
+
+Whether the error names it too depends on whether another failure ends the run first: a timeout, a
+step that failed, an export that could not be read, a record or a finding that could not be
+imported, an exhausted quota, an errored batch, a record status DeepSec does not declare, or a file
+left unfinished. If none does, the run is ``partial`` with code ``scope_incomplete``, or an
+``error`` when no file reached a verdict, and the error names the path from the same list as the
+note. If one does, the run keeps that failure's own status, code and error, and only the note names
+the path. A file left unfinished also ends ``scope_incomplete``, so the code alone does not say
+which of the two errors the run carries. A path that only the ignore filter dropped stays a note:
+that is DeepSec's own scope.
+
+What the run says about the paths it did not examine. A PR run that carries the claims DeepSec
+produced, a ``success`` or a ``partial``, lists in the result's ``omitted_paths`` every path the
+change touches that DeepSec created no file record for: each path present at head with none,
+whatever the reason (the ignore filter, or a name its listing cannot resolve), and each path the
+change removed, which DeepSec never reads (:func:`unexamined_paths`). The list comes from the same
+comparison as the note and changes no status: a change that touches only paths DeepSec's filter
+drops is still an empty review and a ``success``, and DeepSec's own filtering is not touched. What
+it changes is what the scorer may conclude from that success. A control planned on a listed path, or
+one the plan places on no path, earns no quiet credit, because DeepSec's own selection is not a
+scope declared before the run; a scope exclusion is declared by leaving the item out of the plan.
+When the list is every path the change touches, so that DeepSec made a record for none of it, the
+result also says ``examined_nothing`` (:func:`~scaneval.adapters.pr.examined_nothing`), and then no
+control earns quiet credit, one on a file the change leaves alone included: a review that read none
+of the change reached no control. It says ``False`` when some path has a record. A full run reports
+no omissions and says neither.
+
+Direct mode exits 1 for three different reasons (a run that produced findings, a batch that
+errored, an exhausted quota) and also for a runtime failure such as an unresolvable range, so an
+exit 1 is not fatal here and is not innocent either. The run goes on to export, and what an exit 1
+means is read from DeepSec's own records: findings, files left in ``error`` or unfinished, a
+parse-failure dump. An exit 1 that none of those explains is an ``error`` naming the step. What
+DeepSec prints is used to name the reason, never to decide the status, because text an agent's
+output can reach must not be able to turn a failure into a success. A run stopped by an exhausted
+quota, with an errored batch, or with a changed path DeepSec could not list (above) is ``partial``
+when some file still reached a verdict and an ``error`` when none did. "Nothing to process" is a
+completed empty review only with exit 0, no file record, no changed path DeepSec could not list,
+and DeepSec's own statement that it found nothing to do; the same silence without that statement
+is an error.
 """
 
 from __future__ import annotations
@@ -61,7 +123,7 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import subprocess
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Sequence
 
 from ..collectors import EXTERNAL_PREFIX, relocate_paths, workspace_path
 from ..execution import list_directory
@@ -69,6 +131,7 @@ from ..kinds import kind_for_harness_class
 from ..observer import Observer, create_jsonl_sink
 from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command
 from .llm_harness import Enclosure, read_record
+from .pr import Change, examined_nothing, pr_range, removed_paths, workspace_changes
 
 
 ARTIFACT_EXPORT = "deepsec-export"
@@ -99,6 +162,18 @@ CAPTURE_KEYS = ("model_requests", "model_responses", "tool_calls", "context_sele
                 "finding_filtered")
 THINKING_LEVELS = ("minimal", "low", "medium", "high", "xhigh")
 AGENTS = ("claude", "codex", "pi")
+# What DeepSec 2.3.10's direct-mode ``process`` prints when a run ends (process.ts and quota-message.ts
+# in its bundle). It colors its output whether or not stdout is a terminal, so the escape sequences
+# come off before anything is matched.
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+NOTHING_TO_PROCESS = re.compile("^Nothing to process \u2014 exit 0\\.$", re.MULTILINE)
+QUOTA_STOPPED = re.compile("^\u2718 Stopped: (.+) exhausted$", re.MULTILINE)
+PROCESS_FINDINGS = re.compile(r"^ *Findings: ([0-9]+)$", re.MULTILINE)
+PROCESS_ERRORED_BATCHES = re.compile(r"^ *Errored batches: ([0-9]+)$", re.MULTILINE)
+# The summary is the last thing DeepSec prints, so the end of the file is what is read for it.
+PROCESS_OUTPUT_TAIL = 16384
+# Direct mode's exit for findings, an errored batch and an exhausted quota, and for a runtime failure.
+DIRECT_MODE_EXIT = 1
 
 
 def _shape(value: Any) -> str:
@@ -1467,11 +1542,279 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                        transcripts_found, imports_clean, tuple(notes))
 
 
+class ProcessOutput(NamedTuple):
+    """What DeepSec printed at the end of one direct-mode ``process`` run, and nothing more.
+
+    Every field is absent unless DeepSec's own summary line for it is there. This is advisory by
+    construction: stdout is text an agent's output can reach, so nothing here decides a status.
+    The records DeepSec wrote decide that, and this only names the reason (the quota source
+    DeepSec reported, how many batches it counted as errored) and carries DeepSec's own statement
+    that a diff selected no file, which the caller accepts only beside the records that agree.
+    """
+
+    quota: str | None = None
+    errored_batches: int | None = None
+    findings: int | None = None
+    nothing_to_process: bool = False
+
+
+def read_process_output(text: str) -> ProcessOutput:
+    """The summary of one direct-mode ``process`` run, read from the end of its stdout.
+
+    The last match of each line wins, since a summary is printed once and after everything else.
+    An empty or unreadable stdout is a :class:`ProcessOutput` with nothing in it, never an error:
+    a caller that needs the statement it would have carried treats its absence as absence.
+    """
+    plain = ANSI_ESCAPE.sub("", text)
+
+    def last(pattern: re.Pattern) -> str | None:
+        found = pattern.findall(plain)
+        return found[-1] if found else None
+
+    errored, findings = last(PROCESS_ERRORED_BATCHES), last(PROCESS_FINDINGS)
+    return ProcessOutput(quota=last(QUOTA_STOPPED),
+                         errored_batches=int(errored) if errored is not None else None,
+                         findings=int(findings) if findings is not None else None,
+                         nothing_to_process=bool(NOTHING_TO_PROCESS.search(plain)))
+
+
+def _listed(names: Sequence[str], limit: int = 8) -> str:
+    """At most *limit* of *names* joined for a note, and how many more there were.
+
+    A name DeepSec would trim (:func:`listing_trims`) is written as a JSON string. The space at its end is the
+    reason it is listed at all, and a space there cannot be seen in a list.
+    """
+    shown = [json.dumps(name) if listing_trims(name) else name for name in names[:limit]]
+    return ", ".join(shown) + (f" and {len(names) - limit} more" if len(names) > limit else "")
+
+
+def git_prints_quoted(path: str) -> bool:
+    """Whether git, by default (``core.quotePath``), prints *path* as a quoted, escaped string.
+
+    A name with a byte outside printable ASCII, a double quote, a backslash or a control character
+    is. DeepSec 2.3.10 reads git's plain-text listing (``git diff --name-only``, no ``-z``) and
+    keeps only entries that name an existing file, so it never selects such a path: the entry it
+    holds is the quoted spelling, which names nothing. Checked against the real CLI with a
+    non-ASCII name; the other characters are quoted by the same git rule and are not checked.
+    :func:`listing_trims` is the other way a name is lost to that listing.
+    """
+    return any(ord(char) < 0x20 or ord(char) >= 0x7F or char in '"\\' for char in path)
+
+
+# What JavaScript's ``String.prototype.trim`` takes off both ends of a string (ECMAScript's WhiteSpace and
+# LineTerminator), as Node reports it. It is spelled out because Python's ``str.strip`` is not the same set: it also
+# removes U+001C to U+001F and U+0085, which JavaScript keeps, and keeps U+FEFF, which JavaScript removes.
+JS_TRIM = ("\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+           "\u2028\u2029\u202f\u205f\u3000\ufeff")
+
+
+def listing_trims(path: str) -> bool:
+    """Whether DeepSec 2.3.10 looks for something other than *path*, because it trims each line of its listing first.
+
+    ``resolveFiles`` runs ``entry.trim()`` on every line of ``git diff --name-only`` before it looks for the file. A
+    name that begins or ends with a character in :data:`JS_TRIM` is therefore looked for without it, and the entry it
+    holds names another path, or none. Git quotes every one of those characters but the space (a control character,
+    and by default a non-ASCII one), and a quoted line starts and ends with a quote, which the trim leaves alone. So
+    what is left is a space, which git prints as it is at the start or the end of a name. A space inside a name, or
+    at the end of a directory in it (``src /a.js``), is not at an end of the line and is not touched.
+
+    Checked by running the 2.3.10 bundle's own ``resolveFiles`` (its ignore filter stubbed out, no agent) over a git
+    range: a name with a leading or a trailing space is dropped, or resolved to another file that exists (``src/a.js ``
+    to the untouched ``src/a.js``), and a name with a space inside it or at the end of a directory resolves. The
+    characters are the ones Node's own ``trim`` removes. The CLI was not run over such a name, since after the
+    listing it starts a model.
+    """
+    return path != path.strip(JS_TRIM)
+
+
+class DroppedPaths(NamedTuple):
+    """The paths a change leaves at head, and which of them DeepSec created no file record for.
+
+    Both lists are sorted, hold each path once, and come from one comparison by path of what git says
+    the change touches against the file records DeepSec left, so everything this adapter says about a
+    path DeepSec did not investigate, in the notes and in the status, is read from here. In direct
+    mode DeepSec creates a record for every file it selected and none for a file it did not:
+    ``present`` is every path that exists at head (everything but a deletion, which DeepSec never
+    reads) and ``dropped`` those of them with no record. A record whose name cannot be expressed as a
+    path inside the tree (:func:`record_path` calls it external) is the record of no path here, and a
+    path git spells with escapes because it is not UTF-8 can never match a record, so it is dropped.
+
+    ``dropped`` says which paths have no record and never why. The one reason this adapter can state
+    is a limit of the listing DeepSec reads, and there are two: a name git prints quoted
+    (:attr:`quoted`) and a name that begins or ends with a space (:attr:`trimmed`). Together they are
+    :attr:`unlistable`, the known omissions.
+    """
+
+    present: tuple[str, ...]
+    dropped: tuple[str, ...]
+
+    @property
+    def quoted(self) -> tuple[str, ...]:
+        """The dropped paths whose name git prints quoted (:func:`git_prints_quoted`).
+
+        DeepSec 2.3.10 reads the plain listing of ``git diff --name-only`` and keeps only the entries
+        that name an existing file. For a path git prints quoted, the entry it holds is the quoted
+        spelling, which names nothing, so it never selects that path, whatever its ignore filter would
+        have said, and never investigates it.
+        """
+        return tuple(path for path in self.dropped if git_prints_quoted(path))
+
+    @property
+    def trimmed(self) -> tuple[str, ...]:
+        """The dropped paths git prints as they are and DeepSec's trim of its listing changes.
+
+        That is a name that begins or ends with a space (:func:`listing_trims`). The entry DeepSec
+        holds is the name without it, which names no file, or another one, and DeepSec may then have
+        reviewed that one in place of the changed path. A name git prints quoted is not counted here
+        as well: the trim leaves a quoted line alone, so the quoting is what drops it.
+        """
+        return tuple(path for path in self.dropped if not git_prints_quoted(path) and listing_trims(path))
+
+    @property
+    def unlistable(self) -> tuple[str, ...]:
+        """The dropped paths DeepSec's listing cannot resolve to themselves: the known omissions.
+
+        Each is a limit of the listing DeepSec reads and not a choice of scope, so a run over a change
+        that leaves such a path is not a review of all of it. It is :attr:`quoted` and :attr:`trimmed`
+        in one list, each path once, and the note that names these paths, the bundle flag and the
+        refusal to call the run a ``success`` are all made from it, so they cannot disagree. The error
+        that names them is made from it too, but a run carries that error only when no earlier failure
+        ends the run first (see the module docstring).
+
+        It is deliberately not narrowed by the ignore filter, which this adapter cannot see: a name
+        the filter would have dropped anyway is counted too. The cost is credit withheld from a run
+        that was complete after all; the alternative is quiet credit for a file nobody opened.
+
+        Checked against the bundle's own ``resolveFiles`` (see :func:`listing_trims`) over a git range
+        that adds one regular file for each of 1112 names: every printable ASCII character, and several
+        control and non-ASCII ones, at the start, in the middle and at the end of a file name and of a
+        directory name. With git's default configuration it resolved a name to itself exactly when
+        neither :func:`git_prints_quoted` nor :func:`listing_trims` held, so no other spelling is lost;
+        with ``core.quotePath=false`` it dropped no name they did not flag. What it drops for a reason
+        other than the spelling of the name (its ignore filter, an entry that is not a file) is not
+        counted here.
+        """
+        return tuple(path for path in self.dropped if git_prints_quoted(path) or listing_trims(path))
+
+
+def dropped_paths(changes: tuple[Change, ...], files: tuple[tuple[str, dict], ...]) -> DroppedPaths:
+    """What git says the change leaves at head, set against the file records DeepSec left.
+
+    *changes* is what git in the workspace says the two commits differ in, asked by this adapter
+    before DeepSec started; *files* is the file records DeepSec left. This says which paths have no
+    record and never why; :attr:`DroppedPaths.unlistable` is the reason this adapter can state.
+    """
+    recorded = {path for path, external in (record_path(name, record) for name, record in files) if not external}
+    present = sorted({change.path for change in changes if change.present})
+    return DroppedPaths(tuple(present), tuple(path for path in present if path not in recorded))
+
+
+def unexamined_paths(changes: tuple[Change, ...], dropped: DroppedPaths) -> list[str]:
+    """Every path the change touches that DeepSec created no file record for, sorted: the result's ``omitted_paths``.
+
+    That is each path present at head with no record, for whatever reason (:attr:`DroppedPaths.dropped`: its ignore
+    filter, or a name its listing cannot resolve), and each path the change removed, which DeepSec never reads
+    (:func:`~scaneval.adapters.pr.removed_paths`). A path that has a record is not here, however far its file got:
+    which files reached no verdict is the status's to say, and the status logic reads the records, not this list.
+
+    The note, the status and this list are made from the same comparison, so they cannot disagree about a path. It is
+    deliberately not narrowed by the ignore filter, which this adapter cannot see, nor by the reason a path has no
+    record: a path DeepSec's own selection dropped is a choice of DeepSec's and not one declared before the run, so a
+    control planned on it earns no quiet credit however legitimate the drop was. A scope exclusion is declared by
+    leaving the item out of the plan, before the run.
+    """
+    return sorted(set(dropped.dropped) | set(removed_paths(changes)))
+
+
+def listing_limits(paths: DroppedPaths, subject: str) -> list[str]:
+    """One clause for each limit of DeepSec's listing that *paths* met: which of them, and what the limit is.
+
+    The error that ends the run and the note both say this, in these words, from the same lists.
+    *subject* is what they count: ``changed path(s)`` in the error and ``of them`` in the note.
+    """
+    clauses = []
+    if paths.quoted:
+        clauses.append(
+            f"{len(paths.quoted)} {subject} ({_listed(paths.quoted)}) have a name git prints quoted by default (a "
+            "non-ASCII name, or one holding a quote, a backslash or a control character): DeepSec reads git's plain "
+            "listing and cannot resolve a quoted name to a file")
+    if paths.trimmed:
+        clauses.append(
+            f"{len(paths.trimmed)} {subject} ({_listed(paths.trimmed)}) begin or end with a space: DeepSec trims "
+            "every line of git's plain listing before it looks for the file, and the entry it holds then names "
+            "another path, or none")
+    return clauses
+
+
+def unlistable_error(paths: DroppedPaths) -> str:
+    """The ``scope_incomplete`` error of a run that ends on a path DeepSec's listing cannot resolve.
+
+    The status logic gives a run this error only when no failure it tests earlier ends the run first; a
+    run one of them ends keeps that failure's own code and error, and only the note names the paths (see
+    the module docstring).
+    """
+    return ("; ".join(listing_limits(paths, "changed path(s)"))
+            + ", so it never investigated them, whatever its ignore filter says. This run therefore observed only "
+              "part of the change (or none of it) and says nothing about them")
+
+
+def unreviewed_note(changes: tuple[Change, ...], files: tuple[tuple[str, dict], ...]) -> str | None:
+    """The changed paths DeepSec created no file record for, as a note, or ``None`` when there are none.
+
+    *changes* and *files* are as for :func:`dropped_paths`, and the note is written from what it
+    returns. A path present at head with no record is one DeepSec's own selection dropped: it
+    keeps only added, modified, renamed and copied paths (a deletion never reaches it) and drops those
+    matching its default ignore filter (tests, docs, build output and similar). That is DeepSec's
+    scope, not a failure of the run, and the note says so, with the reminder that silence about such a
+    path is not a negative result. A file DeepSec did select but left in ``error`` or unfinished has a
+    record and is reported by the status logic, not here.
+
+    Not every path listed was dropped by the ignore filter. One whose name git prints quoted
+    (:attr:`DroppedPaths.quoted`) is dropped by DeepSec whatever the filter says, because it cannot
+    resolve the quoted spelling to a file, and so is one that begins or ends with a space
+    (:attr:`DroppedPaths.trimmed`), because DeepSec trims each line of its listing and looks for another
+    path. The note names those separately, each with the limit it met: the omission is a limit of
+    DeepSec's own listing and not a scoping choice, so the run observed nothing about them and cannot
+    stand as a complete or quiet observation of the change. The status logic reads the same list, so
+    the note and the status cannot disagree: a run whose note names such a path is never a ``success``
+    and its bundles are unresolved. The note is written whatever ends the run. The error names these
+    paths, in the same words, only when none of the failures the status logic tests before the omission
+    ends the run first (a timeout, a step that failed, an export that could not be read, a record or a
+    finding that could not be imported, an exhausted quota, an errored batch, a record status DeepSec
+    does not declare, a file left unfinished), and the run then ends ``scope_incomplete``. A run one of
+    those ends keeps that failure's own code and error, and only this note names the paths. This adapter
+    cannot tell the other paths apart by reason and does not try to.
+    """
+    paths = dropped_paths(changes, files)
+    omitted = paths.unlistable
+    removed = removed_paths(changes)
+    sentences = []
+    if paths.dropped:
+        apart = f", except for the {len(omitted)} named next" if omitted else ""
+        sentences.append(
+            f"DeepSec did not investigate {len(paths.dropped)} of the {len(paths.present)} path(s) this change "
+            f"leaves at head, because it created no file record for them ({_listed(paths.dropped)}). Its --diff "
+            "selection keeps only added, modified, renamed and copied paths and drops those matching its default "
+            "ignore filter (tests, docs, build output and similar), so this is DeepSec's own scope and not a "
+            f"failure of the run{apart}; silence about these paths is not a negative result.")
+        if omitted:
+            sentences.append(". ".join(listing_limits(paths, "of them")) + ".")
+            sentences.append(
+                "DeepSec drops such a path whatever its ignore filter says; for these the omission is a limit of "
+                "DeepSec's own listing, not a choice of scope, so this run observed nothing about them and does not "
+                "stand as a complete or quiet observation of the change.")
+    if removed:
+        sentences.append(f"The change also removed {len(removed)} path(s) ({_listed(removed)}); DeepSec never reads "
+                         "a path that no longer exists at head.")
+    return " ".join(sentences) or None
+
+
 class DeepsecAdapter(Adapter):
     name = "deepsec"
-    adapter_version = "1.0.0"
+    adapter_version = "1.1.0"
     requires_git = False
     supported_languages = frozenset({"python", "javascript", "typescript", "go", "rust"})
+    scan_modes = frozenset({"full", "pr"})
     # On top of the base set. The provider keys are here because the agent needs one when the
     # operator's route is a direct API key rather than a CLI login; they are secrets, so they
     # are passed and never recorded. ``HOME`` is already in the base set and is what the local
@@ -1533,10 +1876,21 @@ class DeepsecAdapter(Adapter):
         the partial stdout and stderr of every step kept as raw artifacts. A step that exits
         non-zero ends it as an error naming that step, because a stage that failed did not
         produce the records the next stage reads and the result must not read as a quiet scan.
+
+        A PR request (``request["input"]["mode"] == "pr"``) runs two steps instead: ``process
+        --diff <base>..<head>``, DeepSec's direct mode, and ``export``. It is refused before
+        anything runs, as an ``AdapterError``, when the request does not name two full commit ids
+        or the workspace does not hold the clean two-commit history it names, and any mode but
+        ``full`` and ``pr`` is refused too, so a request this adapter cannot serve is never run
+        as a full scan. An exit 1 from ``process`` is DeepSec's own signal and is classified from
+        its records, not treated as fatal; the module docstring states how.
         """
+        pr = pr_range(request, self)
         config = settings(spec)
         if not config.binary.exists():
             raise AdapterError(f"deepsec executable not found at {config.binary}")
+        # Read before DeepSec starts: its agent can run a shell in this workspace, ``.git`` included.
+        changes = workspace_changes(Path(source_dir), pr) if pr is not None else ()
         project = project_id_for(request, config.project_id)
         # Captured before the first process starts: DeepSec writes into the raw directory while
         # it runs, so every read below is checked against a boundary it cannot move.
@@ -1551,11 +1905,14 @@ class DeepsecAdapter(Adapter):
 
         scan_argv = [str(config.binary), "scan", "--project-id", project, "--root", str(source_dir)]
         process_argv = [str(config.binary), "process", "--project-id", project,
-                        "--root", str(source_dir), "--agent", config.agent,
+                        "--root", str(source_dir),
+                        *(["--diff", pr.revision_range] if pr is not None else []),
+                        "--agent", config.agent,
                         "--model", config.model, "--concurrency", str(config.concurrency)]
         if config.thinking_level:
             process_argv += ["--thinking-level", config.thinking_level]
-        if config.limit is not None:
+        if config.limit is not None and pr is None:
+            # Direct mode never passes --limit on (2.3.10), so a PR run does not send it.
             process_argv += ["--limit", str(config.limit)]
         if config.batch_size is not None:
             process_argv += ["--batch-size", str(config.batch_size)]
@@ -1572,7 +1929,8 @@ class DeepsecAdapter(Adapter):
         remaining = float(timeout_seconds)
         results: dict[str, Any] = {}
         timed_out_step = None
-        for step, argv in (("scan", scan_argv), ("process", process_argv), ("export", export_argv)):
+        steps = ((("scan", scan_argv),) if pr is None else ()) + (("process", process_argv), ("export", export_argv))
+        for step, argv in steps:
             stdout = Path(raw_dir) / f"deepsec-{step}.stdout.txt"
             stderr = Path(raw_dir) / f"deepsec-{step}.stderr.txt"
             artifacts.append({"id": f"deepsec-{step}-stdout", "path": stdout})
@@ -1590,6 +1948,11 @@ class DeepsecAdapter(Adapter):
                 timed_out_step = step
                 break
             if result.exit_code != 0:
+                if pr is not None and step == "process" and result.exit_code == DIRECT_MODE_EXIT:
+                    # Direct mode's own exit for findings, an errored batch and an exhausted quota.
+                    # It also exits 1 for a runtime failure, so what it means is decided below, from
+                    # the records; the run goes on to export either way.
+                    continue
                 break
 
         records = read_records(data_dir, enclosure)
@@ -1615,6 +1978,16 @@ class DeepsecAdapter(Adapter):
         refusals = sum(len(session.refusals) for session in sessions)
         batches_failed = len(errored_files) + len(records.debug) + refusals
         suspect_durations = [session.call_id for session in sessions if session.duration_suspect]
+        # The changed paths DeepSec's listing could not resolve (a name git quotes, a name it trims), so that no model
+        # was ever given them. Read once, here, for the bundle flag and the status below; the note is made from the
+        # same helper.
+        dropped = dropped_paths(changes, records.files) if pr is not None else DroppedPaths((), ())
+        omitted = dropped.unlistable
+        # What the result lists as omitted_paths, for the outcomes that carry claims DeepSec produced, and whether that
+        # is every path the change touches, so that DeepSec examined none of it: both ``None`` in a full run, which
+        # reports no omission.
+        unexamined = unexamined_paths(changes, dropped) if pr is not None else None
+        nothing_examined = examined_nothing(changes, unexamined) if pr is not None else None
 
         exported: Any = None
         export_failure = None
@@ -1632,6 +2005,20 @@ class DeepsecAdapter(Adapter):
                 imported = import_export(exported, ids=finding_ids(records.files))
             except AdapterError as exc:
                 export_failure = str(exc)
+
+        # A PR review's own facts. ``output`` is what DeepSec printed and is advisory only: what an
+        # exit 1 means is read from the records it left, which is where each of its three causes
+        # (findings, an errored batch, an exhausted quota) is written down as it happens.
+        output = ProcessOutput()
+        process_result = results.get("process") if pr is not None else None
+        if process_result is not None:
+            process_stdout = Path(raw_dir) / "deepsec-process.stdout.txt"
+            output = read_process_output(bounded_tail(process_stdout, enclosure.write(process_stdout),
+                                                      PROCESS_OUTPUT_TAIL))
+        finding_records = sum(len(record["findings"]) for _name, record in records.files
+                              if isinstance(record.get("findings"), list))
+        exit_one_explained = bool(finding_records or imported.claims or statuses.errored or statuses.unfinished
+                                  or records.debug)
 
         trace_path = (trace_dir / "events.jsonl") if trace_dir is not None else None
         capture_state: dict | None = None
@@ -1693,10 +2080,18 @@ class DeepsecAdapter(Adapter):
                                     else {}).get("package_version") or "unknown"),
             "agent": config.agent,
         }
+        if pr is None:
+            steps_note = (f"DeepSec ran as three CLI steps in one workspace under raw/deepsec-workspace: scan, "
+                          f"process and export. The recorded command is those three argv lists in order, "
+                          f"separated by '&&'; each step's stdout and stderr is its own raw artifact.")
+        else:
+            steps_note = (f"DeepSec ran as two CLI steps in one workspace under raw/deepsec-workspace: process in its "
+                          f"direct mode, given --diff {pr.revision_range}, and export; no separate scan step was run. "
+                          "Direct mode listed the files that range changed itself, ran its own regex scan over just "
+                          "those files and investigated each of them. The recorded command is those two argv lists "
+                          "in order, separated by '&&'; each step's stdout and stderr is its own raw artifact.")
         notes = [
-            f"DeepSec ran as three CLI steps in one workspace under raw/deepsec-workspace: scan, "
-            f"process and export. The recorded command is those three argv lists in order, "
-            f"separated by '&&'; each step's stdout and stderr is its own raw artifact.",
+            steps_note,
             f"Project id {project} is derived from the input tree hash: the scan request carries "
             "no snapshot id, and DeepSec needs an id it accepts as a directory name.",
             "Cost and token counts are DeepSec's own per-file shares of each batch, summed; they "
@@ -1708,6 +2103,28 @@ class DeepsecAdapter(Adapter):
             f"{len(candidates)} regex candidate(s) and {len(sessions)} agent session(s) were read "
             f"out of {len(records.files)} file record(s).",
         ] + notes + list(imported.notes)
+        if pr is not None:
+            if config.limit is not None:
+                notes.append(f"config.limit ({config.limit}) was not passed to DeepSec: its direct mode never applies "
+                             "--limit, so it would have had no effect on which files were investigated.")
+            if process_result is not None and process_result.exit_code == DIRECT_MODE_EXIT and exit_one_explained:
+                said = ([f"{output.quota} exhausted"] if output.quota else []) + (
+                    [f"{output.errored_batches} errored batch(es)"] if output.errored_batches else []) + (
+                    [f"{output.findings} finding(s)"] if output.findings else [])
+                notes.append(
+                    "deepsec process exited 1 and the run went on to export: in direct mode DeepSec exits 1 for "
+                    "findings, for an errored batch and for an exhausted quota, and its records show "
+                    f"{finding_records} finding(s), {len(statuses.errored)} file(s) in status 'error' and "
+                    f"{unfinished_files} unfinished file(s). This run was classified from those records"
+                    + (f"; DeepSec's own summary said {', '.join(said)}." if said else "."))
+            unreviewed = unreviewed_note(changes, records.files)
+            if unreviewed:
+                if records.failures:
+                    # A record this run could not read is missing from the comparison, so a path
+                    # listed as having none may have had one.
+                    unreviewed += (f" {len(records.failures)} DeepSec record(s) could not be read, so a path "
+                                   "listed here may have had one.")
+                notes.append(unreviewed)
         for failure_note in records.failures:
             notes.append(f"DeepSec record not read: {failure_note}")
         if errored_files:
@@ -1719,7 +2136,14 @@ class DeepsecAdapter(Adapter):
         if refusals:
             notes.append(f"{refusals} agent refusal report(s) were recorded on this run's analysis "
                          "entries; the files they name reached no verdict.")
-        if unfinished_files:
+        if unfinished_files and pr is not None:
+            notes.append(
+                f"{unfinished_files} of {len(records.files)} file record(s) were left unfinished "
+                f"({', '.join(statuses.unfinished[:5])}): DeepSec's direct mode created them and its AI stage "
+                "either never reached them, which is how a run ends when its quota runs out, or was still "
+                "holding them when the run ended. No model reached a verdict on those files, so silence about "
+                "them is not a negative result.")
+        elif unfinished_files:
             notes.append(
                 f"{unfinished_files} of {len(records.files)} file record(s) were left unfinished "
                 f"({', '.join(statuses.unfinished[:5])}): DeepSec's scan stage found them and its "
@@ -1740,16 +2164,22 @@ class DeepsecAdapter(Adapter):
                 "than a divided one. The recorded duration is still the sum of the shares; read "
                 f"it as possibly duplicated for: {', '.join(suspect_durations[:5])}")
 
-        command = [*scan_argv, "&&", *process_argv, "&&", *export_argv]
+        command = ([*scan_argv, "&&", *process_argv, "&&", *export_argv] if pr is None
+                   else [*process_argv, "&&", *export_argv])
         base = dict(command=command, artifacts=artifacts, tool_versions=tool_versions,
                     capture=capture, usage=usage, notes=notes, model_identity=model_identity,
                     trace_path=trace_path, capture_state=capture_state,
                     # A run that left records pending delivered claims about part of the input
                     # and nothing at all about the rest, so its bundles are not resolved: the
                     # scoring contract must not read a claim budget off it, and must not grant
-                    # quiet credit for a file no model opened.
+                    # quiet credit for a file no model opened. In a PR review a file left in
+                    # ``error`` is the same case, and the ordinary one: direct mode exits 1 and
+                    # the run goes on, so the claims of the batches that finished are all there is.
+                    # So is a changed path DeepSec never listed: the claims about the rest are a
+                    # part delivered, and a budget read off a part reads as one read off the whole.
                     bundles_resolved=(imported.lost == 0 and not records.failures
-                                      and statuses.incomplete == 0))
+                                      and statuses.incomplete == 0
+                                      and (pr is None or not (statuses.errored or omitted))))
         exit_code = None
         for step in ("export", "process", "scan"):
             result = results.get(step)
@@ -1774,7 +2204,7 @@ class DeepsecAdapter(Adapter):
                                  error={"code": "timeout",
                                         "message": f"deepsec {timed_out_step} exhausted the shared "
                                                    f"{timeout_seconds}s budget and was killed"}, **base)
-        for step in ("scan", "process", "export"):
+        for step, _argv in steps:
             result = results.get(step)
             if result is None:
                 return NativeOutcome(status="error", exit_code=exit_code, claims=[],
@@ -1782,10 +2212,20 @@ class DeepsecAdapter(Adapter):
                                             "message": f"deepsec {step} never ran; an earlier step "
                                                        "ended the invocation"}, **base)
             if result.exit_code != 0:
+                direct_exit = pr is not None and step == "process" and result.exit_code == DIRECT_MODE_EXIT
+                if direct_exit and exit_one_explained:
+                    # Direct mode's exit 1 for findings, an errored batch or an exhausted quota, and
+                    # its records say which one it was; the status below is made from them.
+                    continue
+                message = f"deepsec {step} exited {result.exit_code}; stderr: {tail(step)}"
+                if direct_exit:
+                    message = ("deepsec process exited 1 and left no finding, no file in status 'error' or "
+                               "unfinished and no parse-failure dump, which is what an exit 1 means in direct "
+                               "mode; it also exits 1 for a runtime failure such as an unresolvable range; "
+                               f"stderr: {tail(step)}")
                 return NativeOutcome(status="error", exit_code=result.exit_code, claims=[],
                                      error={"code": f"{step}_exit_{result.exit_code}",
-                                            "message": f"deepsec {step} exited {result.exit_code}; "
-                                                       f"stderr: {tail(step)}"[:2000]}, **base)
+                                            "message": message[:2000]}, **base)
         if export_failure is not None:
             return NativeOutcome(status="error", exit_code=exit_code, claims=[],
                                  error={"code": "unreadable_export",
@@ -1798,39 +2238,93 @@ class DeepsecAdapter(Adapter):
                                  error={"code": "import_loss",
                                         "message": f"{imported.lost} exported finding(s) and "
                                                    f"{len(records.failures)} DeepSec record(s) could not "
-                                                   f"be imported: {detail}"[:2000]}, **base)
-        if batches_failed:
+                                                   f"be imported: {detail}"[:2000]},
+                                 omitted_paths=unexamined, examined_nothing=nothing_examined, **base)
+
+        def stopped(code: str, message: str) -> NativeOutcome:
+            """The outcome of a run that reached no verdict on part of what it was given.
+
+            ``partial``, carrying the claims DeepSec did produce, in every mode. The one refinement
+            is a PR review in which no file reached a verdict at all: with nothing analyzed there is
+            no partial observation to report, so it is an ``error`` with no claims.
+            """
+            if pr is not None:
+                # What DeepSec wrote to stderr says why a run that stopped short stopped, when it
+                # crashed instead of running out of quota, and costs nothing when it is empty.
+                if process_result is not None and process_result.exit_code == DIRECT_MODE_EXIT:
+                    detail = tail("process").strip()
+                    message = f"{message}; deepsec process stderr: {detail}" if detail else message
+                if statuses.finished == 0:
+                    return NativeOutcome(status="error", exit_code=exit_code, claims=[],
+                                         error={"code": code, "message": (f"{message}; no file reached a verdict, so "
+                                                                          "none of the change was observed")[:2000]},
+                                         **base)
+                message = message[:2000]
             return NativeOutcome(status="partial", exit_code=exit_code, claims=imported.claims,
-                                 error={"code": "deepsec_batches_failed",
-                                        "message": f"{len(errored_files)} file(s) in status 'error', "
-                                                   f"{len(records.debug)} parse-failure dump(s) and "
-                                                   f"{refusals} refusal(s): part of the input reached "
-                                                   "no verdict"}, **base)
+                                 error={"code": code, "message": message}, omitted_paths=unexamined,
+                                 examined_nothing=nothing_examined, **base)
+
+        if pr is not None and output.quota and (statuses.errored or statuses.unfinished):
+            return stopped("quota_exhausted",
+                           f"deepsec process stopped: {output.quota} exhausted, in DeepSec's own words. "
+                           f"{statuses.finished} of {len(records.files)} file record(s) reached a verdict, "
+                           f"{len(statuses.errored)} were left in status 'error' and {unfinished_files} were never "
+                           "finished, so the rest of the change was not reviewed")
+        subject = "input" if pr is None else "change"
+        if batches_failed:
+            counted = (f"; DeepSec itself counted {output.errored_batches} errored batch(es)"
+                       if pr is not None and output.errored_batches else "")
+            return stopped("deepsec_batches_failed",
+                           f"{len(errored_files)} file(s) in status 'error', {len(records.debug)} parse-failure "
+                           f"dump(s) and {refusals} refusal(s): part of the {subject} reached no verdict{counted}")
         if statuses.invalid:
             # A record whose state this cannot read is not a record this run can claim to have
             # finished. Reported before the unfinished ones because it is the stronger failure:
             # there, the run knows what it did not do; here, it does not know what it did.
-            return NativeOutcome(status="partial", exit_code=exit_code, claims=imported.claims,
-                                 error={"code": "invalid_record_status",
-                                        "message": f"{len(statuses.invalid)} of {len(records.files)} "
-                                                   "file record(s) carry a status DeepSec does not "
-                                                   "declare, so whether it finished with them cannot "
-                                                   "be read: "
-                                                   + "; ".join(f"{name}: {reason}"
-                                                               for name, reason in statuses.invalid[:5])
-                                        }, **base)
+            return stopped("invalid_record_status",
+                           f"{len(statuses.invalid)} of {len(records.files)} "
+                           "file record(s) carry a status DeepSec does not "
+                           "declare, so whether it finished with them cannot "
+                           "be read: "
+                           + "; ".join(f"{name}: {reason}" for name, reason in statuses.invalid[:5]))
         if unfinished_files:
             # The AI stage never finished with these files. A ``success`` here would let the
             # scoring contract treat every assigned control as completed and grant quiet credit
             # for a file no model reached a verdict on, which is the one thing this adapter's
             # notes say the run does not establish. The status now says it too.
-            limit = f" under config.limit {config.limit}" if config.limit is not None else ""
-            return NativeOutcome(status="partial", exit_code=exit_code, claims=imported.claims,
-                                 error={"code": "scope_incomplete",
-                                        "message": f"{unfinished_files} of {len(records.files)} file "
-                                                   f"record(s) were left unfinished{limit} "
-                                                   f"({', '.join(statuses.unfinished[:5])}): DeepSec "
-                                                   "reached no verdict on them, so this run observed "
-                                                   "part of the input and says nothing about the "
-                                                   "rest"}, **base)
-        return NativeOutcome(status="success", exit_code=exit_code, claims=imported.claims, **base)
+            limit = f" under config.limit {config.limit}" if config.limit is not None and pr is None else ""
+            return stopped("scope_incomplete",
+                           f"{unfinished_files} of {len(records.files)} file "
+                           f"record(s) were left unfinished{limit} "
+                           f"({', '.join(statuses.unfinished[:5])}): DeepSec "
+                           "reached no verdict on them, so this run observed "
+                           f"part of the {subject} and says nothing about the "
+                           "rest")
+        if omitted:
+            # Known omissions of the change: DeepSec's listing cannot resolve these names (git quotes them, or
+            # DeepSec trims the space at an end of them), so it never selected them and no model was given them.
+            # Left to the empty-review block below, a change that touches only such paths would be a ``success``
+            # with resolved bundles, the scoring contract would complete every control planned on one of them, and
+            # a quiet assessment would be granted credit for a file nobody opened. It is the same case as a file
+            # left unfinished, so it ends the same way.
+            return stopped("scope_incomplete", unlistable_error(dropped))
+        if pr is not None and not records.files:
+            # No file record at all. DeepSec says so itself when its diff selects nothing, and that
+            # statement is what makes this an empty review: without it the same silence could be a
+            # run that never read the change.
+            if process_result is not None and process_result.exit_code == 0 and output.nothing_to_process:
+                base["notes"].append(
+                    f"Empty review: DeepSec's direct mode resolved no file to investigate from {pr.revision_range} "
+                    "(it said \"Nothing to process\") and left no file record. Every path the change touches was "
+                    "deleted or dropped by DeepSec's own selection, so nothing was investigated; that is DeepSec's "
+                    "scope and not a failure, and it says nothing about the paths it did not read.")
+            else:
+                return NativeOutcome(
+                    status="error", exit_code=exit_code, claims=[],
+                    error={"code": "nothing_processed",
+                           "message": (f"deepsec process exited {process_result.exit_code if process_result else None} "
+                                       "and left no file record, and its output does not carry the statement DeepSec "
+                                       "prints when a diff selects no file, so an empty review cannot be told from a "
+                                       f"run that read nothing; stderr: {tail('process')}")[:2000]}, **base)
+        return NativeOutcome(status="success", exit_code=exit_code, claims=imported.claims,
+                             omitted_paths=unexamined, examined_nothing=nothing_examined, **base)

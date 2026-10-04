@@ -108,7 +108,7 @@ Exact duplicate copies: {m['duplicate_copies']}. Unmatched distinct claims: {m['
 <p class="muted">The upper bound treats unresolved completed observations as false allegations. It is not a confidence interval and does not cover incomplete runs.</p>
 <h2>Submitted claims</h2><div class="scroll"><table><thead><tr><th>Rank</th><th>ID</th><th>Allegation</th><th>Kind</th><th>Location</th></tr></thead><tbody>{claims}</tbody></table></div>
 <h2>Limits and provenance</h2><ul>{warnings}</ul>
-<p>Single-input metrics only. Corpus weighting, precision estimates, promotion gates and a trace viewer are not implemented in this build.</p>
+<p>Single-input metrics only. Corpus weighting and paired comparison (<code>scaneval aggregate</code>, <code>scaneval compare</code>), sampled precision estimates (<code>scaneval precision</code>), and gate decisions (<code>scaneval gate</code>) are separate commands over saved runs; a trace viewer is not implemented in this build.</p>
 <p>Scorer: {escape(record['scorer_version'])}. Trace capture is optional and does not affect detection credit.</p><dl>{hashes}</dl>
 </body></html>
 '''

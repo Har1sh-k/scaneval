@@ -1633,3 +1633,248 @@ def test_the_operative_review_rule_is_one_rule_every_gate_reads():
         record_history(case, [approval, {**review(decision=decision), "labels_sha256": approval["labels_sha256"]}])
         assert reason in operative_review_gap(case)
         assert covering_review(pack, case) is None, "the gate every plan reads asks this one rule"
+
+
+def test_a_schema_version_this_build_does_not_read_is_refused_by_name():
+    """The version is read before a schema is chosen, and the refusal names what is supported."""
+    from scaneval.contracts import CONTRACT_KINDS, SCHEMA_VERSIONS, schema_file
+
+    document = scan_result()
+    document["schema_version"] = "9.9"
+    with pytest.raises(ContractError, match=r"schema_version: '9.9' is not a scan-result version"):
+        validate_document("scan-result", document)
+    document["schema_version"] = 2.0
+    with pytest.raises(ContractError, match="supported: 2.0"):
+        validate_document("scan-result", document)
+    assert set(SCHEMA_VERSIONS) == CONTRACT_KINDS
+    # The first published version keeps the plain file name every 2.0 schema has always had.
+    for kind, versions in SCHEMA_VERSIONS.items():
+        assert schema_file(kind, versions[0]) == f"{kind}.schema.json"
+        for later in versions[1:]:
+            assert schema_file(kind, later) == f"{kind}-{later}.schema.json"
+    with pytest.raises(ContractError, match="not one this build reads"):
+        schema_file("scan-result", "0.1")
+
+
+# --- protocol 2.1: the same completeness rule for the fields a 2.1 pack adds -------------------
+# A 2.1 pack adds a pack-level ``change_sets`` array and, inside a case, ``canonical_id`` on the
+# canonical target and on a control and ``pr_eligibility`` on the target and on a control. Every one
+# of them is held by a record: the pack anchor holds the change sets and holds each case field until
+# a recorded review holds it by digest, and that digest holds the change set a label names. These
+# tests are the 2.0 ones above run against a maximal 2.1 pack, so a field added to the 2.1 contract
+# and held by neither record fails here on the day it is added.
+
+
+def case_pack_schema_21() -> dict:
+    return json.loads(files("scaneval").joinpath("schemas", "case-pack-2.1.schema.json")
+                      .read_text(encoding="utf-8"))
+
+
+def maximal_pack_21() -> dict:
+    """The maximal 2.0 pack with every field the 2.1 schema adds, on a pack that also declares a base.
+
+    The base snapshot is named by a change set and by no case, which is how a change set's base
+    sits in a real pack: a label points at the head, and the boundary points back at the base.
+    """
+    pack = maximal_pack()
+    pack["schema_version"] = "2.1"
+    pack["snapshots"].append({**copy.deepcopy(pack["snapshots"][0]), "snapshot_id": "snap-base",
+                              "commit": "b" * 40, "tree_hash": "sha256:" + "7" * 64, "git_tree": "8" * 40,
+                              "role": "ordinary", "reference": "the commit the change branched from"})
+    pack["change_sets"] = [{"change_set_id": "cs-widget", "base_snapshot_id": "snap-base",
+                            "head_snapshot_id": "snap-a", "boundary": "introducing",
+                            "review_scope": "changed_files", "description": "the change that adds the sink",
+                            "reference": "acme/widget#42"}]
+    case = pack["cases"][0]
+    case["canonical_target"]["canonical_id"] = "widget-shell-root"
+    case["target"]["pr_eligibility"] = [{"change_set_id": "cs-widget", "relation": "introduced",
+                                         "code_scope": "changed", "note": "the sink is a changed line"}]
+    case["controls"][0]["canonical_id"] = "widget-argv-only"
+    case["controls"][0]["pr_eligibility"] = [{"change_set_id": "cs-widget", "relation": "repaired",
+                                              "code_scope": "context", "note": "the repaired call"}]
+    return pack
+
+
+def test_the_maximal_2_1_pack_carries_every_field_the_2_1_contract_declares():
+    schema = case_pack_schema_21()
+    pack = maximal_pack_21()
+    Draft202012Validator(schema).validate(pack)
+
+    missing = declared_paths(schema, schema) - field_paths(pack)
+    assert missing == set(), f"the 2.1 fixture omits declared fields: {sorted(missing)}"
+    added = declared_paths(schema, schema) - declared_paths(case_pack_schema(), case_pack_schema())
+    assert added == {
+        "change_sets", "change_sets[].change_set_id", "change_sets[].base_snapshot_id",
+        "change_sets[].head_snapshot_id", "change_sets[].boundary", "change_sets[].review_scope",
+        "change_sets[].description", "change_sets[].reference",
+        "cases[].canonical_target.canonical_id", "cases[].controls[].canonical_id",
+        *(f"cases[].{owner}.pr_eligibility{leaf}" for owner in ("target", "controls[]")
+          for leaf in ("", "[].change_set_id", "[].relation", "[].code_scope", "[].note")),
+    }, "the fields 2.1 adds are the ones the tests below say they hold"
+
+
+def test_every_declared_2_1_case_field_is_anchored_or_allowlisted_with_a_reason():
+    """Every field of a 2.1 case, the ones 2.1 added included, is anchored or held by a digest.
+
+    Measured the way the 2.0 test measures a case, against the same hand-written tables: a case no
+    review has bound is anchored whole but its notes, and a case a review binds by digest keeps in
+    the anchor everything but the label fields that review reads. ``canonical_id`` and
+    ``pr_eligibility`` live inside ``canonical_target``, ``target`` and ``controls``, which are label
+    fields, so an approved case holds them by its digest and an unreviewed one by the anchor.
+    """
+    schema = case_pack_schema_21()
+    approved = maximal_pack_21()["cases"][0]
+    assert labels_are_bound(approved)
+    unreviewed = copy.deepcopy(approved)
+    unreviewed["validation"]["reviews"].append(
+        {key: value for key, value in approved["validation"]["reviews"][0].items()
+         if key != "labels_sha256"})
+    assert not labels_are_bound(unreviewed)
+
+    declared = declared_paths(schema, schema["$defs"]["case"])
+    assert declared - field_paths(approved) == set(), "the fixture must carry every declared field"
+    new_in_2_1 = {path for path in declared
+                  if "canonical_id" in path or "pr_eligibility" in path}
+    assert len(new_in_2_1) == 2 + 5 + 5, "the fixture is measured on every field 2.1 added to a case"
+
+    outside_unreviewed = declared - field_paths(case_anchor_projection(unreviewed))
+    escaped = outside_unreviewed - paths_under(CASE_FIELDS_NOTHING_READS, declared)
+    assert escaped == set(), f"no review binds this case, so nothing but the anchor can hold {sorted(escaped)}"
+    assert new_in_2_1 <= field_paths(case_anchor_projection(unreviewed)), \
+        "every field 2.1 added is anchored while no digest holds it"
+
+    outside_approved = declared - field_paths(case_anchor_projection(approved))
+    escaped = (outside_approved - paths_under(CASE_FIELDS_NOTHING_READS, declared)
+               - paths_under(CASE_FIELDS_A_DIGEST_HOLDS, declared))
+    assert escaped == set(), f"{sorted(escaped)} is in neither record and in no allowlist"
+    assert new_in_2_1 <= outside_approved, "an approved case holds every field 2.1 added by its digest"
+    check_allowlist(CASE_FIELDS_A_DIGEST_HOLDS, declared, outside_approved, "2.1 case, approved")
+    digested = {path.split(".")[0].split("[")[0]
+                for path in field_paths(case_label_projection(approved))}
+    assert digested == set(CASE_FIELDS_A_DIGEST_HOLDS)
+    assert new_in_2_1 <= field_paths(case_label_projection(approved)), \
+        "the digest reads every field 2.1 added, subfields included"
+    assert paths_under(CASE_FIELDS_A_DIGEST_HOLDS, field_paths(case_anchor_projection(approved))) == set()
+
+
+def test_every_declared_2_1_pack_field_is_anchored_or_allowlisted_with_a_reason():
+    """The pack's own fields at 2.1: the change sets are anchored whole, down to their free text."""
+    schema = case_pack_schema_21()
+    pack = maximal_pack_21()
+    projected = field_paths(pack_anchor_projection(pack))
+    record_arrays = {"snapshots", "cases", "admissions"}
+
+    for name, child in schema["properties"].items():
+        if name in record_arrays:
+            continue
+        subtree = {name} | declared_paths(schema, child, name)
+        if name in PACK_FIELDS_OUTSIDE_THE_ANCHOR:
+            assert is_stated(PACK_FIELDS_OUTSIDE_THE_ANCHOR[name])
+            assert subtree & projected == set(), f"{name} is allowlisted and anchored both"
+        else:
+            assert subtree <= projected, (
+                f"pack field {name} is in neither the anchor nor the stated allowlist")
+    assert set(PACK_FIELDS_OUTSIDE_THE_ANCHOR) <= set(schema["properties"])
+    assert "change_sets" in projected and "change_sets[].description" in projected, (
+        "a change set's free text is read by no digest, so only the anchor can hold it")
+
+
+def test_a_snapshot_only_a_change_set_names_is_anchored_whole_and_the_head_keeps_its_rule():
+    """The base of a change set is named by no case, so no digest is counted as holding its identity.
+
+    That is coarse in the safe direction: a label naming the change set does carry the base's
+    identity in its digest (see the next test), and the anchor holds it as well, which costs a
+    rebuilt anchor to repin the base by hand and never leaves an identity outside every record. The
+    head is a case's own snapshot, so it follows the rule the 2.0 test measures.
+    """
+    schema = case_pack_schema_21()
+    declared = declared_paths(schema, schema["$defs"]["snapshot"])
+    pack = maximal_pack_21()
+    assert snapshots_bound_by_labels(pack) == {"snap-a"}
+
+    def anchored_fields(index: int) -> set[str]:
+        return field_paths(pack_anchor_projection(pack)["snapshots"][index])
+
+    assert declared - anchored_fields(1) == set(), "the base snapshot is anchored, identity included"
+    assert declared - anchored_fields(0) == paths_under(SNAPSHOT_FIELDS_A_DIGEST_HOLDS, declared)
+
+
+def test_a_change_set_a_label_names_is_held_by_the_label_digest_and_by_the_anchor():
+    """What a label says about its boundary is covered by an approval; a boundary's prose is not.
+
+    The digest projects the change set a label names with its identity: both snapshot ids, the
+    boundary kind, the review scope, and the identity of each snapshot. Its description and its
+    reference say where the boundary came from, so a reviewer of the labels did not read them and
+    an approval survives their edit. The pack anchor holds every one of these fields either way,
+    because a change set is a pack-level field and is anchored whole.
+    """
+    pack = maximal_pack_21()
+    case = pack["cases"][0]
+    held = label_digest(pack, case)
+    anchored(pack)
+    assert pack_anchor_gap(pack) is None
+
+    def change(edit) -> tuple[bool, bool]:
+        candidate = copy.deepcopy(pack)
+        edit(candidate)
+        digest_moved = label_digest(candidate, candidate["cases"][0]) != held
+        return digest_moved, pack_anchor_gap(candidate) is not None
+
+    def set_change_set(field: str, value: str):
+        return lambda candidate: candidate["change_sets"][0].__setitem__(field, value)
+
+    def set_snapshot(index: int, field: str, value):
+        return lambda candidate: candidate["snapshots"][index].__setitem__(field, value)
+
+    assert change(set_change_set("boundary", "repair")) == (True, True)
+    assert change(set_change_set("review_scope", "change_affected_flow")) == (True, True)
+    assert change(set_change_set("base_snapshot_id", "snap-a")) == (True, True)
+    assert change(set_snapshot(1, "commit", "d" * 40)) == (True, True), \
+        "repinning the base costs the approval of a label naming the change set, and an anchor rebuild"
+    assert change(set_snapshot(1, "tree_hash", "sha256:" + "6" * 64)) == (True, True)
+    assert change(set_snapshot(1, "languages", ["go"])) == (True, True)
+    assert change(set_change_set("description", "reworded")) == (False, True), \
+        "prose is read by no digest, so only the anchor sees it"
+    assert change(set_change_set("reference", "acme/widget#43")) == (False, True)
+
+    # A change set no label names is projected into no digest, so it costs no approval at all.
+    unnamed = copy.deepcopy(pack)
+    unnamed["cases"][0]["target"].pop("pr_eligibility")
+    unnamed["cases"][0]["controls"][0].pop("pr_eligibility")
+    assert "change_sets" not in contracts_label_projection(unnamed, unnamed["cases"][0])
+
+
+def contracts_label_projection(pack: dict, case: dict) -> dict:
+    """The full projection a label digest hashes, which is not exported by name."""
+    from scaneval import contracts
+
+    return contracts._label_projection(pack, case)
+
+
+def test_each_field_2_1_adds_is_refused_by_the_2_0_schema_where_it_stands():
+    """The fields 2.1 adds are 2.1's, so a 2.0 pack is never read under rules it was not written to."""
+    plain = maximal_pack()
+    assert Draft202012Validator(case_pack_schema()).is_valid(plain)
+    fields = maximal_pack_21()
+    case = fields["cases"][0]
+
+    def put(edit) -> dict:
+        candidate = copy.deepcopy(plain)
+        edit(candidate)
+        return candidate
+
+    candidates = {
+        "change_sets": put(lambda pack: pack.__setitem__("change_sets", fields["change_sets"])),
+        "canonical_target.canonical_id": put(lambda pack: pack["cases"][0]["canonical_target"].__setitem__(
+            "canonical_id", case["canonical_target"]["canonical_id"])),
+        "target.pr_eligibility": put(lambda pack: pack["cases"][0]["target"].__setitem__(
+            "pr_eligibility", case["target"]["pr_eligibility"])),
+        "controls.canonical_id": put(lambda pack: pack["cases"][0]["controls"][0].__setitem__(
+            "canonical_id", case["controls"][0]["canonical_id"])),
+        "controls.pr_eligibility": put(lambda pack: pack["cases"][0]["controls"][0].__setitem__(
+            "pr_eligibility", case["controls"][0]["pr_eligibility"])),
+    }
+    validator = Draft202012Validator(case_pack_schema())
+    for name, candidate in candidates.items():
+        assert not validator.is_valid(candidate), f"the 2.0 schema accepts {name}"
+    assert Draft202012Validator(case_pack_schema_21()).is_valid(fields)

@@ -5,6 +5,19 @@ ScanEval only injects the harness's default model runner wrapped by the observer
 and a progress reporter, then imports the finding records the engine wrote. Findings
 are file-level; this importer keeps them file-level and never invents line ranges.
 
+Two request modes are carried out. A full request runs the harness's ``bootstrap`` mode over the
+whole exported tree, and one that also carries a ``pr`` is refused before anything runs, because
+bootstrap would ignore the change it names. A PR request runs its ``pr`` mode over the change
+between the base and head commits the request names, which the runner has already made real in the
+workspace's git history: the two are handed to the engine as ``baseRef`` and ``headRef`` exactly as
+named, so the engine never falls back to ``origin/main`` or ``HEAD~1``, and the engine's own write
+policy is left alone, so its knowledge base is written into the workspace and imported like any
+bootstrap run's.
+The run starts from a fresh state either way: an export strips the harness's state directory, so
+no earlier finding, decision, or context note reaches it, which is recorded in the run's notes.
+The consensus judge, the one stage that validates findings, runs only when consensus is
+configured, and this adapter never configures it, so no run it produces has a validation stage.
+
 A record the importer cannot read is import loss, not a detail: it is counted, and a
 count above zero degrades the outcome to ``partial`` with unresolved bundles and error
 code ``import_loss``, so a scan that emitted a finding ScanEval could not read can earn
@@ -667,10 +680,23 @@ def reconcile_import(imported: HarnessImport, report: SelfReport) -> ImportAccou
     return ImportAccounting(lost, message, tuple(notes))
 
 
+# The harness modes this adapter runs and makes capture claims about: bootstrap for a full request,
+# pr for a PR request. A mode outside this pair has no claim behind it, so capture_status refuses it.
+CAPTURE_MODES = ("bootstrap", "pr")
+
+
 def capture_status(trace_mode: str, routes: list[str], *, has_summary: bool,
                    capture_state: dict | None = None, hooks: dict | None = None,
-                   hook_failures: int | None = None) -> dict[str, str]:
+                   hook_failures: int | None = None, mode: str = "bootstrap") -> dict[str, str]:
     """Per-category capture availability for one harness run.
+
+    *mode* is the harness mode the run was in, ``bootstrap`` (the default, and every run before PR
+    mode existed) or ``pr``. It changes no value returned here, and that is a claim, not an
+    oversight: what this adapter can observe depends on the trace mode, the routes, the summary,
+    the observer's own state, and which observation surfaces the harness build exports, and none of
+    those is a property of the mode. The documented matrix and its test hold every cell equal
+    across the two modes, so a difference between them would have to be found and stated. A mode
+    this adapter has no claim about is refused rather than answered as if it were bootstrap.
 
     *hooks* is the ``hooks`` object the driver reported: the harness observation surfaces that
     build actually exported, ``{"runner": <version or None>, "engine": <version or None>}``.
@@ -723,10 +749,12 @@ def capture_status(trace_mode: str, routes: list[str], *, has_summary: bool,
     at a thin attempt stream can find out why it is thin.
 
     ``finding_validation`` is ``not_applicable`` with the engine hooks, and that is a statement
-    about the scan and not about the observer: validation is the consensus judge, the judge runs
-    in pr mode, and :meth:`LlmHarnessAdapter.scan` refuses every mode but bootstrap, so no run
-    this adapter can produce has a validation stage in it. Without the hooks the honest answer is
-    the weaker one, ``unavailable``, which says nothing was observed and not that nothing ran.
+    about the scan and not about the observer: validation is the consensus judge, and no run this
+    adapter can produce has a validation stage in it. A bootstrap run never has one, because the
+    engine runs the judge only in pr mode. A pr run has one only when consensus is configured, and
+    this adapter never configures it: the driver passes no ``consensus`` option in either mode, so
+    the judge is never given the chance to run. Without the hooks the honest answer is the weaker
+    one, ``unavailable``, which says nothing was observed and not that nothing ran.
 
     ``finding_submitted`` is read off *capture_state*, the observer state the driver reported,
     and, where the engine hooks produced it, off *hook_failures* as well, rather than off the
@@ -741,6 +769,8 @@ def capture_status(trace_mode: str, routes: list[str], *, has_summary: bool,
     here is downgraded by :func:`~scaneval.execution._capture_record` when the bundle it lands in
     holds no counted trace, and the run is recorded as partial. Do not answer it twice.
     """
+    if mode not in CAPTURE_MODES:
+        raise ValueError(f"capture is described for the harness modes {', '.join(CAPTURE_MODES)}, not {mode!r}")
     request_capture = {"off": "unavailable", "metadata": "partial", "content": "partial"}[trace_mode]
     traced = trace_mode != "off"
     engine_hooks = bool(hooks.get("engine")) if isinstance(hooks, dict) else False
@@ -768,8 +798,11 @@ def capture_status(trace_mode: str, routes: list[str], *, has_summary: bool,
 
 class LlmHarnessAdapter(Adapter):
     name = "llm-harness"
-    adapter_version = "2.2.0"
+    adapter_version = "2.3.0"
     requires_git = True
+    # A full request runs the harness's bootstrap mode; a PR request runs its pr mode over the base
+    # and head commits the request names (see the module docstring).
+    scan_modes = frozenset({"full", "pr"})
     supported_languages = frozenset({"python", "javascript", "typescript", "go", "rust"})
     # What the driver process inherits from the operator environment, on top of the base set in
     # :mod:`scaneval.adapters.base`, and recorded as ``environment.passthrough`` in every
@@ -844,16 +877,34 @@ class LlmHarnessAdapter(Adapter):
 
     def scan(self, *, request, source_dir, raw_dir, spec, preparation, timeout_seconds, trace_mode, trace_dir):
         harness, preset, root = self._preset(spec)
-        if request["input"]["mode"] != "full":
-            raise AdapterError("native PR mode is not wired in this build; only full scans are supported")
-        mode = str(spec.config.get("mode", "bootstrap"))
-        if mode != "bootstrap":
-            raise AdapterError("only bootstrap (full baseline) mode is supported for full-scan requests")
+        requested = request["input"]["mode"]
+        if requested not in self.scan_modes:
+            raise AdapterError(f"llm-harness carries out {', '.join(sorted(self.scan_modes))} scans, not "
+                               f"{requested!r}; it is never run on another mode's input")
+        if str(spec.config.get("mode", "bootstrap")) != "bootstrap":
+            raise AdapterError("config.mode names the harness mode of a full request, and only bootstrap (full "
+                               "baseline) is supported; a PR request runs the harness's pr mode by itself")
+        # The mode the harness runs in follows the request, never the configuration, and a PR request
+        # names its two commits: the refs are handed to the engine exactly as named, so it can never
+        # resolve a base of its own choosing (origin/main, HEAD~1) for a change it was not asked about.
+        mode = "bootstrap"
+        refs: dict[str, str] = {}
+        if requested == "pr":
+            pr = request["input"].get("pr")
+            base_ref, head_ref = (pr or {}).get("base"), (pr or {}).get("head")
+            if not (isinstance(base_ref, str) and base_ref and isinstance(head_ref, str) and head_ref):
+                raise AdapterError("a PR request must name the base and head commits the review runs between")
+            mode, refs = "pr", {"base_ref": base_ref, "head_ref": head_ref}
+        elif request["input"].get("pr") is not None:
+            # The refusal ``pr_range`` gives the other two adapters: this request would run bootstrap over
+            # the whole tree and drop the change it names. ``build_request`` never produces one.
+            raise AdapterError("llm-harness was given a full-mode request that also carries input.pr; it would "
+                               "ignore the change it names, so the request was refused")
         trace_path = (trace_dir / "events.jsonl") if trace_dir is not None else None
         config = {
             "harness_root": str(root), "engine_entry": preset["engine_entry"], "runner_entry": preset["runner_entry"],
             "mock_entry": preset["mock_entry"], "observer_sdk": preparation["observer_sdk"],
-            "repo_path": str(source_dir), "mode": mode, "model": str(spec.config["model"]),
+            "repo_path": str(source_dir), "mode": mode, **refs, "model": str(spec.config["model"]),
             **({"llm_max_files": int(spec.config["llm_max_files"])} if "llm_max_files" in spec.config else {}),
             **({"llm_timeout_ms": int(spec.config["llm_timeout_ms"])} if "llm_timeout_ms" in spec.config else {}),
             **({"qmd_profile": spec.config["qmd_profile"]} if spec.config.get("qmd_profile") else {}),
@@ -967,7 +1018,8 @@ class LlmHarnessAdapter(Adapter):
         if not isinstance(runner_hook_failures, int) or isinstance(runner_hook_failures, bool):
             runner_hook_failures = None
         capture = capture_status(trace_mode, routes, has_summary=bool(usable_summary),
-                                 capture_state=capture_state, hooks=hooks, hook_failures=hook_failures)
+                                 capture_state=capture_state, hooks=hooks, hook_failures=hook_failures,
+                                 mode=mode)
         # One accounting of import loss, reconciling the records the importer could read against
         # the findings the harness says it wrote. Every branch below reads this and nothing else:
         # the status, the resolved-bundle flag, the error message, and the notes.
@@ -989,12 +1041,14 @@ class LlmHarnessAdapter(Adapter):
             untagged = output.get("model_calls_without_context") if isinstance(output, dict) else None
             counted = (f" It reported context for {tagged} model invocation(s) and none for {untagged}."
                        if isinstance(tagged, int) and isinstance(untagged, int) else "")
+            no_validation = ("a bootstrap scan runs no validation stage" if mode == "bootstrap" else
+                             "a pr scan runs no validation stage either, because the consensus judge is the "
+                             "only one and this adapter never configures consensus")
             notes.append("The engine reported the context it supplied and the life of every finding candidate."
                          + counted +
                          " A model call with no context event is an uninstrumented one -- the threat planner "
                          "reports none and not every specialist does -- rather than a call that was given no "
-                         "context; and a bootstrap scan runs no validation stage, so there is no validation to "
-                         "miss.")
+                         f"context; and {no_validation}, so there is no validation to miss.")
             if hook_failures is None:
                 notes.append("The run reported no final count of engine observer hook failures, so whether any "
                              "candidate, filter or submission record was lost before it reached the trace is "
@@ -1016,6 +1070,10 @@ class LlmHarnessAdapter(Adapter):
         if not mock_only:
             notes.append("Tool dispatch was not observed: it happens inside the model CLI subprocess. Absence of tool events is not evidence that no tool ran.")
         notes.append("Harness findings are file-level; no line ranges were inferred.")
+        if mode == "pr":
+            notes.append("Prepared state: fresh. The harness's state directory is stripped from every export, so "
+                         "this review started with the harness's default threat model and no earlier finding, "
+                         "decision, or context note; nothing is carried from one invocation to the next.")
         served_models = sorted({str(name) for name in (output.get("models_served") or [])}) \
             if isinstance(output, dict) and isinstance(output.get("models_served"), list) else []
         model_identity: dict[str, Any] = {
@@ -1102,12 +1160,26 @@ class LlmHarnessAdapter(Adapter):
         if isinstance(budget, dict) and "estimatedSpentUsd" in budget:
             notes.append(f"Harness cost estimate (not measured): {budget.get('estimatedSpentUsd')} USD "
                          f"for {budget.get('actualLlmFilesScanned')} LLM files; measured cost unavailable.")
-        scan_stats = usable_summary.get("bootstrapScan") or {}
+        # The engine reports how a scan went under the record of the mode it ran: bootstrapScan for
+        # a bootstrap run and changeScan for a pr run. Both carry the same fields, so what is read
+        # from them below is one reading, and a pr run is never judged by a record it cannot have.
+        stats_key = "changeScan" if mode == "pr" else "bootstrapScan"
+        scan_stats = usable_summary.get(stats_key) or {}
         llm_calls = int(scan_stats.get("llmCalls") or 0)
         failed_calls = int(scan_stats.get("failedCalls") or 0)
         notes.append(f"Harness self-report: llm_calls={llm_calls} failed_calls={failed_calls} "
                      f"coverage={scan_stats.get('hypothesisCoverage')} status={scan_stats.get('status')} "
                      f"runtime_profile={usable_summary.get('runtimeProfile')} degraded={usable_summary.get('degraded')}")
+        if mode == "pr":
+            advisories = scan_stats.get("advisories")
+            if not scan_stats:
+                notes.append("The harness summary carried no changeScan record, so its own account of how the "
+                             "review went is unavailable; llm_calls and failed_calls above are zero because "
+                             "nothing was reported, not because nothing was called.")
+            elif scan_stats.get("status") == "skipped" or advisories:
+                notes.append("The harness reported its own account of the change scan: status="
+                             f"{scan_stats.get('status')} advisories={advisories}. A change scan the harness "
+                             "skips is its native scope, not a failure of this run.")
         if result.exit_code not in (0, 2):
             return NativeOutcome(status="error", exit_code=result.exit_code,
                                  error={"code": f"driver_exit_{result.exit_code}",

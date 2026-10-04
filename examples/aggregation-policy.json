@@ -1,0 +1,21 @@
+{
+  "schema_version": "2.1",
+  "policy_id": "example-fixture-policy",
+  "policy_version": "0.1.0-example",
+  "views": ["equal_target", "equal_project", "equal_family"],
+  "target_weights": null,
+  "workload_weights": null,
+  "uncertainty": {
+    "method": "cluster_bootstrap",
+    "cluster_by": "project",
+    "replicates": 1000,
+    "confidence": 0.95,
+    "seed": 20260929,
+    "min_clusters": 5
+  },
+  "notes": [
+    "Example values for a fixture or a first try only; this is not a recommended, reviewed, or validated policy.",
+    "Freeze your own views, weights, seed, cluster rule, and minimum cluster count before any result is read; choosing them after seeing results defeats the policy.",
+    "Declare workload_weights only when a summary across workloads is intended, and target_weights (with 'explicit' in views) only when every canonical target of a view is weighted and the weights sum to 1."
+  ]
+}

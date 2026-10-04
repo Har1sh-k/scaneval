@@ -14,10 +14,46 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 
-CONTRACT_KINDS = frozenset(
-    {"scan-request", "scan-result", "evaluation-plan", "review-decisions", "execution-record",
-     "case-pack", "review-record", "run-config", "run-manifest"}
-)
+# Every contract kind and the protocol versions this build reads, oldest first. A 2.0 document is
+# validated against its 2.0 schema exactly as it always was: 2.1 adds optional fields to some kinds
+# and adds new kinds, and a writer uses 2.1 only for a document that carries one of those fields, so
+# a record written before 2.1 existed is never reread under rules it was not written against.
+SCHEMA_VERSIONS: dict[str, tuple[str, ...]] = {
+    "scan-request": ("2.0",),
+    "scan-result": ("2.0", "2.1"),
+    "evaluation-plan": ("2.0", "2.1"),
+    "review-decisions": ("2.0",),
+    "execution-record": ("2.0", "2.1"),
+    "case-pack": ("2.0", "2.1"),
+    "review-record": ("2.0",),
+    "run-config": ("2.0", "2.1"),
+    "run-manifest": ("2.0", "2.1"),
+    # Kinds first published at 2.1, one per feature: the frozen evaluation schedule a run writes
+    # before it prepares any input, and the reviewed map a metadata-blinded input is transformed
+    # with. 2.1 is each one's only version, so its schema keeps the plain file name.
+    "evaluation-schedule": ("2.1",),
+    "blinding-map": ("2.1",),
+    # SARIF import (profile sarif-import-1): the record scaneval.sarif writes beside the scan
+    # result it produced from a saved log. A kind first published at 2.1 keeps the plain file name.
+    "import-record": ("2.1",),
+    # Corpus aggregation and paired comparison (scaneval.aggregate): the policy an aggregation runs
+    # under, and the two reports it writes. First published at 2.1, so plain file names.
+    "aggregation-policy": ("2.1",),
+    "aggregate-report": ("2.1",),
+    "comparison-report": ("2.1",),
+    # Precision sampling and review (scaneval.precision, docs/PRECISION.md): the seeded sample of
+    # delivered claims with the frame it was drawn from, the chained human reviews of that sample,
+    # and the estimate computed from both. Each is first published at 2.1.
+    "precision-sample": ("2.1",),
+    "precision-reviews": ("2.1",),
+    "precision-estimate": ("2.1",),
+    # Promotion gate decisions (scaneval.gate, docs/GATE.md): the policy a gate is evaluated under,
+    # frozen before any result is read, and the decision made over a comparison. Each is first
+    # published at 2.1, so plain file names.
+    "gate-policy": ("2.1",),
+    "gate-decision": ("2.1",),
+}
+CONTRACT_KINDS = frozenset(SCHEMA_VERSIONS)
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
 # Validation levels are ordered, so an approval at a higher level carries a lower claimed one.
 _LEVEL_RANK = {"L1": 1, "L2": 2, "L3": 3, "L4": 4}
@@ -75,11 +111,31 @@ def is_stated(value: Any) -> bool:
     return any(unicodedata.category(ch) not in _BLANK_CATEGORIES for ch in value)
 
 
-def _schema(kind: str) -> dict[str, Any]:
-    if kind not in CONTRACT_KINDS:
+def schema_file(kind: str, version: str) -> str:
+    """The packaged schema file for *kind* at *version*.
+
+    The first version a kind was published at keeps the plain ``<kind>.schema.json`` name, which is
+    every 2.0 schema this package has ever shipped, and a later version of the same kind is
+    ``<kind>-<version>.schema.json`` beside it, so publishing 2.1 never edits a 2.0 file.
+    """
+    if kind not in SCHEMA_VERSIONS:
         expected = ", ".join(sorted(CONTRACT_KINDS))
         raise ContractError(f"unknown contract kind {kind!r}; expected one of: {expected}")
-    resource = files("scaneval").joinpath("schemas", f"{kind}.schema.json")
+    versions = SCHEMA_VERSIONS[kind]
+    if version not in versions:
+        raise ContractError(
+            f"{kind} schema_version {version!r} is not one this build reads; supported: "
+            f"{', '.join(versions)}")
+    return f"{kind}.schema.json" if version == versions[0] else f"{kind}-{version}.schema.json"
+
+
+def _schema(kind: str, version: str | None = None) -> dict[str, Any]:
+    """The packaged schema for *kind* at *version*, the oldest supported version when omitted."""
+    if kind not in SCHEMA_VERSIONS:
+        expected = ", ".join(sorted(CONTRACT_KINDS))
+        raise ContractError(f"unknown contract kind {kind!r}; expected one of: {expected}")
+    name = schema_file(kind, SCHEMA_VERSIONS[kind][0] if version is None else version)
+    resource = files("scaneval").joinpath("schemas", name)
     return json.loads(resource.read_text(encoding="utf-8"))
 
 
@@ -97,6 +153,24 @@ def _require_relative_path(path: str, label: str) -> None:
         or any(part == ".." for part in normalized.split("/"))
     ):
         raise ContractError(f"{label} must be a relative path without '..' components")
+
+
+def _require_sorted_relative_paths(paths: list[str], label: str) -> None:
+    """Refuse *paths* unless each is a relative POSIX path and together they are sorted, each path once.
+
+    A relative POSIX path here holds no NUL byte and has no empty, ``.``, or ``..`` segment, so a leading ``/``, a
+    doubled or trailing ``/``, and a ``./`` prefix are all refused: one file has one spelling, which is what lets two
+    lists of these be compared by equality. A backslash is an ordinary character in a POSIX name and is not read as a
+    separator, unlike in :func:`_require_relative_path`, because these are the names git reports and a file may be
+    called that. Sorted is :func:`sorted`'s order, so one set of paths is one list.
+    """
+    for index, path in enumerate(paths):
+        if "\x00" in path or any(part in ("", ".", "..") for part in path.split("/")):
+            raise ContractError(
+                f"{label}[{index}] must be a relative POSIX path with no empty, '.', or '..' segment, not {path!r}")
+    _unique(paths, label)
+    if paths != sorted(paths):
+        raise ContractError(f"{label} must be sorted")
 
 
 def reject_nonfinite(value: Any, path: str = "document") -> None:
@@ -351,16 +425,30 @@ PACK_UNANCHORED_FIELDS = frozenset({
 _PACK_RECORD_FIELDS = frozenset({"snapshots", "cases", "admissions"})
 
 
+def _in_change_set_order(entries: Any) -> Any:
+    """PR eligibility *entries* in ``change_set_id`` order, which is the only order that carries content.
+
+    The contract keeps the ids unique, so an item's eligibility is a set keyed by change set and
+    the order it was written in says nothing. Anything that is not a list of objects is returned as
+    it is, because this is read before the contract has validated a candidate and the contract is
+    what refuses it.
+    """
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+        return entries
+    return sorted(entries, key=lambda entry: str(entry.get("change_set_id", "")))
+
+
 def case_label_projection(case: dict[str, Any]) -> dict[str, Any]:
     """The fields of *case* that say what is alleged: what a reviewer of it passed judgment on.
 
     Every field named in :data:`CASE_LABEL_FIELDS` is projected whole, subfields included, so a
     field added inside a target, a control, or an evidence record is covered the day it is added
-    rather than the day someone remembers to list it here. Three orderings are normalized because
+    rather than the day someone remembers to list it here. Five orderings are normalized because
     none of them carries content: controls are read in ``control_id`` order, each control's evidence
-    ids are sorted, evidence records are read in ``evidence_id`` order, and aliases are sorted. The
-    contract keeps all four unique, so reordering one of those lists alone is not a content change
-    while adding, removing, renaming, or editing an entry is.
+    ids are sorted, evidence records are read in ``evidence_id`` order, aliases are sorted, and the
+    PR eligibility entries of the target and of each control are read in ``change_set_id`` order.
+    The contract keeps every one of those unique, so reordering one of those lists alone is not a
+    content change while adding, removing, renaming, or editing an entry is.
 
     The evidence records are in here, not beside it: an L3 label is an allegation plus the evidence
     it rests on, so deleting the advisory a case cites, or rewriting what it says, is a change to
@@ -381,9 +469,14 @@ def case_label_projection(case: dict[str, Any]) -> dict[str, Any]:
     if "canonical_target" in projected:
         canonical = projected["canonical_target"]
         projected["canonical_target"] = {**canonical, "aliases": sorted(canonical["aliases"])}
+    if "target" in projected and "pr_eligibility" in projected["target"]:
+        projected["target"] = {**projected["target"],
+                               "pr_eligibility": _in_change_set_order(projected["target"]["pr_eligibility"])}
     if "controls" in projected:
         projected["controls"] = [
-            {**control, "evidence_ids": sorted(control["evidence_ids"])}
+            {**control, "evidence_ids": sorted(control["evidence_ids"]),
+             **({"pr_eligibility": _in_change_set_order(control["pr_eligibility"])}
+                if "pr_eligibility" in control else {})}
             for control in sorted(projected["controls"], key=lambda item: item["control_id"])]
     if "evidence" in projected:
         projected["evidence"] = sorted(projected["evidence"],
@@ -717,7 +810,49 @@ def _label_projection(pack: dict[str, Any], case: dict[str, Any]) -> dict[str, A
     split between them is stated once, in :data:`CASE_LABEL_FIELDS` and :data:`CASE_UNREAD_FIELDS`,
     and a test holds every field of a case to it.
     """
-    return {**case_label_projection(case), "snapshots": _snapshot_identity(pack, case)}
+    projected = {**case_label_projection(case), "snapshots": _snapshot_identity(pack, case)}
+    change_sets = _change_set_identity(pack, case)
+    if change_sets:
+        # Only a case that names a change set carries this key, so every digest recorded before
+        # change sets existed still hashes the same content it always did.
+        projected["change_sets"] = change_sets
+    return projected
+
+
+def _change_set_identity(pack: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
+    """The identity of every change set *case*'s PR eligibility names, keyed by change set id.
+
+    A PR eligibility entry says an item is scored in the review of one base/head boundary, so what
+    a reviewer approved includes that boundary: which snapshots it runs between, what kind of
+    boundary it is, and which scope it declares, with each snapshot's identity projected the way a
+    label's own snapshot is (:func:`snapshot_identity_projection`). Free text about the change set
+    is left to the anchor. A change set the pack does not declare is projected as ``None``, which is
+    itself a change from one that named a declared change set. Empty when the case names none.
+    """
+    records = [case.get("target")] + list(case.get("controls") or [])
+    named = sorted({entry.get("change_set_id") for record in records if isinstance(record, dict)
+                    for entry in record.get("pr_eligibility") or [] if isinstance(entry, dict)
+                    and isinstance(entry.get("change_set_id"), str)})
+    if not named:
+        return {}
+    declared = {entry.get("change_set_id"): entry for entry in pack.get("change_sets") or []
+                if isinstance(entry, dict)}
+    snapshots = {snapshot.get("snapshot_id"): snapshot for snapshot in pack.get("snapshots") or []
+                 if isinstance(snapshot, dict)}
+    identity: dict[str, Any] = {}
+    for change_set_id in named:
+        change_set = declared.get(change_set_id)
+        if change_set is None:
+            identity[change_set_id] = None
+            continue
+        projected = {key: value for key, value in change_set.items()
+                     if key not in ("description", "reference")}
+        for side in ("base", "head"):
+            snapshot = snapshots.get(change_set.get(f"{side}_snapshot_id"))
+            projected[f"{side}_snapshot"] = (None if snapshot is None
+                                             else snapshot_identity_projection(snapshot))
+        identity[change_set_id] = projected
+    return identity
 
 
 def label_digest(pack: dict[str, Any], case: dict[str, Any]) -> str:
@@ -949,6 +1084,16 @@ def _validate_scan_result(document: dict[str, Any]) -> None:
     any one adapter, so no importer can hand out a citation the bundle cannot honor. This
     checks the reference only: whether the declared artifact's bytes support the allegation is
     a review question that nothing in this file can see.
+
+    The ``omitted_paths`` a 2.1 result may list are paths the adapter observed the scanner did
+    not examine. They must be relative POSIX paths, sorted, each once, because the scorer
+    compares them by equality with the paths a plan gives its controls. Whether a path really
+    was examined is the adapter's claim, and nothing in this file can see it.
+
+    A 2.1 result may also say ``examined_nothing``, that the adapter can show no part of the input
+    to have been examined. The schema makes it a boolean, and nothing here checks it against
+    ``omitted_paths``, ``claims`` or ``status``: each is the adapter's own account of one thing,
+    and the scorer reads each for what it says.
     """
     claims = document["claims"]
     _unique([claim["claim_id"] for claim in claims], "claim_id")
@@ -972,6 +1117,8 @@ def _validate_scan_result(document: dict[str, Any]) -> None:
                 f"result does not declare in raw_artifacts; declared ids: {known}")
     for index, artifact in enumerate(document.get("raw_artifacts", [])):
         _require_relative_path(artifact["path"], f"raw_artifacts[{index}].path")
+    if "omitted_paths" in document:
+        _require_sorted_relative_paths(document["omitted_paths"], "omitted_paths")
 
 
 def _validate_evaluation_plan(document: dict[str, Any]) -> None:
@@ -979,10 +1126,30 @@ def _validate_evaluation_plan(document: dict[str, Any]) -> None:
 
     A draft plan may therefore carry an L3 or L4 item: the scope, not a rewritten level, says
     the plan as a whole is not reviewed evidence. A reviewed plan stays L3/L4 only, and a
-    diagnostic plan stays fixture only.
+    diagnostic plan stays fixture only. A control's ``paths``, which only a 2.1 plan may carry,
+    are relative POSIX paths, sorted, each once, so they compare by equality with the
+    ``omitted_paths`` of a scan result.
     """
     _unique([target["target_id"] for target in document["targets"]], "target_id")
     _unique([control["control_id"] for control in document["controls"]], "control_id")
+    for index, control in enumerate(document["controls"]):
+        if "paths" in control:
+            _require_sorted_relative_paths(control["paths"], f"controls[{index}].paths")
+    provenance = document.get("provenance")
+    if document["schema_version"] != "2.0" and provenance is not None:
+        # A PR plan names the boundary it scores and the scope of every item in it; a full plan
+        # names neither. A blinded plan names the map its input was transformed with.
+        is_pr = provenance["mode"] == "pr"
+        if is_pr != ("pr" in provenance):
+            raise ContractError("provenance.pr is required exactly when the plan mode is pr")
+        scoped = [item for item in document["targets"] + document["controls"] if "pr_scope" in item]
+        if is_pr and len(scoped) != len(document["targets"]) + len(document["controls"]):
+            raise ContractError("every item of a pr plan states its pr_scope")
+        if not is_pr and scoped:
+            raise ContractError("only a pr plan carries pr_scope")
+        blinded = provenance.get("profile") == "metadata_blinded"
+        if blinded != ("blinding" in provenance):
+            raise ContractError("provenance.blinding is required exactly when the profile is metadata_blinded")
     levels = [item["validation_level"] for item in document["targets"]]
     levels += [item["validation_level"] for item in document["controls"]]
     allowed = {"reviewed": {"L3", "L4"}, "draft": {"L1", "L2", "L3", "L4"},
@@ -1018,6 +1185,16 @@ def _validate_execution_record(document: dict[str, Any]) -> None:
         _require_relative_path(trace["path"], "trace.path")
     if document["status"] == "timeout" and not document["timed_out"]:
         raise ContractError("status 'timeout' requires timed_out to be true")
+    if document["schema_version"] == "2.0":
+        return
+    provenance = document["provenance"]
+    if (provenance["mode"] == "pr") != (provenance.get("pr") is not None):
+        raise ContractError("provenance.pr is recorded exactly for a pr invocation")
+    isolation = document["isolation"]
+    if isolation["enforced"] and isolation["backend"] == "local":
+        raise ContractError("the local backend enforces nothing, so it cannot be recorded as enforced")
+    if document["network_policy"]["enforced"] and not isolation["enforced"]:
+        raise ContractError("a network policy is enforced only inside an enforced isolation backend")
 
 
 def _validate_case_pack(document: dict[str, Any]) -> None:
@@ -1113,6 +1290,8 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
     snapshots = [snapshot["snapshot_id"] for snapshot in document["snapshots"]]
     _unique(snapshots, "snapshot_id")
     known = set(snapshots)
+    if document["schema_version"] != "2.0":
+        _validate_change_sets(document, known)
     snapshot_hashes = {snapshot["snapshot_id"]: snapshot.get("tree_hash") for snapshot in document["snapshots"]}
     _unique([case["case_id"] for case in document["cases"]], "case_id")
     target_ids: list[str] = []
@@ -1276,6 +1455,51 @@ def _validate_case_pack(document: dict[str, Any]) -> None:
         raise ContractError(anchor)
 
 
+def _validate_change_sets(document: dict[str, Any], known: set[str]) -> None:
+    """A change set runs between two declared snapshots of one repository, and PR eligibility names one.
+
+    Base and head must be declared, distinct, and fetched from the same repository URL, since a
+    diff between two unrelated repositories is not a change anybody reviewed. An item may be
+    eligible only under a change set whose head is its own snapshot: a PR review reads the head
+    tree, so a label on any other snapshot is not something that review can observe. Relations are
+    checked against the kind of item: a target is introduced or affected by a change, and only a
+    control can be repaired by one. Whether the eligibility is right is a reviewed judgment, never
+    a line-overlap computation here.
+    """
+    by_id = {snapshot["snapshot_id"]: snapshot for snapshot in document["snapshots"]}
+    change_sets = document.get("change_sets", [])
+    _unique([entry["change_set_id"] for entry in change_sets], "change_set_id")
+    heads: dict[str, str] = {}
+    for entry in change_sets:
+        label = f"change set {entry['change_set_id']}"
+        for side in ("base", "head"):
+            if entry[f"{side}_snapshot_id"] not in known:
+                raise ContractError(f"{label}: {side} snapshot {entry[f'{side}_snapshot_id']} is not declared")
+        if entry["base_snapshot_id"] == entry["head_snapshot_id"]:
+            raise ContractError(f"{label}: base and head must be different snapshots")
+        base = by_id[entry["base_snapshot_id"]]["repository"]["url"]
+        head = by_id[entry["head_snapshot_id"]]["repository"]["url"]
+        if base != head:
+            raise ContractError(f"{label}: base and head come from different repositories ({base}, {head})")
+        heads[entry["change_set_id"]] = entry["head_snapshot_id"]
+    for case in document["cases"]:
+        records = [("target", case["target"])] + [("control", control) for control in case["controls"]]
+        for kind, record in records:
+            owner = record.get("target_id") if kind == "target" else record["control_id"]
+            entries = record.get("pr_eligibility", [])
+            _unique([entry["change_set_id"] for entry in entries], f"{owner} pr_eligibility change_set_id")
+            for entry in entries:
+                label = f"case {case['case_id']}: {kind} {owner} pr_eligibility {entry['change_set_id']}"
+                if entry["change_set_id"] not in heads:
+                    raise ContractError(f"{label} names a change set the pack does not declare")
+                if heads[entry["change_set_id"]] != record["snapshot_id"]:
+                    raise ContractError(
+                        f"{label}: the item is on snapshot {record['snapshot_id']}, but a PR review "
+                        f"reads the change set's head, {heads[entry['change_set_id']]}")
+                if kind == "target" and entry["relation"] == "repaired":
+                    raise ContractError(f"{label}: a target is introduced or affected, never repaired")
+
+
 def _validate_review_record(document: dict[str, Any]) -> None:
     """Check what the record asserts about itself; it says nothing about the decisions' quality.
 
@@ -1295,9 +1519,98 @@ def _validate_review_record(document: dict[str, Any]) -> None:
             raise ContractError("the latest review must bind to the current decisions hash")
 
 
+_PINNED_IMAGE = re.compile(r"^(?:[^@\s]+@sha256:[0-9a-f]{64}|sha256:[0-9a-f]{64})$")
+BLINDED_INPUT_SUFFIX = ".blinded"
+
+
+def input_identity(entry: dict[str, Any]) -> str:
+    """The evaluator-side id of one configured input: its ``input_id``, or the default for its shape.
+
+    A full input defaults to its snapshot id and a PR input to its change set id, each with
+    :data:`BLINDED_INPUT_SUFFIX` when the input is metadata-blinded, so a standard and a blinded
+    input of one snapshot can sit in one run. A 2.0 configuration has only snapshot ids, and this
+    returns exactly that for it. The id names directories and invocations on the evaluator side
+    and is never shown to a scanner.
+    """
+    if entry.get("input_id"):
+        return entry["input_id"]
+    base = entry.get("change_set_id") if entry.get("mode", "full") == "pr" else entry.get("snapshot_id")
+    return f"{base}{BLINDED_INPUT_SUFFIX}" if entry.get("profile") == "metadata_blinded" else base
+
+
+def pr_diff_sha256(base_tree_hash: str, head_tree_hash: str, changes: dict[str, Any]) -> str:
+    """The digest of a recorded PR diff: the two trees it is between and the changes it records.
+
+    *changes* is the diff record :func:`scaneval.materialize.diff_trees` writes, over the trees a
+    scanner is handed. Naming both tree hashes inside the digest is what makes it the digest of a
+    change between two things and not of a list of paths: the same paths changed between other
+    trees are a different diff. It is a canonical hash of what was recorded and nothing more.
+    """
+    return canonical_sha256({"base_tree_hash": base_tree_hash, "head_tree_hash": head_tree_hash,
+                             "changes": changes})
+
+
+def pr_input_hash(base_tree_hash: str, head_tree_hash: str, diff_sha256: str) -> str:
+    """The identity a native PR input binds its result, plan, and decisions to.
+
+    A full input is identified by its one tree; a PR input is identified by the base tree, the head
+    tree, and the diff between them, so a result cannot be read as the review of another change
+    that happens to share a head. The trees are the ones a scanner is handed, transformed ones
+    included, because that is what the result describes.
+    """
+    return canonical_sha256({"mode": "pr", "base_tree_hash": base_tree_hash,
+                             "head_tree_hash": head_tree_hash, "diff_sha256": diff_sha256})
+
+
 def _validate_run_config(document: dict[str, Any]) -> None:
+    """Unique ids, and for 2.1 an input shape that says exactly one thing and a backend that can hold.
+
+    A full input names a snapshot and a PR input names a change set, never both; a blinded input
+    names its reviewed map and nothing else carries one. An ``oci`` backend must name an image
+    pinned by digest, and ``model_provider_only`` under it must declare the egress it allows and
+    the proxy image that enforces it, because a policy with no enforcement behind it would be
+    recorded as enforced. A ``local`` backend carries none of those settings, so a configuration
+    cannot look sandboxed while nothing is. These are shape rules: whether an image exists or a
+    map is reviewed is checked when the run prepares it.
+    """
     _unique([system["system_id"] for system in document["systems"]], "system_id")
-    _unique([item["snapshot_id"] for item in document["inputs"]], "inputs.snapshot_id")
+    if document["schema_version"] == "2.0":
+        _unique([item["snapshot_id"] for item in document["inputs"]], "inputs.snapshot_id")
+        return
+    for index, item in enumerate(document["inputs"]):
+        label = f"inputs[{index}]"
+        mode = item.get("mode", "full")
+        if mode == "full" and ("snapshot_id" not in item or "change_set_id" in item):
+            raise ContractError(f"{label}: a full input names a snapshot_id and no change_set_id")
+        if mode == "pr" and ("change_set_id" not in item or "snapshot_id" in item):
+            raise ContractError(f"{label}: a pr input names a change_set_id and no snapshot_id")
+        blinded = item.get("profile", "standard") == "metadata_blinded"
+        if blinded != ("blinding_map" in item):
+            raise ContractError(
+                f"{label}: blinding_map is required exactly when profile is metadata_blinded")
+    _unique([input_identity(item) for item in document["inputs"]], "input id")
+    for index, system in enumerate(document["systems"]):
+        execution = system.get("execution") or {"backend": "local"}
+        label = f"systems[{index}].execution"
+        policy = system.get("network_policy", document["network_policy"])
+        if execution["backend"] == "local":
+            extra = sorted(set(execution) - {"backend"})
+            if extra:
+                raise ContractError(
+                    f"{label}: the local backend enforces nothing, so it takes no {', '.join(extra)}")
+            continue
+        image = execution.get("image")
+        if not isinstance(image, str) or not _PINNED_IMAGE.match(image):
+            raise ContractError(f"{label}: an oci backend needs an image pinned by digest, not {image!r}")
+        if policy == "model_provider_only":
+            if not execution.get("egress"):
+                raise ContractError(f"{label}: model_provider_only needs the egress it allows declared")
+            proxy = execution.get("proxy_image")
+            if not isinstance(proxy, str) or not _PINNED_IMAGE.match(proxy):
+                raise ContractError(
+                    f"{label}: model_provider_only needs a proxy_image pinned by digest, not {proxy!r}")
+        elif execution.get("egress") or execution.get("proxy_image"):
+            raise ContractError(f"{label}: egress and proxy_image apply only to model_provider_only")
 
 
 def _validate_run_manifest(document: dict[str, Any]) -> None:
@@ -1312,11 +1625,22 @@ def _validate_run_manifest(document: dict[str, Any]) -> None:
         raise ContractError("a failed run manifest must record its failure")
     if not failed and "failure" in document:
         raise ContractError("only a failed run manifest may record a failure")
-    _unique([item["snapshot_id"] for item in document["inputs"]], "inputs.snapshot_id")
+    version = document["schema_version"]
+    key = "snapshot_id" if version == "2.0" else "input_id"
+    _unique([item[key] for item in document["inputs"]], f"inputs.{key}")
     _unique([system["system_id"] for system in document["systems"]], "systems.system_id")
     _unique([row["invocation_id"] for row in document["invocations"]], "invocation_id")
     for index, item in enumerate(document["inputs"]):
-        _require_relative_path(item["provenance_path"], f"inputs[{index}].provenance_path")
+        if item["provenance_path"] is not None:
+            _require_relative_path(item["provenance_path"], f"inputs[{index}].provenance_path")
+    if version != "2.0":
+        _require_relative_path(document["schedule_path"], "schedule_path")
+        unprepared = {item["input_id"] for item in document["inputs"] if item["preparation_failure"]}
+        for index, row in enumerate(document["invocations"]):
+            if row["input_id"] in unprepared and row["status"] != "skipped":
+                raise ContractError(
+                    f"invocations[{index}]: input {row['input_id']} was never prepared, so no "
+                    "invocation of it can have run")
     for index, row in enumerate(document["invocations"]):
         label = f"invocations[{index}]"
         if row["status"] == "skipped":
@@ -1332,6 +1656,728 @@ def _validate_run_manifest(document: dict[str, Any]) -> None:
             _require_relative_path(row["bundle_path"], f"{label}.bundle_path")
 
 
+# --- evaluation schedule ------------------------------------------------------------------------
+
+
+def _validate_evaluation_schedule(document: dict[str, Any]) -> None:
+    """Check that a schedule is complete and consistent with itself; it says nothing about outcomes.
+
+    Every input, system, and assignment id is unique, and the assignments are exactly every input
+    under every system for every repetition, each named by the invocation id its bundle carries
+    (``<input>__<system>__r<n>``, the one format :func:`scaneval.execution.invocation_id` writes), so
+    a schedule cannot leave out the assignment that later failed. A full input names its snapshot
+    and no change set; a PR input names its change set and carries the frozen identity of it, the
+    change set block, which names that same change set and ends at the input's own snapshot, since
+    a PR review reads the head. A frozen plan states a ``pr_scope`` for every item of a PR input and
+    for no item of a full one, which is what freezing the eligibility before execution means. A
+    blinded input names the map it is transformed with, and no other input names one. A pair joins a
+    target planned on one full-scan input with a fixed-target control of that target planned on a
+    different full-scan input of the same profile, and pairs repetitions this schedule declares; no
+    pair of PR inputs is defined. Nothing here reads a pack, an export, or a result.
+    """
+    inputs = {item["input_id"]: item for item in document["inputs"]}
+    _unique([item["input_id"] for item in document["inputs"]], "inputs.input_id")
+    _unique([system["system_id"] for system in document["systems"]], "systems.system_id")
+    _unique([row["assignment_id"] for row in document["assignments"]], "assignment_id")
+    for item in document["inputs"]:
+        label = f"input {item['input_id']}"
+        if item["mode"] == "full" and (item["snapshot_id"] is None or item["change_set_id"] is not None
+                                       or item["change_set"] is not None):
+            raise ContractError(f"{label}: a full input names a snapshot_id and no change set")
+        if item["mode"] == "pr" and item["change_set_id"] is None:
+            raise ContractError(f"{label}: a pr input names its change_set_id")
+        if item["mode"] == "pr":
+            change_set = item["change_set"]
+            if change_set is None:
+                raise ContractError(f"{label}: a pr input carries the frozen identity of its change set")
+            if (change_set["change_set_id"] != item["change_set_id"]
+                    or change_set["head_snapshot_id"] != item["snapshot_id"]):
+                raise ContractError(f"{label}: its change set block must be the change set it names, ending "
+                                    "at the snapshot the input reads, which is the head")
+        if (item["profile"] == "metadata_blinded") != (item["blinding"] is not None):
+            raise ContractError(f"{label}: a blinding map is named exactly when the profile is metadata_blinded")
+        if item["plan"]["state"] == "frozen":
+            scoped = [entry for entry in item["plan"]["targets"] + item["plan"]["controls"] if "pr_scope" in entry]
+            everything = len(item["plan"]["targets"]) + len(item["plan"]["controls"])
+            if item["mode"] == "pr" and len(scoped) != everything:
+                raise ContractError(f"{label}: every item of a frozen pr plan states its pr_scope")
+            if item["mode"] == "full" and scoped:
+                raise ContractError(f"{label}: only a pr input's frozen plan carries pr_scope")
+    repetitions = document["repetitions"]
+    expected = {f"{input_id}__{system['system_id']}__r{repetition}": (input_id, system["system_id"], repetition)
+                for input_id in inputs for system in document["systems"]
+                for repetition in range(1, repetitions + 1)}
+    recorded = {row["assignment_id"]: (row["input_id"], row["system_id"], row["repetition"])
+                for row in document["assignments"]}
+    if recorded != expected:
+        missing = sorted(set(expected) - set(recorded))
+        extra = sorted(set(recorded) - set(expected))
+        mismatched = sorted(key for key in set(recorded) & set(expected) if recorded[key] != expected[key])
+        raise ContractError(
+            "assignments must be every input under every system for every repetition, each named by "
+            f"its invocation id; missing {missing[:3]}, unexpected {extra[:3]}, misnamed {mismatched[:3]}")
+    for index, pair in enumerate(document["pairs"]):
+        label = f"pairs[{index}]"
+        vulnerable = inputs.get(pair["vulnerable_input_id"])
+        fixed = inputs.get(pair["fixed_input_id"])
+        if vulnerable is None or fixed is None:
+            raise ContractError(f"{label} names an input this schedule does not declare")
+        if pair["vulnerable_input_id"] == pair["fixed_input_id"]:
+            raise ContractError(f"{label}: the vulnerable and fixed observations are on one input")
+        if vulnerable["mode"] != "full" or fixed["mode"] != "full":
+            raise ContractError(f"{label}: a pair joins two full-scan inputs; no pair of PR inputs is defined")
+        if vulnerable["profile"] != fixed["profile"]:
+            raise ContractError(f"{label}: a pair joins inputs of one profile")
+        if vulnerable["plan"]["state"] != "frozen" or fixed["plan"]["state"] != "frozen":
+            raise ContractError(f"{label}: a pair is matched only between plans frozen before execution")
+        targets = {target["target_id"]: target for target in vulnerable["plan"]["targets"]}
+        controls = {control["control_id"]: control for control in fixed["plan"]["controls"]}
+        target = targets.get(pair["target_id"])
+        control = controls.get(pair["control_id"])
+        if target is None or control is None:
+            raise ContractError(f"{label}: the target must be planned on the vulnerable input and the "
+                                "control on the fixed input")
+        if control["type"] not in ("fixed_target", "both") or control["target_id"] != pair["target_id"]:
+            raise ContractError(f"{label}: control {pair['control_id']} is not a fixed-target control of "
+                                f"{pair['target_id']}")
+        if pair["canonical_id"] != target["canonical_id"]:
+            raise ContractError(f"{label}: canonical_id is not the planned target's canonical id")
+        seen: set[tuple[int, int]] = set()
+        for left, right in pair["repetition_pairs"]:
+            if not (1 <= left <= repetitions and 1 <= right <= repetitions) or (left, right) in seen:
+                raise ContractError(f"{label}: repetition pairs name repetitions this schedule declares, "
+                                    "each pair once")
+            seen.add((left, right))
+
+
+# --- metadata blinding map ---------------------------------------------------------------------
+
+
+# Every character str.splitlines treats as a line break. A pseudonym holding one could move a line
+# and break the line-for-line mapping a blinded input's claim locations rely on.
+_LINE_BREAKS = frozenset("\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def _validate_blinding_map(document: dict[str, Any]) -> None:
+    """Check what a blinding map asserts about itself; whether it fits an export is asked when applied.
+
+    Pseudonyms: neither side blank or holding a line break, an original never its own replacement,
+    originals unique, replacements unique, and, ignoring case, no replacement containing any
+    original (a replaced file would still carry it) and no original containing another pseudonym's
+    replacement (a transformed file could not say which token it came from). Variants are unique by
+    snapshot. Edits are unique by id and by path, each path a normalized relative POSIX path, each
+    rationale stated, a ``display_metadata`` edit carrying a stated ``role_check``, each replaced
+    token a declared original, and exactly one expectation per variant, whose occurrence counts
+    name exactly the edit's replacements. The review history is a chain (kind ``blinding_review``)
+    whose end ``reviews_sha256`` records, present exactly when a review is, and every review names
+    its reviewer. Approval, path classes, and file hashes are not asked here:
+    :mod:`scaneval.blinding` asks them against the export, where a refusal is that input's own
+    preparation failure.
+    """
+    pseudonyms = document["pseudonyms"]
+    for index, pseudonym in enumerate(pseudonyms):
+        for side in ("original", "replacement"):
+            value = pseudonym[side]
+            if not is_stated(value):
+                raise ContractError(f"pseudonyms[{index}].{side} is blank")
+            if any(character in _LINE_BREAKS for character in value):
+                raise ContractError(f"pseudonyms[{index}].{side} holds a line break, which would move a line")
+        if pseudonym["original"] == pseudonym["replacement"]:
+            raise ContractError(f"pseudonyms[{index}] replaces {pseudonym['original']!r} with itself")
+    originals = [pseudonym["original"] for pseudonym in pseudonyms]
+    replacements = [pseudonym["replacement"] for pseudonym in pseudonyms]
+    _unique(originals, "pseudonyms.original")
+    _unique(replacements, "pseudonyms.replacement")
+    for index, replacement in enumerate(replacements):
+        for original in originals:
+            if original.casefold() in replacement.casefold():
+                raise ContractError(
+                    f"pseudonyms[{index}].replacement {replacement!r} contains the original {original!r}, "
+                    "so a replaced file would still carry it")
+    for index, original in enumerate(originals):
+        for other, replacement in enumerate(replacements):
+            if other != index and replacement.casefold() in original.casefold():
+                raise ContractError(
+                    f"pseudonyms[{index}].original {original!r} contains {replacement!r}, the replacement "
+                    f"in pseudonyms[{other}], so a transformed file could not say which token it came from")
+    variants = [variant["snapshot_id"] for variant in document["variants"]]
+    _unique(variants, "variants.snapshot_id")
+    edits = document["edits"]
+    _unique([edit["edit_id"] for edit in edits], "edits.edit_id")
+    _unique([edit["path"] for edit in edits], "edits.path")
+    for edit in edits:
+        label = f"edit {edit['edit_id']}"
+        path = edit["path"]
+        _require_relative_path(path, f"{label}.path")
+        if "\\" in path or any(part in ("", ".") for part in path.split("/")):
+            raise ContractError(f"{label}.path must be a normalized relative POSIX path, not {path!r}")
+        if not is_stated(edit["rationale"]):
+            raise ContractError(f"{label} must state its rationale")
+        if "role_check" in edit and not is_stated(edit["role_check"]):
+            raise ContractError(f"{label}.role_check is blank")
+        if edit["role"] == "display_metadata" and "role_check" not in edit:
+            raise ContractError(f"{label}: a display_metadata edit states its role_check, the reason the "
+                                "field is not read at runtime")
+        unknown = sorted(set(edit["replacements"]) - set(originals))
+        if unknown:
+            raise ContractError(f"{label} replaces tokens no pseudonym declares: {unknown}")
+        expected = [entry["snapshot_id"] for entry in edit["expected"]]
+        _unique(expected, f"{label} expected.snapshot_id")
+        if set(expected) != set(variants):
+            raise ContractError(f"{label} must state one expectation for every variant and no other: "
+                                f"it names {sorted(expected)}, the map covers {sorted(variants)}")
+        for entry in edit["expected"]:
+            if entry["state"] == "present" and set(entry["occurrences"]) != set(edit["replacements"]):
+                raise ContractError(f"{label}: the occurrence counts for {entry['snapshot_id']} must name "
+                                    "exactly the tokens the edit replaces")
+    reviews = document["reviews"]
+    for index, review in enumerate(reviews):
+        if not is_stated(review["reviewer"]):
+            raise ContractError(f"a recorded map review must name its reviewer; reviews[{index}].reviewer is blank")
+    gap, head = chain_link_gap(reviews, kind="blinding_review", label="reviews")
+    if gap:
+        raise ContractError(gap)
+    recorded = document.get("reviews_sha256")
+    if head is None and recorded is not None:
+        raise ContractError(f"reviews_sha256 records {recorded}, but no review is recorded; the history it "
+                            "names was deleted whole")
+    if head is not None and recorded is None:
+        raise ContractError("reviews_sha256 is missing, so nothing says where the review history ends and a "
+                            "review deleted from the end of it would leave no trace")
+    if head != recorded:
+        raise ContractError(f"reviews_sha256 records {recorded}, but the review history ends at {head}; a "
+                            "review was deleted from the end of it")
+# SARIF import (profile sarif-import-1).
+def _validate_import_record(document: dict[str, Any]) -> None:
+    """Check what an import record asserts about its own accounting; it says nothing about the log.
+
+    Every result of the imported run is accounted for exactly once: as a claim, an exclusion the
+    profile states, or a loss, so a result cannot disappear between the three lists and the
+    counts are the lengths of the lists they summarize. A run whose result list was absent
+    accounts for nothing. The record binds the tree hash and system it names in two places each,
+    and they must agree. A recorded normalization decision names a result this import flagged
+    for bundle review, at most once, and names its reviewer by the same :func:`is_stated` rule
+    every other recorded review follows. Whether the reviewer read anything, and whether the log
+    told the truth about its own execution, is outside what this can see.
+    """
+    _require_relative_path(document["artifact"]["path"], "artifact.path")
+    if document["source_binding"]["tree_hash"] != document["input_hash"]:
+        raise ContractError("source_binding.tree_hash must equal input_hash")
+    if document["system"]["system_id"] != document["system_id"]:
+        raise ContractError("system.system_id must equal system_id")
+    if document["sarif"]["run_index"] >= document["sarif"]["run_count"]:
+        raise ContractError("sarif.run_index must name one of the log's runs")
+    claims, excluded, losses = document["claims"], document["excluded"], document["losses"]
+    _unique([entry["claim_id"] for entry in claims], "claims.claim_id")
+    _unique([entry["pointer"] for entry in claims + excluded + losses],
+            "result pointer across claims, excluded, and losses")
+    counts = document["counts"]
+    for key, entries in (("claims", claims), ("excluded", excluded), ("losses", losses)):
+        if counts[key] != len(entries):
+            raise ContractError(f"counts.{key} is {counts[key]}, but {len(entries)} are recorded")
+    accounted = len(claims) + len(excluded) + len(losses)
+    if document["execution"]["results"] == "absent" and accounted:
+        raise ContractError("a run whose results are absent has no result to account for")
+    if counts["results"] != accounted:
+        raise ContractError(f"counts.results is {counts['results']}, but {accounted} results are "
+                            "accounted for as claims, exclusions, and losses")
+    if counts["evidence_losses"] != sum(len(entry["evidence_losses"]) for entry in claims):
+        raise ContractError("counts.evidence_losses must equal the evidence losses recorded per claim")
+    flagged = {entry["pointer"] for entry in claims if entry["bundle_review"]}
+    if counts["bundle_review_flagged"] != len(flagged):
+        raise ContractError("counts.bundle_review_flagged must equal the claims flagged for bundle review")
+    normalization = document["normalization"]
+    decided = [decision["pointer"] for decision in normalization["decisions"]] if normalization else []
+    _unique(decided, "normalization.decisions.pointer")
+    for index, pointer in enumerate(decided):
+        if pointer not in flagged:
+            raise ContractError(f"normalization.decisions[{index}] names {pointer}, which this import "
+                                "did not flag for bundle review")
+        if not is_stated(normalization["decisions"][index]["reviewer"]):
+            raise ContractError(f"normalization.decisions[{index}].reviewer is blank")
+    if counts["bundle_review_resolved"] != len(decided):
+        raise ContractError("counts.bundle_review_resolved must equal the recorded normalization decisions")
+
+
+# --- corpus aggregation and paired comparison ---------------------------------------------------
+
+
+# How far a declared weight total may sit from 1 and still be read as 1; scaneval.aggregate reads
+# the same tolerance when it checks explicit target weights over one view.
+WEIGHT_TOLERANCE = 1e-9
+
+
+def _validate_aggregation_policy(document: dict[str, Any]) -> None:
+    """Check that a policy's weightings and weights can be applied; it says nothing about their merit.
+
+    The explicit weighting is listed exactly when explicit target weights are declared, so a policy
+    cannot ask for a view it gives no weights for, or declare weights no view reads. Declared
+    workload weights sum to 1. Whether explicit target weights cover a view's canonical targets and
+    sum to 1 over them depends on the runs aggregated, and is checked, per view, when they are.
+    """
+    if ("explicit" in document["views"]) != (document.get("target_weights") is not None):
+        raise ContractError("views lists 'explicit' exactly when target_weights is declared")
+    workloads = document.get("workload_weights")
+    if workloads is not None:
+        total = math.fsum(workloads.values())
+        if abs(total - 1) > WEIGHT_TOLERANCE:
+            raise ContractError(f"workload_weights must sum to 1, not {total!r}")
+
+
+def _validate_aggregate_report(document: dict[str, Any]) -> None:
+    """Check that an aggregate report is internally keyed; it says nothing about the numbers in it.
+
+    The embedded policy is a valid aggregation policy, run, system, and view keys are unique, and each
+    system appears once per view with one block per slice and one detection block per weighting the
+    policy lists. Nothing here reads a run directory or recomputes a metric.
+    """
+    validate_document("aggregation-policy", document["policy"])
+    _unique([run["run_id"] for run in document["runs"]], "runs.run_id")
+    _unique([system["system_id"] for system in document["systems"]], "systems.system_id")
+    _unique([f"{view['mode']}/{view['profile']}" for view in document["views"]], "views (mode, profile)")
+    for view in document["views"]:
+        _unique([system["system_id"] for system in view["systems"]], "view systems.system_id")
+        for system in view["systems"]:
+            _check_slices(system["slices"], document["policy"]["views"])
+
+
+def _check_slices(slices: list[dict[str, Any]], weightings: list[str]) -> None:
+    """Each slice once, only the whole-view slice without a value, and every weighting in order."""
+    _unique([f"{block['slice']['dimension']}={block['slice']['value']}" for block in slices], "slices")
+    for block in slices:
+        if (block["slice"]["dimension"] == "all") != (block["slice"]["value"] is None):
+            raise ContractError("only the 'all' slice has no value")
+        if [detection["weighting"] for detection in block["detection"]] != list(weightings):
+            raise ContractError("each slice carries one detection block per weighting, in policy order")
+
+
+def _validate_comparison_report(document: dict[str, Any]) -> None:
+    """Check that a comparison names two systems and lines their slices up; not that the numbers hold.
+
+    The embedded policy is valid, the baseline and candidate are different systems, and in every view
+    both systems and the differences carry the same slices in the same order.
+    """
+    validate_document("aggregation-policy", document["policy"])
+    if document["baseline"]["system_id"] == document["candidate"]["system_id"]:
+        raise ContractError("a comparison names two different systems")
+    _unique([run["run_id"] for run in document["runs"]], "runs.run_id")
+    _unique([f"{view['mode']}/{view['profile']}" for view in document["views"]], "views (mode, profile)")
+    for view in document["views"]:
+        keys = []
+        for side in ("baseline", "candidate"):
+            slices = view["systems"][side]["slices"]
+            _check_slices(slices, document["policy"]["views"])
+            keys.append([block["slice"] for block in slices])
+        keys.append([block["slice"] for block in view["differences"]])
+        if not keys[0] == keys[1] == keys[2]:
+            raise ContractError("the baseline, the candidate, and the differences cover different slices")
+
+
+# --- precision sampling and review ---------------------------------------------------------------
+
+
+# The one stratum of an unstratified precision sample.
+PRECISION_SINGLE_STRATUM = "all"
+
+
+def precision_stratum(unit: dict[str, Any], stratify_by: str | None) -> str:
+    """The stratum a precision frame unit falls in when a sample is stratified by *stratify_by*.
+
+    One definition, read by :mod:`scaneval.precision` when it draws and by the sample contract when
+    it checks the recorded strata, so the two cannot disagree about where a unit belongs.
+    """
+    if stratify_by is None:
+        return PRECISION_SINGLE_STRATUM
+    return {"system": unit["system_id"], "input": unit["input_id"], "kind": unit["claim"]["kind"]}[stratify_by]
+
+
+def precision_exclusions(invocations: list[dict[str, Any]]) -> dict[str, Any]:
+    """What a precision frame leaves out, summed from its invocation rows, one entry per reason.
+
+    ``no_output`` counts assignments that delivered nothing (skipped, or never recorded);
+    ``unranked`` and ``bundle_unresolved`` count the invocations a ``first_b`` population leaves out
+    because their claims have no measured native position, with the claims and units they hold;
+    ``beyond_budget`` counts the units and copies of included invocations that lie past B.
+    """
+    out: dict[str, Any] = {
+        "no_output": {"invocations": 0},
+        "unranked": {"invocations": 0, "claim_records": 0, "units": 0},
+        "bundle_unresolved": {"invocations": 0, "claim_records": 0, "units": 0},
+        "beyond_budget": {"units": 0, "copies": 0},
+    }
+    for row in invocations:
+        state = row["state"]
+        if state == "no_output":
+            out["no_output"]["invocations"] += 1
+        elif state == "included":
+            out["beyond_budget"]["units"] += row["units"] - row["population_units"]
+            out["beyond_budget"]["copies"] += row["claim_records"] - row["population_copies"]
+        else:
+            out[state]["invocations"] += 1
+            out[state]["claim_records"] += row["claim_records"]
+            out[state]["units"] += row["units"]
+    return out
+
+
+def _precision_state(row: dict[str, Any], first_b: bool) -> str:
+    """The population state an invocation row's own output fields call for."""
+    if row["result_sha256"] is None:
+        return "no_output"
+    if first_b and row["ranking"] != "native":
+        return "unranked"
+    if first_b and not row["bundles_resolved"]:
+        return "bundle_unresolved"
+    return "included"
+
+
+def _validate_precision_frame(frame: dict[str, Any]) -> None:
+    """Check that a precision frame's units, invocation rows, and exclusion totals agree."""
+    population = frame["population"]
+    first_b = population["name"] == "first_b"
+    if first_b != (population["budget"] is not None):
+        raise ContractError("frame.population.budget is set exactly when the population is first_b")
+    _unique([run["run_id"] for run in frame["runs"]], "frame.runs.run_id")
+    runs = {run["run_id"] for run in frame["runs"]}
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in frame["invocations"]:
+        key = (row["run_id"], row["invocation_id"])
+        label = f"frame.invocations {key[0]}/{key[1]}"
+        if key in rows:
+            raise ContractError(f"{label} is listed twice")
+        if row["run_id"] not in runs or row["system_id"] not in population["systems"]:
+            raise ContractError(f"{label} names a run or a system outside this frame's population")
+        state = _precision_state(row, first_b)
+        if row["state"] != state:
+            raise ContractError(f"{label} records state {row['state']}, but its output calls for {state}")
+        empty = row["state"] == "no_output"
+        if empty != (row["ranking"] is None) or empty != (row["bundles_resolved"] is None) \
+                or empty != (row["input_hash"] is None) or (empty and row["claim_records"]):
+            raise ContractError(f"{label}: an assignment with no output records no result fields, and "
+                                "one with output records all of them")
+        if not row["population_units"] <= row["units"] <= row["claim_records"] \
+                or row["population_copies"] > row["claim_records"]:
+            raise ContractError(f"{label}: its population counts exceed the claims it delivered")
+        rows[key] = row
+    unit_ids = [unit["unit_id"] for unit in frame["units"]]
+    _unique(unit_ids, "frame.units.unit_id")
+    if unit_ids != sorted(unit_ids):
+        raise ContractError("frame.units must be sorted by unit_id")
+    counted: dict[tuple[str, str], tuple[int, int]] = {}
+    for unit in frame["units"]:
+        label = f"frame unit {unit['unit_id']}"
+        if unit["unit_id"] != f"{unit['run_id']}/{unit['invocation_id']}/{unit['claim_ids'][0]}":
+            raise ContractError(f"{label} is not named <run_id>/<invocation_id>/<first claim id>")
+        if unit["delivered_copies"] != len(unit["claim_ids"]) \
+                or unit["population_copies"] > unit["delivered_copies"]:
+            raise ContractError(f"{label}: its copy counts do not match the claims it lists")
+        key = (unit["run_id"], unit["invocation_id"])
+        row = rows.get(key)
+        if row is None or row["state"] != "included" \
+                or (row["system_id"], row["input_id"]) != (unit["system_id"], unit["input_id"]):
+            raise ContractError(f"{label} does not come from an included invocation of this frame")
+        if (row["ranking"] == "native") != (unit["first_rank"] is not None):
+            raise ContractError(f"{label}: a first rank is recorded exactly for native output")
+        if first_b and unit["first_rank"] > population["budget"]:
+            raise ContractError(f"{label} lies past B={population['budget']}, outside the first_b population")
+        found, copies = counted.get(key, (0, 0))
+        counted[key] = (found + 1, copies + unit["population_copies"])
+    for key, row in rows.items():
+        if (row["population_units"], row["population_copies"]) != counted.get(key, (0, 0)):
+            raise ContractError(f"frame.invocations {key[0]}/{key[1]}: its population counts are not "
+                                "the units the frame lists for it")
+    if frame["exclusions"] != precision_exclusions(frame["invocations"]):
+        raise ContractError("frame.exclusions is not the sum of the invocation rows it summarizes")
+
+
+def _validate_precision_sample(document: dict[str, Any]) -> None:
+    """Check that a precision sample agrees with its own frame; it says nothing about any claim.
+
+    The frame hashes to the recorded ``frame_sha256``, and every count the sample records is one its
+    frame and selection hold: each unit is named ``<run_id>/<invocation_id>/<first claim id>``,
+    comes from an included invocation of its frame, and lies inside the population (at native rank
+    at most B for ``first_b``); per-invocation counts and the exclusion totals are the sums of the
+    rows they summarize; each stratum's population and sample sizes are the units and selected units
+    that fall in it (:func:`precision_stratum`), and its inclusion probability is their ratio; a
+    stratum that drew nothing is listed as uncovered; and every population system has one alias.
+    Whether the selection is the one the recorded seed draws is checked by
+    :func:`scaneval.precision.verify_sample`, which can re-draw it. Nothing here reads a run.
+    """
+    frame = document["frame"]
+    if canonical_sha256(frame) != document["frame_sha256"]:
+        raise ContractError("frame_sha256 does not hash the frame this sample carries; the frame was "
+                            "edited after the sample was drawn")
+    _validate_precision_frame(frame)
+    design = document["design"]
+    stratified = design["stratify_by"] is not None
+    if (design["method"] == "stratified_srswor") != stratified or stratified != (design["allocation"] is not None):
+        raise ContractError("design: a stratified_srswor design names what it stratifies by and its "
+                            "allocation, and an srswor design names neither")
+    stratum_of = {unit["unit_id"]: precision_stratum(unit, design["stratify_by"]) for unit in frame["units"]}
+    population_counts: dict[str, int] = {}
+    for stratum in stratum_of.values():
+        population_counts[stratum] = population_counts.get(stratum, 0) + 1
+    selected_ids = [entry["unit_id"] for entry in document["selected"]]
+    _unique(selected_ids, "selected.unit_id")
+    _unique([entry["item_id"] for entry in document["selected"]], "selected.item_id")
+    if selected_ids != sorted(selected_ids):
+        raise ContractError("selected must be sorted by unit_id")
+    sample_counts: dict[str, int] = {}
+    for entry in document["selected"]:
+        if stratum_of.get(entry["unit_id"]) != entry["stratum"]:
+            raise ContractError(f"selected unit {entry['unit_id']} is not a unit of stratum "
+                                f"{entry['stratum']} in this frame")
+        sample_counts[entry["stratum"]] = sample_counts.get(entry["stratum"], 0) + 1
+    if design["size"] != len(selected_ids):
+        raise ContractError(f"design.size is {design['size']}, but {len(selected_ids)} units are selected")
+    names = [row["stratum"] for row in document["strata"]]
+    if names != sorted(population_counts):
+        raise ContractError("strata must list every stratum that holds a unit, once each, sorted by name")
+    for row in document["strata"]:
+        name = row["stratum"]
+        sampled = sample_counts.get(name, 0)
+        if (row["population_units"], row["sampled_units"]) != (population_counts[name], sampled):
+            raise ContractError(f"stratum {name} records {row['sampled_units']} of {row['population_units']} "
+                                f"units, but the frame and selection hold {sampled} of {population_counts[name]}")
+        if row["inclusion_probability"] != sampled / population_counts[name]:
+            raise ContractError(f"stratum {name}: the inclusion probability must be sampled/population units")
+    if document["uncovered_strata"] != [row["stratum"] for row in document["strata"] if not row["sampled_units"]]:
+        raise ContractError("uncovered_strata must list exactly the strata that drew no unit, sorted by name")
+    aliases = document["blinding"]["system_aliases"]
+    if [row["system_id"] for row in aliases] != sorted(frame["population"]["systems"]):
+        raise ContractError("blinding.system_aliases must give every population system one alias, "
+                            "sorted by system id")
+    _unique([row["alias"] for row in aliases], "blinding.system_aliases.alias")
+
+
+def _validate_precision_reviews(document: dict[str, Any]) -> None:
+    """Check that a precision review history is a chain that ends where it says it ends.
+
+    Every entry names its reviewer by the :func:`is_stated` rule and carries the chain value of its
+    own fields and of the entry before it (:func:`chain_link_gap`, kind ``precision_review``), and
+    ``reviews_sha256`` is the chain value of the last entry, present exactly when there is one, so an
+    entry edited, reordered, or deleted anywhere, the end included, is refused. A history wiped whole
+    and saved with no head reads as a fresh one; an estimate records the digest of the history it
+    used, which is where such a wipe shows. That the history belongs to a given sample and names
+    only units it drew is checked by :mod:`scaneval.precision` against that sample. Like every
+    recorded review here, this is not a signature: it says nothing about who typed an entry or
+    whether they read the claim.
+    """
+    reviews = document["reviews"]
+    for index, entry in enumerate(reviews):
+        if not is_stated(entry["reviewer"]):
+            raise ContractError(f"a precision review must name its reviewer; reviews[{index}].reviewer is blank")
+    gap, head = chain_link_gap(reviews, kind="precision_review", label="reviews")
+    if gap:
+        raise ContractError(gap)
+    recorded = document["reviews_sha256"]
+    if recorded == head:
+        return
+    if head is None:
+        raise ContractError(f"reviews_sha256 records {recorded}, but no review is recorded; the history "
+                            "it names was deleted whole")
+    if recorded is None:
+        raise ContractError("reviews_sha256 is missing, so nothing says where the recorded history ends "
+                            "and a review deleted from the end of it would leave no trace")
+    raise ContractError(f"reviews_sha256 records {recorded}, but the recorded history ends at {head}; a "
+                        "review was deleted from the end of it")
+
+
+def _validate_precision_estimate(document: dict[str, Any]) -> None:
+    """Check the estimate's shape rules; its numbers are recomputed by :mod:`scaneval.precision`, not here.
+
+    The sensitivity range is present or absent as a whole and ordered, the interval carries bounds
+    exactly in the states that have them and names its insufficient strata exactly when it is
+    insufficient, coverage cannot exceed the population, and every sampled unit appears once.
+    """
+    lower, upper = document["sensitivity"]["lower"], document["sensitivity"]["upper"]
+    if (lower is None) != (upper is None) or (lower is not None and lower > upper):
+        raise ContractError("sensitivity: lower and upper are both present and ordered, or both null")
+    interval = document["interval"]
+    bounded = interval["state"] in ("ok", "census")
+    if bounded != (interval["lower"] is not None and interval["upper"] is not None) \
+            or (not bounded and (interval["lower"] is not None or interval["upper"] is not None)):
+        raise ContractError(f"interval: bounds are recorded exactly in the ok and census states, and this "
+                            f"one is {interval['state']}")
+    if bounded and interval["lower"] > interval["upper"]:
+        raise ContractError("interval: lower must not exceed upper")
+    if (interval["state"] == "insufficient") != bool(interval["insufficient_strata"]):
+        raise ContractError("interval: insufficient_strata is named exactly when the interval is insufficient")
+    coverage = document["coverage"]
+    if coverage["covered_units"] > coverage["population_units"]:
+        raise ContractError("coverage: covered_units cannot exceed population_units")
+    _unique([unit["unit_id"] for unit in document["units"]], "units.unit_id")
+    if document["sample"]["selected_units"] != len(document["units"]):
+        raise ContractError("sample.selected_units must equal the number of units resolved")
+
+
+# --- promotion gate decisions ---------------------------------------------------------------------
+
+
+# The requirement blocks a gate policy may declare, in the order a decision lists them. A policy always
+# declares primary and configuration; every other block is a requirement it makes only by writing it.
+GATE_BLOCKS = ("primary", "configuration", "regressions", "precision", "controls", "completion",
+               "target_coverage", "burden", "cost")
+GATE_CONTROL_CLASSES = ("capability_safe", "fixed_target")
+# The only metrics a gate reads for detection: measured known-target recall. Whatever else the
+# comparison reports about detection is a diagnostic, or is not read by a gate at all.
+GATE_METRICS = ("full_recall", "recall_at_budget")
+# Names a comparison or the math gives a diagnostic. A policy naming one is told so, rather than
+# only that its metric is not one of two.
+_GATE_DIAGNOSTICS = frozenset({
+    "random_order_diagnostic", "run_variability", "leave_one_project_out", "first_hit_ranks",
+    "targets_per_input", "claims", "usage"})
+
+
+def gate_declared_blocks(policy: dict[str, Any]) -> list[str]:
+    """The requirement blocks *policy* declares, in the order a decision lists them."""
+    return [name for name in GATE_BLOCKS if name in policy]
+
+
+def gate_requirement_ids(policy: dict[str, Any]) -> list[str]:
+    """Every requirement id a decision under *policy* must carry, in decision order.
+
+    The ids follow from the policy alone, never from what a comparison holds, so a decision that
+    drops a requirement its policy declares (a failed one, say) is refused by
+    :func:`_validate_gate_decision`, and :mod:`scaneval.gate` evaluates exactly these, in this order.
+    The first five are always there; each other block adds what it declares.
+    """
+    ids = ["contract.shared", "contract.runs_completed", "configuration.allowed_differences",
+           "evidence.scope", "primary.improvement"]
+    if "uncertainty" in policy["primary"]:
+        ids.append("primary.uncertainty")
+    ids += [f"regression.{entry['id']}" for entry in policy.get("regressions", [])]
+    if "precision" in policy:
+        precision = policy["precision"]
+        ids += ["precision.binding", "precision.min_value", "precision.max_unresolved_share",
+                "precision.min_evidence_grade"]
+        ids += [f"precision.{name}" for field, name in (
+            ("min_coverage", "min_coverage"), ("min_interval_lower_bound", "interval"),
+            ("max_decrease_vs_baseline", "max_decrease")) if field in precision]
+    for name in GATE_CONTROL_CLASSES:
+        if name in policy.get("controls", {}):
+            ids += [f"controls.{name}.{check}" for check in
+                    ("false_alarm_upper", "completed_mass", "assessable_mass")]
+    completion = policy.get("completion", {})
+    ids += [f"completion.{name}" for name in ("min", "max_decrease") if name in completion]
+    if "target_coverage" in policy:
+        ids.append("target_coverage.min_assessable_mass")
+    burden = policy.get("burden", {})
+    ids += [f"burden.{name}" for field, name in (
+        ("max_claims_per_assignment", "claims_per_assignment"), ("max_duplicate_share", "duplicate_share"),
+        ("max_increase_ratio", "increase_ratio")) if field in burden]
+    cost = policy.get("cost")
+    if cost is not None:
+        ids.append("cost.coverage")
+        ids += [f"cost.{name}" for field, name in (
+            ("max_per_assignment_usd", "per_assignment"), ("max_increase_ratio", "increase_ratio"))
+            if field in cost]
+    return ids
+
+
+def _gate_metric(metric: dict[str, Any], where: str) -> None:
+    """Refuse a gate metric that is not measured known-target recall, naming a diagnostic as one."""
+    kind = metric["kind"]
+    allowed = " or ".join(GATE_METRICS)
+    if kind == "recall_at_budget":
+        if "budget" not in metric:
+            raise ContractError(f"{where}: recall_at_budget names the budget B it reads")
+    elif kind == "full_recall":
+        if "budget" in metric:
+            raise ContractError(f"{where}: full_recall takes no budget")
+    elif "random" in kind.lower():
+        raise ContractError(
+            f"{where}: {kind!r} is a random-order expectation, a diagnostic over an order the system never "
+            f"chose and never a promotion metric; use {allowed}")
+    elif kind in _GATE_DIAGNOSTICS:
+        raise ContractError(f"{where}: {kind!r} is a diagnostic, not a promotion metric; use {allowed}")
+    else:
+        raise ContractError(f"{where}: {kind!r} is not a metric a gate reads; use {allowed}")
+
+
+def _gate_slice(slice_: dict[str, Any], where: str, *, single: bool) -> None:
+    """The whole view has no value; a project or workload slice names one unless it may cover each."""
+    value = slice_.get("value")
+    if slice_["dimension"] == "all":
+        if value is not None:
+            raise ContractError(f"{where}: the whole-view slice has no value")
+    elif value is None and single:
+        raise ContractError(f"{where}: a {slice_['dimension']} slice names which {slice_['dimension']} it is")
+
+
+def _validate_gate_policy(document: dict[str, Any]) -> None:
+    """Check that a policy's requirements can be read; it says nothing about their merit.
+
+    The primary metric and every regression's metric must be measured known-target recall: a
+    random-order expectation or any other diagnostic is refused here, by name, so no policy can ask a
+    decision to rest on one. The primary metric names one slice, regression ids are unique, a budget
+    is named exactly for recall_at_budget and for the first_b population, and a precision interval
+    bound is asked of resolved precision only, the one figure that has an interval.
+    """
+    primary = document["primary"]
+    _gate_metric(primary["metric"], "primary.metric")
+    _gate_slice(primary.get("slice", {"dimension": "all"}), "primary.slice", single=True)
+    regressions = document.get("regressions", [])
+    _unique([entry["id"] for entry in regressions], "regressions.id")
+    for entry in regressions:
+        _gate_metric(entry["metric"], f"regressions[{entry['id']}].metric")
+        _gate_slice(entry.get("slice", {"dimension": "all"}), f"regressions[{entry['id']}].slice", single=False)
+    precision = document.get("precision")
+    if precision is not None:
+        if (precision["population"]["name"] == "first_b") != ("budget" in precision["population"]):
+            raise ContractError("precision.population: a budget is named exactly for the first_b population")
+        if precision["basis"] != "resolved" and "min_interval_lower_bound" in precision:
+            raise ContractError("precision.min_interval_lower_bound: only resolved precision has an interval")
+
+
+def _validate_gate_decision(document: dict[str, Any]) -> None:
+    """Check that a decision is derived from what it records; the requirements are not recomputed here.
+
+    The embedded policy is a valid gate policy and hashes to ``policy_sha256``. The requirements are
+    exactly the ones the policy declares (:func:`gate_requirement_ids`), in order, so a decision cannot
+    leave out one that failed. The outcome, the failed and unresolved lists, and the counts follow from
+    the requirement statuses, the declared and undeclared blocks from the policy, and the
+    recommendation scope from the policy's required scope and the evidence-scope requirement. Nothing
+    here reads a comparison or an estimate: :func:`scaneval.gate.evaluate_gate` is what decides, and a
+    replay of it is what checks a decision against the documents it names.
+    """
+    policy = document["policy"]
+    validate_document("gate-policy", policy)
+    if document["policy_sha256"] != canonical_sha256(policy):
+        raise ContractError("policy_sha256 does not hash the policy this decision carries")
+    requirements = document["requirements"]
+    ids = [requirement["id"] for requirement in requirements]
+    if ids != gate_requirement_ids(policy):
+        raise ContractError("the requirements must be exactly the ones the embedded policy declares, in order")
+    statuses = [requirement["status"] for requirement in requirements]
+    outcome = "fail" if "fail" in statuses else "inconclusive" if "inconclusive" in statuses else "pass"
+    if document["outcome"] != outcome:
+        raise ContractError(f"outcome is {document['outcome']}, but the requirement statuses give {outcome}")
+    for field, status in (("failed", "fail"), ("unresolved", "inconclusive")):
+        if document[field] != [requirement["id"] for requirement in requirements
+                               if requirement["status"] == status]:
+            raise ContractError(f"{field} must list the {status} requirements, in decision order")
+    summary = document["summary"]
+    counts = {"requirements": len(requirements), "passed": statuses.count("pass"),
+              "failed": statuses.count("fail"), "inconclusive": statuses.count("inconclusive")}
+    if summary != counts:
+        raise ContractError(f"summary must count the requirements ({counts}), not {summary}")
+    declared = gate_declared_blocks(policy)
+    blocks = document["blocks"]
+    if blocks["declared"] != declared or blocks["not_declared"] != [
+            name for name in GATE_BLOCKS if name not in declared]:
+        raise ContractError("blocks must list the policy's declared and undeclared requirement blocks")
+    if document["view"] != policy["view"]:
+        raise ContractError("view must be the policy's view")
+    if document["comparison"]["baseline"]["system_id"] == document["comparison"]["candidate"]["system_id"]:
+        raise ContractError("a decision names two different systems")
+    evidence = requirements[ids.index("evidence.scope")]
+    expected = ("none" if evidence["status"] != "pass" else
+                "reviewed" if policy.get("required_scope", "reviewed") == "reviewed" else "development")
+    if document["recommendation_scope"] != expected:
+        raise ContractError(f"recommendation_scope is {document['recommendation_scope']}, but the evidence "
+                            f"requirement and the policy's required scope give {expected}")
+
+
 _RUNTIME_VALIDATORS = {
     "case-pack": _validate_case_pack,
     "review-record": _validate_review_record,
@@ -1342,6 +2388,22 @@ _RUNTIME_VALIDATORS = {
     "evaluation-plan": _validate_evaluation_plan,
     "review-decisions": _validate_review_decisions,
     "run-manifest": _validate_run_manifest,
+    # Kinds first published at 2.1, one per feature.
+    "evaluation-schedule": _validate_evaluation_schedule,
+    "blinding-map": _validate_blinding_map,
+    # SARIF import (profile sarif-import-1).
+    "import-record": _validate_import_record,
+    # Corpus aggregation and paired comparison.
+    "aggregation-policy": _validate_aggregation_policy,
+    "aggregate-report": _validate_aggregate_report,
+    "comparison-report": _validate_comparison_report,
+    # Precision sampling and review.
+    "precision-sample": _validate_precision_sample,
+    "precision-reviews": _validate_precision_reviews,
+    "precision-estimate": _validate_precision_estimate,
+    # Promotion gate decisions.
+    "gate-policy": _validate_gate_policy,
+    "gate-decision": _validate_gate_decision,
 }
 
 
@@ -1355,7 +2417,16 @@ def validate_document(kind: str, document: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(document, dict):
         raise ContractError("contract document must be a JSON object")
     reject_nonfinite(document)
-    validator = Draft202012Validator(_schema(kind))
+    # The version is read before a schema is chosen, and a version this build does not read is
+    # refused rather than validated against another version's rules: a record is only ever checked
+    # against the contract it says it was written to.
+    version = document.get("schema_version")
+    versions = SCHEMA_VERSIONS.get(kind)
+    if versions is not None and (not isinstance(version, str) or version not in versions):
+        raise ContractError(
+            f"schema_version: {version!r} is not a {kind} version this build reads; supported: "
+            f"{', '.join(versions)}")
+    validator = Draft202012Validator(_schema(kind, version))
     errors = sorted(
         validator.iter_errors(document),
         key=lambda error: tuple(str(part) for part in error.absolute_path),

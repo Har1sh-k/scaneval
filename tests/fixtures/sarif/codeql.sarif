@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "CodeQL",
+          "organization": "GitHub",
+          "semanticVersion": "2.26.2",
+          "rules": [
+            {
+              "id": "py/sql-injection",
+              "name": "py/sql-injection",
+              "shortDescription": {"text": "SQL query built from user-controlled sources"},
+              "fullDescription": {"text": "Building a SQL query from user-controlled sources is vulnerable to insertion of malicious SQL code by the user."},
+              "defaultConfiguration": {"enabled": true, "level": "error"},
+              "properties": {"tags": ["security", "external/cwe/cwe-089"], "kind": "path-problem", "precision": "high", "problem.severity": "error", "security-severity": "8.8", "id": "py/sql-injection", "name": "SQL query built from user-controlled sources"}
+            }
+          ]
+        },
+        "extensions": [
+          {
+            "name": "codeql/python-queries",
+            "semanticVersion": "1.8.7+0000000000000000000000000000000000000000",
+            "locations": [
+              {"uri": "file:///opt/codeql/qlpacks/codeql/python-queries/1.8.7/", "description": {"text": "The QL pack root directory."}}
+            ],
+            "notifications": [
+              {"id": "py/diagnostics/successfully-extracted-files", "name": "py/diagnostics/successfully-extracted-files", "shortDescription": {"text": "Extracted Python files"}, "defaultConfiguration": {"enabled": true}}
+            ],
+            "rules": [
+              {
+                "id": "py/path-injection",
+                "name": "py/path-injection",
+                "shortDescription": {"text": "Uncontrolled data used in path expression"},
+                "defaultConfiguration": {"enabled": true, "level": "error"},
+                "properties": {"tags": ["correctness", "security", "external/cwe/cwe-022", "external/cwe/cwe-023", "external/cwe/cwe-036"], "kind": "path-problem", "precision": "high", "security-severity": "7.5"}
+              },
+              {
+                "id": "py/command-line-injection",
+                "name": "py/command-line-injection",
+                "shortDescription": {"text": "Uncontrolled command line"},
+                "defaultConfiguration": {"enabled": true, "level": "error"},
+                "properties": {"tags": ["correctness", "security", "external/cwe/cwe-078", "external/cwe/cwe-088"], "kind": "path-problem", "precision": "high", "security-severity": "9.8"}
+              }
+            ]
+          }
+        ]
+      },
+      "invocations": [
+        {
+          "executionSuccessful": true,
+          "toolExecutionNotifications": [
+            {
+              "locations": [{"physicalLocation": {"artifactLocation": {"uri": "app/web.py", "uriBaseId": "%SRCROOT%", "index": 0}}}],
+              "message": {"text": ""},
+              "level": "none",
+              "descriptor": {"id": "py/diagnostics/successfully-extracted-files", "index": 0, "toolComponent": {"index": 0}}
+            }
+          ]
+        }
+      ],
+      "artifacts": [
+        {"location": {"uri": "app/web.py", "uriBaseId": "%SRCROOT%", "index": 0}},
+        {"location": {"uri": "app/files.py", "uriBaseId": "%SRCROOT%", "index": 1}},
+        {"location": {"uri": "app/run.py", "uriBaseId": "%SRCROOT%", "index": 2}}
+      ],
+      "results": [
+        {
+          "ruleId": "py/sql-injection",
+          "ruleIndex": 0,
+          "rule": {"id": "py/sql-injection", "index": 0},
+          "message": {"text": "This SQL query depends on a [user-provided value](1)."},
+          "locations": [
+            {"physicalLocation": {"artifactLocation": {"uri": "app/web.py", "uriBaseId": "%SRCROOT%", "index": 0}, "region": {"startLine": 16, "startColumn": 20, "endColumn": 69}}}
+          ],
+          "partialFingerprints": {"primaryLocationLineHash": "e08e53ec4172332b:1", "primaryLocationStartColumnFingerprint": "15"},
+          "codeFlows": [
+            {
+              "threadFlows": [
+                {
+                  "locations": [
+                    {"location": {"physicalLocation": {"artifactLocation": {"uri": "app/web.py", "uriBaseId": "%SRCROOT%", "index": 0}, "region": {"startLine": 5, "startColumn": 26, "endColumn": 33}}, "message": {"text": "ControlFlowNode for ImportMember"}}},
+                    {"location": {"physicalLocation": {"artifactLocation": {"uri": "app/web.py", "uriBaseId": "%SRCROOT%", "index": 0}, "region": {"startLine": 12, "startColumn": 12, "endColumn": 24}}, "message": {"text": "ControlFlowNode for Attribute"}}, "taxa": [{"id": "AdditionalTaintStep", "properties": {"CodeQL/DataflowRole": "step"}}]},
+                    {"location": {"physicalLocation": {"artifactLocation": {"uri": "app/web.py", "uriBaseId": "%SRCROOT%", "index": 0}, "region": {"startLine": 16, "startColumn": 20, "endColumn": 69}}, "message": {"text": "ControlFlowNode for BinaryExpr"}}}
+                  ]
+                }
+              ]
+            }
+          ],
+          "relatedLocations": [
+            {"id": 1, "physicalLocation": {"artifactLocation": {"uri": "app/web.py", "uriBaseId": "%SRCROOT%", "index": 0}, "region": {"startLine": 5, "startColumn": 26, "endColumn": 33}}, "message": {"text": "user-provided value"}}
+          ]
+        },
+        {
+          "ruleId": "py/path-injection",
+          "rule": {"id": "py/path-injection", "index": 0, "toolComponent": {"index": 0}},
+          "message": {"text": "This path depends on a [user-provided value](1)."},
+          "locations": [
+            {"physicalLocation": {"artifactLocation": {"uri": "app/files.py", "uriBaseId": "%SRCROOT%", "index": 1}, "region": {"startLine": 12, "startColumn": 15, "endColumn": 23}}}
+          ],
+          "partialFingerprints": {"primaryLocationLineHash": "a886445d8048d84b:1", "primaryLocationStartColumnFingerprint": "10"},
+          "codeFlows": [
+            {
+              "threadFlows": [
+                {
+                  "locations": [
+                    {"location": {"physicalLocation": {"artifactLocation": {"uri": "app/files.py", "uriBaseId": "%SRCROOT%", "index": 1}, "region": {"startLine": 3, "startColumn": 16, "endColumn": 23}}, "message": {"text": "ControlFlowNode for request"}}},
+                    {"location": {"physicalLocation": {"artifactLocation": {"uri": "app/files.py", "uriBaseId": "%SRCROOT%", "index": 1}, "region": {"startLine": 12, "startColumn": 15, "endColumn": 23}}, "message": {"text": "ControlFlowNode for filename"}}}
+                  ]
+                }
+              ]
+            },
+            {
+              "threadFlows": [
+                {
+                  "locations": [
+                    {"location": {"physicalLocation": {"artifactLocation": {"uri": "app/files.py", "uriBaseId": "%SRCROOT%", "index": 1}, "region": {"startLine": 3, "startColumn": 16, "endColumn": 23}}, "message": {"text": "ControlFlowNode for request"}}},
+                    {"location": {"physicalLocation": {"artifactLocation": {"uri": "app/files.py", "uriBaseId": "%SRCROOT%", "index": 1}, "region": {"startLine": 8, "startColumn": 9, "endColumn": 17}}, "message": {"text": "ControlFlowNode for base_dir"}}},
+                    {"location": {"physicalLocation": {"artifactLocation": {"uri": "app/files.py", "uriBaseId": "%SRCROOT%", "index": 1}, "region": {"startLine": 12, "startColumn": 15, "endColumn": 23}}, "message": {"text": "ControlFlowNode for filename"}}}
+                  ]
+                }
+              ]
+            }
+          ],
+          "relatedLocations": [
+            {"id": 1, "physicalLocation": {"artifactLocation": {"uri": "app/files.py", "uriBaseId": "%SRCROOT%", "index": 1}, "region": {"startLine": 3, "startColumn": 16, "endColumn": 23}}, "message": {"text": "user-provided value"}}
+          ]
+        },
+        {
+          "ruleId": "py/command-line-injection",
+          "rule": {"id": "py/command-line-injection", "index": 1, "toolComponent": {"index": 0}},
+          "message": {"text": "This command line depends on a [user-provided value](1) and a [user-provided value](2)."},
+          "locations": [
+            {"physicalLocation": {"artifactLocation": {"uri": "app/run.py", "uriBaseId": "%SRCROOT%", "index": 2}, "region": {"startLine": 20, "startColumn": 24, "endColumn": 31}}}
+          ],
+          "partialFingerprints": {"primaryLocationLineHash": "5c1a2d7e40b3f9aa:1", "primaryLocationStartColumnFingerprint": "19"},
+          "codeFlows": [
+            {
+              "threadFlows": [
+                {
+                  "locations": [
+                    {"location": {"physicalLocation": {"artifactLocation": {"uri": "app/run.py", "uriBaseId": "%SRCROOT%", "index": 2}, "region": {"startLine": 4, "startColumn": 11, "endColumn": 18}}, "message": {"text": "ControlFlowNode for request"}}},
+                    {"location": {"physicalLocation": {"artifactLocation": {"uri": "app/run.py", "uriBaseId": "%SRCROOT%", "index": 2}, "region": {"startLine": 20, "startColumn": 24, "endColumn": 31}}, "message": {"text": "ControlFlowNode for command"}}}
+                  ]
+                }
+              ]
+            },
+            {
+              "threadFlows": [
+                {
+                  "locations": [
+                    {"location": {"physicalLocation": {"artifactLocation": {"uri": "app/run.py", "uriBaseId": "%SRCROOT%", "index": 2}, "region": {"startLine": 14, "startColumn": 13, "endColumn": 27}}, "message": {"text": "ControlFlowNode for environ"}}},
+                    {"location": {"physicalLocation": {"artifactLocation": {"uri": "app/run.py", "uriBaseId": "%SRCROOT%", "index": 2}, "region": {"startLine": 20, "startColumn": 24, "endColumn": 31}}, "message": {"text": "ControlFlowNode for command"}}}
+                  ]
+                }
+              ]
+            }
+          ],
+          "relatedLocations": [
+            {"id": 1, "physicalLocation": {"artifactLocation": {"uri": "app/run.py", "uriBaseId": "%SRCROOT%", "index": 2}, "region": {"startLine": 4, "startColumn": 11, "endColumn": 18}}, "message": {"text": "user-provided value"}},
+            {"id": 2, "physicalLocation": {"artifactLocation": {"uri": "app/run.py", "uriBaseId": "%SRCROOT%", "index": 2}, "region": {"startLine": 14, "startColumn": 13, "endColumn": 27}}, "message": {"text": "user-provided value"}}
+          ]
+        }
+      ],
+      "columnKind": "unicodeCodePoints",
+      "properties": {
+        "semmle.formatSpecifier": "sarifv2.1.0",
+        "fixture": "Fabricated for ScanEval tests in the shape CodeQL 2.26 writes; not the output of a real scan."
+      }
+    }
+  ]
+}

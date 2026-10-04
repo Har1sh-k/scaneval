@@ -14,6 +14,7 @@ from scaneval.cases import (
     _approval_gap,
     accepted_paths_for_targets,
     add_case,
+    add_change_set,
     add_snapshot,
     admit_case,
     approval_is_current,
@@ -21,6 +22,7 @@ from scaneval.cases import (
     build_plan,
     case_by_id,
     checked_tree_hash,
+    control_canonical_id,
     draft_case,
     dump_json,
     evidence,
@@ -33,17 +35,23 @@ from scaneval.cases import (
     new_pack,
     pack_sha256,
     pack_summary,
+    plan_pr_scope,
     record_review,
     require_anchored,
     save_pack,
+    set_canonical_id,
     set_disposition,
+    set_pr_eligibility,
+    target_canonical_id,
 )
 from scaneval.contracts import (
     ContractError,
     admission_chain_digest,
+    canonical_sha256,
     check_set_digest,
     effective_level,
     pack_anchor_digest,
+    pr_input_hash,
     recorded_check_state,
     review_chain_digest,
     validate_document,
@@ -184,10 +192,15 @@ def make_pack() -> dict:
     return pack
 
 
-def export(tmp_path: Path) -> Path:
+def export(tmp_path: Path, *, also: tuple[str, ...] = ()) -> Path:
+    """An export holding ``src/app.py`` and, for each other path in *also*, a one-line file."""
     source = tmp_path / "source"
     (source / "src").mkdir(parents=True)
     (source / "src" / "app.py").write_text("import subprocess\ndef run(cmd):\n    return subprocess.run(cmd, shell=True)\n", encoding="utf-8")
+    for relative in also:
+        if not (source / relative).exists():
+            (source / relative).parent.mkdir(parents=True, exist_ok=True)
+            (source / relative).write_text("x = 1\n", encoding="utf-8")
     return source
 
 
@@ -2403,3 +2416,513 @@ def test_planning_refuses_every_pack_the_load_refuses(tmp_path):
         assert str(planned.value) == (
             f"this pack does not load as a case pack, so no plan can be built from it: "
             f"{loaded.value}"), f"{mutate.__name__} is refused differently by the two gates"
+
+
+# --- change sets, PR eligibility, and canonical ids: 2.1 labels written through the library ------
+
+BASE_SNAPSHOT = {**SNAPSHOT, "snapshot_id": "widget-base", "commit": "b" * 40, "role": "ordinary",
+                 "reference": "the commit the pull request branched from"}
+CHANGE_SET = {"change_set_id": "cs-shell", "base_snapshot_id": "widget-base", "head_snapshot_id": "widget-abc",
+              "boundary": "introducing", "review_scope": "changed_files",
+              "description": "The pull request that introduces the shell interpolation."}
+
+
+def change_set_pack(tmp_path: Path) -> dict:
+    """The approved and admitted case on ``widget-abc`` with the snapshot its change set branches from."""
+    pack = approved_pack(tmp_path)
+    add_snapshot(pack, BASE_SNAPSHOT)
+    return pack
+
+
+def test_the_first_change_set_upgrades_the_pack_to_2_1_and_the_write_anchors_it(tmp_path):
+    pack = change_set_pack(tmp_path)
+    assert pack["schema_version"] == "2.0" and "change_sets" not in pack
+    approval = case_by_id(pack, "widget-shell")["validation"]["reviews"][-1]
+
+    recorded = add_change_set(pack, CHANGE_SET)
+
+    assert recorded == CHANGE_SET and pack["change_sets"] == [CHANGE_SET]
+    assert pack["schema_version"] == "2.1"
+    assert validate_document("case-pack", pack) is pack
+    # Declaring a boundary is not naming it in a label, so it costs no approval: the digest
+    # projects a change set only into the cases whose labels name it.
+    assert case_by_id(pack, "widget-shell")["validation"]["reviews"][-1] == approval
+    assert approval_is_current(pack, case_by_id(pack, "widget-shell")) is True
+    assert build_plan(pack, "widget-abc", HASH)[0]["scope"] == "reviewed"
+
+    edited = json.loads(json.dumps(pack))
+    edited["change_sets"][0]["review_scope"] = "change_affected_flow"
+    with pytest.raises(ContractError, match="anchor_sha256 records"):
+        validate_document("case-pack", edited)
+
+    second = {**CHANGE_SET, "change_set_id": "cs-repair", "boundary": "repair"}
+    add_change_set(pack, second)
+    assert [entry["change_set_id"] for entry in pack["change_sets"]] == ["cs-shell", "cs-repair"]
+    assert pack["schema_version"] == "2.1"
+
+
+def test_a_pack_that_names_no_change_set_stays_at_2_0(tmp_path):
+    pack = change_set_pack(tmp_path)
+    before = dump_json(pack)
+
+    with pytest.raises(ContractError):
+        add_change_set(pack, {**CHANGE_SET, "head_snapshot_id": "widget-missing"})
+
+    assert dump_json(pack) == before and pack["schema_version"] == "2.0"
+    assert "change_sets" not in pack
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"head_snapshot_id": "widget-missing"}, "is not declared"),
+        ({"base_snapshot_id": "widget-abc"}, "base and head must be different"),
+        ({"boundary": "someday"}, "boundary"),
+        ({"review_scope": "everything"}, "review_scope"),
+        ({"description": "   "}, "non-blank description"),
+        ({"change_set_id": "not an id"}, "change_set_id"),
+    ],
+    ids=["undeclared-head", "same-snapshot", "boundary", "scope", "blank-description", "id-shape"],
+)
+def test_a_change_set_the_contract_refuses_leaves_the_pack_exactly_as_it_was(tmp_path, change, message):
+    pack = change_set_pack(tmp_path)
+    before = dump_json(pack)
+
+    with pytest.raises(ContractError, match=message):
+        add_change_set(pack, {**CHANGE_SET, **change})
+
+    assert dump_json(pack) == before
+
+
+def test_a_change_set_between_two_repositories_or_declared_twice_is_refused(tmp_path):
+    pack = change_set_pack(tmp_path)
+    add_snapshot(pack, {**SNAPSHOT, "snapshot_id": "widget-fork", "commit": "c" * 40,
+                        "repository": {"url": "https://example.invalid/fork/widget.git", "name": "fork/widget"}})
+    add_change_set(pack, CHANGE_SET)
+    before = dump_json(pack)
+
+    with pytest.raises(ContractError, match="different repositories"):
+        add_change_set(pack, {**CHANGE_SET, "change_set_id": "cs-fork", "base_snapshot_id": "widget-fork"})
+    with pytest.raises(ContractError, match="change set cs-shell already exists"):
+        add_change_set(pack, CHANGE_SET)
+
+    assert dump_json(pack) == before
+
+
+def test_pr_eligibility_is_a_label_write_and_an_approval_is_never_carried_onto_it(tmp_path):
+    pack = change_set_pack(tmp_path)
+    add_change_set(pack, CHANGE_SET)
+    case = case_by_id(pack, "widget-shell")
+    covered = label_digest(pack, case)
+    assert approval_is_current(pack, case) and build_plan(pack, "widget-abc", HASH)[0]["scope"] == "reviewed"
+    reviews = json.loads(json.dumps(case["validation"]["reviews"]))
+
+    entry = set_pr_eligibility(pack, "widget-shell", "cs-shell", "introduced", "changed",
+                               note="the interpolation is on a changed line")
+
+    case = case_by_id(pack, "widget-shell")
+    assert entry == {"change_set_id": "cs-shell", "relation": "introduced", "code_scope": "changed",
+                     "note": "the interpolation is on a changed line"}
+    assert case["target"]["pr_eligibility"] == [entry]
+    assert validate_document("case-pack", pack) is pack
+    # The labels changed, so the approval that covered the old ones covers nothing now, and the
+    # write did not re-stamp it: the review is exactly what it was, and the case is left out.
+    assert label_digest(pack, case) != covered
+    assert case["validation"]["reviews"] == reviews
+    assert approval_is_current(pack, case) is False
+    plan, notes = build_plan(pack, "widget-abc", HASH)
+    assert plan["scope"] == "draft" and plan["targets"] == []
+    assert any("widget-shell: excluded because the labels changed after the review" in note for note in notes)
+    assert case["validation"]["review_state"] == "human_approved", "code never withdraws a human review"
+
+    approve_case(pack, "widget-shell", reviewer="S. Econd", role="independent_reviewer", level="L3",
+                 note="the eligibility was read too", clock=CLOCK)
+    assert build_plan(pack, "widget-abc", HASH)[0]["scope"] == "reviewed"
+
+
+def test_a_control_carries_its_own_eligibility_and_a_repair_relation(tmp_path):
+    pack = change_set_pack(tmp_path)
+    add_change_set(pack, {**CHANGE_SET, "boundary": "repair"})
+    case_by_id(pack, "widget-shell")["controls"].append(safe_control())
+    reanchor(pack)
+
+    entry = set_pr_eligibility(pack, "widget-shell", "cs-shell", "repaired", "context",
+                               control_id="C-widget-shell-safe")
+
+    case = case_by_id(pack, "widget-shell")
+    assert entry == {"change_set_id": "cs-shell", "relation": "repaired", "code_scope": "context"}
+    assert case["controls"][0]["pr_eligibility"] == [entry] and "pr_eligibility" not in case["target"]
+    assert validate_document("case-pack", pack) is pack
+
+
+def test_setting_eligibility_again_replaces_the_entry_in_place_and_keeps_change_set_order(tmp_path):
+    pack = change_set_pack(tmp_path)
+    add_change_set(pack, CHANGE_SET)
+    add_change_set(pack, {**CHANGE_SET, "change_set_id": "cs-affects"})
+
+    set_pr_eligibility(pack, "widget-shell", "cs-shell", "introduced", "changed", note="first reading")
+    set_pr_eligibility(pack, "widget-shell", "cs-affects", "affected", "context")
+    assert [e["change_set_id"] for e in case_by_id(pack, "widget-shell")["target"]["pr_eligibility"]] == [
+        "cs-affects", "cs-shell"], "entries are read in change set order, whatever order they were written in"
+
+    replaced = set_pr_eligibility(pack, "widget-shell", "cs-shell", "affected", "context")
+
+    entries = case_by_id(pack, "widget-shell")["target"]["pr_eligibility"]
+    assert entries == [{"change_set_id": "cs-affects", "relation": "affected", "code_scope": "context"}, replaced]
+    assert "note" not in replaced, "the entry is set as stated, so the earlier note does not survive it"
+
+
+def test_reordering_pr_eligibility_is_not_a_change_to_the_labels(tmp_path):
+    pack = change_set_pack(tmp_path)
+    add_change_set(pack, CHANGE_SET)
+    add_change_set(pack, {**CHANGE_SET, "change_set_id": "cs-affects"})
+    set_pr_eligibility(pack, "widget-shell", "cs-shell", "introduced", "changed")
+    set_pr_eligibility(pack, "widget-shell", "cs-affects", "affected", "context")
+    approve_case(pack, "widget-shell", reviewer="S. Econd", role="independent_reviewer", level="L3",
+                 note="both entries were read", clock=CLOCK)
+    covered = label_digest(pack, case_by_id(pack, "widget-shell"))
+
+    case_by_id(pack, "widget-shell")["target"]["pr_eligibility"].reverse()
+
+    assert label_digest(pack, case_by_id(pack, "widget-shell")) == covered
+    assert approval_is_current(pack, case_by_id(pack, "widget-shell")) is True
+    case_by_id(pack, "widget-shell")["target"]["pr_eligibility"][0]["relation"] = "affected"
+    assert label_digest(pack, case_by_id(pack, "widget-shell")) != covered
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"change_set_id": "cs-missing"}, "does not declare"),
+        ({"relation": "repaired"}, "never repaired"),
+        ({"relation": "fixed"}, "relation must be one of"),
+        ({"code_scope": "everywhere"}, "code_scope must be one of"),
+        ({"note": "  \u200b "}, "must say something"),
+        ({"control_id": "C-absent"}, "has no control 'C-absent'"),
+        ({"case_id": "absent"}, "unknown case"),
+    ],
+    ids=["undeclared-change-set", "repaired-target", "relation", "scope", "blank-note", "unknown-control",
+         "unknown-case"],
+)
+def test_a_pr_eligibility_the_record_cannot_carry_leaves_the_pack_exactly_as_it_was(tmp_path, arguments, message):
+    pack = change_set_pack(tmp_path)
+    add_change_set(pack, CHANGE_SET)
+    before = dump_json(pack)
+    given = {"case_id": "widget-shell", "change_set_id": "cs-shell", "relation": "introduced",
+             "code_scope": "changed", **arguments}
+
+    with pytest.raises(ContractError, match=message):
+        set_pr_eligibility(pack, **given)
+
+    assert dump_json(pack) == before
+
+
+def test_an_item_off_the_head_snapshot_cannot_be_eligible_for_the_change_set(tmp_path):
+    pack = change_set_pack(tmp_path)
+    add_snapshot(pack, FIXED_SNAPSHOT)
+    add_change_set(pack, CHANGE_SET)
+    case_by_id(pack, "widget-shell")["controls"].append(fixed_control())
+    reanchor(pack)
+    before = dump_json(pack)
+
+    with pytest.raises(ContractError, match="a PR review reads the change set's head"):
+        set_pr_eligibility(pack, "widget-shell", "cs-shell", "repaired", "changed",
+                           control_id="C-widget-shell-fixed")
+
+    assert dump_json(pack) == before
+
+
+def test_a_pack_that_declares_no_change_set_refuses_an_eligibility_naming_one(tmp_path):
+    pack = change_set_pack(tmp_path)
+    before = dump_json(pack)
+
+    with pytest.raises(ContractError, match="does not declare"):
+        set_pr_eligibility(pack, "widget-shell", "cs-shell", "introduced", "changed")
+
+    assert dump_json(pack) == before and pack["schema_version"] == "2.0"
+
+
+def test_a_canonical_id_is_a_label_write_that_upgrades_a_2_0_pack(tmp_path):
+    pack = make_pack()
+    add_snapshot(pack, FIXED_SNAPSHOT)
+    case_by_id(pack, "widget-shell")["controls"].append(fixed_control())
+    reanchor(pack)
+    mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)
+    mechanical_checks(pack, "widget-fixed", export(tmp_path / "fixed"), FIXED_HASH, clock=CLOCK)
+    set_disposition(pack, "widget-shell", "validate", "evidence reviewed")
+    approve_case(pack, "widget-shell", reviewer="R. Eviewer", role="independent_reviewer", level="L3",
+                 note="label and control established", clock=CLOCK)
+    covered = label_digest(pack, case_by_id(pack, "widget-shell"))
+    assert pack["schema_version"] == "2.0"
+    assert target_canonical_id(case_by_id(pack, "widget-shell")) == "T-widget-shell", "the default is the target id"
+
+    assert set_canonical_id(pack, "widget-shell", "shell-interpolation-root") == "shell-interpolation-root"
+
+    case = case_by_id(pack, "widget-shell")
+    assert pack["schema_version"] == "2.1"
+    assert case["canonical_target"]["canonical_id"] == "shell-interpolation-root"
+    assert target_canonical_id(case) == "shell-interpolation-root"
+    assert label_digest(pack, case) != covered and approval_is_current(pack, case) is False
+    assert validate_document("case-pack", pack) is pack
+
+    assert set_canonical_id(pack, "widget-shell", "fixed-argv", control_id="C-widget-shell-fixed") == "fixed-argv"
+    assert control_canonical_id(case_by_id(pack, "widget-shell")["controls"][0]) == "fixed-argv"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"canonical_id": "not an id"}, "canonical_id"),
+        ({"canonical_id": ""}, "canonical_id"),
+        ({"control_id": "C-absent"}, "has no control 'C-absent'"),
+        ({"case_id": "absent"}, "unknown case"),
+    ],
+    ids=["shape", "empty", "unknown-control", "unknown-case"],
+)
+def test_a_canonical_id_the_record_cannot_carry_leaves_the_pack_exactly_as_it_was(tmp_path, arguments, message):
+    pack = change_set_pack(tmp_path)
+    before = dump_json(pack)
+    given = {"case_id": "widget-shell", "canonical_id": "shell-root", **arguments}
+
+    with pytest.raises(ContractError, match=message):
+        set_canonical_id(pack, **given)
+
+    assert dump_json(pack) == before and pack["schema_version"] == "2.0"
+
+
+def test_the_label_writes_refuse_a_pack_whose_anchor_does_not_verify(tmp_path):
+    """Like every write, they are the wrong tool to launder a hand edit with."""
+    pack = change_set_pack(tmp_path)
+    add_change_set(pack, CHANGE_SET)
+    pack["change_sets"][0]["review_scope"] = "change_affected_flow"
+
+    for write in (lambda: add_change_set(pack, {**CHANGE_SET, "change_set_id": "cs-two"}),
+                  lambda: set_pr_eligibility(pack, "widget-shell", "cs-shell", "introduced", "changed"),
+                  lambda: set_canonical_id(pack, "widget-shell", "shell-root")):
+        with pytest.raises(ContractError, match="anchored records do not verify"):
+            write()
+
+
+# --- PR plans: only the items a change set names, scored against the trio that identifies the input ---
+
+BASE_HASH = "sha256:" + "c" * 64
+DIFF_HASH = "sha256:" + "e" * 64
+PR_IDENTITY = {"base_tree_hash": BASE_HASH, "head_tree_hash": HASH, "diff_sha256": DIFF_HASH}
+
+
+def pr_plan_pack(tmp_path: Path, *, admit: bool = True, locations: list[dict] | None = None) -> dict:
+    """One case on the head snapshot with a target and two controls, and a change set naming two items.
+
+    The target and ``C-widget-shell-eligible`` are eligible under ``cs-shell``; the third item,
+    ``C-widget-shell-outside``, is a control of the same case that the change set does not name.
+    Eligibility is stated before the review, so the approval covers it. *locations* replaces the
+    locations of the eligible control, and the export then holds each file they name.
+    """
+    pack = make_pack()
+    add_snapshot(pack, BASE_SNAPSHOT)
+    add_change_set(pack, CHANGE_SET)
+    eligible = safe_control("C-widget-shell-eligible")
+    if locations is not None:
+        eligible["locations"] = locations
+    case_by_id(pack, "widget-shell")["controls"] += [eligible, safe_control("C-widget-shell-outside")]
+    reanchor(pack)
+    mechanical_checks(pack, "widget-abc", export(tmp_path, also=tuple(item["path"] for item in locations or ())),
+                      HASH, clock=CLOCK)
+    set_pr_eligibility(pack, "widget-shell", "cs-shell", "introduced", "changed")
+    set_pr_eligibility(pack, "widget-shell", "cs-shell", "affected", "context",
+                       control_id="C-widget-shell-eligible")
+    set_disposition(pack, "widget-shell", "validate", "evidence reviewed")
+    approve_case(pack, "widget-shell", reviewer="R. Eviewer", role="independent_reviewer", level="L3",
+                 note="label, controls, and eligibility established", clock=CLOCK)
+    if admit:
+        admit_case(pack, "widget-shell", decision="admitted", by="J. Curator",
+                   reason="reviewed label, admitted to the evaluation slice", clock=CLOCK)
+    return pack
+
+
+def pr_plan(pack: dict, **changes) -> tuple[dict, list[str]]:
+    arguments = {"mode": "pr", "change_set_id": "cs-shell", **PR_IDENTITY, **changes}
+    return build_plan(pack, "widget-abc", HASH, **arguments)
+
+
+def test_a_pr_plan_carries_only_the_items_the_change_set_names_and_the_scope_each_was_given(tmp_path):
+    pack = pr_plan_pack(tmp_path)
+
+    plan, notes = pr_plan(pack)
+
+    assert validate_document("evaluation-plan", plan) is plan
+    assert plan["schema_version"] == "2.1" and plan["scope"] == "reviewed"
+    assert plan["input_hash"] == pr_input_hash(BASE_HASH, HASH, DIFF_HASH)
+    assert plan["review_budgets"] == [5, 10, 20], "a PR review is budgeted by the pack's pr budgets"
+    assert [(t["target_id"], t["canonical_id"], t["pr_scope"], t["validation_level"]) for t in plan["targets"]] == [
+        ("T-widget-shell", "T-widget-shell", {"relation": "introduced", "code_scope": "changed"}, "L3")]
+    assert [(c["control_id"], c["type"], c["pr_scope"]) for c in plan["controls"]] == [
+        ("C-widget-shell-eligible", "capability_safe", {"relation": "affected", "code_scope": "context"})]
+    assert plan["provenance"] == {
+        "namespace": "org.example", "pack_id": "pilot", "pack_version": pack["version"],
+        "pack_sha256": pack_sha256(pack), "snapshot_id": "widget-abc", "mode": "pr",
+        "case_ids": ["widget-shell"], "input_id": "cs-shell", "profile": "standard", "source_tree_hash": HASH,
+        "pr": {"change_set_id": "cs-shell", "base_snapshot_id": "widget-base", "head_snapshot_id": "widget-abc",
+               "base_tree_hash": BASE_HASH, "head_tree_hash": HASH, "diff_sha256": DIFF_HASH,
+               "boundary": "introducing", "review_scope": "changed_files", "location_basis": "pr_head"}}
+    assert notes == ["outside change set cs-shell, so not planned and earning nothing in this review: "
+                     "C-widget-shell-outside"]
+
+
+def test_a_pr_plan_control_states_the_sorted_unique_paths_of_its_pack_locations(tmp_path):
+    """The scorer places a control by these: where the pack says it is, each file once, in order."""
+    locations = [{"path": "src/util.py", "start_line": 1, "end_line": 1, "role": "operation"},
+                 {"path": "src/app.py", "start_line": 2, "end_line": 2, "role": "guard"},
+                 {"path": "src/app.py", "start_line": 1, "end_line": 1, "role": "operation"},
+                 {"path": "lib/helpers.py", "start_line": 1, "end_line": 1, "role": "source"}]
+    pack = pr_plan_pack(tmp_path, locations=locations)
+
+    plan, _ = pr_plan(pack)
+
+    assert validate_document("evaluation-plan", plan) is plan
+    assert [(c["control_id"], c["paths"]) for c in plan["controls"]] == [
+        ("C-widget-shell-eligible", ["lib/helpers.py", "src/app.py", "src/util.py"])]
+    assert all("paths" not in target for target in plan["targets"]), "only a control is placed, and only to be scored"
+
+
+def test_a_pr_control_with_no_location_leaves_paths_out_and_does_not_state_that_it_is_nowhere(tmp_path):
+    plan, _ = pr_plan(pr_plan_pack(tmp_path, locations=[]))
+
+    assert validate_document("evaluation-plan", plan) is plan
+    assert [(c["control_id"], "paths" in c) for c in plan["controls"]] == [("C-widget-shell-eligible", False)]
+
+
+def test_a_pack_location_spelled_another_way_is_placed_as_the_file_it_names():
+    """A pack location need only be a relative path without a parent segment; a result lists paths as git does."""
+    from scaneval.cases import _control_paths
+
+    control = {"locations": [{"path": "./src/util.py"}, {"path": "src//app.py"}, {"path": "src/app.py"},
+                             {"path": "."}, {"path": "src/we\\ird.py"}]}
+
+    assert _control_paths(control) == ["src/app.py", "src/util.py", "src/we\\ird.py"]
+    assert _control_paths({"locations": []}) == [] and _control_paths({"locations": [{"path": "./"}]}) == []
+
+
+def test_pr_mode_without_a_change_set_is_still_a_full_plan_with_the_pr_budgets(tmp_path):
+    pack = pr_plan_pack(tmp_path)
+
+    plan, notes = build_plan(pack, "widget-abc", HASH, mode="pr")
+    full, _ = build_plan(pack, "widget-abc", HASH)
+
+    assert plan["schema_version"] == "2.0" and "pr" not in plan["provenance"] and notes == []
+    assert not any("paths" in control for control in plan["controls"] + full["controls"]), \
+        "a plan that names no change stays the 2.0 plan, which has no field for where a control is"
+    assert plan["review_budgets"] == [5, 10, 20] and full["review_budgets"] == [5, 10, 20, 50]
+    assert plan["provenance"]["mode"] == "pr"
+    assert [c["control_id"] for c in plan["controls"]] == ["C-widget-shell-eligible", "C-widget-shell-outside"],         "with no change set nothing is scoped, so every item of the snapshot is planned"
+    assert {**plan, "review_budgets": full["review_budgets"],
+            "provenance": {**plan["provenance"], "mode": "full"}} == full
+
+
+def test_a_pr_plan_binds_to_the_whole_identity_of_its_input(tmp_path):
+    pack = pr_plan_pack(tmp_path)
+    for name in PR_IDENTITY:
+        with pytest.raises(ContractError, match=f"needs {name}"):
+            pr_plan(pack, **{name: None})
+    with pytest.raises(ContractError, match="needs base_tree_hash, head_tree_hash, diff_sha256"):
+        pr_plan(pack, base_tree_hash=None, head_tree_hash=None, diff_sha256=None)
+    with pytest.raises(ContractError, match="given with the change set it reviews"):
+        build_plan(pack, "widget-abc", HASH, mode="pr", diff_sha256=DIFF_HASH)
+    with pytest.raises(ContractError, match="a change set is planned in pr mode, not 'full'"):
+        pr_plan(pack, mode="full")
+    with pytest.raises(ContractError, match="unknown change set 'cs-missing'"):
+        pr_plan(pack, change_set_id="cs-missing")
+    with pytest.raises(ContractError, match="reviews head snapshot widget-abc, not widget-base"):
+        build_plan(pack, "widget-base", HASH, mode="pr", change_set_id="cs-shell", **PR_IDENTITY)
+    with pytest.raises(ContractError, match="head tree hash must be the export's tree hash"):
+        pr_plan(pack, head_tree_hash=BASE_HASH)
+    with pytest.raises(ContractError, match="is not it"):
+        pr_plan(pack, input_hash=HASH)
+    assert pr_plan(pack, input_hash=pr_input_hash(BASE_HASH, HASH, DIFF_HASH))[0]["input_hash"] == \
+        pr_input_hash(BASE_HASH, HASH, DIFF_HASH)
+    with pytest.raises(ContractError, match="provenance.pr.diff_sha256: 'not-a-digest' does not match"):
+        pr_plan(pack, diff_sha256="not-a-digest")
+
+
+def test_a_pr_plan_refuses_a_base_export_the_pack_binds_to_another_tree(tmp_path):
+    pack = pr_plan_pack(tmp_path)
+    mechanical_checks(pack, "widget-base", export(tmp_path / "base"), "sha256:" + "9" * 64, clock=CLOCK)
+
+    with pytest.raises(ContractError, match="widget-base tree hash does not match the materialized base"):
+        pr_plan(pack)
+
+    # A blinded input hands over a transformed base the declared hash cannot vouch for, so the
+    # comparison is not made there; the runner compared the original export when it prepared it.
+    blinded, _ = pr_plan(pack, profile="metadata_blinded", head_tree_hash="sha256:" + "8" * 64,
+                         blinding={"map_id": "widget-metadata", "map_version": "1", "map_sha256": HASH})
+    assert blinded["provenance"]["input_id"] == "cs-shell.blinded"
+    assert blinded["provenance"]["source_tree_hash"] == HASH, "the labels refer to the original head export"
+    assert blinded["provenance"]["pr"]["head_tree_hash"] == "sha256:" + "8" * 64
+    assert blinded["input_hash"] == pr_input_hash(BASE_HASH, "sha256:" + "8" * 64, DIFF_HASH)
+
+
+def test_the_usual_gating_applies_to_the_cases_a_change_set_names(tmp_path):
+    pack = pr_plan_pack(tmp_path, admit=False)
+
+    plan, notes = pr_plan(pack)
+    assert plan["scope"] == "draft" and [t["target_id"] for t in plan["targets"]] == ["T-widget-shell"], \
+        "an approved case nobody has admitted is planned as the draft evidence it is"
+
+    admit_case(pack, "widget-shell", decision="rejected", by="J. Curator", reason="not for this slice", clock=CLOCK)
+    plan, notes = pr_plan(pack)
+    assert plan["targets"] == [] and plan["controls"] == []
+    assert any("excluded by the latest admission decision (rejected by J. Curator" in note for note in notes)
+
+    admit_case(pack, "widget-shell", decision="admitted", by="J. Curator", reason="after all", clock=CLOCK)
+    case_by_id(pack, "widget-shell")["target"]["pr_eligibility"][0]["code_scope"] = "context"
+    plan, notes = pr_plan(pack)
+    assert plan["targets"] == [] and any("the labels changed after the review" in note for note in notes)
+
+
+def test_a_case_none_of_whose_items_names_the_change_set_is_not_planned_and_is_not_noted_as_excluded(tmp_path):
+    pack = pr_plan_pack(tmp_path)
+    add_change_set(pack, {**CHANGE_SET, "change_set_id": "cs-other"})
+    other = draft_case(
+        "widget-path", snapshot_id="widget-abc", kind="path_traversal", description="join of a user path",
+        represents=REPRESENTS, workload="conventional_application", component_role="application", aliases=[],
+        evidence=[evidence("note", origin="research_note", kind="source_inspection", reference="src/app.py")],
+        accepted_locations=[{"path": "src/app.py", "start_line": 1, "end_line": 1, "role": "sink"}])
+    add_case(pack, other)
+    mechanical_checks(pack, "widget-abc", export(tmp_path / "again"), HASH, clock=CLOCK)
+
+    plan, notes = pr_plan(pack)
+    assert plan["provenance"]["case_ids"] == ["widget-shell"]
+    assert all("widget-path:" not in note for note in notes), "a draft nobody scored here is not this plan's business"
+    assert "T-widget-path" in notes[-1], "but its target is named among the items outside the change set"
+
+    set_pr_eligibility(pack, "widget-path", "cs-other", "introduced", "changed")
+    plan, notes = pr_plan(pack)
+    assert plan["provenance"]["case_ids"] == ["widget-shell"]
+    other_plan, _ = pr_plan(pack, change_set_id="cs-other")
+    assert [t["target_id"] for t in other_plan["targets"]] == ["T-widget-path"]
+    assert other_plan["scope"] == "draft" and other_plan["controls"] == []
+
+
+def test_the_scope_frozen_before_a_run_is_the_scope_the_finished_plan_carries(tmp_path):
+    pack = pr_plan_pack(tmp_path)
+
+    frozen = plan_pr_scope(pack, "cs-shell", HASH)
+    plan, notes = pr_plan(pack)
+
+    assert frozen == {"scope": plan["scope"], "review_budgets": plan["review_budgets"],
+                      "targets": plan["targets"], "controls": plan["controls"], "notes": notes,
+                      "case_ids": plan["provenance"]["case_ids"]}
+    with pytest.raises(ContractError, match="tree hash does not match the materialized input"):
+        plan_pr_scope(pack, "cs-shell", BASE_HASH)
+    with pytest.raises(ContractError, match="unknown change set"):
+        plan_pr_scope(pack, "cs-missing", HASH)
+
+
+def test_a_change_set_naming_nothing_plans_nothing_and_never_a_reviewed_scope(tmp_path):
+    pack = pr_plan_pack(tmp_path)
+    add_change_set(pack, {**CHANGE_SET, "change_set_id": "cs-empty"})
+
+    plan, notes = pr_plan(pack, change_set_id="cs-empty")
+
+    assert plan["targets"] == [] and plan["controls"] == [] and plan["scope"] == "draft"
+    assert notes[-1] == "no planned targets or controls for this input; scores will be N/A"

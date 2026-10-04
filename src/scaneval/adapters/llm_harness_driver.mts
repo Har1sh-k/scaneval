@@ -23,7 +23,7 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const DRIVER_VERSION = "2.2.0";
+const DRIVER_VERSION = "2.3.0";
 
 interface DriverConfig {
   harness_root: string;
@@ -785,13 +785,17 @@ async function main(): Promise<void> {
     "tool.start",
     "tool.end",
     ...(engineHooks === null ? ["finding.candidate"] : []),
-    // The consensus judge is the only validation stage, and it runs in pr mode. A bootstrap run
-    // has no validation stage at all, which is a different statement from not seeing one.
+    // The consensus judge is the only validation stage. The engine runs it in pr mode and only
+    // when consensus is configured, and this driver never passes `consensus`, so neither mode it
+    // is used in has a validation stage at all, which is a different statement from not seeing one.
+    // The reason differs by mode: a bootstrap scan has no such stage, and a pr scan is never given
+    // the judge.
     ...(engineHooks === null
       ? ["finding.validation"]
       : config.mode === "bootstrap"
         ? ["finding.validation (not applicable: a bootstrap scan runs no validation stage)"]
-        : []),
+        : ["finding.validation (not applicable: the consensus judge is the only validation stage, and this "
+          + "driver never configures consensus)"]),
     ...(engineHooks === null ? ["finding.filtered"] : []),
     ...(runnerHooks === null
       ? ["model retries inside the harness runner", "token usage"]

@@ -1,0 +1,641 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/evaluation-schedule.schema.json",
+  "title": "ScanEval evaluation schedule",
+  "description": "What one run committed to before it prepared any input: every assignment of a system to an input and a repetition, the targets and controls each input is planned to carry where the pack can say so before execution, and the vulnerable/fixed observation pairs matched in advance. Written once, before the first input is prepared, and never rewritten, so nothing observed during the run can change what was assigned. It holds no scan outcome, no label content beyond ids and levels, and no claim that anything was detected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "created_at",
+    "config_sha256",
+    "pack",
+    "repetitions",
+    "inputs",
+    "systems",
+    "assignments",
+    "pairs",
+    "notes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.1"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "created_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "config_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "canonical_sha256 of the whole run configuration, as the run manifest records it."
+    },
+    "pack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "namespace",
+        "pack_id",
+        "version",
+        "sha256"
+      ],
+      "description": "The pack as the run was handed it, before any mechanical check ran against an export; the frozen copy the run writes later carries the check results and so hashes differently.",
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pack_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "repetitions": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "inputs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/input"
+      }
+    },
+    "systems": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/system"
+      }
+    },
+    "assignments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/assignment"
+      }
+    },
+    "pairs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/pair"
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "validation_level": {
+      "enum": [
+        "fixture",
+        "L1",
+        "L2",
+        "L3",
+        "L4"
+      ]
+    },
+    "blinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "map_id",
+        "map_version",
+        "map_sha256"
+      ],
+      "description": "The reviewed map a metadata-blinded input is transformed with. The map itself stays evaluator-side.",
+      "properties": {
+        "map_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "map_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "map_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "pr_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relation",
+        "code_scope"
+      ],
+      "description": "How an item relates to the change of a PR input, as the pack states it for that change set. Frozen with the plan, so which items a PR review scores is settled before it runs.",
+      "properties": {
+        "relation": {
+          "enum": [
+            "introduced",
+            "affected",
+            "repaired"
+          ]
+        },
+        "code_scope": {
+          "enum": [
+            "changed",
+            "context"
+          ]
+        }
+      }
+    },
+    "planned_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_id",
+        "case_id",
+        "canonical_id",
+        "kind",
+        "variant_family",
+        "workload",
+        "component_role",
+        "project",
+        "validation_level"
+      ],
+      "properties": {
+        "target_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "case_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonical_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "variant_family": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workload": {
+          "enum": [
+            "conventional_application",
+            "conventional_automation",
+            "ai_assisted_application",
+            "agentic_application"
+          ]
+        },
+        "component_role": {
+          "enum": [
+            "application",
+            "library_sdk",
+            "infrastructure"
+          ]
+        },
+        "project": {
+          "type": "string",
+          "minLength": 1
+        },
+        "validation_level": {
+          "$ref": "#/$defs/validation_level"
+        },
+        "pr_scope": {
+          "$ref": "#/$defs/pr_scope"
+        }
+      }
+    },
+    "planned_control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_id",
+        "case_id",
+        "canonical_id",
+        "type",
+        "target_id",
+        "validation_level"
+      ],
+      "properties": {
+        "control_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "case_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonical_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "enum": [
+            "capability_safe",
+            "fixed_target",
+            "both"
+          ]
+        },
+        "target_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "validation_level": {
+          "$ref": "#/$defs/validation_level"
+        },
+        "pr_scope": {
+          "$ref": "#/$defs/pr_scope"
+        }
+      }
+    },
+    "frozen_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "scope",
+        "review_budgets",
+        "targets",
+        "controls",
+        "notes"
+      ],
+      "description": "The plan the pack gave this input before execution, from the tree hash its snapshot declares, or for a PR input from the tree hashes of both snapshots of its change set.",
+      "properties": {
+        "state": {
+          "const": "frozen"
+        },
+        "scope": {
+          "enum": [
+            "diagnostic",
+            "draft",
+            "reviewed"
+          ]
+        },
+        "review_budgets": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/planned_target"
+          }
+        },
+        "controls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/planned_control"
+          }
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "unavailable_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "reason"
+      ],
+      "description": "No plan could be built before execution, and why. The plan each invocation uses is still built from the checked pack at run time; it was not pre-registered here.",
+      "properties": {
+        "state": {
+          "const": "unavailable"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_id",
+        "mode",
+        "profile",
+        "snapshot_id",
+        "change_set_id",
+        "change_set",
+        "blinding",
+        "project",
+        "workload",
+        "component_role",
+        "declared_tree_hash",
+        "plan"
+      ],
+      "properties": {
+        "input_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "mode": {
+          "enum": [
+            "full",
+            "pr"
+          ]
+        },
+        "profile": {
+          "enum": [
+            "standard",
+            "metadata_blinded"
+          ]
+        },
+        "snapshot_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "description": "The snapshot a full input exports; the head snapshot of a PR input."
+        },
+        "change_set_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "change_set": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "change_set_id",
+            "base_snapshot_id",
+            "head_snapshot_id",
+            "boundary",
+            "review_scope"
+          ],
+          "description": "The frozen identity of a PR input's change set: the boundary the pack declared for it, as it stood before this run. Null for a full input.",
+          "properties": {
+            "change_set_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "base_snapshot_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "head_snapshot_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "boundary": {
+              "enum": [
+                "introducing",
+                "repair",
+                "ordinary"
+              ]
+            },
+            "review_scope": {
+              "enum": [
+                "changed_files",
+                "change_affected_flow"
+              ]
+            }
+          }
+        },
+        "blinding": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/blinding"
+            }
+          ]
+        },
+        "project": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The snapshot's repository name."
+        },
+        "workload": {
+          "enum": [
+            "conventional_application",
+            "conventional_automation",
+            "ai_assisted_application",
+            "agentic_application"
+          ]
+        },
+        "component_role": {
+          "enum": [
+            "application",
+            "library_sdk",
+            "infrastructure"
+          ]
+        },
+        "declared_tree_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "The export the pack's snapshot declares before this run exports it; null when it declares none."
+        },
+        "plan": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/frozen_plan"
+            },
+            {
+              "$ref": "#/$defs/unavailable_plan"
+            }
+          ]
+        }
+      }
+    },
+    "system": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "system_id",
+        "adapter",
+        "model_id",
+        "model_revision",
+        "config_sha256",
+        "network_policy",
+        "execution"
+      ],
+      "properties": {
+        "system_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "adapter": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "model_revision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "config_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "canonical_sha256 of the system's config object."
+        },
+        "network_policy": {
+          "enum": [
+            "none",
+            "model_provider_only",
+            "unrestricted"
+          ]
+        },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "backend",
+            "enforced_expected",
+            "image"
+          ],
+          "description": "The execution backend the configuration declares. enforced_expected says the configuration asks for an enforcing backend; whether one actually bounded an invocation is recorded in that invocation's execution record, never here.",
+          "properties": {
+            "backend": {
+              "enum": [
+                "local",
+                "oci"
+              ]
+            },
+            "enforced_expected": {
+              "type": "boolean"
+            },
+            "image": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "assignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assignment_id",
+        "input_id",
+        "system_id",
+        "repetition"
+      ],
+      "description": "One (input, system, repetition) the run is scheduled to invoke. assignment_id is the invocation id its manifest row and bundle carry.",
+      "properties": {
+        "assignment_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "input_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "system_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repetition": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "pair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_id",
+        "canonical_id",
+        "vulnerable_input_id",
+        "control_id",
+        "fixed_input_id",
+        "repetition_pairs"
+      ],
+      "description": "A vulnerable/fixed observation pair matched before execution: the target planned on one full-scan input and a fixed-target control of that target planned on another full-scan input of the same profile. No pair of PR inputs is defined. Each repetition of the vulnerable input is paired with the same repetition of the fixed one, for every system.",
+      "properties": {
+        "target_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonical_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "vulnerable_input_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "control_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fixed_input_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repetition_pairs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    }
+  }
+}

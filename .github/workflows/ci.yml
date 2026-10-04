@@ -59,3 +59,36 @@ jobs:
           "$RUNNER_TEMP/scaneval-wheel-env/bin/scaneval" demo "$RUNNER_TEMP/scaneval-demo"
           "$RUNNER_TEMP/scaneval-wheel-env/bin/scaneval" replay "$RUNNER_TEMP/scaneval-demo" --output "$RUNNER_TEMP/scaneval-replay.json"
           cmp "$RUNNER_TEMP/scaneval-demo/evaluation.json" "$RUNNER_TEMP/scaneval-replay.json"
+
+  oci-integration:
+    name: OCI backend against a real Docker engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      # Without this the module skips when no engine or image is present; here that is a failure.
+      SCANEVAL_REQUIRE_DOCKER: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Install test dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Describe the engine
+        # model_provider_only needs an engine that applies gateway_mode_ipv4=isolated; the record
+        # of which engine ran is here when that test says it did not.
+        run: |
+          docker version
+          docker info
+      - name: Pull the pinned images
+        # The backend never pulls an image, so the tests use only what is already present.
+        run: |
+          docker pull python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
+          docker pull semgrep/semgrep:1.177.0@sha256:acaac22ffc7b7cc5926de0751b223bce0b2491c33d18422fa72f632c78d81198
+      - name: OCI integration tests
+        # Real containers from the pinned images and local fixture services only: no model is
+        # called, and the one allowed destination is a fixture container on a local network.
+        run: python -m pytest -q -rs tests/test_v2_isolation_docker.py

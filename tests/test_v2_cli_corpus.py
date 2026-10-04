@@ -1242,6 +1242,9 @@ def test_every_corpus_command_that_rewrites_a_pack_refuses_one_inside_a_trial_di
                   "admitted", "--by", "J. Curator", "--reason", "pilot slice"],
         "disposition": ["corpus", "disposition", str(planted), "--case-id", "case-finding",
                         "--value", "validate", "--reason", "evidence reviewed"],
+        "add-change-set": change_set_argv(planted),
+        "pr-scope": pr_scope_argv(planted),
+        "canonical": canonical_argv(planted),
     }
     for argv in mutating.values():
         code, _, err = cli(capsys, *argv)
@@ -1387,3 +1390,329 @@ def test_a_hand_edited_review_record_cannot_report_an_approval_by_an_unnamed_per
 
     code, _, err = cli(capsys, "replay", str(bundle))
     assert code == 2 and "must name its reviewer" in err and "Traceback" not in err
+
+
+# --- corpus add-change-set, pr-scope, and canonical: 2.1 labels through the CLI ------------------
+
+
+def change_set_argv(pack: Path, *extra: str, change_set_id: str = "cs-1", base: str = "snap-base",
+                    head: str = "snap-a") -> list[str]:
+    return ["corpus", "add-change-set", str(pack), "--change-set-id", change_set_id,
+            "--base-snapshot-id", base, "--head-snapshot-id", head, "--boundary", "introducing",
+            "--review-scope", "changed_files", "--description", "The change that adds the sink.", *extra]
+
+
+def pr_scope_argv(pack: Path, *extra: str, case_id: str = "case-finding", change_set_id: str = "cs-1",
+                  relation: str = "introduced", code_scope: str = "changed") -> list[str]:
+    return ["corpus", "pr-scope", str(pack), "--case-id", case_id, "--change-set-id", change_set_id,
+            "--relation", relation, "--code-scope", code_scope, *extra]
+
+
+def canonical_argv(pack: Path, *extra: str, case_id: str = "case-finding",
+                   canonical_id: str = "shell-root") -> list[str]:
+    return ["corpus", "canonical", str(pack), "--case-id", case_id, "--canonical-id", canonical_id, *extra]
+
+
+@pytest.fixture
+def boundary_pack(checked_pack: dict, capsys) -> dict:
+    """The checked pack plus a base snapshot of the same repository and a change set ending at snap-a."""
+    pack = checked_pack["pack"]
+    assert main(snapshot_argv(pack, checked_pack["repo"], checked_pack["commit"], "snap-base")) == 0
+    assert main(change_set_argv(pack)) == 0
+    capsys.readouterr()
+    return checked_pack
+
+
+def approve_finding(pack: Path) -> None:
+    assert main(["corpus", "approve", str(pack), "--case-id", "case-finding", "--reviewer", "R. Eviewer",
+                 "--role", "curator", "--level", "L2", "--note", "structure reviewed"]) == 0
+
+
+def test_add_change_set_declares_a_boundary_and_upgrades_the_pack_to_2_1(tmp_path, capsys, checked_pack):
+    pack = checked_pack["pack"]
+    assert main(snapshot_argv(pack, checked_pack["repo"], checked_pack["commit"], "snap-base")) == 0
+    assert read_pack(pack)["schema_version"] == "2.0" and "change_sets" not in read_pack(pack)
+    capsys.readouterr()
+
+    code, out, err = cli(capsys, *change_set_argv(pack, *("--reference", "acme/widget#42")))
+
+    assert code == 0 and err == ""
+    recorded = json.loads(out)
+    assert recorded == {"change_set_id": "cs-1", "base_snapshot_id": "snap-base", "head_snapshot_id": "snap-a",
+                        "boundary": "introducing", "review_scope": "changed_files",
+                        "description": "The change that adds the sink.", "reference": "acme/widget#42"}
+    document = read_pack(pack)
+    assert document["schema_version"] == "2.1" and document["change_sets"] == [recorded]
+    assert load_document(pack, "case-pack")["change_sets"] == [recorded], "the file is a pack that loads"
+    assert not list(tmp_path.glob("pack.json.*"))
+
+    before = pack.read_bytes()
+    for argv, message in (
+        (change_set_argv(pack), "change set cs-1 already exists"),
+        (change_set_argv(pack, change_set_id="cs-2", head="snap-missing"), "is not declared"),
+        (change_set_argv(pack, change_set_id="cs-2", base="snap-a"), "base and head must be different"),
+    ):
+        code, _, err = cli(capsys, *argv)
+        assert code == 2 and err.startswith("scaneval: ") and message in err
+        assert pack.read_bytes() == before
+    argv = change_set_argv(pack, change_set_id="cs-2")
+    argv[argv.index("--boundary") + 1] = "someday"
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 2 and pack.read_bytes() == before
+
+
+def test_add_change_set_refuses_two_repositories_and_a_blank_description(tmp_path, capsys, checked_pack):
+    pack = checked_pack["pack"]
+    assert main([*snapshot_argv(pack, tmp_path / "another-repo", checked_pack["commit"], "snap-fork")]) == 0
+    capsys.readouterr()
+    before = pack.read_bytes()
+
+    code, _, err = cli(capsys, *change_set_argv(pack, base="snap-fork"))
+    assert code == 2 and "different repositories" in err
+
+    argv = change_set_argv(pack, change_set_id="cs-blank")
+    argv[argv.index("--description") + 1] = "   "
+    code, _, err = cli(capsys, *argv)
+    assert code == 2 and "non-blank description" in err
+    assert pack.read_bytes() == before
+
+
+def test_pr_scope_states_eligibility_and_says_when_it_lapsed_an_approval(tmp_path, capsys, boundary_pack):
+    pack = boundary_pack["pack"]
+    approve_finding(pack)
+    capsys.readouterr()
+
+    code, out, err = cli(capsys, *pr_scope_argv(pack, "--note", "the sink is a changed line"))
+
+    assert code == 0
+    assert json.loads(out) == {"change_set_id": "cs-1", "relation": "introduced", "code_scope": "changed",
+                               "note": "the sink is a changed line"}
+    assert err.startswith("note: the recorded approval of case case-finding no longer covers its labels")
+    target = case_by_id(pack, "case-finding")["target"]
+    assert target["pr_eligibility"] == [json.loads(out)]
+    assert [review["reviewer"] for review in case_by_id(pack, "case-finding")["validation"]["reviews"]] == [
+        "R. Eviewer"], "the approval is left as recorded and is not carried onto the new labels"
+    load_document(pack, "case-pack")
+
+    # Writing the same entry again changes no label, so nothing lapses that had not already.
+    approve_finding(pack)
+    capsys.readouterr()
+    code, out, err = cli(capsys, *pr_scope_argv(pack, "--note", "the sink is a changed line"))
+    assert code == 0 and err == ""
+
+    # A different reading is a different label.
+    code, out, err = cli(capsys, *pr_scope_argv(pack, relation="affected", code_scope="context"))
+    assert code == 0 and "no longer covers its labels" in err
+    assert case_by_id(pack, "case-finding")["target"]["pr_eligibility"] == [
+        {"change_set_id": "cs-1", "relation": "affected", "code_scope": "context"}]
+
+
+def test_pr_scope_names_one_control_of_the_case(tmp_path, capsys, boundary_pack):
+    pack = boundary_pack["pack"]
+    document = json.loads(pack.read_text(encoding="utf-8"))
+    document["cases"][0]["controls"].append({
+        "control_id": "C-case-finding-safe", "snapshot_id": "snap-a", "type": "capability_safe",
+        "description": "The admin helper runs a fixed argument list.",
+        "property": "No caller-supplied string reaches a shell at this call site.",
+        "allowed_actors_inputs": "Operators on the host.", "assumptions": ["Default deployment."],
+        "ruled_out_allegation": "Caller-controlled shell interpolation in the admin helper.",
+        "locations": [{"path": "src/app.py", "start_line": 1, "end_line": 1, "role": "operation"}],
+        "evidence_ids": ["allegation"]})
+    from scaneval.contracts import pack_anchor_digest
+
+    document["anchor_sha256"] = pack_anchor_digest(document)
+    pack.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    code, out, _ = cli(capsys, *pr_scope_argv(pack, "--control-id", "C-case-finding-safe",
+                                              relation="repaired", code_scope="context"))
+
+    assert code == 0
+    case = case_by_id(pack, "case-finding")
+    assert case["controls"][0]["pr_eligibility"] == [json.loads(out)] and "pr_eligibility" not in case["target"]
+    code, _, err = cli(capsys, *pr_scope_argv(pack, "--control-id", "C-absent"))
+    assert code == 2 and "has no control 'C-absent'" in err
+
+
+def test_pr_scope_refuses_what_the_pack_cannot_carry_and_leaves_it_as_it_was(tmp_path, capsys, boundary_pack):
+    pack = boundary_pack["pack"]
+    before = pack.read_bytes()
+
+    for argv, message in (
+        (pr_scope_argv(pack, change_set_id="cs-missing"), "does not declare"),
+        (pr_scope_argv(pack, relation="repaired"), "never repaired"),
+        (pr_scope_argv(pack, case_id="absent"), "unknown case"),
+        (pr_scope_argv(pack, "--note", "  "), "must say something"),
+    ):
+        code, _, err = cli(capsys, *argv)
+        assert code == 2 and err.startswith("scaneval: ") and message in err
+        assert pack.read_bytes() == before
+        assert not list(tmp_path.glob("pack.json.*"))
+    with pytest.raises(SystemExit) as exc:
+        main(pr_scope_argv(pack, relation="fixed"))
+    assert exc.value.code == 2 and pack.read_bytes() == before
+
+
+def test_a_pack_with_no_change_set_refuses_pr_scope_naming_one(tmp_path, capsys, checked_pack):
+    pack = checked_pack["pack"]
+    before = pack.read_bytes()
+
+    code, _, err = cli(capsys, *pr_scope_argv(pack))
+
+    assert code == 2 and "does not declare" in err and pack.read_bytes() == before
+
+
+def test_canonical_states_a_root_cause_and_upgrades_a_2_0_pack(tmp_path, capsys, checked_pack):
+    pack = checked_pack["pack"]
+    approve_finding(pack)
+    capsys.readouterr()
+    assert read_pack(pack)["schema_version"] == "2.0"
+
+    code, out, err = cli(capsys, *canonical_argv(pack))
+
+    assert code == 0
+    assert json.loads(out) == {"case_id": "case-finding", "target_id": "T-case-finding",
+                               "canonical_id": "shell-root"}
+    assert "no longer covers its labels" in err
+    document = read_pack(pack)
+    assert document["schema_version"] == "2.1"
+    assert case_by_id(pack, "case-finding")["canonical_target"]["canonical_id"] == "shell-root"
+    load_document(pack, "case-pack")
+
+    before = pack.read_bytes()
+    code, _, err = cli(capsys, *canonical_argv(pack, canonical_id="not an id"))
+    assert code == 2 and err.startswith("scaneval: ") and pack.read_bytes() == before
+    code, _, err = cli(capsys, *canonical_argv(pack, "--control-id", "C-absent"))
+    assert code == 2 and "has no control 'C-absent'" in err and pack.read_bytes() == before
+
+
+def test_the_three_label_commands_follow_the_new_version_rule_of_the_others(tmp_path, capsys, boundary_pack):
+    pack = boundary_pack["pack"]
+    release_pack(pack)
+    before = pack.read_bytes()
+    commands = {
+        "add-change-set": change_set_argv(pack, change_set_id="cs-2"),
+        "pr-scope": pr_scope_argv(pack),
+        "canonical": canonical_argv(pack),
+    }
+
+    for argv in commands.values():
+        code, _, err = cli(capsys, *argv)
+        assert code == 2 and "pack status is released" in err and "--new-version" in err
+        assert pack.read_bytes() == before
+
+    code, _, _ = cli(capsys, *commands["pr-scope"], "--new-version", "1.1.0-draft")
+    assert code == 0
+    document = read_pack(pack)
+    assert document["status"] == "draft" and document["version"] == "1.1.0-draft"
+    assert "version 1.0.0 (status released) reopened as 1.1.0-draft (status draft)" in document["notes"]
+    assert case_by_id(pack, "case-finding")["target"]["pr_eligibility"][0]["change_set_id"] == "cs-1"
+    assert not list(tmp_path.glob("pack.json.*"))
+
+
+def test_the_label_commands_advertise_their_flags(capsys):
+    for command, flags in (("add-change-set", ("--change-set-id", "--base-snapshot-id", "--head-snapshot-id",
+                                               "--boundary", "--review-scope", "--description",
+                                               "--reference", "--new-version")),
+                           ("pr-scope", ("--case-id", "--control-id", "--change-set-id", "--relation",
+                                         "--code-scope", "--note", "--new-version")),
+                           ("canonical", ("--case-id", "--control-id", "--canonical-id", "--new-version"))):
+        with pytest.raises(SystemExit) as exc:
+            main(["corpus", command, "--help"])
+        assert exc.value.code == 0
+        help_text = capsys.readouterr().out
+        assert all(flag in help_text for flag in flags), (command, help_text)
+
+
+# --- plan --mode pr: a full plan with the pr budgets, or the PR plan of a declared change set ------
+
+
+def plan_pr_argv(pack: Path, output: Path, tree_hash: str, *extra: str) -> list[str]:
+    return ["plan", "--pack", str(pack), "--snapshot-id", "snap-a", "--tree-hash", tree_hash,
+            "--output", str(output), "--mode", "pr", *extra]
+
+
+def identity_argv(tree_hash: str, *, base: str = "sha256:" + "5" * 64,
+                  diff: str = "sha256:" + "6" * 64) -> list[str]:
+    return ["--change-set-id", "cs-1", "--base-tree-hash", base, "--head-tree-hash", tree_hash,
+            "--diff-sha256", diff]
+
+
+def test_plan_mode_pr_without_a_change_set_says_it_is_a_full_plan_with_the_pr_budgets(tmp_path, capsys,
+                                                                                    checked_pack):
+    output = tmp_path / "plan.json"
+
+    code, out, err = cli(capsys, *plan_pr_argv(checked_pack["pack"], output, checked_pack["tree_hash"]))
+
+    assert code == 0 and "Wrote a draft plan with 1 targets and 0 controls" in out
+    assert err.startswith("note: --mode pr without --change-set-id only selects the pack's pr review budgets; "
+                          "this is a full plan of the snapshot, not the review of any change")
+    plan = load_document(output, "evaluation-plan")
+    assert plan["schema_version"] == "2.0" and plan["review_budgets"] == [5, 10, 20]
+    assert plan["provenance"]["mode"] == "pr" and "pr" not in plan["provenance"]
+
+
+def test_plan_writes_the_pr_plan_of_a_change_set_from_the_hashes_that_identify_its_input(tmp_path, capsys,
+                                                                                      boundary_pack):
+    pack, tree_hash = boundary_pack["pack"], boundary_pack["tree_hash"]
+    assert main(pr_scope_argv(pack, "--note", "the sink is a changed line")) == 0
+    capsys.readouterr()
+    output = tmp_path / "pr-plan.json"
+
+    code, out, err = cli(capsys, *plan_pr_argv(pack, output, tree_hash, *identity_argv(tree_hash)))
+
+    assert code == 0 and "Wrote a draft PR plan for change set cs-1 with 1 targets and 0 controls" in out
+    assert "--mode pr without" not in err
+    plan = load_document(output, "evaluation-plan")
+    from scaneval.contracts import pr_input_hash
+
+    assert plan["schema_version"] == "2.1" and plan["review_budgets"] == [5, 10, 20]
+    assert plan["input_hash"] == pr_input_hash("sha256:" + "5" * 64, tree_hash, "sha256:" + "6" * 64)
+    assert plan["targets"][0]["pr_scope"] == {"relation": "introduced", "code_scope": "changed"}
+    assert plan["provenance"]["input_id"] == "cs-1" and plan["provenance"]["mode"] == "pr"
+    assert plan["provenance"]["pr"] == {
+        "change_set_id": "cs-1", "base_snapshot_id": "snap-base", "head_snapshot_id": "snap-a",
+        "base_tree_hash": "sha256:" + "5" * 64, "head_tree_hash": tree_hash, "diff_sha256": "sha256:" + "6" * 64,
+        "boundary": "introducing", "review_scope": "changed_files", "location_basis": "pr_head"}
+
+    before = output.read_bytes()
+    code, _, err = cli(capsys, *plan_pr_argv(pack, output, tree_hash, *identity_argv(tree_hash)))
+    assert code == 2 and "File exists" in err and output.read_bytes() == before
+
+
+def test_plan_names_an_item_no_eligibility_reaches_and_plans_nothing_for_it(tmp_path, capsys, boundary_pack):
+    pack, tree_hash = boundary_pack["pack"], boundary_pack["tree_hash"]
+    output = tmp_path / "pr-plan.json"
+
+    code, out, err = cli(capsys, *plan_pr_argv(pack, output, tree_hash, *identity_argv(tree_hash)))
+
+    assert code == 0 and "Wrote a draft PR plan for change set cs-1 with 0 targets and 0 controls" in out
+    assert "outside change set cs-1, so not planned and earning nothing in this review: T-case-finding" in err
+    assert load_document(output, "evaluation-plan")["targets"] == []
+
+
+def test_plan_refuses_a_pr_plan_it_cannot_identify_and_writes_nothing(tmp_path, capsys, boundary_pack):
+    pack, tree_hash = boundary_pack["pack"], boundary_pack["tree_hash"]
+    output = tmp_path / "pr-plan.json"
+
+    complete = identity_argv(tree_hash)
+    cases_ = [
+        (plan_pr_argv(pack, output, tree_hash, "--change-set-id", "cs-1"),
+         "needs --base-tree-hash, --head-tree-hash, --diff-sha256"),
+        (plan_pr_argv(pack, output, tree_hash, *complete[:2], *complete[4:]),
+         "needs --base-tree-hash"),
+        (plan_pr_argv(pack, output, tree_hash, "--diff-sha256", "sha256:" + "6" * 64),
+         "belong with --change-set-id"),
+        (["plan", "--pack", str(pack), "--snapshot-id", "snap-a", "--tree-hash", tree_hash,
+          "--output", str(output), *complete], "add --mode pr"),
+        (plan_pr_argv(pack, output, tree_hash, "--change-set-id", "cs-missing", *complete[2:]),
+         "unknown change set 'cs-missing'"),
+        (plan_pr_argv(pack, output, tree_hash, *identity_argv("sha256:" + "7" * 64)),
+         "head tree hash must be the export's tree hash"),
+        (plan_pr_argv(pack, output, tree_hash, *identity_argv(tree_hash, diff="not-a-digest")),
+         "provenance.pr.diff_sha256"),
+    ]
+    for argv, message in cases_:
+        code, out, err = cli(capsys, *argv)
+        assert code == 2 and err.startswith("scaneval: ") and message in err, (argv, err)
+        assert out == "" and not output.exists()

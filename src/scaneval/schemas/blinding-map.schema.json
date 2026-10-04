@@ -1,0 +1,289 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/blinding-map.schema.json",
+  "title": "ScanEval metadata blinding map",
+  "description": "A reviewed, per-repository replacement map for the metadata_blinded input profile. It names identity tokens and their pseudonyms, the snapshot variants it covers, and each file edit with the exact bytes and occurrence counts it expects in every variant. Evaluator-side: it never enters a scanner workspace. It changes documentation and display metadata only, never source, dependencies, build, CI, or security configuration, and it is not anonymization.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "map_id",
+    "map_version",
+    "repository",
+    "pseudonyms",
+    "variants",
+    "edits",
+    "reviews"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.1"
+    },
+    "map_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Stable id of this map. Every blinded input of one repository in one run uses one map id and one content digest."
+    },
+    "map_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "name"
+      ],
+      "description": "The repository every variant is fetched from; it must be the pack snapshot's repository URL exactly.",
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "pseudonyms": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Identity tokens and their replacements. Neither side may be blank or hold a line break; originals are unique, replacements are unique, no replacement contains an original, and no original contains another pseudonym's replacement, all ignoring case.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "original",
+          "replacement"
+        ],
+        "properties": {
+          "original": {
+            "type": "string",
+            "minLength": 1
+          },
+          "replacement": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "variants": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The snapshots this map covers, each pinned by commit and by the tree hash of its original export. A map applied to a snapshot pinned or exported differently is stale and refused.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "snapshot_id",
+          "commit",
+          "tree_hash"
+        ],
+        "properties": {
+          "snapshot_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "commit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "tree_hash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "edits": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/edit"
+      }
+    },
+    "reviews": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/review"
+      }
+    },
+    "reviews_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Where the review chain ends: the chain_sha256 of the last review, present exactly when a review is recorded."
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "edit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "edit_id",
+        "path",
+        "role",
+        "rationale",
+        "replacements",
+        "expected"
+      ],
+      "properties": {
+        "edit_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "One file, as a normalized relative POSIX path in the export."
+        },
+        "role": {
+          "enum": [
+            "documentation_identifier",
+            "non_runtime_branding",
+            "display_metadata"
+          ]
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role_check": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Why the edited field is not read at runtime. Required for display_metadata."
+        },
+        "replacements": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "The declared originals this edit replaces in its file, every occurrence of each."
+        },
+        "expected": {
+          "type": "array",
+          "minItems": 1,
+          "description": "One entry per variant: the file's exact hash and the occurrence count of each replaced original, or that the file is absent.",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/present"
+              },
+              {
+                "$ref": "#/$defs/absent"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "present": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "snapshot_id",
+        "state",
+        "file_sha256",
+        "occurrences"
+      ],
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "const": "present"
+        },
+        "file_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "occurrences": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "absent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "snapshot_id",
+        "state"
+      ],
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "const": "absent"
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reviewer",
+        "role",
+        "decision",
+        "at",
+        "note",
+        "content_sha256",
+        "chain_sha256"
+      ],
+      "properties": {
+        "reviewer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "enum": [
+            "curator",
+            "independent_reviewer"
+          ]
+        },
+        "decision": {
+          "enum": [
+            "approve",
+            "reject",
+            "unresolved"
+          ],
+          "description": "The latest review is the operative one: a map is applied only when it approves and its content_sha256 is the map's current content digest."
+        },
+        "at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "note": {
+          "type": "string"
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "The digest of the map without its reviews, as the reviewer saw it."
+        },
+        "chain_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "This review's place in the chain: its own fields and the chain value of the review before it, computed by scaneval.contracts.chain_digest with kind blinding_review. Not a signature; it makes a quiet deletion visible."
+        }
+      }
+    }
+  }
+}

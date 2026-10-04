@@ -15,11 +15,13 @@ import sys
 
 import pytest
 
+from scaneval.adapters import base as base_module
 from scaneval.adapters import semgrep as semgrep_module
 from scaneval.adapters.base import AdapterError, CommandResult, SystemSpec
 from scaneval.contracts import _require_relative_path as validate_relative_path
 from scaneval.adapters.semgrep import (SemgrepAdapter, _dotted_prefixes, import_semgrep_results,
                                         semgrep_version)
+from scaneval.execution import PreparedInput, build_request
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -1084,3 +1086,601 @@ def test_the_semgrep_loss_contract_matches_the_harness_one():
     doc = " ".join((import_semgrep_results.__doc__ or "").split())
     assert "it is counted in ``lost``" in doc
     assert "neither completeness nor quiet credit" in doc
+
+
+# --- PR mode ----------------------------------------------------------------------------
+#
+# A PR request names the two commits of a history the runner builds in the scanner's workspace,
+# and the scan is Semgrep's own diff scan over it. The workspaces below are built the same way:
+# a base commit, a head commit, HEAD at head, a clean status, and a neutral identity.
+
+
+def pr_workspace(tmp_path: Path, base: dict, head: dict, *, name: str = "pr-source") -> tuple[Path, str, str]:
+    """A workspace holding a base commit and a head commit, and the two commit ids.
+
+    *base* and *head* map a path to its text. In *head* a value of ``None`` deletes the path, and a
+    path *head* does not name is left as the base commit had it.
+    """
+    workspace = tmp_path / name
+    workspace.mkdir()
+    _git("init", "-q", "-b", "main", cwd=workspace)
+
+    def commit(files: dict, message: str) -> str:
+        for relative, content in files.items():
+            target = workspace / relative
+            if content is None:
+                target.unlink()
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        _git("add", "-A", "-f", ".", cwd=workspace)
+        _git("commit", "-q", "--no-verify", "--allow-empty", "-m", message, cwd=workspace)
+        return _git("rev-parse", "HEAD", cwd=workspace)
+
+    return workspace, commit(base, "base"), commit(head, "head")
+
+
+def pr_scan_request(base: str, head: str) -> dict:
+    """The scan request the runner would build for a PR input, checked against the request contract."""
+    prepared = PreparedInput("pr-fixture", Path("."), "sha256:" + "0" * 64, ("python",), {}, mode="pr",
+                             pr={"base_commit": base, "head_commit": head})
+    return build_request("run-pr", prepared, SystemSpec("semgrep-pr", "semgrep", {}), timeout_seconds=300,
+                         trace_mode="off", pr={"base": base, "head": head})
+
+
+def working_tree(workspace: Path) -> dict[str, bytes]:
+    """Every file outside ``.git`` and its bytes, for comparing a workspace before and after a scan."""
+    return {path.relative_to(workspace).as_posix(): path.read_bytes()
+            for path in sorted(workspace.rglob("*")) if path.is_file() and ".git" not in path.relative_to(workspace).parts}
+
+
+def scan_pr_with_fake(tmp_path: Path, stdout_text: str, exit_code: int, *, request=None, config=None,
+                      base=None, head=None):
+    """One PR-mode scan whose scanner is the stand-in binary, over a two-commit workspace."""
+    workspace, base_commit, head_commit = pr_workspace(
+        tmp_path, base or {"app.py": "import subprocess\n"}, head or {"app.py": "import subprocess\nimport os\n"})
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    settings = {"binary": str(fake_semgrep(tmp_path, stdout_text, exit_code))}
+    settings.update(config or {})
+    outcome = SemgrepAdapter().scan(
+        request=request or pr_scan_request(base_commit, head_commit), source_dir=workspace, raw_dir=raw,
+        spec=SystemSpec("semgrep-fake", "semgrep", settings), preparation=fake_preparation(tmp_path),
+        timeout_seconds=60, trace_mode="off", trace_dir=None)
+    return outcome, raw, workspace, base_commit, head_commit
+
+
+def prepared_semgrep(tmp_path: Path) -> tuple[SystemSpec, dict]:
+    """A system over the offline one-rule ruleset, and its preparation record."""
+    rules, commit = pinned_rules_repo(tmp_path)
+    spec = SystemSpec("semgrep-pr", "semgrep",
+                      {"ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}})
+    return spec, SemgrepAdapter().prepare(spec, tmp_path / "cache")
+
+
+def scan_pr(tmp_path: Path, workspace: Path, base: str, head: str, spec: SystemSpec, preparation: dict):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    outcome = SemgrepAdapter().scan(request=pr_scan_request(base, head), source_dir=workspace, raw_dir=raw,
+                                    spec=spec, preparation=preparation, timeout_seconds=300, trace_mode="off",
+                                    trace_dir=None)
+    text = (raw / "semgrep.json").read_text(encoding="utf-8")
+    return outcome, (json.loads(text) if text else None)
+
+
+def test_semgrep_declares_pr_beside_full():
+    assert SemgrepAdapter.scan_modes == frozenset({"full", "pr"})
+
+
+def test_semgrep_full_mode_argv_is_what_it_always_was_and_carries_no_baseline(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["app.py"]}, "errors": []})
+    outcome, _ = scan_with_fake(tmp_path, payload, 0)
+    binary = str(tmp_path / "fake-semgrep")
+    assert outcome.command == [binary, "scan", "--json", "--metrics=off", "--disable-version-check", "--quiet",
+                               "--timeout", "30", "--jobs", "1", f"--config={tmp_path / 'rules' / 'python'}", "."]
+    assert not any("baseline" in word for word in outcome.command)
+    assert not any("PR mode" in note for note in outcome.notes)
+    assert outcome.omitted_paths is None, "a full scan reports no omission"
+
+
+def test_semgrep_pr_mode_adds_only_the_baseline_option_to_the_full_argv(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["app.py"]}, "errors": []})
+    outcome, raw, _workspace, base, _head = scan_pr_with_fake(tmp_path, payload, 0)
+    binary = str(tmp_path / "fake-semgrep")
+    assert outcome.command == [binary, "scan", "--json", "--metrics=off", "--disable-version-check", "--quiet",
+                               "--timeout", "30", "--jobs", "1", f"--baseline-commit={base}",
+                               f"--config={tmp_path / 'rules' / 'python'}", "."]
+    assert outcome.status == "success" and outcome.claims == []
+    assert any(note.startswith("PR mode: Semgrep ran with --baseline-commit") for note in outcome.notes)
+    assert (raw / "semgrep.json").read_text(encoding="utf-8") == payload
+
+
+def test_semgrep_pr_mode_keeps_import_loss_accounting(tmp_path):
+    """A result the importer cannot place is a finding Semgrep reported, in a PR review as in a full scan."""
+    payload = {"version": "9.9.9", "paths": {"scanned": ["app.py"]}, "errors": [], "results": [PLACEABLE, UNPLACEABLE]}
+    outcome, *_ = scan_pr_with_fake(tmp_path, json.dumps(payload), 0)
+    assert outcome.status == "partial" and outcome.bundles_resolved is False
+    assert outcome.error["code"] == "import_loss"
+    assert "1 semgrep result(s) could not be imported" in outcome.error["message"]
+    assert [claim["claim_id"] for claim in outcome.claims] == ["c1"]
+    assert outcome.omitted_paths == [], "a partial outcome carries what Semgrep scanned and what it did not"
+    assert outcome.examined_nothing is False, "app.py, the one path the change touches, was scanned"
+
+
+def test_semgrep_pr_mode_keeps_the_failure_classification_of_a_nonzero_exit(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": []},
+                          "errors": [{"level": "error", "message": "baseline commit is not in this repository"}]})
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 2)
+    assert outcome.status == "error" and outcome.exit_code == 2 and outcome.claims == []
+    assert outcome.error["code"] == "exit_2"
+    assert "baseline commit is not in this repository" in outcome.error["message"]
+    assert outcome.omitted_paths is None, "an error carries no claim Semgrep reported, so it lists nothing"
+
+
+def test_semgrep_pr_mode_notes_that_a_timeout_can_leave_the_tree_at_the_base_commit(tmp_path, monkeypatch):
+    workspace, base, head = pr_workspace(tmp_path, {"app.py": "1\n"}, {"app.py": "2\n"})
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    real_run = semgrep_module.run_command
+
+    def killed_scan(argv, **kwargs):
+        if "scan" in argv:
+            return CommandResult(list(argv), None, True, 61.0, kwargs["stdout_path"], kwargs["stderr_path"])
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(semgrep_module, "run_command", killed_scan)
+    spec = SystemSpec("semgrep-fake", "semgrep", {"binary": str(fake_semgrep(tmp_path, "{}", 0))})
+    outcome = SemgrepAdapter().scan(request=pr_scan_request(base, head), source_dir=workspace, raw_dir=raw,
+                                    spec=spec, preparation=fake_preparation(tmp_path), timeout_seconds=60,
+                                    trace_mode="off", trace_dir=None)
+    assert outcome.status == "timeout" and outcome.timed_out is True and outcome.claims == []
+    assert outcome.omitted_paths is None
+    assert any("leaves the tree at the base commit" in note for note in outcome.notes)
+
+
+# --- PR mode: what is refused before anything runs --------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["batch", "bootstrap", "PR", ""])
+def test_semgrep_refuses_a_mode_it_does_not_implement_and_runs_nothing(tmp_path, mode):
+    request = {"input": {"mode": mode}}
+    with pytest.raises(AdapterError, match="semgrep does not implement scan mode"):
+        scan_pr_with_fake(tmp_path, "{}", 0, request=request)
+    assert list((tmp_path / "raw").iterdir()) == [], "no output file was claimed and no process ran"
+
+
+def test_semgrep_refuses_a_pr_request_that_does_not_name_two_commits_and_runs_nothing(tmp_path):
+    with pytest.raises(AdapterError, match="input.pr is absent"):
+        scan_pr_with_fake(tmp_path, "{}", 0, request={"input": {"mode": "pr"}})
+    assert list((tmp_path / "raw").iterdir()) == []
+
+
+def test_semgrep_refuses_a_full_request_that_carries_a_pr_rather_than_ignoring_it(tmp_path):
+    request = {"input": {"mode": "full", "pr": {"base": "a" * 40, "head": "b" * 40}}}
+    with pytest.raises(AdapterError, match="full-mode request that also carries input.pr"):
+        scan_pr_with_fake(tmp_path, "{}", 0, request=request)
+    assert list((tmp_path / "raw").iterdir()) == []
+
+
+def test_semgrep_refuses_a_pr_request_over_a_workspace_that_does_not_hold_its_history(tmp_path):
+    """Semgrep would otherwise fail inside its own git call, or scan a tree the request does not describe."""
+    workspace, base, head = pr_workspace(tmp_path, {"app.py": "1\n"}, {"app.py": "2\n"})
+    _git("checkout", "-q", "--detach", base, cwd=workspace)
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    spec = SystemSpec("semgrep-fake", "semgrep", {"binary": str(fake_semgrep(tmp_path, "{}", 0))})
+    with pytest.raises(AdapterError, match="not at the request's head commit"):
+        SemgrepAdapter().scan(request=pr_scan_request(base, head), source_dir=workspace, raw_dir=raw, spec=spec,
+                              preparation=fake_preparation(tmp_path), timeout_seconds=60, trace_mode="off",
+                              trace_dir=None)
+    assert list(raw.iterdir()) == []
+
+
+class HeldBackend:
+    """A backend that holds every command it is handed and never runs one."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.commands: list[list[str]] = []
+
+    def run_command(self, argv, **kwargs):
+        self.commands.append(list(argv))
+        return CommandResult(list(argv), 0, False, 0.0, kwargs["stdout_path"], kwargs["stderr_path"])
+
+
+def test_semgrep_pr_mode_is_refused_under_the_oci_backend_with_the_reason_recorded(tmp_path):
+    """The container mounts the source read-only and Semgrep's baseline scan rewrites the tree in place."""
+    workspace, base, head = pr_workspace(tmp_path, {"app.py": "1\n"}, {"app.py": "2\n"})
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    held = HeldBackend("oci")
+    with base_module.routed_through(held):
+        outcome = SemgrepAdapter().scan(
+            request=pr_scan_request(base, head), source_dir=workspace, raw_dir=raw,
+            spec=SystemSpec("semgrep-oci", "semgrep", {}), preparation=fake_preparation(tmp_path),
+            timeout_seconds=60, trace_mode="off", trace_dir=None)
+    assert outcome.status == "unsupported" and outcome.claims == [] and outcome.command == []
+    assert outcome.error["code"] == "unsupported_mode"
+    assert "oci backend" in outcome.error["message"] and "read-only" in outcome.error["message"]
+    assert "--baseline-commit" in outcome.error["message"]
+    assert any("stays in the denominator" in note for note in outcome.notes)
+    assert held.commands == [] and list(raw.iterdir()) == [], "nothing ran and nothing was claimed"
+
+
+def test_semgrep_full_mode_still_runs_under_oci_and_only_pr_is_refused(tmp_path):
+    """The refusal is about the mode, not the backend: a full scan goes through the backend as before."""
+    workspace, base, head = pr_workspace(tmp_path, {"app.py": "1\n"}, {"app.py": "2\n"})
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["app.py"]}, "errors": []})
+
+    class ScanningBackend(HeldBackend):
+        def run_command(self, argv, **kwargs):
+            result = super().run_command(argv, **kwargs)
+            kwargs["stdout_path"].write_text("9.9.9\n" if "--version" in argv else payload, encoding="utf-8")
+            return result
+
+    held = ScanningBackend("oci")
+    with base_module.routed_through(held):
+        outcome = SemgrepAdapter().scan(
+            request={}, source_dir=workspace, raw_dir=raw, spec=SystemSpec("semgrep-oci", "semgrep", {}),
+            preparation=fake_preparation(tmp_path), timeout_seconds=60, trace_mode="off", trace_dir=None)
+    assert outcome.status == "success"
+    assert [argv[0] for argv in held.commands] == ["semgrep", "semgrep"]
+    assert not any("--baseline-commit" in word for argv in held.commands for word in argv)
+
+
+# --- PR mode: the real binary -----------------------------------------------------------
+
+
+@semgrep_required
+def test_semgrep_pr_mode_reports_only_the_new_finding_and_never_scans_an_unchanged_file(tmp_path):
+    """The workspace holds two findings at base and a third added by the change.
+
+    ``old.py`` is touched but keeps its finding; ``keep.py`` is not touched at all. Only the
+    finding the change introduced is reported, ``keep.py`` is neither scanned nor reported, and
+    the workspace is exactly as it was handed over once Semgrep's in-place baseline scan is done.
+    """
+    spec, preparation = prepared_semgrep(tmp_path)
+    workspace, base, head = pr_workspace(
+        tmp_path,
+        {"old.py": VULNERABLE_PY, "keep.py": VULNERABLE_PY, "README.md": "# readme\n"},
+        {"new.py": VULNERABLE_PY, "old.py": "# a comment that shifts the finding down\n" + VULNERABLE_PY})
+    before = working_tree(workspace)
+
+    outcome, payload = scan_pr(tmp_path, workspace, base, head, spec, preparation)
+
+    assert outcome.status == "success", outcome.error
+    assert [(claim["primary_location"]["path"], claim["primary_location"]["start_line"])
+            for claim in outcome.claims] == [("new.py", 3)]
+    assert [claim["native_rule_id"] for claim in outcome.claims] == ["python.probe.subprocess-shell"]
+    assert outcome.bundles_resolved is True
+    assert [result["path"] for result in payload["results"]] == ["new.py"]
+    assert payload["paths"]["scanned"] == ["new.py", "old.py"], "the unchanged file was not scanned"
+    assert "keep.py" not in json.dumps(payload["results"]) and "README.md" not in payload["paths"]["scanned"]
+    assert outcome.omitted_paths == [], "Semgrep scanned every path the change touches, and keep.py is not one"
+    assert f"--baseline-commit={base}" in outcome.command
+
+    assert working_tree(workspace) == before
+    assert _git("rev-parse", "HEAD", cwd=workspace) == head
+    assert _git("status", "--porcelain", cwd=workspace) == ""
+
+
+@semgrep_required
+def test_semgrep_pr_mode_reports_the_added_finding_in_a_file_that_already_had_one(tmp_path):
+    spec, preparation = prepared_semgrep(tmp_path)
+    second = VULNERABLE_PY + "def other(cmd):\n    return subprocess.call(cmd, shell=True)\n"
+    workspace, base, head = pr_workspace(tmp_path, {"old.py": VULNERABLE_PY}, {"old.py": second})
+    outcome, _payload = scan_pr(tmp_path, workspace, base, head, spec, preparation)
+    assert outcome.status == "success", outcome.error
+    assert [(claim["primary_location"]["path"], claim["primary_location"]["start_line"])
+            for claim in outcome.claims] == [("old.py", 5)]
+
+
+@semgrep_required
+def test_semgrep_pr_mode_does_not_report_a_finding_that_only_moved_with_a_renamed_file(tmp_path):
+    spec, preparation = prepared_semgrep(tmp_path)
+    workspace, base, head = pr_workspace(tmp_path, {"old.py": VULNERABLE_PY}, {"old.py": None, "moved.py": VULNERABLE_PY})
+    outcome, payload = scan_pr(tmp_path, workspace, base, head, spec, preparation)
+    assert outcome.status == "success", outcome.error
+    assert outcome.claims == []
+    assert payload["paths"]["scanned"] == ["moved.py"], "the renamed file was scanned, and its finding matched to base"
+    assert outcome.omitted_paths == ["old.py"], "the old name of the renamed file is a path the change removed"
+
+
+# --- PR mode: an empty baseline review is not a scan that read nothing --------------------
+#
+# A diff scan over a change that touched nothing Semgrep could read reports nothing and scans
+# nothing, exactly as a scan of an empty tree does. The adapter tells them apart with git, asked
+# by the adapter before Semgrep starts, and only when nothing else about the run is amiss.
+
+EMPTY_SCAN = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": []}, "errors": []})
+
+
+@pytest.mark.parametrize("head, described", [
+    ({"README.md": "# changed\n", "docs/guide.md": "# new guide\n"}, "2 path(s) outside those languages"),
+    ({"seed.py": None}, "1 deleted path(s)"),
+    ({"README.md": "# changed\n", "seed.py": None}, "1 deleted path(s) and 1 path(s) outside those languages"),
+    ({"LICENSE": "text\n", "logo.png": "not really a png\n"}, "2 path(s) outside those languages"),
+    ({"seed.py": None, "renamed.md": "# moved docs\n"}, "1 deleted path(s) and 1 path(s) outside those languages"),
+])
+def test_semgrep_pr_mode_calls_a_change_with_nothing_to_scan_an_empty_review_and_says_so(tmp_path, head, described):
+    outcome, _raw, workspace, _base, head_commit = scan_pr_with_fake(
+        tmp_path, EMPTY_SCAN, 0, base={"seed.py": "import os\n", "README.md": "# docs\n"}, head=head)
+    assert outcome.status == "success" and outcome.exit_code == 0
+    assert outcome.claims == [] and outcome.error is None and outcome.bundles_resolved is True
+    note = next(note for note in outcome.notes if note.startswith("Empty baseline review"))
+    assert described in note
+    assert "is not a scan that read nothing" in note
+    assert _git("rev-parse", "HEAD", cwd=workspace) == head_commit
+
+
+@pytest.mark.parametrize("changed, listed", [
+    ({"app.py": "import os\nimport sys\n"}, "app.py"),
+    ({"lib/util.PY": "x = 1\n"}, "lib/util.PY"),
+    ({"tests/test_app.py": "def test(): pass\n"}, "tests/test_app.py"),
+    ({"stub.pyi": "x: int\n"}, "stub.pyi"),
+    ({"main.go": "package main\n"}, "main.go"),
+    ({"src/lib.rs": "fn main() {}\n"}, "src/lib.rs"),
+    ({"web/app.ts": "export {}\n", "web/view.tsx": "export {}\n"}, "web/app.ts, web/view.tsx"),
+    ({"a.js": "1\n", "b.jsx": "1\n", "c.mjs": "1\n", "d.cjs": "1\n"}, "a.js, b.jsx, c.mjs, d.cjs"),
+    ({"README.md": "# docs\n", "app.py": "import os\nimport sys\n"}, "app.py"),
+])
+def test_semgrep_pr_mode_keeps_nothing_scanned_an_error_when_the_change_touches_source(tmp_path, changed, listed):
+    """Semgrep may skip a source file for its own reasons; a diff that touches one was not reviewed."""
+    outcome, *_ = scan_pr_with_fake(tmp_path, EMPTY_SCAN, 0, base={"app.py": "import os\n"}, head=changed)
+    assert outcome.status == "error" and outcome.exit_code == 0 and outcome.claims == []
+    assert outcome.error["code"] == "nothing_scanned" and outcome.omitted_paths is None
+    assert outcome.examined_nothing is None, "an error carries no claim Semgrep reported, so it says nothing about it"
+    message = outcome.error["message"]
+    assert "Semgrep looked at no source at all" in message
+    assert f"the change touches {len(listed.split(', '))} file(s) in a language this adapter scans ({listed})" in message
+    assert "so this is not an empty baseline review" in message
+    assert not any(note.startswith("Empty baseline review") for note in outcome.notes)
+
+
+def test_semgrep_pr_mode_never_calls_a_scan_that_reported_a_diagnostic_an_empty_review(tmp_path):
+    """Any diagnostic, of any level, means the run may have failed to read what it was asked to read."""
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": []},
+                          "errors": [{"level": "warn", "type": "SkippedRule", "message": "rule skipped"}]})
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base={"seed.py": "1\n", "README.md": "a\n"},
+                                    head={"README.md": "b\n"})
+    assert outcome.status == "error" and outcome.error["code"] == "nothing_scanned"
+    assert "it also reported 1 diagnostic(s), so this is not an empty baseline review" in outcome.error["message"]
+    assert not any(note.startswith("Empty baseline review") for note in outcome.notes)
+
+
+def test_semgrep_pr_mode_names_both_reasons_when_a_diagnostic_and_source_are_both_there(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": []},
+                          "errors": [{"level": "warn", "type": "SkippedRule", "message": "rule skipped"}]})
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base={"app.py": "1\n"}, head={"app.py": "2\n"})
+    message = outcome.error["message"]
+    assert "it also reported 1 diagnostic(s); the change touches 1 file(s)" in message
+
+
+def test_semgrep_pr_mode_leaves_a_fatal_diagnostic_as_the_scan_error_it_already_was(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": []},
+                          "errors": [{"level": "error", "message": "invalid rule"}]})
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base={"seed.py": "1\n", "README.md": "a\n"},
+                                    head={"README.md": "b\n"})
+    assert outcome.status == "error" and outcome.error["code"] == "scan_errors"
+
+
+def test_semgrep_pr_mode_still_counts_a_result_it_could_not_import_when_nothing_was_scanned(tmp_path):
+    """A lost result is a finding Semgrep reported, so the docs-only shape cannot make it quiet."""
+    payload = json.dumps({"version": "9.9.9", "results": [UNPLACEABLE], "paths": {"scanned": []}, "errors": []})
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base={"seed.py": "1\n", "README.md": "a\n"},
+                                    head={"README.md": "b\n"})
+    assert outcome.status == "error" and outcome.error["code"] == "nothing_scanned"
+    assert "1 semgrep result(s) could not be imported" in outcome.error["message"]
+    assert outcome.bundles_resolved is False
+    assert not any(note.startswith("Empty baseline review") for note in outcome.notes)
+
+
+def test_semgrep_pr_mode_without_a_scanned_list_stays_a_success_that_cannot_say_what_it_covered(tmp_path):
+    """The full-scan rule for a payload with no ``paths.scanned``: success, with the note that says so."""
+    payload = json.dumps({"version": "9.9.9", "results": [], "errors": []})
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base={"app.py": "1\n"}, head={"app.py": "2\n"})
+    assert outcome.status == "success"
+    assert any("reported no paths.scanned list" in note for note in outcome.notes)
+    assert not any(note.startswith("Empty baseline review") for note in outcome.notes)
+
+
+# --- PR mode: the paths Semgrep did not scan are reported as omitted -------------------------------
+
+
+def test_semgrep_pr_mode_lists_the_only_file_no_rule_applies_to_as_omitted_in_the_empty_baseline_review(tmp_path):
+    """The reviewer's case in Semgrep's terms: a change that touches only such a file is a success over nothing."""
+    outcome, *_ = scan_pr_with_fake(tmp_path, EMPTY_SCAN, 0, base={"seed.py": "import os\n", "README.md": "# docs\n"},
+                                    head={"README.md": "# changed\n"})
+
+    assert outcome.status == "success" and outcome.claims == [] and outcome.error is None
+    assert outcome.bundles_resolved is True
+    assert outcome.omitted_paths == ["README.md"]
+    assert outcome.examined_nothing is True, "that is every path the change touches, so no control earns credit from it"
+    assert any(note.startswith("Empty baseline review") for note in outcome.notes), "the status and the note are kept"
+
+
+def test_semgrep_pr_mode_does_not_list_a_changed_file_semgrep_scanned(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["a.py", "b.py"]}, "errors": []})
+
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base={"seed.py": "1\n"},
+                                    head={"a.py": "1\n", "b.py": "2\n"})
+
+    assert outcome.status == "success" and outcome.omitted_paths == [], \
+        "an empty list says Semgrep scanned every path the change touches, which an absent field would not say"
+    assert outcome.examined_nothing is False
+
+
+def test_semgrep_pr_mode_lists_what_it_did_not_scan_beside_what_it_did_and_every_path_the_change_removed(tmp_path):
+    """Scanned: a.py and moved.py. Touched and not scanned: b.py, c.go, notes.md, the deleted seed.py, and old.py."""
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["a.py", "moved.py"]}, "errors": []})
+    base = {"seed.py": "1\n", "old.py": "def helper():\n    return 'moved'\n", "keep.py": "2\n"}
+    head = {"a.py": "1\n", "b.py": "2\n", "c.go": "package c\n", "notes.md": "x\n", "seed.py": None,
+            "old.py": None, "moved.py": "def helper():\n    return 'moved'\n"}
+
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base=base, head=head)
+
+    assert outcome.status == "success"
+    assert outcome.omitted_paths == ["b.py", "c.go", "notes.md", "old.py", "seed.py"], \
+        "keep.py is not touched by the change, so it is not an omission of this review"
+    assert outcome.examined_nothing is False, "a.py and moved.py were scanned, so some of the change was"
+
+
+def test_semgrep_pr_mode_reads_the_scanned_paths_the_way_it_reads_a_claim_location(tmp_path):
+    """Semgrep may spell a path with a leading ``./``; it names the same file."""
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["./app.py", ".//lib/util.py"]},
+                          "errors": []})
+
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base={"app.py": "1\n", "lib/util.py": "1\n"},
+                                    head={"app.py": "2\n", "lib/util.py": "2\n", "README.md": "x\n"})
+
+    assert outcome.omitted_paths == ["README.md"] and outcome.examined_nothing is False
+
+
+def test_semgrep_pr_mode_without_a_scanned_list_lists_every_path_the_change_touches(tmp_path):
+    """Nothing says which paths it opened, so credit is withheld for all of them rather than granted for none."""
+    payload = json.dumps({"version": "9.9.9", "results": [], "errors": []})
+
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base={"app.py": "1\n", "gone.py": "x\n", "keep.py": "k\n"},
+                                    head={"app.py": "2\n", "gone.py": None, "new.py": "n\n"})
+
+    assert outcome.status == "success"
+    assert any("reported no paths.scanned list" in note for note in outcome.notes)
+    assert outcome.omitted_paths == ["app.py", "gone.py", "new.py"]
+    assert outcome.examined_nothing is True, "nothing shows any of them was read, so no part of the change is shown so"
+
+
+def test_semgrep_pr_mode_carries_its_omissions_on_a_partial_outcome_too(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["a.py"]},
+                          "errors": [{"level": "error", "message": "a rule failed"}]})
+
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base={"seed.py": "1\n"},
+                                    head={"a.py": "1\n", "notes.md": "x\n"})
+
+    assert outcome.status == "partial" and outcome.error["code"] == "scan_errors"
+    assert outcome.omitted_paths == ["notes.md"] and outcome.examined_nothing is False
+
+
+@pytest.mark.parametrize("scanned, base, head, omitted, nothing", [
+    ([], {"seed.py": "1\n", "README.md": "a\n"}, {"README.md": "b\n"}, ["README.md"], True),
+    ([], {"seed.py": "1\n"}, {"seed.py": None}, ["seed.py"], True),
+    (["a.py"], {"seed.py": "1\n"}, {"a.py": "1\n", "README.md": "x\n"}, ["README.md"], False),
+    (["a.py", "README.md"], {"seed.py": "1\n"}, {"a.py": "1\n", "README.md": "x\n"}, [], False),
+    (["unrelated.py"], {"seed.py": "1\n", "unrelated.py": "u\n"}, {"README.md": "x\n"}, ["README.md"], True),
+    (None, {"seed.py": "1\n"}, {"a.py": "1\n"}, ["a.py"], True),
+], ids=["only-a-doc", "only-a-deletion", "one-of-two", "every-path", "only-an-untouched-file-scanned",
+        "no-scanned-list"])
+def test_semgrep_pr_mode_says_it_examined_nothing_exactly_when_it_omitted_every_path_the_change_touches(
+        tmp_path, scanned, base, head, omitted, nothing):
+    """Scanned paths the change does not touch count for nothing: it is the change that was to be reviewed."""
+    payload = {"version": "9.9.9", "results": [], "errors": []}
+    if scanned is not None:
+        payload["paths"] = {"scanned": scanned}
+
+    outcome, *_ = scan_pr_with_fake(tmp_path, json.dumps(payload), 0, base=base, head=head)
+
+    assert outcome.status == "success", "none of this changes the status, which stays the adapter's own account"
+    assert outcome.omitted_paths == omitted and outcome.examined_nothing is nothing
+
+
+def test_semgrep_full_mode_reports_no_omission_and_does_not_say_whether_it_examined_anything(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["app.py"]}, "errors": []})
+
+    outcome, _ = scan_with_fake(tmp_path, payload, 0)
+
+    assert outcome.status == "success"
+    assert outcome.omitted_paths is None and outcome.examined_nothing is None
+
+
+def test_semgrep_full_mode_still_treats_an_empty_scanned_list_as_nothing_scanned(tmp_path):
+    """The empty-review rule is PR mode's alone: the same payload over a full scan is the error it always was."""
+    outcome, _ = scan_with_fake(tmp_path, EMPTY_SCAN, 0)
+    assert outcome.status == "error" and outcome.error["code"] == "nothing_scanned"
+    assert outcome.error["message"].startswith(
+        "semgrep exited 0 having scanned no files and reported no results: Semgrep looked at no source at all, "
+        "which its ignore rules, an empty tree, or a default-ignored directory layout can cause; stderr: ")
+
+
+def test_semgrep_pr_mode_notes_a_changed_source_file_semgrep_did_not_scan_beside_one_it_did(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["a.py"]}, "errors": []})
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base={"seed.py": "1\n"},
+                                    head={"a.py": "1\n", "b.py": "2\n", "c.go": "package c\n", "notes.md": "x\n"})
+    assert outcome.status == "success"
+    note = next(note for note in outcome.notes if note.startswith("PR mode: 2 changed file(s)"))
+    assert "(b.py, c.go)" in note and "nothing was looked for in them" in note
+
+
+def test_semgrep_pr_mode_says_nothing_about_coverage_when_every_changed_source_file_was_scanned(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["a.py", "b.py"]}, "errors": []})
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base={"seed.py": "1\n"},
+                                    head={"a.py": "1\n", "b.py": "2\n", "notes.md": "x\n"})
+    assert outcome.status == "success"
+    assert not any("changed file(s) in a language" in note for note in outcome.notes)
+
+
+@pytest.mark.parametrize("kind, counted", [
+    (["Timeout", "probe.rule"], True), ("OutOfMemory", True), (["StackOverflow", "probe.rule"], True),
+    ("FixpointTimeout", True), ("TimeoutDuringInterfile", True), ("OutOfMemoryDuringInterfile", True),
+    (["PartialParsing", []], False), ("SkippedRule", False), (None, False),
+])
+def test_semgrep_pr_mode_says_which_diagnostics_make_a_baseline_scan_drop_findings(tmp_path, kind, counted):
+    """Semgrep 1.177 drops a head finding whose file failed its baseline scan, and says so only in errors."""
+    diagnostic = {"level": "warn", "message": "a diagnostic", "path": "a.py", **({} if kind is None else {"type": kind})}
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["a.py"]}, "errors": [diagnostic]})
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base={"a.py": "1\n"}, head={"a.py": "2\n"})
+    assert outcome.status == "success"
+    named = [note for note in outcome.notes if "scan-failure type" in note]
+    assert bool(named) is counted
+    if counted:
+        assert named[0].startswith("1 diagnostic(s) of a scan-failure type")
+        assert "silence about those files is not a negative result" in named[0]
+
+
+# --- PR mode: the empty review with the real binary -------------------------------------
+
+
+@semgrep_required
+def test_semgrep_pr_mode_reports_a_docs_only_change_as_an_empty_review_not_a_failure(tmp_path):
+    spec, preparation = prepared_semgrep(tmp_path)
+    workspace, base, head = pr_workspace(
+        tmp_path, {"old.py": VULNERABLE_PY, "README.md": "# readme\n"},
+        {"README.md": "# readme\n\nmore words\n", "docs/guide.md": "# guide\n"})
+    before = working_tree(workspace)
+
+    outcome, payload = scan_pr(tmp_path, workspace, base, head, spec, preparation)
+
+    assert payload["paths"]["scanned"] == [] and payload["results"] == [] and payload["errors"] == []
+    assert outcome.status == "success" and outcome.exit_code == 0 and outcome.claims == []
+    assert outcome.error is None and outcome.bundles_resolved is True
+    assert outcome.omitted_paths == ["README.md", "docs/guide.md"], "scanned is empty, so both touched paths are omitted"
+    assert outcome.examined_nothing is True
+    assert any(note.startswith("Empty baseline review") and "2 path(s) outside those languages" in note
+               for note in outcome.notes)
+    assert working_tree(workspace) == before and _git("status", "--porcelain", cwd=workspace) == ""
+
+
+@semgrep_required
+def test_semgrep_pr_mode_reports_a_change_that_only_deletes_files_as_an_empty_review(tmp_path):
+    spec, preparation = prepared_semgrep(tmp_path)
+    workspace, base, head = pr_workspace(tmp_path, {"old.py": VULNERABLE_PY, "keep.py": VULNERABLE_PY},
+                                         {"old.py": None})
+    outcome, payload = scan_pr(tmp_path, workspace, base, head, spec, preparation)
+    assert payload["paths"]["scanned"] == []
+    assert outcome.status == "success" and outcome.claims == []
+    assert outcome.omitted_paths == ["old.py"], "a deleted path is a path the change touches that Semgrep never read"
+    assert outcome.examined_nothing is True
+    assert any(note.startswith("Empty baseline review") and "1 deleted path(s)" in note for note in outcome.notes)
+
+
+@semgrep_required
+def test_semgrep_pr_mode_keeps_nothing_scanned_an_error_when_semgrep_ignored_a_changed_source_file(tmp_path):
+    """The changed file is one Semgrep was told to skip, so nothing the change touched was reviewed."""
+    spec, preparation = prepared_semgrep(tmp_path)
+    workspace, base, head = pr_workspace(
+        tmp_path, {".semgrepignore": "ignored.py\n", "ignored.py": "x = 1\n"}, {"ignored.py": VULNERABLE_PY})
+    outcome, payload = scan_pr(tmp_path, workspace, base, head, spec, preparation)
+    assert payload["paths"]["scanned"] == [] and payload["results"] == []
+    assert outcome.status == "error" and outcome.error["code"] == "nothing_scanned"
+    assert "the change touches 1 file(s) in a language this adapter scans (ignored.py)" in outcome.error["message"]
+    assert outcome.claims == []

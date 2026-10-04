@@ -3,23 +3,44 @@
 An adapter runs the real product once, preserves its raw output, and translates the
 native findings into normalized claims. It never receives labels, never decides whether
 a claim is true, and never turns an execution failure into an empty successful scan.
+
+Every scanner process an adapter starts goes through :func:`run_command`, and that is what lets
+an execution backend hold it: while a backend is active (:func:`routed_through`, which the
+backend's own ``activate()`` enters for the span of one scan), :func:`run_command` hands the
+command to that backend instead of starting it on the host. With no backend active the command
+runs locally exactly as it always has. A process an adapter starts any other way is outside every
+backend, which is why only an adapter declaring :attr:`Adapter.oci_compatible` is run under one.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
+import threading
 import time
-from typing import Any
+from typing import Any, Iterator
 
 
 STATUSES = ("success", "partial", "unsupported", "error", "timeout")
 # Environment variables passed to scanner subprocesses unless an adapter adds more.
 BASE_ENV_PASSTHROUGH = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "USER", "SHELL")
+
+# The execution backend every scanner process in this context is routed through, or None, which
+# runs it on the host. Set only by :func:`routed_through`.
+_ACTIVE_BACKEND: ContextVar[Any] = ContextVar("scaneval_execution_backend", default=None)
+# How many backends are routing commands anywhere in this process. A context variable does not
+# follow a thread started inside the routed block, so a command started on such a thread finds no
+# backend in its context; this count is what makes that a refusal rather than a process started
+# on the host while the scan it belongs to is recorded as contained.
+_ROUTING = 0
+_ROUTING_LOCK = threading.Lock()
 
 
 class AdapterError(RuntimeError):
@@ -49,7 +70,26 @@ class CommandResult:
 
 @dataclass
 class NativeOutcome:
-    """Everything one invocation produced, before the runner writes the bundle."""
+    """Everything one invocation produced, before the runner writes the bundle.
+
+    ``omitted_paths`` is what the adapter observed the scanner did not examine of its input: paths the
+    scanner's own selection, filter, or limit left out, as the adapter saw them, in no particular
+    order. ``None`` is an adapter that reports no omissions, which says nothing about whether there
+    were any, and ``[]`` is one that looked and saw none. The runner records a list as the result's
+    ``omitted_paths``, sorted and each path once, in a 2.1 result, and the scorer withholds quiet credit
+    from a control on a listed path. A list is only as true as the adapter's observation, and it is
+    meant for an outcome that carries claims the adapter read; it does not change ``status``, which
+    stays the adapter's own account of how the run ended.
+
+    ``examined_nothing`` is the adapter's statement about the whole input, beside that list: ``True``
+    says it can show no part of the input to have been examined, and in a PR review that is every path
+    the change touches being one the scanner is not shown to have read; ``False`` says it saw some
+    examined; ``None`` says it does not report. The runner records a ``bool`` as the result's
+    ``examined_nothing`` in a 2.1 result, and the scorer withholds quiet credit from every control of a
+    result that says ``True``, wherever the plan places it, because a scan that read none of what it
+    was given has reached no control. It is the adapter's claim like the list, and like the list it
+    never changes ``status``.
+    """
 
     status: str
     exit_code: int | None
@@ -67,6 +107,8 @@ class NativeOutcome:
     trace_path: Path | None = None
     capture_state: dict | None = None
     timed_out: bool = False
+    omitted_paths: list[str] | None = None
+    examined_nothing: bool | None = None
 
     def __post_init__(self) -> None:
         if self.status not in STATUSES:
@@ -77,6 +119,34 @@ def build_env(extra_names: tuple[str, ...] = (), overrides: dict[str, str] | Non
     env = {name: os.environ[name] for name in (*BASE_ENV_PASSTHROUGH, *extra_names) if name in os.environ}
     env.update(overrides or {})
     return env
+
+
+@contextmanager
+def routed_through(backend: Any) -> Iterator[None]:
+    """Hand every :func:`run_command` in this context to *backend* until the block exits.
+
+    *backend* provides ``run_command`` with this module's signature and returns a
+    :class:`CommandResult`. The routing follows the context, not the process: a thread started
+    inside the block does not carry it. While any such block is open, a :func:`run_command` whose
+    context carries no backend is therefore refused instead of run on the host, because the only
+    way to reach that state during a routed scan is a command the backend would never see. The
+    block does not start, stop, or clean up anything itself; that is the backend's job.
+    """
+    global _ROUTING
+    token = _ACTIVE_BACKEND.set(backend)
+    with _ROUTING_LOCK:
+        _ROUTING += 1
+    try:
+        yield
+    finally:
+        with _ROUTING_LOCK:
+            _ROUTING -= 1
+        _ACTIVE_BACKEND.reset(token)
+
+
+def active_backend() -> Any:
+    """The backend :func:`run_command` hands commands to in this context, or ``None`` (the host)."""
+    return _ACTIVE_BACKEND.get()
 
 
 def run_command(
@@ -93,7 +163,23 @@ def run_command(
 
     On timeout the whole process group is killed and ``timed_out`` is reported; the
     partial stdout/stderr files are kept as raw artifacts.
+
+    Inside :func:`routed_through` the command goes to the active backend instead, with the same
+    arguments, and what that backend returns is returned; the backend decides where the process
+    runs and states its own guarantees. A command started outside every routed context while one
+    is open elsewhere in the process, which is a thread the routed scan started, is refused with
+    :class:`AdapterError` and never started. Everything below that applies only when no backend
+    is involved, and it is the same code path this function has always had.
     """
+    backend = _ACTIVE_BACKEND.get()
+    if backend is not None:
+        return backend.run_command(argv, cwd=cwd, timeout_seconds=timeout_seconds, env=env,
+                                   stdout_path=stdout_path, stderr_path=stderr_path, stdin_text=stdin_text)
+    if _ROUTING:
+        raise AdapterError(
+            f"could not start {argv[0] if argv else 'a command'}: an execution backend is holding a "
+            "scan in this process and this command was started outside it, from a thread that does "
+            "not carry the backend; it was not run on the host")
     started = time.monotonic()
     with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
         try:
@@ -120,11 +206,32 @@ def run_command(
 
 
 def tail_text(path: Path, limit: int = 2000) -> str:
+    """The last *limit* bytes of *path* as text, or ``""`` when it cannot be read. Never raises.
+
+    The file is one a scanner wrote, and the scanner can replace it after its own descriptor
+    closed, so it is read the way :func:`~scaneval.execution.read_regular_file` reads:
+    ``O_NOFOLLOW`` refuses a symbolic link, ``O_NONBLOCK`` makes a named pipe fail at once instead
+    of waiting for a writer that never comes, and :func:`os.fstat` on the descriptor refuses
+    anything that is not a regular file. The read seeks to the last *limit* bytes, so the size of
+    the file does not decide how much memory this takes. A regular file gives exactly the text it
+    always gave. What changed is that a link planted where stderr belongs is no longer followed to
+    a file of the scanner's choosing, whose tail every failure message would then have quoted into
+    the record; under an isolating backend that was a host file carried across the boundary.
+    """
     try:
-        data = path.read_bytes()
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
     except OSError:
         return ""
-    return data[-limit:].decode("utf-8", errors="replace")
+    try:
+        with os.fdopen(descriptor, "rb") as stream:
+            status = os.fstat(stream.fileno())
+            if not stat.S_ISREG(status.st_mode):
+                return ""
+            if status.st_size > limit:
+                stream.seek(status.st_size - limit)
+            return stream.read(limit).decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return ""
 
 
 class Adapter(ABC):
@@ -134,11 +241,39 @@ class Adapter(ABC):
     adapter_version: str = "0.0.0"
     requires_git: bool = False
     supported_languages: frozenset[str] = frozenset()
+    # The scan modes this adapter carries out: ``full`` scans the whole exported tree, ``pr`` reviews
+    # the change between the base and head commits its request names. The runner never calls scan()
+    # for an input whose mode is not listed: it records the invocation as unsupported, which stays in
+    # every denominator, and a full scan of the head is never run in place of a PR review. An adapter
+    # declaring ``pr`` promises to read ``request["input"]["pr"]`` and to review that change, and to
+    # refuse a request it cannot honour rather than scan something else.
+    scan_modes: frozenset[str] = frozenset({"full"})
     env_passthrough: tuple[str, ...] = ()
+    # Whether this adapter may run under the ``oci`` execution backend. True is three promises:
+    # every scanner process it starts goes through :func:`run_command` from the thread that called
+    # ``scan()``; its scanner exists in a Linux image and it takes the in-image tool when a backend
+    # is active; and every host-side read of what a command wrote goes through
+    # :func:`~scaneval.execution.read_regular_file` or :func:`tail_text`, because a container can
+    # replace any path under its writable mounts with a link to a host file, and a read that
+    # followed it would carry that file across the boundary. An adapter that shells out any other
+    # way, whose tools exist only as host installs, or whose reads follow links would run partly
+    # outside the boundary, so the default is False and the runner refuses such a system under
+    # ``oci`` with a recorded reason instead of running it.
+    oci_compatible: bool = False
 
     def prepare(self, spec: SystemSpec, cache_root: Path) -> dict[str, Any]:
         """Separately recorded preparation phase (rulesets, dependencies). Default: nothing."""
         return {}
+
+    def runtime_mounts(self, spec: SystemSpec, preparation: dict) -> tuple[str, ...]:
+        """Host paths the scanner reads at run time besides its workspace. Default: none.
+
+        An isolating backend mounts each of them read-only at its own path, so a path the adapter
+        hands its scanner means the same file inside the boundary as outside it. Only what the
+        scan needs belongs here, and never a directory holding evaluator material: whatever is
+        listed becomes readable to the scanner.
+        """
+        return ()
 
     @abstractmethod
     def scan(

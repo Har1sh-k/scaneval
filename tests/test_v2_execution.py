@@ -20,10 +20,17 @@ from scaneval import execution as execution_module
 from scaneval.adapters import get_adapter
 from scaneval.adapters.base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command
 from scaneval.adapters.semgrep import SemgrepAdapter, import_semgrep_results
-from scaneval.contracts import ContractError, canonical_sha256, load_document, validate_document
+from scaneval.contracts import (
+    ContractError,
+    canonical_sha256,
+    load_document,
+    pr_diff_sha256,
+    pr_input_hash,
+    validate_document,
+)
 from scaneval.execution import ExecutionError, PreparedInput, _write_new, invocation_id, run_invocation
 from scaneval import materialize as materialize_module
-from scaneval.materialize import hash_exported_tree, sha256_file
+from scaneval.materialize import compute_pr_history, diff_trees, hash_exported_tree, sha256_file
 from scaneval.scoring import score
 
 
@@ -194,10 +201,23 @@ def test_successful_invocation_writes_validated_bundle_and_captures_state(tmp_pa
     assert execution["network_policy"] == {"declared": "none", "enforced": False,
                                            "note": "Policy is recorded, not enforced by this runner; enforce it in the execution environment."}
     assert "declared artifact missing: missing" in execution["notes"]
-    assert execution["system_config"] == {"knob": 1} and execution["versions"]["kind_mapping"] == "1.0.0"
+    # 1.1.0: a claim with several mapped CWE ids takes the kind of the lowest-numbered one, so the
+    # SARIF import and the Semgrep adapter agree; changed deliberately from the 1.0.0 this pinned.
+    assert execution["system_config"] == {"knob": 1} and execution["versions"]["kind_mapping"] == "1.1.0"
     assert not list(Path(tmp_path).glob("scaneval-trial-*"))
     with pytest.raises(FileExistsError):
         run(tmp_path, adapter)
+
+
+def test_a_local_record_lists_the_names_the_runner_offers_the_scanner_and_the_adapters_own(tmp_path):
+    """Without a backend the scanner gets the operator's own variables, so the record names the offer."""
+
+    class Keyed(FakeAdapter):
+        env_passthrough = ("FIXTURE_API_KEY",)
+
+    execution = load_document(run(tmp_path, Keyed()) / "execution.json", "execution-record")
+    assert execution["environment"]["passthrough"] == [
+        "FIXTURE_API_KEY", "HOME", "LANG", "LC_ALL", "PATH", "SHELL", "TERM", "TMPDIR", "USER"]
 
 
 def test_scanner_edits_to_source_are_detected(tmp_path):
@@ -359,8 +379,14 @@ def _with(outcome: NativeOutcome, **fields) -> NativeOutcome:
         (lambda outcome: _with(outcome, artifacts=[{"id": 7, "path": "raw/native.json"}]), "artifacts[0].id must be a non-empty string"),
         (lambda outcome: _with(outcome, usage={"cost_usd": "free"}), "usage['cost_usd'] must be a number, not str"),
         (lambda outcome: _with(outcome, notes=[object()]), "notes[0] must be a string, not object"),
+        (lambda outcome: _with(outcome, omitted_paths="src/app.py"), "omitted_paths must be a list or None, not str"),
+        (lambda outcome: _with(outcome, omitted_paths=["src/a.py", 7]), "omitted_paths[1] must be a string, not int"),
+        (lambda outcome: _with(outcome, omitted_paths=[None]), "omitted_paths[0] must be a string, not NoneType"),
+        (lambda outcome: _with(outcome, examined_nothing="yes"), "examined_nothing must be a bool or None, not str"),
+        (lambda outcome: _with(outcome, examined_nothing=1), "examined_nothing must be a bool or None, not int"),
     ],
-    ids=["float-version", "path-in-command", "dict-outcome", "artifact-id", "usage-string", "note-object"],
+    ids=["float-version", "path-in-command", "dict-outcome", "artifact-id", "usage-string", "note-object",
+         "omitted-string", "omitted-number", "omitted-none", "examined-text", "examined-number"],
 )
 def test_an_outcome_that_breaks_the_adapter_contract_is_a_recorded_error(tmp_path, mutate, fragment):
     """An outcome this module cannot read is an error bundle, never a success with fields dropped."""
@@ -2783,3 +2809,565 @@ def test_a_capture_gap_and_an_unbacked_capture_claim_are_reported_together(tmp_p
     assert "observed capture of context_selection, finding_submitted, model_requests" in message
     assert execution["capture"]["finding_submitted"] == "unavailable"
     assert execution["trace"]["capture_gap"] is True and execution["trace"]["events"] is None
+
+
+def test_a_standard_full_local_invocation_keeps_writing_2_0_records(tmp_path):
+    """The record version moves only when a 2.1 field is needed; the standard local path is unchanged."""
+    bundle = run(tmp_path, FakeAdapter())
+    result = json.loads((bundle / "result.json").read_text(encoding="utf-8"))
+    execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))
+    assert result["schema_version"] == "2.0" and execution["schema_version"] == "2.0"
+    assert "isolation" not in execution and "input_hash" not in execution["provenance"]
+    assert execution["network_policy"]["enforced"] is False
+
+
+def test_a_blinded_input_writes_a_2_1_record_naming_its_identities_and_the_local_backend(tmp_path):
+    import dataclasses
+
+    base = prepared_input(tmp_path)
+    blinding = {"map_id": "m", "map_version": "1", "map_sha256": "sha256:" + "e" * 64,
+                "original_tree_hash": "sha256:" + "f" * 64, "transformed_tree_hash": base.tree_hash}
+    prepared = dataclasses.replace(base, profile="metadata_blinded", blinding=blinding,
+                                   source_tree_hash="sha256:" + "f" * 64)
+    bundle = run(tmp_path, FakeAdapter(), prepared)
+    result = json.loads((bundle / "result.json").read_text(encoding="utf-8"))
+    execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))
+    validate_document("execution-record", execution)
+    assert result["schema_version"] == "2.0" and result["input_hash"] == base.tree_hash
+    assert execution["schema_version"] == "2.1"
+    assert execution["provenance"]["input_hash"] == base.tree_hash
+    assert execution["provenance"]["blinding"] == blinding and execution["provenance"]["pr"] is None
+    assert execution["isolation"]["backend"] == "local" and execution["isolation"]["enforced"] is False
+
+
+class PrAdapter(FakeAdapter):
+    """A fake adapter that declares it reviews a change, and looks at the workspace it is handed."""
+
+    scan_modes = frozenset({"full", "pr"})
+
+    def __init__(self, behavior: str = "success"):
+        super().__init__(behavior)
+        self.seen: dict = {}
+
+    def scan(self, *, request, source_dir, raw_dir, spec, preparation, timeout_seconds, trace_mode, trace_dir):
+        pr = request["input"].get("pr")
+        if pr is not None:
+            self.seen = {
+                "request": request,
+                "name_status": workspace_git(source_dir, "diff", "--name-status", pr["base"], pr["head"]),
+                "head": workspace_git(source_dir, "rev-parse", "HEAD"),
+                "commits": workspace_git(source_dir, "rev-list", "--count", "HEAD"),
+                "status": workspace_git(source_dir, "status", "--porcelain", "--untracked-files=all"),
+                "listing": sorted(path.name for path in source_dir.iterdir()),
+            }
+        return super().scan(request=request, source_dir=source_dir, raw_dir=raw_dir, spec=spec,
+                            preparation=preparation, timeout_seconds=timeout_seconds,
+                            trace_mode=trace_mode, trace_dir=trace_dir)
+
+
+def workspace_git(workspace: Path, *args: str) -> str:
+    """What git says inside a workspace, read the way a scanner would, with no operator configuration."""
+    argv, env = materialize_module.git_command(list(args))
+    return subprocess.run(argv, cwd=str(workspace), env=env, capture_output=True, text=True, check=True).stdout
+
+
+def pr_input(tmp_path: Path) -> PreparedInput:
+    """A PR input whose head is :func:`prepared_input`'s tree and whose base is an older one beside it.
+
+    The change holds every kind the record names: an edited file, an added one, a deleted one, an
+    exact-content rename, and a mode change. The synthetic commits are the ones preparation computes.
+    """
+    import dataclasses
+
+    head = prepared_input(tmp_path)
+    base = tmp_path / "trial" / "base" / "source"
+    base.mkdir(parents=True)
+    (base / "app.py").write_text("import subprocess\ndef run(cmd):\n    return subprocess.run(cmd)\n", encoding="utf-8")
+    (base / "README.md").write_text("demo\n", encoding="utf-8")
+    (base / "legacy.txt").write_text("removed in the head\n", encoding="utf-8")
+    (base / "util.py").write_text("def helper():\n    return 'moved by the rename'\n", encoding="utf-8")
+    (base / "tool.sh").write_text("#!/bin/sh\necho tool\n", encoding="utf-8")
+    for name, contents, mode in (("added.txt", "added in the head\n", 0o644),
+                                 ("helpers.py", "def helper():\n    return 'moved by the rename'\n", 0o644)):
+        (head.source_dir / name).write_text(contents, encoding="utf-8")
+        (head.source_dir / name).chmod(mode)
+    (head.source_dir / "tool.sh").write_text("#!/bin/sh\necho tool\n", encoding="utf-8")
+    (head.source_dir / "tool.sh").chmod(0o755)
+    head_hash = hash_exported_tree(head.source_dir)["tree_hash"]
+    base_hash = hash_exported_tree(base)["tree_hash"]
+    changes = diff_trees(base, head.source_dir)
+    diff = pr_diff_sha256(base_hash, head_hash, changes)
+    history = compute_pr_history(head.source_dir, base, changes)
+    pr = {"change_set_id": "cs-1", "base_snapshot_id": "snap-base", "head_snapshot_id": "snap-head",
+          "boundary": "introducing", "review_scope": "changed_files", "base_tree_hash": base_hash,
+          "head_tree_hash": head_hash, "diff_sha256": diff, "changes": changes,
+          "base_commit": history["base_commit"], "head_commit": history["head_commit"],
+          "history": {key: history[key] for key in ("messages", "identity", "date")},
+          "prepared_state": "fresh"}
+    return dataclasses.replace(head, tree_hash=head_hash, mode="pr", input_hash=pr_input_hash(base_hash, head_hash, diff),
+                               pr=pr, base_source_dir=base)
+
+
+def test_a_pr_input_binds_its_result_to_the_change_set_identity_and_locates_against_head(tmp_path):
+    """Changed deliberately: a PR input now needs the base tree its history is built from, and an
+    adapter that declares it reviews a change (the default fake declares only full scans), so the
+    input is a real one and the synthetic commits in the request are the ones the workspace holds."""
+    prepared = pr_input(tmp_path)
+    adapter = PrAdapter()
+
+    bundle = run(tmp_path, adapter, prepared)
+
+    request = json.loads((bundle / "request.json").read_text(encoding="utf-8"))
+    assert request["input"]["mode"] == "pr"
+    assert request["input"]["pr"] == {"base": prepared.pr["base_commit"], "head": prepared.pr["head_commit"]}
+    # Nothing evaluator-side about the change reaches the scanner's request.
+    for private in ("cs-1", "snap-base", "snap-head", prepared.input_hash, prepared.pr["base_tree_hash"],
+                    prepared.pr["diff_sha256"]):
+        assert private not in json.dumps(request)
+    result = json.loads((bundle / "result.json").read_text(encoding="utf-8"))
+    execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))
+    validate_document("scan-result", result)
+    validate_document("execution-record", execution)
+    assert result["schema_version"] == "2.1" and result["location_basis"] == "pr_head"
+    assert result["status"] == "success" and adapter.calls == 1
+    assert result["input_hash"] == prepared.input_hash and execution["provenance"]["tree_hash"] == prepared.tree_hash
+    assert execution["provenance"]["mode"] == "pr" and execution["provenance"]["pr"] == prepared.pr
+    assert execution["provenance"]["synthetic_history"] == {
+        "base_commit": prepared.pr["base_commit"], "head_commit": prepared.pr["head_commit"],
+        "messages": {"base": "base", "head": "head"}, "identity": "ScanEval <scaneval@localhost>",
+        "date": "2000-01-01T00:00:00+00:00"}
+    assert execution["provenance"]["source_modified"] is False and execution["provenance"]["modified_paths"] == []
+    assert not any(str(prepared.base_source_dir) in json.dumps(document) for document in (request, result, execution))
+
+
+class PrOutcomeAdapter(PrAdapter):
+    """A PR adapter that hands back whatever *mutate* makes of its outcome."""
+
+    def __init__(self, mutate):
+        super().__init__()
+        self.mutate = mutate
+
+    def scan(self, **kwargs):
+        return self.mutate(super().scan(**kwargs))
+
+
+def test_a_result_lists_no_omitted_paths_unless_the_adapter_reported_some(tmp_path):
+    result = load_document(run(tmp_path, PrAdapter(), pr_input(tmp_path)) / "result.json", "scan-result")
+
+    assert result["schema_version"] == "2.1" and "omitted_paths" not in result, \
+        "an adapter that reports none says nothing about whether the scanner left anything out"
+
+
+def test_an_adapter_that_saw_no_omission_says_so_with_an_empty_list(tmp_path):
+    adapter = PrOutcomeAdapter(lambda outcome: _with(outcome, omitted_paths=[]))
+
+    result = load_document(run(tmp_path, adapter, pr_input(tmp_path)) / "result.json", "scan-result")
+
+    assert result["omitted_paths"] == [] and result["status"] == "success"
+
+
+def test_the_omitted_paths_an_adapter_reports_are_written_sorted_and_once_in_a_2_1_result(tmp_path):
+    adapter = PrOutcomeAdapter(lambda outcome: _with(
+        outcome, omitted_paths=["tests/server.test.js", "README.md", "docs/guide.md", "README.md"]))
+
+    bundle = run(tmp_path, adapter, pr_input(tmp_path))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    assert result["omitted_paths"] == ["README.md", "docs/guide.md", "tests/server.test.js"]
+    assert result["schema_version"] == "2.1" and result["location_basis"] == "pr_head"
+    assert result["status"] == "success" and result["bundles_resolved"] is True, \
+        "the list is the adapter's account of the scan and changes neither its status nor its claims"
+    assert result["claims"] and "error" not in result
+
+
+def test_a_scan_that_is_not_a_review_of_a_change_records_omitted_paths_in_a_2_1_result_with_no_location_basis(tmp_path):
+    """The version moves for the field, whatever the mode: a 2.0 result has nowhere to put it."""
+    adapter = OutcomeAdapter(lambda outcome: _with(outcome, omitted_paths=["README.md"]))
+
+    result = load_document(run(tmp_path, adapter) / "result.json", "scan-result")
+
+    assert result["schema_version"] == "2.1" and result["omitted_paths"] == ["README.md"]
+    assert "location_basis" not in result
+
+
+@pytest.mark.parametrize("omitted", [["../outside.py"], ["/etc/passwd"], ["src//a.py"], [""]],
+                         ids=["parent", "absolute", "empty-segment", "empty-path"])
+def test_an_omitted_path_the_contract_refuses_is_a_recorded_import_failure_and_the_error_carries_none(tmp_path,
+                                                                                                    omitted):
+    adapter = PrOutcomeAdapter(lambda outcome: _with(outcome, omitted_paths=omitted))
+
+    bundle = run(tmp_path, adapter, pr_input(tmp_path))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "import_contract_violation"
+    assert "omitted_paths" in execution["import_error"]
+    assert "omitted_paths" not in result, "the result recorded in place of a refused one carries nothing the adapter said"
+
+
+def test_an_omitted_path_utf8_cannot_encode_is_rendered_and_the_list_is_still_sorted_and_unique(tmp_path):
+    """Rendering a lone surrogate as backslash escapes moves it before ``a~``, and merges it with that text typed out."""
+    adapter = PrOutcomeAdapter(lambda outcome: _with(
+        outcome, omitted_paths=["a~", f"a{LONE_SURROGATE}", "a\\ud800", "b.py"]))
+
+    bundle = run(tmp_path, adapter, pr_input(tmp_path))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "success" and result["omitted_paths"] == ["a\\ud800", "a~", "b.py"]
+    assert any("bytes UTF-8 cannot encode" in note for note in execution["notes"])
+
+
+def test_a_result_says_nothing_about_examination_unless_the_adapter_reported_it(tmp_path):
+    result = load_document(run(tmp_path, PrAdapter(), pr_input(tmp_path)) / "result.json", "scan-result")
+
+    assert result["schema_version"] == "2.1" and "examined_nothing" not in result, \
+        "an adapter that does not report it says nothing about whether the scanner read any of the change"
+
+
+@pytest.mark.parametrize("examined_nothing", [True, False], ids=["nothing", "some"])
+def test_an_adapter_that_reports_whether_it_examined_nothing_has_it_written_as_it_said(tmp_path, examined_nothing):
+    adapter = PrOutcomeAdapter(lambda outcome: _with(outcome, omitted_paths=["README.md"],
+                                                     examined_nothing=examined_nothing))
+
+    bundle = run(tmp_path, adapter, pr_input(tmp_path))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    assert result["examined_nothing"] is examined_nothing and result["omitted_paths"] == ["README.md"]
+    assert result["schema_version"] == "2.1" and result["location_basis"] == "pr_head"
+    assert result["status"] == "success" and result["bundles_resolved"] is True and result["claims"], \
+        "it is the adapter's account of the scan and changes neither its status nor its claims"
+
+
+def test_examined_nothing_alone_is_written_without_a_list_of_omitted_paths(tmp_path):
+    adapter = PrOutcomeAdapter(lambda outcome: _with(outcome, examined_nothing=True))
+
+    result = load_document(run(tmp_path, adapter, pr_input(tmp_path)) / "result.json", "scan-result")
+
+    assert result["examined_nothing"] is True and "omitted_paths" not in result
+
+
+def test_a_scan_that_is_not_a_review_of_a_change_records_examined_nothing_in_a_2_1_result_too(tmp_path):
+    """The version moves for the field, whatever the mode: a 2.0 result has nowhere to put it."""
+    adapter = OutcomeAdapter(lambda outcome: _with(outcome, examined_nothing=True))
+
+    result = load_document(run(tmp_path, adapter) / "result.json", "scan-result")
+
+    assert result["schema_version"] == "2.1" and result["examined_nothing"] is True
+    assert "location_basis" not in result and "omitted_paths" not in result
+
+
+def test_a_result_the_contract_refused_carries_neither_the_list_nor_the_flag(tmp_path):
+    """The error recorded in place of it is built from known-good fields, so nothing the adapter said survives."""
+    adapter = PrOutcomeAdapter(lambda outcome: _with(outcome, omitted_paths=["../outside.py"],
+                                                     examined_nothing=True))
+
+    result = load_document(run(tmp_path, adapter, pr_input(tmp_path)) / "result.json", "scan-result")
+
+    assert result["status"] == "error" and result["error"]["code"] == "import_contract_violation"
+    assert "omitted_paths" not in result and "examined_nothing" not in result
+
+
+def test_the_workspace_git_diff_between_the_synthetic_commits_is_the_recorded_diff(tmp_path):
+    """One native invocation hands the scanner the recorded change, kind by kind, and nothing else."""
+    prepared = pr_input(tmp_path)
+    adapter = PrAdapter()
+
+    run(tmp_path, adapter, prepared)
+
+    changes = prepared.pr["changes"]
+    assert changes == {"added": ["added.txt"], "deleted": ["legacy.txt"], "modified": ["app.py"],
+                       "renamed": [["util.py", "helpers.py"]], "mode_changed": ["tool.sh"]}, \
+        "the fixture covers added, deleted, modified, renamed, and mode-changed files"
+    lines = sorted(line.split("\t") for line in adapter.seen["name_status"].splitlines())
+    assert lines == sorted([["A", "added.txt"], ["D", "legacy.txt"], ["M", "app.py"],
+                            ["R100", "util.py", "helpers.py"], ["M", "tool.sh"]])
+    assert adapter.seen["head"].strip() == prepared.pr["head_commit"]
+    assert adapter.seen["commits"].strip() == "2", "the base and the head, no filler commits"
+    assert adapter.seen["status"] == "", "HEAD is the head and the worktree is clean"
+    assert ".git" in adapter.seen["listing"] and "base" not in adapter.seen["listing"], \
+        "the base is reachable through git only, never as a directory beside the head"
+
+
+def test_the_request_names_only_the_synthetic_commits(tmp_path):
+    prepared = pr_input(tmp_path)
+    adapter = PrAdapter()
+
+    run(tmp_path, adapter, prepared)
+
+    request = adapter.seen["request"]
+    assert request["input"] == {"tree_hash": prepared.tree_hash, "root": ".", "languages": ["python"],
+                                "mode": "pr", "profile": "standard",
+                                "pr": {"base": prepared.pr["base_commit"], "head": prepared.pr["head_commit"]}}
+    assert set(request["input"]["pr"]) == {"base", "head"}
+
+
+def test_an_adapter_that_does_not_declare_pr_yields_unsupported_and_is_never_called(tmp_path):
+    prepared = pr_input(tmp_path)
+    adapter = FakeAdapter()
+    assert adapter.scan_modes == frozenset({"full"}), "an adapter that declares nothing carries out full scans"
+
+    bundle = run(tmp_path, adapter, prepared)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert adapter.calls == 0, "scan() is never called for a mode the adapter does not declare"
+    assert result["status"] == execution["status"] == "unsupported" and result["claims"] == []
+    assert result["error"]["code"] == execution["error"]["code"] == "unsupported_mode"
+    assert "does not declare support for pr scans; it carries out: full" in result["error"]["message"]
+    assert any("stays in the denominator" in note for note in execution["notes"])
+    assert result["schema_version"] == "2.1" and result["location_basis"] == "pr_head"
+    assert result["input_hash"] == prepared.input_hash
+    assert execution["provenance"]["mode"] == "pr" and execution["provenance"]["synthetic_history"] is None
+    assert execution["provenance"]["source_modified"] is False
+    assert not (bundle / "raw" / "native.json").exists(), "no scan ran, so it produced nothing"
+
+
+def test_an_unsupported_mode_stays_in_the_denominator_and_earns_no_quiet_credit(tmp_path):
+    prepared = pr_input(tmp_path)
+    bundle = run(tmp_path, FakeAdapter(), prepared)
+    result = load_document(bundle / "result.json", "scan-result")
+    plan, decisions = _quiet_plan(result)
+
+    evaluation = score(plan, result, decisions)
+
+    assert evaluation["status"] == "unsupported" and evaluation["metrics"]["completed"] is False
+    assert evaluation["metrics"]["targets_assigned"] == 1 and evaluation["metrics"]["targets_detected"] == 0
+    control = evaluation["metrics"]["controls"]["capability_safe"]
+    assert control["assigned"] == 1 and control["completed"] == 0 and control["resolved"] == 0, \
+        "an unsupported invocation completes no control, so silence earns nothing"
+    assert "Incomplete or failed execution cannot establish a successful negative control." in evaluation["warnings"]
+
+
+def test_an_adapter_that_declares_only_pr_is_not_run_on_a_full_input(tmp_path):
+    class PrOnlyAdapter(PrAdapter):
+        scan_modes = frozenset({"pr"})
+
+    adapter = PrOnlyAdapter()
+
+    bundle = run(tmp_path, adapter)
+
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert adapter.calls == 0 and execution["status"] == "unsupported"
+    assert execution["error"]["code"] == "unsupported_mode"
+    assert "does not declare support for full scans; it carries out: pr" in execution["error"]["message"]
+    assert execution["schema_version"] == "2.0", "a full local input still needs no 2.1 field"
+
+
+def test_a_pr_input_gets_the_history_even_from_an_adapter_that_asked_for_no_git(tmp_path):
+    adapter = PrAdapter()
+    assert adapter.requires_git is False
+
+    run(tmp_path, adapter, pr_input(tmp_path))
+
+    assert adapter.seen["commits"].strip() == "2"
+
+
+def test_a_full_scan_of_a_git_adapter_still_gets_its_one_commit_and_no_pr_history(tmp_path):
+    adapter = PrAdapter(behavior="git")
+    adapter.requires_git = True
+
+    bundle = run(tmp_path, adapter)
+
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["provenance"]["synthetic_history"]["message"] == "snapshot"
+    assert "base_commit" not in execution["provenance"]["synthetic_history"]
+
+
+def test_the_runner_own_history_is_not_a_modification_and_a_scanner_write_still_is(tmp_path):
+    clean = run(tmp_path / "clean", PrAdapter(), pr_input(tmp_path / "clean"))
+    assert load_document(clean / "execution.json", "execution-record")["provenance"]["source_modified"] is False
+
+    prepared = pr_input(tmp_path / "dirty")
+    bundle = run(tmp_path / "dirty", PrAdapter("modify"), prepared)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "partial" and result["error"]["code"] == "source_modified"
+    assert execution["provenance"]["source_modified"] is True and execution["provenance"]["modified_paths"] == ["app.py"]
+    assert result["bundles_resolved"] is False
+
+
+def test_the_history_directory_the_runner_created_is_left_out_of_the_watched_tree_as_a_whole(tmp_path):
+    """A PR scanner may legitimately move the history's own state (a baseline scan resets the tree in
+    place and restores it), so the runner's ``.git`` is not a modification, exactly as the single
+    commit a git-dependent full scan gets is not; what a scanner writes in the tree is still seen."""
+
+    class WritesToGit(PrAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            (kwargs["source_dir"] / ".git" / "hooks").mkdir(exist_ok=True)
+            (kwargs["source_dir"] / "app.py").write_text("changed\n", encoding="utf-8")
+            return outcome
+
+    bundle = run(tmp_path, WritesToGit(), pr_input(tmp_path))
+
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["provenance"]["modified_paths"] == ["app.py"], "only app.py, never anything under .git"
+
+
+def test_a_workspace_history_that_is_not_the_recorded_one_is_refused_before_the_scanner_runs(tmp_path):
+    import dataclasses
+
+    prepared = pr_input(tmp_path)
+    forged = dataclasses.replace(prepared, pr={**prepared.pr, "head_commit": "f" * 40})
+    adapter = PrAdapter()
+
+    with pytest.raises(ExecutionError, match="synthetic PR history is not reproducible") as refused:
+        run(tmp_path, adapter, forged)
+
+    assert "f" * 40 in str(refused.value) and prepared.pr["head_commit"] in str(refused.value)
+    assert adapter.calls == 0
+
+
+def test_a_base_tree_other_than_the_recorded_one_cannot_reproduce_the_recorded_history(tmp_path):
+    prepared = pr_input(tmp_path)
+    (prepared.base_source_dir / "legacy.txt").write_text("edited after preparation\n", encoding="utf-8")
+    adapter = PrAdapter()
+
+    with pytest.raises(ExecutionError, match="synthetic PR history is not reproducible"):
+        run(tmp_path, adapter, prepared)
+    assert adapter.calls == 0
+
+
+def test_a_pr_input_without_a_base_tree_is_refused_before_a_bundle_exists(tmp_path):
+    import dataclasses
+
+    prepared = pr_input(tmp_path)
+    for base in (None, tmp_path / "no-such-base"):
+        with pytest.raises(ExecutionError, match="must carry the base export its synthetic history is built from"):
+            run(tmp_path, PrAdapter(), dataclasses.replace(prepared, base_source_dir=base))
+    assert not (tmp_path / "out").exists()
+
+
+# --- a PR run with the real Semgrep binary over trees git would convert -------------------------------
+#
+# Semgrep's baseline scan resets the workspace to the base commit and back to the head with its own
+# git, in place. What that git writes comes from the blobs of the runner's history and from whatever
+# attributes and configuration it finds, so a history that stored anything but the exported bytes, or
+# an operator's attributes file, made the restore rewrite files the scan had been handed.
+
+SAFE_PY = b"import subprocess\ndef run(cmd):\n    return subprocess.run(cmd)\n"
+SHELL_PY = b"import subprocess\ndef run(cmd):\n    return subprocess.run(cmd, shell=True)\n"
+
+
+def crlf(data: bytes) -> bytes:
+    return data.replace(b"\n", b"\r\n")
+
+
+def pr_input_over(tmp_path: Path, base_files: dict[str, bytes], head_files: dict[str, bytes]) -> PreparedInput:
+    """A PR input over two trees written byte for byte, with the synthetic commits preparation computes."""
+    trial = tmp_path / "trial"
+    head_dir, base_dir = trial / "source", trial / "base" / "source"
+    for root, files in ((base_dir, base_files), (head_dir, head_files)):
+        for relative, data in files.items():
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (root / relative).write_bytes(data)
+    head_hash, base_hash = hash_exported_tree(head_dir)["tree_hash"], hash_exported_tree(base_dir)["tree_hash"]
+    changes = diff_trees(base_dir, head_dir)
+    diff = pr_diff_sha256(base_hash, head_hash, changes)
+    history = compute_pr_history(head_dir, base_dir, changes)
+    pr = {"change_set_id": "cs-1", "base_snapshot_id": "snap-base", "head_snapshot_id": "snap-head",
+          "boundary": "introducing", "review_scope": "changed_files", "base_tree_hash": base_hash,
+          "head_tree_hash": head_hash, "diff_sha256": diff, "changes": changes,
+          "base_commit": history["base_commit"], "head_commit": history["head_commit"],
+          "history": {key: history[key] for key in ("messages", "identity", "date")}, "prepared_state": "fresh"}
+    return PreparedInput("input-pr", head_dir, head_hash, ("python",), {"source": {"commit": "x"}}, mode="pr",
+                         input_hash=pr_input_hash(base_hash, head_hash, diff), pr=pr, base_source_dir=base_dir)
+
+
+def semgrep_pr_run(tmp_path: Path, base_files: dict[str, bytes], head_files: dict[str, bytes]) -> tuple[dict, dict]:
+    """One PR invocation of the real Semgrep binary over the two trees: ``(result, execution record)``."""
+    rules, commit = pinned_rules_repo(tmp_path)
+    adapter = get_adapter("semgrep")
+    spec = SystemSpec("semgrep-pr", "semgrep", {"ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}})
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    bundle = run_invocation(prepared=pr_input_over(tmp_path, base_files, head_files), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out", run_id="run-semgrep-pr",
+                            timeout_seconds=300, clock=CLOCK)
+    return (load_document(bundle / "result.json", "scan-result"),
+            load_document(bundle / "execution.json", "execution-record"))
+
+
+def assert_a_clean_review_of_the_added_finding(result: dict, execution: dict, path: str) -> None:
+    assert execution["provenance"]["source_modified"] is False and execution["provenance"]["modified_paths"] == []
+    assert result["status"] == "success" and result["bundles_resolved"] is True and "error" not in result
+    assert [claim["primary_location"] for claim in result["claims"]] == [
+        {"path": path, "start_line": 3, "end_line": 3}], "the change adds one finding, and it is reported"
+
+
+@semgrep_required
+def test_a_semgrep_pr_run_is_not_a_source_modification_when_an_in_tree_text_auto_meets_crlf_files(tmp_path):
+    """The trees hold CRLF bytes beside ``* text=auto``, as a repository does once the attribute is added.
+
+    The history used to store LF for them, so Semgrep's restore wrote LF over the CRLF files the scan
+    was handed: the run was recorded as a modified source, ``partial`` with unresolved bundles.
+    """
+    base_files = {".gitattributes": b"* text=auto\n", "src/app.py": crlf(SAFE_PY), "README.md": b"docs\n"}
+    head_files = {**base_files, "src/app.py": crlf(SHELL_PY)}
+
+    result, execution = semgrep_pr_run(tmp_path, base_files, head_files)
+
+    assert_a_clean_review_of_the_added_finding(result, execution, "src/app.py")
+
+
+@semgrep_required
+@pytest.mark.parametrize("operator_attributes", [True, False], ids=["operator-attributes", "control-none"])
+def test_a_semgrep_pr_run_is_not_a_source_modification_under_the_operators_own_git_attributes(
+        tmp_path, monkeypatch, operator_attributes):
+    """``~/.config/git/attributes`` reaches Semgrep's own git, whatever the runner's history says.
+
+    The operator asks for CRLF on Python files. The control runs the same trees under the same HOME
+    without that file, which shows the run itself is sound and only the attributes differ.
+    """
+    home = tmp_path / "operator-home"
+    (home / ".config" / "git").mkdir(parents=True)
+    if operator_attributes:
+        (home / ".config" / "git" / "attributes").write_text("*.py text eol=crlf\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    base_files = {"src/app.py": SAFE_PY, "README.md": b"docs\n"}
+    head_files = {**base_files, "src/app.py": SHELL_PY}
+
+    result, execution = semgrep_pr_run(tmp_path, base_files, head_files)
+
+    assert_a_clean_review_of_the_added_finding(result, execution, "src/app.py")
+
+
+def test_a_backend_is_active_around_the_scan_and_its_isolation_record_is_written(tmp_path):
+    from contextlib import contextmanager
+
+    seen = []
+
+    class RecordingBackend:
+        network_enforced = True
+
+        @contextmanager
+        def activate(self):
+            seen.append("enter")
+            yield
+            seen.append("exit")
+
+        def isolation_record(self):
+            return {"backend": "oci", "enforced": True, "note": "fixture backend"}
+
+    class ObservingAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            seen.append("scan")
+            return super().scan(**kwargs)
+
+    bundle = run(tmp_path, ObservingAdapter(), backend=RecordingBackend())
+    execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))
+    assert seen == ["enter", "scan", "exit"]
+    assert execution["schema_version"] == "2.1" and execution["isolation"]["backend"] == "oci"
+    assert execution["network_policy"]["enforced"] is True
+
+
+def test_a_pr_input_without_its_synthetic_commits_is_refused_before_a_bundle_exists(tmp_path):
+    import dataclasses
+
+    prepared = dataclasses.replace(prepared_input(tmp_path), mode="pr", pr={"change_set_id": "cs-1"})
+    with pytest.raises(ExecutionError, match="base_commit and head_commit"):
+        run(tmp_path, FakeAdapter(), prepared)
+    assert not (tmp_path / "out").exists()

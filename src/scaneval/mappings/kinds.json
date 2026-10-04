@@ -1,5 +1,5 @@
 {
-  "mapping_version": "1.0.0",
+  "mapping_version": "1.1.0",
   "description": "Versioned native-to-canonical kind mapping. Importers preserve the native rule, class, and CWE identity on every claim; unmapped kinds stay unmapped rather than being dropped or guessed from titles.",
   "canonical_kinds": [
     "command_injection",

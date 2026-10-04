@@ -82,12 +82,23 @@ failed, and keeps the adapter's own ``bundles_resolved``. Losing trace events is
 claim, so nothing about the claim set is withdrawn; what is withdrawn is the result's standing
 as a clean complete observation.
 
+An adapter may report ``omitted_paths``, the paths of its input it observed the scanner did not
+examine. They are written into the result sorted and each path once, and the result is then a 2.1
+result, because the version moves only when a 2.1 field needs it. They are the adapter's claim:
+this module checks only their shape, the contract checks that each is a relative POSIX path, and
+nothing here can see whether a path was really examined. It may also report ``examined_nothing``,
+that it can show no part of the input to have been examined, and a ``bool`` is written into the
+result as it is, in a 2.1 result for the same reason; it too is the adapter's claim and is checked
+for its type only. The error result recorded in place of a result the contract refused carries
+neither, like everything else the adapter supplied.
+
 Directory separation documents the boundary; it does not enforce it. Network and
 filesystem policy are declared here and must be enforced outside this process.
 """
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import errno
@@ -97,7 +108,7 @@ import shutil
 import stat
 import tempfile
 import time
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator
 import uuid
 
 from . import __version__
@@ -107,6 +118,7 @@ from .kinds import mapping_version
 from .materialize import (
     Containment,
     MaterializationError,
+    prepare_pr_history,
     prepare_synthetic_history,
     sha256_file,
     tree_hash,
@@ -133,6 +145,22 @@ class _BundleRefused(Exception):
 
 @dataclass(frozen=True)
 class PreparedInput:
+    """One prepared input as a scanner receives it, and the identities the evaluator binds to it.
+
+    ``tree_hash`` is the tree the workspace holds and the pre-scan check compares against: the
+    exported snapshot, the transformed tree of a blinded input, or the head of a PR input.
+    ``input_hash`` is what the result, the plan, and the decisions bind to; it defaults to
+    ``tree_hash`` and differs only for a PR input, whose identity is its base, its head, and the
+    diff between them. ``source_tree_hash`` is the original export the labels refer to, which
+    differs from ``tree_hash`` for a blinded input. ``blinding`` and ``pr`` carry the evaluator-side
+    identities recorded in a 2.1 execution record; neither is ever handed to a scanner.
+
+    ``base_source_dir`` is the base tree of a PR input, the one the first commit of its synthetic
+    history is built from; it is read, never written, and never copied into a workspace. ``pr`` then
+    carries the neutral ``base_commit`` and ``head_commit`` the request names, which the history
+    built in each workspace must reproduce exactly.
+    """
+
     input_id: str
     source_dir: Path
     tree_hash: str
@@ -140,10 +168,59 @@ class PreparedInput:
     provenance: dict
     profile: str = "standard"
     mode: str = "full"
+    input_hash: str | None = None
+    source_tree_hash: str | None = None
+    blinding: dict | None = None
+    pr: dict | None = None
+    base_source_dir: Path | None = None
+
+    @property
+    def binding_hash(self) -> str:
+        """The identity the result and every evaluator record of this input bind to."""
+        return self.input_hash or self.tree_hash
+
+    @property
+    def needs_2_1(self) -> bool:
+        """Whether a record of this input needs a 2.1 field: a PR or blinded input does."""
+        return self.mode != "full" or self.profile != "standard" or self.binding_hash != self.tree_hash
+
+
+# The isolation record of every invocation run without an OS-level backend. It is written into 2.1
+# execution records only; a 2.0 record written for a standard local run says the same thing through
+# its network note, and nothing about it changes.
+LOCAL_ISOLATION = {
+    "backend": "local",
+    "enforced": False,
+    "note": ("The scanner ran as the operator with no OS-level boundary. Workspace separation, path "
+             "containment, and the before/after source hash are checks, not enforcement; see "
+             "docs/THREAT_MODEL.md."),
+}
 
 
 def invocation_id(input_id: str, system_id: str, repetition: int) -> str:
     return f"{input_id}__{system_id}__r{repetition}"
+
+
+def _passthrough(adapter: Adapter, isolation: dict) -> list[str]:
+    """The environment variable names this record says reached the scanner, sorted.
+
+    Without a backend the scanner process gets the operator's variables, and the record names the
+    runner's own offer: its base names and the adapter's, whether or not the operator's environment
+    holds each of them. Under a backend the scanner's environment is the one the backend built and
+    the operator's is not what it receives, so the names are the backend's own record of it
+    (``isolation.settings.environment``): what it set in the container, and the declared
+    credentials it passed by name. A backend that ran nothing set nothing. One that records no
+    environment leaves the runner's offer, which is then all the record can say.
+    """
+    settings = isolation.get("settings")
+    environment = settings.get("environment") if isinstance(settings, dict) else None
+    if not isinstance(environment, dict):
+        return sorted(set(("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "USER", "SHELL")
+                          + tuple(adapter.env_passthrough)))
+    names = {name for name in environment.get("set") or () if isinstance(name, str)}
+    names |= {item["env"] for item in environment.get("credentials") or ()
+              if isinstance(item, dict) and item.get("passed") is True and isinstance(item.get("env"), str)}
+    return sorted(names)
 
 
 def _now(clock: Callable[[], datetime] | None) -> str:
@@ -233,6 +310,29 @@ def build_request(run_id: str, prepared: PreparedInput, spec: SystemSpec, *, tim
         "trace_mode": trace_mode,
     }
     return validate_document("scan-request", request)
+
+
+def _pr_history(source: Path, prepared: PreparedInput) -> dict:
+    """Build the two-commit history of a PR input in its workspace, and prove it is the recorded one.
+
+    The head is the workspace's own copy of the export and the base is read from the input's base
+    tree, so the history a scanner finds is exactly the one preparation computed in a scratch copy.
+    Equal trees give equal commit ids, so a difference is not noise: the workspace was not built
+    from the trees the input recorded, or git did not read them the way it did then, and the
+    request names commits that are not the ones the workspace holds. That is refused rather than
+    scanned.
+    """
+    try:
+        history = prepare_pr_history(source, Path(prepared.base_source_dir))
+    except MaterializationError as exc:
+        raise ExecutionError(f"the synthetic PR history could not be built in the workspace: {exc}") from exc
+    recorded = (prepared.pr["base_commit"], prepared.pr["head_commit"])
+    built = (history["base_commit"], history["head_commit"])
+    if built != recorded:
+        raise ExecutionError(
+            f"synthetic PR history is not reproducible: the workspace holds {built[0]}..{built[1]}, "
+            f"and the prepared input recorded {recorded[0]}..{recorded[1]}")
+    return history
 
 
 def _failure_message(exc: BaseException) -> str:
@@ -799,12 +899,12 @@ def _outcome_violation(outcome: object) -> str | None:
     """The first way *outcome* breaks the adapter contract, or ``None`` when it keeps it.
 
     This checks only the shapes the bundle documents are built from: the outcome type itself,
-    artifact entries, tool versions, command words, usage numbers, notes, and the containers
-    this module copies or walks. It says nothing about whether the scan was correct, complete,
-    or honest, and it does not check the claims, the ranking, or the status: the scan-result
-    contract checks those, and a violation there is recorded as a failed import. A field only
-    the execution record constrains, such as a non-integer exit code, is caught when that record
-    is validated.
+    artifact entries, tool versions, command words, usage numbers, notes, the omitted paths, the
+    ``examined_nothing`` flag, and the containers this module copies or walks. It says nothing
+    about whether the scan was correct, complete, or honest, and it does not check the claims, the
+    ranking, or the status: the scan-result contract checks those, and a violation there is
+    recorded as a failed import. A field only the execution record constrains, such as a
+    non-integer exit code, is caught when that record is validated.
     """
     if not isinstance(outcome, NativeOutcome):
         return f"adapter returned {type(outcome).__name__}, not a NativeOutcome"
@@ -857,6 +957,14 @@ def _outcome_violation(outcome: object) -> str | None:
         return f"model_identity must be a mapping or None, not {type(outcome.model_identity).__name__}"
     if outcome.trace_path is not None and not isinstance(outcome.trace_path, (str, PurePath)):
         return f"trace_path must be a string, a path, or None, not {type(outcome.trace_path).__name__}"
+    if outcome.omitted_paths is not None:
+        if not isinstance(outcome.omitted_paths, list):
+            return f"omitted_paths must be a list or None, not {type(outcome.omitted_paths).__name__}"
+        for index, path in enumerate(outcome.omitted_paths):
+            if not isinstance(path, str):
+                return f"omitted_paths[{index}] must be a string, not {type(path).__name__}"
+    if outcome.examined_nothing is not None and not isinstance(outcome.examined_nothing, bool):
+        return f"examined_nothing must be a bool or None, not {type(outcome.examined_nothing).__name__}"
     return None
 
 
@@ -909,8 +1017,25 @@ def run_invocation(
     network_policy: str = "none",
     workspace_root: Path | None = None,
     clock: Callable[[], datetime] | None = None,
+    backend: Any = None,
 ) -> Path:
     """Execute one invocation and return its bundle directory. Never overwrites.
+
+    *backend* is the execution backend the scanner's processes run under; ``None`` is the local,
+    unenforced one. A backend exposes ``activate()``, a context manager in force while the adapter
+    runs, ``isolation_record()``, the 2.1 isolation block describing what actually bounded the
+    run, and ``network_enforced``. The execution record is written at 2.1 when the input is PR or
+    blinded or the backend is not local, and at 2.0 exactly as before otherwise.
+
+    An input whose mode the adapter does not declare in :attr:`~scaneval.adapters.base.Adapter.scan_modes`
+    is recorded as ``unsupported`` with error code ``unsupported_mode`` and the adapter's ``scan`` is
+    never called, whatever it would have done: an adapter that cannot review a change is never run
+    on the head instead, and the invocation stays in every denominator, as an unsupported language
+    does. For a PR input the workspace also holds the neutral two-commit history the request names
+    (:func:`_pr_history`): built from the head copy and the input's base tree, whether or not the
+    adapter asked for git, verified to be the commits the input recorded, and left out of the watched
+    tree like the single commit a git-dependent full scan gets. A PR input that carries no synthetic
+    commits or no base tree is refused before the bundle exists.
 
     ``result.json`` and ``execution.json`` are written only once both documents validate and
     encode, and they are renamed into place together, so a bundle never holds a successful
@@ -1021,12 +1146,29 @@ def run_invocation(
     except ContractError as exc:
         raise ExecutionError(f"the prepared input's provenance cannot be hashed, so no execution "
                              f"record can bind to it: {exc}") from exc
+    request_pr = None
+    if prepared.mode == "pr":
+        # The request names the neutral synthetic commits the workspace history holds, and nothing
+        # else about the change: no change set id, no snapshot, no tree hash. Checked before the
+        # bundle exists, so a malformed PR input leaves no empty directory behind.
+        commits = prepared.pr if isinstance(prepared.pr, dict) else {}
+        base_commit, head_commit = commits.get("base_commit"), commits.get("head_commit")
+        if not (isinstance(base_commit, str) and base_commit and isinstance(head_commit, str) and head_commit):
+            raise ExecutionError("a PR input must carry the synthetic base_commit and head_commit its "
+                                 "request names")
+        if prepared.base_source_dir is None or not Path(prepared.base_source_dir).is_dir():
+            raise ExecutionError("a PR input must carry the base export its synthetic history is built from")
+        request_pr = {"base": base_commit, "head": head_commit}
+    # Decided from what the adapter declares and never from what its scan would do: an input whose
+    # mode the adapter does not carry out is recorded as unsupported and scan() is never called.
+    mode_unsupported = prepared.mode not in adapter.scan_modes
     bundle = out_dir / invocation_id(prepared.input_id, spec.system_id, repetition)
     bundle.mkdir(parents=True, exist_ok=False)
     raw_dir = bundle / "raw"
     trace_dir = bundle / "trace" if trace_mode != "off" else None
     bundle_area = _enclose(bundle)
-    request = build_request(run_id, prepared, spec, timeout_seconds=timeout_seconds, trace_mode=trace_mode)
+    request = build_request(run_id, prepared, spec, timeout_seconds=timeout_seconds, trace_mode=trace_mode,
+                            pr=request_pr)
     _write_new(bundle / "request.json", request)
 
     state_dirs = frozenset(getattr(adapter, "state_dirs", ()))
@@ -1094,18 +1236,32 @@ def run_invocation(
                            "watched input tree counts and the exported hash does not")
             raise ExecutionError(f"workspace tree hash {actual} does not match prepared input "
                                  f"{prepared.tree_hash}{detail}")
-        if adapter.requires_git and not (source / ".git").exists():
+        if prepared.mode == "pr":
+            # A PR scanner reads a base and a head whether or not the adapter asked for git, and
+            # nothing is built for one that will not scan: the history exists to be reviewed.
+            if not mode_unsupported and not unsupported:
+                synthetic = _pr_history(source, prepared)
+        elif adapter.requires_git and not (source / ".git").exists():
             synthetic = prepare_synthetic_history(source)
-        if unsupported:
+        if mode_unsupported:
+            outcome = NativeOutcome(status="unsupported", exit_code=None, command=[],
+                                    error={"code": "unsupported_mode",
+                                           "message": f"{adapter.name} does not declare support for "
+                                                      f"{prepared.mode} scans; it carries out: "
+                                                      f"{', '.join(sorted(adapter.scan_modes))}"},
+                                    notes=["Not executed; stays in the denominator. A scan of any other "
+                                           "mode is never run in its place."])
+        elif unsupported:
             outcome = NativeOutcome(status="unsupported", exit_code=None, command=[],
                                     error={"code": "unsupported_language",
                                            "message": f"{adapter.name} does not declare support for: {', '.join(unsupported)}"},
                                     notes=["Unsupported work stays in the denominator; nothing was executed."])
         else:
             try:
-                outcome = adapter.scan(request=request, source_dir=source, raw_dir=staging_raw, spec=spec,
-                                       preparation=preparation, timeout_seconds=timeout_seconds,
-                                       trace_mode=trace_mode, trace_dir=staging_trace)
+                with (backend.activate() if backend is not None else nullcontext()):
+                    outcome = adapter.scan(request=request, source_dir=source, raw_dir=staging_raw, spec=spec,
+                                           preparation=preparation, timeout_seconds=timeout_seconds,
+                                           trace_mode=trace_mode, trace_dir=staging_trace)
             except Exception as exc:
                 # Any failure inside the adapter is a recorded error with its own type name,
                 # never an empty successful scan and never a crash of the whole run.
@@ -1238,6 +1394,10 @@ def run_invocation(
     modified = sorted(set(before) ^ set(after) | {p for p in before if p in after and before[p] != after[p]})
     trace_record: dict | None = None
 
+    isolation = dict(LOCAL_ISOLATION) if backend is None else backend.isolation_record()
+    network_enforced = backend is not None and bool(backend.network_enforced)
+    record_2_1 = prepared.needs_2_1 or isolation.get("backend") != "local"
+
     def build_documents() -> tuple[dict, dict]:
         """The result and execution documents for the outcome as it currently stands.
 
@@ -1289,12 +1449,30 @@ def run_invocation(
             usage["cost_usd"] = None
         result = {
             "schema_version": "2.0", "run_id": run_id, "system_id": spec.system_id,
-            "input_hash": prepared.tree_hash, "status": outcome.status, "ranking": outcome.ranking,
+            "input_hash": prepared.binding_hash, "status": outcome.status, "ranking": outcome.ranking,
             "claims": outcome.claims, "bundles_resolved": outcome.bundles_resolved, "usage": usage,
             **({"error": outcome.error} if outcome.error else {}),
             **({"raw_artifacts": raw_artifacts} if raw_artifacts else {}),
         }
+        if prepared.mode == "pr":
+            # A PR review reads the head tree, so its claims locate against head. Said in the
+            # result itself, where the locations are, rather than left for a reader to infer.
+            result["schema_version"] = "2.1"
+            result["location_basis"] = "pr_head"
+        if outcome.omitted_paths is not None:
+            # A 2.1 field, so the result is 2.1 whatever the mode. Sorted and each path once, so one set of
+            # omissions is one list, which is what the contract requires of it.
+            result["schema_version"] = "2.1"
+            result["omitted_paths"] = sorted(set(outcome.omitted_paths))
+        if outcome.examined_nothing is not None:
+            # Also a 2.1 field, so also 2.1 whatever the mode, and written as the adapter said it.
+            result["schema_version"] = "2.1"
+            result["examined_nothing"] = outcome.examined_nothing
         result, rendered_in_result = _recordable_document(result)
+        if "omitted_paths" in result:
+            # Rendering a name UTF-8 cannot encode can reorder the list or merge two entries into one, so the
+            # order and the uniqueness the contract checks are made last, on the text that is written.
+            result["omitted_paths"] = sorted(set(result["omitted_paths"]))
         import_error = None
         try:
             # The document validated is the document written: the rendering above happens first,
@@ -1306,8 +1484,11 @@ def run_invocation(
             # refused document would carry its usage or artifacts, and their violation with
             # them, straight into the record that reports the refusal.
             import_error = _recordable_text(str(exc))
-            result = _error_result(run_id, spec.system_id, prepared.tree_hash, wall,
+            result = _error_result(run_id, spec.system_id, prepared.binding_hash, wall,
                                    {"code": "import_contract_violation", "message": import_error[:2000]})
+            if prepared.mode == "pr":
+                result["schema_version"] = "2.1"
+                result["location_basis"] = "pr_head"
             try:
                 validate_document("scan-result", result)
             except ContractError as refusal:
@@ -1325,10 +1506,12 @@ def run_invocation(
             "timeout_seconds": timeout_seconds,
             "tool_versions": dict(outcome.tool_versions), "model_identity": outcome.model_identity,
             "system_config": dict(spec.config),
-            "network_policy": {"declared": network_policy, "enforced": False,
-                               "note": "Policy is recorded, not enforced by this runner; enforce it in the execution environment."},
-            "environment": {"passthrough": sorted(set(("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM", "USER", "SHELL")
-                                                      + tuple(adapter.env_passthrough)))},
+            "network_policy": ({"declared": network_policy, "enforced": True,
+                                "note": "Enforced by the execution backend; see isolation.network."}
+                               if network_enforced else
+                               {"declared": network_policy, "enforced": False,
+                                "note": "Policy is recorded, not enforced by this runner; enforce it in the execution environment."}),
+            "environment": {"passthrough": _passthrough(adapter, isolation)},
             # One derivation for both: the capture mapping and the trace record cannot claim
             # different things about how completely this run was observed.
             "capture": _capture_record(dict(outcome.capture), outcome.capture_state, trace_record)[0],
@@ -1345,6 +1528,11 @@ def run_invocation(
             "notes": list(outcome.notes) + alias_notes + capture_notes + cleanup_notes,
             "raw_artifacts": raw_artifacts,
         }
+        if record_2_1:
+            execution["schema_version"] = "2.1"
+            execution["provenance"].update({"input_hash": prepared.binding_hash, "mode": prepared.mode,
+                                            "pr": prepared.pr, "blinding": prepared.blinding})
+            execution["isolation"] = isolation
         execution, rendered_in_execution = _recordable_document(execution)
         if rendered_in_result + rendered_in_execution:
             # Appended after the rendering, so this sentence is itself plain ASCII and needs no

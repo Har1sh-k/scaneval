@@ -32,21 +32,71 @@ A result the importer cannot turn into a claim is import loss, not a detail: it 
 and a count above zero degrades the outcome to ``partial`` with unresolved bundles and error
 code ``import_loss``, so a scan that reported a finding ScanEval could not read can earn
 neither completeness nor silence credit for it.
+
+Both processes the adapter starts, the version probe and the scan, go through ``run_command``,
+and both pass ``--disable-version-check``, so neither asks the network for a newer release or
+writes that answer under ``HOME``. Every file either of them wrote is read back without following
+a link and without blocking on a named pipe (:func:`~scaneval.execution.read_regular_file` and
+:func:`~scaneval.adapters.base.tail_text`), because the process that wrote the raw directory can
+leave anything at those names. That is what makes the adapter ``oci_compatible``: under the
+``oci`` backend both run in the configured image, the binary defaults to that image's own
+``semgrep`` rather than a host install, and the pinned rules checkout is declared as a read-only
+runtime mount at its own path, so the ``--config`` paths and the ``check_id`` prefixes they
+produce are the same inside the container as outside it.
+
+PR mode. A request whose ``input.mode`` is ``pr`` is a review of the change between two commits of
+the workspace's own history (:mod:`scaneval.adapters.pr`), and the scan argv is the full-scan argv
+plus ``--baseline-commit=<base>``: Semgrep's own diff scan. Semgrep then scans the files changed
+between the two commits and drops every finding its own baseline comparison matches to the base
+commit, one that moved with a renamed file included; this adapter compares nothing itself. Semgrep
+does it by resetting the workspace tree to the base commit and back to head in place (for a clean
+repository, which the request promises and this adapter checks first), so the source must be
+writable. Under the ``oci`` backend, which mounts it read-only, a PR request is answered
+``unsupported`` with the reason recorded and nothing is run. A kill between the two resets leaves
+the tree at the base commit, which the invocation's own source check then reports.
+
+A diff scan over a change that touches only deleted paths and files no rule applies to
+(documentation, say) scans nothing and reports nothing, which in a full scan is the
+``nothing_scanned`` error. In a PR review it is a success with a note (an empty baseline review),
+and only when Semgrep exited 0 with no diagnostic of any level, no result was lost in the import,
+and git, run by this adapter before Semgrep starts, shows that no path present at head has the
+extension of a supported language. Anything else stays the error, with the reason added. That extension test is
+this adapter's own approximation of what Semgrep would scan, not Semgrep's target selection, and
+it errs toward the error. Import-loss accounting and every other outcome rule below are the
+full-scan ones, unchanged.
+
+What the run says about the paths it did not scan. A PR run that delivers the claims Semgrep
+reported, a ``success`` or a ``partial``, lists in the result's ``omitted_paths`` every path the
+change touches that is not among ``paths.scanned``, a path the change removed included
+(:func:`_pr_omitted_paths`), and a payload with no ``paths.scanned`` lists every path the change
+touches. It changes no status and no note: an empty baseline review is still a success. What it
+changes is what the scorer may conclude from that success. A control planned on a listed path, or
+one the plan places on no path, earns no quiet credit, because Semgrep's own selection is not a
+scope declared before the run; a scope exclusion is declared by leaving the item out of the plan.
+When the list is every path the change touches, as it is for an empty baseline review and for a
+payload with no ``paths.scanned``, the result also says ``examined_nothing``
+(:func:`~scaneval.adapters.pr.examined_nothing`), and then no control earns quiet credit, one on a
+file the change leaves alone included: a diff scan that read none of the change reached no control.
+It says ``False`` when Semgrep scanned some path of the change. A full scan reports no omissions and
+says neither.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import sys
 from typing import Any, NamedTuple
 
+from ..execution import read_regular_file
 from ..kinds import cwe_ids, kind_for_cwes, mapping_version
 from ..materialize import MaterializationError, fetch_snapshot, sha256_file, tree_hash
-from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command, tail_text
+from .base import (Adapter, AdapterError, NativeOutcome, SystemSpec, active_backend, build_env, run_command,
+                   tail_text)
+from .pr import Change, examined_nothing, pr_range, touched_paths, workspace_changes
 
 
 ARTIFACT_JSON = "semgrep-json"
@@ -59,6 +109,23 @@ _RULE_ID_DROPPED = re.compile(r"[^A-Za-z0-9._-]")
 _YAML_SUFFIXES = frozenset({".yaml", ".yml"})
 _RULE_TEST_SUFFIX = ".test"
 _RULE_FIXTEST_SUFFIX = ".fixed"
+# Semgrep 1.177's own extension table (semgrep_interfaces/lang.json) for the five languages this adapter
+# supports. It is only used to ask whether a change touches a file this adapter's languages could have
+# scanned; it is not Semgrep's target selection, which also applies ignore rules, size limits and rule
+# languages that are not known here. See _source_paths.
+_SOURCE_SUFFIXES = frozenset({".cjs", ".go", ".js", ".jsx", ".mjs", ".py", ".pyi", ".rs", ".ts", ".tsx"})
+# The diagnostics Semgrep 1.177 treats as a scan failure (semgrep.error.SemgrepCoreError.is_scan_failure): a
+# baseline scan that ends in one of them makes it drop the head findings of that file or rule.
+_SCAN_FAILURES = frozenset({"Timeout", "OutOfMemory", "StackOverflow", "FixpointTimeout", "TimeoutDuringInterfile",
+                            "OutOfMemoryDuringInterfile"})
+# Recorded on every PR-mode outcome, so a reader of the result knows what the claims are relative to.
+_PR_NOTE = (
+    "PR mode: Semgrep ran with --baseline-commit set to the request's base commit over the workspace's two-commit "
+    "history. It scans the files changed between base and head and reports only the findings its own baseline "
+    "comparison does not match to the base commit; this adapter does no baseline comparison of its own, so a finding "
+    "Semgrep matched to the base is absent from the claims rather than marked pre-existing, and a file the change did "
+    "not touch is not scanned. Semgrep 1.177 also drops a head finding on a file whose baseline scan failed (a "
+    "timeout or an out-of-memory) and records that failure only as a diagnostic in the raw errors list.")
 # A backslash separates directories only on Windows. On POSIX it is an ordinary character in a
 # file name, so a payload path is only translated when it cannot be a POSIX path.
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
@@ -118,6 +185,12 @@ def _discard_outputs(paths) -> None:
 
 
 def _binary(spec: SystemSpec) -> str:
+    """``config.binary`` when set; under the ``oci`` backend the image's own ``semgrep``; else a host install.
+
+    A host install is looked up only when commands run on the host: under ``oci`` the process
+    runs in the configured image, where a path to this machine's virtual environment names
+    nothing, so the default there is the ``semgrep`` on the image's own ``PATH``.
+    """
     configured = spec.config.get("binary")
     if configured:
         text = str(configured)
@@ -126,6 +199,8 @@ def _binary(spec: SystemSpec) -> str:
         if "\x00" in text:
             raise AdapterError("semgrep config.binary contains a NUL byte and cannot name an executable")
         return text
+    if getattr(active_backend(), "name", None) == "oci":
+        return "semgrep"
     sibling = Path(sys.executable).with_name("semgrep")
     if sibling.exists():
         return str(sibling)
@@ -152,6 +227,11 @@ def semgrep_version(binary: str, raw_dir: Path, timeout_seconds: float = 60) -> 
     the same raw directory fail on the create-only claim and report a file collision rather than
     the failure that actually stopped the first one. A file this call did not create is never
     removed: that one is an earlier attempt's evidence.
+
+    The probe passes ``--disable-version-check``. Without it Semgrep asks the network for its
+    latest release and caches the answer under ``HOME`` (``~/.cache/semgrep_version``), which is
+    a network call and a host write outside the scan, and fails outright where there is no
+    network. The flag leaves the reported version unchanged.
     """
     stdout_path = raw_dir / "semgrep-version.txt"
     stderr_path = raw_dir / "semgrep-version.stderr.txt"
@@ -162,14 +242,17 @@ def semgrep_version(binary: str, raw_dir: Path, timeout_seconds: float = 60) -> 
         _claim_output(stderr_path, what)
         created.append(stderr_path)
         try:
-            result = run_command([binary, "--version"], cwd=raw_dir, timeout_seconds=timeout_seconds,
-                                 env=build_env(), stdout_path=stdout_path, stderr_path=stderr_path)
+            result = run_command([binary, "--version", "--disable-version-check"], cwd=raw_dir,
+                                 timeout_seconds=timeout_seconds, env=build_env(), stdout_path=stdout_path,
+                                 stderr_path=stderr_path)
             if result.timed_out:
                 raise AdapterError(f"semgrep --version exceeded its {timeout_seconds}s limit and was killed after "
                                    f"{result.wall_seconds:.1f}s: {tail_text(result.stderr_path)}")
             if result.exit_code != 0:
                 raise AdapterError(f"semgrep --version failed: {tail_text(result.stderr_path)}")
-            text = stdout_path.read_text(encoding="utf-8", errors="replace")
+            # The one read of a file the probe could have replaced: a link is refused rather than
+            # followed to a file whose content would become the recorded version.
+            text = read_regular_file(stdout_path).decode("utf-8", errors="replace")
         except (OSError, UnicodeDecodeError) as exc:
             raise AdapterError(f"{what} could not be recorded: {exc}") from exc
     except AdapterError:
@@ -497,11 +580,132 @@ def _path_list(payload: dict, key: str) -> tuple[list, bool]:
     return value, True
 
 
+def _listed(names: list[str], limit: int = 8) -> str:
+    """At most *limit* of *names* joined for a note, and how many more there were."""
+    shown = ", ".join(names[:limit])
+    return shown + (f" and {len(names) - limit} more" if len(names) > limit else "")
+
+
+def _source_paths(changes: tuple[Change, ...]) -> list[str]:
+    """The paths present at head whose extension names a language this adapter scans, sorted.
+
+    This is the adapter's own approximation of "a file Semgrep would scan", made from Semgrep's
+    extension table for the five supported languages and nothing else. It is deliberately the
+    cautious direction: a changed ``.py`` file that Semgrep skipped for its own reasons (a ``tests/``
+    directory, a size limit, a generated-file marker) still counts here, so a diff that touches one
+    is never reported as an empty review. What it does not see is a file in another language that a
+    ruleset could target (YAML, Dockerfiles), or a script with no extension whose shebang names one
+    of these languages; a change to only such files, from a scan that read nothing and reported no
+    diagnostic, is called an empty review.
+    """
+    return sorted(change.path for change in changes
+                  if change.present and PurePosixPath(change.path).suffix.lower() in _SOURCE_SUFFIXES)
+
+
+def _error_type(entry: dict) -> str:
+    """The name of a Semgrep diagnostic's type, which the JSON writes as a string or as ``[name, ...]``."""
+    kind = entry.get("type")
+    if isinstance(kind, list) and kind and isinstance(kind[0], str):
+        return kind[0]
+    return kind if isinstance(kind, str) else ""
+
+
+def _empty_baseline_review(payload: dict, changes: tuple[Change, ...]) -> tuple[bool, str]:
+    """Whether a baseline scan that read nothing is an empty review, and the sentence that says why or why not.
+
+    Called only for an exit-0 scan that reported no result and an explicit empty ``paths.scanned``.
+    It is an empty review only when Semgrep also reported no diagnostic of any level and git shows the
+    change touches no path this adapter's languages could have scanned (see :func:`_source_paths`):
+    deleted paths, and paths outside those languages. Either counter-example is a scan that looked
+    at nothing it should have looked at, which stays the ``nothing_scanned`` error.
+    """
+    reasons = []
+    diagnostics = payload.get("errors")
+    if isinstance(diagnostics, list) and diagnostics:
+        reasons.append(f"it also reported {len(diagnostics)} diagnostic(s)")
+    source = _source_paths(changes)
+    if source:
+        reasons.append(f"the change touches {len(source)} file(s) in a language this adapter scans "
+                       f"({_listed(source)}), which Semgrep did not scan; its own ignore rules, or no rule for the "
+                       "language, can cause that")
+    if reasons:
+        return False, "; ".join(reasons) + ", so this is not an empty baseline review"
+    deleted = [change.path for change in changes if change.status == "D"]
+    other = sorted(change.path for change in changes if change.present)
+    parts = ([f"{len(deleted)} deleted path(s)"] if deleted else []) + (
+        [f"{len(other)} path(s) outside those languages ({_listed(other)})"] if other else [])
+    return True, ("Empty baseline review: Semgrep exited 0 with no diagnostics, scanned no file and reported nothing, "
+                  "and git shows the change touches no file in a language this adapter scans, only "
+                  + " and ".join(parts) + ". Semgrep's diff scan had no changed source to read, so there was "
+                  "nothing for it to report; this is not a scan that read nothing.")
+
+
+def _scanned_paths(scanned: list) -> set[str]:
+    """The paths in a ``paths.scanned`` list as paths inside the scanned tree, the way a claim location is read."""
+    return {_claim_path(item)[0] for item in scanned if isinstance(item, str)}
+
+
+def _pr_omitted_paths(changes: tuple[Change, ...], scanned: list, scanned_reported: bool) -> list[str]:
+    """The paths a PR change touches that Semgrep did not scan, sorted: what the result lists as ``omitted_paths``.
+
+    The paths the change touches are those present at head and those it removed (a deletion, and the old name of a
+    rename), which Semgrep's diff scan never reads. Each is omitted unless it is among ``paths.scanned``, whose
+    entries are read as :func:`_pr_review_notes` reads them. A payload that reports no ``paths.scanned`` says nothing
+    about which paths Semgrep opened, so every path the change touches is listed: credit is withheld rather than
+    granted for a file nobody can show was read. The list does not say why a path was left out, which the payload
+    names only in part: a path Semgrep's ignore rules dropped is listed with one no rule applies to.
+    """
+    touched = touched_paths(changes)
+    if not scanned_reported:
+        return touched
+    covered = _scanned_paths(scanned)
+    return [path for path in touched if path not in covered]
+
+
+def _pr_review_notes(payload: dict, changes: tuple[Change, ...], scanned: list) -> list[str]:
+    """What a reader of a PR-mode result needs beyond the claims: failed scans and unscanned source."""
+    notes = []
+    diagnostics = payload.get("errors")
+    failures = 0
+    if isinstance(diagnostics, list):
+        failures = sum(1 for entry in diagnostics if isinstance(entry, dict) and _error_type(entry) in _SCAN_FAILURES)
+    if failures:
+        notes.append(f"{failures} diagnostic(s) of a scan-failure type (timeout, out of memory, stack overflow) are in "
+                     "the raw errors list. In --baseline-commit mode Semgrep drops a head finding on a file whose "
+                     "baseline scan ended that way, so silence about those files is not a negative result.")
+    covered = _scanned_paths(scanned)
+    unscanned = [path for path in _source_paths(changes) if path not in covered]
+    if scanned and unscanned:
+        notes.append(f"PR mode: {len(unscanned)} changed file(s) in a language this adapter scans were not among the "
+                     f"paths Semgrep reports as scanned ({_listed(unscanned)}); its own ignore rules, or no rule for "
+                     "the language, can cause that, and nothing was looked for in them.")
+    return notes
+
+
 class SemgrepAdapter(Adapter):
     name = "semgrep"
-    adapter_version = "2.0.0"
+    adapter_version = "2.1.0"
     requires_git = False
     supported_languages = frozenset({"python", "javascript", "typescript", "go", "rust"})
+    scan_modes = frozenset({"full", "pr"})
+    oci_compatible = True
+
+    def runtime_mounts(self, spec: SystemSpec, preparation: dict) -> tuple[str, ...]:
+        """The pinned rules checkout, which the scan reads through its ``--config`` directories.
+
+        The whole checkout rather than each configured directory, because ``prepare()`` accepts a
+        rule file that is a symbolic link to another file inside the checkout, and inside a
+        container that link resolves only if its target is mounted too: mounting the directories
+        alone would drop such a rule silently while the recorded ruleset hash still counted it.
+        The checkout is one pinned commit in the cache, never the cache itself. A preparation
+        recorded before ``ruleset_root`` existed falls back to the configured directories.
+        """
+        directories, _commit, _digest = _prepared_ruleset(preparation)
+        root = preparation.get("ruleset_root")
+        if isinstance(root, str) and root and "\x00" not in root and all(
+                directory == root or Path(directory).is_relative_to(root) for directory in directories):
+            return (root,)
+        return tuple(sorted(set(directories)))
 
     def prepare(self, spec: SystemSpec, cache_root: Path) -> dict[str, Any]:
         """Fetch the pinned rules commit and record an inventory of the rule files it holds.
@@ -623,11 +827,33 @@ class SemgrepAdapter(Adapter):
         otherwise have been a clean success, makes the outcome ``partial`` with error code
         ``import_loss``. A timeout and an unreadable payload return before the import, so
         neither reports a loss count: nothing was imported at all.
+
+        A PR request (``request["input"]["mode"] == "pr"``) adds one option to the argv,
+        ``--baseline-commit=<base>``, and is otherwise the same scan. It is refused before anything
+        runs, as an ``AdapterError``, when the request does not name two full commit ids or the
+        workspace does not hold the clean two-commit history it names, and it is answered
+        ``unsupported``, not run, under the ``oci`` backend. Any mode but ``full`` and ``pr`` is
+        refused too, so a request this adapter cannot serve is never run as a full scan. What a PR
+        review that scanned nothing is called, and when, is :func:`_empty_baseline_review`'s
+        rule, stated in the module docstring.
         """
+        pr = pr_range(request, self)
         binary = _binary(spec)
         rule_timeout = _integer_config(spec, "rule_timeout_seconds", 30, minimum=0)
         jobs = _integer_config(spec, "jobs", 1, minimum=1)
         config_dirs, ruleset_commit, ruleset_tree_hash = _prepared_ruleset(preparation)
+        changes: tuple[Change, ...] = ()
+        if pr is not None:
+            if getattr(active_backend(), "name", None) == "oci":
+                return NativeOutcome(
+                    status="unsupported", exit_code=None, command=[],
+                    error={"code": "unsupported_mode",
+                           "message": "semgrep does not run a PR review under the oci backend: --baseline-commit "
+                                      "resets the scanned tree to the merge base and restores it in place, and "
+                                      "that backend mounts the source read-only, so the scan was not started"},
+                    notes=["Unsupported work stays in the denominator; nothing was executed."])
+            # Read before Semgrep starts, from a repository nothing but the runner has written to.
+            changes = workspace_changes(Path(source_dir), pr)
         stdout = raw_dir / "semgrep.json"
         stderr = raw_dir / "semgrep.stderr.txt"
         _claim_output(stdout, f"semgrep output under {raw_dir}")
@@ -638,6 +864,8 @@ class SemgrepAdapter(Adapter):
             "--timeout", str(rule_timeout),
             "--jobs", str(jobs),
         ]
+        if pr is not None:
+            argv.append(f"--baseline-commit={pr.base}")
         for directory in config_dirs:
             argv.append(f"--config={directory}")
         argv.append(".")
@@ -652,12 +880,21 @@ class SemgrepAdapter(Adapter):
         capture = {"model_requests": "not_applicable", "tool_calls": "not_applicable",
                    "context_selection": "not_applicable", "finding_lifecycle": "not_applicable"}
         base = dict(command=argv, artifacts=artifacts, tool_versions=tool_versions, capture=capture,
-                    usage={"cost_usd": 0.0}, notes=["Semgrep OSS has no metered cost; license cost not included."])
+                    usage={"cost_usd": 0.0},
+                    notes=["Semgrep OSS has no metered cost; license cost not included."]
+                    + ([_PR_NOTE] if pr is not None else []))
         if result.timed_out:
+            if pr is not None:
+                base["notes"].append(
+                    "Semgrep was killed at the timeout. Its --baseline-commit scan resets the workspace tree to the "
+                    "base commit and back in place, so a kill between the two resets leaves the tree at the base "
+                    "commit; the invocation's source check reports that as a modified source.")
             return NativeOutcome(status="timeout", exit_code=None, timed_out=True, error={"code": "timeout",
                                  "message": f"semgrep exceeded {timeout_seconds}s; output written at exit only"}, **base)
         try:
-            payload = json.loads(stdout.read_text(encoding="utf-8"))
+            # Read without following a link and without blocking on a pipe: the scan wrote this
+            # directory, and under an isolating backend a link planted here would name a host file.
+            payload = json.loads(read_regular_file(stdout).decode("utf-8"))
             ruleset_root = preparation.get("ruleset_root")
             # config_dirs stays as the fallback so a preparation recorded before ruleset_root
             # existed still keeps the cache path out of native_rule_id.
@@ -681,6 +918,14 @@ class SemgrepAdapter(Adapter):
             return NativeOutcome(status="error", exit_code=result.exit_code,
                                  error={"code": "unparseable_output", "message": message[:2000]}, **base)
         base["notes"] = base["notes"] + notes
+        # What the result lists as omitted_paths, for the outcomes that carry the claims Semgrep reported, and whether
+        # that is every path the change touches, so that Semgrep scanned none of it: both ``None`` in a full scan, which
+        # reports no omission.
+        omitted = nothing_examined = None
+        if pr is not None:
+            base["notes"] += _pr_review_notes(payload, changes, scanned)
+            omitted = _pr_omitted_paths(changes, scanned, scanned_reported)
+            nothing_examined = examined_nothing(changes, omitted)
         base["tool_versions"]["semgrep_reported"] = reported_version
         # Import loss leaves the claim set incomplete, so the bundles it delivers are not
         # resolved: the scoring contract then refuses both completed-control and quiet credit.
@@ -715,7 +960,8 @@ class SemgrepAdapter(Adapter):
             message = with_loss(f"semgrep exited {result.exit_code} after scanning {len(scanned)} "
                                 f"paths{detail}; stderr: {tail_text(stderr)}")
             return NativeOutcome(status="partial", exit_code=result.exit_code, claims=claims,
-                                 error={"code": f"exit_{result.exit_code}", "message": message[:2000]}, **base)
+                                 error={"code": f"exit_{result.exit_code}", "message": message[:2000]},
+                                 omitted_paths=omitted, examined_nothing=nothing_examined, **base)
         if fatal:
             base["notes"].append(f"{len(fatal)} error-level Semgrep diagnostics; see raw semgrep.json errors")
             reason = str(fatal[0].get("message", "")).strip()
@@ -735,7 +981,8 @@ class SemgrepAdapter(Adapter):
             message = with_loss(f"semgrep exited 0 after scanning {len(scanned)} paths with {len(fatal)} "
                                 f"error-level diagnostics{detail}; stderr: {tail_text(stderr)}")
             return NativeOutcome(status="partial", exit_code=0, claims=claims,
-                                 error={"code": "scan_errors", "message": message[:2000]}, **base)
+                                 error={"code": "scan_errors", "message": message[:2000]},
+                                 omitted_paths=omitted, examined_nothing=nothing_examined, **base)
         if skipped:
             base["notes"].append(f"Semgrep skipped {len(skipped)} paths under its own ignore rules; see raw semgrep.json paths")
         if not scanned_reported:
@@ -743,15 +990,28 @@ class SemgrepAdapter(Adapter):
                                  "be distinguished from a run that looked at no files")
         elif not scanned and not claims:
             # An explicit empty scanned list means Semgrep opened no file. Silence from a scan
-            # that read nothing is missing evidence, not a clean negative control.
+            # that read nothing is missing evidence, not a clean negative control. A PR review
+            # is the one place it can also be the truth: a change that touched only deleted
+            # paths and files outside the scanned languages leaves a diff scan nothing to read,
+            # and git, asked by this adapter, is what says so. Anything else stays an error.
+            explanation = ""
+            if pr is not None:
+                empty, detail = _empty_baseline_review(payload, changes)
+                if empty and not imported.lost:
+                    base["notes"].append(detail)
+                    return NativeOutcome(status="success", exit_code=0, claims=[], omitted_paths=omitted,
+                                         examined_nothing=nothing_examined, **base)
+                explanation = f"; {detail}" if not empty else ""
             message = with_loss("semgrep exited 0 having scanned no files and reported no results: Semgrep "
                                 "looked at no source at all, which its ignore rules, an empty tree, or a "
-                                f"default-ignored directory layout can cause; stderr: {tail_text(stderr)}")
+                                f"default-ignored directory layout can cause{explanation}; stderr: {tail_text(stderr)}")
             return NativeOutcome(status="error", exit_code=0, claims=[],
                                  error={"code": "nothing_scanned", "message": message[:2000]}, **base)
         if loss_message:
             # A scan whose results did not all survive the import is not a clean run: it is
             # partial, and the count and the reason travel with it as an explicit error.
             return NativeOutcome(status="partial", exit_code=0, claims=claims,
-                                 error={"code": "import_loss", "message": loss_message}, **base)
-        return NativeOutcome(status="success", exit_code=0, claims=claims, **base)
+                                 error={"code": "import_loss", "message": loss_message},
+                                 omitted_paths=omitted, examined_nothing=nothing_examined, **base)
+        return NativeOutcome(status="success", exit_code=0, claims=claims, omitted_paths=omitted,
+                             examined_nothing=nothing_examined, **base)

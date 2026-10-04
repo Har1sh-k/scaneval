@@ -1,0 +1,768 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/precision-estimate.schema.json",
+  "title": "ScanEval precision estimate",
+  "description": "Reviewed precision of one declared claim population, estimated from a precision sample and its recorded human reviews by inverse inclusion-probability (Horvitz-Thompson) weighting. Unresolved units, nonresponse, and disagreement stay visible; an unsampled stratum is never estimated; the sensitivity range is not a confidence interval and the interval is approximate. It is not a repository false-positive rate, and it changes no decision, score, or detection credit.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evaluator_version",
+    "sample_sha256",
+    "frame_sha256",
+    "reviews_sha256",
+    "review_entries",
+    "population",
+    "exclusions",
+    "runs",
+    "design",
+    "coverage",
+    "sample",
+    "totals",
+    "precision_resolved",
+    "unresolved_share",
+    "sensitivity",
+    "interval",
+    "evidence_grade",
+    "duplicate_burden",
+    "strata",
+    "units",
+    "notes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.1"
+    },
+    "evaluator_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sample_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "frame_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "reviews_sha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "canonical_sha256 of the reviews document used; null when none was."
+    },
+    "review_entries": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "population": {
+      "$ref": "#/$defs/population"
+    },
+    "exclusions": {
+      "$ref": "#/$defs/exclusions"
+    },
+    "runs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/run"
+      }
+    },
+    "design": {
+      "$ref": "#/$defs/design"
+    },
+    "coverage": {
+      "$ref": "#/$defs/coverage"
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selected_units",
+        "classes",
+        "bases"
+      ],
+      "description": "Raw counts over the sampled units, unweighted.",
+      "properties": {
+        "selected_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "classes": {
+          "$ref": "#/$defs/counts"
+        },
+        "bases": {
+          "$ref": "#/$defs/bases"
+        }
+      }
+    },
+    "totals": {
+      "$ref": "#/$defs/totals"
+    },
+    "precision_resolved": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 1,
+      "description": "T / (T + F) over the weighted totals; null when T + F is 0."
+    },
+    "unresolved_share": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 1,
+      "description": "U / (T + F + U); null when that is 0."
+    },
+    "sensitivity": {
+      "$ref": "#/$defs/sensitivity"
+    },
+    "interval": {
+      "$ref": "#/$defs/interval"
+    },
+    "evidence_grade": {
+      "enum": [
+        "double_review_or_adjudicated",
+        "single_review",
+        "incomplete"
+      ]
+    },
+    "duplicate_burden": {
+      "$ref": "#/$defs/burden"
+    },
+    "strata": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/stratum"
+      }
+    },
+    "units": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/unit"
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "population": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "budget",
+        "mode",
+        "profile",
+        "systems"
+      ],
+      "description": "Which claims the frame lists: the population, the view (mode and profile), and the systems.",
+      "properties": {
+        "name": {
+          "enum": [
+            "first_b",
+            "full"
+          ],
+          "description": "first_b: units with a copy at native rank at most budget, from invocations with native order and resolved bundles. full: every unit a saved result delivered."
+        },
+        "budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "B for first_b; null for full."
+        },
+        "mode": {
+          "enum": [
+            "full",
+            "pr"
+          ]
+        },
+        "profile": {
+          "enum": [
+            "standard",
+            "metadata_blinded"
+          ]
+        },
+        "systems": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "The systems whose claims the population holds, sorted."
+        }
+      }
+    },
+    "excluded": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "invocations",
+        "claim_records",
+        "units"
+      ],
+      "properties": {
+        "invocations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "claim_records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "units": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "exclusions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "no_output",
+        "unranked",
+        "bundle_unresolved",
+        "beyond_budget"
+      ],
+      "description": "What the population leaves out, copied from the frame.",
+      "properties": {
+        "no_output": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "invocations"
+          ],
+          "properties": {
+            "invocations": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "unranked": {
+          "$ref": "#/$defs/excluded"
+        },
+        "bundle_unresolved": {
+          "$ref": "#/$defs/excluded"
+        },
+        "beyond_budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "units",
+            "copies"
+          ],
+          "properties": {
+            "units": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "copies": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "status",
+        "manifest_sha256",
+        "schedule_sha256"
+      ],
+      "description": "One run directory the frame read, bound by the canonical digests of its manifest and frozen schedule.",
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "failed"
+          ]
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "schedule_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "design": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "stratify_by",
+        "allocation",
+        "size",
+        "seed",
+        "algorithm",
+        "stream_label"
+      ],
+      "description": "How the sample was drawn: simple random sampling without replacement within each stratum.",
+      "properties": {
+        "method": {
+          "enum": [
+            "srswor",
+            "stratified_srswor"
+          ]
+        },
+        "stratify_by": {
+          "enum": [
+            null,
+            "system",
+            "input",
+            "kind"
+          ]
+        },
+        "allocation": {
+          "enum": [
+            null,
+            "proportional",
+            "equal"
+          ],
+          "description": "proportional: largest remainder, ties by stratum name. equal: equal shares with the remainder to the first strata by name, a stratum smaller than its share taken whole and the rest shared again."
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "algorithm": {
+          "type": "string",
+          "minLength": 1,
+          "description": "scaneval.resampling.ALGORITHM at draw time."
+        },
+        "stream_label": {
+          "const": "precision/{frame_sha256}/{stratum}",
+          "description": "The label of the stream each stratum draws from; the stratum of an unstratified sample is 'all'."
+        }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "true",
+        "false",
+        "unresolved",
+        "out_of_scope"
+      ],
+      "properties": {
+        "true": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "false": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unresolved": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "out_of_scope": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "true",
+        "false",
+        "unresolved",
+        "out_of_scope"
+      ],
+      "properties": {
+        "true": {
+          "type": "number",
+          "minimum": 0
+        },
+        "false": {
+          "type": "number",
+          "minimum": 0
+        },
+        "unresolved": {
+          "type": "number",
+          "minimum": 0
+        },
+        "out_of_scope": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "bases": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adjudicated",
+        "double_review",
+        "single_review",
+        "disagreement",
+        "nonresponse"
+      ],
+      "properties": {
+        "adjudicated": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "double_review": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "single_review": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "disagreement": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nonresponse": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "sensitivity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lower",
+        "upper"
+      ],
+      "description": "Every unresolved unit counted as false (lower) and as true (upper). Not a confidence interval.",
+      "properties": {
+        "lower": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "upper": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "interval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "method",
+        "confidence",
+        "z",
+        "variance",
+        "standard_error",
+        "lower",
+        "upper",
+        "insufficient_strata"
+      ],
+      "description": "An approximate normal interval for precision_resolved from the stratified linearized variance of the ratio. It covers sampling only.",
+      "properties": {
+        "state": {
+          "enum": [
+            "ok",
+            "census",
+            "degenerate",
+            "insufficient",
+            "unavailable"
+          ],
+          "description": "ok: bounds from a positive variance. census: every stratum was taken whole, none left uncovered, so there is no sampling variance. degenerate: a zero variance from a sample that is not a census (a sample with an uncovered stratum is never one), which is not certainty, so no bounds. insufficient: a sampled stratum that was not taken whole drew fewer than two units, so its variance cannot be estimated. unavailable: no unit was resolved true or false."
+        },
+        "method": {
+          "const": "stratified_linearized_normal"
+        },
+        "confidence": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "z": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "variance": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "standard_error": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "lower": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "upper": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "insufficient_strata": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "population_units",
+        "covered_units",
+        "share",
+        "uncovered_strata"
+      ],
+      "description": "How much of the population the sampled strata cover. Nothing is estimated for an uncovered stratum.",
+      "properties": {
+        "population_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "covered_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "share": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "uncovered_strata": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stratum",
+              "population_units"
+            ],
+            "properties": {
+              "stratum": {
+                "type": "string",
+                "minLength": 1
+              },
+              "population_units": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    "burden": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "copies",
+        "units",
+        "duplicate_copies",
+        "copies_per_unit"
+      ],
+      "description": "Delivered copies per unit of the population, from the frame. Reported apart from precision, which counts each unit once.",
+      "properties": {
+        "copies": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "duplicate_copies": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "copies_per_unit": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 1
+        }
+      }
+    },
+    "stratum": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stratum",
+        "population_units",
+        "sampled_units",
+        "inclusion_probability",
+        "covered",
+        "classes",
+        "totals",
+        "precision_resolved",
+        "unresolved_share",
+        "sensitivity"
+      ],
+      "properties": {
+        "stratum": {
+          "type": "string",
+          "minLength": 1
+        },
+        "population_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sampled_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inclusion_probability": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "covered": {
+          "type": "boolean"
+        },
+        "classes": {
+          "$ref": "#/$defs/counts"
+        },
+        "totals": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/totals"
+            }
+          ],
+          "description": "Null for an uncovered stratum: an unsampled stratum is never estimated."
+        },
+        "precision_resolved": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "unresolved_share": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        }
+      }
+    },
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unit_id",
+        "item_id",
+        "stratum",
+        "class",
+        "basis",
+        "entries"
+      ],
+      "description": "One sampled unit's final class and what it rests on.",
+      "properties": {
+        "unit_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "item_id": {
+          "type": "string",
+          "pattern": "^item-[0-9]{4,}$"
+        },
+        "stratum": {
+          "type": "string",
+          "minLength": 1
+        },
+        "class": {
+          "enum": [
+            "true",
+            "false",
+            "unresolved",
+            "out_of_scope"
+          ]
+        },
+        "basis": {
+          "enum": [
+            "adjudicated",
+            "double_review",
+            "single_review",
+            "disagreement",
+            "nonresponse"
+          ]
+        },
+        "entries": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Review entries recorded for this unit, revisions included."
+        }
+      }
+    }
+  }
+}

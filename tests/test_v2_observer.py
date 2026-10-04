@@ -2917,8 +2917,10 @@ CAPTURE_SECTION = "What the securevibes-agent and Fieldglass integration actuall
 # The keyword arguments ``capture_status`` takes, in the order the guide's column table lists
 # them. The names are asserted against that header rather than assumed. ``hooks`` joined them
 # when what the adapter can see stopped being fixed: it is the harness observation surfaces the
-# driver found, so two harness builds differ in this table the way two trace modes do.
-CAPTURE_INPUTS = ("trace_mode", "routes", "has_summary", "capture_state", "hooks", "hook_failures")
+# driver found, so two harness builds differ in this table the way two trace modes do. ``mode``
+# joined them with native PR review: the harness mode the run was in, which the guide says moves no
+# cell, and which is therefore an input so that a change to that claim fails here.
+CAPTURE_INPUTS = ("trace_mode", "routes", "has_summary", "capture_state", "hooks", "hook_failures", "mode")
 # The guide counts small things in words. Spelling them out here is what lets a sentence like
 # "the ten wire event types" be compared with ``len(EVENT_TYPES)``.
 COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
@@ -3138,7 +3140,7 @@ def test_the_documented_capture_matrix_is_the_one_capture_status_returns():
                 returned = capture_status(
                     call["trace_mode"], call["routes"],
                     has_summary=call["has_summary"], capture_state=call["capture_state"],
-                    hooks=call["hooks"], hook_failures=call["hook_failures"],
+                    hooks=call["hooks"], hook_failures=call["hook_failures"], mode=call["mode"],
                 )
                 for key in keys:
                     assert returned[key] == documented[0], (key, column, call)
@@ -3198,10 +3200,19 @@ def test_the_documented_capture_matrix_is_the_one_capture_status_returns():
         every_run = capture_status(
             call["trace_mode"], call["routes"],
             has_summary=call["has_summary"], capture_state=call["capture_state"],
-            hooks=call["hooks"], hook_failures=call["hook_failures"],
+            hooks=call["hooks"], hook_failures=call["hook_failures"], mode=call["mode"],
         )
         engine_hooks = bool((call["hooks"] or {}).get("engine"))
         assert set(every_run) == documented_keys, call
+        # The mode moves no cell: the same run in the other mode is given the same matrix. This is
+        # the sixth claim the guide states across the space, and the one a future divergence
+        # between a full scan and a PR review would have to change on purpose.
+        other = "pr" if call["mode"] == "bootstrap" else "bootstrap"
+        assert every_run == capture_status(
+            call["trace_mode"], call["routes"],
+            has_summary=call["has_summary"], capture_state=call["capture_state"],
+            hooks=call["hooks"], hook_failures=call["hook_failures"], mode=other,
+        ), call
         assert (every_run["tool_calls"] == "not_applicable") == (call["routes"] == ["mock"]), call
         assert (every_run["finding_validation"] == "not_applicable") == engine_hooks, call
         assert every_run["finding_candidate"] == every_run["finding_filtered"], call

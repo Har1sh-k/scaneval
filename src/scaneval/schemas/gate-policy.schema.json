@@ -1,0 +1,435 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/gate-policy.schema.json",
+  "title": "ScanEval gate policy",
+  "description": "The requirements a candidate system must meet against a baseline before an external workflow may promote it, frozen before any result is read and written whole into every decision made under it: the primary detection metric and the change it must make, the evidence the decision must rest on, the configuration differences the comparison is meant to measure, and whichever regression, precision, control, completion, coverage, review-burden, and cost requirements the policy chooses to make. Every threshold is written by whoever owns the policy; nothing here supplies one, and a block the policy leaves out is a requirement it does not make. It holds no result and no label.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_id",
+    "policy_version",
+    "view",
+    "primary",
+    "configuration"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.1"
+    },
+    "policy_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "policy_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "required_scope": {
+      "enum": [
+        "reviewed",
+        "draft"
+      ],
+      "description": "The weakest evidence scope the decision may rest on, read as the comparison's evidence scope for both systems in the policy's view. 'reviewed' (the default when this is omitted) needs reviewed evidence. 'draft' accepts draft or reviewed evidence and makes the decision a development decision, never a reviewed recommendation. Diagnostic fixture evidence meets neither."
+    },
+    "view": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "profile"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "full",
+            "pr"
+          ]
+        },
+        "profile": {
+          "enum": [
+            "standard",
+            "metadata_blinded"
+          ]
+        }
+      },
+      "description": "The one (mode, profile) view of the comparison every requirement reads. Views are never pooled, so a policy for another view is another policy."
+    },
+    "primary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "metric",
+        "weighting",
+        "min_improvement"
+      ],
+      "properties": {
+        "metric": {
+          "$ref": "#/$defs/metric"
+        },
+        "weighting": {
+          "$ref": "#/$defs/weighting"
+        },
+        "slice": {
+          "$ref": "#/$defs/slice"
+        },
+        "min_improvement": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "The least candidate-minus-baseline difference of the metric, as the comparison computes it, that counts as the improvement. An improvement below it fails."
+        },
+        "uncertainty": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "lower_bound_above"
+          ],
+          "properties": {
+            "lower_bound_above": {
+              "type": "number",
+              "minimum": -1,
+              "maximum": 1
+            },
+            "min_confidence": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "exclusiveMaximum": 1
+            },
+            "min_clusters": {
+              "type": "integer",
+              "minimum": 2
+            }
+          },
+          "description": "The uncertainty the improvement must survive. The lower bound of the comparison's paired interval must be above lower_bound_above, at the confidence the comparison was computed with; min_confidence and min_clusters, when declared, also bound that confidence and the clusters the interval rests on. An interval that is not 'ok' leaves the requirement inconclusive. Leave this out and the point estimate alone decides."
+        }
+      },
+      "description": "The one metric the change is meant to improve, and how much. It must be a measured known-target recall: a diagnostic, such as a random-order expectation, is never a primary metric and a policy naming one is refused."
+    },
+    "regressions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/regression"
+      },
+      "description": "Detection the candidate may not give up: each entry is a metric, a weighting, and a slice, with the decrease from the baseline it allows."
+    },
+    "precision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "population",
+        "min_value",
+        "max_unresolved_share",
+        "min_evidence_grade"
+      ],
+      "properties": {
+        "basis": {
+          "enum": [
+            "resolved",
+            "sensitivity_lower"
+          ],
+          "description": "Which figure of the reviewed-precision estimate min_value bounds: resolved precision T/(T+F), or the sensitivity lower bound T/(T+F+U), which counts every unresolved claim as false."
+        },
+        "population": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name"
+          ],
+          "properties": {
+            "name": {
+              "enum": [
+                "first_b",
+                "full"
+              ]
+            },
+            "budget": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "description": "The claim population the estimate must be over. The first-B and full populations are different, so a figure from one is not evidence about the other; budget is named exactly for first_b."
+        },
+        "min_value": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "The least value of the basis figure that meets the requirement."
+        },
+        "max_unresolved_share": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "The largest share of the sample's weighted claims that may remain unresolved (reviewed unresolved, disagreement, or never reviewed)."
+        },
+        "min_evidence_grade": {
+          "enum": [
+            "single_review",
+            "double_review_or_adjudicated"
+          ],
+          "description": "The weakest review grade the estimate may carry. An incomplete review never meets it."
+        },
+        "min_coverage": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "The least share of the population's units the sampled strata must hold; a stratum that drew no unit is not estimated at all."
+        },
+        "min_interval_lower_bound": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "The least lower bound of the estimate's approximate interval for resolved precision. Only the resolved basis has an interval."
+        },
+        "max_decrease_vs_baseline": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "The largest decrease of the basis figure from the baseline's own estimate. Declaring it makes a baseline estimate necessary."
+        }
+      },
+      "description": "Reviewed precision the candidate must show, from an estimate over a declared population of its own delivered claims. An estimate that is missing or not bound to the candidate and the compared runs leaves every precision requirement inconclusive."
+    },
+    "controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "capability_safe": {
+          "$ref": "#/$defs/control_bounds"
+        },
+        "fixed_target": {
+          "$ref": "#/$defs/control_bounds"
+        }
+      },
+      "description": "False-alarm bounds per control class, read from the candidate's whole-view control block. A class with no eligible control is unresolved, never a perfect score."
+    },
+    "completion": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "min": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "The least share of assigned inputs the candidate completes; only a successful scan completes."
+        },
+        "max_decrease": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "The largest decrease of that share from the baseline's."
+        }
+      },
+      "description": "Completion of the assigned work, read from the whole view."
+    },
+    "target_coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min_assessable_mass"
+      ],
+      "properties": {
+        "min_assessable_mass": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        }
+      },
+      "description": "The least assessable target mass, under the primary metric's weighting, that BOTH systems must show: a completed scan with a resolved outcome for the target. A baseline whose matches are largely unresolved would otherwise make any candidate look better."
+    },
+    "burden": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "max_claims_per_assignment": {
+          "type": "number",
+          "minimum": 0,
+          "description": "The most claim records the candidate delivers per assigned scan, over every assignment of the whole view."
+        },
+        "max_duplicate_share": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "The largest share of the candidate's delivered claim records that are exact duplicates of another record of the same scan."
+        },
+        "max_increase_ratio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "The largest ratio of the candidate's claims per assignment to the baseline's."
+        }
+      },
+      "description": "Review burden the candidate may add, from delivered claim volume."
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "min_coverage": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "The least share of executed scans whose cost is known. Without it, any cost requirement needs every cost known."
+        },
+        "max_per_assignment_usd": {
+          "type": "number",
+          "minimum": 0,
+          "description": "The most the candidate's executed scans may cost on average, in USD, over the scans whose cost is recorded."
+        },
+        "max_increase_ratio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "The largest ratio of the candidate's mean recorded cost per scan to the baseline's."
+        }
+      },
+      "description": "Cost the candidate may add. An unknown cost is unknown, never free: a cost requirement over missing cost data is unresolved."
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowed_differences"
+      ],
+      "properties": {
+        "allowed_differences": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "description": "The configuration differences the comparison is meant to measure, as the dotted keys the comparison lists (an entry also allows every key beneath it). Any other difference means the comparison does not isolate the intended change and leaves the decision inconclusive. An empty list allows none."
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "weighting": {
+      "enum": [
+        "equal_target",
+        "equal_project",
+        "equal_family",
+        "explicit"
+      ],
+      "description": "One of the target weightings the comparison's aggregation policy reports."
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "description": "full_recall or recall_at_budget. Anything else is refused when the policy is loaded, a random-order expectation and every other diagnostic by name."
+        },
+        "budget": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The budget B of recall_at_budget, named exactly for it."
+        }
+      }
+    },
+    "slice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dimension"
+      ],
+      "properties": {
+        "dimension": {
+          "enum": [
+            "all",
+            "project",
+            "workload"
+          ]
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      },
+      "description": "The whole view, or one project or workload of it. A regression may leave the value out to cover every project or workload; the primary metric may not."
+    },
+    "regression": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "metric",
+        "weighting",
+        "max_decrease"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "metric": {
+          "$ref": "#/$defs/metric"
+        },
+        "weighting": {
+          "$ref": "#/$defs/weighting"
+        },
+        "slice": {
+          "$ref": "#/$defs/slice"
+        },
+        "max_decrease": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "The largest decrease of the metric from the baseline's, as the comparison computes the difference."
+        },
+        "check_interval": {
+          "type": "boolean",
+          "description": "When true, the lower bound of the paired interval must also stay within max_decrease, so a noisy estimate that allows a larger regression is not a pass."
+        }
+      }
+    },
+    "control_bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_false_alarm_upper",
+        "min_completed_mass",
+        "min_assessable_mass"
+      ],
+      "properties": {
+        "max_false_alarm_upper": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "The largest missing-assessment upper bound F+ of the false-alarm rate on completed controls: every unresolved assessment counted as a false allegation."
+        },
+        "min_completed_mass": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "The least completed control mass."
+        },
+        "min_assessable_mass": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "The least resolved (assessable) control mass."
+        }
+      }
+    }
+  }
+}

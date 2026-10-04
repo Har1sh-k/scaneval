@@ -1,0 +1,386 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/gate-decision.schema.json",
+  "title": "ScanEval gate decision",
+  "description": "The outcome of holding one comparison of a candidate against a baseline, and optionally reviewed precision estimates of them, to a gate policy: pass only when every requirement the policy declares holds, fail when any fails, inconclusive when none fails and any could not be settled. Every requirement reports what was observed, what it was held to, and why. The decision is bound by digest to its policy, comparison, precision estimates, evaluator version, and the runs and schedules the comparison read, and the same inputs give the same document byte for byte. It is evidence for a decision made elsewhere: it promotes, deploys, and approves nothing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evaluator_version",
+    "outcome",
+    "recommendation_scope",
+    "policy",
+    "policy_sha256",
+    "blocks",
+    "view",
+    "comparison",
+    "precision",
+    "requirements",
+    "summary",
+    "failed",
+    "unresolved",
+    "notes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.1"
+    },
+    "evaluator_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "outcome": {
+      "enum": [
+        "pass",
+        "fail",
+        "inconclusive"
+      ],
+      "description": "fail if any requirement failed, else inconclusive if any could not be settled, else pass."
+    },
+    "recommendation_scope": {
+      "enum": [
+        "reviewed",
+        "development",
+        "none"
+      ],
+      "description": "What the decision can support: 'reviewed' when the policy requires reviewed evidence and the evidence was reviewed, 'development' when the policy itself declares draft scope and the evidence met it, 'none' when the evidence did not meet the policy's scope, whatever the outcome says."
+    },
+    "policy": {
+      "type": "object",
+      "description": "The complete gate policy, validated as a gate-policy document."
+    },
+    "policy_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "blocks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "declared",
+        "not_declared"
+      ],
+      "properties": {
+        "declared": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "primary",
+              "configuration",
+              "regressions",
+              "precision",
+              "controls",
+              "completion",
+              "target_coverage",
+              "burden",
+              "cost"
+            ]
+          }
+        },
+        "not_declared": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "primary",
+              "configuration",
+              "regressions",
+              "precision",
+              "controls",
+              "completion",
+              "target_coverage",
+              "burden",
+              "cost"
+            ]
+          }
+        }
+      },
+      "description": "Which requirement blocks the policy declared; a block it left out is a requirement it did not make, and was not evaluated."
+    },
+    "view": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "profile"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "full",
+            "pr"
+          ]
+        },
+        "profile": {
+          "enum": [
+            "standard",
+            "metadata_blinded"
+          ]
+        }
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "evaluator_version",
+        "policy_sha256",
+        "contract_sha256",
+        "baseline",
+        "candidate",
+        "runs"
+      ],
+      "properties": {
+        "sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "canonical_sha256 of the comparison report."
+        },
+        "evaluator_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "policy_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "The comparison's own aggregation policy digest."
+        },
+        "contract_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "The comparison's frozen-contract digest."
+        },
+        "baseline": {
+          "$ref": "#/$defs/system"
+        },
+        "candidate": {
+          "$ref": "#/$defs/system"
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/run"
+          }
+        }
+      }
+    },
+    "precision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "baseline",
+        "candidate"
+      ],
+      "properties": {
+        "baseline": {
+          "$ref": "#/$defs/estimate"
+        },
+        "candidate": {
+          "$ref": "#/$defs/estimate"
+        }
+      },
+      "description": "The precision estimates supplied, each by digest, or null when none was."
+    },
+    "requirements": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/requirement"
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requirements",
+        "passed",
+        "failed",
+        "inconclusive"
+      ],
+      "properties": {
+        "requirements": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "passed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inconclusive": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "failed": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "The ids of the failed requirements, in decision order."
+    },
+    "unresolved": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "The ids of the inconclusive requirements, in decision order."
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "system": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "system_id",
+        "config_sha256"
+      ],
+      "properties": {
+        "system_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "config_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "status",
+        "manifest_sha256",
+        "schedule_sha256",
+        "config_sha256",
+        "evidence_sha256"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "failed"
+          ]
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "schedule_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "config_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "evidence_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "estimate": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sha256",
+            "evaluator_version",
+            "sample_sha256",
+            "frame_sha256",
+            "reviews_sha256"
+          ],
+          "properties": {
+            "sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "evaluator_version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sample_sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "frame_sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "reviews_sha256": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "observed",
+        "threshold",
+        "explanation"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "fail",
+            "inconclusive"
+          ]
+        },
+        "observed": {
+          "description": "What the documents record, or null when nothing could be read."
+        },
+        "threshold": {
+          "description": "What the requirement holds it to."
+        },
+        "explanation": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}
