@@ -415,12 +415,18 @@ def placed(control_id: str, paths: list[str] | None = None, *, kind: str = "capa
     return control
 
 
-def omission_fixture(controls: list[dict], omitted: list[str] | None, assessments, *, claims=(), **result_fields):
-    """``(plan, result, decisions)``: a 2.1 plan of *controls* and a 2.1 result that lists *omitted*, if it lists any."""
+def omission_fixture(controls: list[dict], omitted: list[str] | None, assessments, *, claims=(),
+                     examined_nothing: bool | None = None, **result_fields):
+    """``(plan, result, decisions)``: a 2.1 plan of *controls* and a 2.1 result that lists *omitted*, if it lists any.
+
+    The result says it ``examined_nothing`` only when that is given, as an adapter that does not report it does not.
+    """
     plan = {**make_plan(controls=controls), "schema_version": "2.1"}
     result = {**make_result(list(claims), **result_fields), "schema_version": "2.1"}
     if omitted is not None:
         result["omitted_paths"] = omitted
+    if examined_nothing is not None:
+        result["examined_nothing"] = examined_nothing
     return plan, result, make_decisions(result, controls=assessments)
 
 
@@ -560,3 +566,127 @@ def test_a_result_that_lists_no_omission_scores_exactly_as_it_did_and_the_new_fi
         "result_sha256", "plan_sha256", "decisions_sha256", "status", "ranking", "bundles_resolved", "completed",
         "valid_positive_output", "budget_measurable", "review_budgets", "targets", "controls", "random_order",
         "claims", "duplicate_groups", "usage"}
+
+
+# --- a scan that examined none of what it was given -------------------------------------------------------
+#
+# The list of omitted paths covers the paths a change touches, so a control on a file the change leaves alone is
+# not on it. A scan that examined none of the change reached that control no more than it reached the one on the
+# test file, and a quiet assessment of it used to resolve it all the same.
+
+UNCHANGED = "src/server.js"
+
+
+def test_a_quiet_assessment_of_a_control_on_an_unchanged_file_resolves_nothing_when_the_scan_examined_nothing():
+    """The case left open: the change touches only tests/server.test.js, the scan reads none of it, and succeeds.
+
+    The control is the context kind, a safe capability in src/server.js that the change does not touch, so no list of
+    the change's paths names it. The scan completed, nothing was examined, and the control stays a completed
+    observation that is unresolved, counted in the false-alarm bound as it is for a control on the omitted path.
+    """
+    from scaneval.scoring import observe
+
+    plan, result, decisions = omission_fixture(
+        [placed("C1", [UNCHANGED])], [SERVER_TEST], QUIET, examined_nothing=True)
+
+    assert observe(plan, result, decisions)["controls"] == [
+        {"control_id": "C1", "type": "capability_safe", "decision": "quiet", "completed": True,
+         "resolved": False, "false_allegation": False, "observed_false_allegation": False}]
+    record = score(plan, result, decisions)
+    safe = record["metrics"]["controls"]["capability_safe"]
+    assert (safe["assigned"], safe["completed"], safe["resolved"], safe["false_allegations"]) == (1, 1, 0, 0)
+    assert safe["completion_mass"] == 1.0 and safe["assessable_mass"] == 0.0
+    assert safe["resolved_false_alarm_rate"] is None
+    assert safe["sensitivity_lower"] == 0.0 and safe["sensitivity_upper"] == 1.0
+    [warning] = withheld_warnings(record)
+    assert warning == ("1 quiet control assessment(s) earn no credit: the scan examined none of the input it was given, "
+                       "so its silence says nothing about any control.")
+    assert record["warnings"][-1] == warning
+
+
+def test_the_same_control_keeps_its_quiet_credit_when_the_scan_examined_some_of_the_change():
+    """Examining part of the change is not examining nothing: the unchanged file is as it was, one the list never names."""
+    from scaneval.scoring import observe
+
+    for fields in ({"examined_nothing": False}, {}):
+        plan, result, decisions = omission_fixture([placed("C1", [UNCHANGED])], [SERVER_TEST], QUIET, **fields)
+
+        assert observe(plan, result, decisions)["controls"][0]["resolved"] is True
+        assert withheld_warnings(score(plan, result, decisions)) == []
+
+
+@pytest.mark.parametrize("controls, omitted", [
+    ([placed("C1")], None), ([placed("C1")], []), ([placed("C1")], [SERVER_TEST]),
+    ([placed("C1", [UNCHANGED])], None), ([placed("C1", [UNCHANGED])], []),
+    ([placed("C1", [SERVER_TEST])], [SERVER_TEST]),
+], ids=["unplaced-no-list", "unplaced-empty-list", "unplaced-listed", "placed-no-list", "placed-empty-list",
+        "placed-on-an-omitted-path"])
+def test_every_control_of_a_scan_that_examined_nothing_is_unexamined_wherever_the_plan_places_it(controls, omitted):
+    """With or without the list beside it, and whether the plan places the control or not."""
+    from scaneval.scoring import observe
+
+    plan, result, decisions = omission_fixture(controls, omitted, QUIET, examined_nothing=True)
+
+    row = observe(plan, result, decisions)["controls"][0]
+    assert (row["completed"], row["resolved"]) == (True, False)
+    assert len(withheld_warnings(score(plan, result, decisions))) == 1
+
+
+def test_a_scan_that_examined_nothing_withholds_from_each_quiet_control_and_counts_only_those():
+    """Three controls: two assessed quiet and one never assessed. The warning counts the two, each once."""
+    from scaneval.scoring import observe
+
+    plan, result, decisions = omission_fixture(
+        [placed("C1", [UNCHANGED]), placed("C2"), placed("C3", ["src/other.js"])], [SERVER_TEST],
+        [("C1", "quiet", [], "no claim"), ("C2", "quiet", [], "no claim")], examined_nothing=True)
+
+    rows = {row["control_id"]: row for row in observe(plan, result, decisions)["controls"]}
+    assert [(rows[name]["decision"], rows[name]["resolved"]) for name in ("C1", "C2", "C3")] == [
+        ("quiet", False), ("quiet", False), ("unresolved", False)]
+    [warning] = withheld_warnings(score(plan, result, decisions))
+    assert warning.startswith("2 quiet control assessment(s) earn no credit: the scan examined none of the input")
+
+
+def test_a_confirmed_false_allegation_still_counts_when_the_scan_examined_nothing():
+    """Only silence is withheld: an allegation a reviewer confirmed fails the control, and resolves it."""
+    from scaneval.scoring import observe
+
+    alleged = claim("c1", "the handler runs the request body as a command", rank=1, path=UNCHANGED)
+    plan, result, decisions = omission_fixture(
+        [placed("C1", [UNCHANGED])], [SERVER_TEST], [("C1", "false_allegation", ["c1"], "confirmed")],
+        claims=[alleged], examined_nothing=True)
+
+    row = observe(plan, result, decisions)["controls"][0]
+    assert (row["completed"], row["resolved"], row["false_allegation"]) == (True, True, True)
+    record = score(plan, result, decisions)
+    safe = record["metrics"]["controls"]["capability_safe"]
+    assert (safe["resolved"], safe["false_allegations"], safe["resolved_false_alarm_rate"]) == (1, 1, 1.0)
+    assert withheld_warnings(record) == []
+
+
+@pytest.mark.parametrize("fields", [{"status": "partial"}, {"status": "error"}, {"bundles_resolved": False}],
+                         ids=["partial", "error", "unresolved-bundles"])
+def test_the_warning_for_a_scan_that_examined_nothing_is_only_for_what_that_alone_left_unresolved(fields):
+    from scaneval.scoring import observe
+
+    plan, result, decisions = omission_fixture(
+        [placed("C1", [UNCHANGED])], [SERVER_TEST], QUIET, examined_nothing=True, **fields)
+
+    assert observe(plan, result, decisions)["controls"][0]["resolved"] is False
+    assert withheld_warnings(score(plan, result, decisions)) == []
+
+
+def test_a_result_that_says_it_examined_some_scores_exactly_as_one_that_says_nothing():
+    """``examined_nothing: false`` is inert, as the plan's paths and an empty list are, and adds no key anywhere."""
+    from scaneval.scoring import observe
+
+    plain = omission_fixture([placed("C1", [UNCHANGED])], [SERVER_TEST], QUIET)
+    said = omission_fixture([placed("C1", [UNCHANGED])], [SERVER_TEST], QUIET, examined_nothing=False)
+
+    old, new = score(*plain), score(*said)
+
+    digests = ("result_sha256", "plan_sha256", "decisions_sha256")
+    assert {key: value for key, value in new.items() if key not in digests} == {
+        key: value for key, value in old.items() if key not in digests}
+    assert set(observe(*said)) == set(observe(*plain))
+    assert observe(*said)["controls"] == observe(*plain)["controls"]
