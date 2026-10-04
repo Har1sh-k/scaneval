@@ -3062,6 +3062,21 @@ def test_a_change_that_touches_only_a_path_deepsecs_filter_drops_earns_a_quiet_c
     assert safe["assessable_mass"] == 0.0 and safe["sensitivity_upper"] == 1.0
     assert any(warning.startswith("1 quiet control assessment(s) earn no credit") for warning in record["warnings"])
 
+    # The same facts through corpus aggregation, built with the aggregate tests' own helpers: what the real run listed
+    # and where the plan places the control. The aggregate reads the observation rows and has no rule of its own, so
+    # the control is a completed observation that is unresolved, and the false-alarm bound counts it, as 1 and not 0.
+    from test_v2_aggregate import control as frozen_control, planned, policy, safe_controls
+    from test_v2_aggregate import scan as saved_scan, write_run
+    from scaneval import aggregate
+
+    run = write_run(tmp_path / "aggregate", "run-deepsec-pr", [planned("safe", controls=[frozen_control("C1")])],
+                    outcomes={("safe", "sys-a", 1): saved_scan(paths={"C1": plan["controls"][0]["paths"]},
+                                                                omitted=result["omitted_paths"])})
+    block = safe_controls(aggregate.aggregate([run], policy=policy()))
+    assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (1, 1, 0, 1)
+    assert block["assessable_mass"] == 0.0 and block["resolved_rate"]["value"] is None
+    assert block["completed_lower"] == 0.0 and block["completed_upper"]["value"] == 1.0
+
 
 @pytest.mark.parametrize("path, quoted", [
     ("src/app.js", False), ("docs/read me.md", False), ("a-b_c.d/e~f.js", False),
