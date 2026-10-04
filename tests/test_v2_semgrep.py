@@ -1180,6 +1180,7 @@ def test_semgrep_full_mode_argv_is_what_it_always_was_and_carries_no_baseline(tm
                                "--timeout", "30", "--jobs", "1", f"--config={tmp_path / 'rules' / 'python'}", "."]
     assert not any("baseline" in word for word in outcome.command)
     assert not any("PR mode" in note for note in outcome.notes)
+    assert outcome.omitted_paths is None, "a full scan reports no omission"
 
 
 def test_semgrep_pr_mode_adds_only_the_baseline_option_to_the_full_argv(tmp_path):
@@ -1202,6 +1203,7 @@ def test_semgrep_pr_mode_keeps_import_loss_accounting(tmp_path):
     assert outcome.error["code"] == "import_loss"
     assert "1 semgrep result(s) could not be imported" in outcome.error["message"]
     assert [claim["claim_id"] for claim in outcome.claims] == ["c1"]
+    assert outcome.omitted_paths == [], "a partial outcome carries what Semgrep scanned and what it did not"
 
 
 def test_semgrep_pr_mode_keeps_the_failure_classification_of_a_nonzero_exit(tmp_path):
@@ -1211,6 +1213,7 @@ def test_semgrep_pr_mode_keeps_the_failure_classification_of_a_nonzero_exit(tmp_
     assert outcome.status == "error" and outcome.exit_code == 2 and outcome.claims == []
     assert outcome.error["code"] == "exit_2"
     assert "baseline commit is not in this repository" in outcome.error["message"]
+    assert outcome.omitted_paths is None, "an error carries no claim Semgrep reported, so it lists nothing"
 
 
 def test_semgrep_pr_mode_notes_that_a_timeout_can_leave_the_tree_at_the_base_commit(tmp_path, monkeypatch):
@@ -1230,6 +1233,7 @@ def test_semgrep_pr_mode_notes_that_a_timeout_can_leave_the_tree_at_the_base_com
                                     spec=spec, preparation=fake_preparation(tmp_path), timeout_seconds=60,
                                     trace_mode="off", trace_dir=None)
     assert outcome.status == "timeout" and outcome.timed_out is True and outcome.claims == []
+    assert outcome.omitted_paths is None
     assert any("leaves the tree at the base commit" in note for note in outcome.notes)
 
 
@@ -1353,6 +1357,7 @@ def test_semgrep_pr_mode_reports_only_the_new_finding_and_never_scans_an_unchang
     assert [result["path"] for result in payload["results"]] == ["new.py"]
     assert payload["paths"]["scanned"] == ["new.py", "old.py"], "the unchanged file was not scanned"
     assert "keep.py" not in json.dumps(payload["results"]) and "README.md" not in payload["paths"]["scanned"]
+    assert outcome.omitted_paths == [], "Semgrep scanned every path the change touches, and keep.py is not one"
     assert f"--baseline-commit={base}" in outcome.command
 
     assert working_tree(workspace) == before
@@ -1379,6 +1384,7 @@ def test_semgrep_pr_mode_does_not_report_a_finding_that_only_moved_with_a_rename
     assert outcome.status == "success", outcome.error
     assert outcome.claims == []
     assert payload["paths"]["scanned"] == ["moved.py"], "the renamed file was scanned, and its finding matched to base"
+    assert outcome.omitted_paths == ["old.py"], "the old name of the renamed file is a path the change removed"
 
 
 # --- PR mode: an empty baseline review is not a scan that read nothing --------------------
@@ -1423,7 +1429,7 @@ def test_semgrep_pr_mode_keeps_nothing_scanned_an_error_when_the_change_touches_
     """Semgrep may skip a source file for its own reasons; a diff that touches one was not reviewed."""
     outcome, *_ = scan_pr_with_fake(tmp_path, EMPTY_SCAN, 0, base={"app.py": "import os\n"}, head=changed)
     assert outcome.status == "error" and outcome.exit_code == 0 and outcome.claims == []
-    assert outcome.error["code"] == "nothing_scanned"
+    assert outcome.error["code"] == "nothing_scanned" and outcome.omitted_paths is None
     message = outcome.error["message"]
     assert "Semgrep looked at no source at all" in message
     assert f"the change touches {len(listed.split(', '))} file(s) in a language this adapter scans ({listed})" in message
@@ -1476,6 +1482,78 @@ def test_semgrep_pr_mode_without_a_scanned_list_stays_a_success_that_cannot_say_
     assert outcome.status == "success"
     assert any("reported no paths.scanned list" in note for note in outcome.notes)
     assert not any(note.startswith("Empty baseline review") for note in outcome.notes)
+
+
+# --- PR mode: the paths Semgrep did not scan are reported as omitted -------------------------------
+
+
+def test_semgrep_pr_mode_lists_the_only_file_no_rule_applies_to_as_omitted_in_the_empty_baseline_review(tmp_path):
+    """The reviewer's case in Semgrep's terms: a change that touches only such a file is a success over nothing."""
+    outcome, *_ = scan_pr_with_fake(tmp_path, EMPTY_SCAN, 0, base={"seed.py": "import os\n", "README.md": "# docs\n"},
+                                    head={"README.md": "# changed\n"})
+
+    assert outcome.status == "success" and outcome.claims == [] and outcome.error is None
+    assert outcome.bundles_resolved is True
+    assert outcome.omitted_paths == ["README.md"]
+    assert any(note.startswith("Empty baseline review") for note in outcome.notes), "the status and the note are kept"
+
+
+def test_semgrep_pr_mode_does_not_list_a_changed_file_semgrep_scanned(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["a.py", "b.py"]}, "errors": []})
+
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base={"seed.py": "1\n"},
+                                    head={"a.py": "1\n", "b.py": "2\n"})
+
+    assert outcome.status == "success" and outcome.omitted_paths == [], \
+        "an empty list says Semgrep scanned every path the change touches, which an absent field would not say"
+
+
+def test_semgrep_pr_mode_lists_what_it_did_not_scan_beside_what_it_did_and_every_path_the_change_removed(tmp_path):
+    """Scanned: a.py and moved.py. Touched and not scanned: b.py, c.go, notes.md, the deleted seed.py, and old.py."""
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["a.py", "moved.py"]}, "errors": []})
+    base = {"seed.py": "1\n", "old.py": "def helper():\n    return 'moved'\n", "keep.py": "2\n"}
+    head = {"a.py": "1\n", "b.py": "2\n", "c.go": "package c\n", "notes.md": "x\n", "seed.py": None,
+            "old.py": None, "moved.py": "def helper():\n    return 'moved'\n"}
+
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base=base, head=head)
+
+    assert outcome.status == "success"
+    assert outcome.omitted_paths == ["b.py", "c.go", "notes.md", "old.py", "seed.py"], \
+        "keep.py is not touched by the change, so it is not an omission of this review"
+
+
+def test_semgrep_pr_mode_reads_the_scanned_paths_the_way_it_reads_a_claim_location(tmp_path):
+    """Semgrep may spell a path with a leading ``./``; it names the same file."""
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["./app.py", ".//lib/util.py"]},
+                          "errors": []})
+
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base={"app.py": "1\n", "lib/util.py": "1\n"},
+                                    head={"app.py": "2\n", "lib/util.py": "2\n", "README.md": "x\n"})
+
+    assert outcome.omitted_paths == ["README.md"]
+
+
+def test_semgrep_pr_mode_without_a_scanned_list_lists_every_path_the_change_touches(tmp_path):
+    """Nothing says which paths it opened, so credit is withheld for all of them rather than granted for none."""
+    payload = json.dumps({"version": "9.9.9", "results": [], "errors": []})
+
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base={"app.py": "1\n", "gone.py": "x\n", "keep.py": "k\n"},
+                                    head={"app.py": "2\n", "gone.py": None, "new.py": "n\n"})
+
+    assert outcome.status == "success"
+    assert any("reported no paths.scanned list" in note for note in outcome.notes)
+    assert outcome.omitted_paths == ["app.py", "gone.py", "new.py"]
+
+
+def test_semgrep_pr_mode_carries_its_omissions_on_a_partial_outcome_too(tmp_path):
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["a.py"]},
+                          "errors": [{"level": "error", "message": "a rule failed"}]})
+
+    outcome, *_ = scan_pr_with_fake(tmp_path, payload, 0, base={"seed.py": "1\n"},
+                                    head={"a.py": "1\n", "notes.md": "x\n"})
+
+    assert outcome.status == "partial" and outcome.error["code"] == "scan_errors"
+    assert outcome.omitted_paths == ["notes.md"]
 
 
 def test_semgrep_full_mode_still_treats_an_empty_scanned_list_as_nothing_scanned(tmp_path):
@@ -1538,6 +1616,7 @@ def test_semgrep_pr_mode_reports_a_docs_only_change_as_an_empty_review_not_a_fai
     assert payload["paths"]["scanned"] == [] and payload["results"] == [] and payload["errors"] == []
     assert outcome.status == "success" and outcome.exit_code == 0 and outcome.claims == []
     assert outcome.error is None and outcome.bundles_resolved is True
+    assert outcome.omitted_paths == ["README.md", "docs/guide.md"], "scanned is empty, so both touched paths are omitted"
     assert any(note.startswith("Empty baseline review") and "2 path(s) outside those languages" in note
                for note in outcome.notes)
     assert working_tree(workspace) == before and _git("status", "--porcelain", cwd=workspace) == ""
@@ -1551,6 +1630,7 @@ def test_semgrep_pr_mode_reports_a_change_that_only_deletes_files_as_an_empty_re
     outcome, payload = scan_pr(tmp_path, workspace, base, head, spec, preparation)
     assert payload["paths"]["scanned"] == []
     assert outcome.status == "success" and outcome.claims == []
+    assert outcome.omitted_paths == ["old.py"], "a deleted path is a path the change touches that Semgrep never read"
     assert any(note.startswith("Empty baseline review") and "1 deleted path(s)" in note for note in outcome.notes)
 
 
