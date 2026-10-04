@@ -940,13 +940,17 @@ approval across. `corpus canonical` is the same kind of write for a canonical ro
 
 That is also how a scope exclusion is declared: before the run, by leaving the item out of the plan. A
 scanner's own omission is never one. A control in a PR plan carries `paths`, the paths of its pack
-locations (a control with no location carries none), and a PR result may list `omitted_paths`, the paths the change touches that the scanner did
-not examine: Semgrep lists those not among its `paths.scanned`, and DeepSec the changed paths it made no
-file record for, its own ignore filter's drops among them. A quiet assessment of a control on a listed
-path, or of one whose plan gives it no paths while the result lists any, resolves nothing. The control
-stays a completed, unresolved observation, `replay` warns how many were withheld, and a confirmed false
-allegation about it still counts. The run's status is unchanged, so a change that touches only files the
-scanner's filter drops is still a success.
+locations (a control with no location carries none), and a PR result may list `omitted_paths`, the
+paths the change touches that the scanner did not examine: Semgrep lists those not among its
+`paths.scanned`, and DeepSec the changed paths it made no file record for, its own ignore filter's
+drops among them. A quiet assessment of a control on a listed path, or of one whose plan gives it no
+paths while the result lists any, resolves nothing. When the list is every path the change touches,
+the result also says `examined_nothing` and no quiet assessment of any control resolves anything, a
+control on an unchanged `context` file included: a review that read none of the change reached none of
+them. A review that examined some of the change still credits that `context` control. A control
+withheld stays a completed, unresolved observation, `replay` warns how many were withheld, and a
+confirmed false allegation about it still counts. The run's status is unchanged, so a change that
+touches only files the scanner's filter drops is still a success.
 
 A PR input is configured by its change set and needs a 2.1 configuration. The first system below
 runs the own harness's pr mode with its mock runner, which calls no model; the second is Semgrep,
@@ -1172,7 +1176,8 @@ These are limits of the current implementation, not guarantees about your enviro
 - **Omissions are reported for native PR reviews by `semgrep` and `deepsec` only.** A full scan does
   not list the paths its scanner's ignore rules or limits dropped, the own harness's PR review lists
   none, and a list covers only the paths the change touches, so a control on an unchanged `context` file
-  is not withheld. A quiet assessment over any of them still earns credit.
+  is withheld only when the review examined none of the change. A quiet assessment over a path a full scan
+  or the own harness dropped, or over such a file when some of the change was examined, still earns credit.
 - **No cross-pack weighting.** `scaneval aggregate` combines the inputs, systems, and repetitions
   of saved runs of one pack into weighted corpus metrics ([aggregation](AGGREGATION.md)). It
   refuses runs of different packs. Private and public results stay separate because aggregation
