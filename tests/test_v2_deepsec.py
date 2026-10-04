@@ -713,6 +713,8 @@ def test_a_clean_run_produces_claims_artifacts_and_a_trace_of_what_deepsec_recor
     assert execution["adapter"]["name"] == "deepsec"
     assert execution["provenance"]["source_modified"] is False
     assert execution["timed_out"] is False
+    assert result["schema_version"] == "2.0" and "omitted_paths" not in result, "a full run reports no omission"
+    assert "examined_nothing" not in result, "and does not say whether it examined anything"
 
     # Two source files, one finding each, both joined to the native id in the file records.
     assert len(result["claims"]) == 2
@@ -2448,6 +2450,8 @@ def test_a_pr_run_with_an_errored_batch_and_a_finished_one_is_partial_and_keeps_
     assert "DeepSec itself counted 1 errored batch(es)" in outcome.error["message"]
     assert "part of the change reached no verdict" in outcome.error["message"]
     assert len(outcome.claims) == 1, "the batch that finished still reports what it found"
+    assert outcome.omitted_paths == [], "every changed path has a record, and the errored one is the status's to report"
+    assert outcome.examined_nothing is False, "DeepSec examined the change, and one of its files reached no verdict"
     assert any("deepsec process exited 1 and the run went on" in note for note in outcome.notes)
 
 
@@ -2462,7 +2466,7 @@ def test_a_pr_run_in_which_every_batch_errored_observed_nothing_and_is_an_error(
     assert outcome.error["code"] == "deepsec_batches_failed"
     assert "2 file(s) in status 'error'" in outcome.error["message"]
     assert outcome.error["message"].endswith("no file reached a verdict, so none of the change was observed")
-    assert outcome.bundles_resolved is False
+    assert outcome.bundles_resolved is False and outcome.omitted_paths is None and outcome.examined_nothing is None
 
 
 def test_an_exhausted_quota_is_partial_with_the_source_deepsec_named_when_some_file_finished(tmp_path):
@@ -2514,6 +2518,8 @@ def test_a_run_that_crashed_mid_way_leaves_unfinished_files_and_says_what_deepse
     assert outcome.error["message"].endswith("deepsec process stderr: fake deepsec crashed mid-run\n\n"
                                              "(set DEEPSEC_DEBUG=1 for a stack trace)")
     assert [claim["primary_location"]["path"] for claim in outcome.claims] == ["src/a.js"]
+    assert outcome.omitted_paths == [], "the unfinished files have records: they are partial, not omitted"
+    assert outcome.examined_nothing is False
 
 
 def test_a_run_that_crashed_before_any_file_finished_is_an_error(tmp_path):
@@ -2575,6 +2581,7 @@ def test_a_pr_process_that_outlives_the_budget_is_a_timeout_like_any_other_step(
     outcome, *_ = scan_pr(tmp_path, root, workspace, pr, timeout_seconds=3)
     assert outcome.status == "timeout" and outcome.timed_out is True
     assert "deepsec process exhausted the shared" in outcome.error["message"]
+    assert outcome.omitted_paths is None and outcome.examined_nothing is None
 
 
 # --- PR mode: nothing to process --------------------------------------------------------
@@ -2590,6 +2597,9 @@ def test_a_change_deepsec_selects_nothing_from_is_a_completed_empty_review_and_s
     assert "Nothing to process" in ANSI.sub("", (raw / "deepsec-process.stdout.txt").read_text(encoding="utf-8"))
     assert outcome.status == "success" and outcome.error is None and outcome.claims == []
     assert outcome.bundles_resolved is True and outcome.exit_code == 0
+    assert outcome.omitted_paths == ["README.md", "src/db.js", "tests/server.test.js"], \
+        "the two dropped paths and the one removed: every path the change touches, and DeepSec read none of them"
+    assert outcome.examined_nothing is True, "and that is every path the change touches, so it says nothing was examined"
     empty = next(note for note in outcome.notes if note.startswith("Empty review:"))
     assert f"from {pr.base}..{pr.head}" in empty and "it said \"Nothing to process\"" in empty
     assert "not a failure" in empty
@@ -2639,6 +2649,49 @@ def test_a_pr_run_names_the_changed_paths_deepsecs_own_filter_dropped(tmp_path):
     assert "The change also removed 1 path(s) (src/db.js)" in note
     assert "prints quoted" not in note and "except for" not in note, "no name here is one git quotes"
     assert outcome.error is None and outcome.bundles_resolved is True
+    assert outcome.omitted_paths == ["README.md", "src/db.js", "tests/server.test.js", "types/api.d.ts"]
+    assert outcome.examined_nothing is False, "src/server.js and src/routes.js were investigated, so some of it was"
+
+
+def test_a_change_that_touches_only_a_path_deepsecs_filter_drops_is_still_a_success_and_lists_it_as_omitted(tmp_path):
+    """The reviewer's case: a change touching only tests/server.test.js is a success though nothing was inspected.
+
+    DeepSec's own filtering is kept: it is the empty review it was, with its note, and a success. What the result adds
+    is the path, so that what the scorer reads off that success is not "the control there was found quiet".
+    """
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, {"tests/server.test.js": "t\n"})
+
+    outcome, raw, _ = scan_pr(tmp_path, root, workspace, pr)
+
+    assert "Nothing to process" in ANSI.sub("", (raw / "deepsec-process.stdout.txt").read_text(encoding="utf-8"))
+    assert outcome.status == "success" and outcome.claims == [] and outcome.error is None
+    assert outcome.bundles_resolved is True and outcome.exit_code == 0
+    assert outcome.omitted_paths == ["tests/server.test.js"]
+    assert outcome.examined_nothing is True, "so no control earns quiet credit from this success, wherever it is"
+    assert any(note.startswith("Empty review:") for note in outcome.notes)
+    unreviewed = next(note for note in outcome.notes if note.startswith("DeepSec did not investigate"))
+    assert "(tests/server.test.js)" in unreviewed
+
+
+def test_a_pr_run_that_investigated_every_changed_path_reports_that_it_omitted_none(tmp_path):
+    """An empty list says DeepSec was asked and saw none, which an absent field would not say."""
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+
+    assert outcome.status == "success" and outcome.omitted_paths == [] and outcome.examined_nothing is False
+
+
+def test_a_change_that_only_removes_a_file_lists_it_because_deepsec_reads_only_head(tmp_path):
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, {"src/db.js": None})
+
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+
+    assert outcome.status == "success" and outcome.omitted_paths == ["src/db.js"]
+    assert outcome.examined_nothing is True, "a removed path is touched and never read, so the whole change went unread"
 
 
 def test_a_record_the_run_could_not_read_is_said_to_possibly_belong_to_a_path_it_lists(tmp_path):
@@ -2647,6 +2700,8 @@ def test_a_record_the_run_could_not_read_is_said_to_possibly_belong_to_a_path_it
     workspace, pr = pr_workspace(tmp_path, {**CHANGED_SOURCE, "README.md": "# more\n"})
     outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
     assert outcome.status == "partial" and outcome.error["code"] == "import_loss"
+    assert outcome.omitted_paths == ["README.md"], "a partial outcome carries what DeepSec read, and what it left out"
+    assert outcome.examined_nothing is False
     note = next(note for note in outcome.notes if note.startswith("DeepSec did not investigate"))
     assert "(README.md)" in note
     assert note.endswith("1 DeepSec record(s) could not be read, so a path listed here may have had one.")
@@ -2675,6 +2730,9 @@ def test_a_changed_path_git_prints_quoted_makes_the_review_partial_and_is_named_
                             "about them")
     assert "README.md" not in message, "a path that only the ignore filter dropped is DeepSec's scope, and stays a note"
     assert [claim["primary_location"]["path"] for claim in outcome.claims] == ["src/routes.js"]
+    assert outcome.omitted_paths == ["README.md", "src/caf\u00e9.js"], \
+        "the name DeepSec cannot list and the one its filter dropped are both paths it did not examine"
+    assert outcome.examined_nothing is False, "src/routes.js was investigated"
     note = next(note for note in outcome.notes if note.startswith("DeepSec did not investigate"))
     assert "2 of the 3 path(s) this change leaves at head" in note and "(README.md, src/caf\u00e9.js)" in note
     assert "not a failure of the run, except for the 1 named next;" in note
@@ -2698,6 +2756,8 @@ def test_a_change_that_touches_only_a_quoted_name_is_an_error_and_never_an_empty
     assert "Nothing to process" in ANSI.sub("", (raw / "deepsec-process.stdout.txt").read_text(encoding="utf-8"))
     assert outcome.exit_code == 0, "DeepSec itself ran to the end; it is the change it read that was short"
     assert outcome.status == "error" and outcome.claims == [] and outcome.bundles_resolved is False
+    assert outcome.omitted_paths is None, "an error carries no claim DeepSec read, so it lists nothing"
+    assert outcome.examined_nothing is None, "and does not say whether it examined anything"
     assert outcome.error["code"] == "scope_incomplete"
     assert outcome.error["message"].startswith("1 changed path(s) (src/caf\u00e9.js) have a name git prints quoted")
     assert outcome.error["message"].endswith("no file reached a verdict, so none of the change was observed")
@@ -2969,6 +3029,66 @@ def test_a_quiet_assessment_of_a_control_on_a_name_deepsec_cannot_list_earns_no_
                    for note in load_document(bundle / "execution.json", "execution-record")["notes"])
 
 
+def test_a_change_that_touches_only_a_path_deepsecs_filter_drops_earns_a_quiet_control_on_it_no_credit(tmp_path):
+    """The reviewer's case, through the runner and the scorer: a pull request that changes only tests/server.test.js.
+
+    DeepSec drops the file with its own filter, says "Nothing to process", and exits 0, so the run is the empty review
+    it was and a ``success`` with resolved bundles. A quiet assessment of a control planned on that file resolved it,
+    so a safe capability no model opened counted in the false-alarm rate. The saved result now lists the path, and the
+    scorer reads it against the paths the plan gives the control.
+    """
+    root = fake_deepsec_root(tmp_path)
+    prepared = pr_prepared_input(tmp_path, {"tests/server.test.js": "test('serves', () => {});\n"})
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+
+    bundle = run_invocation(prepared=prepared, adapter=adapter, spec=spec,
+                            preparation=adapter.prepare(spec, tmp_path / "cache"), out_dir=tmp_path / "out",
+                            run_id="run-deepsec-pr", timeout_seconds=300, trace_mode="off",
+                            network_policy="model_provider_only", clock=CLOCK)
+
+    result = load_document(bundle / "result.json", "scan-result")
+    assert result["status"] == "success" and result["claims"] == [] and result["bundles_resolved"] is True
+    assert result["schema_version"] == "2.1" and result["omitted_paths"] == ["tests/server.test.js"]
+    assert result["examined_nothing"] is True
+    notes = load_document(bundle / "execution.json", "execution-record")["notes"]
+    assert any(note.startswith("Empty review:") for note in notes), "DeepSec's own filtering is kept as it was"
+    plan = {"schema_version": "2.1", "input_hash": result["input_hash"], "scope": "diagnostic",
+            "targets": [{"target_id": "T1", "description": "the planted root cause in src/server.js",
+                         "validation_level": "fixture"}],
+            "controls": [{"control_id": "C1", "description": "the safe test server in tests/server.test.js",
+                          "type": "capability_safe", "validation_level": "fixture",
+                          "paths": ["tests/server.test.js"]}],
+            "review_budgets": [3]}
+    decisions = {"schema_version": "2.0", "run_id": result["run_id"], "input_hash": result["input_hash"],
+                 "result_sha256": canonical_sha256(result), "claim_matches": [],
+                 "control_assessments": [{"control_id": "C1", "decision": "quiet", "claim_ids": [],
+                                          "reason": "the scanner said nothing about the safe test server"}]}
+
+    control = observe(plan, result, decisions)["controls"][0]
+    assert (control["decision"], control["completed"], control["resolved"]) == ("quiet", True, False)
+    record = score(plan, result, decisions)
+    safe = record["metrics"]["controls"]["capability_safe"]
+    assert (safe["assigned"], safe["completed"], safe["resolved"]) == (1, 1, 0)
+    assert safe["assessable_mass"] == 0.0 and safe["sensitivity_upper"] == 1.0
+    assert any(warning.startswith("1 quiet control assessment(s) earn no credit") for warning in record["warnings"])
+
+    # The same facts through corpus aggregation, built with the aggregate tests' own helpers: what the real run listed
+    # and where the plan places the control. The aggregate reads the observation rows and has no rule of its own, so
+    # the control is a completed observation that is unresolved, and the false-alarm bound counts it, as 1 and not 0.
+    from test_v2_aggregate import control as frozen_control, planned, policy, safe_controls
+    from test_v2_aggregate import scan as saved_scan, write_run
+    from scaneval import aggregate
+
+    run = write_run(tmp_path / "aggregate", "run-deepsec-pr", [planned("safe", controls=[frozen_control("C1")])],
+                    outcomes={("safe", "sys-a", 1): saved_scan(paths={"C1": plan["controls"][0]["paths"]},
+                                                                omitted=result["omitted_paths"])})
+    block = safe_controls(aggregate.aggregate([run], policy=policy()))
+    assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (1, 1, 0, 1)
+    assert block["assessable_mass"] == 0.0 and block["resolved_rate"]["value"] is None
+    assert block["completed_lower"] == 0.0 and block["completed_upper"]["value"] == 1.0
+
+
 @pytest.mark.parametrize("path, quoted", [
     ("src/app.js", False), ("docs/read me.md", False), ("a-b_c.d/e~f.js", False),
     ("src/caf\u00e9.js", True), ('we"ird.js', True), ("back\\slash.js", True), ("tab\tname.js", True),
@@ -2993,6 +3113,8 @@ def test_a_renamed_file_is_investigated_under_its_new_name_and_its_old_name_is_a
     assert not any("did not investigate" in note and "src/store.js" in note for note in outcome.notes)
     assert any(note == "The change also removed 1 path(s) (src/db.js); DeepSec never reads a path that no longer "
                        "exists at head." for note in outcome.notes)
+    assert outcome.omitted_paths == ["src/db.js"], "the old name is a removal, and the new name has a record"
+    assert outcome.examined_nothing is False, "the new name was investigated"
 
 
 def test_the_unreviewed_note_lists_a_bounded_number_of_paths_and_counts_the_rest():

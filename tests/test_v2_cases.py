@@ -192,10 +192,15 @@ def make_pack() -> dict:
     return pack
 
 
-def export(tmp_path: Path) -> Path:
+def export(tmp_path: Path, *, also: tuple[str, ...] = ()) -> Path:
+    """An export holding ``src/app.py`` and, for each other path in *also*, a one-line file."""
     source = tmp_path / "source"
     (source / "src").mkdir(parents=True)
     (source / "src" / "app.py").write_text("import subprocess\ndef run(cmd):\n    return subprocess.run(cmd, shell=True)\n", encoding="utf-8")
+    for relative in also:
+        if not (source / relative).exists():
+            (source / relative).parent.mkdir(parents=True, exist_ok=True)
+            (source / relative).write_text("x = 1\n", encoding="utf-8")
     return source
 
 
@@ -2705,20 +2710,24 @@ DIFF_HASH = "sha256:" + "e" * 64
 PR_IDENTITY = {"base_tree_hash": BASE_HASH, "head_tree_hash": HASH, "diff_sha256": DIFF_HASH}
 
 
-def pr_plan_pack(tmp_path: Path, *, admit: bool = True) -> dict:
+def pr_plan_pack(tmp_path: Path, *, admit: bool = True, locations: list[dict] | None = None) -> dict:
     """One case on the head snapshot with a target and two controls, and a change set naming two items.
 
     The target and ``C-widget-shell-eligible`` are eligible under ``cs-shell``; the third item,
     ``C-widget-shell-outside``, is a control of the same case that the change set does not name.
-    Eligibility is stated before the review, so the approval covers it.
+    Eligibility is stated before the review, so the approval covers it. *locations* replaces the
+    locations of the eligible control, and the export then holds each file they name.
     """
     pack = make_pack()
     add_snapshot(pack, BASE_SNAPSHOT)
     add_change_set(pack, CHANGE_SET)
-    case_by_id(pack, "widget-shell")["controls"] += [safe_control("C-widget-shell-eligible"),
-                                                     safe_control("C-widget-shell-outside")]
+    eligible = safe_control("C-widget-shell-eligible")
+    if locations is not None:
+        eligible["locations"] = locations
+    case_by_id(pack, "widget-shell")["controls"] += [eligible, safe_control("C-widget-shell-outside")]
     reanchor(pack)
-    mechanical_checks(pack, "widget-abc", export(tmp_path), HASH, clock=CLOCK)
+    mechanical_checks(pack, "widget-abc", export(tmp_path, also=tuple(item["path"] for item in locations or ())),
+                      HASH, clock=CLOCK)
     set_pr_eligibility(pack, "widget-shell", "cs-shell", "introduced", "changed")
     set_pr_eligibility(pack, "widget-shell", "cs-shell", "affected", "context",
                        control_id="C-widget-shell-eligible")
@@ -2760,6 +2769,40 @@ def test_a_pr_plan_carries_only_the_items_the_change_set_names_and_the_scope_eac
                      "C-widget-shell-outside"]
 
 
+def test_a_pr_plan_control_states_the_sorted_unique_paths_of_its_pack_locations(tmp_path):
+    """The scorer places a control by these: where the pack says it is, each file once, in order."""
+    locations = [{"path": "src/util.py", "start_line": 1, "end_line": 1, "role": "operation"},
+                 {"path": "src/app.py", "start_line": 2, "end_line": 2, "role": "guard"},
+                 {"path": "src/app.py", "start_line": 1, "end_line": 1, "role": "operation"},
+                 {"path": "lib/helpers.py", "start_line": 1, "end_line": 1, "role": "source"}]
+    pack = pr_plan_pack(tmp_path, locations=locations)
+
+    plan, _ = pr_plan(pack)
+
+    assert validate_document("evaluation-plan", plan) is plan
+    assert [(c["control_id"], c["paths"]) for c in plan["controls"]] == [
+        ("C-widget-shell-eligible", ["lib/helpers.py", "src/app.py", "src/util.py"])]
+    assert all("paths" not in target for target in plan["targets"]), "only a control is placed, and only to be scored"
+
+
+def test_a_pr_control_with_no_location_leaves_paths_out_and_does_not_state_that_it_is_nowhere(tmp_path):
+    plan, _ = pr_plan(pr_plan_pack(tmp_path, locations=[]))
+
+    assert validate_document("evaluation-plan", plan) is plan
+    assert [(c["control_id"], "paths" in c) for c in plan["controls"]] == [("C-widget-shell-eligible", False)]
+
+
+def test_a_pack_location_spelled_another_way_is_placed_as_the_file_it_names():
+    """A pack location need only be a relative path without a parent segment; a result lists paths as git does."""
+    from scaneval.cases import _control_paths
+
+    control = {"locations": [{"path": "./src/util.py"}, {"path": "src//app.py"}, {"path": "src/app.py"},
+                             {"path": "."}, {"path": "src/we\\ird.py"}]}
+
+    assert _control_paths(control) == ["src/app.py", "src/util.py", "src/we\\ird.py"]
+    assert _control_paths({"locations": []}) == [] and _control_paths({"locations": [{"path": "./"}]}) == []
+
+
 def test_pr_mode_without_a_change_set_is_still_a_full_plan_with_the_pr_budgets(tmp_path):
     pack = pr_plan_pack(tmp_path)
 
@@ -2767,6 +2810,8 @@ def test_pr_mode_without_a_change_set_is_still_a_full_plan_with_the_pr_budgets(t
     full, _ = build_plan(pack, "widget-abc", HASH)
 
     assert plan["schema_version"] == "2.0" and "pr" not in plan["provenance"] and notes == []
+    assert not any("paths" in control for control in plan["controls"] + full["controls"]), \
+        "a plan that names no change stays the 2.0 plan, which has no field for where a control is"
     assert plan["review_budgets"] == [5, 10, 20] and full["review_budgets"] == [5, 10, 20, 50]
     assert plan["provenance"]["mode"] == "pr"
     assert [c["control_id"] for c in plan["controls"]] == ["C-widget-shell-eligible", "C-widget-shell-outside"],         "with no change set nothing is scoped, so every item of the snapshot is planned"

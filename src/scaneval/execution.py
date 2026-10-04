@@ -82,6 +82,16 @@ failed, and keeps the adapter's own ``bundles_resolved``. Losing trace events is
 claim, so nothing about the claim set is withdrawn; what is withdrawn is the result's standing
 as a clean complete observation.
 
+An adapter may report ``omitted_paths``, the paths of its input it observed the scanner did not
+examine. They are written into the result sorted and each path once, and the result is then a 2.1
+result, because the version moves only when a 2.1 field needs it. They are the adapter's claim:
+this module checks only their shape, the contract checks that each is a relative POSIX path, and
+nothing here can see whether a path was really examined. It may also report ``examined_nothing``,
+that it can show no part of the input to have been examined, and a ``bool`` is written into the
+result as it is, in a 2.1 result for the same reason; it too is the adapter's claim and is checked
+for its type only. The error result recorded in place of a result the contract refused carries
+neither, like everything else the adapter supplied.
+
 Directory separation documents the boundary; it does not enforce it. Network and
 filesystem policy are declared here and must be enforced outside this process.
 """
@@ -889,12 +899,12 @@ def _outcome_violation(outcome: object) -> str | None:
     """The first way *outcome* breaks the adapter contract, or ``None`` when it keeps it.
 
     This checks only the shapes the bundle documents are built from: the outcome type itself,
-    artifact entries, tool versions, command words, usage numbers, notes, and the containers
-    this module copies or walks. It says nothing about whether the scan was correct, complete,
-    or honest, and it does not check the claims, the ranking, or the status: the scan-result
-    contract checks those, and a violation there is recorded as a failed import. A field only
-    the execution record constrains, such as a non-integer exit code, is caught when that record
-    is validated.
+    artifact entries, tool versions, command words, usage numbers, notes, the omitted paths, the
+    ``examined_nothing`` flag, and the containers this module copies or walks. It says nothing
+    about whether the scan was correct, complete, or honest, and it does not check the claims, the
+    ranking, or the status: the scan-result contract checks those, and a violation there is
+    recorded as a failed import. A field only the execution record constrains, such as a
+    non-integer exit code, is caught when that record is validated.
     """
     if not isinstance(outcome, NativeOutcome):
         return f"adapter returned {type(outcome).__name__}, not a NativeOutcome"
@@ -947,6 +957,14 @@ def _outcome_violation(outcome: object) -> str | None:
         return f"model_identity must be a mapping or None, not {type(outcome.model_identity).__name__}"
     if outcome.trace_path is not None and not isinstance(outcome.trace_path, (str, PurePath)):
         return f"trace_path must be a string, a path, or None, not {type(outcome.trace_path).__name__}"
+    if outcome.omitted_paths is not None:
+        if not isinstance(outcome.omitted_paths, list):
+            return f"omitted_paths must be a list or None, not {type(outcome.omitted_paths).__name__}"
+        for index, path in enumerate(outcome.omitted_paths):
+            if not isinstance(path, str):
+                return f"omitted_paths[{index}] must be a string, not {type(path).__name__}"
+    if outcome.examined_nothing is not None and not isinstance(outcome.examined_nothing, bool):
+        return f"examined_nothing must be a bool or None, not {type(outcome.examined_nothing).__name__}"
     return None
 
 
@@ -1441,7 +1459,20 @@ def run_invocation(
             # result itself, where the locations are, rather than left for a reader to infer.
             result["schema_version"] = "2.1"
             result["location_basis"] = "pr_head"
+        if outcome.omitted_paths is not None:
+            # A 2.1 field, so the result is 2.1 whatever the mode. Sorted and each path once, so one set of
+            # omissions is one list, which is what the contract requires of it.
+            result["schema_version"] = "2.1"
+            result["omitted_paths"] = sorted(set(outcome.omitted_paths))
+        if outcome.examined_nothing is not None:
+            # Also a 2.1 field, so also 2.1 whatever the mode, and written as the adapter said it.
+            result["schema_version"] = "2.1"
+            result["examined_nothing"] = outcome.examined_nothing
         result, rendered_in_result = _recordable_document(result)
+        if "omitted_paths" in result:
+            # Rendering a name UTF-8 cannot encode can reorder the list or merge two entries into one, so the
+            # order and the uniqueness the contract checks are made last, on the text that is written.
+            result["omitted_paths"] = sorted(set(result["omitted_paths"]))
         import_error = None
         try:
             # The document validated is the document written: the rendering above happens first,

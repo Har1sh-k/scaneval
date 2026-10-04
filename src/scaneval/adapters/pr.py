@@ -81,6 +81,40 @@ class Change(NamedTuple):
         return self.status != "D"
 
 
+def removed_paths(changes: tuple[Change, ...]) -> list[str]:
+    """The paths the change removed, sorted and each once: every deletion and the old name of every rename.
+
+    Nothing exists at one of them at head, so a scanner that reads head reads none of them. The old name
+    of a copy is not here: the source of a copy is still at head, as it was.
+    """
+    return sorted({change.path for change in changes if change.status == "D"}
+                  | {change.old_path for change in changes if change.status == "R" and change.old_path})
+
+
+def touched_paths(changes: tuple[Change, ...]) -> list[str]:
+    """Every path the change touches, sorted and each once: each path present at head, and each path it removed.
+
+    This is what a review of the change could have examined, so it is what a scanner's omissions are measured
+    against (:func:`examined_nothing`). A deletion and the old name of a rename are touched though nothing is at
+    them at head, because a scanner that reads head reads none of them; the source of a copy is not, since it is
+    still at head as it was.
+    """
+    return sorted({change.path for change in changes if change.present} | set(removed_paths(changes)))
+
+
+def examined_nothing(changes: tuple[Change, ...], omitted: list[str]) -> bool:
+    """Whether *omitted* holds every path the change touches, so that no part of the change is shown examined.
+
+    An adapter that lists the paths its scanner did not examine can say from the same list whether that is all of
+    them, and this is the result's ``examined_nothing``. It says what the adapter can show and no more: a path in
+    *omitted* is one the scanner is not shown to have read, which for an adapter that cannot see what its scanner
+    read is every path. A change that touches no path says nothing, so this is false for one, and a review of one
+    is refused before any scanner starts (:func:`workspace_changes`).
+    """
+    touched = touched_paths(changes)
+    return bool(touched) and set(touched) <= set(omitted)
+
+
 def pr_range(request: Any, adapter: Adapter) -> PrRange | None:
     """The change *request* asks *adapter* to review, or ``None`` when it asks for a full scan.
 

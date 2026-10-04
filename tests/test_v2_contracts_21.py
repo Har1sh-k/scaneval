@@ -110,6 +110,62 @@ def test_unknown_wall_time_is_null_in_2_1_and_still_refused_in_2_0():
         validate_document("scan-result", {**scan_result("2.0"), "location_basis": "pr_head"})
 
 
+def test_a_2_1_result_lists_the_paths_the_scanner_did_not_examine_and_a_2_0_result_cannot():
+    listed = {**scan_result("2.1"), "location_basis": "pr_head",
+              "omitted_paths": ["README.md", "src/a.py", "tests/server.test.js"]}
+    assert validate_document("scan-result", listed) is listed
+    assert validate_document("scan-result", {**scan_result("2.1"), "omitted_paths": []}), \
+        "an empty list says the adapter saw no omission, which an absent field does not"
+    for omitted in (["README.md"], []):
+        with pytest.raises(ContractError, match="Additional properties are not allowed"):
+            validate_document("scan-result", {**scan_result("2.0"), "omitted_paths": omitted})
+
+
+@pytest.mark.parametrize("omitted, message", [
+    (["src/b.py", "src/a.py"], r"omitted_paths must be sorted"),
+    (["README.md", "src/a.py", "README.md"], r"non-unique"),
+    (["/etc/passwd"], r"omitted_paths\[0\] must be a relative POSIX path"),
+    (["README.md", "../outside.py"], r"omitted_paths\[1\] must be a relative POSIX path"),
+    (["src/../a.py"], r"omitted_paths\[0\] must be a relative POSIX path"),
+    (["./a.py"], r"omitted_paths\[0\] must be a relative POSIX path"),
+    (["src/./a.py"], r"omitted_paths\[0\] must be a relative POSIX path"),
+    (["src//a.py"], r"omitted_paths\[0\] must be a relative POSIX path"),
+    (["src/"], r"omitted_paths\[0\] must be a relative POSIX path"),
+    (["a\x00b.py"], r"omitted_paths\[0\] must be a relative POSIX path"),
+    ([""], r"should be non-empty"),
+    ([7], r"7 is not of type 'string'"),
+], ids=["unsorted", "duplicate", "absolute", "parent", "inner-parent", "dot-prefix", "dot-segment", "empty-segment",
+        "trailing-slash", "nul", "empty-path", "not-a-string"])
+def test_a_result_that_lists_a_path_that_is_not_a_sorted_relative_posix_one_is_refused(omitted, message):
+    with pytest.raises(ContractError, match=message):
+        validate_document("scan-result", {**scan_result("2.1"), "omitted_paths": omitted})
+
+
+def test_a_listed_omission_keeps_a_backslash_because_it_is_a_character_of_a_posix_name():
+    """Git reports the name a file has: ``we\\ird.py`` is not ``we/ird.py``, and a name that is not UTF-8 is escaped."""
+    omitted = sorted(["caf\\xe9.py", "src/we\\ird.py", "src/we\\..\\ird.py"])
+    validate_document("scan-result", {**scan_result("2.1"), "omitted_paths": omitted})
+
+
+@pytest.mark.parametrize("examined_nothing", [True, False], ids=["true", "false"])
+def test_a_2_1_result_says_whether_the_scanner_examined_nothing_and_a_2_0_result_cannot(examined_nothing):
+    """Both values are a statement: true that nothing was shown examined, false that some of it was."""
+    said = {**scan_result("2.1"), "location_basis": "pr_head", "omitted_paths": ["README.md"],
+            "examined_nothing": examined_nothing}
+    assert validate_document("scan-result", said) is said
+    assert validate_document("scan-result", {**scan_result("2.1"), "examined_nothing": examined_nothing}), \
+        "it does not need the list beside it: each is the adapter's account of one thing"
+    with pytest.raises(ContractError, match="Additional properties are not allowed"):
+        validate_document("scan-result", {**scan_result("2.0"), "examined_nothing": examined_nothing})
+
+
+@pytest.mark.parametrize("value", [None, 1, 0, "true", "", [], {}], ids=["null", "one", "zero", "text", "empty-text",
+                                                                          "list", "object"])
+def test_a_result_that_says_examined_nothing_with_anything_but_a_boolean_is_refused(value):
+    with pytest.raises(ContractError, match="is not of type 'boolean'"):
+        validate_document("scan-result", {**scan_result("2.1"), "examined_nothing": value})
+
+
 def plan(mode: str = "full", **provenance) -> dict:
     return {"schema_version": "2.1", "input_hash": HASH, "scope": "draft",
             "targets": [{"target_id": "T1", "description": "d", "validation_level": "L1"}],
@@ -139,6 +195,45 @@ def test_a_pr_plan_states_its_boundary_and_the_scope_of_every_item():
         validate_document("evaluation-plan", scoped_full)
     with pytest.raises(ContractError, match="blinding is required exactly"):
         validate_document("evaluation-plan", plan(profile="metadata_blinded"))
+
+
+def placed_control(paths, *, version: str = "2.1") -> dict:
+    """A plan whose one control says where it is, as the pack's locations place it."""
+    document = plan()
+    document["schema_version"] = version
+    document["controls"] = [{"control_id": "C1", "description": "d", "type": "capability_safe",
+                             "validation_level": "L1", "paths": paths}]
+    return document
+
+
+def test_a_2_1_plan_control_states_the_paths_of_its_locations_and_a_2_0_plan_cannot():
+    document = placed_control(["src/a.py", "src/b.py"])
+    assert validate_document("evaluation-plan", document) is document
+    unplaced = placed_control(["src/a.py"])
+    del unplaced["controls"][0]["paths"]
+    validate_document("evaluation-plan", unplaced)
+    legacy = {"schema_version": "2.0", "input_hash": HASH, "scope": "draft", "review_budgets": [5],
+              "targets": [{"target_id": "T1", "description": "d", "validation_level": "L1"}],
+              "controls": [{"control_id": "C1", "description": "d", "type": "capability_safe",
+                            "validation_level": "L1"}]}
+    validate_document("evaluation-plan", legacy)
+    legacy["controls"][0]["paths"] = ["src/a.py"]
+    with pytest.raises(ContractError, match="Additional properties are not allowed"):
+        validate_document("evaluation-plan", legacy)
+
+
+@pytest.mark.parametrize("paths, message", [
+    (["src/b.py", "src/a.py"], r"controls\[0\]\.paths must be sorted"),
+    (["src/a.py", "src/a.py"], r"non-unique"),
+    ([], r"should be non-empty"),
+    (["/src/a.py"], r"controls\[0\]\.paths\[0\] must be a relative POSIX path"),
+    (["src/a.py", "src/../a.py"], r"controls\[0\]\.paths\[1\] must be a relative POSIX path"),
+    (["./src/a.py"], r"controls\[0\]\.paths\[0\] must be a relative POSIX path"),
+    ([""], r"should be non-empty"),
+], ids=["unsorted", "duplicate", "none", "absolute", "parent", "dot-prefix", "empty-path"])
+def test_a_plan_control_whose_paths_are_not_sorted_relative_posix_paths_is_refused(paths, message):
+    with pytest.raises(ContractError, match=message):
+        validate_document("evaluation-plan", placed_control(paths))
 
 
 def execution_record(**changes) -> dict:

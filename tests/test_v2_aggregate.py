@@ -84,18 +84,23 @@ def planned(input_id: str, *, targets=(), controls=(), project: str = "acme/alph
 
 def scan(*, hits=None, claims: int | None = None, ranking: str = "native", status: str = "success",
          resolved: bool = True, controls=None, pending=None, usage=None, review_state: str = "approved",
-         timing=None, execution: bool = True, drop=(), extra=(), scope: str | None = None) -> dict:
+         timing=None, execution: bool = True, drop=(), extra=(), scope: str | None = None,
+         omitted=None, paths=None, examined_nothing=None) -> dict:
     """What one bundle holds.
 
     ``hits`` maps a target id to the 1-based position of the claim a reviewer accepted for it;
     ``pending`` does the same for an unresolved match; ``controls`` maps a control id to ``"quiet"``,
     ``"unresolved"``, or ``("false_allegation", position)``. ``drop`` leaves frozen targets or controls out
-    of the bundle's plan and ``extra`` adds targets to it.
+    of the bundle's plan and ``extra`` adds targets to it. ``omitted`` is the list of paths the result says
+    its scanner did not examine, ``paths`` maps a control id to the paths its plan gives it, and
+    ``examined_nothing`` is the result's statement that no part of its input was shown examined; each makes the
+    document that carries it 2.1, and none is given by default.
     """
     return {"hits": hits or {}, "claims": claims, "ranking": ranking, "status": status, "resolved": resolved,
             "controls": controls or {}, "pending": pending or {}, "usage": usage or {"wall_seconds": 1.0},
             "review_state": review_state, "timing": timing, "execution": execution, "drop": set(drop),
-            "extra": list(extra), "scope": scope}
+            "extra": list(extra), "scope": scope, "omitted": omitted, "paths": paths or {},
+            "examined_nothing": examined_nothing}
 
 
 def _plan_item(item: dict, kind: str) -> dict:
@@ -113,12 +118,15 @@ def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: d
     items = frozen if frozen["state"] == "frozen" else {"targets": [], "controls": [], "scope": "draft",
                                                          "review_budgets": [1, 5]}
     bound = input_hash(row["input_id"])
-    plan = {"schema_version": "2.0", "input_hash": bound, "scope": spec["scope"] or items["scope"],
+    plan = {"schema_version": "2.1" if spec["paths"] else "2.0", "input_hash": bound,
+            "scope": spec["scope"] or items["scope"],
             "targets": [_plan_item(item, "targets") for item in items["targets"]
                         if item["target_id"] not in spec["drop"]] + [_plan_item(item, "targets")
                                                                      for item in spec["extra"]],
-            "controls": [_plan_item(item, "controls") for item in items["controls"]
-                         if item["control_id"] not in spec["drop"]],
+            "controls": [{**_plan_item(item, "controls"),
+                          **({"paths": spec["paths"][item["control_id"]]} if item["control_id"] in spec["paths"]
+                             else {})}
+                         for item in items["controls"] if item["control_id"] not in spec["drop"]],
             "review_budgets": items["review_budgets"]}
     positions = list(spec["hits"].values()) + list(spec["pending"].values())
     positions += [value[1] for value in spec["controls"].values() if isinstance(value, tuple)]
@@ -128,9 +136,12 @@ def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: d
                "primary_location": {"path": f"src/file{index}.py", "start_line": index, "end_line": index},
                **({"rank": index} if native else {})} for index in range(1, count + 1)]
     usage = dict(spec["usage"])
-    result = {"schema_version": "2.1" if usage.get("wall_seconds", 0) is None else "2.0", "run_id": run_id,
+    result = {"schema_version": "2.1" if usage.get("wall_seconds", 0) is None or spec["omitted"] is not None
+              or spec["examined_nothing"] is not None else "2.0", "run_id": run_id,
               "system_id": assignment["system_id"], "input_hash": bound, "status": spec["status"],
-              "ranking": spec["ranking"], "claims": claims, "bundles_resolved": spec["resolved"], "usage": usage}
+              "ranking": spec["ranking"], "claims": claims, "bundles_resolved": spec["resolved"], "usage": usage,
+              **({"omitted_paths": spec["omitted"]} if spec["omitted"] is not None else {}),
+              **({"examined_nothing": spec["examined_nothing"]} if spec["examined_nothing"] is not None else {})}
     matches = [{"claim_id": f"c{position}", "target_id": target_id, "decision": "accepted",
                 "reason": "fixture: accepted by a fictional reviewer"}
                for target_id, position in spec["hits"].items()]
@@ -816,6 +827,112 @@ def test_a_frozen_control_missing_from_a_completed_scans_plan_is_completed_and_u
     assert block["completed_mass"] == 1.0 and block["assessable_mass"] == 0.7
     assert block["resolved_rate"]["value"] == 0.0
     assert block["completed_lower"] == 0.0 and block["completed_upper"]["value"] == 0.3
+
+
+def test_a_quiet_control_on_a_path_its_scan_did_not_examine_is_completed_and_unresolved_not_dropped(tmp_path):
+    """The reviewer's change touches only tests/server.test.js, DeepSec's filter drops it, and the scan succeeds.
+
+    One input freezes one safe control. Its bundle's plan says the control is on tests/server.test.js, the result
+    lists that path as not examined, and the reviewer assessed the control quiet. The scan completed in the frozen
+    scope (c = 1) and nothing resolved the control (b = 0), where the quiet assessment used to (b = 1).
+    - C = 1 and A = 0, and nothing is confirmed false, so E = 0 and the resolved rate E/A is undefined.
+    - The completed bounds [E/C, (E + C - A)/C] are [0, 1], where they were [0, 0]: the control counts as false in F+.
+    - Counts: 1 observation, completed and unresolved, and not unscored, since the plan holds it. Dropping it from the
+      completed mass would have made C = 0 and left no bound at all.
+    """
+    run = write_run(tmp_path, "run-omitted", [planned("safe", controls=[control("C-server-test")])], outcomes={
+        ("safe", "sys-a", 1): scan(paths={"C-server-test": ["tests/server.test.js"]},
+                                   omitted=["tests/server.test.js"])})
+
+    block = safe_controls(aggregate.aggregate([run], policy=policy()))
+
+    assert block["canonical_controls"] == 1
+    assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (1, 1, 0, 1)
+    assert block["unscored"] == 0 and block["false_allegations"] == 0
+    assert block["completed_mass"] == 1.0 and block["assessable_mass"] == 0.0
+    assert block["resolved_rate"]["value"] is None
+    assert block["completed_lower"] == 0.0 and block["completed_upper"]["value"] == 1.0
+
+
+def test_only_a_control_on_an_omitted_path_or_placed_nowhere_loses_its_quiet_credit_in_a_corpus(tmp_path):
+    """Four safe controls in four projects, each assessed quiet over a successful scan, and equal weights of 1/4.
+
+    - C-omitted is on a path its result lists as not examined: completed, unresolved.
+    - C-read is on src/b.js while the result lists tests/b.test.js: examined, so resolved quiet.
+    - C-unplaced has no paths in its plan and its result lists README.md: it cannot be shown to be outside the
+      omission, so it is completed and unresolved.
+    - C-nothing-omitted has no paths either, but its result lists an empty set: nothing was left out, so resolved.
+    Then C = 1 and A = 1/2, E = 0: the resolved rate is 0 and the completed bounds are [0, (0 + 1 - 1/2)/1] = [0, 0.5].
+    Counts: 4 observations, 4 completed, 2 resolved, 2 unresolved, none unscored.
+    """
+    controls = {"omitted": "C-omitted", "read": "C-read", "unplaced": "C-unplaced", "nothing": "C-nothing-omitted"}
+    inputs = [planned(name, project=f"acme/{name}", controls=[control(control_id)])
+              for name, control_id in controls.items()]
+    run = write_run(tmp_path, "run-corpus-omissions", inputs, outcomes={
+        ("omitted", "sys-a", 1): scan(paths={"C-omitted": ["tests/a.test.js"]}, omitted=["tests/a.test.js"]),
+        ("read", "sys-a", 1): scan(paths={"C-read": ["src/b.js"]}, omitted=["tests/b.test.js"]),
+        ("unplaced", "sys-a", 1): scan(omitted=["README.md"]),
+        ("nothing", "sys-a", 1): scan(omitted=[])})
+
+    block = safe_controls(aggregate.aggregate([run], policy=policy()))
+
+    assert block["canonical_controls"] == 4
+    assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (4, 4, 2, 2)
+    assert block["unscored"] == 0 and block["false_allegations"] == 0
+    assert block["completed_mass"] == 1.0 and block["assessable_mass"] == 0.5
+    assert block["resolved_rate"]["value"] == 0.0
+    assert block["completed_lower"] == 0.0 and block["completed_upper"]["value"] == 0.5
+
+
+def test_a_quiet_control_on_an_unchanged_file_is_completed_and_unresolved_when_its_scan_examined_nothing(tmp_path):
+    """The reviewer's change again, with the safe control in src/server.js, a file the change does not touch.
+
+    The result lists tests/server.test.js as not examined and says no part of the change was, and the plan places the
+    one frozen control on the unchanged file, so no list of the change's paths names it. It was resolved quiet, and
+    it is now a completed observation that nothing resolved, as the control on the omitted path is.
+    - C = 1 and A = 0, and nothing is confirmed false, so E = 0 and the resolved rate E/A is undefined.
+    - The completed bounds [E/C, (E + C - A)/C] are [0, 1], where they were [0, 0]: F+ counts the control as false.
+    """
+    run = write_run(tmp_path, "run-examined-nothing", [planned("safe", controls=[control("C-server")])], outcomes={
+        ("safe", "sys-a", 1): scan(paths={"C-server": ["src/server.js"]}, omitted=["tests/server.test.js"],
+                                   examined_nothing=True)})
+
+    block = safe_controls(aggregate.aggregate([run], policy=policy()))
+
+    assert block["canonical_controls"] == 1
+    assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (1, 1, 0, 1)
+    assert block["unscored"] == 0 and block["false_allegations"] == 0
+    assert block["completed_mass"] == 1.0 and block["assessable_mass"] == 0.0
+    assert block["resolved_rate"]["value"] is None
+    assert block["completed_lower"] == 0.0 and block["completed_upper"]["value"] == 1.0
+
+
+def test_only_a_scan_that_examined_nothing_loses_the_quiet_credit_of_its_control_on_an_unchanged_file(tmp_path):
+    """Three safe controls in three projects, each on src/server.js and assessed quiet, with equal weights of 1/3.
+
+    Each result lists the one path its change touched as not examined. Only the first also says nothing was examined.
+    - C-nothing: unresolved. C-some says some was examined, and C-silent says nothing about it: resolved quiet.
+    Then C = 1 and A = 2/3, E = 0: the resolved rate is 0 and the completed bounds are [0, (0 + 1 - 2/3)/1] = [0, 1/3].
+    """
+    controls = {"nothing": "C-nothing", "some": "C-some", "silent": "C-silent"}
+    inputs = [planned(name, project=f"acme/{name}", controls=[control(control_id)])
+              for name, control_id in controls.items()]
+    on_server = {control_id: ["src/server.js"] for control_id in controls.values()}
+    run = write_run(tmp_path, "run-corpus-examined-nothing", inputs, outcomes={
+        ("nothing", "sys-a", 1): scan(paths={"C-nothing": on_server["C-nothing"]}, omitted=["tests/a.test.js"],
+                                      examined_nothing=True),
+        ("some", "sys-a", 1): scan(paths={"C-some": on_server["C-some"]}, omitted=["tests/b.test.js"],
+                                   examined_nothing=False),
+        ("silent", "sys-a", 1): scan(paths={"C-silent": on_server["C-silent"]}, omitted=["tests/c.test.js"])})
+
+    block = safe_controls(aggregate.aggregate([run], policy=policy()))
+
+    assert block["canonical_controls"] == 3
+    assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (3, 3, 2, 1)
+    assert block["unscored"] == 0 and block["false_allegations"] == 0
+    assert block["completed_mass"] == 1.0 and abs(block["assessable_mass"] - 2 / 3) < 1e-12
+    assert block["resolved_rate"]["value"] == 0.0
+    assert block["completed_lower"] == 0.0 and abs(block["completed_upper"]["value"] - 1 / 3) < 1e-12
 
 
 def alias_control_run(root: Path, run_id: str, **choices) -> Path:

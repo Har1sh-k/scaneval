@@ -38,6 +38,7 @@ from scaneval.contracts import (
     validate_document,
 )
 from scaneval.runner import run_from_config
+from scaneval.scoring import observe, score
 
 
 CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
@@ -3525,3 +3526,258 @@ def test_a_view_spanning_workloads_without_declared_weights_is_inconclusive_but_
         "conventional_application": 0.5, "agentic_application": 0.5})
     declared = gate.evaluate_gate(gate_policy(controls={"capability_safe": bounds()}), weighted)
     assert declared["outcome"] == "pass", "declared workload weights let the whole view be summarized"
+
+
+# --- a pull request whose scan examined none of the change, through the real adapters -----------------
+#
+# The reviewer's case, end to end: a change that touches only a file the scanner's own selection drops is a success,
+# and a quiet assessment of a safe control over it used to resolve that control. The scanners are stand-ins (a fake
+# DeepSec that prints what 2.3.10 prints, a fake Semgrep that prints a fixed payload), but the adapters, the runner,
+# the plan it builds from the pack, the scorer, the aggregation, and the gate are the real ones.
+
+
+def pull_request_through_the_runner(root: Path, *, adapter: str, languages: list[str], base: dict[str, str],
+                                    head: dict[str, str], controls: dict[str, tuple[str, str]],
+                                    configs: dict[str, dict], network_policy: str = "none") -> Path:
+    """One pull request over a real local repository, run by two systems of one adapter, every control assessed quiet.
+
+    *base* is every file of the base commit and *head* the files the pull request writes over it. *controls* maps a
+    control id to its path and its PR code scope, ``changed`` or ``context``. The pack declares the change set and
+    those controls, a first run checks it against both exports, and the second, from the pack that run froze,
+    schedules its plan before the run, as a pre-registered evaluation does. A fictional reviewer then records a quiet
+    assessment of every control in every bundle. Returns the second run's directory.
+    """
+    repo = root / "upstream"
+    commits = []
+    for files in (base, head):
+        for relative, text in files.items():
+            (repo / relative).parent.mkdir(parents=True, exist_ok=True)
+            (repo / relative).write_text(text, encoding="utf-8")
+        if not commits:
+            git("init", "-q", "-b", "main", cwd=repo)
+            git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=repo)
+        git("add", "-A", cwd=repo)
+        git("commit", "-q", "-m", "base" if not commits else "head", cwd=repo)
+        commits.append(git("rev-parse", "HEAD", cwd=repo))
+    pack = cases.new_pack("test", "pr-examined-nothing", "Local fixture pack for the examined-nothing tests.")
+    for snapshot_id, commit in zip(("snap-base", "snap-head"), commits):
+        cases.add_snapshot(pack, {
+            "snapshot_id": snapshot_id, "repository": {"url": str(repo), "name": "widget"}, "commit": commit,
+            "reference": "Commit chosen by the test fixture; no advisory is claimed.", "languages": languages,
+            "workload": "conventional_application", "component_role": "application",
+            "license": {"spdx": None, "verified": False, "note": "Local fixture repository."}})
+    case = cases.draft_case(
+        "case-widget", snapshot_id="snap-head", kind="command_injection",
+        description="A fixed argument list reaches a process.", represents=REAL_REPRESENTS,
+        workload="conventional_application", component_role="application", aliases=[],
+        evidence=[cases.evidence("source", origin="research_note", kind="source_inspection",
+                                 reference=next(iter(base)), note="Fixture inspection, not an advisory.")],
+        accepted_locations=[{"path": next(iter(base)), "start_line": 1, "end_line": 1, "role": "sink", "note": ""}])
+    for control_id, (path, _scope) in controls.items():
+        case["controls"].append({
+            "control_id": control_id, "snapshot_id": "snap-head", "type": "capability_safe",
+            "description": f"The control {control_id} is a safe capability.",
+            "property": "No caller-supplied string reaches a shell at this call site.",
+            "allowed_actors_inputs": "Operators on the host.", "assumptions": ["Default deployment."],
+            "ruled_out_allegation": "Caller-controlled shell interpolation.",
+            "locations": [{"path": path, "start_line": 1, "end_line": 1, "role": "operation"}],
+            "evidence_ids": ["source"]})
+    cases.add_case(pack, case)
+    cases.add_change_set(pack, {"change_set_id": "cs-1", "base_snapshot_id": "snap-base",
+                                "head_snapshot_id": "snap-head", "boundary": "ordinary",
+                                "review_scope": "changed_files", "description": "The pull request under review."})
+    for control_id, (_path, scope) in controls.items():
+        cases.set_pr_eligibility(pack, "case-widget", "cs-1", "affected", scope, control_id=control_id)
+    cases.save_pack(root / "pack.json", pack)
+    config = {"schema_version": "2.1", "run_id": "run-examined-nothing", "pack": "pack.json", "cache_root": "cache",
+              "inputs": [{"mode": "pr", "change_set_id": "cs-1"}],
+              "systems": [{"system_id": system_id, "adapter": adapter, "config": settings}
+                          for system_id, settings in configs.items()],
+              "repetitions": 1, "timeout_seconds": 120, "trace_mode": "off", "network_policy": network_policy}
+    (root / "run.json").write_text(canonical_json(config) + "\n", encoding="utf-8")
+    run_from_config(root / "run.json", root / "check", clock=CLOCK)
+    shutil.copyfile(root / "check" / "evaluator" / "pack.json", root / "pack.json")
+    out = root / "out"
+    manifest = run_from_config(root / "run.json", out, clock=CLOCK)
+    assert [row["status"] for row in manifest["invocations"]] == ["success"] * len(configs)
+    assert load_document(out / "evaluator" / "schedule.json", "evaluation-schedule")["inputs"][0]["plan"]["state"] == \
+        "frozen"
+    for bundle in sorted((out / "invocations").iterdir()):
+        decisions = load_document(bundle / "evaluator" / "decisions.json", "review-decisions")
+        for assessment in decisions["control_assessments"]:
+            assessment.update(decision="quiet", claim_ids=[],
+                              reason="fixture: the fictional reviewer saw no allegation about the control")
+        write_json(bundle / "evaluator" / "decisions.json", decisions)
+        review.record_decisions(bundle, clock=CLOCK)
+    return out
+
+
+def saved_bundle(out: Path, system_id: str) -> tuple[dict, dict, dict, dict]:
+    """``(result, plan, decisions, score record)`` of the one bundle *system_id* wrote, read back from disk."""
+    bundle = out / "invocations" / f"cs-1__{system_id}__r1"
+    result = load_document(bundle / "result.json", "scan-result")
+    plan = load_document(bundle / "evaluator" / "plan.json", "evaluation-plan")
+    decisions = load_document(bundle / "evaluator" / "decisions.json", "review-decisions")
+    return result, plan, decisions, score(plan, result, decisions)
+
+
+def pr_safe_controls(report: dict, system_id: str) -> dict:
+    """The capability-safe control block of one system over the whole PR view of an aggregate report."""
+    view = next(item for item in report["views"] if (item["mode"], item["profile"]) == ("pr", "standard"))
+    system = next(item for item in view["systems"] if item["system_id"] == system_id)
+    whole = next(item for item in system["slices"] if item["slice"] == {"dimension": "all", "value": None})
+    return whole["controls"]["capability_safe"]
+
+
+DEEPSEC_SERVER = ("const { execFile } = require('child_process');\nconst express = require('express');\n"
+                  "const app = express();\napp.get('/run', (req, res) => { execFile('ls', ['-l'], (e, out) => "
+                  "res.send(out)); });\napp.listen(3000);\n")
+DEEPSEC_TEST = "test('serves', () => {});\n"
+
+
+def deepsec_configs(root: Path) -> dict[str, dict]:
+    from test_v2_deepsec import fake_deepsec_root
+
+    settings = {"deepsec_root": str(fake_deepsec_root(root)), "model": "claude-haiku-4-5", "agent": "claude",
+                "thinking_level": "low", "limit": 6, "batch_size": 3, "concurrency": 1, "max_turns": 60}
+    return {"baseline": settings, "candidate": {**settings, "max_turns": 61}}
+
+
+def test_a_deepsec_review_that_examined_none_of_the_change_earns_no_quiet_credit_for_any_control(tmp_path):
+    """The pull request changes only tests/server.test.js, which DeepSec's own ignore filter drops.
+
+    DeepSec says "Nothing to process" and exits 0, so each scan is the empty review it was and a success with
+    resolved bundles. The pack places two safe controls: C-test on the changed test file, and C-context on
+    src/server.js, which the change leaves alone. Both were resolved quiet, so the corpus false-alarm bound F+ was 0.
+    The result now lists the one path the change touches as not examined and says that was all of it, so each
+    control is a completed observation that nothing resolved and F+ counts both: F+ = (0 + 2 - 0) / 2 = 1.
+    """
+    out = pull_request_through_the_runner(
+        tmp_path, adapter="deepsec", languages=["javascript"],
+        base={"src/server.js": DEEPSEC_SERVER, "tests/server.test.js": DEEPSEC_TEST, "package.json": '{"name": "w"}\n'},
+        head={"tests/server.test.js": DEEPSEC_TEST + "test('serves twice', () => {});\n"},
+        controls={"C-test": ("tests/server.test.js", "changed"), "C-context": ("src/server.js", "context")},
+        configs=deepsec_configs(tmp_path), network_policy="model_provider_only")
+
+    for system_id in ("baseline", "candidate"):
+        result, plan, decisions, record = saved_bundle(out, system_id)
+        assert result["status"] == "success" and result["bundles_resolved"] is True and result["claims"] == []
+        assert result["omitted_paths"] == ["tests/server.test.js"] and result["examined_nothing"] is True
+        assert [(c["control_id"], c["pr_scope"]["code_scope"], c["paths"]) for c in plan["controls"]] == [
+            ("C-test", "changed", ["tests/server.test.js"]), ("C-context", "context", ["src/server.js"])]
+        rows = observe(plan, result, decisions)["controls"]
+        assert [(row["control_id"], row["decision"], row["completed"], row["resolved"]) for row in rows] == [
+            ("C-test", "quiet", True, False), ("C-context", "quiet", True, False)]
+        safe = record["metrics"]["controls"]["capability_safe"]
+        assert (safe["assigned"], safe["completed"], safe["resolved"]) == (2, 2, 0)
+        assert safe["assessable_mass"] == 0.0 and safe["sensitivity_upper"] == 1.0
+        assert [w for w in record["warnings"] if "earn no credit" in w] == [
+            "2 quiet control assessment(s) earn no credit: the scan examined none of the input it was given, so its "
+            "silence says nothing about any control."]
+
+    settings = aggregation_policy()
+    report = aggregate.aggregate([out], policy=settings)
+    for system_id in ("baseline", "candidate"):
+        block = pr_safe_controls(report, system_id)
+        assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (2, 2, 0, 2)
+        assert block["completed_mass"] == 1.0 and block["assessable_mass"] == 0.0
+        assert block["resolved_rate"]["value"] is None and block["completed_upper"]["value"] == 1.0
+    comparison = aggregate.compare([out], baseline="baseline", candidate="candidate", policy=settings)
+    policy = gate_policy(view={"mode": "pr", "profile": "standard"},
+                         configuration={"allowed_differences": ["config.max_turns"]},
+                         controls={"capability_safe": bounds(max_false_alarm_upper=0.1, min_completed_mass=0.5,
+                                                             min_assessable_mass=0.01)})
+    decision = gate.evaluate_gate(policy, comparison)
+    upper = requirement(decision, "controls.capability_safe.false_alarm_upper")
+    assert upper["status"] == "fail" and "false-alarm upper bound F+ is 1 " in upper["explanation"]
+    assert "2 unresolved assessment(s) counted as false allegations" in upper["explanation"]
+    assert "controls.capability_safe.false_alarm_upper" in decision["failed"]
+
+
+def test_a_deepsec_review_that_examined_part_of_the_change_still_credits_a_context_control(tmp_path):
+    """The change also touches src/routes.js, which DeepSec investigates, so something was examined.
+
+    C-test is still on a path the scan omitted, so it is unresolved. C-context is on src/server.js, which the change
+    leaves alone, and the scan did examine part of the change: it keeps the quiet credit it always had, and F+ is
+    (0 + 2 - 1) / 2 = 1/2, not 1.
+    """
+    out = pull_request_through_the_runner(
+        tmp_path, adapter="deepsec", languages=["javascript"],
+        base={"src/server.js": DEEPSEC_SERVER, "src/routes.js": "module.exports = 1;\n",
+              "tests/server.test.js": DEEPSEC_TEST, "package.json": '{"name": "w"}\n'},
+        head={"tests/server.test.js": DEEPSEC_TEST + "test('serves twice', () => {});\n",
+              "src/routes.js": "module.exports = 2;\n"},
+        controls={"C-test": ("tests/server.test.js", "changed"), "C-context": ("src/server.js", "context")},
+        configs=deepsec_configs(tmp_path), network_policy="model_provider_only")
+
+    result, plan, decisions, record = saved_bundle(out, "baseline")
+    assert result["omitted_paths"] == ["tests/server.test.js"] and result["examined_nothing"] is False
+    assert [(row["control_id"], row["resolved"]) for row in observe(plan, result, decisions)["controls"]] == [
+        ("C-test", False), ("C-context", True)]
+    block = pr_safe_controls(aggregate.aggregate([out], policy=aggregation_policy()), "baseline")
+    assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (2, 2, 1, 1)
+    assert block["assessable_mass"] == 0.5 and block["completed_upper"]["value"] == 0.5
+
+
+def semgrep_configs(root: Path, scanned: list[str]) -> dict[str, dict]:
+    """Two systems over one stand-in Semgrep that always prints a clean scan reporting *scanned* as scanned."""
+    from test_v2_semgrep import fake_semgrep, pinned_rules_repo
+
+    rules, commit = pinned_rules_repo(root)
+    payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": scanned}, "errors": []})
+    settings = {"binary": str(fake_semgrep(root, payload, 0)),
+                "ruleset": {"url": str(rules), "commit": commit, "paths": ["python"]}, "jobs": 1}
+    return {"baseline": settings, "candidate": {**settings, "jobs": 2}}
+
+
+def test_a_semgrep_review_that_scanned_none_of_the_change_earns_no_quiet_credit_for_any_control(tmp_path):
+    """The pull request changes only README.md, no file any rule applies to, so Semgrep's diff scan reads nothing.
+
+    That is the empty baseline review and a success. C-context is a safe control in app.py, which the change leaves
+    alone. It was resolved quiet, and with the result saying no part of the change was examined it is not.
+    """
+    out = pull_request_through_the_runner(
+        tmp_path, adapter="semgrep", languages=["python"],
+        base={"app.py": "import subprocess\n", "README.md": "# widget\n"}, head={"README.md": "# widget\n\nmore\n"},
+        controls={"C-context": ("app.py", "context")}, configs=semgrep_configs(tmp_path, []))
+
+    for system_id in ("baseline", "candidate"):
+        result, plan, decisions, record = saved_bundle(out, system_id)
+        assert result["status"] == "success" and result["claims"] == [] and result["bundles_resolved"] is True
+        assert result["omitted_paths"] == ["README.md"] and result["examined_nothing"] is True
+        assert [(c["control_id"], c["paths"]) for c in plan["controls"]] == [("C-context", ["app.py"])]
+        assert [(row["decision"], row["completed"], row["resolved"])
+                for row in observe(plan, result, decisions)["controls"]] == [("quiet", True, False)]
+        assert len([w for w in record["warnings"] if "earn no credit" in w]) == 1
+
+    settings = aggregation_policy()
+    report = aggregate.aggregate([out], policy=settings)
+    for system_id in ("baseline", "candidate"):
+        block = pr_safe_controls(report, system_id)
+        assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (1, 1, 0, 1)
+        assert block["resolved_rate"]["value"] is None and block["completed_upper"]["value"] == 1.0
+    comparison = aggregate.compare([out], baseline="baseline", candidate="candidate", policy=settings)
+    policy = gate_policy(view={"mode": "pr", "profile": "standard"},
+                         configuration={"allowed_differences": ["config.jobs"]},
+                         controls={"capability_safe": bounds(max_false_alarm_upper=0.1, min_completed_mass=0.5,
+                                                             min_assessable_mass=0.01)})
+    upper = requirement(gate.evaluate_gate(policy, comparison), "controls.capability_safe.false_alarm_upper")
+    assert upper["status"] == "fail" and "false-alarm upper bound F+ is 1 " in upper["explanation"]
+
+
+def test_a_semgrep_review_that_scanned_part_of_the_change_still_credits_a_context_control(tmp_path):
+    """The change also touches lib/other.py, which Semgrep scanned, so C-context in app.py keeps its quiet credit."""
+    out = pull_request_through_the_runner(
+        tmp_path, adapter="semgrep", languages=["python"],
+        base={"app.py": "import subprocess\n", "README.md": "# widget\n", "lib/other.py": "x = 1\n"},
+        head={"README.md": "# widget\n\nmore\n", "lib/other.py": "x = 2\n"},
+        controls={"C-doc": ("README.md", "changed"), "C-context": ("app.py", "context")},
+        configs=semgrep_configs(tmp_path, ["lib/other.py"]))
+
+    result, plan, decisions, record = saved_bundle(out, "baseline")
+    assert result["omitted_paths"] == ["README.md"] and result["examined_nothing"] is False
+    assert [(row["control_id"], row["resolved"]) for row in observe(plan, result, decisions)["controls"]] == [
+        ("C-doc", False), ("C-context", True)]
+    block = pr_safe_controls(aggregate.aggregate([out], policy=aggregation_policy()), "baseline")
+    assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (2, 2, 1, 1)
+    assert block["completed_upper"]["value"] == 0.5

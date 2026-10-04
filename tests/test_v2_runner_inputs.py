@@ -90,6 +90,8 @@ def test_a_snapshot_input_named_as_itself_keeps_the_2_0_plan_byte_for_byte(tmp_p
     assert set(plain["provenance"]) == {"namespace", "pack_id", "pack_version", "pack_sha256",
                                         "snapshot_id", "mode", "case_ids"}
     assert all("canonical_id" not in item for item in plain["targets"] + plain["controls"])
+    assert all("paths" not in control for control in plain["controls"]), \
+        "a control's paths are a 2.1 field, and a plan is never made 2.1 for them"
 
 
 def test_a_blinded_input_plans_at_2_1_bound_to_the_transformed_tree(tmp_path):
@@ -109,10 +111,13 @@ def test_a_blinded_input_plans_at_2_1_bound_to_the_transformed_tree(tmp_path):
     assert provenance["snapshot_id"] == "widget-abc"
     assert [(t["target_id"], t["canonical_id"]) for t in plan["targets"]] == [("T-widget-shell", "T-widget-shell")]
     assert [(c["control_id"], c["canonical_id"]) for c in plan["controls"]] == [("C-widget-safe", "C-widget-safe")]
+    assert [(c["control_id"], c["paths"]) for c in plan["controls"]] == [("C-widget-safe", ["src/app.py"])], \
+        "a 2.1 plan says where each control is"
     # The identity changes what the plan says about its input, never what it plans.
     assert plan["scope"] == plain["scope"] and plan["review_budgets"] == plain["review_budgets"]
     assert [{k: v for k, v in t.items() if k != "canonical_id"} for t in plan["targets"]] == plain["targets"]
-    assert [{k: v for k, v in c.items() if k != "canonical_id"} for c in plan["controls"]] == plain["controls"]
+    assert [{k: v for k, v in c.items() if k not in ("canonical_id", "paths")}
+            for c in plan["controls"]] == plain["controls"]
 
 
 def test_a_renamed_standard_input_plans_at_2_1_without_a_blinding_identity(tmp_path):
@@ -123,6 +128,7 @@ def test_a_renamed_standard_input_plans_at_2_1_without_a_blinding_identity(tmp_p
     assert plan["schema_version"] == "2.1" and plan["input_hash"] == HASH
     assert plan["provenance"]["input_id"] == "widget-main" and plan["provenance"]["profile"] == "standard"
     assert plan["provenance"]["source_tree_hash"] == HASH and "blinding" not in plan["provenance"]
+    assert [c["paths"] for c in plan["controls"]] == [["src/app.py"]]
 
 
 def test_a_blinded_profile_and_a_map_identity_come_together_or_not_at_all(tmp_path):

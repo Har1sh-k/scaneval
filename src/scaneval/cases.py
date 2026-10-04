@@ -124,6 +124,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import posixpath
 import re
 from typing import Any, Callable
 import unicodedata
@@ -1225,6 +1226,19 @@ def _pr_boundary(pack: dict, change_set_id: str, head_snapshot_id: str, head_sou
     return change_set, expected
 
 
+def _control_paths(control: dict) -> list[str]:
+    """The paths of *control*'s locations, each once and sorted: where a plan says the control is.
+
+    A plan carries them so the scorer can tell whether a scan examined the control. It compares them
+    with the paths a result lists as omitted, which are paths as git spells them, while a pack location
+    only has to be a relative path with no ``..`` component. So a spelling such as ``./src/a.py`` is
+    read as the file it names, ``src/a.py``, and a location that names no file (``.``) states no path.
+    A control with no location states none, and the plan then leaves ``paths`` out, which says it does
+    not place the control and never that the control is nowhere.
+    """
+    return sorted({posixpath.normpath(location["path"]) for location in control["locations"]} - {"."})
+
+
 def _pr_items(pack: dict, snapshot_id: str, change_set_id: str
               ) -> tuple[list[tuple[dict, str, dict | None]], list[dict], list[dict], str, list[str]]:
     """What a PR review of one change set is planned to carry: cases, targets, controls, scope, notes.
@@ -1255,6 +1269,9 @@ def _pr_items(pack: dict, snapshot_id: str, change_set_id: str
                          "canonical_id": control_canonical_id(control), "pr_scope": scope}
                 if control.get("target_id"):
                     entry["target_id"] = control["target_id"]
+                paths = _control_paths(control)
+                if paths:
+                    entry["paths"] = paths
                 controls.append(entry)
     outside = []
     for case in on_snapshot:
@@ -1325,6 +1342,13 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
     run and a resolved assessment like any other. The plan says which items it left out.
     ``mode="pr"`` with no change set is what it always was, a full plan carrying the ``pr`` review
     budgets, which says nothing about any change.
+
+    A 2.1 plan, a PR plan or the full plan of a renamed or blinded input, also gives each control
+    ``paths``: the sorted, unique paths of the control's pack locations, left out of a control that has
+    none. They are evaluator-side and read only by the scorer, to withhold quiet credit from a control
+    on a path a scan result lists in ``omitted_paths``, or from one the plan places on no path when the
+    result lists any. A plan is 2.1 for the reasons above and never for this one: the plan of a standard
+    full input stays the 2.0 plan it always was, byte for byte, and carries no ``paths``.
 
     A case is planned only when its disposition is not ``exclude``, no check set failed after
     approval, the latest admission decision covering its content is not ``rejected``, the pack
@@ -1433,6 +1457,9 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
                         entry["target_id"] = control["target_id"]
                     if identified:
                         entry["canonical_id"] = control_canonical_id(control)
+                        paths = _control_paths(control)
+                        if paths:
+                            entry["paths"] = paths
                     controls.append(entry)
     if scope == "reviewed" and not (targets or controls):
         scope = "draft"

@@ -84,6 +84,22 @@ the path. A file left unfinished also ends ``scope_incomplete``, so the code alo
 which of the two errors the run carries. A path that only the ignore filter dropped stays a note:
 that is DeepSec's own scope.
 
+What the run says about the paths it did not examine. A PR run that carries the claims DeepSec
+produced, a ``success`` or a ``partial``, lists in the result's ``omitted_paths`` every path the
+change touches that DeepSec created no file record for: each path present at head with none,
+whatever the reason (the ignore filter, or a name its listing cannot resolve), and each path the
+change removed, which DeepSec never reads (:func:`unexamined_paths`). The list comes from the same
+comparison as the note and changes no status: a change that touches only paths DeepSec's filter
+drops is still an empty review and a ``success``, and DeepSec's own filtering is not touched. What
+it changes is what the scorer may conclude from that success. A control planned on a listed path, or
+one the plan places on no path, earns no quiet credit, because DeepSec's own selection is not a
+scope declared before the run; a scope exclusion is declared by leaving the item out of the plan.
+When the list is every path the change touches, so that DeepSec made a record for none of it, the
+result also says ``examined_nothing`` (:func:`~scaneval.adapters.pr.examined_nothing`), and then no
+control earns quiet credit, one on a file the change leaves alone included: a review that read none
+of the change reached no control. It says ``False`` when some path has a record. A full run reports
+no omissions and says neither.
+
 Direct mode exits 1 for three different reasons (a run that produced findings, a batch that
 errored, an exhausted quota) and also for a runtime failure such as an unresolvable range, so an
 exit 1 is not fatal here and is not innocent either. The run goes on to export, and what an exit 1
@@ -115,7 +131,7 @@ from ..kinds import kind_for_harness_class
 from ..observer import Observer, create_jsonl_sink
 from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command
 from .llm_harness import Enclosure, read_record
-from .pr import Change, pr_range, workspace_changes
+from .pr import Change, examined_nothing, pr_range, removed_paths, workspace_changes
 
 
 ARTIFACT_EXPORT = "deepsec-export"
@@ -1693,6 +1709,23 @@ def dropped_paths(changes: tuple[Change, ...], files: tuple[tuple[str, dict], ..
     return DroppedPaths(tuple(present), tuple(path for path in present if path not in recorded))
 
 
+def unexamined_paths(changes: tuple[Change, ...], dropped: DroppedPaths) -> list[str]:
+    """Every path the change touches that DeepSec created no file record for, sorted: the result's ``omitted_paths``.
+
+    That is each path present at head with no record, for whatever reason (:attr:`DroppedPaths.dropped`: its ignore
+    filter, or a name its listing cannot resolve), and each path the change removed, which DeepSec never reads
+    (:func:`~scaneval.adapters.pr.removed_paths`). A path that has a record is not here, however far its file got:
+    which files reached no verdict is the status's to say, and the status logic reads the records, not this list.
+
+    The note, the status and this list are made from the same comparison, so they cannot disagree about a path. It is
+    deliberately not narrowed by the ignore filter, which this adapter cannot see, nor by the reason a path has no
+    record: a path DeepSec's own selection dropped is a choice of DeepSec's and not one declared before the run, so a
+    control planned on it earns no quiet credit however legitimate the drop was. A scope exclusion is declared by
+    leaving the item out of the plan, before the run.
+    """
+    return sorted(set(dropped.dropped) | set(removed_paths(changes)))
+
+
 def listing_limits(paths: DroppedPaths, subject: str) -> list[str]:
     """One clause for each limit of DeepSec's listing that *paths* met: which of them, and what the limit is.
 
@@ -1754,8 +1787,7 @@ def unreviewed_note(changes: tuple[Change, ...], files: tuple[tuple[str, dict], 
     """
     paths = dropped_paths(changes, files)
     omitted = paths.unlistable
-    removed = sorted({change.path for change in changes if change.status == "D"}
-                     | {change.old_path for change in changes if change.status == "R" and change.old_path})
+    removed = removed_paths(changes)
     sentences = []
     if paths.dropped:
         apart = f", except for the {len(omitted)} named next" if omitted else ""
@@ -1951,6 +1983,11 @@ class DeepsecAdapter(Adapter):
         # same helper.
         dropped = dropped_paths(changes, records.files) if pr is not None else DroppedPaths((), ())
         omitted = dropped.unlistable
+        # What the result lists as omitted_paths, for the outcomes that carry claims DeepSec produced, and whether that
+        # is every path the change touches, so that DeepSec examined none of it: both ``None`` in a full run, which
+        # reports no omission.
+        unexamined = unexamined_paths(changes, dropped) if pr is not None else None
+        nothing_examined = examined_nothing(changes, unexamined) if pr is not None else None
 
         exported: Any = None
         export_failure = None
@@ -2201,7 +2238,8 @@ class DeepsecAdapter(Adapter):
                                  error={"code": "import_loss",
                                         "message": f"{imported.lost} exported finding(s) and "
                                                    f"{len(records.failures)} DeepSec record(s) could not "
-                                                   f"be imported: {detail}"[:2000]}, **base)
+                                                   f"be imported: {detail}"[:2000]},
+                                 omitted_paths=unexamined, examined_nothing=nothing_examined, **base)
 
         def stopped(code: str, message: str) -> NativeOutcome:
             """The outcome of a run that reached no verdict on part of what it was given.
@@ -2223,7 +2261,8 @@ class DeepsecAdapter(Adapter):
                                          **base)
                 message = message[:2000]
             return NativeOutcome(status="partial", exit_code=exit_code, claims=imported.claims,
-                                 error={"code": code, "message": message}, **base)
+                                 error={"code": code, "message": message}, omitted_paths=unexamined,
+                                 examined_nothing=nothing_examined, **base)
 
         if pr is not None and output.quota and (statuses.errored or statuses.unfinished):
             return stopped("quota_exhausted",
@@ -2287,4 +2326,5 @@ class DeepsecAdapter(Adapter):
                                        "and left no file record, and its output does not carry the statement DeepSec "
                                        "prints when a diff selects no file, so an empty review cannot be told from a "
                                        f"run that read nothing; stderr: {tail('process')}")[:2000]}, **base)
-        return NativeOutcome(status="success", exit_code=exit_code, claims=imported.claims, **base)
+        return NativeOutcome(status="success", exit_code=exit_code, claims=imported.claims,
+                             omitted_paths=unexamined, examined_nothing=nothing_examined, **base)

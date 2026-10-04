@@ -119,6 +119,19 @@
         "pr_head"
       ],
       "description": "Which tree claim locations refer to: the scanned input, or the head of the reviewed change set in PR mode. Absent means input."
+    },
+    "omitted_paths": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Paths of the input the scanner is known not to have examined (its own selection, filter, or limit), as the adapter observed them: sorted, each once, and each a relative POSIX path with no leading '/' and no empty, '.', or '..' segment. A control planned on one earns no quiet credit, and neither does a control the plan places on no path while any is listed. Absent means the adapter reports no omissions, which says nothing about whether there were any; an empty list says it saw none."
+    },
+    "examined_nothing": {
+      "type": "boolean",
+      "description": "True says the adapter can show no part of the input to have been examined by the scanner: in a PR review, that every path the change touches is one the scanner is not shown to have read. Such a scan reached no control, wherever the plan places it, so no control earns quiet credit from it, including one on a file the change leaves alone. False says the adapter saw some of the input examined, and the paths it lists in omitted_paths then apply as they do without this field. Absent means the adapter does not report it, which says nothing about whether anything was examined."
     }
   },
   "$defs": {

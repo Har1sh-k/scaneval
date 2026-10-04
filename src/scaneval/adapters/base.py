@@ -70,7 +70,26 @@ class CommandResult:
 
 @dataclass
 class NativeOutcome:
-    """Everything one invocation produced, before the runner writes the bundle."""
+    """Everything one invocation produced, before the runner writes the bundle.
+
+    ``omitted_paths`` is what the adapter observed the scanner did not examine of its input: paths the
+    scanner's own selection, filter, or limit left out, as the adapter saw them, in no particular
+    order. ``None`` is an adapter that reports no omissions, which says nothing about whether there
+    were any, and ``[]`` is one that looked and saw none. The runner records a list as the result's
+    ``omitted_paths``, sorted and each path once, in a 2.1 result, and the scorer withholds quiet credit
+    from a control on a listed path. A list is only as true as the adapter's observation, and it is
+    meant for an outcome that carries claims the adapter read; it does not change ``status``, which
+    stays the adapter's own account of how the run ended.
+
+    ``examined_nothing`` is the adapter's statement about the whole input, beside that list: ``True``
+    says it can show no part of the input to have been examined, and in a PR review that is every path
+    the change touches being one the scanner is not shown to have read; ``False`` says it saw some
+    examined; ``None`` says it does not report. The runner records a ``bool`` as the result's
+    ``examined_nothing`` in a 2.1 result, and the scorer withholds quiet credit from every control of a
+    result that says ``True``, wherever the plan places it, because a scan that read none of what it
+    was given has reached no control. It is the adapter's claim like the list, and like the list it
+    never changes ``status``.
+    """
 
     status: str
     exit_code: int | None
@@ -88,6 +107,8 @@ class NativeOutcome:
     trace_path: Path | None = None
     capture_state: dict | None = None
     timed_out: bool = False
+    omitted_paths: list[str] | None = None
+    examined_nothing: bool | None = None
 
     def __post_init__(self) -> None:
         if self.status not in STATUSES:

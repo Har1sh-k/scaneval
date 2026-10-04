@@ -14,7 +14,8 @@ import subprocess
 import pytest
 
 from scaneval.adapters.base import Adapter, AdapterError, NativeOutcome
-from scaneval.adapters.pr import Change, PrRange, _parse_name_status, pr_range, workspace_changes
+from scaneval.adapters.pr import (Change, PrRange, _parse_name_status, examined_nothing, pr_range, removed_paths,
+                                  touched_paths, workspace_changes)
 
 
 class BareAdapter(Adapter):
@@ -87,6 +88,19 @@ def test_an_adapter_that_declares_no_modes_implements_full_scans_only():
     assert BareAdapter.scan_modes == frozenset({"full"})
     assert BareAdapter().scan_modes == frozenset({"full"})
     assert isinstance(Adapter.scan_modes, frozenset)
+
+
+def test_an_outcome_reports_no_omitted_paths_until_an_adapter_says_which():
+    """``None`` is an adapter that reports none, which is not ``[]``, an adapter that looked and saw none."""
+    assert NativeOutcome(status="success", exit_code=0, command=[]).omitted_paths is None
+    assert NativeOutcome(status="success", exit_code=0, command=[], omitted_paths=[]).omitted_paths == []
+
+
+def test_an_outcome_says_nothing_about_having_examined_nothing_until_an_adapter_says_so():
+    """``None`` is an adapter that does not report it; ``False`` is one that saw some of the input examined."""
+    assert NativeOutcome(status="success", exit_code=0, command=[]).examined_nothing is None
+    assert NativeOutcome(status="success", exit_code=0, command=[], examined_nothing=False).examined_nothing is False
+    assert NativeOutcome(status="success", exit_code=0, command=[], examined_nothing=True).examined_nothing is True
 
 
 # --- reading the request ----------------------------------------------------------------
@@ -207,6 +221,39 @@ def test_paths_with_spaces_newlines_and_non_ascii_names_come_through_intact(tmp_
     changes = workspace_changes(workspace, pr)
     assert {change.path for change in changes} == set(odd)
     assert all(change.status == "A" for change in changes)
+
+
+def test_the_removed_paths_are_the_deletions_and_the_old_names_of_renames_and_nothing_else():
+    """A scanner that reads head reads none of them; the source of a copy and a type change are still at head."""
+    changes = (Change("D", "gone.py"), Change("R", "new.py", "old.py"), Change("C", "copy.py", "source.py"),
+               Change("M", "edit.py"), Change("A", "added.py"), Change("T", "link.txt"), Change("D", "gone.py"))
+
+    assert removed_paths(changes) == ["gone.py", "old.py"]
+    assert removed_paths((Change("M", "edit.py"),)) == []
+
+
+def test_the_touched_paths_are_those_present_at_head_and_those_removed_each_once_in_order():
+    """The old name of a rename and a deletion are touched though nothing is there at head; a copy's source is not."""
+    changes = (Change("D", "gone.py"), Change("R", "new.py", "old.py"), Change("C", "copy.py", "source.py"),
+               Change("M", "edit.py"), Change("A", "added.py"), Change("T", "link.txt"), Change("M", "edit.py"))
+
+    assert touched_paths(changes) == ["added.py", "copy.py", "edit.py", "gone.py", "link.txt", "new.py", "old.py"]
+    assert touched_paths(()) == []
+
+
+@pytest.mark.parametrize("omitted, nothing", [
+    (["README.md", "src/a.py"], True), (["README.md", "src/a.py", "unrelated.py"], True), (["src/a.py"], False),
+    ([], False), (["README.md", "SRC/a.py"], False), (["README.md", "src/a.py/"], False),
+], ids=["every-path", "every-path-and-more", "one-of-two", "none", "another-case", "another-spelling"])
+def test_an_adapter_examined_nothing_exactly_when_what_it_omitted_holds_every_path_the_change_touches(omitted, nothing):
+    """Compared by equality of spelling, as the scorer compares a result's list with a plan's paths."""
+    assert examined_nothing((Change("M", "README.md"), Change("A", "src/a.py")), omitted) is nothing
+
+
+def test_a_removed_path_counts_as_touched_and_a_change_that_touches_nothing_says_nothing():
+    assert examined_nothing((Change("D", "gone.py"),), ["gone.py"]) is True
+    assert examined_nothing((Change("D", "gone.py"),), []) is False
+    assert examined_nothing((), []) is False and examined_nothing((), ["gone.py"]) is False
 
 
 def test_a_name_that_is_not_utf8_is_spelled_with_escapes_and_never_a_lone_surrogate():
