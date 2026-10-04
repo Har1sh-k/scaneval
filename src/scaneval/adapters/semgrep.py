@@ -72,8 +72,13 @@ change touches that is not among ``paths.scanned``, a path the change removed in
 touches. It changes no status and no note: an empty baseline review is still a success. What it
 changes is what the scorer may conclude from that success. A control planned on a listed path, or
 one the plan places on no path, earns no quiet credit, because Semgrep's own selection is not a
-scope declared before the run; a scope exclusion is declared by leaving the item out of the plan. A
-full scan reports no omissions.
+scope declared before the run; a scope exclusion is declared by leaving the item out of the plan.
+When the list is every path the change touches, as it is for an empty baseline review and for a
+payload with no ``paths.scanned``, the result also says ``examined_nothing``
+(:func:`~scaneval.adapters.pr.examined_nothing`), and then no control earns quiet credit, one on a
+file the change leaves alone included: a diff scan that read none of the change reached no control.
+It says ``False`` when Semgrep scanned some path of the change. A full scan reports no omissions and
+says neither.
 """
 
 from __future__ import annotations
@@ -91,7 +96,7 @@ from ..kinds import cwe_ids, kind_for_cwes, mapping_version
 from ..materialize import MaterializationError, fetch_snapshot, sha256_file, tree_hash
 from .base import (Adapter, AdapterError, NativeOutcome, SystemSpec, active_backend, build_env, run_command,
                    tail_text)
-from .pr import Change, pr_range, removed_paths, workspace_changes
+from .pr import Change, examined_nothing, pr_range, touched_paths, workspace_changes
 
 
 ARTIFACT_JSON = "semgrep-json"
@@ -650,7 +655,7 @@ def _pr_omitted_paths(changes: tuple[Change, ...], scanned: list, scanned_report
     granted for a file nobody can show was read. The list does not say why a path was left out, which the payload
     names only in part: a path Semgrep's ignore rules dropped is listed with one no rule applies to.
     """
-    touched = sorted({change.path for change in changes if change.present} | set(removed_paths(changes)))
+    touched = touched_paths(changes)
     if not scanned_reported:
         return touched
     covered = _scanned_paths(scanned)
@@ -913,12 +918,14 @@ class SemgrepAdapter(Adapter):
             return NativeOutcome(status="error", exit_code=result.exit_code,
                                  error={"code": "unparseable_output", "message": message[:2000]}, **base)
         base["notes"] = base["notes"] + notes
-        # What the result lists as omitted_paths, for the outcomes that carry the claims Semgrep reported: ``None`` in a
-        # full scan, which reports no omission.
-        omitted = None
+        # What the result lists as omitted_paths, for the outcomes that carry the claims Semgrep reported, and whether
+        # that is every path the change touches, so that Semgrep scanned none of it: both ``None`` in a full scan, which
+        # reports no omission.
+        omitted = nothing_examined = None
         if pr is not None:
             base["notes"] += _pr_review_notes(payload, changes, scanned)
             omitted = _pr_omitted_paths(changes, scanned, scanned_reported)
+            nothing_examined = examined_nothing(changes, omitted)
         base["tool_versions"]["semgrep_reported"] = reported_version
         # Import loss leaves the claim set incomplete, so the bundles it delivers are not
         # resolved: the scoring contract then refuses both completed-control and quiet credit.
@@ -954,7 +961,7 @@ class SemgrepAdapter(Adapter):
                                 f"paths{detail}; stderr: {tail_text(stderr)}")
             return NativeOutcome(status="partial", exit_code=result.exit_code, claims=claims,
                                  error={"code": f"exit_{result.exit_code}", "message": message[:2000]},
-                                 omitted_paths=omitted, **base)
+                                 omitted_paths=omitted, examined_nothing=nothing_examined, **base)
         if fatal:
             base["notes"].append(f"{len(fatal)} error-level Semgrep diagnostics; see raw semgrep.json errors")
             reason = str(fatal[0].get("message", "")).strip()
@@ -975,7 +982,7 @@ class SemgrepAdapter(Adapter):
                                 f"error-level diagnostics{detail}; stderr: {tail_text(stderr)}")
             return NativeOutcome(status="partial", exit_code=0, claims=claims,
                                  error={"code": "scan_errors", "message": message[:2000]},
-                                 omitted_paths=omitted, **base)
+                                 omitted_paths=omitted, examined_nothing=nothing_examined, **base)
         if skipped:
             base["notes"].append(f"Semgrep skipped {len(skipped)} paths under its own ignore rules; see raw semgrep.json paths")
         if not scanned_reported:
@@ -992,7 +999,8 @@ class SemgrepAdapter(Adapter):
                 empty, detail = _empty_baseline_review(payload, changes)
                 if empty and not imported.lost:
                     base["notes"].append(detail)
-                    return NativeOutcome(status="success", exit_code=0, claims=[], omitted_paths=omitted, **base)
+                    return NativeOutcome(status="success", exit_code=0, claims=[], omitted_paths=omitted,
+                                         examined_nothing=nothing_examined, **base)
                 explanation = f"; {detail}" if not empty else ""
             message = with_loss("semgrep exited 0 having scanned no files and reported no results: Semgrep "
                                 "looked at no source at all, which its ignore rules, an empty tree, or a "
@@ -1004,5 +1012,6 @@ class SemgrepAdapter(Adapter):
             # partial, and the count and the reason travel with it as an explicit error.
             return NativeOutcome(status="partial", exit_code=0, claims=claims,
                                  error={"code": "import_loss", "message": loss_message},
-                                 omitted_paths=omitted, **base)
-        return NativeOutcome(status="success", exit_code=0, claims=claims, omitted_paths=omitted, **base)
+                                 omitted_paths=omitted, examined_nothing=nothing_examined, **base)
+        return NativeOutcome(status="success", exit_code=0, claims=claims, omitted_paths=omitted,
+                             examined_nothing=nothing_examined, **base)
