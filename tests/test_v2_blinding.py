@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+import importlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ import stat
 import subprocess
 import time
 from typing import Callable
+import warnings
 
 import pytest
 
@@ -1125,7 +1127,10 @@ def test_the_yaml_subset_reads_block_collections_and_scalars_as_yaml_does(name):
         assert [key for key, _ in parsed] == list(expected), "the keys stay in the order the file wrote them"
 
 
-@pytest.mark.parametrize("text", ["", "\n", "# a comment\n", "   \n\n", "---\n", "--- # a comment\n# another\n", BOM])
+YAML_EMPTY = ["", "\n", "# a comment\n", "   \n\n", "---\n", "--- # a comment\n# another\n", BOM]
+
+
+@pytest.mark.parametrize("text", YAML_EMPTY)
 def test_an_empty_yaml_document_reads_as_null(text):
     assert blinding._parse_yaml(text) == plain("")
 
@@ -1473,30 +1478,197 @@ def test_a_large_yaml_file_is_read_in_time_linear_in_its_size():
     assert time.perf_counter() - started < 10
 
 
-def test_pyyaml_and_ruamel_read_every_accepted_edit_as_the_original_with_only_the_reviewed_replacements(tmp_path):
+# --- the YAML readers the subset claims to read as ---------------------------------------------------------------
+# The subset reads YAML as PyYAML and ruamel.yaml (in YAML 1.2 and in 1.1) do. What holds it to that is a comparison
+# with those libraries as installed, and a runner without them would pass by comparing nothing. So under CI (GitHub
+# Actions sets CI=true) a library that cannot be imported fails the run; anywhere else the tests skip and name the dev
+# extra, which installs both. src/ imports neither.
+
+
+def yaml_library(name: str, package: str):
+    """The module *name* of the YAML library *package*, which the dev extra installs.
+
+    Under CI it is imported outright, so a runner that lacks it fails the run instead of skipping the comparison;
+    anywhere else the test is skipped, with the reason.
+    """
+    install = "python -m pip install -e '.[dev]' installs it"
+    if os.environ.get("CI"):
+        try:
+            return importlib.import_module(name)
+        except ImportError as exc:
+            problem = str(exc)
+        pytest.fail(f"{package} is required when CI is set, and cannot be imported ({problem}); {install}",
+                    pytrace=False)
+    return pytest.importorskip(name, reason=f"{package} is not installed; {install}")
+
+
+def pyyaml_reader(libyaml: bool) -> Callable[[str], object]:
+    """PyYAML's safe loader as a function of the text: its Python scanner, or libyaml's (``CSafeLoader``) if built in.
+
+    PyYAML builds a dict in the order of the file but keeps the last of two equal keys, so this loader refuses one.
+    """
+    yaml = yaml_library("yaml", "PyYAML")
+    if libyaml and not yaml.__with_libyaml__:
+        pytest.skip("this PyYAML is built without libyaml, so it has no CSafeLoader")
+    base = yaml.CSafeLoader if libyaml else yaml.SafeLoader
+
+    class Loader(base):
+        def construct_mapping(self, node, deep=False):
+            mapping = super().construct_mapping(node, deep=deep)
+            if len(mapping) < len(node.value):
+                raise yaml.constructor.ConstructorError(None, None, "found a duplicate key", node.start_mark)
+            return mapping
+
+    return lambda text: yaml.load(text, Loader=Loader)
+
+
+def ruamel_reader(version: tuple[int, int] | None, *, c_parser: bool = False) -> Callable[[str], object]:
+    """ruamel.yaml's safe loader as a function of the text: its Python parser, or its C parser if it has one.
+
+    *version* is the YAML version it is asked to read, and ``None`` leaves it unset, which reads YAML 1.2.
+    ``typ="safe"`` takes the C parser when it is installed and the Python one otherwise, so without it the C case is
+    skipped rather than run the Python parser twice. Each text is read by an instance of its own, because one that has
+    read a ``---`` as YAML 1.1 goes on to read as 1.2. A mapping is a dict in the order of the file, and a duplicate
+    key is refused.
+    """
+    ruamel = yaml_library("ruamel.yaml", "ruamel.yaml")
+    if c_parser and ruamel.YAML(typ="safe").Parser is ruamel.YAML(typ="safe", pure=True).Parser:
+        pytest.skip("ruamel.yaml has no C parser here (the ruamel.yaml.clib package is not installed)")
+
+    def load(text: str) -> object:
+        reader = ruamel.YAML(typ="safe", pure=not c_parser)
+        if version is not None:
+            reader.version = version
+        with warnings.catch_warnings():
+            # YAML 1.1 wants a dot in a float, so it warns about 1e3 and still reads it as the float.
+            warnings.simplefilter("ignore", ruamel.error.MantissaNoDotYAML1_1Warning)
+            return reader.load(text)
+
+    return load
+
+
+# Each reader by the name a failure shows: how to build it, and the YAML version it reads.
+YAML_READERS = {
+    "pyyaml-safeloader": (lambda: pyyaml_reader(False), "1.1"),
+    "pyyaml-csafeloader": (lambda: pyyaml_reader(True), "1.1"),
+    "ruamel-pure-1.2": (lambda: ruamel_reader(None), "1.2"),
+    "ruamel-pure-1.1": (lambda: ruamel_reader((1, 1)), "1.1"),
+    "ruamel-c-1.2": (lambda: ruamel_reader(None, c_parser=True), "1.2"),
+    "ruamel-c-1.1": (lambda: ruamel_reader((1, 1), c_parser=True), "1.1"),
+}
+# The readers the subset names. The others run the same libraries on their C parsers, which are not always installed.
+CLAIMED_YAML_READERS = ("pyyaml-safeloader", "ruamel-pure-1.2", "ruamel-pure-1.1")
+
+
+def yaml_reader(name: str) -> Callable[[str], object]:
+    """The reader *name* of ``YAML_READERS``, as a function of the text it loads."""
+    return YAML_READERS[name][0]()
+
+
+def rewritten(value, pseudonyms: dict[str, str]):
+    """A loaded YAML value with the reviewed replacements applied to every string in it, keys included."""
+    if isinstance(value, dict):
+        return {rewritten(key, pseudonyms): rewritten(item, pseudonyms) for key, item in value.items()}
+    if isinstance(value, list):
+        return [rewritten(item, pseudonyms) for item in value]
+    return replaced(value, pseudonyms) if isinstance(value, str) else value
+
+
+def typed(value):
+    """A loaded YAML value with its kinds kept apart, so equal ones have the same types, nesting, and key order."""
+    if isinstance(value, dict):
+        return ("mapping", [(typed(key), typed(item)) for key, item in value.items()])
+    if isinstance(value, list):
+        return ("sequence", [typed(item) for item in value])
+    return (type(value), value)
+
+
+def paired_scalars(loaded, parsed, where: str = "$"):
+    """The scalars of *parsed*, what the subset read of a text, each beside what a reader's *loaded* value holds there.
+
+    Yields ``(where, the reader's scalar, the subset's scalar)``, keys too. A mapping or sequence that the reader
+    loaded as something else, with another length, or with its keys in another order fails here, naming where.
+    """
+    if isinstance(parsed, blinding._Pairs):
+        assert isinstance(loaded, dict) and len(loaded) == len(parsed), (
+            f"{where} is a mapping of {len(parsed)} entries; this reader loaded {loaded!r}")
+        for (loaded_key, loaded_value), (key, value) in zip(loaded.items(), parsed):
+            yield from paired_scalars(loaded_key, key, f"{where} key {key!r}")
+            yield from paired_scalars(loaded_value, value, f"{where}[{key!r}]")
+    elif isinstance(parsed, list):
+        assert isinstance(loaded, list) and len(loaded) == len(parsed), (
+            f"{where} is a sequence of {len(parsed)} items; this reader loaded {loaded!r}")
+        for index, (loaded_item, item) in enumerate(zip(loaded, parsed)):
+            yield from paired_scalars(loaded_item, item, f"{where}[{index}]")
+    else:
+        yield where, loaded, parsed
+
+
+@pytest.mark.parametrize("reader", list(YAML_READERS))
+def test_a_yaml_reader_reads_the_yaml_version_it_is_named_for(reader):
+    """YAML 1.1 reads ``no`` as a boolean and YAML 1.2 as a string. A reader that ignored the version it was given
+    would be a reader of the other version under the wrong name, and the comparisons below would not say so."""
+    version = YAML_READERS[reader][1]
+
+    assert typed(yaml_reader(reader)("a: no\n")) == typed({"a": False if version == "1.1" else "no"})
+
+
+@pytest.mark.parametrize("reader", list(YAML_READERS))
+def test_a_yaml_reader_refuses_a_key_that_occurs_twice(reader):
+    """A reader that kept the last of two equal keys would hide a duplicate from every comparison made with it."""
+    with pytest.raises(Exception, match="duplicate key"):
+        yaml_reader(reader)("a: 1\na: 2\n")
+
+
+@pytest.mark.parametrize("name", sorted(YAML_ACCEPTED))
+@pytest.mark.parametrize("reader", list(YAML_READERS))
+def test_every_yaml_reader_reads_an_accepted_edit_as_the_original_with_only_the_reviewed_replacements(
+        tmp_path, reader, name):
     """The subset's claim, checked against the libraries whose reading it claims: same keys, order, nesting, types."""
-    yaml = pytest.importorskip("yaml")
-    ruamel = pytest.importorskip("ruamel.yaml")
-    readers = {"PyYAML": yaml.safe_load, "ruamel.yaml (YAML 1.2)": lambda text: ruamel.YAML(typ="safe").load(text)}
+    load = yaml_reader(reader)
+    content, pseudonyms = YAML_ACCEPTED[name]
+    transformed = display_edit(tmp_path, "display.yml", content, pseudonyms).data.decode("utf-8")
 
-    def rewritten(value, pseudonyms):
-        if isinstance(value, dict):
-            return {rewritten(key, pseudonyms): rewritten(item, pseudonyms) for key, item in value.items()}
-        if isinstance(value, list):
-            return [rewritten(item, pseudonyms) for item in value]
-        return replaced(value, pseudonyms) if isinstance(value, str) else value
+    assert typed(load(transformed)) == typed(rewritten(load(content), pseudonyms))
 
-    def typed(value):
-        if isinstance(value, dict):
-            return ("mapping", [(typed(key), typed(item)) for key, item in value.items()])
-        if isinstance(value, list):
-            return ("sequence", [typed(item) for item in value])
-        return (type(value), value)
 
-    for name, (content, pseudonyms) in sorted(YAML_ACCEPTED.items()):
-        transformed = display_edit(tmp_path / name, "display.yml", content, pseudonyms).data.decode("utf-8")
-        for reader, load in readers.items():
-            assert typed(load(transformed)) == typed(rewritten(load(content), pseudonyms)), (name, reader)
+@pytest.mark.parametrize("name", sorted(YAML_READS))
+@pytest.mark.parametrize("reader", list(YAML_READERS))
+def test_every_yaml_reader_reads_a_text_as_the_subset_does(reader, name):
+    """A string of the subset is that string to every reader. What the subset keeps as a non-string is one only to some
+    (YAML 1.2 reads ``No`` as a string), so a reader that loads it as a string loads it as it was written."""
+    load = yaml_reader(reader)
+    text = YAML_READS[name][0]
+
+    for where, loaded, kept in paired_scalars(load(text), blinding._parse_yaml(text)):
+        if isinstance(kept, blinding._NonString):
+            assert not isinstance(loaded, str) or loaded == kept.text, (
+                f"{where} is {kept.text!r}, kept as a non-string; this reader loaded it as the string {loaded!r}")
+        else:
+            assert isinstance(loaded, str) and loaded == kept, (
+                f"{where} is the string {kept!r}; this reader loaded {loaded!r}")
+
+
+@pytest.mark.parametrize("name", sorted(YAML_READS))
+def test_a_scalar_the_subset_keeps_as_a_non_string_is_one_to_some_claimed_yaml_reader(name):
+    """The subset keeps as a non-string what some reader reads as one. A scalar that every claimed reader reads as a
+    string would be kept from a reviewed replacement for nothing."""
+    text = YAML_READS[name][0]
+    parsed = blinding._parse_yaml(text)
+    other_than_a_string = {}
+
+    for reader in CLAIMED_YAML_READERS:
+        for where, loaded, kept in paired_scalars(yaml_reader(reader)(text), parsed):
+            if isinstance(kept, blinding._NonString):
+                other_than_a_string[where] = other_than_a_string.get(where, False) or not isinstance(loaded, str)
+
+    assert all(other_than_a_string.values()), [where for where, other in other_than_a_string.items() if not other]
+
+
+@pytest.mark.parametrize("text", YAML_EMPTY)
+@pytest.mark.parametrize("reader", list(YAML_READERS))
+def test_every_yaml_reader_reads_an_empty_document_as_null(reader, text):
+    assert yaml_reader(reader)(text) is None
 
 
 def test_a_yaml_display_file_is_verified_as_the_block_subset_and_the_check_is_recorded(tmp_path, display):
