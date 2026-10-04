@@ -14,7 +14,7 @@ import subprocess
 import pytest
 
 from scaneval.adapters.base import Adapter, AdapterError, NativeOutcome
-from scaneval.adapters.pr import Change, PrRange, _parse_name_status, pr_range, workspace_changes
+from scaneval.adapters.pr import Change, PrRange, _parse_name_status, pr_range, removed_paths, workspace_changes
 
 
 class BareAdapter(Adapter):
@@ -213,6 +213,15 @@ def test_paths_with_spaces_newlines_and_non_ascii_names_come_through_intact(tmp_
     changes = workspace_changes(workspace, pr)
     assert {change.path for change in changes} == set(odd)
     assert all(change.status == "A" for change in changes)
+
+
+def test_the_removed_paths_are_the_deletions_and_the_old_names_of_renames_and_nothing_else():
+    """A scanner that reads head reads none of them; the source of a copy and a type change are still at head."""
+    changes = (Change("D", "gone.py"), Change("R", "new.py", "old.py"), Change("C", "copy.py", "source.py"),
+               Change("M", "edit.py"), Change("A", "added.py"), Change("T", "link.txt"), Change("D", "gone.py"))
+
+    assert removed_paths(changes) == ["gone.py", "old.py"]
+    assert removed_paths((Change("M", "edit.py"),)) == []
 
 
 def test_a_name_that_is_not_utf8_is_spelled_with_escapes_and_never_a_lone_surrogate():

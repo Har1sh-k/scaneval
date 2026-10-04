@@ -81,6 +81,16 @@ class Change(NamedTuple):
         return self.status != "D"
 
 
+def removed_paths(changes: tuple[Change, ...]) -> list[str]:
+    """The paths the change removed, sorted and each once: every deletion and the old name of every rename.
+
+    Nothing exists at one of them at head, so a scanner that reads head reads none of them. The old name
+    of a copy is not here: the source of a copy is still at head, as it was.
+    """
+    return sorted({change.path for change in changes if change.status == "D"}
+                  | {change.old_path for change in changes if change.status == "R" and change.old_path})
+
+
 def pr_range(request: Any, adapter: Adapter) -> PrRange | None:
     """The change *request* asks *adapter* to review, or ``None`` when it asks for a full scan.
 
