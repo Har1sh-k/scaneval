@@ -155,6 +155,24 @@ def _require_relative_path(path: str, label: str) -> None:
         raise ContractError(f"{label} must be a relative path without '..' components")
 
 
+def _require_sorted_relative_paths(paths: list[str], label: str) -> None:
+    """Refuse *paths* unless each is a relative POSIX path and together they are sorted, each path once.
+
+    A relative POSIX path here holds no NUL byte and has no empty, ``.``, or ``..`` segment, so a leading ``/``, a
+    doubled or trailing ``/``, and a ``./`` prefix are all refused: one file has one spelling, which is what lets two
+    lists of these be compared by equality. A backslash is an ordinary character in a POSIX name and is not read as a
+    separator, unlike in :func:`_require_relative_path`, because these are the names git reports and a file may be
+    called that. Sorted is :func:`sorted`'s order, so one set of paths is one list.
+    """
+    for index, path in enumerate(paths):
+        if "\x00" in path or any(part in ("", ".", "..") for part in path.split("/")):
+            raise ContractError(
+                f"{label}[{index}] must be a relative POSIX path with no empty, '.', or '..' segment, not {path!r}")
+    _unique(paths, label)
+    if paths != sorted(paths):
+        raise ContractError(f"{label} must be sorted")
+
+
 def reject_nonfinite(value: Any, path: str = "document") -> None:
     """Refuse a NaN or infinity anywhere in *value*, naming where it sits.
 
@@ -1066,6 +1084,11 @@ def _validate_scan_result(document: dict[str, Any]) -> None:
     any one adapter, so no importer can hand out a citation the bundle cannot honor. This
     checks the reference only: whether the declared artifact's bytes support the allegation is
     a review question that nothing in this file can see.
+
+    The ``omitted_paths`` a 2.1 result may list are paths the adapter observed the scanner did
+    not examine. They must be relative POSIX paths, sorted, each once, because the scorer
+    compares them by equality with the paths a plan gives its controls. Whether a path really
+    was examined is the adapter's claim, and nothing in this file can see it.
     """
     claims = document["claims"]
     _unique([claim["claim_id"] for claim in claims], "claim_id")
@@ -1089,6 +1112,8 @@ def _validate_scan_result(document: dict[str, Any]) -> None:
                 f"result does not declare in raw_artifacts; declared ids: {known}")
     for index, artifact in enumerate(document.get("raw_artifacts", [])):
         _require_relative_path(artifact["path"], f"raw_artifacts[{index}].path")
+    if "omitted_paths" in document:
+        _require_sorted_relative_paths(document["omitted_paths"], "omitted_paths")
 
 
 def _validate_evaluation_plan(document: dict[str, Any]) -> None:
@@ -1096,10 +1121,15 @@ def _validate_evaluation_plan(document: dict[str, Any]) -> None:
 
     A draft plan may therefore carry an L3 or L4 item: the scope, not a rewritten level, says
     the plan as a whole is not reviewed evidence. A reviewed plan stays L3/L4 only, and a
-    diagnostic plan stays fixture only.
+    diagnostic plan stays fixture only. A control's ``paths``, which only a 2.1 plan may carry,
+    are relative POSIX paths, sorted, each once, so they compare by equality with the
+    ``omitted_paths`` of a scan result.
     """
     _unique([target["target_id"] for target in document["targets"]], "target_id")
     _unique([control["control_id"] for control in document["controls"]], "control_id")
+    for index, control in enumerate(document["controls"]):
+        if "paths" in control:
+            _require_sorted_relative_paths(control["paths"], f"controls[{index}].paths")
     provenance = document.get("provenance")
     if document["schema_version"] != "2.0" and provenance is not None:
         # A PR plan names the boundary it scores and the scope of every item in it; a full plan

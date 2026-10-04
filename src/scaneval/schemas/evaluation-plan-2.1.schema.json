@@ -311,6 +311,16 @@
               ]
             }
           }
+        },
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "The paths of the control's locations in the case pack: sorted, each once, and each a relative POSIX path with no leading '/' and no empty, '.', or '..' segment. Evaluator-side, never handed to a scanner, and read only to withhold quiet credit from a control on a path the scan result lists in omitted_paths. Absent means the plan does not say where the control is."
         }
       }
     }
