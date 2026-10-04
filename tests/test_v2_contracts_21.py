@@ -147,6 +147,25 @@ def test_a_listed_omission_keeps_a_backslash_because_it_is_a_character_of_a_posi
     validate_document("scan-result", {**scan_result("2.1"), "omitted_paths": omitted})
 
 
+@pytest.mark.parametrize("examined_nothing", [True, False], ids=["true", "false"])
+def test_a_2_1_result_says_whether_the_scanner_examined_nothing_and_a_2_0_result_cannot(examined_nothing):
+    """Both values are a statement: true that nothing was shown examined, false that some of it was."""
+    said = {**scan_result("2.1"), "location_basis": "pr_head", "omitted_paths": ["README.md"],
+            "examined_nothing": examined_nothing}
+    assert validate_document("scan-result", said) is said
+    assert validate_document("scan-result", {**scan_result("2.1"), "examined_nothing": examined_nothing}), \
+        "it does not need the list beside it: each is the adapter's account of one thing"
+    with pytest.raises(ContractError, match="Additional properties are not allowed"):
+        validate_document("scan-result", {**scan_result("2.0"), "examined_nothing": examined_nothing})
+
+
+@pytest.mark.parametrize("value", [None, 1, 0, "true", "", [], {}], ids=["null", "one", "zero", "text", "empty-text",
+                                                                          "list", "object"])
+def test_a_result_that_says_examined_nothing_with_anything_but_a_boolean_is_refused(value):
+    with pytest.raises(ContractError, match="is not of type 'boolean'"):
+        validate_document("scan-result", {**scan_result("2.1"), "examined_nothing": value})
+
+
 def plan(mode: str = "full", **provenance) -> dict:
     return {"schema_version": "2.1", "input_hash": HASH, "scope": "draft",
             "targets": [{"target_id": "T1", "description": "d", "validation_level": "L1"}],

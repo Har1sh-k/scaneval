@@ -1089,6 +1089,11 @@ def _validate_scan_result(document: dict[str, Any]) -> None:
     not examine. They must be relative POSIX paths, sorted, each once, because the scorer
     compares them by equality with the paths a plan gives its controls. Whether a path really
     was examined is the adapter's claim, and nothing in this file can see it.
+
+    A 2.1 result may also say ``examined_nothing``, that the adapter can show no part of the input
+    to have been examined. The schema makes it a boolean, and nothing here checks it against
+    ``omitted_paths``, ``claims`` or ``status``: each is the adapter's own account of one thing,
+    and the scorer reads each for what it says.
     """
     claims = document["claims"]
     _unique([claim["claim_id"] for claim in claims], "claim_id")
