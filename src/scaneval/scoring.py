@@ -60,11 +60,12 @@ def _unexamined_controls(plan: dict, result: dict) -> set[str]:
     was given has reached no control, a safe one on a file the change leaves alone included, and its
     silence says nothing about any of them.
 
-    A result that says neither leaves every control as examined as this can tell. The lists are another
-    party's statement, the pack's for the plan and the adapter's for the result, and this checks
-    none of them. Short of ``examined_nothing`` it reads only the paths a result lists, so a control on
-    a path the listing never names is not here, whether or not the scanner read it: a scan that
-    examined some of the change still earns a control on an unchanged context file its quiet credit.
+    A result that says neither leaves every control as examined as this can tell. What a plan says of
+    where a control is and what a result says of what its scanner left out are another party's
+    statements, the pack's and the adapter's, and this checks none of them. Short of
+    ``examined_nothing`` it reads only the paths a result lists, so a control on a path the listing
+    never names is not here, whether or not the scanner read it: a scan that examined some of the
+    change still earns a control on an unchanged context file its quiet credit.
     """
     if result.get("examined_nothing") is True:
         return {control["control_id"] for control in plan["controls"]}
