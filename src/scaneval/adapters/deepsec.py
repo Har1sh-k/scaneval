@@ -93,8 +93,12 @@ comparison as the note and changes no status: a change that touches only paths D
 drops is still an empty review and a ``success``, and DeepSec's own filtering is not touched. What
 it changes is what the scorer may conclude from that success. A control planned on a listed path, or
 one the plan places on no path, earns no quiet credit, because DeepSec's own selection is not a
-scope declared before the run; a scope exclusion is declared by leaving the item out of the plan. A
-full run reports no omissions.
+scope declared before the run; a scope exclusion is declared by leaving the item out of the plan.
+When the list is every path the change touches, so that DeepSec made a record for none of it, the
+result also says ``examined_nothing`` (:func:`~scaneval.adapters.pr.examined_nothing`), and then no
+control earns quiet credit, one on a file the change leaves alone included: a review that read none
+of the change reached no control. It says ``False`` when some path has a record. A full run reports
+no omissions and says neither.
 
 Direct mode exits 1 for three different reasons (a run that produced findings, a batch that
 errored, an exhausted quota) and also for a runtime failure such as an unresolvable range, so an
@@ -127,7 +131,7 @@ from ..kinds import kind_for_harness_class
 from ..observer import Observer, create_jsonl_sink
 from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command
 from .llm_harness import Enclosure, read_record
-from .pr import Change, pr_range, removed_paths, workspace_changes
+from .pr import Change, examined_nothing, pr_range, removed_paths, workspace_changes
 
 
 ARTIFACT_EXPORT = "deepsec-export"
@@ -1979,9 +1983,11 @@ class DeepsecAdapter(Adapter):
         # same helper.
         dropped = dropped_paths(changes, records.files) if pr is not None else DroppedPaths((), ())
         omitted = dropped.unlistable
-        # What the result lists as omitted_paths, for the outcomes that carry claims DeepSec produced: ``None`` in a
-        # full run, which reports no omission.
+        # What the result lists as omitted_paths, for the outcomes that carry claims DeepSec produced, and whether that
+        # is every path the change touches, so that DeepSec examined none of it: both ``None`` in a full run, which
+        # reports no omission.
         unexamined = unexamined_paths(changes, dropped) if pr is not None else None
+        nothing_examined = examined_nothing(changes, unexamined) if pr is not None else None
 
         exported: Any = None
         export_failure = None
@@ -2233,7 +2239,7 @@ class DeepsecAdapter(Adapter):
                                         "message": f"{imported.lost} exported finding(s) and "
                                                    f"{len(records.failures)} DeepSec record(s) could not "
                                                    f"be imported: {detail}"[:2000]},
-                                 omitted_paths=unexamined, **base)
+                                 omitted_paths=unexamined, examined_nothing=nothing_examined, **base)
 
         def stopped(code: str, message: str) -> NativeOutcome:
             """The outcome of a run that reached no verdict on part of what it was given.
@@ -2255,7 +2261,8 @@ class DeepsecAdapter(Adapter):
                                          **base)
                 message = message[:2000]
             return NativeOutcome(status="partial", exit_code=exit_code, claims=imported.claims,
-                                 error={"code": code, "message": message}, omitted_paths=unexamined, **base)
+                                 error={"code": code, "message": message}, omitted_paths=unexamined,
+                                 examined_nothing=nothing_examined, **base)
 
         if pr is not None and output.quota and (statuses.errored or statuses.unfinished):
             return stopped("quota_exhausted",
@@ -2320,4 +2327,4 @@ class DeepsecAdapter(Adapter):
                                        "prints when a diff selects no file, so an empty review cannot be told from a "
                                        f"run that read nothing; stderr: {tail('process')}")[:2000]}, **base)
         return NativeOutcome(status="success", exit_code=exit_code, claims=imported.claims,
-                             omitted_paths=unexamined, **base)
+                             omitted_paths=unexamined, examined_nothing=nothing_examined, **base)
