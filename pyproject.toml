@@ -26,6 +26,9 @@ scaneval = ["schemas/*.json", "mappings/*.json", "adapters/*.mts"]
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+  # The YAML readers the blinding tests compare the YAML subset with. Test-only: src/ never imports them.
+  "PyYAML>=6.0",
+  "ruamel.yaml>=0.18",
 ]
 official-adapters = [
   "semgrep>=1.77.0",
