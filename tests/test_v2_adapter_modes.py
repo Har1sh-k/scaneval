@@ -89,6 +89,12 @@ def test_an_adapter_that_declares_no_modes_implements_full_scans_only():
     assert isinstance(Adapter.scan_modes, frozenset)
 
 
+def test_an_outcome_reports_no_omitted_paths_until_an_adapter_says_which():
+    """``None`` is an adapter that reports none, which is not ``[]``, an adapter that looked and saw none."""
+    assert NativeOutcome(status="success", exit_code=0, command=[]).omitted_paths is None
+    assert NativeOutcome(status="success", exit_code=0, command=[], omitted_paths=[]).omitted_paths == []
+
+
 # --- reading the request ----------------------------------------------------------------
 
 

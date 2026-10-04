@@ -70,7 +70,17 @@ class CommandResult:
 
 @dataclass
 class NativeOutcome:
-    """Everything one invocation produced, before the runner writes the bundle."""
+    """Everything one invocation produced, before the runner writes the bundle.
+
+    ``omitted_paths`` is what the adapter observed the scanner did not examine of its input: paths the
+    scanner's own selection, filter, or limit left out, as the adapter saw them, in no particular
+    order. ``None`` is an adapter that reports no omissions, which says nothing about whether there
+    were any, and ``[]`` is one that looked and saw none. The runner records a list as the result's
+    ``omitted_paths``, sorted and each path once, in a 2.1 result, and the scorer withholds quiet credit
+    from a control on a listed path. A list is only as true as the adapter's observation, and it is
+    meant for an outcome that carries claims the adapter read; it does not change ``status``, which
+    stays the adapter's own account of how the run ended.
+    """
 
     status: str
     exit_code: int | None
@@ -88,6 +98,7 @@ class NativeOutcome:
     trace_path: Path | None = None
     capture_state: dict | None = None
     timed_out: bool = False
+    omitted_paths: list[str] | None = None
 
     def __post_init__(self) -> None:
         if self.status not in STATUSES:

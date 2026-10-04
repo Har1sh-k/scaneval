@@ -379,8 +379,12 @@ def _with(outcome: NativeOutcome, **fields) -> NativeOutcome:
         (lambda outcome: _with(outcome, artifacts=[{"id": 7, "path": "raw/native.json"}]), "artifacts[0].id must be a non-empty string"),
         (lambda outcome: _with(outcome, usage={"cost_usd": "free"}), "usage['cost_usd'] must be a number, not str"),
         (lambda outcome: _with(outcome, notes=[object()]), "notes[0] must be a string, not object"),
+        (lambda outcome: _with(outcome, omitted_paths="src/app.py"), "omitted_paths must be a list or None, not str"),
+        (lambda outcome: _with(outcome, omitted_paths=["src/a.py", 7]), "omitted_paths[1] must be a string, not int"),
+        (lambda outcome: _with(outcome, omitted_paths=[None]), "omitted_paths[0] must be a string, not NoneType"),
     ],
-    ids=["float-version", "path-in-command", "dict-outcome", "artifact-id", "usage-string", "note-object"],
+    ids=["float-version", "path-in-command", "dict-outcome", "artifact-id", "usage-string", "note-object",
+         "omitted-string", "omitted-number", "omitted-none"],
 )
 def test_an_outcome_that_breaks_the_adapter_contract_is_a_recorded_error(tmp_path, mutate, fragment):
     """An outcome this module cannot read is an error bundle, never a success with fields dropped."""
@@ -2932,6 +2936,85 @@ def test_a_pr_input_binds_its_result_to_the_change_set_identity_and_locates_agai
         "date": "2000-01-01T00:00:00+00:00"}
     assert execution["provenance"]["source_modified"] is False and execution["provenance"]["modified_paths"] == []
     assert not any(str(prepared.base_source_dir) in json.dumps(document) for document in (request, result, execution))
+
+
+class PrOutcomeAdapter(PrAdapter):
+    """A PR adapter that hands back whatever *mutate* makes of its outcome."""
+
+    def __init__(self, mutate):
+        super().__init__()
+        self.mutate = mutate
+
+    def scan(self, **kwargs):
+        return self.mutate(super().scan(**kwargs))
+
+
+def test_a_result_lists_no_omitted_paths_unless_the_adapter_reported_some(tmp_path):
+    result = load_document(run(tmp_path, PrAdapter(), pr_input(tmp_path)) / "result.json", "scan-result")
+
+    assert result["schema_version"] == "2.1" and "omitted_paths" not in result, \
+        "an adapter that reports none says nothing about whether the scanner left anything out"
+
+
+def test_an_adapter_that_saw_no_omission_says_so_with_an_empty_list(tmp_path):
+    adapter = PrOutcomeAdapter(lambda outcome: _with(outcome, omitted_paths=[]))
+
+    result = load_document(run(tmp_path, adapter, pr_input(tmp_path)) / "result.json", "scan-result")
+
+    assert result["omitted_paths"] == [] and result["status"] == "success"
+
+
+def test_the_omitted_paths_an_adapter_reports_are_written_sorted_and_once_in_a_2_1_result(tmp_path):
+    adapter = PrOutcomeAdapter(lambda outcome: _with(
+        outcome, omitted_paths=["tests/server.test.js", "README.md", "docs/guide.md", "README.md"]))
+
+    bundle = run(tmp_path, adapter, pr_input(tmp_path))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    assert result["omitted_paths"] == ["README.md", "docs/guide.md", "tests/server.test.js"]
+    assert result["schema_version"] == "2.1" and result["location_basis"] == "pr_head"
+    assert result["status"] == "success" and result["bundles_resolved"] is True, \
+        "the list is the adapter's account of the scan and changes neither its status nor its claims"
+    assert result["claims"] and "error" not in result
+
+
+def test_a_scan_that_is_not_a_review_of_a_change_records_omitted_paths_in_a_2_1_result_with_no_location_basis(tmp_path):
+    """The version moves for the field, whatever the mode: a 2.0 result has nowhere to put it."""
+    adapter = OutcomeAdapter(lambda outcome: _with(outcome, omitted_paths=["README.md"]))
+
+    result = load_document(run(tmp_path, adapter) / "result.json", "scan-result")
+
+    assert result["schema_version"] == "2.1" and result["omitted_paths"] == ["README.md"]
+    assert "location_basis" not in result
+
+
+@pytest.mark.parametrize("omitted", [["../outside.py"], ["/etc/passwd"], ["src//a.py"], [""]],
+                         ids=["parent", "absolute", "empty-segment", "empty-path"])
+def test_an_omitted_path_the_contract_refuses_is_a_recorded_import_failure_and_the_error_carries_none(tmp_path,
+                                                                                                    omitted):
+    adapter = PrOutcomeAdapter(lambda outcome: _with(outcome, omitted_paths=omitted))
+
+    bundle = run(tmp_path, adapter, pr_input(tmp_path))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "import_contract_violation"
+    assert "omitted_paths" in execution["import_error"]
+    assert "omitted_paths" not in result, "the result recorded in place of a refused one carries nothing the adapter said"
+
+
+def test_an_omitted_path_utf8_cannot_encode_is_rendered_and_the_list_is_still_sorted_and_unique(tmp_path):
+    """Rendering a lone surrogate as backslash escapes moves it before ``a~``, and merges it with that text typed out."""
+    adapter = PrOutcomeAdapter(lambda outcome: _with(
+        outcome, omitted_paths=["a~", f"a{LONE_SURROGATE}", "a\\ud800", "b.py"]))
+
+    bundle = run(tmp_path, adapter, pr_input(tmp_path))
+
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "success" and result["omitted_paths"] == ["a\\ud800", "a~", "b.py"]
+    assert any("bytes UTF-8 cannot encode" in note for note in execution["notes"])
 
 
 def test_the_workspace_git_diff_between_the_synthetic_commits_is_the_recorded_diff(tmp_path):
