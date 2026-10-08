@@ -1,0 +1,51 @@
+{
+  "schema_version": "2.0",
+  "run_id": "pilot-harness-codex-sol",
+  "pack": "pack.json",
+  "cache_root": "../../.repos",
+  "inputs": [
+    {
+      "snapshot_id": "oauth2-proxy-f4b33b64",
+      "profile": "standard"
+    },
+    {
+      "snapshot_id": "fastmcp-c861862a",
+      "profile": "standard"
+    },
+    {
+      "snapshot_id": "fastify-v5.12.1",
+      "profile": "standard"
+    }
+  ],
+  "systems": [
+    {
+      "system_id": "securevibes-agent-codex-sol-bootstrap",
+      "adapter": "llm-harness",
+      "model_id": "openai-codex/gpt-5.6-sol",
+      "config": {
+        "harness": "securevibes-agent",
+        "root": "~/Documents/GitHub/securevibes-agent",
+        "model": "openai-codex/gpt-5.6-sol",
+        "mode": "bootstrap",
+        "runner": "default",
+        "qmd_profile": "lite",
+        "llm_max_files": 25,
+        "llm_timeout_ms": 180000,
+        "flush_timeout_ms": 30000
+      },
+      "network_policy": "model_provider_only"
+    }
+  ],
+  "repetitions": 1,
+  "timeout_seconds": 3600,
+  "trace_mode": "content",
+  "network_policy": "model_provider_only",
+  "notes": [
+    "Own-harness run through securevibes-agent with ScanEval Observer hooks enabled when the checkout supports them.",
+    "The model route is openai-codex/gpt-5.6-sol through pi. Authenticate the OpenAI Codex provider in pi before running.",
+    "The pi route may not report token usage, cost, or independently served model identity. ScanEval records those fields as unavailable rather than inventing values.",
+    "llm_max_files bounds how many files reach the model. Keep the input list small until the pilot labels have human approval.",
+    "The harness root uses a leading ~ so it expands for the operator. Point it at the securevibes-agent checkout you intend to evaluate.",
+    "Content-mode traces stay local because they can contain source code and previously unknown findings. This configuration is not a publishable comparison by itself."
+  ]
+}

@@ -285,11 +285,13 @@ A human edits `evaluator/decisions.json`. `review record` then re-drafts the rev
 
 ## Run configuration
 
-A run configuration is a frozen document naming the pack, the inputs, the systems, the repetition count, the timeout, the trace mode, and the network policy. The three pilot configurations are [`corpus/pilot/run-semgrep.json`](../corpus/pilot/run-semgrep.json), [`corpus/pilot/run-harness.json`](../corpus/pilot/run-harness.json), and [`corpus/pilot/run-deepsec.json`](../corpus/pilot/run-deepsec.json). The DeepSec one names an installed DeepSec workspace with a leading `~`, so it expands to whichever operator runs it rather than pinning one machine.
+A run configuration is a frozen document naming the pack, the inputs, the systems, the repetition count, the timeout, the trace mode, and the network policy. The four pilot configurations are [`corpus/pilot/run-semgrep.json`](../corpus/pilot/run-semgrep.json), [`corpus/pilot/run-harness.json`](../corpus/pilot/run-harness.json), [`corpus/pilot/run-harness-codex-sol.json`](../corpus/pilot/run-harness-codex-sol.json), and [`corpus/pilot/run-deepsec.json`](../corpus/pilot/run-deepsec.json). The harness and DeepSec configurations name installed workspaces with a leading `~`, so they expand for the operator rather than pinning one machine. The two harness configurations keep Haiku and GPT-5.6 Sol runs explicit instead of silently changing the model behind one filename.
 
 A 2.1 configuration can also name each input with `input_id` (its directory and invocation name, never shown to a scanner), choose its `profile`, name the reviewed `blinding_map` of a `metadata_blinded` input by a path relative to the configuration, and give a system an `execution` backend (`local`, or `oci` as described in the [threat model](THREAT_MODEL.md)). A native PR input names a change set the pack declares (`{"mode": "pr", "change_set_id": "..."}`, and no `snapshot_id`); one the pack does not declare is refused when the configuration is read, before the output directory exists, and a full scan of the head never stands in for it. A PR input's default `input_id` is its change set id.
 
 `--only-input` (input ids) and `--only-system` narrow a run. Naming something the configuration does not contain is an error rather than a silently empty run, and what was narrowed away is recorded in the manifest and the schedule. `--workspace-root` chooses where the scanner's private workspace is created; a workspace inside the run output, the source cache, or an exported input is refused. Under the `oci` backend it must be a directory the Docker daemon can see.
+
+The CLI reports preparation, invocation start, a 30-second heartbeat, completion, and the final manifest path on stderr, with no prompt or raw scanner content. `--quiet` suppresses these operator messages without changing the run or its final summary.
 
 ## CLI surface
 

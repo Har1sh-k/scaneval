@@ -12,7 +12,8 @@ Install ScanEval using the [setup guide](INITIAL_BUILD.md#try-it), then configur
 | Configuration | Required setup |
 |---|---|
 | [`run-semgrep.json`](../corpus/pilot/run-semgrep.json) | Install Semgrep. The adapter fetches the pinned ruleset rather than loading registry rules at scan time. |
-| [`run-harness.json`](../corpus/pilot/run-harness.json) | Set `config.root` to your securevibes-agent checkout with its dependencies installed. Build the [TypeScript Observer](OBSERVER_SDK.md) and configure the requested model route. |
+| [`run-harness.json`](../corpus/pilot/run-harness.json) | Haiku through securevibes-agent. Set `config.root` to your checkout with its dependencies installed. Build the [TypeScript Observer](OBSERVER_SDK.md) and authenticate the requested model route. |
+| [`run-harness-codex-sol.json`](../corpus/pilot/run-harness-codex-sol.json) | GPT-5.6 Sol through securevibes-agent and pi's OpenAI Codex provider. The checked-in path expands to `~/Documents/GitHub/securevibes-agent`; update it if your checkout lives elsewhere. |
 | [`run-deepsec.json`](../corpus/pilot/run-deepsec.json) | Set `config.deepsec_root` to an installed DeepSec workspace and configure CLI authentication. |
 
 Review model, budget, input, and tracing settings before running. The harness and DeepSec
@@ -32,6 +33,10 @@ scaneval run corpus/pilot/run-semgrep.json --output results/semgrep-pilot
 scaneval run corpus/pilot/run-harness.json --output results/harness-pilot \
   --only-input fastify-v5.12.1
 
+# Own harness with GPT-5.6 Sol, all three pilot inputs. Makes live model calls.
+scaneval run corpus/pilot/run-harness-codex-sol.json \
+  --output "results/harness-codex-sol-$(date +%Y%m%d-%H%M%S)"
+
 # Third-party scanner, one input. Makes live model calls.
 scaneval run corpus/pilot/run-deepsec.json --output results/deepsec-pilot \
   --only-input fastify-v5.12.1
@@ -40,6 +45,10 @@ scaneval run corpus/pilot/run-deepsec.json --output results/deepsec-pilot \
 These configurations are starting points, not performance claims. File-limited or incomplete
 scans cannot establish silence on unexamined targets or controls. The supplied DeepSec file
 limit can leave incomplete coverage; retain the reported status.
+
+`scaneval run` prints preparation, invocation start, periodic heartbeat, completion, and final
+manifest messages to stderr. It does not print prompts or raw scanner output. Use `--quiet` only
+when a calling script needs progress suppressed.
 
 ## Inspect and replay
 
