@@ -712,10 +712,14 @@ def _run(args: argparse.Namespace) -> int:
     command reports a negative result (1) whenever any input or invocation delivered no usable scan.
     """
     _refuse_trial_path(args.output)
+    def progress(message: str) -> None:
+        print(f"scaneval: {message}", file=sys.stderr, flush=True)
+
     manifest = runner.run_from_config(
         args.config, args.output, workspace_root=args.workspace_root,
         only_systems=set(args.only_system) if args.only_system else None,
         only_inputs=set(args.only_input) if args.only_input else None,
+        progress=None if args.quiet else progress,
     )
     for invocation in manifest["invocations"]:
         print(f"{invocation['invocation_id']} status={invocation['status']} "
@@ -1541,6 +1545,8 @@ def build_parser() -> argparse.ArgumentParser:
     running.add_argument("--only-input", action="append",
                          help="input id to run (a 2.0 configuration's snapshot id); repeatable")
     running.add_argument("--workspace-root", type=Path)
+    running.add_argument("--quiet", action="store_true",
+                         help="suppress live progress; final summaries and errors remain")
     _add_import_commands(sub)
     _add_aggregate_commands(sub)
     _add_gate_commands(sub)

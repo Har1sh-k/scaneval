@@ -463,9 +463,15 @@ def test_run_executes_one_configuration_and_leaves_the_source_pack_a_draft(tmp_p
     out_dir = tmp_path / "out"
     pack_before = checked_pack["pack"].read_bytes()
 
-    code, out, _ = cli(capsys, "run", str(config), "--output", str(out_dir),
-                       "--workspace-root", str(workspace))
+    code, out, err = cli(capsys, "run", str(config), "--output", str(out_dir),
+                         "--workspace-root", str(workspace))
     assert code == 0
+    assert "preparing input 1/1 snap-a" in err
+    assert "input snap-a prepared" in err
+    assert "preparing system 1/1 fake-a" in err
+    assert "invocation 1/1 snap-a__fake-a__r1 (timeout 60s): started" in err
+    assert "snap-a__fake-a__r1: finished status=success claims=1" in err
+    assert f"manifest written to {out_dir / 'run-manifest.json'}" in err
     assert "snap-a__fake-a__r1 status=success claims=1 plan=draft review=draft" in out
     assert f"Manifest: {out_dir / 'run-manifest.json'}" in out
     manifest = json.loads((out_dir / "run-manifest.json").read_text(encoding="utf-8"))
@@ -480,6 +486,20 @@ def test_run_executes_one_configuration_and_leaves_the_source_pack_a_draft(tmp_p
     code, _, err = cli(capsys, "run", str(config), "--output", str(tmp_path / "other"),
                        "--only-system", "absent")
     assert code == 2 and "systems not present" in err and not (tmp_path / "other").exists()
+
+
+def test_run_quiet_suppresses_live_progress_but_keeps_the_summary(tmp_path, capsys, monkeypatch,
+                                                                  checked_pack):
+    monkeypatch.setattr("scaneval.runner.get_adapter", lambda name: FakeAdapter())
+    config = write_config(tmp_path)
+    out_dir = tmp_path / "out"
+
+    code, out, err = cli(capsys, "run", str(config), "--output", str(out_dir), "--quiet")
+
+    assert code == 0
+    assert "snap-a__fake-a__r1 status=success" in out
+    assert "preparing input" not in err
+    assert "invocation 1/1" not in err
 
 
 def test_run_reports_a_skipped_system_without_inventing_a_scan(tmp_path, capsys, monkeypatch, checked_pack):

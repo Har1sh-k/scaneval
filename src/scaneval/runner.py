@@ -59,9 +59,12 @@ and an input that was never prepared is never rewritten as one that had nothing 
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+import threading
+import time
 from typing import Any, Callable
 
 from . import blinding, cases, execution, isolation, materialize, report, review, schedule, scoring
@@ -85,6 +88,52 @@ SCHEMA_VERSION = "2.1"
 PLAN_MODE = "full"
 # The scan modes an input can have and an adapter can declare (:attr:`Adapter.scan_modes`).
 SCAN_MODES = ("full", "pr")
+DEFAULT_PROGRESS_INTERVAL_SECONDS = 30.0
+ProgressReporter = Callable[[str], None]
+
+
+def _emit_progress(progress: ProgressReporter | None, message: str) -> None:
+    """Send best-effort operator progress without making it part of the run record.
+
+    Progress is a usability aid, not evidence. A broken terminal or caller callback must not
+    change scanner execution, scoring, or replay.
+    """
+    if progress is None:
+        return
+    try:
+        progress(message)
+    except Exception:
+        return
+
+
+@contextmanager
+def _invocation_heartbeat(
+    progress: ProgressReporter | None,
+    label: str,
+    *,
+    interval_seconds: float,
+):
+    """Report that a blocking invocation is alive without exposing scanner output."""
+    started = time.monotonic()
+    _emit_progress(progress, f"{label}: started")
+    stop = threading.Event()
+    thread: threading.Thread | None = None
+
+    if progress is not None and interval_seconds > 0:
+        def report_while_running() -> None:
+            while not stop.wait(interval_seconds):
+                elapsed = int(time.monotonic() - started)
+                _emit_progress(progress, f"{label}: still running ({elapsed}s elapsed)")
+
+        thread = threading.Thread(target=report_while_running, daemon=True)
+        thread.start()
+
+    try:
+        yield started
+    finally:
+        stop.set()
+        if thread is not None:
+            thread.join()
 
 
 @dataclass(frozen=True)
@@ -814,6 +863,8 @@ def run_from_config(
     adapters: dict[str, Adapter] | None = None,
     only_systems: set[str] | None = None,
     only_inputs: set[str] | None = None,
+    progress: ProgressReporter | None = None,
+    progress_interval_seconds: float = DEFAULT_PROGRESS_INTERVAL_SECONDS,
 ) -> dict:
     """Run every configured (input, system, repetition) and return the run manifest.
 
@@ -831,6 +882,11 @@ def run_from_config(
     the first input is fetched. The manifest's planning notes and per-input label states are
     derived after every input has been checked and the pack has been frozen, which is what the
     invocations then plan against.
+
+    ``progress`` receives concise operator messages about preparation, invocation state, and
+    output paths. Long invocations receive a heartbeat every ``progress_interval_seconds``.
+    These messages are best-effort, carry no scanner content, are not saved as evidence, and a
+    reporter failure cannot change the run.
 
     Refused before the output directory is created, so a refused run writes nothing at all: an
     input the pack does not declare, a native PR input whose change set the pack does not declare,
@@ -901,6 +957,7 @@ def run_from_config(
         systems=systems, maps={spec.input_id: spec.blinding_map for spec in inputs if spec.blinding_map})
 
     out_dir.mkdir(parents=True, exist_ok=False)
+    _emit_progress(progress, f"run {config['run_id']}: output {out_dir}")
 
     warnings: list[str] = []
     prepared_inputs: list[tuple[_InputSpec, execution.PreparedInput]] = []
@@ -916,7 +973,11 @@ def run_from_config(
         # before anything about how the run went is known.
         _write_new(out_dir / schedule.SCHEDULE_PATH, frozen_schedule)
 
-        for spec in inputs:
+        for input_number, spec in enumerate(inputs, start=1):
+            _emit_progress(
+                progress,
+                f"run {config['run_id']}: preparing input {input_number}/{len(inputs)} {spec.input_id}",
+            )
             row = _input_row(spec)
             try:
                 prepared = _prepare_input(spec, pack, out_dir, cache_root, clock, row)
@@ -926,9 +987,15 @@ def run_from_config(
                 row["preparation_failure"] = {"type": type(exc).__name__, "message": _message(exc)}
                 warnings.append(f"{spec.input_id}: not prepared ({type(exc).__name__}: {_message(exc)})")
                 manifest_inputs.append(row)
+                _emit_progress(
+                    progress,
+                    f"run {config['run_id']}: input {spec.input_id} not prepared "
+                    f"({type(exc).__name__}: {_message(exc)})",
+                )
                 continue
             manifest_inputs.append(row)
             prepared_inputs.append((spec, prepared))
+            _emit_progress(progress, f"run {config['run_id']}: input {spec.input_id} prepared")
 
         # The pack is frozen once, here: every input has been checked and nothing is invoked yet.
         _write_new(evaluator_dir / "pack.json", pack)
@@ -936,36 +1003,56 @@ def run_from_config(
         # planning notes and per-input label states are derived from the frozen copy.
         warnings.extend(_planning_records(pack, prepared_inputs, manifest_inputs))
 
-        for entry in systems:
+        for system_number, entry in enumerate(systems, start=1):
+            _emit_progress(
+                progress,
+                f"run {config['run_id']}: preparing system {system_number}/{len(systems)} "
+                f"{entry['system_id']}",
+            )
             system, system_warnings = _prepare_system(entry, cache_root, config["network_policy"], adapters)
             prepared_systems.append(system)
             warnings.extend(system_warnings)
+            state = "skipped" if system.skipped is not None else "ready"
+            _emit_progress(progress, f"run {config['run_id']}: system {entry['system_id']} {state}")
 
         prepared_by_id = {spec.input_id: prepared for spec, prepared in prepared_inputs}
         failures = {row["input_id"]: row["preparation_failure"] for row in manifest_inputs
                     if row["preparation_failure"] is not None}
+        total_invocations = len(inputs) * len(prepared_systems) * config["repetitions"]
+        invocation_number = 0
         for spec in inputs:
             prepared = prepared_by_id.get(spec.input_id)
             for system in prepared_systems:
                 system_spec = system.spec
                 for repetition in range(1, config["repetitions"] + 1):
+                    invocation_number += 1
                     row: dict[str, Any] = {
                         "invocation_id": execution.invocation_id(spec.input_id, system_spec.system_id, repetition),
                         "input_id": spec.input_id, "system_id": system_spec.system_id, "repetition": repetition,
                     }
+                    label = (f"invocation {invocation_number}/{total_invocations} "
+                             f"{row['invocation_id']}")
                     if prepared is None:
                         failure = failures[spec.input_id]
                         invocations.append(_skipped_invocation(
                             row, f"input {spec.input_id} could not be prepared: "
                                  f"{failure['type']}: {failure['message']}"))
+                        _emit_progress(progress, f"{label}: skipped because the input was not prepared")
                         continue
                     if system.skipped is not None:
                         invocations.append(_skipped_invocation(row, system.skipped))
+                        _emit_progress(progress, f"{label}: skipped because the system is unavailable")
                         continue
-                    bundle = _invoke(system, prepared, repetition, config=config, out_dir=out_dir,
-                                     cache_root=cache_root, workspace_root=workspace_root, clock=clock,
-                                     warnings=warnings)
-                    plan, record, evaluation, _notes = _evaluate_bundle(bundle, pack, spec, prepared, clock)
+                    with _invocation_heartbeat(
+                        progress,
+                        f"{label} (timeout {config['timeout_seconds']}s)",
+                        interval_seconds=progress_interval_seconds,
+                    ) as started:
+                        bundle = _invoke(system, prepared, repetition, config=config, out_dir=out_dir,
+                                         cache_root=cache_root, workspace_root=workspace_root, clock=clock,
+                                         warnings=warnings)
+                        plan, record, evaluation, _notes = _evaluate_bundle(
+                            bundle, pack, spec, prepared, clock)
                     metrics = evaluation["metrics"]
                     invocations.append({**row, "status": evaluation["status"],
                                         "claim_records": metrics["claim_records"], "plan_scope": plan["scope"],
@@ -974,6 +1061,12 @@ def run_from_config(
                                         "pending_matching_count": metrics["pending_matching_count"],
                                         "bundle_path": _relative(bundle, out_dir),
                                         "review_state": record["state"], "skipped_reason": None})
+                    elapsed = time.monotonic() - started
+                    _emit_progress(
+                        progress,
+                        f"{label}: finished status={evaluation['status']} "
+                        f"claims={metrics['claim_records']} ({elapsed:.1f}s)",
+                    )
     except BaseException as exc:
         # Inputs prepared before the failure may never have reached the derivation above, and
         # the manifest cannot record them without a label state.
@@ -983,10 +1076,15 @@ def run_from_config(
                             status="failed", failure={"type": type(exc).__name__, "message": _message(exc)},
                             clock=clock)
         _write_new(out_dir / MANIFEST_NAME, partial)
+        _emit_progress(
+            progress,
+            f"run {config['run_id']}: failed; partial manifest written to {out_dir / MANIFEST_NAME}",
+        )
         raise
 
     manifest = _manifest(config=config, pack=pack, selection=selection, manifest_inputs=manifest_inputs,
                          systems=prepared_systems, invocations=invocations, warnings=warnings,
                          status="completed", failure=None, clock=clock)
     _write_new(out_dir / MANIFEST_NAME, manifest)
+    _emit_progress(progress, f"run {config['run_id']}: manifest written to {out_dir / MANIFEST_NAME}")
     return manifest
