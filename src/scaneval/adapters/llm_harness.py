@@ -1,9 +1,9 @@
 """Own-harness adapter for the securevibes-agent / Fieldglass engine family.
 
-The harness runs unchanged through its own engine entry point inside its own ``tsx``.
-ScanEval only injects the harness's default model runner wrapped by the observer SDK
-and a progress reporter, then imports the finding records the engine wrote. Findings
-are file-level; this importer keeps them file-level and never invents line ranges.
+The harness runs through its own engine entry point inside its own ``tsx``.
+ScanEval injects the harness's model runner wrapped by the observer SDK and a progress
+reporter, then imports the finding records the engine wrote. Native scan-site anchors
+are kept when present; a missing or invalid anchor remains file-level.
 
 Two request modes are carried out. A full request runs the harness's ``bootstrap`` mode over the
 whole exported tree, and one that also carries a ``pr`` is refused before anything runs, because
@@ -62,6 +62,8 @@ the open that follows it, so they refuse what is planted before them and nothing
 
 from __future__ import annotations
 
+import base64
+import binascii
 import errno
 import hashlib
 import json
@@ -161,6 +163,25 @@ def _split_items(inner: str) -> list[str]:
             current.append(char)
     items.append("".join(current))
     return [item for item in items if item.strip()]
+
+
+def _native_scan_site(record: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """Read a bounded native anchor; never infer one from a finding's prose."""
+    encoded = record.get("scan_site_json_b64")
+    if encoded is None:
+        return None, None
+    if not isinstance(encoded, str) or len(encoded) > 90_000:
+        return None, "scan site is not a bounded base64 string"
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        if len(raw) > 65_536:
+            return None, "scan site exceeds 64 KiB"
+        site = json.loads(raw.decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None, "scan site could not be decoded"
+    if not isinstance(site, dict):
+        return None, "scan site is not an object"
+    return site, None
 
 
 class Enclosure(NamedTuple):
@@ -440,7 +461,8 @@ def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix
     failures: nothing behind it is read, because it is not the workspace this scan was handed.
     Every record read and every staged copy goes through the same enclosure, so a link anywhere
     above a record is refused exactly like a record that is a link. The full native allegation
-    text is preserved; line ranges are never invented.
+    text is preserved. A line is imported only when the native scan-site record
+    supplies a positive integer; no location is inferred from the prose.
 
     Provenance. *baseline* is :func:`snapshot_findings` taken before the harness process
     started, and a record whose name and bytes are both in it is not imported: it was already
@@ -534,6 +556,21 @@ def import_harness_findings(findings_dir: Path, *, harness: str, artifact_prefix
             "native_rule_id": f"{harness}:{vulnerability_class or 'unknown'}",
             "raw_artifact_id": f"{artifact_prefix}/{path.name}",
         }
+        site, site_error = _native_scan_site(record)
+        if site_error:
+            notes.append(f"{finding_id}: {site_error}; location kept file-level")
+        if site is not None:
+            line = site.get("line")
+            if isinstance(line, int) and not isinstance(line, bool) and line > 0:
+                claim["primary_location"]["start_line"] = line
+                claim["primary_location"]["end_line"] = line
+            elif line is not None:
+                notes.append(f"{finding_id}: scan site line is not a positive integer; location kept file-level")
+            for source, destination in (("sourceSymbol", "native_source_symbol"),
+                                        ("sinkSymbol", "native_sink_symbol")):
+                value = site.get(source)
+                if isinstance(value, str) and value.strip():
+                    claim[destination] = value
         if reasoning and reasoning != "N/A":
             claim["evidence_text"] = reasoning
         severity = record.get("severity")
@@ -901,6 +938,13 @@ class LlmHarnessAdapter(Adapter):
             raise AdapterError("llm-harness was given a full-mode request that also carries input.pr; it would "
                                "ignore the change it names, so the request was refused")
         trace_path = (trace_dir / "events.jsonl") if trace_dir is not None else None
+        capture_pi_sessions = spec.config.get("capture_pi_sessions", trace_mode == "content")
+        if not isinstance(capture_pi_sessions, bool):
+            raise AdapterError("config.capture_pi_sessions must be a boolean")
+        if capture_pi_sessions and trace_mode != "content":
+            raise AdapterError("pi session history contains prompts and requires content tracing")
+        pi_session_root = (raw_dir / "pi-sessions" if capture_pi_sessions
+                           and spec.config.get("runner", "default") == "default" else None)
         config = {
             "harness_root": str(root), "engine_entry": preset["engine_entry"], "runner_entry": preset["runner_entry"],
             "mock_entry": preset["mock_entry"], "observer_sdk": preparation["observer_sdk"],
@@ -911,6 +955,7 @@ class LlmHarnessAdapter(Adapter):
             **({"specialist_ids": list(spec.config["specialist_ids"])} if spec.config.get("specialist_ids") else {}),
             "runner": str(spec.config.get("runner", "default")), "trace_mode": trace_mode,
             **({"trace_path": str(trace_path)} if trace_path else {}),
+            **({"pi_session_root": str(pi_session_root)} if pi_session_root else {}),
             "run_id": request["run_id"], "producer_id": f"{harness}-driver",
             "output_path": str(raw_dir / "driver-output.json"), "progress_path": str(raw_dir / "driver-progress.log"),
             "flush_timeout_ms": int(spec.config.get("flush_timeout_ms", 30000)),
@@ -934,6 +979,33 @@ class LlmHarnessAdapter(Adapter):
                      {"id": "driver-stderr", "path": raw_dir / "driver-stderr.txt"},
                      {"id": "driver-progress", "path": raw_dir / "driver-progress.log"},
                      {"id": "driver-config", "path": config_path}]
+        session_notes: list[str] = []
+        pi_session_files = 0
+        captured_session_calls: set[str] = set()
+        if pi_session_root is not None:
+            try:
+                if enclosure.write(pi_session_root) is None:
+                    raise OSError(errno.EPERM, "pi session directory escaped the private run directory")
+                for call in list_directory(pi_session_root):
+                    if not re.fullmatch(r"call-[1-9][0-9]*", call.name) or not call.is_dir(follow_symlinks=False):
+                        session_notes.append("pi session capture contains an unexpected entry; it was not registered")
+                        continue
+                    for entry in list_directory(Path(call.path)):
+                        path = Path(entry.path)
+                        if not entry.name.endswith(".jsonl") or not entry.is_file(follow_symlinks=False):
+                            session_notes.append("pi session capture contains a non-JSONL or non-regular entry; "
+                                                 "it was not registered")
+                            continue
+                        if enclosure.write(path) is None:
+                            session_notes.append("pi session capture record escaped the private run directory")
+                            continue
+                        artifacts.append({"id": f"pi-session/{call.name}/{entry.name}", "path": path})
+                        pi_session_files += 1
+                        captured_session_calls.add(call.name)
+            except FileNotFoundError:
+                pass  # A run that made no pi call has no history directory.
+            except OSError as exc:
+                session_notes.append(f"pi session capture could not be listed ({exc.strerror or exc})")
         # The finding records live in the workspace too, so each imported one is copied into the
         # staging directory and registered under the id its claim carries. Only records this
         # scan produced are imported; the baseline above says which those are.
@@ -993,6 +1065,20 @@ class LlmHarnessAdapter(Adapter):
         # self-report that could not be read, which :func:`read_self_report` counts as loss.
         summary = output.get("summary") if isinstance(output, dict) else None
         usable_summary = summary if isinstance(summary, dict) and summary else None
+        if usable_summary:
+            native_findings = [item for key in ("newFindings", "updatedFindings")
+                               for item in (usable_summary.get(key)
+                                            if isinstance(usable_summary.get(key), list) else [])
+                               if isinstance(item, dict)]
+            cwe_by_id = {item.get("id"): item.get("cweIds") for item in native_findings
+                         if isinstance(item.get("id"), str) and isinstance(item.get("cweIds"), list)}
+            for claim in claims:
+                cwes = cwe_by_id.get(claim["claim_id"])
+                if cwes:
+                    normalized = list(dict.fromkeys(value.strip() for value in cwes
+                                                    if isinstance(value, str) and value.strip()))
+                    if normalized:
+                        claim["native_cwe"] = normalized
         trace = output.get("trace") if isinstance(output, dict) else None
         capture_state = (trace or {}).get("state") if isinstance(trace, dict) else None
         routes = sorted({str(route) for route in (output.get("observed_routes") or [])}) if isinstance(output, dict) else []
@@ -1025,7 +1111,17 @@ class LlmHarnessAdapter(Adapter):
         # the status, the resolved-bundle flag, the error message, and the notes.
         accounting = reconcile_import(imported, read_self_report(summary))
         loss_message = accounting.message
-        notes = notes_prefix + list(imported.notes) + plan_notes + list(accounting.notes)
+        notes = notes_prefix + list(imported.notes) + plan_notes + session_notes + list(accounting.notes)
+        if pi_session_root is not None:
+            pi_calls = output.get("pi_session_calls") if isinstance(output, dict) else None
+            expected_calls = output.get("pi_session_call_ids") if isinstance(output, dict) else None
+            notes.append(f"ScanEval-only pi session history: {pi_session_files} JSONL file(s) preserved for "
+                         f"{pi_calls if isinstance(pi_calls, int) else 'unknown'} logical pi call(s); "
+                         "separate call directories do not resume one another.")
+            if isinstance(expected_calls, list) and any(call not in captured_session_calls
+                                                        for call in expected_calls if isinstance(call, str)):
+                notes.append("Pi history is incomplete: at least one logical pi call has no session file. "
+                             "The observer trace and native history must not be treated as independent complete records.")
         # What the boundary this run was observed at could and could not see. It is capability
         # dependent because the boundary is: the same adapter against an older harness build
         # sees less, and says so, rather than repeating a fixed sentence that is true of one of
@@ -1069,7 +1165,8 @@ class LlmHarnessAdapter(Adapter):
                 notes.append(f"Declared tool policy on the {route} route: {policy} This is the argv the harness built, not an observation of what the CLI did.")
         if not mock_only:
             notes.append("Tool dispatch was not observed: it happens inside the model CLI subprocess. Absence of tool events is not evidence that no tool ran.")
-        notes.append("Harness findings are file-level; no line ranges were inferred.")
+        notes.append("Native scan-site lines and source/sink symbols were imported when present; "
+                     "no missing location or symbol was inferred.")
         if mode == "pr":
             notes.append("Prepared state: fresh. The harness's state directory is stripped from every export, so "
                          "this review started with the harness's default threat model and no earlier finding, "
@@ -1167,6 +1264,9 @@ class LlmHarnessAdapter(Adapter):
         scan_stats = usable_summary.get(stats_key) or {}
         llm_calls = int(scan_stats.get("llmCalls") or 0)
         failed_calls = int(scan_stats.get("failedCalls") or 0)
+        driver_failures = output.get("model_call_failures") if isinstance(output, dict) else None
+        driver_failures = (driver_failures if isinstance(driver_failures, int) and
+                           not isinstance(driver_failures, bool) and driver_failures >= 0 else None)
         notes.append(f"Harness self-report: llm_calls={llm_calls} failed_calls={failed_calls} "
                      f"coverage={scan_stats.get('hypothesisCoverage')} status={scan_stats.get('status')} "
                      f"runtime_profile={usable_summary.get('runtimeProfile')} degraded={usable_summary.get('degraded')}")
@@ -1187,6 +1287,12 @@ class LlmHarnessAdapter(Adapter):
         if llm_calls and failed_calls >= llm_calls:
             return NativeOutcome(status="partial", exit_code=result.exit_code,
                                  error={"code": "llm_path_failed", "message": with_loss("every harness model call failed; findings come from deterministic passes only")}, **base)
+        if failed_calls > 0 or (driver_failures is not None and driver_failures > 0):
+            return NativeOutcome(status="partial", exit_code=result.exit_code,
+                                 error={"code": "llm_calls_failed",
+                                        "message": with_loss(f"unrecovered model calls failed: harness={failed_calls}, "
+                                                             f"driver={driver_failures if driver_failures is not None else 'unavailable'}")},
+                                 **base)
         if usable_summary.get("degradation") or scan_stats.get("status") == "inconclusive":
             return NativeOutcome(status="partial", exit_code=result.exit_code,
                                  error={"code": "harness_inconclusive",

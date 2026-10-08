@@ -201,6 +201,8 @@
             "minLength": 1
           }
         },
+        "native_source_symbol": {"type": "string", "minLength": 1},
+        "native_sink_symbol": {"type": "string", "minLength": 1},
         "evidence_text": {
           "type": "string"
         },

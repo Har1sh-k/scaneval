@@ -30,14 +30,18 @@ def claim_fingerprint(claim: dict) -> str:
 Delivery IDs, raw-artifact references and native ranks are not an allegation.
 Different evidence or related locations remain distinct, even at one sink.
 """
-    return canonical_sha256({
+    identity = {
         "allegation": _text(claim["allegation"]),
         "kind": claim["kind"],
         "native_rule_id": claim.get("native_rule_id"),
         "primary_location": _location(claim["primary_location"]),
         "related_locations": [_location(x) for x in claim.get("related_locations", [])],
         "evidence_text": _text(claim.get("evidence_text", "")),
-    })
+    }
+    for field in ("native_source_symbol", "native_sink_symbol"):
+        if field in claim:
+            identity[field] = _text(claim[field])
+    return canonical_sha256(identity)
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:

@@ -28,6 +28,7 @@
         "model": "openai-codex/gpt-5.6-sol",
         "mode": "bootstrap",
         "runner": "default",
+        "capture_pi_sessions": true,
         "qmd_profile": "lite",
         "llm_max_files": 25,
         "llm_timeout_ms": 180000,
@@ -46,6 +47,6 @@
     "The pi route may not report token usage, cost, or independently served model identity. ScanEval records those fields as unavailable rather than inventing values.",
     "llm_max_files bounds how many files reach the model. Keep the input list small until the pilot labels have human approval.",
     "The harness root uses a leading ~ so it expands for the operator. Point it at the securevibes-agent checkout you intend to evaluate.",
-    "Content-mode traces stay local because they can contain source code and previously unknown findings. This configuration is not a publishable comparison by itself."
+    "Content-mode traces and per-call pi sessions stay local because they can contain source code and previously unknown findings. This configuration is not a publishable comparison by itself."
   ]
 }

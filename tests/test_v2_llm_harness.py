@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import base64
 import json
 import os
 from pathlib import Path
@@ -150,6 +151,32 @@ def test_import_keeps_findings_file_only_with_full_native_text(tmp_path):
     assert missing == ([], [], ["no findings directory was written by the harness"], ())
     assert missing.lost == 0
     assert not (tmp_path / "unused").exists(), "nothing is staged when the harness wrote no findings"
+
+
+def test_import_preserves_native_scan_site_without_inventing_missing_coordinates(tmp_path):
+    findings = tmp_path / "findings"
+    findings.mkdir()
+    baseline = snapshot_findings(findings, _enclosure(tmp_path))
+    site = {"revision": "abc", "line": 37, "sourceSymbol": "request.path", "sinkSymbol": "join"}
+    encoded = base64.b64encode(json.dumps(site).encode()).decode("ascii")
+    (findings / "a.md").write_text(FINDING.replace("file_path:", f"scan_site_json_b64: {encoded}\nfile_path:"),
+                                   encoding="utf-8")
+    imported = import_harness_findings(findings, harness="securevibes-agent",
+                                       artifact_prefix="harness-findings", stage_dir=tmp_path / "staged",
+                                       baseline=baseline, enclosure=_enclosure(tmp_path))
+    claim = imported.claims[0]
+    assert claim["primary_location"] == {"path": "src/routes/admin.ts", "start_line": 37, "end_line": 37}
+    assert claim["native_source_symbol"] == "request.path"
+    assert claim["native_sink_symbol"] == "join"
+    assert imported.lost == 0
+
+    (findings / "a.md").write_text(FINDING.replace("file_path:", "scan_site_json_b64: !!!\nfile_path:"),
+                                   encoding="utf-8")
+    invalid = import_harness_findings(findings, harness="securevibes-agent",
+                                      artifact_prefix="harness-findings", stage_dir=tmp_path / "invalid",
+                                      baseline=baseline, enclosure=_enclosure(tmp_path))
+    assert invalid.claims[0]["primary_location"] == {"path": "src/routes/admin.ts"}
+    assert any("scan site could not be decoded" in note for note in invalid.notes)
 
 
 def test_a_finding_record_that_is_not_a_regular_file_is_counted_as_import_loss(tmp_path):
@@ -919,14 +946,80 @@ def _stub_harness(tmp_path: Path, name: str, *, engine: str, runner: str,
     return root
 
 
-def _stub_harness_bundle(tmp_path: Path, root: Path, *, run_id: str, runner: str) -> Path:
+def _stub_harness_bundle(tmp_path: Path, root: Path, *, run_id: str, runner: str,
+                         trace_mode: str = "content", capture_pi_sessions: bool | None = None) -> Path:
     adapter = get_adapter("llm-harness")
     spec = SystemSpec(f"stub-{runner}", "llm-harness", {"harness": "securevibes-agent", "root": str(root),
-                                                        "model": "test/mock-llm", "runner": runner})
+                                                        "model": "test/mock-llm", "runner": runner,
+                                                        **({"capture_pi_sessions": capture_pi_sessions}
+                                                           if capture_pi_sessions is not None else {})})
     preparation = adapter.prepare(spec, tmp_path / "cache")
     return run_invocation(prepared=_prepared(tmp_path), adapter=adapter, spec=spec, preparation=preparation,
                           out_dir=tmp_path / "out", run_id=run_id, timeout_seconds=600,
-                          trace_mode="content", network_policy="none", clock=CLOCK)
+                          trace_mode=trace_mode, network_policy="none", clock=CLOCK)
+
+
+PI_HISTORY_ENGINE = """
+export async function runRuntimeScan(options: any): Promise<any> {
+  for (const prompt of ["one", "two"]) {
+    await options.llmRunner.runPi({
+      args: ["-p", "--no-session", "--model", options.llmModel, prompt],
+      cwd: options.repoPath, timeoutMs: 1000, env: {},
+    });
+  }
+  return { newFindings: [], updatedFindings: [],
+    bootstrapScan: { llmCalls: 2, failedCalls: 0, status: "complete", hypothesisCoverage: 1 },
+    runtimeProfile: "full", degraded: false };
+}
+"""
+PI_HISTORY_RUNNER = """
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+export function resolveRunnerBinary(): string { return "pi"; }
+export function createDefaultPiRunner() {
+  return { async runPi(invocation: any) {
+    const dir = invocation.env.PI_CODING_AGENT_SESSION_DIR;
+    if (dir) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "session.jsonl"), JSON.stringify({ args: invocation.args }) + "\\n");
+    }
+    return { code: 0, stdout: "", stderr: "" };
+  } };
+}
+"""
+
+
+def test_scaneval_only_pi_history_is_preserved_per_call_without_resumption(tmp_path):
+    root = _stub_harness(tmp_path, "harness-pi-history", engine=PI_HISTORY_ENGINE, runner=PI_HISTORY_RUNNER)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="run-pi-history", runner="default")
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    output = json.loads((bundle / "raw" / "driver-output.json").read_text(encoding="utf-8"))
+    assert result["status"] == "success", execution.get("error")
+    assert output["pi_session_calls"] == 2
+    artifacts = {entry["id"] for entry in execution["raw_artifacts"]}
+    assert {"pi-session/call-1/session.jsonl", "pi-session/call-2/session.jsonl"} <= artifacts
+    for number, prompt in [(1, "one"), (2, "two")]:
+        native = json.loads((bundle / "raw" / "pi-sessions" / f"call-{number}" / "session.jsonl").read_text())
+        assert native["args"][-1] == prompt
+        assert "--no-session" not in native["args"]
+    assert not (root / "pi-sessions").exists(), "history belongs to the private run, not the harness checkout"
+
+    off = _stub_harness_bundle(tmp_path / "off", root, run_id="run-pi-no-history", runner="default",
+                               capture_pi_sessions=False)
+    assert not (off / "raw" / "pi-sessions").exists()
+    off_events = [json.loads(line) for line in (off / "trace" / "events.jsonl").read_text().splitlines()]
+    assert all("--no-session" in event["content"]["args"] for event in off_events
+               if event["type"] == "model.request")
+
+
+def test_pi_history_requires_content_tracing(tmp_path):
+    adapter = get_adapter("llm-harness")
+    spec = SystemSpec("sv", "llm-harness", {"harness": "securevibes-agent", "root": str(tmp_path),
+                                           "model": "openai-codex/test", "capture_pi_sessions": True})
+    with pytest.raises(AdapterError, match="requires content tracing"):
+        adapter.scan(request={"input": {"mode": "full"}}, source_dir=tmp_path, raw_dir=tmp_path,
+                     spec=spec, preparation={}, timeout_seconds=1, trace_mode="metadata", trace_dir=None)
 
 
 def test_a_harness_that_exports_no_hooks_is_observed_the_way_it_was_before_them(tmp_path):
@@ -1150,6 +1243,24 @@ DRIVER_OUTPUT = {
                                   "hypothesisCoverage": 1.0},
                 "runtimeProfile": "lite", "degraded": False},
 }
+
+
+@pytest.mark.parametrize("failed,driver_failed", [(1, 1), (0, 1), (1, None)])
+def test_unrecovered_model_call_makes_completed_scan_partial(tmp_path, monkeypatch, failed, driver_failed):
+    output = {**DRIVER_OUTPUT, "summary": {
+        **DRIVER_OUTPUT["summary"],
+        "bootstrapScan": {"llmCalls": 20, "failedCalls": failed, "status": "complete",
+                          "hypothesisCoverage": 1.0},
+        "newFindings": [{"id": "SV-AUTH-AUTHBYPASS-001", "cweIds": ["CWE-287"]}],
+    }}
+    if driver_failed is not None:
+        output["model_call_failures"] = driver_failed
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {"a.md": FINDING}, output=output)
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == execution["status"] == "partial"
+    assert result["error"]["code"] == execution["error"]["code"] == "llm_calls_failed"
+    assert result["claims"][0]["native_cwe"] == ["CWE-287"]
 
 
 def _fake_harness_root(tmp_path: Path) -> Path:

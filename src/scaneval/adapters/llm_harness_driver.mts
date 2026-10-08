@@ -18,7 +18,7 @@
 // Invoked by scaneval.adapters.llm_harness with the harness's own tsx:
 //   <harness>/node_modules/.bin/tsx llm_harness_driver.mts --config <driver-config.json>
 
-import { appendFileSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -43,6 +43,7 @@ interface DriverConfig {
   runner: "default" | "mock";
   trace_mode: "off" | "metadata" | "content";
   trace_path?: string;
+  pi_session_root?: string;
   run_id: string;
   producer_id: string;
   output_path: string;
@@ -263,6 +264,8 @@ async function main(): Promise<void> {
   let modelCalls = 0;
   let modelFailures = 0;
   let modelAttempts = 0;
+  let piSessionCalls = 0;
+  const piSessionCallIds: string[] = [];
   // Which CLI actually served each call. The tool policy differs by route, and neither
   // route's tool dispatch happens in this process, so this records what was asked for,
   // never what the CLI did with it.
@@ -493,10 +496,27 @@ async function main(): Promise<void> {
       modelCalls += 1;
       const minted = `call-${modelCalls}`;
       const meta = (options.meta ?? {}) as PiMeta;
+      // Only an evaluated pi call changes its session policy. Each logical call gets a
+      // separate directory, so removing --no-session preserves history without carrying
+      // model context from one hypothesis into the next. Ordinary harness runs are untouched.
+      const binary = config.runner === "mock" ? "mock"
+        : options.args && resolveBinary ? resolveBinary(options.args) : "unknown";
+      let observedOptions = options;
+      if (binary === "pi" && config.pi_session_root && options.args) {
+        const sessionDir = join(config.pi_session_root, minted);
+        mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+        observedOptions = {
+          ...options,
+          args: options.args.filter((arg) => arg !== "--no-session"),
+          env: { ...options.env, PI_CODING_AGENT_SESSION_DIR: sessionDir },
+        };
+        piSessionCalls += 1;
+        piSessionCallIds.push(minted);
+      }
       // The engine's own id when it tagged the call, so a context.selection event and the model
       // events of the same invocation share one call_id; the driver's own id when it did not.
       const callId = meta.invocationId ?? minted;
-      const view = describeInvocation(options as unknown as Record<string, unknown>, resolveBinary);
+      const view = describeInvocation(observedOptions as unknown as Record<string, unknown>, resolveBinary);
       const route = config.runner === "mock" ? "mock" : view.route;
       observedRoutes.add(route);
       const state: CallState = { callId, view, route, final: null };
@@ -504,7 +524,8 @@ async function main(): Promise<void> {
       modelCallIds.add(callId);
       // Injected so an untagged call still arrives at the hooks with an id to join on. The
       // runners ignore meta; nothing the engine decides changes because of it.
-      const invocation = meta.invocationId === undefined ? { ...options, meta: { ...meta, invocationId: callId } } : options;
+      const invocation = meta.invocationId === undefined
+        ? { ...observedOptions, meta: { ...meta, invocationId: callId } } : observedOptions;
       const began = Date.now();
       if (runnerHooks === null) {
         await observer.emit({
@@ -821,6 +842,8 @@ async function main(): Promise<void> {
     wall_ms: Date.now() - started,
     model_calls: modelCalls,
     model_call_failures: modelFailures,
+    pi_session_calls: piSessionCalls,
+    pi_session_call_ids: piSessionCallIds,
     // CLI attempts, which is a different number from logical calls only where the runner
     // reports them; zero with no runner hooks, where an attempt is not observable at all.
     model_attempts: modelAttempts,

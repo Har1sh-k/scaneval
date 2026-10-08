@@ -16,10 +16,19 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from scaneval.contracts import ContractError, canonical_sha256
-from scaneval.scoring import score
+from scaneval.scoring import claim_fingerprint, score
 
 
 HASH = "sha256:" + "a" * 64
+
+
+def test_native_flow_symbols_distinguish_claims_at_one_location():
+    first = claim("a", "Unsafe input reaches a command", path="src/run.ts")
+    first.update(native_source_symbol="request.command", native_sink_symbol="exec")
+    second = {**first, "claim_id": "b", "native_source_symbol": "config.command"}
+    assert claim_fingerprint(first) != claim_fingerprint(second)
+    from scaneval.contracts import validate_document
+    validate_document("scan-result", make_result([first, second], ranking="unranked"))
 
 
 def make_plan(*, controls: list[dict] | None = None) -> dict:

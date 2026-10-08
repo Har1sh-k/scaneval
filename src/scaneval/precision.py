@@ -93,10 +93,11 @@ DEFAULT_CONFIDENCE = 0.95
 INTERVAL_METHOD = "stratified_linearized_normal"
 # What a unit keeps of its first copy: exactly the fields its duplicate identity is computed from.
 CLAIM_FIELDS = ("allegation", "kind", "native_rule_id", "primary_location", "related_locations",
-                "evidence_text")
+                "evidence_text", "native_source_symbol", "native_sink_symbol")
 # What a reviewer is shown of a claim. A native rule id often names the tool that wrote it, so it
 # stays out, as do claim ids, ranks, and run and invocation names.
-QUEUE_CLAIM_FIELDS = ("allegation", "kind", "primary_location", "related_locations", "evidence_text")
+QUEUE_CLAIM_FIELDS = ("allegation", "kind", "primary_location", "related_locations", "evidence_text",
+                      "native_source_symbol", "native_sink_symbol")
 OUTCOME_MEANINGS = {
     "true": "The allegation holds for this input: a real security issue as claimed, whether or not "
             "it is one of the evaluation's labeled targets.",
