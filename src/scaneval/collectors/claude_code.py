@@ -88,6 +88,15 @@ USAGE_KEYS = {
 }
 
 
+# What the CLI writes as the ``model`` of a record it authored itself, such as the one that
+# reports a refused request. It names no model that served anything.
+SYNTHETIC_MODEL = "<synthetic>"
+
+# The categories the CLI writes in the ``error`` field of an API-error record. Closed here, so
+# a value a later release adds reads as ``unknown`` rather than as an open string in metadata.
+API_ERRORS = ("authentication_failed", "billing_error", "rate_limit", "invalid_request",
+              "server_error", "max_output_tokens", "unknown")
+
 def session_id_is_usable(session_id: Any) -> bool:
     """Whether this string may be looked up as a session ID at all.
 
