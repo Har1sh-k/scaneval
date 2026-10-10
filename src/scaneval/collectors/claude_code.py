@@ -1237,6 +1237,10 @@ class _State:
             "invocation_duration_api_ms": None,
             "stdout_chars": len(answer),
             "stderr_chars": None,
+            # When the CLI wrote the first and the last block of the response. Neither is when
+            # the request started or the response ended, so no duration is derived from them.
+            **_source_time(whole.first_origin or NO_ORIGIN, "first_block_record"),
+            "source_last_timestamp": whole.last_origin.timestamp,
         }
         # Present on every response, so a consumer reads one key shape. Only the CLI's record
         # of a refused request fills them, from its own closed fields.
