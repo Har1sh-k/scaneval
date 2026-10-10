@@ -175,6 +175,16 @@ An imported event has two times, and they answer different questions.
   was read from, copied verbatim. Re-importing the same file changes `timestamp` and leaves
   this unchanged. It is `null` when the record has no RFC 3339 time with an offset.
 
+`metadata.source_timestamp_of` names which record the time belongs to, because the records
+do not mark the moments a latency analysis wants:
+
+| Event | `source_timestamp_of` | What the time is |
+|---|---|---|
+| `model.request` | `input_record` | When the prompt or tool result before this request was recorded. The request was sent no earlier. No record says when it was sent. |
+| `model.response` | `first_block_record` | When the CLI wrote the response's first block. `source_last_timestamp` is when it wrote the last. A response whose blocks straddle tool results spans their execution. |
+| `tool.start` | `tool_use_record` | When the CLI wrote the block that calls the tool. |
+| `tool.end`, `context.selection` | `tool_result_record` | When the CLI wrote the tool's result. |
+
 
 ## A failure message is free text, not a code
 
