@@ -654,6 +654,8 @@ async function main(): Promise<void> {
       observerRecords.context_selection += 1;
       if (typeof record.invocationId === "string") contextCallIds.add(record.invocationId);
       const spans = (Array.isArray(record.spans) ? record.spans : []) as Record<string, unknown>[];
+      const inputs = (Array.isArray(record.inputs) ? record.inputs : [])
+        .filter((input): input is Record<string, unknown> => typeof input === "object" && input !== null);
       void observer.emit({
         type: "context.selection",
         // The engine reports the whole set it supplied for this invocation, which is the one
@@ -666,6 +668,11 @@ async function main(): Promise<void> {
           prompt_chars: wireNumber(record.promptChars),
           span_count: spans.length,
           spans: spans.map(suppliedSpan),
+          // The inputs that are not located source: an inventory, a change summary, an
+          // architecture description. A record with inputs and no spans is a prompt built
+          // from those, not a prompt given nothing.
+          input_count: inputs.length,
+          inputs: inputs.map(suppliedInput),
           truncated_spans: wireNumber(record.truncatedSpans),
           omitted_paths: Array.isArray(record.omittedPaths) ? record.omittedPaths : [],
           hypothesis_id: record.hypothesisId ?? null,
