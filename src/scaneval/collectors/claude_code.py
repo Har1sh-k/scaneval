@@ -34,7 +34,7 @@ import os
 from pathlib import Path
 import re
 import stat
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import (
     ImportSummary,
@@ -43,6 +43,7 @@ from . import (
     clip,
     parse_lines,
     sha256_text,
+    workspace_path,
     workspace_roots,
 )
 
@@ -271,6 +272,96 @@ def project_directory_name(path: str) -> str:
     from the records rather than from the name.
     """
     return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+# How much of a project directory's name the CLI keeps before shortening it.
+PROJECT_NAME_KEPT = 200
+
+
+class WorkspaceSessions(NamedTuple):
+    """What :func:`find_workspace_sessions` found, and what it refused to adopt."""
+
+    session_ids: tuple[str, ...]
+    # Transcripts in the workspace's project directory whose records did not show they ran in
+    # the workspace: a ``cwd`` outside it, none at all, or a ``sessionId`` naming another file.
+    foreign: int
+
+
+def find_workspace_sessions(workspace_root: Path | str | Sequence[Path | str], *,
+                            projects_dir: Path | None = None) -> WorkspaceSessions:
+    """The sessions Claude Code filed under this workspace's own project directory.
+
+    A harness that records its session IDs only on success leaves a failed session with a
+    transcript and nothing naming it. When the workspace was private to one invocation, its
+    project directory is that invocation's session register: every session the harness
+    opened there wrote its transcript into it, whether or not the harness lived to record the
+    ID. Only that directory is listed, never the rest of the projects directory, so a session
+    from any other working directory cannot be adopted.
+
+    The directory name is evidence of where to look, not of ownership. A transcript is adopted
+    only when every ``cwd`` its records carry lies inside the workspace (one at least, under
+    any spelling in ``workspace_root``) and every ``sessionId`` they carry is its own file
+    name. The read goes through :func:`_read_transcript`, with the same refusals an import
+    makes. Subagent files are not listed here: :func:`find_transcripts` finds them by the
+    session ID this returns.
+    """
+    roots = workspace_roots(workspace_root)
+    root = projects_dir if projects_dir is not None else Path.home().joinpath(*PROJECTS_DIR)
+    try:
+        boundary = root.resolve(strict=True)
+        entries = sorted(entry for entry in root.iterdir() if _is_directory(entry))
+    except OSError:
+        return WorkspaceSessions((), 0)
+    wanted = {project_directory_name(spelling) for spelling in roots}
+    projects = [entry for entry in entries
+                if entry.name in wanted
+                or any(len(name) > PROJECT_NAME_KEPT
+                       and entry.name.startswith(name[:PROJECT_NAME_KEPT]) for name in wanted)]
+    found: list[str] = []
+    foreign = 0
+    for project in projects:
+        try:
+            candidates = sorted(project.glob("*.jsonl"))
+        except OSError:
+            continue
+        for candidate in candidates:
+            session_id = candidate.stem
+            if (not session_id_is_usable(session_id) or session_id in found
+                    or not _inside(candidate, boundary)):
+                continue
+            if _ran_in(candidate, session_id, roots):
+                found.append(session_id)
+            else:
+                foreign += 1
+    return WorkspaceSessions(tuple(found), foreign)
+
+
+def _ran_in(path: Path, session_id: str, roots: tuple[str, ...]) -> bool:
+    """Whether a transcript's own records say it is *session_id* and ran inside *roots*."""
+    lines, loss = _read_transcript(path)
+    if loss == "refused":
+        return False
+    located = False
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        named = record.get("sessionId", record.get("session_id"))
+        if named is not None and named != session_id:
+            return False
+        cwd = record.get("cwd")
+        if cwd is None:
+            continue
+        if not isinstance(cwd, str) or not cwd.startswith("/"):
+            return False
+        _rendered, external = workspace_path(cwd, roots)
+        if external:
+            return False
+        located = True
+    return located
 
 
 def parse_result_object(text: str) -> dict | None:
