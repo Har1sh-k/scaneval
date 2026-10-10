@@ -1422,6 +1422,9 @@ class TraceResult(NamedTuple):
     transcripts_found: int
     imports_clean: bool
     notes: tuple[str, ...]
+    # Every session this run knows it opened: the ones DeepSec named, the ones found only in
+    # the workspace history, and one for each failed batch whose session neither one found.
+    sessions_expected: int = 0
 
 
 def _overlapping(candidates: tuple[Candidate, ...], path: str,
@@ -1678,6 +1681,16 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                           "detail": "DeepSec could not parse one batch's agent output and wrote "
                                     "a debug dump; the findings of that batch, if any, were not "
                                     "recorded and nothing here says what the model produced"})
+        missing = max(0, failed_batches - len(unreferenced))
+        for index in range(1, missing + 1):
+            observer.emit(
+                type="observer.error", category="observer", capture_status="unavailable",
+                metadata={"source": "harness_record",
+                          "error_code": "failed_batch_session_not_found",
+                          "stage": "process", "sequence_in_run": index,
+                          "detail": "DeepSec's records show a batch that failed, and no session "
+                                    "in this invocation's workspace history could be matched "
+                                    "to it; whatever that session did is not in this trace"})
         for finding in imported.findings:
             observer.emit(
                 type="finding.submitted", category="finding", capture_status="complete",
@@ -1699,12 +1712,23 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
             f"{len(invalid)} analysis entr(ies) carried an agentSessionId that is not one "
             "transcript discovery may be handed, so each became its own uncorrelated call and "
             "none was looked up: " + ", ".join(sorted(invalid)[:5]))
-    if sessions:
-        notes.append(f"{transcripts_found} of {len(sessions)} agent session(s) had a Claude Code "
+    expected = len(sessions) + len(unreferenced) + missing
+    if expected:
+        notes.append(f"{transcripts_found} of {expected} agent session(s) had a Claude Code "
                      "transcript this run could import. A session with a transcript is described "
                      "by that transcript's own per-turn model events; a session without one is "
                      "described by a single reconstructed request/response pair carrying "
                      "DeepSec's summed usage. No call is described both ways.")
+    if unreferenced or missing:
+        listed = ", ".join(session.session_id for session in unreferenced[:5])
+        notes.append(
+            f"The {expected} session(s) are the {len(sessions)} DeepSec's analysis entries name, "
+            f"{len(unreferenced)} found only in this invocation's workspace history"
+            + (f" ({listed}{', ...' if len(unreferenced) > 5 else ''})" if unreferenced else "")
+            + f", and {missing} failed batch(es) whose session that history did not hold. DeepSec "
+            "names a session only on the analysis entries of a batch that finished, so a failed "
+            "batch is found by its transcript or not at all.")
+    if expected:
         notes.append(
             "Transcript paths were matched against "
             + ("both spellings of the scanned workspace" if len(roots) > 1
@@ -1714,7 +1738,20 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
             "the collectors compare textually without resolving a link, so a path matched "
             "against one spelling alone reads as external to the workspace.")
     return TraceResult({"capture_gap": state.capture_gap, "dropped_events": state.dropped_events},
-                       transcripts_found, imports_clean, tuple(notes))
+                       transcripts_found, imports_clean, tuple(notes), expected)
+
+
+def failed_batch_count(agent: str, records: Records, statuses: RecordStatuses, output: "ProcessOutput") -> int:
+    """How many batches this run's evidence shows failed, as a lower bound, for the claude agent.
+
+    Each parse-failure dump is one failed batch, and a file left in ``error`` is at least one. The
+    count DeepSec printed is advisory and is used only here, where it can raise the number of
+    sessions the run must account for and so lower what the capture may claim, never raise it.
+    Other agents leave no Claude Code transcript, so no session of theirs is expected to be found.
+    """
+    if agent != "claude":
+        return 0
+    return max(len(records.debug), output.errored_batches or 0, 1 if statuses.errored else 0)
 
 
 class ProcessOutput(NamedTuple):
