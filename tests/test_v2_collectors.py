@@ -1825,6 +1825,56 @@ def test_a_cli_authored_result_subtype_is_bounded_too():
     assert len(of_type(seen, "model.response")[0]["metadata"]["result_subtype"]) <= 60
 
 
+# --- a request the provider refused -------------------------------------------------------------
+
+
+LIMIT_TEXT = "You've hit your session limit · resets 3am (America/Chicago)"
+
+
+def refusal_record(text: str = LIMIT_TEXT, error: str = "rate_limit") -> dict:
+    """The record the CLI writes itself when the provider refuses a request, as it writes it."""
+    return {"type": "assistant", "isApiErrorMessage": True, "error": error,
+            "message": {"id": "synthetic-1", "model": "<synthetic>", "role": "assistant",
+                        "usage": {"input_tokens": 0, "output_tokens": 0,
+                                  "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                        "content": [{"type": "text", "text": text}]}}
+
+
+READ_THEN_REFUSED = [
+    {"type": "user", "message": {"content": "Investigate app.py."}},
+    assistant_block("message-1", {"type": "tool_use", "id": "tool-read", "name": "Read",
+                                  "input": {"file_path": "/workspace/app.py"}}),
+    {"type": "user",
+     "message": {"content": [{"type": "tool_result", "tool_use_id": "tool-read",
+                              "content": "1\tprint('hi')"}]},
+     "toolUseResult": {"type": "text", "file": {"filePath": "/workspace/app.py",
+                                                "content": "print('hi')", "numLines": 1,
+                                                "startLine": 1, "totalLines": 1}}},
+    refusal_record(),
+]
+
+
+def test_a_request_the_provider_refused_is_a_failed_attempt_carrying_its_closed_cause(tmp_path: Path):
+    """The CLI's own record of the refusal says why, in fields no model and no repository wrote."""
+    events, summary = import_records(READ_THEN_REFUSED, tmp_path)
+
+    refused = of_type(events, "model.response")[-1]["metadata"]
+    assert refused["failure_kind"] == "api_error"
+    assert refused["api_error"] == "rate_limit"
+    assert refused["limit"] == {"kind": "session_limit", "resets_at_local": "3am",
+                                "resets_timezone": "America/Chicago"}
+    assert refused["is_error"] is True
+    # No model served it and nothing was measured: "<synthetic>" and the zeros are the CLI's.
+    assert refused["model_served"] is None
+    assert refused["usage_available"] is False and refused["usage"] is None
+    assert refused["stdout_chars"] == 0
+    assert summary.api_errors == ("session_limit",)
+    assert not any("session limit" in text for event in events for text in metadata_strings(event))
+    # Every other response carries the same keys, empty.
+    first = of_type(events, "model.response")[0]["metadata"]
+    assert first["api_error"] is None and first["limit"] is None
+
+
 # --- more than one spelling of the same workspace --------------------------------------------
 
 # The shape of the real failure this pair of roots was added for: a harness handed the CLI
