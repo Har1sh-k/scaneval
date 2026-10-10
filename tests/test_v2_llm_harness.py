@@ -1306,6 +1306,20 @@ def test_a_planner_reports_the_inputs_it_was_given_without_inventing_spans(tmp_p
     assert output["model_calls_without_context_by_stage"] == {}
 
 
+def test_an_older_planner_without_the_hook_stays_an_explicit_gap(tmp_path):
+    """No event is no evidence: the planner is counted as uninstrumented, never as given nothing."""
+    output, execution, events = _planner_run(tmp_path, planner_reports=False)
+
+    assert not [event for event in events
+                if event["type"] == "context.selection" and event.get("call_id") == "planner-1"]
+    assert output["model_calls_with_context"] == 1 and output["model_calls_without_context"] == 1
+    assert output["model_calls_without_context_by_stage"] == {"planner": 1}
+    assert any("by the stage it tagged them: planner 1" in entry for entry in output["trace"]["unavailable"])
+    assert execution["capture"]["context_selection"] == "partial"
+    assert any("none for 1 (by the stage the engine tagged them: planner 1)" in note
+               for note in execution["notes"])
+
+
 def test_a_supplied_span_that_could_not_be_located_says_so_rather_than_naming_file_lines(tmp_path):
     """``location_known`` is the difference between a file position and a position in a prompt.
 
