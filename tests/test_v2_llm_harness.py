@@ -1194,6 +1194,16 @@ def test_a_transcript_counts_as_kept_only_when_it_is_also_a_registered_artifact(
     assert "call-2 attempt 1: moved by the driver but not registered" in notes
 
 
+def test_claude_transcripts_are_never_counted_against_the_pi_call_counter():
+    """The reported defect: 19 claude transcripts read as preserved for zero logical pi calls."""
+    from scaneval.adapters.llm_harness import session_history_notes
+
+    manifest = [{"call": f"call-{n}", "backend": "claude", "attempt": 1, "session_id": f"s-{n}",
+                 "transcript": "moved"} for n in range(1, 20)]
+    notes = session_history_notes(manifest, {f"call-{n}": {f"s-{n}.jsonl"} for n in range(1, 20)})
+    assert notes[0].startswith("ScanEval-only claude session history: 19 of 19 attempt session(s) preserved, "
+                               "for 19 logical claude call(s)")
+    assert not any("pi" in note.split(":")[0] for note in notes)
 
 
 def test_pi_history_requires_content_tracing(tmp_path):
