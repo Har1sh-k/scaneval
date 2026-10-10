@@ -2656,6 +2656,27 @@ def test_a_session_limit_survives_the_parse_failure_it_caused_and_the_run_stays_
                for note in execution["notes"])
 
 
+def test_a_limit_a_session_waited_out_is_an_error_encountered_and_not_how_it_ended(tmp_path):
+    """The two finished sessions hit the limit and then answered; only the failed one ended on it.
+
+    Reporting every recorded refusal as how its session ended made a session that recovered
+    read as one that failed, and named a cause for failures it did not have.
+    """
+    bundle = failed_batch_run(tmp_path, control={"parse_error": True, "recovered_refusal": True})
+    result, execution = documents(bundle)
+
+    assert result["error"]["message"].endswith(
+        "the provider refusing a request that ended 1 session(s) with session_limit")
+    symptom = next(event for event in trace_events(bundle)
+                   if event["metadata"].get("error_code") == "agent_output_parse_failure")
+    assert symptom["metadata"]["sessions_ended_on_refusal_in_run"] == {"session_limit": 1}
+    assert symptom["metadata"]["refusals_recorded_in_run"] == {"session_limit": 3}
+    notes = " ".join(execution["notes"])
+    assert "1 session(s) ended on a request the provider refused" in notes
+    assert ("2 session(s) recorded a refused request and went on to a real response after it, so "
+            "the refusal is an error the session encountered and not how it ended") in notes
+
+
 def test_a_parse_failure_with_no_recorded_cause_names_none(tmp_path, monkeypatch):
     """Without a CLI record of a refusal there is no cause to report, and none is guessed."""
     root = fake_deepsec_root(tmp_path, parse_error=True)
