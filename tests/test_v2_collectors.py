@@ -510,6 +510,23 @@ def test_a_later_block_of_the_same_response_does_not_deliver_an_earlier_read(tmp
     assert order[: order.index("context.selection")].count("model.request") == 1
 
 
+def test_text_written_after_a_tool_result_still_belongs_to_its_response(tmp_path: Path):
+    """The response is assembled from the whole message, so no block of it is lost."""
+    records = [
+        assistant_block("message-1", tool_use("tool-1", "alpha")),
+        tool_result("tool-1", "first result"),
+        assistant_block("message-1", {"type": "text", "text": "and one more thing"}),
+    ]
+
+    events, summary = import_records(records, tmp_path, mode="content")
+
+    responses = of_type(events, "model.response")
+    assert len(responses) == 1
+    assert responses[0]["content"]["stdout"] == "and one more thing"
+    assert responses[0]["metadata"]["stdout_chars"] == len("and one more thing")
+    assert not any("replayed" in note for note in summary.notes)
+
+
 def test_a_read_result_becomes_a_span_whose_path_is_relative_to_the_workspace():
     """The span is the one claim a collector makes that Contract 5 later joins against.
 
