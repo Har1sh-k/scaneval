@@ -1888,6 +1888,26 @@ def test_the_cli_s_refusal_text_is_kept_in_content_and_nowhere_else(tmp_path: Pa
     assert refused["content"] == {"error": LIMIT_TEXT}
 
 
+@pytest.mark.parametrize("text,error,limit,cause", [
+    pytest.param("You've hit your session limit", "rate_limit",
+                 {"kind": "session_limit", "resets_at_local": None, "resets_timezone": None},
+                 "session_limit", id="no-reset-named"),
+    pytest.param("You've hit your weekly limit · resets 9pm (Europe/Berlin)", "rate_limit",
+                 {"kind": "weekly_limit", "resets_at_local": "9pm", "resets_timezone": "Europe/Berlin"},
+                 "weekly_limit", id="weekly"),
+    pytest.param("Rate limited, try again shortly", "rate_limit", None, "rate_limit",
+                 id="throttled-not-a-limit"),
+    pytest.param(LIMIT_TEXT, "server_error", None, "server_error", id="limit-words-on-another-error"),
+    pytest.param("Something new happened", "a_category_from_a_later_release", None, "unknown",
+                 id="unknown-category"),
+])
+def test_the_cause_is_read_from_the_cli_s_closed_fields_first(tmp_path: Path, text, error, limit, cause):
+    events, summary = import_records([refusal_record(text, error)], tmp_path)
+    refused = of_type(events, "model.response")[-1]["metadata"]
+    assert refused["limit"] == limit
+    assert summary.api_errors == (cause,)
+
+
 # --- more than one spelling of the same workspace --------------------------------------------
 
 # The shape of the real failure this pair of roots was added for: a harness handed the CLI
