@@ -1984,6 +1984,17 @@ def test_the_same_words_anywhere_but_the_cli_s_own_record_set_no_cause(tmp_path:
         assert response["metadata"]["api_error"] is None and response["metadata"]["limit"] is None
 
 
+def test_a_refusal_the_session_recovered_from_is_recorded_but_is_not_how_it_ended(tmp_path: Path):
+    """Hitting a limit and later getting an answer is an error encountered, not a failed session."""
+    records = READ_THEN_REFUSED + [assistant_block("message-2", {"type": "text", "text": "Found it."})]
+
+    events, summary = import_records(records, tmp_path)
+
+    assert summary.api_errors == ("session_limit",)
+    assert summary.final_api_error is None
+    assert of_type(events, "model.response")[-1]["metadata"]["failure_kind"] is None
+
+
 # --- two clocks -----------------------------------------------------------------------------------
 
 
