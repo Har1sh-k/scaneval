@@ -85,6 +85,11 @@ Lives at `~/.claude/projects/<slug-of-cwd>/<session-id>.jsonl`, with subagent fi
   `apiBlockIndex`. The importer accumulates blocks per `message.id` and emits one
   request/response pair per message. Emitting per record would report twice the turns and
   **double-count every token**.
+- **The records of one message are not always adjacent.** Claude Code runs a tool as soon as
+  its block has streamed, so a response that calls three tools is written as block, result,
+  block, result, block, result. The response event carries the whole message, assembled in a
+  first pass; each later `tool_use` block emits its `tool.start` where its record appears,
+  pointing at the request of the turn that issued it. It opens no turn and adds no usage.
 - A tool result is a `user` record whose `message.content` holds a `tool_result` block, plus a
   top-level `toolUseResult` whose shape depends on the tool: `Read` gives
   `{type, file: {filePath, content, numLines, startLine, totalLines}}`, `Bash` gives
