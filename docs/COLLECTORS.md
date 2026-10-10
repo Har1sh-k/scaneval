@@ -171,7 +171,7 @@ field nobody reads as a content field.
 So a failure is split in two:
 
 - **`metadata.failure_kind`** is a code from a closed set: `turn_failed`, `item_error`,
-  `result_error`, `unknown` (`scaneval.collectors.FAILURE_KINDS`). An unrecognized kind
+  `result_error`, `api_error`, `unknown` (`scaneval.collectors.FAILURE_KINDS`). An unrecognized kind
   becomes `unknown` rather than being passed through, because `failure_kind` is a field
   consumers group by and one CLI's stray string would open the vocabulary without anyone
   deciding to.
