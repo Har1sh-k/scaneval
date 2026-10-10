@@ -337,9 +337,38 @@ async function main(): Promise<void> {
   const piSessionCallIds: string[] = [];
   let claudeSessionCalls = 0;
   const claudeSessionCallIds: string[] = [];
-  // Calls whose transcript was not found or not moved. Only the final attempt's session id is
-  // returned, so a transcript written by an earlier, retried attempt stays where the CLI put it.
+  // Calls with at least one attempt whose transcript was not moved, for readers of the older field.
   const claudeSessionMissing: string[] = [];
+  // Every native session a captured call can have left, by call, backend and attempt. The
+  // adapter reconciles it with what it registers and builds its history notes from it alone.
+  const sessionManifest: SessionEntry[] = [];
+
+  /**
+   * Move every transcript a claude call's attempts left, failed and retried attempts included.
+   * The ids come from each attempt's end record when the runner reports attempts, and from the
+   * returned result otherwise; a call that threw before returning still has its attempts.
+   */
+  function archiveClaudeSessions(state: CallState, minted: string, result: PiResult | null, destination: string): void {
+    const reported = [...state.attemptSessions];
+    const returned = result?.structured?.sessionId ?? null;
+    if (returned && !reported.some((entry) => entry.sessionId === returned)) {
+      reported.push({ attempt: state.final?.attempt ?? (reported.length ? reported[reported.length - 1].attempt : 1), sessionId: returned });
+    }
+    if (reported.length === 0) reported.push({ attempt: 1, sessionId: null });
+    const moved = new Set<string>();
+    let complete = true;
+    for (const { attempt, sessionId } of reported) {
+      let transcript: SessionEntry["transcript"] = "session_id_not_reported";
+      if (sessionId) {
+        transcript = moved.has(sessionId) || moveClaudeTranscript(sessionId, destination) ? "moved" : "not_found";
+        if (transcript === "moved") moved.add(sessionId);
+      }
+      if (transcript !== "moved") complete = false;
+      sessionManifest.push({ call: minted, invocation_id: state.callId, backend: "claude",
+        attempt: runnerHooks === null ? null : attempt, session_id: sessionId, transcript });
+    }
+    if (!complete) claudeSessionMissing.push(minted);
+  }
   // Which CLI actually served each call. The tool policy differs by route, and neither
   // route's tool dispatch happens in this process, so this records what was asked for,
   // never what the CLI did with it.
@@ -589,6 +618,8 @@ async function main(): Promise<void> {
         };
         piSessionCalls += 1;
         piSessionCallIds.push(minted);
+        sessionManifest.push({ call: minted, invocation_id: meta.invocationId ?? minted, backend: "pi",
+          attempt: null, session_id: null, transcript: "in_call_directory" });
       }
       // The claude route has no session-directory variable, so the CLI keeps its transcript
       // under its own projects directory. Persistence is turned on the same way, and the
@@ -957,6 +988,7 @@ async function main(): Promise<void> {
     claude_session_calls: claudeSessionCalls,
     claude_session_call_ids: claudeSessionCallIds,
     claude_session_missing: claudeSessionMissing,
+    session_manifest: sessionManifest,
     // CLI attempts, which is a different number from logical calls only where the runner
     // reports them; zero with no runner hooks, where an attempt is not observable at all.
     model_attempts: modelAttempts,
