@@ -2599,6 +2599,42 @@ def test_a_failed_batch_whose_session_cannot_be_found_is_an_explicit_entry(tmp_p
     assert execution["capture"]["tool_calls"] == "partial"
 
 
+def test_a_session_limit_survives_the_parse_failure_it_caused_and_the_run_stays_partial(tmp_path):
+    """The cause and the symptom are both kept, and neither turns the run into a completion.
+
+    The failed batch's session ends on the CLI's session-limit record and DeepSec, reading
+    that text as the agent's answer, writes a parse-failure dump. The trace carries the cause
+    on the session's own response, the dump stays an uncorrelated symptom, and the run is
+    partial with the cause named by its closed code.
+    """
+    bundle = failed_batch_run(tmp_path, control={"parse_error": True})
+    result, execution = documents(bundle)
+
+    assert result["status"] == "partial"
+    assert result["error"]["code"] == "deepsec_batches_failed"
+    assert "1 session(s) with session_limit" in result["error"]["message"]
+    assert execution["status"] == "partial"
+    assert len([path for path in bundle.rglob("deepsec-process.stdout.txt")]) == 1, "never retried"
+
+    events = trace_events(bundle)
+    refused = [event for event in events if event["type"] == "model.response"
+               and event.get("call_id") == FAILED_CALL
+               and event["metadata"]["failure_kind"] == "api_error"]
+    assert len(refused) == 1
+    assert refused[0]["attempt_id"].startswith(FAILED_CALL + "/turn-")
+    assert refused[0]["metadata"]["api_error"] == "rate_limit"
+    assert refused[0]["metadata"]["limit"] == {"kind": "session_limit", "resets_at_local": "3am",
+                                               "resets_timezone": "America/Chicago"}
+
+    symptom = [event for event in events
+               if event["metadata"].get("error_code") == "agent_output_parse_failure"]
+    assert len(symptom) == 1
+    assert symptom[0]["metadata"]["correlation"] == "uncorrelated" and "call_id" not in symptom[0]
+    assert symptom[0]["metadata"]["provider_failures_in_run"] == {"session_limit": 1}
+    assert any("1 session(s) ended on a request the provider refused" in note
+               for note in execution["notes"])
+
+
 def test_transcript_capture_requires_content_tracing(tmp_path):
     adapter = get_adapter("deepsec")
     spec = system_spec(fake_deepsec_root(tmp_path), capture_claude_sessions=True)
