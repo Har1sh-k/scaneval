@@ -1995,6 +1995,17 @@ def test_a_refusal_the_session_recovered_from_is_recorded_but_is_not_how_it_ende
     assert of_type(events, "model.response")[-1]["metadata"]["failure_kind"] is None
 
 
+def test_a_refusal_that_ends_the_file_is_how_the_session_ended(tmp_path: Path):
+    second = refusal_record()
+    second["message"]["id"] = "synthetic-2"
+    records = READ_THEN_REFUSED + [second]
+
+    _events, summary = import_records(records, tmp_path)
+
+    assert summary.api_errors == ("session_limit", "session_limit")
+    assert summary.final_api_error == "session_limit"
+
+
 # --- two clocks -----------------------------------------------------------------------------------
 
 
