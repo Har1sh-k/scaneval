@@ -1974,6 +1974,20 @@ def test_a_re_import_changes_when_events_were_emitted_and_never_when_they_happen
     assert all(e["metadata"]["source_timestamp"] for e in first)
 
 
+def test_each_event_names_the_native_record_its_time_was_read_from(tmp_path: Path):
+    events = import_at(timed_session("a", 0), tmp_path, "a", EPOCH)
+    first = lambda kind: of_type(events, kind)[0]["metadata"]  # noqa: E731
+    when = lambda meta: (meta["source_timestamp"], meta["source_timestamp_of"], meta["source_line"])  # noqa: E731
+    # A request is bounded by its input, the prompt or the tool result before it, and never
+    # dated by the response that answered it.
+    assert when(first("model.request")) == ("2026-10-10T03:00:00.000Z", "input_record", 1)
+    assert when(of_type(events, "model.request")[1]["metadata"]) == (
+        "2026-10-10T03:04:00.000Z", "input_record", 3)
+    assert when(first("model.response")) == ("2026-10-10T03:02:00.000Z", "first_block_record", 2)
+    assert when(first("tool.start")) == ("2026-10-10T03:02:00.000Z", "tool_use_record", 2)
+    assert when(first("tool.end")) == ("2026-10-10T03:04:00.000Z", "tool_result_record", 3)
+
+
 # --- more than one spelling of the same workspace --------------------------------------------
 
 # The shape of the real failure this pair of roots was added for: a harness handed the CLI
