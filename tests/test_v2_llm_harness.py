@@ -1057,6 +1057,119 @@ def test_claude_history_is_moved_into_the_private_run_per_call(tmp_path, monkeyp
     assert not any("pi session history" in note for note in execution["notes"])
 
 
+# Two backends behind one runner, with attempt hooks: the model flag picks pi or claude. Each
+# prompt names what its claude call does. "retried" fails its first attempt and succeeds on the
+# second, each attempt with its own session; "throws" reports its attempt and then throws before
+# returning; "unreported" reports no session id; "lost" reports one whose transcript was never
+# written. Every transcript a claude attempt writes lands where the CLI keeps them.
+TWO_BACKEND_RUNNER = """
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+export const PI_RUNNER_HOOKS_VERSION = 1;
+export function resolveRunnerBinary(args: string[]): string { return args.includes("pi-model") ? "pi" : "claude"; }
+const SESSIONS: Record<string, string> = {
+  "retried-1": "00000000-0000-4000-8000-0000000000a1", "retried-2": "00000000-0000-4000-8000-0000000000a2",
+  "throws-1": "00000000-0000-4000-8000-0000000000b1", "lost-1": "00000000-0000-4000-8000-0000000000c1",
+};
+function transcript(sessionId: string): void {
+  const dir = join(process.env.HOME as string, ".claude", "projects", "-encoded-cwd");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${sessionId}.jsonl`), JSON.stringify({ sessionId }) + "\\n");
+}
+export function createDefaultPiRunner(options: any) {
+  const hooks = options.hooks;
+  return { async runPi(invocation: any) {
+    const prompt = String(invocation.args[invocation.args.length - 1]);
+    const binary = resolveRunnerBinary(invocation.args);
+    const start = (attempt: number) => ({ invocationId: invocation.meta?.invocationId, stage: invocation.meta?.stage,
+      attempt, maxAttempts: 2, binary, modelRequested: "m", thinking: null, outputFormat: "json",
+      promptChars: prompt.length, timeoutMs: 1000, startedAt: new Date().toISOString() });
+    const end = (attempt: number, willRetry: boolean, code: number, sessionId: string | null) => ({
+      ...start(attempt), durationMs: 1, code, stdoutChars: 0, stderrChars: 0, willRetry,
+      ...(code ? { failureKind: "transient" } : {}), structured: sessionId ? { sessionId, isError: code !== 0 } : null });
+    if (binary === "pi") {
+      hooks.onAttemptStart(start(1));
+      const dir = invocation.env.PI_CODING_AGENT_SESSION_DIR;
+      if (dir) { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, "session.jsonl"), "{}\\n"); }
+      hooks.onAttemptEnd(end(1, false, 0, null));
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (prompt === "retried") {
+      hooks.onAttemptStart(start(1));
+      transcript(SESSIONS["retried-1"]);
+      hooks.onAttemptEnd(end(1, true, 1, SESSIONS["retried-1"]));
+      hooks.onAttemptStart(start(2));
+      transcript(SESSIONS["retried-2"]);
+      hooks.onAttemptEnd(end(2, false, 0, SESSIONS["retried-2"]));
+      return { code: 0, stdout: "", stderr: "", outputFormat: "json", structured: { sessionId: SESSIONS["retried-2"] } };
+    }
+    if (prompt === "throws") {
+      hooks.onAttemptStart(start(1));
+      transcript(SESSIONS["throws-1"]);
+      hooks.onAttemptEnd(end(1, false, 1, SESSIONS["throws-1"]));
+      throw new Error("the call failed before it returned");
+    }
+    hooks.onAttemptStart(start(1));
+    const sessionId = prompt === "lost" ? SESSIONS["lost-1"] : null;
+    hooks.onAttemptEnd(end(1, false, 0, sessionId));
+    return { code: 0, stdout: "", stderr: "", outputFormat: "json", structured: sessionId ? { sessionId } : null };
+  } };
+}
+"""
+TWO_BACKEND_ENGINE = """
+export async function runRuntimeScan(options: any): Promise<any> {
+  for (const [model, prompt] of __CALLS__) {
+    try {
+      await options.llmRunner.runPi({ args: ["-p", "--no-session", "--model", model, prompt],
+        cwd: options.repoPath, timeoutMs: 1000, env: {} });
+    } catch {
+      // The scan goes on; the driver still has to keep what the failed call left.
+    }
+  }
+  return { newFindings: [], updatedFindings: [],
+    bootstrapScan: { llmCalls: 0, failedCalls: 0, status: "complete", hypothesisCoverage: 1 },
+    runtimeProfile: "full", degraded: false };
+}
+"""
+
+
+def _two_backend_run(tmp_path: Path, monkeypatch, calls: list[list[str]]) -> tuple[dict, dict, Path]:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    engine = TWO_BACKEND_ENGINE.replace("__CALLS__", json.dumps(calls))
+    root = _stub_harness(tmp_path, "harness-two-backends", engine=engine, runner=TWO_BACKEND_RUNNER)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="run-two-backends", runner="default")
+    output = json.loads((bundle / "raw" / "driver-output.json").read_text(encoding="utf-8"))
+    execution = load_document(bundle / "execution.json", "execution-record")
+    return output, execution, home
+
+
+def test_every_attempt_s_transcript_is_kept_under_its_own_backend(tmp_path, monkeypatch):
+    """A retried call keeps both attempts' sessions, and a call that threw keeps its attempt's."""
+    output, execution, home = _two_backend_run(
+        tmp_path, monkeypatch, [["pi-model", "one"], ["claude-model", "retried"], ["claude-model", "throws"]])
+
+    manifest = [(entry["call"], entry["backend"], entry["attempt"], entry["transcript"])
+                for entry in output["session_manifest"]]
+    assert manifest == [("call-1", "pi", None, "in_call_directory"),
+                        ("call-2", "claude", 1, "moved"), ("call-2", "claude", 2, "moved"),
+                        ("call-3", "claude", 1, "moved")]
+    artifacts = {entry["id"] for entry in execution["raw_artifacts"]}
+    assert {"pi-session/call-1/session.jsonl",
+            "claude-session/call-2/00000000-0000-4000-8000-0000000000a1.jsonl",
+            "claude-session/call-2/00000000-0000-4000-8000-0000000000a2.jsonl",
+            "claude-session/call-3/00000000-0000-4000-8000-0000000000b1.jsonl"} <= artifacts
+    assert not list((home / ".claude" / "projects").rglob("*.jsonl")), "every transcript was moved"
+
+    notes = " ".join(execution["notes"])
+    assert "pi session history: 1 JSONL file(s) preserved for 1 logical pi call(s)" in notes
+    assert "claude session history: 3 of 3 attempt session(s) preserved, for 2 logical claude call(s)" in notes
+    assert "history is incomplete" not in notes
+    # Logical calls, attempts and transcripts stay three different numbers.
+    assert output["model_calls"] == 3 and output["claude_session_calls"] == 2 and output["pi_session_calls"] == 1
+
+
 
 
 def test_pi_history_requires_content_tracing(tmp_path):
