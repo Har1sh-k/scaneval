@@ -665,12 +665,10 @@ async function main(): Promise<void> {
           content: view.content,
         });
       }
+      let returned: PiResult | null = null;
       try {
         const result = await baseRunner.runPi(invocation);
-        if (claudeSessionDir !== null) {
-          const sessionId = (result as { structured?: ClaudeStructured | null }).structured?.sessionId ?? null;
-          if (!moveClaudeTranscript(sessionId, claudeSessionDir)) claudeSessionMissing.push(minted);
-        }
+        returned = result;
         if (result.code !== 0) modelFailures += 1;
         const elapsed = Date.now() - began;
         if (runnerHooks === null) await emitUnhookedResponse(state, result, null, elapsed);
@@ -683,6 +681,8 @@ async function main(): Promise<void> {
         else await emitHookedResponse(state, null, error, elapsed);
         throw error;
       } finally {
+        // Here rather than after the return, so a call that threw keeps its attempts' transcripts.
+        if (claudeSessionDir !== null) archiveClaudeSessions(state, minted, returned, claudeSessionDir);
         calls.delete(callId);
       }
     },
