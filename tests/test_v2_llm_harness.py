@@ -1281,6 +1281,31 @@ def _planner_run(tmp_path: Path, *, planner_reports: bool) -> tuple[dict, dict, 
     return output, execution, events
 
 
+def test_a_planner_reports_the_inputs_it_was_given_without_inventing_spans(tmp_path):
+    """Both calls are covered, each by its own call id, and the planner's event holds no span."""
+    output, _execution, events = _planner_run(tmp_path, planner_reports=True)
+    selections = {event["call_id"]: event for event in events if event["type"] == "context.selection"}
+    requests = {event["call_id"] for event in events if event["type"] == "model.request"}
+
+    assert set(selections) == requests == {"planner-1", "analysis-1"}
+    planner = selections["planner-1"]["metadata"]
+    assert planner["stage"] == "planner" and planner["prompt_chars"] == 41200
+    assert planner["span_count"] == 0 and planner["spans"] == []
+    assert planner["input_count"] == 3
+    inventory, architecture, unknown = planner["inputs"]
+    assert inventory == {"kind": "file_inventory", "chars": 900, "sha256": "c" * 64, "items": 12,
+                         "truncated": False, "original_chars": None, "omitted_items": None}
+    assert architecture["truncated"] is True and architecture["original_chars"] == 5000
+    assert architecture["sha256"] is None, "no digest was supplied, so none is claimed"
+    # The vocabulary stays closed, and a value that is not a digest is not carried as one.
+    assert unknown["kind"] == "other" and unknown["sha256"] is None
+    assert selections["analysis-1"]["metadata"]["span_count"] == 1
+    assert selections["analysis-1"]["metadata"]["inputs"] == []
+
+    assert output["model_calls_with_context"] == 2 and output["model_calls_without_context"] == 0
+    assert output["model_calls_without_context_by_stage"] == {}
+
+
 def test_a_supplied_span_that_could_not_be_located_says_so_rather_than_naming_file_lines(tmp_path):
     """``location_known`` is the difference between a file position and a position in a prompt.
 
