@@ -1183,6 +1183,17 @@ def test_a_session_that_could_not_be_kept_is_listed_by_call_and_attempt(tmp_path
             "no session id; call-2 attempt 1: no transcript found for its session id)") in notes
 
 
+def test_a_transcript_counts_as_kept_only_when_it_is_also_a_registered_artifact():
+    """The driver's word and the bundle's contents are reconciled, not either one trusted alone."""
+    from scaneval.adapters.llm_harness import session_history_notes
+
+    manifest = [{"call": "call-1", "backend": "claude", "attempt": 1, "session_id": "s-1", "transcript": "moved"},
+                {"call": "call-2", "backend": "claude", "attempt": 1, "session_id": "s-2", "transcript": "moved"}]
+    notes = " ".join(session_history_notes(manifest, {"call-1": {"s-1.jsonl"}}))
+    assert "1 of 2 attempt session(s) preserved" in notes
+    assert "call-2 attempt 1: moved by the driver but not registered" in notes
+
+
 
 
 def test_pi_history_requires_content_tracing(tmp_path):
