@@ -1419,7 +1419,10 @@ class _State:
             "is_error": bool(block.get("is_error")),
             "result_chars": len(delivered),
             "spans": [span] if span else None,
+            # Unknown. The records say when the call was written and when its result was, and
+            # the tool ran somewhere between; neither is when it started or stopped.
             "duration_ms": None,
+            **_source_time(self.origin, "tool_result_record"),
         }
         fields: dict[str, Any] = {
             "type": "tool.end",
@@ -1468,6 +1471,7 @@ class _State:
                 "truncated_spans": 1 if span.get("truncated") else 0,
                 "omitted_paths": None,
                 "span_count": 1,
+                **_source_time(origin, "tool_result_record"),
             },
         }
         if parent_event_id:
