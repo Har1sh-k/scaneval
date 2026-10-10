@@ -417,6 +417,22 @@ def test_a_transcript_that_could_not_be_checked_to_its_end_is_not_adopted(monkey
     assert found.unverified == 1 and found.foreign == 0
 
 
+def test_a_subagent_file_is_kept_only_when_it_too_ran_in_the_workspace(tmp_path: Path):
+    projects = tmp_path / "projects"
+    workspace = "/private/tmp/trial-1/source"
+    directory = projects / claude_code.project_directory_name(workspace)
+    main = session_file(directory, WORKSPACE_SESSION, cwd=workspace)
+    subagents = directory / WORKSPACE_SESSION / "subagents"
+    owned = session_file(subagents, "agent-0001", cwd=workspace + "/src", named=WORKSPACE_SESSION)
+    session_file(subagents, "agent-0002", cwd="/private/tmp/another-project", named=WORKSPACE_SESSION)
+    session_file(subagents, "agent-0003", cwd=workspace, named=OTHER_SESSION)
+
+    found = claude_code.find_workspace_sessions(workspace, projects_dir=projects)
+
+    assert found.transcripts == {WORKSPACE_SESSION: (main, owned)}
+    assert found.foreign == 2
+
+
 # --- turns ------------------------------------------------------------------------------
 
 
