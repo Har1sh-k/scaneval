@@ -209,6 +209,33 @@ completed with an error item inside it gets `is_error: false`, `result_subtype: 
 and `failure_kind: "item_error"`, because both facts are true and the trace reports both
 rather than picking one. A `turn.failed` outranks an error item inside it.
 
+### A request the provider refused
+
+When the provider refuses a request, Claude Code writes an `assistant` record itself instead
+of a model response. It sets `isApiErrorMessage: true` and an `error` category on the record,
+sets the model to `<synthetic>`, records zero usage, and puts its own message in the text.
+The record that ended a real session reads `error: "rate_limit"` with the text
+`You've hit your session limit · resets 3am (America/Chicago)`.
+
+The importer emits this as an attempt that failed:
+
+- `failure_kind` is `api_error`, `is_error` is `true`, and `api_error` holds the CLI's
+  category from a closed set (`authentication_failed`, `billing_error`, `rate_limit`,
+  `invalid_request`, `server_error`, `max_output_tokens`, `unknown`).
+- For `rate_limit`, `limit` holds the usage limit the message names: `kind` is
+  `session_limit`, `weekly_limit` or `usage_limit`. `resets_at_local` and `resets_timezone`
+  hold the reset exactly as the CLI wrote it, or `null` when it named none. Nothing converts
+  the reset to an instant or guesses when a retry would work. Throttling without a named
+  limit leaves `limit` null.
+- `model_served` is `null`, and `usage` is `null` with `usage_available: false`. The zeros on
+  the record are a placeholder, not a measurement.
+- The CLI's text goes to `content.error` in content mode only.
+- It releases no held context selection, because no model received the request.
+
+Every other response carries `api_error` and `limit` as `null`. `ImportSummary.api_errors`
+lists one cause per refusal, the limit kind when one was named and the category otherwise.
+It is not a capture loss: the record was read in full.
+
 ## Pass every spelling of the workspace root
 
 `workspace_root` takes **one root or a sequence of roots**
