@@ -1116,21 +1116,21 @@ class _State:
             return
         if self.pending is not None and self.pending.message_id == key:
             # The ordinary case: another content block of the message already open.
-            if not self.pending.absorb(record):
+            if not self.pending.absorb(record, self.origin):
                 self._replayed()
             return
         emitted = self.emitted.get(key)
         if emitted is None:
             self.flush()
             self.pending = _Turn(key)
-            self.pending.absorb(record)
+            self.pending.absorb(record, self.origin)
             return
         # The same message after its turn was emitted. Blocks it already had are a replay:
         # accepting them would double a turn's usage and, worse, would count as a second
         # delivery. A tool use it did not have yet is the rest of that same response, written
         # after an earlier tool's result arrived; it is started under the turn that issued it,
         # and it opens no turn and releases no held context, because no new response exists.
-        added = emitted.absorb(record)
+        added = emitted.absorb(record, self.origin)
         if not added:
             self._replayed()
             return
@@ -1138,7 +1138,8 @@ class _State:
         agent_id = emitted.agent_id or self.default_agent_id
         for block in added:
             if block.get("type") == "tool_use":
-                self._tool_start(block, emitted.request_event_id, sidechain, agent_id)
+                self._tool_start(block, emitted.request_event_id, sidechain, agent_id,
+                                 emitted.tool_origins.get(_block_identity(block), NO_ORIGIN))
 
     def _replayed(self) -> None:
         self.tracker.unknown("assistant:replayed-message")
@@ -1274,7 +1275,8 @@ class _State:
         tracker.model_turns += 1
 
         for block in turn.tool_uses:
-            self._tool_start(block, request_id, sidechain, agent_id)
+            self._tool_start(block, request_id, sidechain, agent_id,
+                             turn.tool_origins.get(_block_identity(block), NO_ORIGIN))
 
     def _apply_result(self, metadata: dict[str, Any]) -> str | None:
         """Attach the CLI's own accounting of the invocation to its last response.
@@ -1338,6 +1340,7 @@ class _State:
         parent_event_id: str | None,
         sidechain: bool,
         agent_id: str | None,
+        origin: _Origin = NO_ORIGIN,
     ) -> None:
         tracker = self.tracker
         tool_id = block.get("id")
@@ -1356,6 +1359,7 @@ class _State:
                 "input_summary": _input_summary(tool_name, tool_input, tracker),
                 "sidechain": bool(sidechain),
                 "agent_id": agent_id,
+                **_source_time(origin, "tool_use_record"),
             },
         }
         if parent_event_id:
