@@ -445,6 +445,15 @@ def test_an_interleaved_tool_use_starts_where_its_record_was_written(tmp_path: P
                      ("tool.start", "tool-2"), ("tool.end", "tool-2")]
 
 
+def test_the_rest_of_a_response_adds_no_turn_and_no_usage(tmp_path: Path):
+    """Every block repeats the response's usage; the turn reports it once."""
+    events, _ = import_records(INTERLEAVED, tmp_path)
+    responses = of_type(events, "model.response")
+    assert len(responses) == 2
+    assert responses[0]["metadata"]["usage"] == USAGE
+    assert sum(r["metadata"]["usage"]["output_tokens"] for r in responses) == 2 * 40
+
+
 def test_a_read_result_becomes_a_span_whose_path_is_relative_to_the_workspace():
     """The span is the one claim a collector makes that Contract 5 later joins against.
 
