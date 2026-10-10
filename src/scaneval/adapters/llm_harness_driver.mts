@@ -258,6 +258,31 @@ function suppliedSpan(span: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
+// What a non-span input to a prompt may be called. A planner is given a file inventory, a change
+// summary or an architecture description rather than located source, and those are described
+// rather than dressed up as spans. A kind outside this list is reported as "other", so the
+// vocabulary stays closed whatever a harness passes.
+const INPUT_KINDS = new Set([
+  "file_inventory", "change_summary", "diff", "architecture_context", "threat_model",
+  "prior_findings", "instructions", "other",
+]);
+
+function suppliedInput(input: Record<string, unknown>): Record<string, unknown> {
+  const kind = typeof input.kind === "string" && INPUT_KINDS.has(input.kind) ? input.kind : "other";
+  const digest = typeof input.sha256 === "string" && /^[0-9a-f]{64}$/.test(input.sha256) ? input.sha256 : null;
+  return {
+    kind,
+    chars: wireNumber(input.chars),
+    sha256: digest,
+    // How many entries the input lists, when it is a list (files in an inventory, say).
+    items: wireNumber(input.items),
+    // Null when the harness did not say, which is not a claim that nothing was cut.
+    truncated: typeof input.truncated === "boolean" ? input.truncated : null,
+    original_chars: wireNumber(input.originalChars),
+    omitted_items: wireNumber(input.omittedItems),
+  };
+}
+
 async function main(): Promise<void> {
   const configPath = argValue("config");
   if (!configPath) throw new Error("--config <path> is required");
