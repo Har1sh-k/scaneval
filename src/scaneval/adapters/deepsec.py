@@ -2196,6 +2196,11 @@ class DeepsecAdapter(Adapter):
         roots = workspace_spellings(Path(source_dir))
         candidates = candidates_from(records.files, roots)
         sessions = sessions_from(records.files, roots)
+        # The sessions of failed batches, which DeepSec names nowhere. Only the claude agent leaves
+        # a Claude Code transcript, and only a traced run reads any.
+        unreferenced = (unreferenced_sessions(sessions, roots, config.projects_dir)
+                        if config.agent == "claude" and trace_dir is not None and trace_mode != "off"
+                        else Unreferenced((), 0, False))
         # Only ``analyzed`` says the AI stage finished with a file. ``pending`` is one it never
         # reached, which is what ``--limit`` does by design; ``processing`` is one a run was
         # still holding when it ended; a status DeepSec does not declare, or none at all, is a
@@ -2257,13 +2262,16 @@ class DeepsecAdapter(Adapter):
         capture_state: dict | None = None
         transcripts_found = 0
         imports_clean = True
+        sessions_expected = len(sessions)
         if trace_dir is not None and trace_mode != "off":
             try:
                 traced = write_trace(
                     trace_dir=Path(trace_dir), trace_mode=trace_mode, run_id=request["run_id"],
                     source_dir=Path(source_dir), projects_dir=config.projects_dir, records=records,
                     sessions=sessions, candidates=candidates, imported=imported,
-                    model_requested=config.model, thinking=config.thinking_level)
+                    model_requested=config.model, thinking=config.thinking_level,
+                    unreferenced=unreferenced.sessions,
+                    failed_batches=failed_batch_count(config.agent, records, statuses, output))
             except Exception as exc:  # noqa: BLE001
                 # The one place a trace failure is contained. A trace is instrumentation: losing
                 # it must not discard the claims the import already built, and it must not read
@@ -2275,15 +2283,20 @@ class DeepsecAdapter(Adapter):
                 capture_state = traced.capture_state
                 transcripts_found = traced.transcripts_found
                 imports_clean = traced.imports_clean
+                sessions_expected = traced.sessions_expected
                 notes.extend(traced.notes)
+                if unreferenced.foreign:
+                    notes.append(f"{unreferenced.foreign} transcript(s) in this workspace's project directory "
+                                 "did not show they ran in it, and were neither imported nor moved.")
         if config.capture_claude_sessions:
             # After the import, which reads the transcripts where the sessions left them.
-            moved, capture_notes = preserve_transcripts(sessions, config.projects_dir, Path(raw_dir), enclosure)
+            moved, capture_notes = preserve_transcripts(sessions + unreferenced.sessions, config.projects_dir,
+                                                        Path(raw_dir), enclosure)
             artifacts.extend(moved)
             notes.extend(capture_notes)
 
         capture = capture_status(
-            trace_mode, transcripts_found=transcripts_found, sessions=len(sessions),
+            trace_mode, transcripts_found=transcripts_found, sessions=sessions_expected,
             batches_failed=batches_failed, imports_clean=imports_clean,
             # Everything this run already knows it did not see. A category may not claim
             # completeness over a population this run could not read in full, and none may

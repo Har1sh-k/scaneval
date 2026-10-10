@@ -993,8 +993,14 @@ def test_a_parse_failure_dump_is_an_observer_error_and_never_shaped_like_an_atte
     _result, execution = documents(bundle)
     assert any(artifact["id"].startswith("deepsec-debug/") for artifact in execution["raw_artifacts"])
     events = trace_events(bundle)
-    failures = [event for event in events if event["type"] == "observer.error"]
+    errors = [event for event in events if event["type"] == "observer.error"]
+    failures = [event for event in errors
+                if event["metadata"]["error_code"] == "agent_output_parse_failure"]
     assert len(failures) == 1
+    # The batch that failed opened a session this fake left no transcript for, so it is
+    # accounted for as one that could not be found rather than left out of the count.
+    assert [event["metadata"]["error_code"] for event in errors if event not in failures] == [
+        "failed_batch_session_not_found"]
     assert failures[0]["category"] == "observer"
     assert failures[0]["capture_status"] == "unavailable"
     assert failures[0]["metadata"]["error_code"] == "agent_output_parse_failure"
