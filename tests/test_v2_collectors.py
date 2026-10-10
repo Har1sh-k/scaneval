@@ -1928,6 +1928,52 @@ def test_the_same_words_anywhere_but_the_cli_s_own_record_set_no_cause(tmp_path:
         assert response["metadata"]["api_error"] is None and response["metadata"]["limit"] is None
 
 
+# --- two clocks -----------------------------------------------------------------------------------
+
+
+def stamped(record: dict, at: str) -> dict:
+    return {**record, "timestamp": at}
+
+
+def timed_session(prefix: str, minute: int) -> list[dict]:
+    """A session whose records the CLI stamped at known times, a minute apart per step."""
+    def at(offset: int) -> str:
+        return f"2026-10-10T03:{minute + offset:02d}:00.000Z"
+    return [
+        stamped({"type": "user", "message": {"content": "Investigate."}}, at(0)),
+        stamped(assistant_block(f"{prefix}-m1", tool_use(f"{prefix}-t1", "alpha")), at(2)),
+        stamped(tool_result(f"{prefix}-t1", "first result"), at(4)),
+        stamped(assistant_block(f"{prefix}-m2", {"type": "text", "text": "done"}), at(6)),
+    ]
+
+
+def import_at(records: list[dict], tmp_path: Path, name: str, wall: datetime) -> list[dict]:
+    """Import one file with an observer whose clock reads *wall*, as a re-import later would."""
+    path = tmp_path / f"{name}.jsonl"
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+    seen: list[dict] = []
+    observer = Observer(mode="metadata", sink=seen.append, run_id="run", producer_id="producer",
+                        clock=lambda: wall, id_factory=ids())
+    claude_code.import_transcript(observer, path, workspace_root=WORKSPACE, call_id=name)
+    return seen
+
+
+def source_timeline(events: list[dict]) -> list[tuple]:
+    return [(e["type"], e.get("call_id"), e["metadata"]["source_timestamp"],
+             e["metadata"]["source_timestamp_of"], e["metadata"]["source_line"]) for e in events]
+
+
+def test_a_re_import_changes_when_events_were_emitted_and_never_when_they_happened(tmp_path: Path):
+    """``timestamp`` is the import's clock; ``source_timestamp`` is the CLI's, and stays put."""
+    session = timed_session("a", 0)
+    first = import_at(session, tmp_path, "a", datetime(2026, 10, 10, 18, 0, tzinfo=timezone.utc))
+    later = import_at(session, tmp_path, "a", datetime(2027, 1, 1, 9, 30, tzinfo=timezone.utc))
+
+    assert {e["timestamp"] for e in first} != {e["timestamp"] for e in later}
+    assert source_timeline(first) == source_timeline(later)
+    assert all(e["metadata"]["source_timestamp"] for e in first)
+
+
 # --- more than one spelling of the same workspace --------------------------------------------
 
 # The shape of the real failure this pair of roots was added for: a harness handed the CLI
