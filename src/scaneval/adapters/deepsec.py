@@ -2290,6 +2290,7 @@ class DeepsecAdapter(Adapter):
         transcripts_found = 0
         imports_clean = True
         sessions_expected = len(sessions)
+        provider_failures: dict[str, int] = {}
         if trace_dir is not None and trace_mode != "off":
             try:
                 traced = write_trace(
@@ -2311,6 +2312,7 @@ class DeepsecAdapter(Adapter):
                 transcripts_found = traced.transcripts_found
                 imports_clean = traced.imports_clean
                 sessions_expected = traced.sessions_expected
+                provider_failures = dict(traced.provider_failures)
                 notes.extend(traced.notes)
                 if unreferenced.foreign:
                     notes.append(f"{unreferenced.foreign} transcript(s) in this workspace's project directory "
@@ -2570,9 +2572,14 @@ class DeepsecAdapter(Adapter):
         if batches_failed:
             counted = (f"; DeepSec itself counted {output.errored_batches} errored batch(es)"
                        if pr is not None and output.errored_batches else "")
+            # The cause, when the sessions' own transcripts recorded one. Named by closed code only.
+            caused = ("; the Claude Code CLI recorded the provider refusing a request that ended "
+                      + ", ".join(f"{count} session(s) with {cause}" for cause, count in provider_failures.items())
+                      if provider_failures else "")
             return stopped("deepsec_batches_failed",
                            f"{len(errored_files)} file(s) in status 'error', {len(records.debug)} parse-failure "
-                           f"dump(s) and {refusals} refusal(s): part of the {subject} reached no verdict{counted}")
+                           f"dump(s) and {refusals} refusal(s): part of the {subject} reached no verdict{counted}"
+                           f"{caused}")
         if statuses.invalid:
             # A record whose state this cannot read is not a record this run can claim to have
             # finished. Reported before the unfinished ones because it is the stronger failure:
