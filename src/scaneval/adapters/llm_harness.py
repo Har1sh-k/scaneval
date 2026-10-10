@@ -833,6 +833,30 @@ def capture_status(trace_mode: str, routes: list[str], *, has_summary: bool,
     }
 
 
+SESSION_BACKENDS = {"pi": "pi-session", "claude": "claude-session"}
+SESSION_TRANSCRIPTS = ("moved", "not_found", "session_id_not_reported", "in_call_directory")
+
+
+def session_manifest(output: Any) -> list[dict[str, Any]] | None:
+    """The driver's per-attempt manifest of native sessions, or None when it reported none.
+
+    Each entry names the call directory, the backend, the attempt where one is observable, the
+    session id where the CLI reported one, and what became of the transcript. An entry this
+    cannot read is dropped rather than guessed at; the notes then count only the readable ones.
+    """
+    entries = output.get("session_manifest") if isinstance(output, dict) else None
+    if not isinstance(entries, list):
+        return None
+    readable = []
+    for entry in entries:
+        if (isinstance(entry, dict) and isinstance(entry.get("call"), str)
+                and re.fullmatch(r"call-[1-9][0-9]*", entry["call"])
+                and entry.get("backend") in SESSION_BACKENDS
+                and entry.get("transcript") in SESSION_TRANSCRIPTS):
+            readable.append(entry)
+    return readable
+
+
 class LlmHarnessAdapter(Adapter):
     name = "llm-harness"
     adapter_version = "2.3.0"
