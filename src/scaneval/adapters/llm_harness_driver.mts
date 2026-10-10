@@ -235,6 +235,22 @@ interface CallState {
   route: string;
   /** The `willRetry: false` record, stashed for the wrapper to pair with the returned result. */
   final: AttemptRecord | null;
+  /** The session id each attempt's end record reported, in the order the attempts ended. */
+  attemptSessions: Array<{ attempt: number; sessionId: string | null }>;
+}
+
+/**
+ * One entry per native session a call can have left: per attempt on the claude route, where each
+ * attempt reports its own session id, and per logical call on the pi route, where the CLI writes
+ * into the call's own directory and reports no id. `transcript` says what became of it.
+ */
+interface SessionEntry {
+  call: string;
+  invocation_id: string;
+  backend: "pi" | "claude";
+  attempt: number | null;
+  session_id: string | null;
+  transcript: "moved" | "not_found" | "session_id_not_reported" | "in_call_directory";
 }
 
 function suppliedSpan(span: Record<string, unknown>): Record<string, unknown> {
@@ -426,6 +442,7 @@ async function main(): Promise<void> {
     onAttemptEnd(record: AttemptRecord): void {
       accumulate(record);
       const state = record.invocationId ? calls.get(record.invocationId) : undefined;
+      state?.attemptSessions.push({ attempt: record.attempt, sessionId: record.structured?.sessionId ?? null });
       if (!record.willRetry) {
         // The last attempt's response is emitted by the wrapper instead, once the call has
         // settled: only the returned result carries stdout and stderr, and this record carries
@@ -589,7 +606,7 @@ async function main(): Promise<void> {
       const view = describeInvocation(observedOptions as unknown as Record<string, unknown>, resolveBinary);
       const route = config.runner === "mock" ? "mock" : view.route;
       observedRoutes.add(route);
-      const state: CallState = { callId, view, route, final: null };
+      const state: CallState = { callId, view, route, final: null, attemptSessions: [] };
       calls.set(callId, state);
       modelCallIds.add(callId);
       if (typeof meta.stage === "string" && meta.stage) callStages.set(callId, meta.stage);
