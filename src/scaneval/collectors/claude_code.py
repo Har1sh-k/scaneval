@@ -547,11 +547,28 @@ def _span_from_result(native: Any, tracker: _Import) -> tuple[dict[str, Any] | N
     return span, delivered
 
 
+def _block_identity(block: dict[str, Any]) -> str:
+    """What makes two content blocks the same block. A tool use is its ID; anything else is
+    its whole content, because a text or thinking block carries no identity of its own."""
+    if block.get("type") == "tool_use":
+        tool_id = block.get("id")
+        if isinstance(tool_id, str) and tool_id:
+            return f"tool_use:{tool_id}"
+    return json.dumps(block, sort_keys=True, default=str)
+
+
 class _Turn:
-    """One assistant message, accumulated across the per-block records that spell it."""
+    """One assistant message, accumulated across the per-block records that spell it.
+
+    The records of one message are not always adjacent. Claude Code runs a tool as soon as
+    its block has streamed, so a message that calls three tools is written as block, result,
+    block, result, block, result, and the second and third blocks arrive after the turn was
+    already emitted. Each block is therefore absorbed once, by identity: a block seen before
+    is a replay, and a block never seen is the rest of the same response.
+    """
 
     __slots__ = ("message_id", "model", "usage", "usage_available", "text", "tool_uses",
-                 "sidechain", "agent_id", "session_id")
+                 "sidechain", "agent_id", "session_id", "blocks", "request_event_id")
 
     def __init__(self, message_id: str) -> None:
         self.message_id = message_id
@@ -563,6 +580,46 @@ class _Turn:
         self.sidechain = False
         self.agent_id: str | None = None
         self.session_id: str | None = None
+        self.blocks: set[str] = set()
+        # Set when the turn is emitted, so a tool use that arrives later can point at it.
+        self.request_event_id: str | None = None
+
+    def absorb(self, record: dict[str, Any]) -> list[dict[str, Any]]:
+        """Fold one record into the turn. Returns the blocks this record added, if any."""
+        added: list[dict[str, Any]] = []
+        message = record.get("message")
+        if isinstance(message, dict):
+            model = message.get("model")
+            if isinstance(model, str) and model:
+                self.model = model
+            usage, available = _usage(message)
+            if available:
+                self.usage, self.usage_available = usage, True
+            content = message.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    identity = _block_identity(block)
+                    if identity in self.blocks:
+                        continue
+                    self.blocks.add(identity)
+                    added.append(block)
+                    if block.get("type") == "text" and isinstance(block.get("text"), str):
+                        self.text.append(block["text"])
+                    elif block.get("type") == "tool_use":
+                        self.tool_uses.append(block)
+        if record.get("isSidechain") is True:
+            self.sidechain = True
+        for key_name in ("agentId", "agent_id"):
+            value = record.get(key_name)
+            if isinstance(value, str) and value:
+                self.agent_id = value
+        for key_name in ("sessionId", "session_id"):
+            value = record.get(key_name)
+            if isinstance(value, str) and value:
+                self.session_id = value
+        return added
 
 
 def _import_records(
