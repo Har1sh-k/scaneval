@@ -396,6 +396,27 @@ def test_discovery_hands_back_the_verified_file_and_not_a_namesake_in_another_pr
         "the lookup this replaces would have read both")
 
 
+def test_a_transcript_that_could_not_be_checked_to_its_end_is_not_adopted(monkeypatch, tmp_path: Path):
+    """A record past the read bound could name another workspace, so a partial check adopts nothing."""
+    monkeypatch.setattr(claude_code, "MAX_TRANSCRIPT_BYTES", 512)
+    projects = tmp_path / "projects"
+    workspace = "/private/tmp/trial-1/source"
+    path = session_file(projects / claude_code.project_directory_name(workspace), WORKSPACE_SESSION,
+                        cwd=workspace)
+    filler = {"type": "user", "sessionId": WORKSPACE_SESSION, "cwd": workspace,
+              "message": {"content": "x" * 200}}
+    beyond = {"type": "user", "sessionId": WORKSPACE_SESSION, "cwd": "/private/tmp/another-project",
+              "message": {"content": "past the bound"}}
+    with path.open("a") as stream:
+        for record in [filler] * 3 + [beyond]:
+            stream.write(json.dumps(record) + "\n")
+
+    found = claude_code.find_workspace_sessions(workspace, projects_dir=projects)
+
+    assert found.session_ids == () and found.transcripts == {}
+    assert found.unverified == 1 and found.foreign == 0
+
+
 # --- turns ------------------------------------------------------------------------------
 
 
