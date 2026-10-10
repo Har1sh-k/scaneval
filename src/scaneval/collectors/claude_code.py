@@ -681,6 +681,35 @@ def _block_identity(block: dict[str, Any]) -> str:
     return json.dumps(block, sort_keys=True, default=str)
 
 
+def _is_api_error(record: dict[str, Any]) -> bool:
+    """Whether the CLI wrote this record to report that the provider refused a request.
+
+    The fields are the CLI's own, set on the record and not inside the message, so neither a
+    model nor a repository can produce them: the transcript flags ``isApiErrorMessage``, and a
+    stream names an ``error`` on a message whose model is :data:`SYNTHETIC_MODEL`.
+    """
+    if record.get("isApiErrorMessage") is True:
+        return True
+    message = record.get("message")
+    return (isinstance(record.get("error"), str) and isinstance(message, dict)
+            and message.get("model") == SYNTHETIC_MODEL)
+
+
+def _limit(category: str | None, text: str) -> dict[str, Any] | None:
+    """The usage limit a ``rate_limit`` API-error record names, or None when it names none."""
+    if category != "rate_limit":
+        return None
+    match = LIMIT_MESSAGE.match(text.strip())
+    if match is None:
+        return None
+    resets = match.group("at") is not None
+    return {
+        "kind": LIMIT_KINDS.get(match.group("scope"), "usage_limit"),
+        "resets_at_local": match.group("at") if resets else None,
+        "resets_timezone": match.group("tz") if resets else None,
+    }
+
+
 class _Turn:
     """One assistant message, accumulated across the per-block records that spell it.
 
