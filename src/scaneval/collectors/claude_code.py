@@ -1195,6 +1195,9 @@ class _State:
             "prompt_chars": len(prompt) if isinstance(prompt, str) else None,
             "timeout_ms": None,
             "output_format": self.output_format,
+            # When the request's input was recorded, which bounds its start from below. No
+            # record says when the request itself was sent.
+            **_source_time(self.input_origin, "input_record"),
         }
         request_fields: dict[str, Any] = {
             "type": "model.request",
@@ -1380,9 +1383,11 @@ class _State:
             prompt = _user_prompt(record)
             if prompt is not None:
                 self.prompt = prompt
+                self.input_origin = self.origin
             else:
                 self.tracker.unknown("user")
             return
+        self.input_origin = self.origin
         native = _native_result(record)
         for block in results:
             self._tool_end(block, native, record)
