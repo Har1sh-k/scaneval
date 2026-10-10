@@ -1355,9 +1355,12 @@ __all__ = [
     "ROUTE",
     "SOURCE_STREAM",
     "SOURCE_TRANSCRIPT",
+    "WorkspaceSessions",
     "find_transcripts",
+    "find_workspace_sessions",
     "import_stream_json",
     "import_transcript",
     "parse_result_object",
+    "project_directory_name",
     "session_id_is_usable",
 ]
