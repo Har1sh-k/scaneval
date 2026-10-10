@@ -1998,6 +1998,14 @@ def test_sessions_imported_one_after_another_keep_the_order_they_ran_in(tmp_path
     assert [e["call_id"] for e in requests] == ["a", "b", "a", "b"]
 
 
+def test_no_duration_is_derived_from_the_native_times(tmp_path: Path):
+    """Two record times bound an interval; they do not measure the call inside it."""
+    events = import_at(timed_session("a", 0), tmp_path, "a", EPOCH)
+    assert not any("duration_ms" in event for event in events)
+    assert all(e["metadata"]["duration_ms"] is None for e in of_type(events, "tool.end"))
+    assert all(e["metadata"]["duration_api_ms"] is None for e in of_type(events, "model.response"))
+
+
 # --- more than one spelling of the same workspace --------------------------------------------
 
 # The shape of the real failure this pair of roots was added for: a harness handed the CLI
