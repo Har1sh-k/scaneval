@@ -70,7 +70,7 @@ CLOCK = lambda: datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)  # noqa: E731
 # directory, and it refuses to run without the generated config, so a run that forgot to build
 # the private workspace fails loudly here rather than producing an empty scan.
 FAKE_CLI = '''
-import json, os, subprocess, sys, time
+import json, os, re, subprocess, sys, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -171,6 +171,11 @@ def investigate(argv, names, settings):
     A batch listed in ``fail_batches`` fails the way DeepSec's does: every file in it is left in
     status ``error`` with no analysis. ``quota_at_batch`` fails that batch and stops there, and the
     batches it never started keep the status the scan gave them.
+
+    ``workspace_history`` files every transcript where the CLI does, under the project directory
+    named after the workspace's real path, and gives each failed batch the next id from
+    ``failed_session_ids`` and a transcript that ends in the CLI's session-limit record. DeepSec
+    names that session nowhere.
     """
     project = option(argv, "--project-id")
     model = option(argv, "--model")
@@ -182,6 +187,8 @@ def investigate(argv, names, settings):
     lines = settings.get("lines", [4])
     batches = [names[i:i + batch_size] for i in range(0, len(names), batch_size)]
     result = {"analyses": 0, "findings": 0, "errored": 0, "quota": False}
+    ran = []
+    failed_ids = list(settings.get("failed_session_ids") or [])
     for index, batch in enumerate(batches):
         if result["quota"]:
             continue
@@ -202,8 +209,11 @@ def investigate(argv, names, settings):
                 write(path, record)
             result["errored"] += 1
             result["quota"] = index == settings.get("quota_at_batch")
+            if failed_ids:
+                ran.append((failed_ids.pop(0), True))
             continue
         session = sessions[index % len(sessions)]
+        ran.append((session, False))
         share = float(len(batch)) or 1.0
         for name in batch:
             path = base / "files" / (name + ".json")
@@ -245,10 +255,22 @@ def investigate(argv, names, settings):
         # What the Claude Agent SDK leaves behind: the session transcript, with every path it
         # read written under the platform's REAL path, which is not the path deepsec was handed.
         real = os.path.realpath(root)
-        for session in sessions[:len(batches)]:
-            out = Path(transcripts) / "slug-for-the-cwd" / (session + ".jsonl")
+        workspace = settings.get("workspace_history")
+        slug = re.sub("[^A-Za-z0-9]", "-", real) if workspace else "slug-for-the-cwd"
+        written = ran if workspace else [(session, False) for session in sessions[:len(batches)]]
+        for session, failed in written:
+            out = Path(transcripts) / slug / (session + ".jsonl")
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text("\\n".join(json.dumps(record) for record in [
+            ending = [{"type": "assistant", "uuid": "u4", "sessionId": session, "cwd": real,
+                       "isApiErrorMessage": True, "error": "rate_limit", "message": {
+                           "id": "synthetic-" + session, "role": "assistant", "model": "<synthetic>",
+                           "usage": {"input_tokens": 0, "output_tokens": 0,
+                                     "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                           "content": [{"type": "text", "text":
+                                        "You've hit your session limit \\u00b7 resets 3am (America/Chicago)"}]}}]
+            opening = [{"type": "user", "uuid": "u0", "sessionId": session, "cwd": real, "message": {
+                "role": "user", "content": "Investigate the batch."}}] if workspace else []
+            out.write_text("\\n".join(json.dumps(record) for record in opening + [
                 {"type": "assistant", "uuid": "u1", "sessionId": session, "message": {
                     "role": "assistant", "model": model,
                     "usage": {"input_tokens": 17, "output_tokens": 3652,
@@ -267,7 +289,7 @@ def investigate(argv, names, settings):
                     "role": "assistant", "model": model,
                     "usage": {"input_tokens": 20, "output_tokens": 40},
                     "content": [{"type": "text", "text": "That file shells out."}]}},
-            ]) + "\\n", encoding="utf-8")
+            ] + (ending if failed else [])) + "\\n", encoding="utf-8")
     if settings.get("parse_error"):
         dump = base / "debug" / "parse-error-investigate-2026-09-25T12-01-30-000Z.txt"
         dump.parent.mkdir(parents=True, exist_ok=True)
