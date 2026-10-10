@@ -2006,6 +2006,17 @@ def test_no_duration_is_derived_from_the_native_times(tmp_path: Path):
     assert all(e["metadata"]["duration_api_ms"] is None for e in of_type(events, "model.response"))
 
 
+def test_a_response_written_across_tool_results_keeps_its_first_and_last_block_times(tmp_path: Path):
+    records = [stamped(record, f"2026-10-10T03:0{index}:00.000Z")
+               for index, record in enumerate(INTERLEAVED)]
+    events = import_at(records, tmp_path, "a", EPOCH)
+    response = of_type(events, "model.response")[0]["metadata"]
+    assert response["source_timestamp"] == "2026-10-10T03:00:00.000Z"
+    assert response["source_last_timestamp"] == "2026-10-10T03:02:00.000Z"
+    late_start = [e for e in of_type(events, "tool.start") if e["call_id"] == "tool-2"][0]
+    assert late_start["metadata"]["source_timestamp"] == "2026-10-10T03:02:00.000Z"
+
+
 # --- more than one spelling of the same workspace --------------------------------------------
 
 # The shape of the real failure this pair of roots was added for: a harness handed the CLI
