@@ -851,7 +851,7 @@ class Session(NamedTuple):
     one says the number may be a duplicate rather than a share; it never changes the number,
     because a guess at a different total would be worse than a flagged one.
 
-``correlation`` says how the call boundary was arrived at, and only one of its three values
+``correlation`` says how the call boundary was arrived at, and only one of its four values
     means DeepSec supplied it.
 
     ``agent_session_id`` is DeepSec's own. ``missing_session_id`` is an entry that carried none:
@@ -861,6 +861,10 @@ class Session(NamedTuple):
     whose id is not one transcript discovery may be handed — the value is scanner-written, and
     an id like ``*`` reached a glob and imported the transcripts of unrelated sessions. Both of
     the latter get their own per-entry group and are never passed to discovery.
+    ``workspace_history`` is a session no analysis entry names, found by
+    :func:`unreferenced_sessions` in the history of this invocation's own workspace: a batch
+    that failed before DeepSec recorded an analysis. It carries no paths and no numbers, because
+    DeepSec wrote none for it.
     """
 
     run_id: str
@@ -889,8 +893,17 @@ class Session(NamedTuple):
 
     @property
     def correlated(self) -> bool:
-        """Whether DeepSec itself named this call, which is what discovery may be given."""
+        """Whether DeepSec itself named this call."""
         return self.correlation == "agent_session_id"
+
+    @property
+    def discoverable(self) -> bool:
+        """Whether transcript discovery may be given this session's id.
+
+        DeepSec's own id, or one this adapter read off a transcript name in the workspace's own
+        history. Never a missing or refused id.
+        """
+        return self.correlation in ("agent_session_id", "workspace_history")
 
 
 def _number(value: Any) -> float:
