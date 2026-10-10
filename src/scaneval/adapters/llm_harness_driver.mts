@@ -334,6 +334,9 @@ async function main(): Promise<void> {
   // which stage caused each gap.
   const modelCallIds = new Set<string>();
   const contextCallIds = new Set<string>();
+  // The stage the engine itself tagged each call with, so a call nothing reported context for
+  // is counted under the engine's own name for it rather than one this driver guessed.
+  const callStages = new Map<string, string>();
   const usageTotals: Record<string, number> = {};
   let usageObserved = false;
   let costTotal: number | null = null;
@@ -589,6 +592,7 @@ async function main(): Promise<void> {
       const state: CallState = { callId, view, route, final: null };
       calls.set(callId, state);
       modelCallIds.add(callId);
+      if (typeof meta.stage === "string" && meta.stage) callStages.set(callId, meta.stage);
       // Injected so an untagged call still arrives at the hooks with an id to join on. The
       // runners ignore meta; nothing the engine decides changes because of it.
       const invocation = meta.invocationId === undefined
@@ -877,7 +881,15 @@ async function main(): Promise<void> {
 
   // Model invocations the engine reported no context for. Measured, not assumed: which stages
   // are instrumented is the harness's business and changes as it instruments more of itself.
-  const untaggedCalls = [...modelCallIds].filter((id) => !contextCallIds.has(id)).length;
+  const untaggedIds = [...modelCallIds].filter((id) => !contextCallIds.has(id));
+  const untaggedCalls = untaggedIds.length;
+  const untaggedByStage: Record<string, number> = {};
+  for (const id of untaggedIds) {
+    const stage = callStages.get(id) ?? "untagged";
+    untaggedByStage[stage] = (untaggedByStage[stage] ?? 0) + 1;
+  }
+  const stagesListed = Object.entries(untaggedByStage).sort()
+    .map(([stage, count]) => `${stage} ${count}`).join(", ");
   // What this run could not see, for this harness build. Each entry is a category nothing was
   // observed in; none of them is evidence that the thing did not happen.
   const unavailable = [
@@ -902,7 +914,7 @@ async function main(): Promise<void> {
     ...(engineHooks === null || untaggedCalls === 0
       ? []
       : [`context.selection for ${untaggedCalls} of ${modelCallIds.size} model invocations `
-        + "(the harness did not report supplied spans for these calls)"]),
+        + `(the harness did not report supplied spans for these calls; by the stage it tagged them: ${stagesListed})`]),
   ];
 
   const output = {
@@ -944,6 +956,8 @@ async function main(): Promise<void> {
     // untagged call is an uninstrumented one, never a call that was given no context.
     model_calls_with_context: [...modelCallIds].filter((id) => contextCallIds.has(id)).length,
     model_calls_without_context: untaggedCalls,
+    // The same calls by the stage the engine tagged each one with, "untagged" when it named none.
+    model_calls_without_context_by_stage: Object.fromEntries(Object.entries(untaggedByStage).sort()),
     // Context the engine reported for an invocation that never reached the runner (a budget
     // stop between the two). Zero is the normal reading.
     context_without_model_call: [...contextCallIds].filter((id) => !modelCallIds.has(id)).length,
