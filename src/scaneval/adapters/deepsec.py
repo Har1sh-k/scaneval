@@ -1443,8 +1443,12 @@ class TraceResult(NamedTuple):
     # the workspace history, and one for each failed batch whose session neither one found.
     sessions_expected: int = 0
     # How many sessions ended on each closed cause the Claude Code CLI recorded for a request
-    # the provider refused (``session_limit``, ``rate_limit``, ...), read off the transcripts.
-    provider_failures: dict = {}
+    # the provider refused (``session_limit``, ``rate_limit``, ...): the session's last response
+    # was that refusal. A refusal the session went on past is not counted here.
+    sessions_ended_on_refusal: dict = {}
+    # Every refused request the transcripts recorded, by cause, whether or not a later response
+    # recovered from it.
+    refusals_recorded: dict = {}
 
 
 def _overlapping(candidates: tuple[Candidate, ...], path: str,
@@ -1556,8 +1560,11 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
     notes: list[str] = []
     transcripts_found = 0
     imports_clean = True
-    # The last provider failure each session's main transcript recorded, by session id.
+    # How each session's main transcript ended when its last response was a refusal, by session
+    # id, and every refusal the transcripts recorded on the way, which is a different count.
     ended_on: dict[str, str] = {}
+    refusals_recorded: dict[str, int] = {}
+    refused_sessions: set[str] = set()
     # Both spellings of the workspace, because the SDK writes the transcript under the real one
     # and the collectors match textually. See :func:`workspace_spellings`.
     roots = workspace_spellings(source_dir)
@@ -1606,10 +1613,13 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                     captured_anything = captured_anything or health.captured
                     if not sidechain:
                         main_turns += health.turns
-                        causes = [cause for cause in getattr(summary, "api_errors", ()) or ()
-                                  if isinstance(cause, str) and cause]
-                        if causes:
-                            ended_on[session.session_id] = causes[-1]
+                        for cause in getattr(summary, "api_errors", ()) or ():
+                            if isinstance(cause, str) and cause:
+                                refusals_recorded[cause] = refusals_recorded.get(cause, 0) + 1
+                                refused_sessions.add(session.session_id)
+                        final = getattr(summary, "final_api_error", None)
+                        if isinstance(final, str) and final:
+                            ended_on[session.session_id] = final
                     if health.loss:
                         imports_clean = False
                         notes.append(f"transcript {Path(path).name} was imported short of the "
@@ -1685,19 +1695,21 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                 **({"content": {"refusal_reasons": [
                     {"file_path": refusal.path, "reason": refusal.reason}
                     for refusal in session.refusals]}} if refusals else {}))
-        provider_failures: dict[str, int] = {}
+        ended_by: dict[str, int] = {}
         for cause in ended_on.values():
-            provider_failures[cause] = provider_failures.get(cause, 0) + 1
+            ended_by[cause] = ended_by.get(cause, 0) + 1
         for index, name in enumerate(records.debug, start=1):
             observer.emit(
                 type="observer.error", category="observer", capture_status="unavailable",
                 metadata={"source": "harness_record",
                           "error_code": "agent_output_parse_failure",
                           "stage": "process", "debug_dump": name, "sequence_in_run": index,
-                          # A dump names no session, so it is tied to no call. The causes the
-                          # run's own transcripts recorded are counted beside it instead.
+                          # A dump names no session, so it is tied to no call. What the run's own
+                          # transcripts recorded is counted beside it instead: how many sessions
+                          # ended on a refusal, and every refusal, recovered from or not.
                           "correlation": "uncorrelated",
-                          "provider_failures_in_run": dict(sorted(provider_failures.items())),
+                          "sessions_ended_on_refusal_in_run": dict(sorted(ended_by.items())),
+                          "refusals_recorded_in_run": dict(sorted(refusals_recorded.items())),
                           "detail": "DeepSec could not parse one batch's agent output and wrote "
                                     "a debug dump; the findings of that batch, if any, were not "
                                     "recorded and nothing here says what the model produced. "
@@ -1760,16 +1772,23 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
             "its working directory and every file it read under the platform's real path, and "
             "the collectors compare textually without resolving a link, so a path matched "
             "against one spelling alone reads as external to the workspace.")
-    if provider_failures:
+    if ended_by:
         notes.append(
             f"{len(ended_on)} session(s) ended on a request the provider refused, as the Claude Code "
             "CLI recorded it in the transcript: "
-            + ", ".join(f"{cause} ({count})" for cause, count in sorted(provider_failures.items()))
+            + ", ".join(f"{cause} ({count})" for cause, count in sorted(ended_by.items()))
             + ". Each is on that session's own model.response as failure_kind api_error. The reset "
             "the CLI named, if any, is kept there as it wrote it.")
+    recovered = len(refused_sessions - set(ended_on))
+    if recovered:
+        notes.append(
+            f"{recovered} session(s) recorded a refused request and went on to a real response "
+            "after it, so the refusal is an error the session encountered and not how it ended. "
+            "Refused requests recorded in all: "
+            + ", ".join(f"{cause} ({count})" for cause, count in sorted(refusals_recorded.items())) + ".")
     return TraceResult({"capture_gap": state.capture_gap, "dropped_events": state.dropped_events},
                        transcripts_found, imports_clean, tuple(notes), expected,
-                       dict(sorted(provider_failures.items())))
+                       dict(sorted(ended_by.items())), dict(sorted(refusals_recorded.items())))
 
 
 def failed_batch_count(agent: str, records: Records, statuses: RecordStatuses, output: "ProcessOutput") -> int:
@@ -2294,7 +2313,7 @@ class DeepsecAdapter(Adapter):
         transcripts_found = 0
         imports_clean = True
         sessions_expected = len(sessions)
-        provider_failures: dict[str, int] = {}
+        ended_on_refusal: dict[str, int] = {}
         if trace_dir is not None and trace_mode != "off":
             try:
                 traced = write_trace(
@@ -2316,7 +2335,7 @@ class DeepsecAdapter(Adapter):
                 transcripts_found = traced.transcripts_found
                 imports_clean = traced.imports_clean
                 sessions_expected = traced.sessions_expected
-                provider_failures = dict(traced.provider_failures)
+                ended_on_refusal = dict(traced.sessions_ended_on_refusal)
                 notes.extend(traced.notes)
                 if history.foreign:
                     notes.append(f"{history.foreign} transcript(s) in this workspace's project directory "
@@ -2580,10 +2599,11 @@ class DeepsecAdapter(Adapter):
         if batches_failed:
             counted = (f"; DeepSec itself counted {output.errored_batches} errored batch(es)"
                        if pr is not None and output.errored_batches else "")
-            # The cause, when the sessions' own transcripts recorded one. Named by closed code only.
+            # The cause, when the sessions' own transcripts recorded one as how they ended. Named by
+            # closed code only; a refusal a session recovered from is not a cause of anything here.
             caused = ("; the Claude Code CLI recorded the provider refusing a request that ended "
-                      + ", ".join(f"{count} session(s) with {cause}" for cause, count in provider_failures.items())
-                      if provider_failures else "")
+                      + ", ".join(f"{count} session(s) with {cause}" for cause, count in ended_on_refusal.items())
+                      if ended_on_refusal else "")
             return stopped("deepsec_batches_failed",
                            f"{len(errored_files)} file(s) in status 'error', {len(records.debug)} parse-failure "
                            f"dump(s) and {refusals} refusal(s): part of the {subject} reached no verdict{counted}"

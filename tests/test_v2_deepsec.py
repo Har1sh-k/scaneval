@@ -2650,7 +2650,8 @@ def test_a_session_limit_survives_the_parse_failure_it_caused_and_the_run_stays_
                if event["metadata"].get("error_code") == "agent_output_parse_failure"]
     assert len(symptom) == 1
     assert symptom[0]["metadata"]["correlation"] == "uncorrelated" and "call_id" not in symptom[0]
-    assert symptom[0]["metadata"]["provider_failures_in_run"] == {"session_limit": 1}
+    assert symptom[0]["metadata"]["sessions_ended_on_refusal_in_run"] == {"session_limit": 1}
+    assert symptom[0]["metadata"]["refusals_recorded_in_run"] == {"session_limit": 1}
     assert any("1 session(s) ended on a request the provider refused" in note
                for note in execution["notes"])
 
@@ -2663,7 +2664,8 @@ def test_a_parse_failure_with_no_recorded_cause_names_none(tmp_path, monkeypatch
     assert "refusing a request" not in result["error"]["message"]
     symptom = [event for event in trace_events(bundle)
                if event["metadata"].get("error_code") == "agent_output_parse_failure"]
-    assert symptom[0]["metadata"]["provider_failures_in_run"] == {}
+    assert symptom[0]["metadata"]["sessions_ended_on_refusal_in_run"] == {}
+    assert symptom[0]["metadata"]["refusals_recorded_in_run"] == {}
 
 
 def test_transcript_capture_requires_content_tracing(tmp_path):
