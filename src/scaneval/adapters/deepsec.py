@@ -1453,6 +1453,7 @@ def preserve_transcripts(sessions: tuple[Session, ...], projects_dir: Path, raw_
     directory with every other session on the machine; moved here they become hashed artifacts of
     the run that wrote them. Only sessions with a usable id are looked up, through the same
     collector discovery the import used, and a subagent transcript keeps its ``subagents/`` level.
+    That includes the sessions no analysis entry names, which are the evidence of a failed batch.
     A transcript that cannot be moved stays where it was and is counted in the note.
     """
     collectors = collector()
@@ -1465,7 +1466,7 @@ def preserve_transcripts(sessions: tuple[Session, ...], projects_dir: Path, raw_
     moved = failed = 0
     seen: set[str] = set()
     for session in sessions:
-        if not session.correlated or session.session_id in seen:
+        if not session.discoverable or session.session_id in seen:
             continue
         seen.add(session.session_id)
         try:
