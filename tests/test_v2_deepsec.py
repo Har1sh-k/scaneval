@@ -29,6 +29,7 @@ import stat
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -606,8 +607,12 @@ def transcript_fixture(tmp_path: Path) -> Path:
 
 def stub_collector(monkeypatch, tmp_path: Path, *, found: bool = True, subagent: bool = False,
                    malformed: int = 0, unmatched: int = 0, main_unreadable: bool = False,
-                   ) -> list[dict]:
-    """Replace the collector with a recording stub and return the list of calls it saw."""
+                   discovered: tuple[str, ...] = ("session-aaaa",)) -> list[dict]:
+    """Replace the collector with a recording stub and return the list of calls it saw.
+
+    The workspace history it reports holds the sessions in ``discovered``, each with the
+    synthetic transcript as its verified file, and holds none when ``found`` is false.
+    """
     calls: list[dict] = []
     main = transcript_fixture(tmp_path)
     sub = main.parent / "session-aaaa" / "subagents" / "agent-1.jsonl"
@@ -642,7 +647,14 @@ def stub_collector(monkeypatch, tmp_path: Path, *, found: bool = True, subagent:
             return StubSummary.unreadable()
         return StubSummary(malformed_lines=malformed, unmatched_tool_results=unmatched)
 
+    def find_workspace_sessions(roots, *, projects_dir=None):
+        calls.append({"call": "discover", "roots": tuple(roots), "projects_dir": projects_dir})
+        owned = {session_id: (main, sub) if subagent else (main,)
+                 for session_id in (discovered if found else ())}
+        return SimpleNamespace(session_ids=tuple(owned), foreign=0, unverified=0, transcripts=owned)
+
     monkeypatch.setattr(deepsec_module, "collector", lambda: (find_transcripts, import_transcript))
+    monkeypatch.setattr(deepsec_module, "workspace_discovery", lambda: find_workspace_sessions)
     return calls
 
 
@@ -830,7 +842,9 @@ def test_a_clean_run_produces_claims_artifacts_and_a_trace_of_what_deepsec_recor
     assert imports[0]["path"].name == "session-aaaa.jsonl"
     assert imports[0]["call_id"].endswith("/session-aaaa")
     assert imports[0]["sidechain"] is False and imports[0]["agent_id"] is None
-    assert [call["session_id"] for call in calls if call["call"] == "find"] == ["session-aaaa"]
+    # The transcript was found once, by listing the workspace history, and never by looking
+    # the session id up across the operator's other project directories.
+    assert [call["call"] for call in calls if call["call"] in ("discover", "find")] == ["discover"]
 
     # Both spellings of the workspace are offered, the handed one first, because the SDK writes
     # the transcript under the real one and the collectors match textually.
@@ -881,8 +895,8 @@ def test_the_configured_projects_directory_is_the_one_the_collector_is_asked_abo
     root = fake_deepsec_root(tmp_path)
     calls = stub_collector(monkeypatch, tmp_path)
     invoke(tmp_path, root, claude_projects_dir=str(tmp_path / "elsewhere"))
-    assert all(call["projects_dir"] == tmp_path / "elsewhere"
-               for call in calls if call["call"] == "find")
+    discovered = [call for call in calls if call["call"] == "discover"]
+    assert discovered and all(call["projects_dir"] == tmp_path / "elsewhere" for call in discovered)
 
 
 def test_a_run_with_no_transcript_leaves_tool_calls_unavailable_and_says_so(tmp_path, monkeypatch):
@@ -2241,12 +2255,13 @@ def test_a_crafted_session_id_never_reaches_discovery_and_imports_nobody_else(tm
                 "content": [{"type": "text", "text": "not this run"}]}}) + "\n", encoding="utf-8")
 
     root = fake_deepsec_root(tmp_path, session_ids=["*"])
-    calls = stub_collector(monkeypatch, tmp_path)
+    calls = stub_collector(monkeypatch, tmp_path, discovered=())
     bundle = invoke(tmp_path, root, claude_projects_dir=str(tmp_path / "claude-projects"))
     result, execution = documents(bundle)
     assert result["status"] == "success", execution["error"]
 
-    assert calls == [], "an unusable id is never handed to the finder"
+    assert [call for call in calls if call["call"] != "discover"] == [], \
+        "an unusable id is never looked up and nothing is imported for it"
     events = trace_events(bundle)
     assert "someone-elses-model" not in json.dumps(events)
     assert not [event for event in events if event["metadata"].get("source")
@@ -2265,11 +2280,11 @@ def test_a_crafted_session_id_never_reaches_discovery_and_imports_nobody_else(tm
 def test_a_valid_session_id_still_resolves_to_its_own_transcript(tmp_path, monkeypatch):
     """The control: the rule must not cost a real lookup."""
     root = fake_deepsec_root(tmp_path, session_ids=["3348970b-6b99-46ad-a496-dd84c5a85613"])
-    calls = stub_collector(monkeypatch, tmp_path)
+    calls = stub_collector(monkeypatch, tmp_path, discovered=("3348970b-6b99-46ad-a496-dd84c5a85613",))
     bundle = invoke(tmp_path, root)
     _result, execution = documents(bundle)
-    assert [call["session_id"] for call in calls if call["call"] == "find"] == [
-        "3348970b-6b99-46ad-a496-dd84c5a85613"]
+    assert [call["call_id"] for call in calls if call["call"] == "import"] == [
+        "deepsec/20260925120100-process/3348970b-6b99-46ad-a496-dd84c5a85613"]
     request = next((event for event in trace_events(bundle)
                     if event["type"] == "model.request"
                     and event["metadata"].get("source") == "harness_record"), None)

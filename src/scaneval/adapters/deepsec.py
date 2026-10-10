@@ -871,7 +871,7 @@ class Session(NamedTuple):
     an id like ``*`` reached a glob and imported the transcripts of unrelated sessions. Both of
     the latter get their own per-entry group and are never passed to discovery.
     ``workspace_history`` is a session no analysis entry names, found by
-    :func:`unreferenced_sessions` in the history of this invocation's own workspace: a batch
+    :func:`workspace_history` in the history of this invocation's own workspace: a batch
     that failed before DeepSec recorded an analysis. It carries no paths and no numbers, because
     DeepSec wrote none for it.
     """
@@ -1051,45 +1051,62 @@ def sessions_from(files: tuple[tuple[str, dict], ...],
     return tuple(sessions)
 
 
-class Unreferenced(NamedTuple):
-    """The sessions of this invocation's workspace that no analysis entry names."""
+class WorkspaceHistory(NamedTuple):
+    """The sessions this invocation's own workspace history holds, and the files it verified."""
 
-    sessions: tuple[Session, ...]
+    # The sessions no analysis entry names.
+    unreferenced: tuple[Session, ...]
+    # Every adopted session's verified files, main transcript first. Import and archive read
+    # these paths and never look an ID up anywhere else.
+    transcripts: dict[str, tuple[Path, ...]]
     # Transcripts in the workspace's project directory whose records did not show they ran in it.
     foreign: int
+    # Transcripts that could not be read to their end, so their ownership was never settled.
+    unverified: int
     # Whether the workspace history could be listed at all.
     listed: bool
 
 
-def unreferenced_sessions(sessions: tuple[Session, ...], roots: tuple[Path, ...],
-                          projects_dir: Path) -> Unreferenced:
-    """The agent sessions this run opened that DeepSec's records do not name.
+NO_HISTORY = WorkspaceHistory((), {}, 0, 0, False)
+
+
+def workspace_history(sessions: tuple[Session, ...], roots: tuple[Path, ...],
+                      projects_dir: Path) -> WorkspaceHistory:
+    """The agent sessions this run opened, as its own workspace history verifies them.
+
+    Every session of this invocation ran in its private source directory, and the CLI files each
+    transcript under the project directory named after that working directory, so that directory
+    is the run's own register of the sessions it opened. The collector lists it and nothing else,
+    and adopts only transcripts whose records, read to their end, say they ran inside the
+    workspace. Those verified paths are the only transcripts this adapter reads: a session ID,
+    named by DeepSec or not, is never looked up across the operator's other project directories,
+    where the same ID could name another project's records.
 
     DeepSec writes ``agentSessionId`` only onto the analysis entries of a batch that finished, so
     a batch that failed (an exhausted session limit, an output it could not parse) leaves a
-    Claude Code transcript and no record naming it. Every session of this invocation ran in its
-    private source directory, and the CLI files each transcript under the project directory named
-    after that working directory, so that directory is the run's own register of the sessions it
-    opened. The collector lists it and nothing else, and adopts only transcripts whose records say
-    they ran inside the workspace; the ids DeepSec already named are left out here.
+    transcript and no record naming it. The sessions DeepSec did not name are returned as
+    ``unreferenced``.
     """
     find = workspace_discovery()
     if find is None:
-        return Unreferenced((), 0, False)
+        return NO_HISTORY
     try:
         found = find(tuple(str(root) for root in roots), projects_dir=projects_dir)
-    except Exception:  # noqa: BLE001 - a discovery failure costs the failed sessions, not the scan
-        return Unreferenced((), 0, False)
+    except Exception:  # noqa: BLE001 - a discovery failure costs the transcripts, not the scan
+        return NO_HISTORY
+    verified = getattr(found, "transcripts", None)
+    transcripts = {session_id: tuple(Path(path) for path in paths)
+                   for session_id, paths in (verified.items() if isinstance(verified, dict) else ())
+                   if session_id_usable(session_id) and isinstance(paths, (list, tuple)) and paths}
     named = {session.session_id for session in sessions if session.correlated}
     extra = tuple(
         Session(run_id="", session_id=session_id, model=None, paths=(), num_turns=0.0, cost_usd=0.0,
                 duration_ms=0.0, duration_api_ms=0.0, usage={}, refusals=(),
                 correlation="workspace_history", key=f"workspace-history/{session_id}",
                 external_paths=0)
-        for session_id in getattr(found, "session_ids", ())
-        if session_id not in named and session_id_usable(session_id))
-    foreign = getattr(found, "foreign", 0)
-    return Unreferenced(extra, foreign if isinstance(foreign, int) else 0, True)
+        for session_id in transcripts if session_id not in named)
+    count = lambda name: value if isinstance(value := getattr(found, name, 0), int) else 0  # noqa: E731
+    return WorkspaceHistory(extra, transcripts, count("foreign"), count("unverified"), True)
 
 
 class Candidate(NamedTuple):
@@ -1450,23 +1467,18 @@ def _overlapping(candidates: tuple[Candidate, ...], path: str,
     return sorted(dict.fromkeys(ids))
 
 
-def preserve_transcripts(sessions: tuple[Session, ...], projects_dir: Path, raw_dir: Path,
-                         enclosure: Enclosure) -> tuple[list[dict], list[str]]:
+def preserve_transcripts(sessions: tuple[Session, ...], transcripts: dict[str, tuple[Path, ...]],
+                         projects_dir: Path, raw_dir: Path, enclosure: Enclosure) -> tuple[list[dict], list[str]]:
     """Move each session's Claude Code transcripts into ``raw/claude-sessions`` and register them.
 
     Run after :func:`write_trace` has imported them in place. The agent sessions leave their
     transcripts under the operator's projects directory, where they outlive the run and share a
     directory with every other session on the machine; moved here they become hashed artifacts of
-    the run that wrote them. Only sessions with a usable id are looked up, through the same
-    collector discovery the import used, and a subagent transcript keeps its ``subagents/`` level.
-    That includes the sessions no analysis entry names, which are the evidence of a failed batch.
-    A transcript that cannot be moved stays where it was and is counted in the note.
+    the run that wrote them. Only the files the workspace history verified are moved, the same
+    paths the import read, and a subagent transcript keeps its ``subagents/`` level. That includes
+    the sessions no analysis entry names, which are the evidence of a failed batch. A transcript
+    that cannot be moved stays where it was and is counted in the note.
     """
-    collectors = collector()
-    if collectors is None:
-        return [], ["config.capture_claude_sessions is set, but the transcript collector is not installed, so "
-                    "no transcript was moved into the run."]
-    find, _load = collectors
     root = raw_dir / "claude-sessions"
     artifacts: list[dict] = []
     moved = failed = 0
@@ -1475,12 +1487,7 @@ def preserve_transcripts(sessions: tuple[Session, ...], projects_dir: Path, raw_
         if not session.discoverable or session.session_id in seen:
             continue
         seen.add(session.session_id)
-        try:
-            paths = [Path(path) for path in find(session.session_id, projects_dir=projects_dir)]
-        except Exception:  # noqa: BLE001 - a discovery failure costs this session's transcripts
-            failed += 1
-            continue
-        for source in paths:
+        for source in transcripts.get(session.session_id, ()):
             relative = (Path("subagents", source.name) if source.parent.name == "subagents"
                         else Path(source.name))
             target = root / session.session_id / relative
@@ -1497,7 +1504,7 @@ def preserve_transcripts(sessions: tuple[Session, ...], projects_dir: Path, raw_
             moved += 1
     notes = [f"{moved} Claude Code transcript(s) were moved from {projects_dir} into raw/claude-sessions and "
              "registered as artifacts of this run."
-             + (f" {failed} transcript(s) or session lookup(s) could not be moved and were left in place."
+             + (f" {failed} transcript(s) could not be moved and were left in place."
                 if failed else "")]
     return artifacts, notes
 
@@ -1506,7 +1513,8 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                 projects_dir: Path, records: Records, sessions: tuple[Session, ...],
                 candidates: tuple[Candidate, ...], imported: DeepsecImport,
                 model_requested: str, thinking: str | None,
-                unreferenced: tuple[Session, ...] = (), failed_batches: int = 0) -> TraceResult:
+                unreferenced: tuple[Session, ...] = (), failed_batches: int = 0,
+                transcripts: dict[str, tuple[Path, ...]] | None = None) -> TraceResult:
     """Write this run's trace and report what the observer and the transcript import saw.
 
     Ordering is the order the run happened in: the regex candidates first, then each agent
@@ -1533,7 +1541,7 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
     run's notes, because inventing a second response to hang it on is the thing this fixed.
 
     **A failed batch is a session too.** ``unreferenced`` holds the sessions found only in the
-    workspace history (:func:`unreferenced_sessions`); each is imported exactly like a named one,
+    workspace history (:func:`workspace_history`); each is imported exactly like a named one,
     and none gets a reconstructed pair, because DeepSec wrote no record to reconstruct one from.
     ``failed_batches`` is how many batches this run's records show failed. Each one beyond the
     unreferenced sessions found is a session this run opened and could not find, and is recorded
@@ -1578,14 +1586,10 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
             # ``correlated`` is the gate, not the bare presence of an id: an id discovery may
             # not be handed is treated exactly like a missing one.
             if collectors is not None and session.discoverable:
-                find, load = collectors
-                try:
-                    paths = list(find(session.session_id, projects_dir=projects_dir))
-                except Exception as exc:  # noqa: BLE001 - a collector failure costs the import
-                    notes.append(f"transcripts for session {session.session_id} could not be "
-                                 f"located ({type(exc).__name__}); none were imported")
-                    imports_clean = False
-                    paths = []
+                _find, load = collectors
+                # Only the files the workspace history verified as this session's, never a
+                # lookup of the ID across other project directories.
+                paths = list((transcripts or {}).get(session.session_id, ()))
                 located = bool(paths)
                 for path in paths:
                     sidechain = Path(path).parent.name == "subagents"
@@ -2225,9 +2229,9 @@ class DeepsecAdapter(Adapter):
         sessions = sessions_from(records.files, roots)
         # The sessions of failed batches, which DeepSec names nowhere. Only the claude agent leaves
         # a Claude Code transcript, and only a traced run reads any.
-        unreferenced = (unreferenced_sessions(sessions, roots, config.projects_dir)
-                        if config.agent == "claude" and trace_dir is not None and trace_mode != "off"
-                        else Unreferenced((), 0, False))
+        history = (workspace_history(sessions, roots, config.projects_dir)
+                   if config.agent == "claude" and trace_dir is not None and trace_mode != "off"
+                   else NO_HISTORY)
         # Only ``analyzed`` says the AI stage finished with a file. ``pending`` is one it never
         # reached, which is what ``--limit`` does by design; ``processing`` is one a run was
         # still holding when it ended; a status DeepSec does not declare, or none at all, is a
@@ -2298,7 +2302,7 @@ class DeepsecAdapter(Adapter):
                     source_dir=Path(source_dir), projects_dir=config.projects_dir, records=records,
                     sessions=sessions, candidates=candidates, imported=imported,
                     model_requested=config.model, thinking=config.thinking_level,
-                    unreferenced=unreferenced.sessions,
+                    unreferenced=history.unreferenced, transcripts=history.transcripts,
                     failed_batches=failed_batch_count(config.agent, records, statuses, output))
             except Exception as exc:  # noqa: BLE001
                 # The one place a trace failure is contained. A trace is instrumentation: losing
@@ -2314,13 +2318,17 @@ class DeepsecAdapter(Adapter):
                 sessions_expected = traced.sessions_expected
                 provider_failures = dict(traced.provider_failures)
                 notes.extend(traced.notes)
-                if unreferenced.foreign:
-                    notes.append(f"{unreferenced.foreign} transcript(s) in this workspace's project directory "
+                if history.foreign:
+                    notes.append(f"{history.foreign} transcript(s) in this workspace's project directory "
                                  "did not show they ran in it, and were neither imported nor moved.")
+                if history.unverified:
+                    notes.append(f"{history.unverified} transcript(s) in this workspace's project directory could "
+                                 "not be read to their end, so whether they ran in it was never settled; none of "
+                                 "them was imported or moved.")
         if config.capture_claude_sessions:
             # After the import, which reads the transcripts where the sessions left them.
-            moved, capture_notes = preserve_transcripts(sessions + unreferenced.sessions, config.projects_dir,
-                                                        Path(raw_dir), enclosure)
+            moved, capture_notes = preserve_transcripts(sessions + history.unreferenced, history.transcripts,
+                                                        config.projects_dir, Path(raw_dir), enclosure)
             artifacts.extend(moved)
             notes.extend(capture_notes)
 
