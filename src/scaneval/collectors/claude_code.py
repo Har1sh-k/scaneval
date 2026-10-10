@@ -109,6 +109,12 @@ LIMIT_MESSAGE = re.compile(
 LIMIT_KINDS = {"session": "session_limit", "weekly": "weekly_limit"}
 
 
+# The shape of the ``timestamp`` the CLI writes on a record: RFC 3339 with an explicit offset.
+# Anything else is not carried, because a time that cannot be read as an instant is not one.
+SOURCE_TIMESTAMP = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})$")
+
+
 def session_id_is_usable(session_id: Any) -> bool:
     """Whether this string may be looked up as a session ID at all.
 
@@ -707,6 +713,37 @@ def _limit(category: str | None, text: str) -> dict[str, Any] | None:
         "kind": LIMIT_KINDS.get(match.group("scope"), "usage_limit"),
         "resets_at_local": match.group("at") if resets else None,
         "resets_timezone": match.group("tz") if resets else None,
+    }
+
+
+class _Origin(NamedTuple):
+    """Where one native record sits: the time the CLI wrote on it and its line in the file."""
+
+    timestamp: str | None
+    line: int | None
+
+
+NO_ORIGIN = _Origin(None, None)
+
+
+def _origin(record: dict[str, Any], line: int | None) -> _Origin:
+    value = record.get("timestamp")
+    timestamp = value if isinstance(value, str) and SOURCE_TIMESTAMP.match(value) else None
+    return _Origin(timestamp, line)
+
+
+def _source_time(origin: _Origin, of: str) -> dict[str, Any]:
+    """The ``source_*`` keys of one event, read from the native record it came from.
+
+    ``source_timestamp`` is the time the CLI wrote on that record, verbatim, and
+    ``source_timestamp_of`` names which record that was, so the time is never read as the
+    moment something else happened. The event's own ``timestamp`` is when this import emitted
+    it, which says nothing about when the session ran.
+    """
+    return {
+        "source_timestamp": origin.timestamp,
+        "source_timestamp_of": of if origin.timestamp else None,
+        "source_line": origin.line,
     }
 
 
