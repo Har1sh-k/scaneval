@@ -606,12 +606,12 @@ def test_a_hooked_run_reports_what_it_could_not_see_and_claims_no_usage_it_did_n
     assert not any("retries" in entry for entry in unavailable), unavailable
     assert "token usage on the pi route" in unavailable
     assert any(entry.startswith("finding.validation") and "not applicable" in entry for entry in unavailable)
-    # The planner's own model call is untagged, so this run has a counted gap in context, and
-    # the entry states the count rather than describing the split in prose that would go stale.
+    # Some harness calls lack supplied-span events; report their count without guessing
+    # which stage produced them.
     assert output["model_calls_without_context"] >= 1
     assert output["model_calls_with_context"] + output["model_calls_without_context"] == output["model_calls"]
     assert output["context_without_model_call"] == 0
-    assert any("untagged" in entry and str(output["model_calls_without_context"]) in entry
+    assert any("did not report supplied spans" in entry and str(output["model_calls_without_context"]) in entry
                for entry in unavailable)
 
     assert output["usage_totals"] is None and output["cost_usd_cli_reported_total"] is None

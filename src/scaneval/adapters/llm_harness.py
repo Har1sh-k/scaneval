@@ -1142,9 +1142,8 @@ class LlmHarnessAdapter(Adapter):
                              "only one and this adapter never configures consensus")
             notes.append("The engine reported the context it supplied and the life of every finding candidate."
                          + counted +
-                         " A model call with no context event is an uninstrumented one -- the threat planner "
-                         "reports none and not every specialist does -- rather than a call that was given no "
-                         f"context; and {no_validation}, so there is no validation to miss.")
+                         " A model call with no context event is an uninstrumented one, not proof that it was "
+                         f"given no context; and {no_validation}, so there is no validation to miss.")
             if hook_failures is None:
                 notes.append("The run reported no final count of engine observer hook failures, so whether any "
                              "candidate, filter or submission record was lost before it reached the trace is "

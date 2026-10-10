@@ -272,9 +272,8 @@ async function main(): Promise<void> {
   const observedRoutes = new Set<string>();
   const calls = new Map<string, CallState>();
   // Which invocations were seen from each side. Not every model call is instrumented -- the
-  // threat planner reports no context, and only some specialists do -- so how many were is
-  // counted here rather than described in a sentence that would go stale as the harness
-  // instruments more of itself.
+  // Some harness stages do not report supplied spans, so count coverage rather than guessing
+  // which stage caused each gap.
   const modelCallIds = new Set<string>();
   const contextCallIds = new Set<string>();
   const usageTotals: Record<string, number> = {};
@@ -824,7 +823,7 @@ async function main(): Promise<void> {
     ...(engineHooks === null || untaggedCalls === 0
       ? []
       : [`context.selection for ${untaggedCalls} of ${modelCallIds.size} model invocations `
-        + "(untagged: the threat planner reports no context, and not every specialist does)"]),
+        + "(the harness did not report supplied spans for these calls)"]),
   ];
 
   const output = {
@@ -899,9 +898,8 @@ async function main(): Promise<void> {
         ? "Context selection is read from the harness's own progress notes, which describe the scan rather than "
           + "report the prompt; nothing here is the engine's actual selection."
         : `The engine reported the context it supplied for ${modelCallIds.size - untaggedCalls} of `
-          + `${modelCallIds.size} model invocations. The threat planner reports none and not every specialist `
-          + "does, so a model.request with no context.selection is an uninstrumented call, not a call that was "
-          + "given no context.",
+          + `${modelCallIds.size} model invocations. A model.request with no context.selection is an `
+          + "uninstrumented call, not a call that was given no context.",
     },
   };
   writeFileSync(config.output_path, JSON.stringify(output, null, 2));
