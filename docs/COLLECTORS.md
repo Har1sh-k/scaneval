@@ -159,6 +159,9 @@ These are format limits, not reader defects. They are the reason `capture` says 
 - **Codex reports no model identity**, so `model_served` is `null` on every Codex response.
 - **No collector produces finding events.** A finding is made by the harness that reads the
   model's answer, and that boundary is the harness's to emit at.
+- **No collector measures a duration.** The records say when the CLI wrote them, not when a
+  request started or a tool stopped. See [Two clocks](#two-clocks).
+
 
 ## A failure message is free text, not a code
 
