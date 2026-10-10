@@ -1097,17 +1097,23 @@ class _State:
         Any tool result waiting for proof of delivery is released first. This turn existing
         is that proof, and emitting the selections just ahead of the request reads in the
         order the conversation happened: these lines arrived, then the model was asked again.
+
+        A request the provider refused is the exception. The CLI's record of it is an attempt
+        that failed, and it is emitted as one, but no model received anything, so the held
+        selections stay held for a response that actually happened.
         """
         turn = self.pending
         if turn is None:
             return
-        self.release_selections()
-        self.pending = None
-        self.emitted[turn.message_id] = turn
         # What the response says comes from the whole message, which the first pass saw.
         # The tool uses started here are only the ones written so far; the rest are started
         # by :meth:`assistant` where their records appear.
         whole = self.messages.get(turn.message_id, turn)
+        refused = whole.api_error is not None
+        if not refused:
+            self.release_selections()
+        self.pending = None
+        self.emitted[turn.message_id] = turn
         tracker = self.tracker
         self.turn_index += 1
         attempt_id = f"{self.call_id}/turn-{self.turn_index}"
@@ -1175,9 +1181,24 @@ class _State:
             "stdout_chars": len(answer),
             "stderr_chars": None,
         }
+        # Present on every response, so a consumer reads one key shape. Only the CLI's record
+        # of a refused request fills them, from its own closed fields.
+        response_metadata["api_error"] = None
+        response_metadata["limit"] = None
         raw_error: str | None = None
+        if refused:
+            # The text is the CLI's report, not a model's answer, and the zero usage on the
+            # record is the CLI's placeholder, not a measurement.
+            raw_error, answer = answer or None, ""
+            limit = _limit(whole.api_error, raw_error or "")
+            response_metadata.update({
+                "failure_kind": tracker.failure("api_error", raw_error),
+                "is_error": True, "usage_available": False, "usage": None,
+                "stdout_chars": 0, "api_error": whole.api_error, "limit": limit,
+            })
+            tracker.api_errors.append(limit["kind"] if limit else whole.api_error)
         if self.result_record is not None and turn.message_id == self.last_message:
-            raw_error = self._apply_result(response_metadata)
+            raw_error = self._apply_result(response_metadata) or raw_error
         response_fields: dict[str, Any] = {
             "type": "model.response",
             "capture_status": "partial",
