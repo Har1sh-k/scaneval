@@ -1882,6 +1882,12 @@ def test_a_refused_request_does_not_deliver_the_read_before_it(tmp_path: Path):
     assert summary.undelivered_tool_results == 1
 
 
+def test_the_cli_s_refusal_text_is_kept_in_content_and_nowhere_else(tmp_path: Path):
+    events, _ = import_records(READ_THEN_REFUSED, tmp_path, mode="content")
+    refused = of_type(events, "model.response")[-1]
+    assert refused["content"] == {"error": LIMIT_TEXT}
+
+
 # --- more than one spelling of the same workspace --------------------------------------------
 
 # The shape of the real failure this pair of roots was added for: a harness handed the CLI
