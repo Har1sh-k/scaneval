@@ -28,7 +28,7 @@ from scaneval.collectors import claude_code, codex
 
 | Name | What it does |
 |---|---|
-| `ImportSummary` | Frozen dataclass returned by every importer: `events`, `model_turns`, `tool_calls`, `tool_results`, `spans`, `unknown_records`, `malformed_lines`, `unmatched_tool_results`, `undelivered_tool_results`, `capture` (the Contract 3 capture-status keys), `notes`. |
+| `ImportSummary` | Frozen dataclass returned by every importer: `events`, `model_turns`, `tool_calls`, `tool_results`, `spans`, `unknown_records`, `malformed_lines`, `unmatched_tool_results`, `undelivered_tool_results`, `capture` (the Contract 3 capture-status keys), `notes`, `api_errors` (see [A request the provider refused](#a-request-the-provider-refused)). |
 | `claude_code.find_transcripts(session_id, *, projects_dir=None)` | Returns the main transcript for that session followed by its `subagents/*.jsonl`. `projects_dir` defaults to `~/.claude/projects`. Returns `[]` rather than raising when nothing matches **or when the ID is refused** — see [A session ID is untrusted input](#a-session-id-is-untrusted-input). |
 | `claude_code.session_id_is_usable(session_id)` | Whether an ID may be looked up at all. Call it first to tell "refused" from "no transcript". |
 | `claude_code.find_workspace_sessions(workspace_root, *, projects_dir=None)` | Lists the sessions Claude Code filed under the workspace's own project directory and returns `WorkspaceSessions(session_ids, foreign)`. Use it when the harness records a session ID only on success. See [A session nobody named](#a-session-nobody-named). |
