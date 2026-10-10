@@ -271,6 +271,11 @@ Every other response carries `api_error` and `limit` as `null`. `ImportSummary.a
 lists one cause per refusal, the limit kind when one was named and the category otherwise.
 It is not a capture loss: the record was read in full.
 
+A refusal is an error the session encountered, which is not the same as how it ended. A
+session can hit a limit, wait, and then get an answer. `ImportSummary.final_api_error` is the
+cause of the last model response when that response was a refusal, and `null` when the last
+response was a real one. Report a session as failed on a refusal only from that field.
+
 The cause is read only from the CLI's own record. The fields sit on the record, outside the
 message, so neither the model nor a repository can write them, and the limit text is matched
 only on such a record. The same words in a model answer, a tool result or a prompt set
