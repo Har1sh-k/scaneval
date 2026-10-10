@@ -450,8 +450,14 @@ lists every session the invocation opened. It is bounded in three ways:
   the workspace, with at least one present, and every `sessionId` must match the file name.
   Any other transcript is counted in `foreign` and not returned.
 - Each file goes through the same `lstat`, boundary, and no-follow read checks as an import.
+  A file that cannot be read to its end, because the read was refused or stopped at
+  `MAX_TRANSCRIPT_BYTES`, is not adopted: a record past the bound could name another workspace.
+  It is counted in `unverified`.
 
-It returns main transcripts only. Pass each ID to `find_transcripts` for its subagent files.
+`transcripts` maps each adopted session to the files verified: its main transcript, then each
+subagent file under `<session-id>/subagents/` that passes the same check with the parent's ID.
+Import and archive those paths. Do not pass the ID to `find_transcripts`, which searches every
+project directory, so the same ID in another project would bring that project's records in.
 
 ## A transcript is a file somebody else is still writing
 
