@@ -1135,7 +1135,12 @@ class LlmHarnessAdapter(Adapter):
         if engine_hooks:
             tagged = output.get("model_calls_with_context") if isinstance(output, dict) else None
             untagged = output.get("model_calls_without_context") if isinstance(output, dict) else None
-            counted = (f" It reported context for {tagged} model invocation(s) and none for {untagged}."
+            by_stage = output.get("model_calls_without_context_by_stage") if isinstance(output, dict) else None
+            staged = (" (by the stage the engine tagged them: "
+                      + ", ".join(f"{stage} {count}" for stage, count in sorted(by_stage.items())
+                                  if isinstance(stage, str) and isinstance(count, int)) + ")"
+                      if isinstance(by_stage, dict) and by_stage else "")
+            counted = (f" It reported context for {tagged} model invocation(s) and none for {untagged}{staged}."
                        if isinstance(tagged, int) and isinstance(untagged, int) else "")
             no_validation = ("a bootstrap scan runs no validation stage" if mode == "bootstrap" else
                              "a pr scan runs no validation stage either, because the consensus judge is the "
