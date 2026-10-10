@@ -1545,6 +1545,8 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
     notes: list[str] = []
     transcripts_found = 0
     imports_clean = True
+    # The last provider failure each session's main transcript recorded, by session id.
+    ended_on: dict[str, str] = {}
     # Both spellings of the workspace, because the SDK writes the transcript under the real one
     # and the collectors match textually. See :func:`workspace_spellings`.
     roots = workspace_spellings(source_dir)
@@ -1597,6 +1599,10 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                     captured_anything = captured_anything or health.captured
                     if not sidechain:
                         main_turns += health.turns
+                        causes = [cause for cause in getattr(summary, "api_errors", ()) or ()
+                                  if isinstance(cause, str) and cause]
+                        if causes:
+                            ended_on[session.session_id] = causes[-1]
                     if health.loss:
                         imports_clean = False
                         notes.append(f"transcript {Path(path).name} was imported short of the "
