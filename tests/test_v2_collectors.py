@@ -377,6 +377,25 @@ def test_workspace_sessions_finds_nothing_rather_than_raising_without_a_projects
     assert found == claude_code.WorkspaceSessions((), 0)
 
 
+def test_discovery_hands_back_the_verified_file_and_not_a_namesake_in_another_project(tmp_path: Path):
+    """The same session ID in another project is that project's record, not this run's.
+
+    A lookup by ID searches every project directory, so the caller is handed the exact file
+    this check verified and reads nothing else.
+    """
+    projects = tmp_path / "projects"
+    workspace = "/private/tmp/trial-1/source"
+    mine = session_file(projects / claude_code.project_directory_name(workspace), WORKSPACE_SESSION,
+                        cwd=workspace)
+    session_file(projects / "-private-tmp-another-project", WORKSPACE_SESSION, cwd="/private/tmp/another-project")
+
+    found = claude_code.find_workspace_sessions(workspace, projects_dir=projects)
+
+    assert found.transcripts == {WORKSPACE_SESSION: (mine,)}
+    assert len(claude_code.find_transcripts(WORKSPACE_SESSION, projects_dir=projects)) == 2, (
+        "the lookup this replaces would have read both")
+
+
 # --- turns ------------------------------------------------------------------------------
 
 
