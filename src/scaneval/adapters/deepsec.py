@@ -121,6 +121,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
 import subprocess
 from typing import Any, NamedTuple, Sequence
@@ -411,6 +412,38 @@ class Settings(NamedTuple):
     claude_code_executable: str | None
     project_id: str | None
     configured_root: str
+    files_from: tuple[str, ...] | None = None
+    capture_claude_sessions: bool = False
+
+
+def _files_from(spec: SystemSpec) -> tuple[str, ...] | None:
+    """The operator's file list for a PR review, read from the file ``config.files_from`` names.
+
+    One path per line, relative to the repository root; blank lines and ``#`` comments are skipped.
+    Each is checked here, before anything runs, so a list that would leave the tree is a setup
+    failure. The list is a scope declared before the run: DeepSec reviews exactly these paths
+    instead of the whole change, and the changed paths it leaves out are reported as omitted.
+    """
+    configured = _text(spec, "files_from")
+    if configured is None:
+        return None
+    path = Path(configured).expanduser()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise AdapterError(f"deepsec config.files_from could not be read: {exc}") from exc
+    paths: list[str] = []
+    for line in lines:
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        if "\x00" in entry or entry.startswith("/") or ".." in PurePosixPath(entry).parts:
+            raise AdapterError(f"deepsec config.files_from names a path outside the repository: {entry!r}")
+        if entry not in paths:
+            paths.append(entry)
+    if not paths:
+        raise AdapterError("deepsec config.files_from names no path")
+    return tuple(paths)
 
 
 def _text(spec: SystemSpec, key: str, default: str | None = None, *,
@@ -484,7 +517,16 @@ def settings(spec: SystemSpec) -> Settings:
         claude_code_executable=_text(spec, "claude_code_executable"),
         project_id=project_id,
         configured_root=configured_root,
+        files_from=_files_from(spec),
+        capture_claude_sessions=_flag(spec, "capture_claude_sessions"),
     )
+
+
+def _flag(spec: SystemSpec, key: str) -> bool:
+    value = spec.config.get(key, False)
+    if not isinstance(value, bool):
+        raise AdapterError(f"deepsec config.{key} must be a boolean, got a {_shape(value)}")
+    return value
 
 
 def project_id_for(request: dict, configured: str | None) -> str:
@@ -1339,6 +1381,57 @@ def _overlapping(candidates: tuple[Candidate, ...], path: str,
     return sorted(dict.fromkeys(ids))
 
 
+def preserve_transcripts(sessions: tuple[Session, ...], projects_dir: Path, raw_dir: Path,
+                         enclosure: Enclosure) -> tuple[list[dict], list[str]]:
+    """Move each session's Claude Code transcripts into ``raw/claude-sessions`` and register them.
+
+    Run after :func:`write_trace` has imported them in place. The agent sessions leave their
+    transcripts under the operator's projects directory, where they outlive the run and share a
+    directory with every other session on the machine; moved here they become hashed artifacts of
+    the run that wrote them. Only sessions with a usable id are looked up, through the same
+    collector discovery the import used, and a subagent transcript keeps its ``subagents/`` level.
+    A transcript that cannot be moved stays where it was and is counted in the note.
+    """
+    collectors = collector()
+    if collectors is None:
+        return [], ["config.capture_claude_sessions is set, but the transcript collector is not installed, so "
+                    "no transcript was moved into the run."]
+    find, _load = collectors
+    root = raw_dir / "claude-sessions"
+    artifacts: list[dict] = []
+    moved = failed = 0
+    seen: set[str] = set()
+    for session in sessions:
+        if not session.correlated or session.session_id in seen:
+            continue
+        seen.add(session.session_id)
+        try:
+            paths = [Path(path) for path in find(session.session_id, projects_dir=projects_dir)]
+        except Exception:  # noqa: BLE001 - a discovery failure costs this session's transcripts
+            failed += 1
+            continue
+        for source in paths:
+            relative = (Path("subagents", source.name) if source.parent.name == "subagents"
+                        else Path(source.name))
+            target = root / session.session_id / relative
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                if enclosure.write(target.parent) is None:
+                    raise OSError("the transcript directory escaped the private run directory")
+                shutil.copyfile(source, target)
+                source.unlink()
+            except OSError:
+                failed += 1
+                continue
+            artifacts.append({"id": f"claude-session/{session.session_id}/{relative.as_posix()}", "path": target})
+            moved += 1
+    notes = [f"{moved} Claude Code transcript(s) were moved from {projects_dir} into raw/claude-sessions and "
+             "registered as artifacts of this run."
+             + (f" {failed} transcript(s) or session lookup(s) could not be moved and were left in place."
+                if failed else "")]
+    return artifacts, notes
+
+
 def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Path,
                 projects_dir: Path, records: Records, sessions: tuple[Session, ...],
                 candidates: tuple[Candidate, ...], imported: DeepsecImport,
@@ -1758,7 +1851,8 @@ def unlistable_error(paths: DroppedPaths) -> str:
               "part of the change (or none of it) and says nothing about them")
 
 
-def unreviewed_note(changes: tuple[Change, ...], files: tuple[tuple[str, dict], ...]) -> str | None:
+def unreviewed_note(changes: tuple[Change, ...], files: tuple[tuple[str, dict], ...],
+                    source: str = "--diff") -> str | None:
     """The changed paths DeepSec created no file record for, as a note, or ``None`` when there are none.
 
     *changes* and *files* are as for :func:`dropped_paths`, and the note is written from what it
@@ -1793,10 +1887,12 @@ def unreviewed_note(changes: tuple[Change, ...], files: tuple[tuple[str, dict], 
         apart = f", except for the {len(omitted)} named next" if omitted else ""
         sentences.append(
             f"DeepSec did not investigate {len(paths.dropped)} of the {len(paths.present)} path(s) this change "
-            f"leaves at head, because it created no file record for them ({_listed(paths.dropped)}). Its --diff "
-            "selection keeps only added, modified, renamed and copied paths and drops those matching its default "
-            "ignore filter (tests, docs, build output and similar), so this is DeepSec's own scope and not a "
-            f"failure of the run{apart}; silence about these paths is not a negative result.")
+            f"leaves at head, because it created no file record for them ({_listed(paths.dropped)}). "
+            + ("Its --diff selection keeps only added, modified, renamed and copied paths"
+               if source == "--diff" else "Its --files-from selection keeps only listed paths that exist as files")
+            + " and drops those matching its default ignore filter (tests, docs, build output and similar), so this "
+            f"is DeepSec's own scope and not a failure of the run{apart}; silence about these paths is not a "
+            "negative result.")
         if omitted:
             sentences.append(". ".join(listing_limits(paths, "of them")) + ".")
             sentences.append(
@@ -1887,6 +1983,11 @@ class DeepsecAdapter(Adapter):
         """
         pr = pr_range(request, self)
         config = settings(spec)
+        if config.files_from is not None and pr is None:
+            raise AdapterError("deepsec config.files_from scopes a PR review and is refused for a full run")
+        if config.capture_claude_sessions and trace_mode != "content":
+            raise AdapterError("deepsec config.capture_claude_sessions keeps transcripts that hold prompts and "
+                               "source, and requires content tracing")
         if not config.binary.exists():
             raise AdapterError(f"deepsec executable not found at {config.binary}")
         # Read before DeepSec starts: its agent can run a shell in this workspace, ``.git`` included.
@@ -1904,9 +2005,17 @@ class DeepsecAdapter(Adapter):
         env = build_env(self.env_passthrough, overrides)
 
         scan_argv = [str(config.binary), "scan", "--project-id", project, "--root", str(source_dir)]
+        # A PR review normally lets DeepSec list the change itself. An operator's file list
+        # replaces that listing with --files-from, the other source its direct mode accepts.
+        files_from_path = Path(raw_dir) / "deepsec-files-from.txt"
+        if pr is not None and config.files_from is not None:
+            files_from_path.write_text("\n".join(config.files_from) + "\n", encoding="utf-8")
+            source_argv = ["--files-from", str(files_from_path)]
+        else:
+            source_argv = ["--diff", pr.revision_range] if pr is not None else []
         process_argv = [str(config.binary), "process", "--project-id", project,
                         "--root", str(source_dir),
-                        *(["--diff", pr.revision_range] if pr is not None else []),
+                        *source_argv,
                         "--agent", config.agent,
                         "--model", config.model, "--concurrency", str(config.concurrency)]
         if config.thinking_level:
@@ -1924,6 +2033,7 @@ class DeepsecAdapter(Adapter):
         artifacts: list[dict] = [
             {"id": "deepsec-config", "path": workspace / "deepsec.config.ts"},
             {"id": "deepsec-package-json", "path": workspace / "package.json"},
+            *([{"id": "deepsec-files-from", "path": files_from_path}] if "--files-from" in source_argv else []),
         ]
         notes: list[str] = []
         remaining = float(timeout_seconds)
@@ -1981,12 +2091,16 @@ class DeepsecAdapter(Adapter):
         # The changed paths DeepSec's listing could not resolve (a name git quotes, a name it trims), so that no model
         # was ever given them. Read once, here, for the bundle flag and the status below; the note is made from the
         # same helper.
-        dropped = dropped_paths(changes, records.files) if pr is not None else DroppedPaths((), ())
+        # With an operator's file list, what DeepSec's own listing could or could not resolve is judged over that list,
+        # and every other changed path is an omission the operator declared before the run.
+        selected = set(config.files_from) if pr is not None and config.files_from is not None else None
+        scoped = tuple(change for change in changes if change.path in selected) if selected is not None else changes
+        dropped = dropped_paths(scoped, records.files) if pr is not None else DroppedPaths((), ())
         omitted = dropped.unlistable
         # What the result lists as omitted_paths, for the outcomes that carry claims DeepSec produced, and whether that
         # is every path the change touches, so that DeepSec examined none of it: both ``None`` in a full run, which
         # reports no omission.
-        unexamined = unexamined_paths(changes, dropped) if pr is not None else None
+        unexamined = unexamined_paths(changes, dropped_paths(changes, records.files)) if pr is not None else None
         nothing_examined = examined_nothing(changes, unexamined) if pr is not None else None
 
         exported: Any = None
@@ -2043,6 +2157,11 @@ class DeepsecAdapter(Adapter):
                 transcripts_found = traced.transcripts_found
                 imports_clean = traced.imports_clean
                 notes.extend(traced.notes)
+        if config.capture_claude_sessions:
+            # After the import, which reads the transcripts where the sessions left them.
+            moved, capture_notes = preserve_transcripts(sessions, config.projects_dir, Path(raw_dir), enclosure)
+            artifacts.extend(moved)
+            notes.extend(capture_notes)
 
         capture = capture_status(
             trace_mode, transcripts_found=transcripts_found, sessions=len(sessions),
@@ -2084,6 +2203,13 @@ class DeepsecAdapter(Adapter):
             steps_note = (f"DeepSec ran as three CLI steps in one workspace under raw/deepsec-workspace: scan, "
                           f"process and export. The recorded command is those three argv lists in order, "
                           f"separated by '&&'; each step's stdout and stderr is its own raw artifact.")
+        elif selected is not None:
+            steps_note = (f"DeepSec ran as two CLI steps in one workspace under raw/deepsec-workspace: process in its "
+                          f"direct mode, given --files-from raw/deepsec-files-from.txt, the operator's list of "
+                          f"{len(selected)} path(s) chosen from the change {pr.revision_range}, and export; no separate "
+                          "scan step was run. Direct mode ran its own regex scan over just those files and "
+                          "investigated each of them. The recorded command is those two argv lists in order, "
+                          "separated by '&&'; each step's stdout and stderr is its own raw artifact.")
         else:
             steps_note = (f"DeepSec ran as two CLI steps in one workspace under raw/deepsec-workspace: process in its "
                           f"direct mode, given --diff {pr.revision_range}, and export; no separate scan step was run. "
@@ -2117,7 +2243,18 @@ class DeepsecAdapter(Adapter):
                     f"{finding_records} finding(s), {len(statuses.errored)} file(s) in status 'error' and "
                     f"{unfinished_files} unfinished file(s). This run was classified from those records"
                     + (f"; DeepSec's own summary said {', '.join(said)}." if said else "."))
-            unreviewed = unreviewed_note(changes, records.files)
+            if selected is not None:
+                present = {change.path for change in changes if change.present}
+                excluded = sorted(present - selected)
+                outside = sorted(selected - present)
+                notes.append(
+                    f"config.files_from limited the review to {len(selected & present)} of the {len(present)} path(s) "
+                    f"this change leaves at head. The other {len(excluded)} were left out by the operator before the "
+                    "run and are listed as omitted; silence about them is not a negative result."
+                    + (f" {len(outside)} listed path(s) are not changed by this range ({_listed(outside)}) and were "
+                       "reviewed at head anyway." if outside else ""))
+            unreviewed = unreviewed_note(scoped, records.files,
+                                         source="--files-from" if selected is not None else "--diff")
             if unreviewed:
                 if records.failures:
                     # A record this run could not read is missing from the comparison, so a path

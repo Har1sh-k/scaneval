@@ -153,7 +153,7 @@ def do_scan(argv):
 def do_process(argv):
     step_failure("process_exit", "process")
     settings = control()
-    if "--diff" in argv:
+    if "--diff" in argv or "--files-from" in argv:
         do_direct(argv, settings)
         return
     project = option(argv, "--project-id")
@@ -321,16 +321,22 @@ def do_direct(argv, settings):
         sys.exit(1)
     # git's default quotes a name that holds a non-ASCII byte, which names no file once DeepSec reads it back;
     # the ``raw_listing`` knob is an operator whose git prints such a name as it is.
-    quote_path = "false" if settings.get("raw_listing") else "true"
-    listed = subprocess.run(["git", "-c", "core.quotePath=" + quote_path, "diff", "--name-only",
-                             "--diff-filter=AMRC", diff], cwd=root, capture_output=True, text=True)
-    if listed.returncode != 0:
-        sys.stderr.write("\\ngit diff --name-only --diff-filter=AMRC %s exited %d: %s\\n\\n"
-                         "(set DEEPSEC_DEBUG=1 for a stack trace)\\n"
-                         % (diff, listed.returncode, listed.stderr.strip()))
-        sys.exit(1)
+    files_from = option(argv, "--files-from")
+    label = "files-from:" + files_from if files_from else "git-diff:" + diff
+    if files_from:
+        lines = Path(files_from).read_text(encoding="utf-8").split("\\n")
+    else:
+        quote_path = "false" if settings.get("raw_listing") else "true"
+        listed = subprocess.run(["git", "-c", "core.quotePath=" + quote_path, "diff", "--name-only",
+                                 "--diff-filter=AMRC", diff], cwd=root, capture_output=True, text=True)
+        if listed.returncode != 0:
+            sys.stderr.write("\\ngit diff --name-only --diff-filter=AMRC %s exited %d: %s\\n\\n"
+                             "(set DEEPSEC_DEBUG=1 for a stack trace)\\n"
+                             % (diff, listed.returncode, listed.stderr.strip()))
+            sys.exit(1)
+        lines = listed.stdout.split("\\n")
     names = []
-    for line in listed.stdout.split("\\n"):
+    for line in lines:
         name = line.strip()
         if name and name not in names and Path(root, name).is_file() and not ignored(name):
             names.append(name)
@@ -338,7 +344,7 @@ def do_direct(argv, settings):
     write(base / "project.json", {"projectId": project, "rootPath": root,
                                   "createdAt": "2026-09-25T12:00:00.000Z"})
     say(paint("1", "Direct process") + " project " + paint("1", project))
-    say("  Source: git-diff:" + diff)
+    say("  Source: " + label)
     say("  Files: %d" % len(names))
     say("  Agent: claude-agent-sdk (%s)" % option(argv, "--model"))
     say("  Root: " + root)
@@ -347,7 +353,7 @@ def do_direct(argv, settings):
         if settings.get("stray_record"):
             write(base / "files" / "stray.js.json", dict(scanned_record("stray.js", project), status="error"))
         if not settings.get("say_nothing"):
-            say(paint("33", "No files matched git-diff:%s (after ignore filter)." % diff))
+            say(paint("33", "No files matched %s (after ignore filter)." % label))
             say(paint("32", "Nothing to process \\u2014 exit 0."))
         return
     say(paint("1", "Scanning %d file(s)\\u2026" % len(names)))
@@ -2410,6 +2416,76 @@ def test_a_pr_run_with_no_limit_configured_says_nothing_about_one(tmp_path):
     workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
     outcome, *_ = scan_pr(tmp_path, root, workspace, pr, limit=None)
     assert not any("config.limit" in note for note in outcome.notes)
+
+
+def test_a_pr_run_with_a_file_list_reviews_only_those_paths_and_omits_the_rest(tmp_path):
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+    listing = tmp_path / "files.txt"
+    listing.write_text("# chosen\nsrc/routes.js\n\n", encoding="utf-8")
+
+    outcome, raw, _ = scan_pr(tmp_path, root, workspace, pr, files_from=str(listing))
+
+    process = outcome.command[:outcome.command.index("&&")]
+    assert process[process.index("--files-from") + 1] == str(raw / "deepsec-files-from.txt")
+    assert "--diff" not in process, "direct mode takes exactly one file source"
+    assert (raw / "deepsec-files-from.txt").read_text(encoding="utf-8") == "src/routes.js\n"
+    assert "deepsec-files-from" in {artifact["id"] for artifact in outcome.artifacts}
+    assert {claim["primary_location"]["path"] for claim in outcome.claims} == {"src/routes.js"}
+    assert "src/server.js" in outcome.omitted_paths and "src/routes.js" not in outcome.omitted_paths
+    assert outcome.examined_nothing is False
+    assert any(note.startswith("config.files_from limited the review to 1 of the 2 path(s)") for note in outcome.notes)
+    assert any("given --files-from raw/deepsec-files-from.txt" in note for note in outcome.notes)
+
+
+def test_a_file_list_is_refused_for_a_full_run(tmp_path):
+    root = fake_deepsec_root(tmp_path)
+    listing = tmp_path / "files.txt"
+    listing.write_text("src/server.js\n", encoding="utf-8")
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root, files_from=str(listing))
+    with pytest.raises(AdapterError, match="scopes a PR review"):
+        adapter.scan(request={"input": {"mode": "full"}}, source_dir=tmp_path, raw_dir=tmp_path, spec=spec,
+                     preparation={}, timeout_seconds=1, trace_mode="off", trace_dir=None)
+
+
+@pytest.mark.parametrize("entry", ["/etc/passwd", "../outside.js", "src/../../outside.js"])
+def test_a_file_list_that_leaves_the_repository_is_a_setup_failure(tmp_path, entry):
+    listing = tmp_path / "files.txt"
+    listing.write_text(entry + "\n", encoding="utf-8")
+    with pytest.raises(AdapterError, match="outside the repository"):
+        deepsec_module.settings(system_spec(fake_deepsec_root(tmp_path), files_from=str(listing)))
+
+
+def test_captured_transcripts_are_moved_into_the_run_and_registered(tmp_path, monkeypatch):
+    root = fake_deepsec_root(tmp_path, session_ids=["session-aaaa"])
+    stub_collector(monkeypatch, tmp_path, subagent=True)
+    main = transcript_fixture(tmp_path)
+    sub = main.parent / "session-aaaa" / "subagents" / "agent-1.jsonl"
+    bundle = invoke(tmp_path, root, capture_claude_sessions=True)
+    _result, execution = documents(bundle)
+    registered = {artifact["id"]: artifact["path"] for artifact in execution["raw_artifacts"]}
+    assert f"claude-session/session-aaaa/{main.name}" in registered
+    assert "claude-session/session-aaaa/subagents/agent-1.jsonl" in registered
+    assert not main.exists() and not sub.exists(), "moved, not copied"
+
+
+def test_transcripts_stay_in_place_unless_capture_is_configured(tmp_path, monkeypatch):
+    root = fake_deepsec_root(tmp_path, session_ids=["session-aaaa"])
+    stub_collector(monkeypatch, tmp_path)
+    main = transcript_fixture(tmp_path)
+    bundle = invoke(tmp_path, root)
+    _result, execution = documents(bundle)
+    assert not any(artifact["id"].startswith("claude-session/") for artifact in execution["raw_artifacts"])
+    assert main.exists()
+
+
+def test_transcript_capture_requires_content_tracing(tmp_path):
+    adapter = get_adapter("deepsec")
+    spec = system_spec(fake_deepsec_root(tmp_path), capture_claude_sessions=True)
+    with pytest.raises(AdapterError, match="requires content tracing"):
+        adapter.scan(request={"input": {"mode": "full"}}, source_dir=tmp_path, raw_dir=tmp_path, spec=spec,
+                     preparation={}, timeout_seconds=1, trace_mode="metadata", trace_dir=None)
 
 
 def test_an_exit_of_1_with_findings_is_a_normal_review_that_is_recorded_as_one(tmp_path):
