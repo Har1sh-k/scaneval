@@ -1908,6 +1908,26 @@ def test_the_cause_is_read_from_the_cli_s_closed_fields_first(tmp_path: Path, te
     assert summary.api_errors == (cause,)
 
 
+@pytest.mark.parametrize("records", [
+    pytest.param([assistant_block("message-1", {"type": "text", "text": LIMIT_TEXT})],
+                 id="a-model-answer"),
+    pytest.param([assistant_block("message-1", tool_use("tool-1", "alpha")),
+                  tool_result("tool-1", LIMIT_TEXT),
+                  assistant_block("message-2", {"type": "text", "text": "done"})],
+                 id="a-tool-result"),
+    pytest.param([{"type": "user", "message": {"content": LIMIT_TEXT}},
+                  assistant_block("message-1", {"type": "text", "text": "ok"})],
+                 id="a-prompt-quoting-the-repository"),
+])
+def test_the_same_words_anywhere_but_the_cli_s_own_record_set_no_cause(tmp_path: Path, records):
+    """A phrase a repository can put in front of a model must not decide a failure category."""
+    events, summary = import_records(records, tmp_path)
+    assert summary.api_errors == ()
+    for response in of_type(events, "model.response"):
+        assert response["metadata"]["failure_kind"] is None
+        assert response["metadata"]["api_error"] is None and response["metadata"]["limit"] is None
+
+
 # --- more than one spelling of the same workspace --------------------------------------------
 
 # The shape of the real failure this pair of roots was added for: a harness handed the CLI
