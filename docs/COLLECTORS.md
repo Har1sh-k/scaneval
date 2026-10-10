@@ -236,6 +236,11 @@ Every other response carries `api_error` and `limit` as `null`. `ImportSummary.a
 lists one cause per refusal, the limit kind when one was named and the category otherwise.
 It is not a capture loss: the record was read in full.
 
+The cause is read only from the CLI's own record. The fields sit on the record, outside the
+message, so neither the model nor a repository can write them, and the limit text is matched
+only on such a record. The same words in a model answer, a tool result or a prompt set
+nothing.
+
 ## Pass every spelling of the workspace root
 
 `workspace_root` takes **one root or a sequence of roots**
