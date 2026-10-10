@@ -721,7 +721,7 @@ class _Turn:
     """
 
     __slots__ = ("message_id", "model", "usage", "usage_available", "text", "tool_uses",
-                 "sidechain", "agent_id", "session_id", "blocks", "request_event_id")
+                 "sidechain", "agent_id", "session_id", "blocks", "request_event_id", "api_error")
 
     def __init__(self, message_id: str) -> None:
         self.message_id = message_id
@@ -736,14 +736,19 @@ class _Turn:
         self.blocks: set[str] = set()
         # Set when the turn is emitted, so a tool use that arrives later can point at it.
         self.request_event_id: str | None = None
+        # The CLI's own category when this record is its report of a refused request.
+        self.api_error: str | None = None
 
     def absorb(self, record: dict[str, Any]) -> list[dict[str, Any]]:
         """Fold one record into the turn. Returns the blocks this record added, if any."""
         added: list[dict[str, Any]] = []
         message = record.get("message")
+        if _is_api_error(record):
+            category = record.get("error")
+            self.api_error = category if category in API_ERRORS else "unknown"
         if isinstance(message, dict):
             model = message.get("model")
-            if isinstance(model, str) and model:
+            if isinstance(model, str) and model and model != SYNTHETIC_MODEL:
                 self.model = model
             usage, available = _usage(message)
             if available:
