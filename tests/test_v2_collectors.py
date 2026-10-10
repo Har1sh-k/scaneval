@@ -454,6 +454,27 @@ def test_the_rest_of_a_response_adds_no_turn_and_no_usage(tmp_path: Path):
     assert sum(r["metadata"]["usage"]["output_tokens"] for r in responses) == 2 * 40
 
 
+def test_an_exact_replay_of_a_tool_block_starts_nothing_twice(tmp_path: Path):
+    """A block already seen is a replay whether it arrives mid-message or after it."""
+    records = [
+        assistant_block("message-1", tool_use("tool-1", "alpha")),
+        assistant_block("message-1", tool_use("tool-1", "alpha")),
+        tool_result("tool-1", "first result"),
+        assistant_block("message-1", tool_use("tool-1", "alpha")),
+        assistant_block("message-1", tool_use("tool-2", "beta")),
+        tool_result("tool-2", "second result"),
+        assistant_block("message-2", {"type": "text", "text": "done"}),
+    ]
+
+    events, summary = import_records(records, tmp_path)
+
+    assert [e["call_id"] for e in of_type(events, "tool.start")] == ["tool-1", "tool-2"]
+    assert summary.model_turns == 2
+    assert summary.unmatched_tool_results == 0
+    assert any("assistant:replayed-message:2" in note for note in summary.notes)
+    assert any("no model response" in note for note in summary.notes)
+
+
 def test_a_read_result_becomes_a_span_whose_path_is_relative_to_the_workspace():
     """The span is the one claim a collector makes that Contract 5 later joins against.
 
