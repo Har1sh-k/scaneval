@@ -645,9 +645,11 @@ def _import_records(
     records = parse_lines(lines, tracker)
 
     # First pass: the invocation-level facts that arrive after the turns they describe.
+    # Each message is also assembled whole here, so the response emitted for it carries every
+    # block it had, including blocks written after one of its tool results had arrived.
     result_record = None
     init_record = None
-    message_order: list[str] = []
+    messages: dict[str, _Turn] = {}
     for record in records:
         kind = record.get("type")
         if kind == "result":
@@ -656,9 +658,9 @@ def _import_records(
             init_record = record
         elif kind == "assistant" and _is_model_message(record):
             key = _message_key(record)
-            if key and key not in message_order:
-                message_order.append(key)
-    last_message = message_order[-1] if message_order else None
+            if key:
+                messages.setdefault(key, _Turn(key)).absorb(record)
+    last_message = next(reversed(messages), None)
 
     session_hint = None
     if isinstance(init_record, dict):
@@ -679,6 +681,7 @@ def _import_records(
         default_agent_id=agent_id,
         result_record=result_record if isinstance(result_record, dict) else None,
         last_message=last_message,
+        messages=messages,
         session_hint=session_hint if isinstance(session_hint, str) else None,
     )
 
@@ -849,6 +852,7 @@ class _State:
         default_agent_id: str | None,
         result_record: dict[str, Any] | None,
         last_message: str | None,
+        messages: dict[str, _Turn],
         session_hint: str | None,
     ) -> None:
         self.tracker = tracker
@@ -859,6 +863,8 @@ class _State:
         self.default_agent_id = default_agent_id
         self.result_record = result_record
         self.last_message = last_message
+        # Every message assembled whole by the first pass, for what a turn's response says.
+        self.messages = messages
         self.session_hint = session_hint
         self.turn_index = 0
         self.pending: _Turn | None = None
