@@ -2017,6 +2017,17 @@ def test_a_response_written_across_tool_results_keeps_its_first_and_last_block_t
     assert late_start["metadata"]["source_timestamp"] == "2026-10-10T03:02:00.000Z"
 
 
+@pytest.mark.parametrize("value", ["yesterday", "2026-10-10 03:00:00", "2026-10-10T03:00:00",
+                                   1791602883099, None])
+def test_a_time_that_is_not_an_instant_is_not_carried(tmp_path: Path, value):
+    """A time with no offset, or not a time at all, says nothing about when the record was written."""
+    records = [stamped(record, value) for record in timed_session("a", 0)]
+    events = import_at(records, tmp_path, "a", EPOCH)
+    assert all(e["metadata"]["source_timestamp"] is None for e in events)
+    assert all(e["metadata"]["source_timestamp_of"] is None for e in events)
+    assert all(isinstance(e["metadata"]["source_line"], int) for e in events)
+
+
 # --- more than one spelling of the same workspace --------------------------------------------
 
 # The shape of the real failure this pair of roots was added for: a harness handed the CLI
