@@ -874,9 +874,9 @@ class _State:
         # File reads whose text has not yet been shown to reach a model turn. See
         # :meth:`release_selections`.
         self.pending_selections: list[tuple[dict[str, Any], str | None, str | None]] = []
-        # Message keys already emitted as a turn, so the same message arriving again is a
-        # replay rather than a second turn.
-        self.seen_messages: set[str] = set()
+        # Messages already emitted as a turn, so the same message arriving again is the rest
+        # of that turn or a replay of it, and never a second turn.
+        self.emitted: dict[str, _Turn] = {}
         # Assistant records that were not a usable model message. Counted here as well as in
         # ``unknown_records`` so the note can say what their presence cost.
         self.unusable_model_records = 0
@@ -905,45 +905,33 @@ class _State:
             return
         if self.pending is not None and self.pending.message_id == key:
             # The ordinary case: another content block of the message already open.
-            turn = self.pending
-        elif key in self.seen_messages:
-            # The same message again after its turn was already emitted. Accepting it would
-            # double a turn's usage and, worse, would count as a second delivery.
-            self.tracker.unknown("assistant:replayed-message")
-            self.unusable_model_records += 1
+            if not self.pending.absorb(record):
+                self._replayed()
             return
-        else:
+        emitted = self.emitted.get(key)
+        if emitted is None:
             self.flush()
-            self.seen_messages.add(key)
             self.pending = _Turn(key)
-            turn = self.pending
-        message = record.get("message")
-        if isinstance(message, dict):
-            model = message.get("model")
-            if isinstance(model, str) and model:
-                turn.model = model
-            usage, available = _usage(message)
-            if available:
-                turn.usage, turn.usage_available = usage, True
-            content = message.get("content")
-            if isinstance(content, list):
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    if block.get("type") == "text" and isinstance(block.get("text"), str):
-                        turn.text.append(block["text"])
-                    elif block.get("type") == "tool_use":
-                        turn.tool_uses.append(block)
-        if record.get("isSidechain") is True:
-            turn.sidechain = True
-        for key_name in ("agentId", "agent_id"):
-            value = record.get(key_name)
-            if isinstance(value, str) and value:
-                turn.agent_id = value
-        for key_name in ("sessionId", "session_id"):
-            value = record.get(key_name)
-            if isinstance(value, str) and value:
-                turn.session_id = value
+            self.pending.absorb(record)
+            return
+        # The same message after its turn was emitted. Blocks it already had are a replay:
+        # accepting them would double a turn's usage and, worse, would count as a second
+        # delivery. A tool use it did not have yet is the rest of that same response, written
+        # after an earlier tool's result arrived; it is started under the turn that issued it,
+        # and it opens no turn and releases no held context, because no new response exists.
+        added = emitted.absorb(record)
+        if not added:
+            self._replayed()
+            return
+        sidechain = emitted.sidechain or self.default_sidechain
+        agent_id = emitted.agent_id or self.default_agent_id
+        for block in added:
+            if block.get("type") == "tool_use":
+                self._tool_start(block, emitted.request_event_id, sidechain, agent_id)
+
+    def _replayed(self) -> None:
+        self.tracker.unknown("assistant:replayed-message")
+        self.unusable_model_records += 1
 
     def flush(self) -> None:
         """Emit the accumulated turn: request, response, then one start per tool use.
@@ -957,6 +945,11 @@ class _State:
             return
         self.release_selections()
         self.pending = None
+        self.emitted[turn.message_id] = turn
+        # What the response says comes from the whole message, which the first pass saw.
+        # The tool uses started here are only the ones written so far; the rest are started
+        # by :meth:`assistant` where their records appear.
+        whole = self.messages.get(turn.message_id, turn)
         tracker = self.tracker
         self.turn_index += 1
         attempt_id = f"{self.call_id}/turn-{self.turn_index}"
@@ -995,8 +988,9 @@ class _State:
         if tracker.content_mode and isinstance(prompt, str) and prompt:
             request_fields["content"] = {"prompt": prompt}
         request_id = tracker.emit(**request_fields)
+        turn.request_event_id = request_id
 
-        answer = "".join(turn.text)
+        answer = "".join(whole.text)
         response_metadata: dict[str, Any] = {
             "source": self.source,
             "exit_code": None,
@@ -1004,15 +998,15 @@ class _State:
             "attempt": 1,
             "will_retry": False,
             "failure_kind": None,
-            "usage_available": turn.usage_available,
-            "usage": turn.usage,
+            "usage_available": whole.usage_available,
+            "usage": whole.usage,
             "cost_usd_cli_reported": None,
             "num_turns": None,
-            "session_id": turn.session_id or self.session_hint,
+            "session_id": whole.session_id or self.session_hint,
             "result_subtype": None,
             "is_error": None,
             "duration_api_ms": None,
-            "model_served": turn.model,
+            "model_served": whole.model,
             # Present on every response and null on all but the last, so a consumer reads
             # one key shape rather than testing for absence. Only the response the CLI
             # printed its totals against ever fills them.
