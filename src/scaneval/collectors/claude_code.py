@@ -1275,6 +1275,7 @@ class _State:
         response_metadata["api_error"] = None
         response_metadata["limit"] = None
         raw_error: str | None = None
+        cause: str | None = None
         if refused:
             # The text is the CLI's report, not a model's answer, and the zero usage on the
             # record is the CLI's placeholder, not a measurement.
@@ -1285,7 +1286,10 @@ class _State:
                 "is_error": True, "usage_available": False, "usage": None,
                 "stdout_chars": 0, "api_error": whole.api_error, "limit": limit,
             })
-            tracker.api_errors.append(limit["kind"] if limit else whole.api_error)
+            cause = limit["kind"] if limit else whole.api_error
+            tracker.api_errors.append(cause)
+        # Every response replaces it, so it ends as the outcome of the last one.
+        tracker.final_api_error = cause
         if self.result_record is not None and turn.message_id == self.last_message:
             raw_error = self._apply_result(response_metadata) or raw_error
         response_fields: dict[str, Any] = {

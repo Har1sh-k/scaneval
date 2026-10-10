@@ -120,7 +120,12 @@ class ImportSummary:
     ``api_errors`` holds one closed cause per request the CLI recorded the provider refusing,
     in file order: the limit it named when it named one (``session_limit``), otherwise its own
     error category (``rate_limit``). It is not a capture loss. The record was read in full, and
-    what it says is that the run failed.
+    what it says is that a request failed.
+
+    ``final_api_error`` is how the file ended, which is a different fact: the cause of the last
+    model response when that response was a refusal, and ``None`` when the last response was a
+    real one or there was none. A session that hit a limit, waited, and then got an answer has
+    an entry in ``api_errors`` and no ``final_api_error``.
     """
 
     events: int
@@ -135,6 +140,7 @@ class ImportSummary:
     capture: dict[str, str]
     notes: tuple[str, ...]
     api_errors: tuple[str, ...] = ()
+    final_api_error: str | None = None
 
 
 def workspace_roots(root_or_roots: Any) -> tuple[str, ...]:
@@ -346,6 +352,8 @@ class _Import:
         self.unknown_types: dict[str, int] = {}
         self.notes: list[str] = []
         self.api_errors: list[str] = []
+        # The cause of the last model response emitted, when it was a refusal.
+        self.final_api_error: str | None = None
 
     @property
     def content_mode(self) -> bool:
@@ -465,6 +473,7 @@ class _Import:
             capture=dict(capture),
             notes=tuple(notes),
             api_errors=tuple(self.api_errors),
+            final_api_error=self.final_api_error,
         )
 
 
