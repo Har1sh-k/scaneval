@@ -2512,6 +2512,50 @@ def test_transcripts_stay_in_place_unless_capture_is_configured(tmp_path, monkey
     assert main.exists()
 
 
+THIRD_FILE = {"src/jobs.js": "module.exports = () => 1;\n"}
+FAILED_CALL = "deepsec/workspace-history/session-cccc"
+
+
+def failed_batch_run(tmp_path: Path, *, failed_session_ids=("session-cccc",), **overrides) -> Path:
+    """Three batches of one file each: two finish and are analyzed, the third fails.
+
+    Files sort as ``src/db.js``, ``src/jobs.js``, ``src/server.js``, so the failed batch is the
+    third. Its session writes a transcript that ends in the CLI's session-limit record and is
+    named by no analysis entry, which is how DeepSec leaves a batch that failed.
+    """
+    if deepsec_module.collector() is None:
+        pytest.skip("the Claude Code transcript collector is not installed on this checkout")
+    projects = tmp_path / "claude-projects"
+    root = fake_deepsec_root(tmp_path, transcript_dir=str(projects), workspace_history=True,
+                             session_ids=["session-aaaa", "session-bbbb"], fail_batches=[2],
+                             failed_session_ids=list(failed_session_ids))
+    return invoke(tmp_path, root, claude_projects_dir=str(projects), batch_size=1,
+                  extra_files=THIRD_FILE, **overrides)
+
+
+def test_a_failed_batch_s_session_is_imported_and_counted_though_no_analysis_names_it(tmp_path):
+    """The result importer sees two analyses; the run opened three sessions and says so."""
+    bundle = failed_batch_run(tmp_path)
+    result, execution = documents(bundle)
+    assert result["status"] == "partial" and result["error"]["code"] == "deepsec_batches_failed"
+
+    events = trace_events(bundle)
+    failed = [event for event in events if event.get("call_id") == FAILED_CALL
+              or event.get("parent_event_id") in {e["event_id"] for e in events
+                                                  if e.get("call_id") == FAILED_CALL}]
+    assert {"model.request", "model.response", "tool.start", "tool.end"} <= {e["type"] for e in failed}
+    assert all(event["metadata"]["source"] == "claude_code_transcript" for event in failed)
+    # Found by its transcript, so nothing is reconstructed for it from a record DeepSec never wrote.
+    assert not any(event["metadata"].get("source") == "harness_record"
+                   and event.get("call_id") == FAILED_CALL for event in events)
+    assert not any(event["metadata"].get("error_code") == "failed_batch_session_not_found"
+                   for event in events)
+
+    notes = " ".join(execution["notes"])
+    assert "3 of 3 agent session(s) had a Claude Code transcript" in notes
+    assert "1 found only in this invocation's workspace history (session-cccc)" in notes
+
+
 def test_transcript_capture_requires_content_tracing(tmp_path):
     adapter = get_adapter("deepsec")
     spec = system_spec(fake_deepsec_root(tmp_path), capture_claude_sessions=True)
