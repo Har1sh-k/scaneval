@@ -328,6 +328,25 @@ def test_workspace_sessions_lists_only_the_workspace_s_own_project_directory(tmp
     assert found.foreign == 0
 
 
+@pytest.mark.parametrize("cwd,named", [
+    pytest.param("/private/tmp/elsewhere", None, id="cwd-outside-the-workspace"),
+    pytest.param(None, None, id="no-cwd-at-all"),
+    pytest.param("relative/source", None, id="cwd-not-absolute"),
+    pytest.param("/private/tmp/trial-1/source", OTHER_SESSION, id="records-name-another-session"),
+])
+def test_a_transcript_in_the_workspace_directory_must_say_it_ran_there(tmp_path: Path, cwd, named):
+    """The directory name says where to look; only the records say whose session it is."""
+    projects = tmp_path / "projects"
+    workspace = "/private/tmp/trial-1/source"
+    session_file(projects / claude_code.project_directory_name(workspace), WORKSPACE_SESSION,
+                 cwd=cwd, named=named)
+
+    found = claude_code.find_workspace_sessions(workspace, projects_dir=projects)
+
+    assert found.session_ids == ()
+    assert found.foreign == 1
+
+
 # --- turns ------------------------------------------------------------------------------
 
 
