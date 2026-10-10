@@ -312,6 +312,13 @@ class WorkspaceSessions(NamedTuple):
     # Transcripts in the workspace's project directory whose records did not show they ran in
     # the workspace: a ``cwd`` outside it, none at all, or a ``sessionId`` naming another file.
     foreign: int
+    # Each adopted session's verified files, main transcript first, then its subagent files.
+    # These paths, and no lookup by session ID, are what an import or an archive may read.
+    transcripts: dict = {}
+    # Transcripts that could not be checked in full, because the read was refused or stopped
+    # at :data:`MAX_TRANSCRIPT_BYTES`. A record past the bound could name another workspace, so
+    # an unfinished check adopts nothing.
+    unverified: int = 0
 
 
 def find_workspace_sessions(workspace_root: Path | str | Sequence[Path | str], *,
@@ -328,9 +335,14 @@ def find_workspace_sessions(workspace_root: Path | str | Sequence[Path | str], *
     The directory name is evidence of where to look, not of ownership. A transcript is adopted
     only when every ``cwd`` its records carry lies inside the workspace (one at least, under
     any spelling in ``workspace_root``) and every ``sessionId`` they carry is its own file
-    name. The read goes through :func:`_read_transcript`, with the same refusals an import
-    makes. Subagent files are not listed here: :func:`find_transcripts` finds them by the
-    session ID this returns.
+    name. A subagent file under ``<session-id>/subagents/`` is kept only when the same holds
+    with its parent's ID. The read goes through :func:`_read_transcript`, with the same
+    refusals an import makes, and a file that could not be read to its end is not adopted.
+
+    ``transcripts`` maps each adopted session to exactly the files verified here. A caller
+    imports and archives those paths and does not look the ID up again:
+    :func:`find_transcripts` searches every project directory, and the same ID in another
+    project would bring that project's records into this run.
     """
     roots = workspace_roots(workspace_root)
     root = projects_dir if projects_dir is not None else Path.home().joinpath(*PROJECTS_DIR)
@@ -338,14 +350,21 @@ def find_workspace_sessions(workspace_root: Path | str | Sequence[Path | str], *
         boundary = root.resolve(strict=True)
         entries = sorted(entry for entry in root.iterdir() if _is_directory(entry))
     except OSError:
-        return WorkspaceSessions((), 0)
+        return WorkspaceSessions((), 0, {}, 0)
     wanted = {project_directory_name(spelling) for spelling in roots}
     projects = [entry for entry in entries
                 if entry.name in wanted
                 or any(len(name) > PROJECT_NAME_KEPT
                        and entry.name.startswith(name[:PROJECT_NAME_KEPT]) for name in wanted)]
-    found: list[str] = []
-    foreign = 0
+    transcripts: dict[str, tuple[Path, ...]] = {}
+    tally = {"foreign": 0, "unverified": 0}
+
+    def owned(path: Path, session_id: str) -> bool:
+        verdict = _ran_in(path, session_id, roots)
+        if verdict != "owned":
+            tally[verdict] += 1
+        return verdict == "owned"
+
     for project in projects:
         try:
             candidates = sorted(project.glob("*.jsonl"))
@@ -353,21 +372,30 @@ def find_workspace_sessions(workspace_root: Path | str | Sequence[Path | str], *
             continue
         for candidate in candidates:
             session_id = candidate.stem
-            if (not session_id_is_usable(session_id) or session_id in found
-                    or not _inside(candidate, boundary)):
+            if (not session_id_is_usable(session_id) or session_id in transcripts
+                    or not _inside(candidate, boundary) or not owned(candidate, session_id)):
                 continue
-            if _ran_in(candidate, session_id, roots):
-                found.append(session_id)
-            else:
-                foreign += 1
-    return WorkspaceSessions(tuple(found), foreign)
+            files = [candidate]
+            subagents = project / session_id / "subagents"
+            if _is_directory(subagents):
+                try:
+                    listed = sorted(subagents.glob("*.jsonl"))
+                except OSError:
+                    listed = []
+                files.extend(sub for sub in listed if _inside(sub, boundary) and owned(sub, session_id))
+            transcripts[session_id] = tuple(files)
+    return WorkspaceSessions(tuple(transcripts), tally["foreign"], transcripts, tally["unverified"])
 
 
-def _ran_in(path: Path, session_id: str, roots: tuple[str, ...]) -> bool:
-    """Whether a transcript's own records say it is *session_id* and ran inside *roots*."""
+def _ran_in(path: Path, session_id: str, roots: tuple[str, ...]) -> str:
+    """``owned`` when a transcript's records say it is *session_id* and ran inside *roots*.
+
+    ``foreign`` when a record says otherwise or none locates it, and ``unverified`` when the
+    file could not be read to its end, so that some of its records were never checked.
+    """
     lines, loss = _read_transcript(path)
-    if loss == "refused":
-        return False
+    if loss is not None:
+        return "unverified"
     located = False
     for line in lines:
         try:
@@ -378,17 +406,17 @@ def _ran_in(path: Path, session_id: str, roots: tuple[str, ...]) -> bool:
             continue
         named = record.get("sessionId", record.get("session_id"))
         if named is not None and named != session_id:
-            return False
+            return "foreign"
         cwd = record.get("cwd")
         if cwd is None:
             continue
         if not isinstance(cwd, str) or not cwd.startswith("/"):
-            return False
+            return "foreign"
         _rendered, external = workspace_path(cwd, roots)
         if external:
-            return False
+            return "foreign"
         located = True
-    return located
+    return "owned" if located else "foreign"
 
 
 def parse_result_object(text: str) -> dict | None:
