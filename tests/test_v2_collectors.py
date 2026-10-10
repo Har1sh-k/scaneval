@@ -358,6 +358,20 @@ def test_a_linked_transcript_in_the_workspace_directory_is_never_adopted(tmp_pat
     assert claude_code.find_workspace_sessions(workspace, projects_dir=projects).session_ids == ()
 
 
+def test_a_long_workspace_path_is_matched_by_the_prefix_the_cli_keeps(tmp_path: Path):
+    """The CLI shortens a long directory name, so the prefix finds it and the records decide."""
+    projects = tmp_path / "projects"
+    workspace = "/private/tmp/" + "deep/" * 50 + "source"
+    kept = claude_code.project_directory_name(workspace)[:claude_code.PROJECT_NAME_KEPT]
+    session_file(projects / (kept + "-a1b2c3"), WORKSPACE_SESSION, cwd=workspace)
+    session_file(projects / (kept + "-d4e5f6"), OTHER_SESSION, cwd="/private/tmp/another")
+
+    found = claude_code.find_workspace_sessions(workspace, projects_dir=projects)
+
+    assert found.session_ids == (WORKSPACE_SESSION,)
+    assert found.foreign == 1
+
+
 # --- turns ------------------------------------------------------------------------------
 
 
