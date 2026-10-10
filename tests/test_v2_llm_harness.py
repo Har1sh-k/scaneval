@@ -1170,6 +1170,19 @@ def test_every_attempt_s_transcript_is_kept_under_its_own_backend(tmp_path, monk
     assert output["model_calls"] == 3 and output["claude_session_calls"] == 2 and output["pi_session_calls"] == 1
 
 
+def test_a_session_that_could_not_be_kept_is_listed_by_call_and_attempt(tmp_path, monkeypatch):
+    output, execution, _home = _two_backend_run(
+        tmp_path, monkeypatch, [["claude-model", "unreported"], ["claude-model", "lost"]])
+
+    assert [(entry["call"], entry["attempt"], entry["transcript"]) for entry in output["session_manifest"]] == [
+        ("call-1", 1, "session_id_not_reported"), ("call-2", 1, "not_found")]
+    assert output["claude_session_missing"] == ["call-1", "call-2"]
+    notes = " ".join(execution["notes"])
+    assert "claude session history: 0 of 2 attempt session(s) preserved" in notes
+    assert ("Claude history is incomplete: 2 session(s) were not preserved (call-1 attempt 1: the CLI reported "
+            "no session id; call-2 attempt 1: no transcript found for its session id)") in notes
+
+
 
 
 def test_pi_history_requires_content_tracing(tmp_path):
