@@ -2516,7 +2516,8 @@ THIRD_FILE = {"src/jobs.js": "module.exports = () => 1;\n"}
 FAILED_CALL = "deepsec/workspace-history/session-cccc"
 
 
-def failed_batch_run(tmp_path: Path, *, failed_session_ids=("session-cccc",), **overrides) -> Path:
+def failed_batch_run(tmp_path: Path, *, failed_session_ids=("session-cccc",), control: dict | None = None,
+                     **overrides) -> Path:
     """Three batches of one file each: two finish and are analyzed, the third fails.
 
     Files sort as ``src/db.js``, ``src/jobs.js``, ``src/server.js``, so the failed batch is the
@@ -2528,7 +2529,7 @@ def failed_batch_run(tmp_path: Path, *, failed_session_ids=("session-cccc",), **
     projects = tmp_path / "claude-projects"
     root = fake_deepsec_root(tmp_path, transcript_dir=str(projects), workspace_history=True,
                              session_ids=["session-aaaa", "session-bbbb"], fail_batches=[2],
-                             failed_session_ids=list(failed_session_ids))
+                             failed_session_ids=list(failed_session_ids), **(control or {}))
     return invoke(tmp_path, root, claude_projects_dir=str(projects), batch_size=1,
                   extra_files=THIRD_FILE, **overrides)
 
