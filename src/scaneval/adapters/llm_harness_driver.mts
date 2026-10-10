@@ -24,7 +24,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const DRIVER_VERSION = "2.3.0";
+const DRIVER_VERSION = "2.4.0";
 
 interface DriverConfig {
   harness_root: string;

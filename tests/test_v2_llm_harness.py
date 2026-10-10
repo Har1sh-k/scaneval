@@ -509,7 +509,7 @@ def test_the_runner_hooks_make_every_cli_attempt_a_paired_request_and_response(t
     requests = [event for event in events if event["type"] == "model.request"]
     responses = [event for event in events if event["type"] == "model.response"]
 
-    assert output["driver_version"] == "2.3.0"
+    assert output["driver_version"] == "2.4.0"
     assert output["hooks"] == {"runner": 1, "engine": 1}
     assert len(requests) == output["model_attempts"] >= output["model_calls"] >= 1
     for event in requests + responses:
