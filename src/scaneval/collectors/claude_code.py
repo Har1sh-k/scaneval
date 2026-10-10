@@ -41,7 +41,7 @@ from . import (
     _Import,
     block_text,
     clip,
-    parse_lines,
+    parse_numbered_lines,
     sha256_text,
     workspace_path,
     workspace_roots,
@@ -848,7 +848,7 @@ def _import_records(
         workspace_root=workspace_root,
         call_id=call_id,
     )
-    records = parse_lines(lines, tracker)
+    numbered = parse_numbered_lines(lines, tracker)
 
     # First pass: the invocation-level facts that arrive after the turns they describe.
     # Each message is also assembled whole here, so the response emitted for it carries every
@@ -856,7 +856,7 @@ def _import_records(
     result_record = None
     init_record = None
     messages: dict[str, _Turn] = {}
-    for record in records:
+    for line, record in numbered:
         kind = record.get("type")
         if kind == "result":
             result_record = record
@@ -865,7 +865,7 @@ def _import_records(
         elif kind == "assistant" and _is_model_message(record):
             key = _message_key(record)
             if key:
-                messages.setdefault(key, _Turn(key)).absorb(record)
+                messages.setdefault(key, _Turn(key)).absorb(record, _origin(record, line))
     last_message = next(reversed(messages), None)
 
     session_hint = None
@@ -891,8 +891,9 @@ def _import_records(
         session_hint=session_hint if isinstance(session_hint, str) else None,
     )
 
-    for record in records:
+    for line, record in numbered:
         kind = record.get("type")
+        state.origin = _origin(record, line)
         if kind == "assistant":
             state.assistant(record)
             continue
@@ -1079,7 +1080,7 @@ class _State:
         self.open_tools: dict[str, dict[str, Any]] = {}
         # File reads whose text has not yet been shown to reach a model turn. See
         # :meth:`release_selections`.
-        self.pending_selections: list[tuple[dict[str, Any], str | None, str | None]] = []
+        self.pending_selections: list[tuple[dict[str, Any], str | None, str | None, _Origin]] = []
         # Messages already emitted as a turn, so the same message arriving again is the rest
         # of that turn or a replay of it, and never a second turn.
         self.emitted: dict[str, _Turn] = {}
@@ -1087,12 +1088,16 @@ class _State:
         # ``unknown_records`` so the note can say what their presence cost.
         self.unusable_model_records = 0
         self.result_note: str | None = None
+        # The record the walk is on, and the last record that gave a model its input: a prompt
+        # or a tool result. A request's time is only ever bounded by the second.
+        self.origin = NO_ORIGIN
+        self.input_origin = NO_ORIGIN
 
     def release_selections(self) -> None:
         """Emit the held selections. Called when a later assistant turn proves delivery."""
         held, self.pending_selections = self.pending_selections, []
-        for span, delivered, end_event_id in held:
-            self._context_selection(span, delivered, end_event_id)
+        for span, delivered, end_event_id, origin in held:
+            self._context_selection(span, delivered, end_event_id, origin)
 
     def drop_selections(self) -> int:
         """Discard the selections no turn ever consumed and say how many there were."""
@@ -1423,13 +1428,14 @@ class _State:
             # different fact from the model having received it: a transcript that stops right
             # here recorded a read whose output no turn ever consumed. The selection is
             # released by :meth:`flush` once a later assistant turn proves delivery.
-            self.pending_selections.append((span, span_text, end_event_id))
+            self.pending_selections.append((span, span_text, end_event_id, self.origin))
 
     def _context_selection(
         self,
         span: dict[str, Any],
         delivered: str | None,
         parent_event_id: str | None,
+        origin: _Origin = NO_ORIGIN,
     ) -> None:
         """One selection event per tool result that actually delivered file text.
 
