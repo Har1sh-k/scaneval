@@ -1425,6 +1425,9 @@ class TraceResult(NamedTuple):
     # Every session this run knows it opened: the ones DeepSec named, the ones found only in
     # the workspace history, and one for each failed batch whose session neither one found.
     sessions_expected: int = 0
+    # How many sessions ended on each closed cause the Claude Code CLI recorded for a request
+    # the provider refused (``session_limit``, ``rate_limit``, ...), read off the transcripts.
+    provider_failures: dict = {}
 
 
 def _overlapping(candidates: tuple[Candidate, ...], path: str,
@@ -1678,15 +1681,25 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                 **({"content": {"refusal_reasons": [
                     {"file_path": refusal.path, "reason": refusal.reason}
                     for refusal in session.refusals]}} if refusals else {}))
+        provider_failures: dict[str, int] = {}
+        for cause in ended_on.values():
+            provider_failures[cause] = provider_failures.get(cause, 0) + 1
         for index, name in enumerate(records.debug, start=1):
             observer.emit(
                 type="observer.error", category="observer", capture_status="unavailable",
                 metadata={"source": "harness_record",
                           "error_code": "agent_output_parse_failure",
                           "stage": "process", "debug_dump": name, "sequence_in_run": index,
+                          # A dump names no session, so it is tied to no call. The causes the
+                          # run's own transcripts recorded are counted beside it instead.
+                          "correlation": "uncorrelated",
+                          "provider_failures_in_run": dict(sorted(provider_failures.items())),
                           "detail": "DeepSec could not parse one batch's agent output and wrote "
                                     "a debug dump; the findings of that batch, if any, were not "
-                                    "recorded and nothing here says what the model produced"})
+                                    "recorded and nothing here says what the model produced. "
+                                    "When the run's transcripts recorded a provider refusing a "
+                                    "request, this is the downstream symptom of one: DeepSec "
+                                    "read the CLI's error text as the agent's answer"})
         missing = max(0, failed_batches - len(unreferenced))
         for index in range(1, missing + 1):
             observer.emit(
@@ -1743,8 +1756,16 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
             "its working directory and every file it read under the platform's real path, and "
             "the collectors compare textually without resolving a link, so a path matched "
             "against one spelling alone reads as external to the workspace.")
+    if provider_failures:
+        notes.append(
+            f"{len(ended_on)} session(s) ended on a request the provider refused, as the Claude Code "
+            "CLI recorded it in the transcript: "
+            + ", ".join(f"{cause} ({count})" for cause, count in sorted(provider_failures.items()))
+            + ". Each is on that session's own model.response as failure_kind api_error. The reset "
+            "the CLI named, if any, is kept there as it wrote it.")
     return TraceResult({"capture_gap": state.capture_gap, "dropped_events": state.dropped_events},
-                       transcripts_found, imports_clean, tuple(notes), expected)
+                       transcripts_found, imports_clean, tuple(notes), expected,
+                       dict(sorted(provider_failures.items())))
 
 
 def failed_batch_count(agent: str, records: Records, statuses: RecordStatuses, output: "ProcessOutput") -> int:
