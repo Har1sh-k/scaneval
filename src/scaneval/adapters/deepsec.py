@@ -1498,7 +1498,8 @@ def preserve_transcripts(sessions: tuple[Session, ...], projects_dir: Path, raw_
 def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Path,
                 projects_dir: Path, records: Records, sessions: tuple[Session, ...],
                 candidates: tuple[Candidate, ...], imported: DeepsecImport,
-                model_requested: str, thinking: str | None) -> TraceResult:
+                model_requested: str, thinking: str | None,
+                unreferenced: tuple[Session, ...] = (), failed_batches: int = 0) -> TraceResult:
     """Write this run's trace and report what the observer and the transcript import saw.
 
     Ordering is the order the run happened in: the regex candidates first, then each agent
@@ -1523,6 +1524,14 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
     call that did happen, so it rides on that call's own response metadata as a closed code and a
     bounded summary; when a transcript described the call instead, the refusal is named in the
     run's notes, because inventing a second response to hang it on is the thing this fixed.
+
+    **A failed batch is a session too.** ``unreferenced`` holds the sessions found only in the
+    workspace history (:func:`unreferenced_sessions`); each is imported exactly like a named one,
+    and none gets a reconstructed pair, because DeepSec wrote no record to reconstruct one from.
+    ``failed_batches`` is how many batches this run's records show failed. Each one beyond the
+    unreferenced sessions found is a session this run opened and could not find, and is recorded
+    as an ``observer.error`` of its own, so the denominator of every session count is what ran and
+    not what succeeded.
 
     A failure inside the collector is contained here, because a collector that cannot read one
     transcript must cost that import rather than the scan. Anything else that raises leaves
@@ -1552,14 +1561,14 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                           "matched_patterns": list(candidate.patterns),
                           "matcher_hits": candidate.hits,
                           "external_paths": int(candidate.external)})
-        for session in sessions:
+        for session in sessions + unreferenced:
             call_id = session.call_id
             located = False
             main_turns = 0
             captured_anything = False
             # ``correlated`` is the gate, not the bare presence of an id: an id discovery may
             # not be handed is treated exactly like a missing one.
-            if collectors is not None and session.correlated:
+            if collectors is not None and session.discoverable:
                 find, load = collectors
                 try:
                     paths = list(find(session.session_id, projects_dir=projects_dir))
@@ -1588,6 +1597,15 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                         imports_clean = False
                         notes.append(f"transcript {Path(path).name} was imported short of the "
                                      f"file: {'; '.join(health.loss)}")
+            if session.correlation == "workspace_history":
+                # Found by its transcript, so the transcript is the only description there is.
+                if captured_anything:
+                    transcripts_found += 1
+                if main_turns <= 0:
+                    imports_clean = False
+                    notes.append(f"the main transcript of session {session.session_id}, which no "
+                                 "analysis entry names, produced no model turn")
+                continue
             if located and main_turns <= 0:
                 # The transcript is there and it did not describe the call. Whatever else was
                 # read from it, this session's own turns were not, so no category may claim a
