@@ -314,6 +314,20 @@ def test_project_directory_name_is_the_path_with_every_other_character_a_dash():
     assert name == "-private-var-folders-x-y-T-scaneval-trial-1-source"
 
 
+def test_workspace_sessions_lists_only_the_workspace_s_own_project_directory(tmp_path: Path):
+    """A failed session is found by where it ran; a session from anywhere else is not."""
+    projects = tmp_path / "projects"
+    workspace = "/private/tmp/trial-1/source"
+    session_file(projects / claude_code.project_directory_name(workspace), WORKSPACE_SESSION,
+                 cwd=workspace + "/packages/a")
+    session_file(projects / "-private-tmp-trial-2-source", OTHER_SESSION, cwd="/private/tmp/trial-2/source")
+
+    found = claude_code.find_workspace_sessions(("/tmp/trial-1/source", workspace), projects_dir=projects)
+
+    assert found.session_ids == (WORKSPACE_SESSION,)
+    assert found.foreign == 0
+
+
 # --- turns ------------------------------------------------------------------------------
 
 
