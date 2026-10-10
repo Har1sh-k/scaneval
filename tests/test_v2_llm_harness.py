@@ -1051,6 +1051,12 @@ def test_claude_history_is_moved_into_the_private_run_per_call(tmp_path, monkeyp
         assert native["args"][-1] == prompt
         assert "--no-session" not in native["args"]
     assert not list((home / ".claude" / "projects").rglob("*.jsonl")), "transcripts are moved, not copied"
+    # Counted against the claude calls that wrote them, under their own backend's name.
+    assert "ScanEval-only claude session history: 2 of 2 session(s) preserved, for 2 logical claude call(s)" in (
+        " ".join(execution["notes"]))
+    assert not any("pi session history" in note for note in execution["notes"])
+
+
 
 
 def test_pi_history_requires_content_tracing(tmp_path):
