@@ -475,7 +475,7 @@ def fake_deepsec_root(tmp_path: Path, **control) -> Path:
     return root
 
 
-def prepared_input(tmp_path: Path) -> PreparedInput:
+def prepared_input(tmp_path: Path, extra_files: dict[str, str] | None = None) -> PreparedInput:
     source = tmp_path / "trial" / "source"
     (source / "src").mkdir(parents=True)
     (source / "src" / "server.js").write_text(
@@ -487,6 +487,9 @@ def prepared_input(tmp_path: Path) -> PreparedInput:
         "module.exports = (db, id) => db.query('select * from t where id = ' + id);\n",
         encoding="utf-8")
     (source / "README.md").write_text("# fixture\n", encoding="utf-8")
+    for name, text in (extra_files or {}).items():
+        (source / name).parent.mkdir(parents=True, exist_ok=True)
+        (source / name).write_text(text, encoding="utf-8")
     return PreparedInput("fixture-js", source, hash_exported_tree(source)["tree_hash"],
                          ("javascript",), {"source": {"commit": "fixture"}})
 
@@ -500,11 +503,12 @@ def system_spec(root: Path, **overrides) -> SystemSpec:
 
 
 def invoke(tmp_path: Path, root: Path, *, trace_mode: str = "content", out: str = "out",
-           timeout_seconds: float = 300, workspace_root: Path | None = None, **overrides) -> Path:
+           timeout_seconds: float = 300, workspace_root: Path | None = None,
+           extra_files: dict[str, str] | None = None, **overrides) -> Path:
     adapter = get_adapter("deepsec")
     spec = system_spec(root, **overrides)
     preparation = adapter.prepare(spec, tmp_path / "cache")
-    return run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+    return run_invocation(prepared=prepared_input(tmp_path, extra_files), adapter=adapter, spec=spec,
                           preparation=preparation, out_dir=tmp_path / out, run_id="run-deepsec",
                           timeout_seconds=timeout_seconds, trace_mode=trace_mode,
                           network_policy="model_provider_only", workspace_root=workspace_root,
