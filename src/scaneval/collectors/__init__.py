@@ -80,8 +80,10 @@ EXTERNAL_PREFIX = "external:"
 # a content field. So metadata carries a code from this set and nothing else: not the message
 # and not a bounded prefix of it either, because the first hundred characters of a traceback
 # are the line of source that raised, and bounded source is still source. The message goes to
-# ``content.error`` in content mode, or nowhere at all.
-FAILURE_KINDS = ("turn_failed", "item_error", "result_error", "unknown")
+# ``content.error`` in content mode, or nowhere at all. ``api_error`` is a request the CLI
+# reports the provider refused, which the CLI writes as a record of its own rather than as a
+# model response.
+FAILURE_KINDS = ("turn_failed", "item_error", "result_error", "api_error", "unknown")
 
 
 @dataclass(frozen=True)
