@@ -372,6 +372,11 @@ def test_a_long_workspace_path_is_matched_by_the_prefix_the_cli_keeps(tmp_path: 
     assert found.foreign == 1
 
 
+def test_workspace_sessions_finds_nothing_rather_than_raising_without_a_projects_directory(tmp_path: Path):
+    found = claude_code.find_workspace_sessions("/private/tmp/source", projects_dir=tmp_path / "absent")
+    assert found == claude_code.WorkspaceSessions((), 0)
+
+
 # --- turns ------------------------------------------------------------------------------
 
 
