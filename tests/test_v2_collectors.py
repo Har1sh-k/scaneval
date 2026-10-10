@@ -437,6 +437,14 @@ def test_a_tool_use_written_after_an_earlier_tools_result_still_starts(tmp_path:
     assert ends["tool-2"]["parent_event_id"] == first_request["event_id"]
 
 
+def test_an_interleaved_tool_use_starts_where_its_record_was_written(tmp_path: Path):
+    """The trace keeps the order the file recorded: start, result, start, result."""
+    events, _ = import_records(INTERLEAVED, tmp_path)
+    tools = [(e["type"], e["call_id"]) for e in events if e["type"].startswith("tool.")]
+    assert tools == [("tool.start", "tool-1"), ("tool.end", "tool-1"),
+                     ("tool.start", "tool-2"), ("tool.end", "tool-2")]
+
+
 def test_a_read_result_becomes_a_span_whose_path_is_relative_to_the_workspace():
     """The span is the one claim a collector makes that Contract 5 later joins against.
 
