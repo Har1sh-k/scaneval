@@ -2584,6 +2584,20 @@ def test_a_failed_session_s_transcript_is_preserved_and_replays_without_a_scan(t
     assert from_trace[start:start + len(replayed)] == shape(replayed)
 
 
+def test_a_failed_batch_whose_session_cannot_be_found_is_an_explicit_entry(tmp_path):
+    """No transcript, so the session is listed as missing instead of left out of the count."""
+    bundle = failed_batch_run(tmp_path, failed_session_ids=())
+    _result, execution = documents(bundle)
+    missing = [event for event in trace_events(bundle)
+               if event["metadata"].get("error_code") == "failed_batch_session_not_found"]
+    assert len(missing) == 1
+    assert missing[0]["type"] == "observer.error" and missing[0]["capture_status"] == "unavailable"
+    notes = " ".join(execution["notes"])
+    assert "2 of 3 agent session(s) had a Claude Code transcript" in notes
+    assert "1 failed batch(es) whose session that history did not hold" in notes
+    assert execution["capture"]["tool_calls"] == "partial"
+
+
 def test_transcript_capture_requires_content_tracing(tmp_path):
     adapter = get_adapter("deepsec")
     spec = system_spec(fake_deepsec_root(tmp_path), capture_claude_sessions=True)
