@@ -2577,6 +2577,29 @@ def test_a_failed_session_s_transcript_is_preserved_and_replays_without_a_scan(t
     assert from_trace[start:start + len(replayed)] == shape(replayed)
 
 
+def test_a_session_id_another_project_also_holds_never_brings_that_project_in(tmp_path):
+    """Import and archive read the file the workspace history verified, not every namesake.
+
+    The other project's transcript carries the same session ID. A lookup by ID across the
+    projects directory imported its records into this run's trace and moved it into the bundle.
+    """
+    elsewhere = tmp_path / "claude-projects" / "-some-other-project" / "session-aaaa.jsonl"
+    elsewhere.parent.mkdir(parents=True)
+    elsewhere.write_text(json.dumps(
+        {"type": "assistant", "uuid": "x1", "sessionId": "session-aaaa", "cwd": "/some/other/project",
+         "message": {"id": "other-1", "role": "assistant", "model": "someone-elses-model",
+                     "usage": {"input_tokens": 9, "output_tokens": 9},
+                     "content": [{"type": "text", "text": "not this run"}]}}) + "\n", encoding="utf-8")
+
+    bundle = failed_batch_run(tmp_path, capture_claude_sessions=True)
+
+    trace = (bundle / "trace" / "events.jsonl").read_text(encoding="utf-8")
+    assert "someone-elses-model" not in trace and "not this run" not in trace
+    kept = [path for path in bundle.rglob("claude-sessions/session-aaaa/*.jsonl")]
+    assert len(kept) == 1 and "someone-elses-model" not in kept[0].read_text(encoding="utf-8")
+    assert elsewhere.exists(), "another project's transcript is never moved"
+
+
 def test_a_failed_batch_whose_session_cannot_be_found_is_an_explicit_entry(tmp_path):
     """No transcript, so the session is listed as missing instead of left out of the count."""
     bundle = failed_batch_run(tmp_path, failed_session_ids=())
