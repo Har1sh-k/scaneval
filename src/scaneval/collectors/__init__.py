@@ -116,6 +116,11 @@ class ImportSummary:
     ``capture`` carries the Contract 3 keys with values ``complete``, ``partial``,
     ``unavailable`` or ``not_applicable``. Collectors say ``complete`` for nothing: every
     reading here is derived from a record written for another purpose.
+
+    ``api_errors`` holds one closed cause per request the CLI recorded the provider refusing,
+    in file order: the limit it named when it named one (``session_limit``), otherwise its own
+    error category (``rate_limit``). It is not a capture loss. The record was read in full, and
+    what it says is that the run failed.
     """
 
     events: int
@@ -129,6 +134,7 @@ class ImportSummary:
     undelivered_tool_results: int
     capture: dict[str, str]
     notes: tuple[str, ...]
+    api_errors: tuple[str, ...] = ()
 
 
 def workspace_roots(root_or_roots: Any) -> tuple[str, ...]:
@@ -339,6 +345,7 @@ class _Import:
         self.external_paths = 0
         self.unknown_types: dict[str, int] = {}
         self.notes: list[str] = []
+        self.api_errors: list[str] = []
 
     @property
     def content_mode(self) -> bool:
@@ -457,6 +464,7 @@ class _Import:
             undelivered_tool_results=self.undelivered_tool_results,
             capture=dict(capture),
             notes=tuple(notes),
+            api_errors=tuple(self.api_errors),
         )
 
 
