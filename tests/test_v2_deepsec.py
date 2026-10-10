@@ -176,7 +176,8 @@ def investigate(argv, names, settings):
     Every transcript is filed where the CLI files it, under the project directory named after the
     workspace's real path, with that path as its ``cwd``. ``workspace_history`` also gives each
     failed batch the next id from ``failed_session_ids`` and a transcript that ends in the CLI's
-    session-limit record. DeepSec names that session nowhere.
+    session-limit record. DeepSec names that session nowhere. ``recovered_refusal`` puts the same
+    record into every finished session before its last answer: a limit it waited out.
     """
     project = option(argv, "--project-id")
     model = option(argv, "--model")
@@ -262,13 +263,16 @@ def investigate(argv, names, settings):
         for session, failed in written:
             out = Path(transcripts) / slug / (session + ".jsonl")
             out.parent.mkdir(parents=True, exist_ok=True)
-            ending = [{"type": "assistant", "uuid": "u4", "sessionId": session, "cwd": real,
-                       "isApiErrorMessage": True, "error": "rate_limit", "message": {
-                           "id": "synthetic-" + session, "role": "assistant", "model": "<synthetic>",
-                           "usage": {"input_tokens": 0, "output_tokens": 0,
-                                     "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
-                           "content": [{"type": "text", "text":
-                                        "You've hit your session limit \\u00b7 resets 3am (America/Chicago)"}]}}]
+            def refusal(uuid):
+                return {"type": "assistant", "uuid": uuid, "sessionId": session, "cwd": real,
+                        "isApiErrorMessage": True, "error": "rate_limit", "message": {
+                            "id": "synthetic-" + uuid + "-" + session, "role": "assistant", "model": "<synthetic>",
+                            "usage": {"input_tokens": 0, "output_tokens": 0,
+                                      "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                            "content": [{"type": "text", "text":
+                                         "You've hit your session limit \\u00b7 resets 3am (America/Chicago)"}]}}
+            ending = [refusal("u4")]
+            waited = [refusal("u2b")] if settings.get("recovered_refusal") and not failed else []
             opening = [{"type": "user", "uuid": "u0", "sessionId": session, "cwd": real, "message": {
                 "role": "user", "content": "Investigate the batch."}}]
             out.write_text("\\n".join(json.dumps(record) for record in opening + [
@@ -286,6 +290,7 @@ def investigate(argv, names, settings):
                  "toolUseResult": {"file": {"filePath": real + "/src/server.js",
                                             "startLine": 1, "numLines": 1,
                                             "content": "const x = 1;\\n"}}},
+            ] + waited + [
                 {"type": "assistant", "uuid": "u3", "sessionId": session, "message": {
                     "role": "assistant", "model": model,
                     "usage": {"input_tokens": 20, "output_tokens": 40},
