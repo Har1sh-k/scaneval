@@ -2635,6 +2635,17 @@ def test_a_session_limit_survives_the_parse_failure_it_caused_and_the_run_stays_
                for note in execution["notes"])
 
 
+def test_a_parse_failure_with_no_recorded_cause_names_none(tmp_path, monkeypatch):
+    """Without a CLI record of a refusal there is no cause to report, and none is guessed."""
+    root = fake_deepsec_root(tmp_path, parse_error=True)
+    stub_collector(monkeypatch, tmp_path)
+    result, execution = documents(bundle := invoke(tmp_path, root))
+    assert "refusing a request" not in result["error"]["message"]
+    symptom = [event for event in trace_events(bundle)
+               if event["metadata"].get("error_code") == "agent_output_parse_failure"]
+    assert symptom[0]["metadata"]["provider_failures_in_run"] == {}
+
+
 def test_transcript_capture_requires_content_tracing(tmp_path):
     adapter = get_adapter("deepsec")
     spec = system_spec(fake_deepsec_root(tmp_path), capture_claude_sessions=True)
