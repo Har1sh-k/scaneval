@@ -2556,6 +2556,34 @@ def test_a_failed_batch_s_session_is_imported_and_counted_though_no_analysis_nam
     assert "1 found only in this invocation's workspace history (session-cccc)" in notes
 
 
+def test_a_failed_session_s_transcript_is_preserved_and_replays_without_a_scan(tmp_path):
+    """The preserved transcript is the evidence: importing it again recovers the same events."""
+    from scaneval.collectors import claude_code
+    from scaneval.observer import Observer
+
+    bundle = failed_batch_run(tmp_path, capture_claude_sessions=True)
+    _result, execution = documents(bundle)
+    registered = {artifact["id"] for artifact in execution["raw_artifacts"]}
+    assert {"claude-session/session-aaaa/session-aaaa.jsonl",
+            "claude-session/session-bbbb/session-bbbb.jsonl",
+            "claude-session/session-cccc/session-cccc.jsonl"} <= registered
+    assert not list((tmp_path / "claude-projects").rglob("*.jsonl")), "moved, not copied"
+
+    preserved = next(bundle.rglob("claude-sessions/session-cccc/session-cccc.jsonl"))
+    replayed: list[dict] = []
+    claude_code.import_transcript(
+        Observer(mode="content", sink=replayed.append, run_id="replay", producer_id="replay"),
+        preserved, workspace_root="/workspace", call_id=FAILED_CALL)
+
+    traced = [event for event in trace_events(bundle)
+              if event["metadata"].get("source") == "claude_code_transcript"]
+    shape = lambda events: [(e["type"], e.get("call_id"), e.get("attempt_id")) for e in events]  # noqa: E731
+    from_trace = shape(e for e in traced if e.get("call_id") in (FAILED_CALL, "toolu_1"))
+    # The trace holds three sessions' events; the failed one's are those from its first request on.
+    start = from_trace.index(shape(replayed)[0])
+    assert from_trace[start:start + len(replayed)] == shape(replayed)
+
+
 def test_transcript_capture_requires_content_tracing(tmp_path):
     adapter = get_adapter("deepsec")
     spec = system_spec(fake_deepsec_root(tmp_path), capture_claude_sessions=True)
