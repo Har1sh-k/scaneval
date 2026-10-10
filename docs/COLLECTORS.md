@@ -162,6 +162,19 @@ These are format limits, not reader defects. They are the reason `capture` says 
 - **No collector measures a duration.** The records say when the CLI wrote them, not when a
   request started or a tool stopped. See [Two clocks](#two-clocks).
 
+## Two clocks
+
+An imported event has two times, and they answer different questions.
+
+- **`timestamp`** is when the import emitted the event. A run imported after it finished
+  gets the import's times. One real run's 29 minutes of activity imported in under half a
+  second. Never compute runtime latency or concurrency from it. `sequence` orders events in
+  the order the import emitted them, and sessions are imported one after another, so it is
+  not runtime order across sessions either.
+- **`metadata.source_timestamp`** is the time the CLI wrote on the native record the event
+  was read from, copied verbatim. Re-importing the same file changes `timestamp` and leaves
+  this unchanged. It is `null` when the record has no RFC 3339 time with an offset.
+
 
 ## A failure message is free text, not a code
 
