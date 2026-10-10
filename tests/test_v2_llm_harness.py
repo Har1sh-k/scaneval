@@ -547,6 +547,11 @@ def test_a_context_selection_event_names_the_spans_and_the_invocation_they_were_
         assert event["metadata"]["source"] == "harness_emitted"
         assert event["capture_status"] == "complete"
         assert event["call_id"] in request_calls, "a context event must name a call the model events name"
+        if event["metadata"]["stage"] == "planner":
+            # A planner is given a listing and summaries, not file contents: inputs, no span.
+            assert event["metadata"]["spans"] == [] and event["metadata"]["input_count"] > 0
+            assert all(len(entry["sha256"]) == 64 for entry in event["metadata"]["inputs"])
+            continue
         spans = event["metadata"]["spans"]
         assert spans and len(spans) == event["metadata"]["span_count"]
         assert event["metadata"]["truncated_spans"] == sum(1 for span in spans if span["truncated"])
