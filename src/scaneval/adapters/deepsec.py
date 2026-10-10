@@ -201,6 +201,15 @@ def collector() -> tuple[Any, Any] | None:
     return find, load
 
 
+def workspace_discovery() -> Any | None:
+    """The collector's ``find_workspace_sessions``, or ``None`` on a checkout without it."""
+    try:
+        module = import_module(COLLECTOR_MODULE)
+    except ImportError:
+        return None
+    return getattr(module, "find_workspace_sessions", None)
+
+
 def session_id_usable(session_id: Any) -> bool:
     """Whether an ``agentSessionId`` may be handed to transcript discovery.
 
@@ -1040,6 +1049,47 @@ def sessions_from(files: tuple[tuple[str, dict], ...],
             external_paths=bucket["external"],
             duration_suspect=_duplicated_duration(bucket["durations"], bucket["fractional"])))
     return tuple(sessions)
+
+
+class Unreferenced(NamedTuple):
+    """The sessions of this invocation's workspace that no analysis entry names."""
+
+    sessions: tuple[Session, ...]
+    # Transcripts in the workspace's project directory whose records did not show they ran in it.
+    foreign: int
+    # Whether the workspace history could be listed at all.
+    listed: bool
+
+
+def unreferenced_sessions(sessions: tuple[Session, ...], roots: tuple[Path, ...],
+                          projects_dir: Path) -> Unreferenced:
+    """The agent sessions this run opened that DeepSec's records do not name.
+
+    DeepSec writes ``agentSessionId`` only onto the analysis entries of a batch that finished, so
+    a batch that failed (an exhausted session limit, an output it could not parse) leaves a
+    Claude Code transcript and no record naming it. Every session of this invocation ran in its
+    private source directory, and the CLI files each transcript under the project directory named
+    after that working directory, so that directory is the run's own register of the sessions it
+    opened. The collector lists it and nothing else, and adopts only transcripts whose records say
+    they ran inside the workspace; the ids DeepSec already named are left out here.
+    """
+    find = workspace_discovery()
+    if find is None:
+        return Unreferenced((), 0, False)
+    try:
+        found = find(tuple(str(root) for root in roots), projects_dir=projects_dir)
+    except Exception:  # noqa: BLE001 - a discovery failure costs the failed sessions, not the scan
+        return Unreferenced((), 0, False)
+    named = {session.session_id for session in sessions if session.correlated}
+    extra = tuple(
+        Session(run_id="", session_id=session_id, model=None, paths=(), num_turns=0.0, cost_usd=0.0,
+                duration_ms=0.0, duration_api_ms=0.0, usage={}, refusals=(),
+                correlation="workspace_history", key=f"workspace-history/{session_id}",
+                external_paths=0)
+        for session_id in getattr(found, "session_ids", ())
+        if session_id not in named and session_id_usable(session_id))
+    foreign = getattr(found, "foreign", 0)
+    return Unreferenced(extra, foreign if isinstance(foreign, int) else 0, True)
 
 
 class Candidate(NamedTuple):
