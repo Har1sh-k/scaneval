@@ -261,6 +261,18 @@ def find_transcripts(session_id: str, *, projects_dir: Path | None = None) -> li
     return found
 
 
+def project_directory_name(path: str) -> str:
+    """The name Claude Code gives the project directory of a session run in *path*.
+
+    Every character that is not an ASCII letter or digit becomes ``-``, so
+    ``/private/var/folders/x_y/T/source`` is filed under ``-private-var-folders-x-y-T-source``.
+    The CLI shortens a very long name and adds a suffix of its own, which is why
+    :func:`find_workspace_sessions` matches such a name by its prefix and decides ownership
+    from the records rather than from the name.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
 def parse_result_object(text: str) -> dict | None:
     """Parse ``claude -p --output-format json`` stdout. None when it is not a result object.
 
