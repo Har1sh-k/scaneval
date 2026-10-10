@@ -857,6 +857,56 @@ def session_manifest(output: Any) -> list[dict[str, Any]] | None:
     return readable
 
 
+def session_history_notes(manifest: list[dict[str, Any]], registered: dict[str, set[str]]) -> list[str]:
+    """What native history this run kept, per backend, read off the manifest and the artifacts.
+
+    Logical calls, attempt sessions and transcript files are three different counts and each is
+    named as itself. A transcript counts as preserved only when the driver moved it and the file
+    is among the artifacts this run registered, so the two records are reconciled rather than
+    either one being taken on its own word.
+    """
+    notes: list[str] = []
+    for backend in sorted({entry["backend"] for entry in manifest}):
+        entries = [entry for entry in manifest if entry["backend"] == backend]
+        calls = list(dict.fromkeys(entry["call"] for entry in entries))
+        if backend == "pi":
+            files = sum(len(registered.get(call, ())) for call in calls)
+            notes.append(f"ScanEval-only pi session history: {files} JSONL file(s) preserved for {len(calls)} "
+                         "logical pi call(s); separate call directories do not resume one another.")
+            empty = [call for call in calls if not registered.get(call)]
+            if empty:
+                notes.append(f"Pi history is incomplete: {len(empty)} logical pi call(s) have no session file "
+                             f"({', '.join(empty[:10])}). The observer trace and native history must not be "
+                             "treated as independent complete records.")
+            continue
+        missing: list[str] = []
+        preserved = 0
+        for entry in entries:
+            name = f"{entry.get('session_id')}.jsonl"
+            where = entry["call"] + (f" attempt {entry['attempt']}" if isinstance(entry.get("attempt"), int) else "")
+            if entry["transcript"] == "moved" and name in registered.get(entry["call"], ()):
+                preserved += 1
+            elif entry["transcript"] == "moved":
+                missing.append(f"{where}: moved by the driver but not registered")
+            elif entry["transcript"] == "not_found":
+                missing.append(f"{where}: no transcript found for its session id")
+            else:
+                missing.append(f"{where}: the CLI reported no session id")
+        by_attempt = any(isinstance(entry.get("attempt"), int) for entry in entries)
+        notes.append(f"ScanEval-only claude session history: {preserved} of {len(entries)} "
+                     + ("attempt session(s)" if by_attempt else "session(s)")
+                     + f" preserved, for {len(calls)} logical claude call(s)"
+                     + ("; every attempt that reported a session id is kept, retried and failed ones included."
+                        if by_attempt else "; this harness build reports no attempts, so only the session each "
+                        "call returned is known."))
+        if missing:
+            notes.append(f"Claude history is incomplete: {len(missing)} session(s) were not preserved ("
+                         + "; ".join(missing[:10]) + ("; ..." if len(missing) > 10 else "")
+                         + "). The observer trace and native history must not be treated as independent "
+                         "complete records.")
+    return notes
+
+
 class LlmHarnessAdapter(Adapter):
     name = "llm-harness"
     adapter_version = "2.3.0"
