@@ -172,10 +172,10 @@ def investigate(argv, names, settings):
     status ``error`` with no analysis. ``quota_at_batch`` fails that batch and stops there, and the
     batches it never started keep the status the scan gave them.
 
-    ``workspace_history`` files every transcript where the CLI does, under the project directory
-    named after the workspace's real path, and gives each failed batch the next id from
-    ``failed_session_ids`` and a transcript that ends in the CLI's session-limit record. DeepSec
-    names that session nowhere.
+    Every transcript is filed where the CLI files it, under the project directory named after the
+    workspace's real path, with that path as its ``cwd``. ``workspace_history`` also gives each
+    failed batch the next id from ``failed_session_ids`` and a transcript that ends in the CLI's
+    session-limit record. DeepSec names that session nowhere.
     """
     project = option(argv, "--project-id")
     model = option(argv, "--model")
@@ -256,7 +256,7 @@ def investigate(argv, names, settings):
         # read written under the platform's REAL path, which is not the path deepsec was handed.
         real = os.path.realpath(root)
         workspace = settings.get("workspace_history")
-        slug = re.sub("[^A-Za-z0-9]", "-", real) if workspace else "slug-for-the-cwd"
+        slug = re.sub("[^A-Za-z0-9]", "-", real)
         written = ran if workspace else [(session, False) for session in sessions[:len(batches)]]
         for session, failed in written:
             out = Path(transcripts) / slug / (session + ".jsonl")
@@ -269,7 +269,7 @@ def investigate(argv, names, settings):
                            "content": [{"type": "text", "text":
                                         "You've hit your session limit \\u00b7 resets 3am (America/Chicago)"}]}}]
             opening = [{"type": "user", "uuid": "u0", "sessionId": session, "cwd": real, "message": {
-                "role": "user", "content": "Investigate the batch."}}] if workspace else []
+                "role": "user", "content": "Investigate the batch."}}]
             out.write_text("\\n".join(json.dumps(record) for record in opening + [
                 {"type": "assistant", "uuid": "u1", "sessionId": session, "message": {
                     "role": "assistant", "model": model,
@@ -1387,39 +1387,16 @@ def test_a_run_that_failed_before_the_export_declares_no_artifact_it_does_not_ho
 def test_the_adapter_composes_with_the_real_claude_code_collector(tmp_path):
     """The stub above pins what is passed; this pins that the real importer accepts it.
 
-    Nothing is replaced here: the adapter resolves the collector by name, finds a synthetic
-    transcript under a projects directory this test owns, and hands it to WP-D's importer. The
-    transcript is synthetic — no real session content and no operator path — and it is written
-    here rather than kept as a fixture so the shape it asserts is visible beside the assertion.
+    Nothing is replaced here: the adapter resolves the collector by name, the fake DeepSec
+    leaves a synthetic transcript where the CLI would, under the project directory named after
+    the workspace and with the workspace as its ``cwd``, and the adapter finds it by listing
+    that directory and hands it to WP-D's importer. The transcript is synthetic: no real
+    session content and no operator path.
     """
     if deepsec_module.collector() is None:
         pytest.skip("the Claude Code transcript collector is not installed on this checkout")
-    root = fake_deepsec_root(tmp_path, session_ids=["session-aaaa"])
-    projects = tmp_path / "claude-projects" / "-tmp-workspace"
-    projects.mkdir(parents=True)
-    (projects / "session-aaaa.jsonl").write_text("\n".join(json.dumps(record) for record in [
-        {"type": "assistant", "uuid": "u1", "sessionId": "session-aaaa", "message": {
-            "role": "assistant", "model": "claude-haiku-4-5",
-            "usage": {"input_tokens": 1200, "output_tokens": 210,
-                      "cache_read_input_tokens": 40, "cache_creation_input_tokens": 8},
-            "content": [{"type": "text", "text": "Reading the route handler."},
-                        {"type": "tool_use", "id": "toolu_1", "name": "Read",
-                         "input": {"file_path": "src/server.js"}}]}},
-        {"type": "user", "uuid": "u2", "sessionId": "session-aaaa", "message": {
-            "role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "toolu_1",
-                 "content": "     1\tconst { exec } = require('child_process');\n"}]},
-         "toolUseResult": {"file": {"filePath": "src/server.js", "startLine": 1, "numLines": 2,
-                                    "content": "const { exec } = require('child_process');\n"
-                                               "const express = require('express');\n"}}},
-        # The turn that consumes the read. The collector claims a context selection only for a
-        # file a later model turn actually saw, so a transcript that ends on the tool result
-        # describes a read nothing consumed.
-        {"type": "assistant", "uuid": "u3", "sessionId": "session-aaaa", "message": {
-            "role": "assistant", "model": "claude-haiku-4-5",
-            "usage": {"input_tokens": 1400, "output_tokens": 90},
-            "content": [{"type": "text", "text": "The handler shells out with request input."}]}},
-    ]) + "\n", encoding="utf-8")
+    root = fake_deepsec_root(tmp_path, session_ids=["session-aaaa"],
+                             transcript_dir=str(tmp_path / "claude-projects"))
 
     bundle = invoke(tmp_path, root, claude_projects_dir=str(tmp_path / "claude-projects"))
     result, execution = documents(bundle)
