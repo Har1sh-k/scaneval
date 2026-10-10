@@ -1875,6 +1875,13 @@ def test_a_request_the_provider_refused_is_a_failed_attempt_carrying_its_closed_
     assert first["api_error"] is None and first["limit"] is None
 
 
+def test_a_refused_request_does_not_deliver_the_read_before_it(tmp_path: Path):
+    """No model received the request, so the file it carried was not shown to one."""
+    events, summary = import_records(READ_THEN_REFUSED, tmp_path)
+    assert of_type(events, "context.selection") == []
+    assert summary.undelivered_tool_results == 1
+
+
 # --- more than one spelling of the same workspace --------------------------------------------
 
 # The shape of the real failure this pair of roots was added for: a harness handed the CLI
