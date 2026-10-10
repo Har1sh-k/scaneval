@@ -758,7 +758,8 @@ class _Turn:
     """
 
     __slots__ = ("message_id", "model", "usage", "usage_available", "text", "tool_uses",
-                 "sidechain", "agent_id", "session_id", "blocks", "request_event_id", "api_error")
+                 "sidechain", "agent_id", "session_id", "blocks", "request_event_id", "api_error",
+                 "first_origin", "last_origin", "tool_origins")
 
     def __init__(self, message_id: str) -> None:
         self.message_id = message_id
@@ -775,10 +776,17 @@ class _Turn:
         self.request_event_id: str | None = None
         # The CLI's own category when this record is its report of a refused request.
         self.api_error: str | None = None
+        # The first and last records that added to the message, and the record each tool use
+        # was written on.
+        self.first_origin: _Origin | None = None
+        self.last_origin = NO_ORIGIN
+        self.tool_origins: dict[str, _Origin] = {}
 
-    def absorb(self, record: dict[str, Any]) -> list[dict[str, Any]]:
+    def absorb(self, record: dict[str, Any], origin: _Origin = NO_ORIGIN) -> list[dict[str, Any]]:
         """Fold one record into the turn. Returns the blocks this record added, if any."""
         added: list[dict[str, Any]] = []
+        if self.first_origin is None:
+            self.first_origin = self.last_origin = origin
         message = record.get("message")
         if _is_api_error(record):
             category = record.get("error")
@@ -804,6 +812,9 @@ class _Turn:
                         self.text.append(block["text"])
                     elif block.get("type") == "tool_use":
                         self.tool_uses.append(block)
+                        self.tool_origins[identity] = origin
+        if added:
+            self.last_origin = origin
         if record.get("isSidechain") is True:
             self.sidechain = True
         for key_name in ("agentId", "agent_id"):
