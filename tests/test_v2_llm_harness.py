@@ -1013,6 +1013,46 @@ def test_scaneval_only_pi_history_is_preserved_per_call_without_resumption(tmp_p
                if event["type"] == "model.request")
 
 
+CLAUDE_HISTORY_RUNNER = """
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+export function resolveRunnerBinary(): string { return "claude"; }
+let calls = 0;
+export function createDefaultPiRunner() {
+  return { async runPi(invocation: any) {
+    calls += 1;
+    const sessionId = `00000000-0000-4000-8000-00000000000${calls}`;
+    const dir = join(process.env.HOME as string, ".claude", "projects", "-encoded-cwd");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${sessionId}.jsonl`), JSON.stringify({ args: invocation.args }) + "\\n");
+    return { code: 0, stdout: "", stderr: "", outputFormat: "json", structured: { sessionId } };
+  } };
+}
+"""
+
+
+def test_claude_history_is_moved_into_the_private_run_per_call(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    root = _stub_harness(tmp_path, "harness-claude-history", engine=PI_HISTORY_ENGINE, runner=CLAUDE_HISTORY_RUNNER)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="run-claude-history", runner="default")
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    output = json.loads((bundle / "raw" / "driver-output.json").read_text(encoding="utf-8"))
+    assert result["status"] == "success", execution.get("error")
+    assert output["claude_session_calls"] == 2
+    assert output["claude_session_missing"] == []
+    artifacts = {entry["id"] for entry in execution["raw_artifacts"]}
+    for number, prompt in [(1, "one"), (2, "two")]:
+        name = f"00000000-0000-4000-8000-00000000000{number}.jsonl"
+        assert f"pi-session/call-{number}/{name}" in artifacts
+        native = json.loads((bundle / "raw" / "pi-sessions" / f"call-{number}" / name).read_text())
+        assert native["args"][-1] == prompt
+        assert "--no-session" not in native["args"]
+    assert not list((home / ".claude" / "projects").rglob("*.jsonl")), "transcripts are moved, not copied"
+
+
 def test_pi_history_requires_content_tracing(tmp_path):
     adapter = get_adapter("llm-harness")
     spec = SystemSpec("sv", "llm-harness", {"harness": "securevibes-agent", "root": str(tmp_path),

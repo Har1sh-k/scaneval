@@ -18,8 +18,9 @@
 // Invoked by scaneval.adapters.llm_harness with the harness's own tsx:
 //   <harness>/node_modules/.bin/tsx llm_harness_driver.mts --config <driver-config.json>
 
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { appendFileSync, copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -164,6 +165,33 @@ function modelServed(structured: ClaudeStructured | null | undefined): string | 
   return keys.length === 1 ? keys[0] ?? null : null;
 }
 
+/**
+ * Move one claude transcript into a call's private directory.
+ *
+ * The CLI writes `<config dir>/projects/<encoded cwd>/<session id>.jsonl`. The encoding of the
+ * working directory is the CLI's business, so the projects directories are searched for the id
+ * instead of rebuilding it. The id comes from the CLI's own result object and must look like one
+ * before it is used in a path. Returns false when there was nothing to move.
+ */
+function moveClaudeTranscript(sessionId: string | null, destination: string): boolean {
+  if (!sessionId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) return false;
+  const projects = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "projects");
+  try {
+    for (const entry of readdirSync(projects, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const source = join(projects, entry.name, `${sessionId}.jsonl`);
+      if (!existsSync(source)) continue;
+      mkdirSync(destination, { recursive: true, mode: 0o700 });
+      copyFileSync(source, join(destination, `${sessionId}.jsonl`));
+      rmSync(source);
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
 interface InvocationView {
   model: string | null;
   thinking: string | null;
@@ -266,6 +294,11 @@ async function main(): Promise<void> {
   let modelAttempts = 0;
   let piSessionCalls = 0;
   const piSessionCallIds: string[] = [];
+  let claudeSessionCalls = 0;
+  const claudeSessionCallIds: string[] = [];
+  // Calls whose transcript was not found or not moved. Only the final attempt's session id is
+  // returned, so a transcript written by an earlier, retried attempt stays where the CLI put it.
+  const claudeSessionMissing: string[] = [];
   // Which CLI actually served each call. The tool policy differs by route, and neither
   // route's tool dispatch happens in this process, so this records what was asked for,
   // never what the CLI did with it.
@@ -512,6 +545,16 @@ async function main(): Promise<void> {
         piSessionCalls += 1;
         piSessionCallIds.push(minted);
       }
+      // The claude route has no session-directory variable, so the CLI keeps its transcript
+      // under its own projects directory. Persistence is turned on the same way, and the
+      // transcript is moved into this call's directory once the call returns its session id.
+      let claudeSessionDir: string | null = null;
+      if (binary === "claude" && config.pi_session_root && options.args) {
+        claudeSessionDir = join(config.pi_session_root, minted);
+        observedOptions = { ...options, args: options.args.filter((arg) => arg !== "--no-session") };
+        claudeSessionCalls += 1;
+        claudeSessionCallIds.push(minted);
+      }
       // The engine's own id when it tagged the call, so a context.selection event and the model
       // events of the same invocation share one call_id; the driver's own id when it did not.
       const callId = meta.invocationId ?? minted;
@@ -547,6 +590,10 @@ async function main(): Promise<void> {
       }
       try {
         const result = await baseRunner.runPi(invocation);
+        if (claudeSessionDir !== null) {
+          const sessionId = (result as { structured?: ClaudeStructured | null }).structured?.sessionId ?? null;
+          if (!moveClaudeTranscript(sessionId, claudeSessionDir)) claudeSessionMissing.push(minted);
+        }
         if (result.code !== 0) modelFailures += 1;
         const elapsed = Date.now() - began;
         if (runnerHooks === null) await emitUnhookedResponse(state, result, null, elapsed);
@@ -843,6 +890,12 @@ async function main(): Promise<void> {
     model_call_failures: modelFailures,
     pi_session_calls: piSessionCalls,
     pi_session_call_ids: piSessionCallIds,
+    // Claude transcripts are moved into the same per-call directories, so the adapter registers
+    // them with the pi ones. These fields say which calls were claude and which transcripts were
+    // not found.
+    claude_session_calls: claudeSessionCalls,
+    claude_session_call_ids: claudeSessionCallIds,
+    claude_session_missing: claudeSessionMissing,
     // CLI attempts, which is a different number from logical calls only where the runner
     // reports them; zero with no runner hooks, where an attempt is not observable at all.
     model_attempts: modelAttempts,
