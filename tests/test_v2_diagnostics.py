@@ -1362,12 +1362,29 @@ def _real_invocations() -> list[Path]:
     return sorted(path.parent for path in ROOT.glob("results/*/invocations/*/execution.json"))
 
 
+def _planned_targets(invocation: Path) -> int | None:
+    """How many targets the bundle's own plan declares, or None when it has no readable plan."""
+    plan = invocation / "evaluator" / "plan.json"
+    if not plan.is_file():
+        return None
+    targets = json.loads(plan.read_text(encoding="utf-8")).get("targets")
+    return len(targets) if isinstance(targets, list) else None
+
+
 @pytest.mark.skipif(not _real_invocations(), reason="no run bundle in this working copy")
 def test_a_real_run_bundle_reads_without_raising():
-    """Traces written before spans were emitted classify unknown, which is the honest answer."""
+    """Traces written before spans were emitted classify unknown, which is the honest answer.
+
+    A run made only to observe a scanner plans no labeled target, and that is a legitimate run
+    rather than a broken bundle: its document reads, and it lists no target rather than one
+    made up for it.
+    """
     for invocation in _real_invocations():
         document = diagnostics.context_coverage_for_invocation(invocation)
         assert document["diagnostic"] == "context_coverage"
+        if _planned_targets(invocation) == 0:
+            assert document["targets"] == [], f"{invocation.name} planned no target and must list none"
+            continue
         assert document["targets"], f"{invocation.name} planned no target"
         for target in document["targets"]:
             assert target["best"] in diagnostics.CLASSIFICATIONS
