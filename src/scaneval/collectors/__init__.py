@@ -486,8 +486,13 @@ def parse_lines(lines: Any, tracker: _Import) -> list[dict[str, Any]]:
     A blank line is not damage and is not counted: every one of these files ends with a
     newline, and a trailing empty string is how that newline reads after a split.
     """
+    return [record for _line, record in parse_numbered_lines(lines, tracker)]
+
+
+def parse_numbered_lines(lines: Any, tracker: _Import) -> list[tuple[int, dict[str, Any]]]:
+    """:func:`parse_lines`, with each record's 1-based line number in the file it came from."""
     records = []
-    for line in _read_lines(lines):
+    for number, line in enumerate(_read_lines(lines), start=1):
         text = line.strip() if isinstance(line, str) else ""
         if not text:
             continue
@@ -497,7 +502,7 @@ def parse_lines(lines: Any, tracker: _Import) -> list[dict[str, Any]]:
             tracker.malformed_lines += 1
             continue
         if isinstance(parsed, dict):
-            records.append(parsed)
+            records.append((number, parsed))
         else:
             # Valid JSON that is not a record: a bare number or list is as unreadable as a
             # broken line for this purpose, and counting it as malformed says so honestly.
@@ -514,6 +519,7 @@ __all__ = [
     "block_text",
     "clip",
     "parse_lines",
+    "parse_numbered_lines",
     "relocate_paths",
     "sha256_text",
     "workspace_path",
