@@ -347,6 +347,17 @@ def test_a_transcript_in_the_workspace_directory_must_say_it_ran_there(tmp_path:
     assert found.foreign == 1
 
 
+def test_a_linked_transcript_in_the_workspace_directory_is_never_adopted(tmp_path: Path):
+    projects = tmp_path / "projects"
+    workspace = "/private/tmp/trial-1/source"
+    elsewhere = session_file(tmp_path / "outside", WORKSPACE_SESSION, cwd=workspace)
+    directory = projects / claude_code.project_directory_name(workspace)
+    directory.mkdir(parents=True)
+    (directory / f"{WORKSPACE_SESSION}.jsonl").symlink_to(elsewhere)
+
+    assert claude_code.find_workspace_sessions(workspace, projects_dir=projects).session_ids == ()
+
+
 # --- turns ------------------------------------------------------------------------------
 
 
