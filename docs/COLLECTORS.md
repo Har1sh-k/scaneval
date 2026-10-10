@@ -185,6 +185,15 @@ do not mark the moments a latency analysis wants:
 | `tool.start` | `tool_use_record` | When the CLI wrote the block that calls the tool. |
 | `tool.end`, `context.selection` | `tool_result_record` | When the CLI wrote the tool's result. |
 
+`metadata.source_line` is the record's 1-based line in the file it was read from, so every
+event can be traced back to its record. Ordering one session's events by `source_line` gives
+the order the CLI wrote them. Ordering several sessions' events by `source_timestamp` gives
+how they interleaved.
+
+No duration is derived from these times. `duration_ms` is absent and `tool.end`'s
+`metadata.duration_ms` is `null`, because two record times bound an interval without
+measuring the call inside it. Codex's `exec --json` records carry no time, so a Codex import
+has no source timestamps.
 
 ## A failure message is free text, not a code
 
