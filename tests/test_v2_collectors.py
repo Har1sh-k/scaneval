@@ -378,6 +378,65 @@ def test_a_tool_start_points_at_the_request_event_of_the_turn_that_issued_it():
         assert start["parent_event_id"] in request_ids
 
 
+USAGE = {"input_tokens": 2, "output_tokens": 40,
+         "cache_read_input_tokens": 100, "cache_creation_input_tokens": 0}
+
+
+def assistant_block(message_id: str, block: dict) -> dict:
+    """One per-block record, shaped as Claude Code writes it: the usage repeats on each."""
+    return {"type": "assistant", "requestId": f"req-{message_id}",
+            "message": {"id": message_id, "model": "claude-fixture", "usage": dict(USAGE),
+                        "content": [block]}}
+
+
+def tool_use(tool_id: str, pattern: str) -> dict:
+    return {"type": "tool_use", "id": tool_id, "name": "search", "input": {"pattern": pattern}}
+
+
+def tool_result(tool_id: str, text: str) -> dict:
+    return {"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": tool_id, "content": text}]}}
+
+
+def import_records(records: list[dict], tmp_path: Path, *, mode: str = "metadata"):
+    path = tmp_path / "records.jsonl"
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+    return import_file(path, mode=mode)
+
+
+# Claude Code runs a tool as soon as its block has streamed, so a response that calls two
+# tools is written block, result, block, result. This is the issue's reproduction verbatim.
+INTERLEAVED = [
+    assistant_block("message-1", tool_use("tool-1", "alpha")),
+    tool_result("tool-1", "first result"),
+    assistant_block("message-1", tool_use("tool-2", "beta")),
+    tool_result("tool-2", "second result"),
+    assistant_block("message-2", {"type": "text", "text": "done"}),
+]
+
+
+def test_a_tool_use_written_after_an_earlier_tools_result_still_starts(tmp_path: Path):
+    """The second block is the rest of the same response, not a replay of it.
+
+    Treating it as a replay dropped the call's start and its input, so its result arrived
+    with nothing to pair with. Both calls start, both pair, and the response that issued
+    them is still one turn.
+    """
+    events, summary = import_records(INTERLEAVED, tmp_path)
+
+    starts = of_type(events, "tool.start")
+    assert [e["call_id"] for e in starts] == ["tool-1", "tool-2"]
+    assert summary.tool_calls == 2
+    assert summary.unmatched_tool_results == 0
+    assert summary.model_turns == 2
+    assert "assistant:replayed-message" not in " ".join(summary.notes)
+
+    first_request = of_type(events, "model.request")[0]
+    assert {e["parent_event_id"] for e in starts} == {first_request["event_id"]}
+    ends = {e["call_id"]: e for e in of_type(events, "tool.end")}
+    assert ends["tool-2"]["parent_event_id"] == first_request["event_id"]
+
+
 def test_a_read_result_becomes_a_span_whose_path_is_relative_to_the_workspace():
     """The span is the one claim a collector makes that Contract 5 later joins against.
 
