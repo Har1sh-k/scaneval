@@ -475,6 +475,41 @@ def test_an_exact_replay_of_a_tool_block_starts_nothing_twice(tmp_path: Path):
     assert any("no model response" in note for note in summary.notes)
 
 
+def test_a_later_block_of_the_same_response_does_not_deliver_an_earlier_read(tmp_path: Path):
+    """Delivery needs a new response. The rest of the response that asked for the read is
+    not one, so a file that ends there has an undelivered read."""
+    read = {"type": "tool_use", "id": "tool-read", "name": "Read",
+            "input": {"file_path": "/workspace/app.py"}}
+    read_result = {
+        "type": "user",
+        "message": {"content": [{"type": "tool_result", "tool_use_id": "tool-read",
+                                 "content": "1\tprint('hi')"}]},
+        "toolUseResult": {"type": "text", "file": {
+            "filePath": "/workspace/app.py", "content": "print('hi')",
+            "numLines": 1, "startLine": 1, "totalLines": 1}},
+    }
+    records = [
+        assistant_block("message-1", read),
+        read_result,
+        assistant_block("message-1", tool_use("tool-2", "beta")),
+        tool_result("tool-2", "second result"),
+    ]
+
+    events, summary = import_records(records, tmp_path)
+
+    assert of_type(events, "context.selection") == []
+    assert summary.undelivered_tool_results == 1
+
+    events, summary = import_records(
+        records + [assistant_block("message-2", {"type": "text", "text": "done"})], tmp_path
+    )
+    assert len(of_type(events, "context.selection")) == 1
+    assert summary.undelivered_tool_results == 0
+    order = [e["type"] for e in events]
+    assert order[order.index("context.selection") + 1] == "model.request"
+    assert order[: order.index("context.selection")].count("model.request") == 1
+
+
 def test_a_read_result_becomes_a_span_whose_path_is_relative_to_the_workspace():
     """The span is the one claim a collector makes that Contract 5 later joins against.
 
