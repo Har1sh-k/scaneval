@@ -1237,6 +1237,50 @@ def test_a_call_with_no_final_attempt_record_is_not_paired_into_an_attempt_it_ne
     assert "file prompt" not in json.dumps(ended), "metadata must never carry the prompt"
 
 
+# One planner call and one analysis call. The planner is given an inventory and an architecture
+# description rather than located source, so when it is instrumented it reports inputs and no
+# spans; ``__PLANNER_REPORTS__`` is false for an older build whose planner reports nothing.
+PLANNER_ENGINE = """
+export const HARNESS_OBSERVER_VERSION = 1;
+const ARGS = (prompt: string) => ["-p", "--no-session", "--model", "claude-haiku-4-5", prompt];
+export async function runRuntimeScan(options: any): Promise<any> {
+  const observer = options.observer;
+  if (__PLANNER_REPORTS__) {
+    observer.onContextSupplied({
+      invocationId: "planner-1", stage: "planner", promptChars: 41200, spans: [],
+      inputs: [
+        { kind: "file_inventory", chars: 900, items: 12, sha256: "c".repeat(64), truncated: false },
+        { kind: "architecture_context", chars: 3000, truncated: true, originalChars: 5000 },
+        { kind: "a-kind-from-a-later-build", chars: 5, sha256: "not a digest" },
+      ],
+    });
+  }
+  await options.llmRunner.runPi({ args: ARGS("plan"), cwd: options.repoPath, timeoutMs: 1000, env: {},
+    meta: { invocationId: "planner-1", stage: "planner" } });
+  observer.onContextSupplied({
+    invocationId: "analysis-1", stage: "llm-static.file", promptChars: 300,
+    spans: [{ path: "src/server.js", startLine: 1, endLine: 6, chars: 274, sha256: "a".repeat(64),
+              truncated: false, originalChars: 274, role: "primary" }],
+  });
+  await options.llmRunner.runPi({ args: ARGS("analyze"), cwd: options.repoPath, timeoutMs: 1000, env: {},
+    meta: { invocationId: "analysis-1", stage: "llm-static.file" } });
+  return { newFindings: [], updatedFindings: [],
+    bootstrapScan: { llmCalls: 2, failedCalls: 0, status: "ok", hypothesisCoverage: 1 },
+    runtimeProfile: "full", degraded: false, observer: { version: 1, hookFailures: 0 } };
+}
+"""
+
+
+def _planner_run(tmp_path: Path, *, planner_reports: bool) -> tuple[dict, dict, list[dict]]:
+    engine = PLANNER_ENGINE.replace("__PLANNER_REPORTS__", "true" if planner_reports else "false")
+    root = _stub_harness(tmp_path, "harness-planner", engine=engine, runner=NO_HOOKS_RUNNER)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="run-planner", runner="default")
+    output = json.loads((bundle / "raw" / "driver-output.json").read_text(encoding="utf-8"))
+    execution = load_document(bundle / "execution.json", "execution-record")
+    events = [json.loads(line) for line in (bundle / "trace" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    return output, execution, events
+
+
 def test_a_supplied_span_that_could_not_be_located_says_so_rather_than_naming_file_lines(tmp_path):
     """``location_known`` is the difference between a file position and a position in a prompt.
 
