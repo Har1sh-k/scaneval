@@ -278,9 +278,13 @@ would accept a damaged line as evidence. A record releases held context only whe
   record is the message we already saw rather than a second one. Accepting one would double
   that turn's usage and count as a second delivery.
 
-The per-block records a real message is written as are *not* replays: they share a
-`message.id` with the turn currently open and accumulate into it, and the replay check only
-sees a key whose turn was already emitted.
+The per-block records a real message is written as are *not* replays, and neither are the
+blocks of an emitted message that arrive after one of its tool results: both are the same
+response. Blocks are absorbed once each, by identity (a `tool_use` by its ID, any other block
+by its content), so a record that adds a block the message did not have yet continues the
+message, and a record whose every block was already seen is a replay. Neither one opens a
+turn or releases held context: the read whose result arrived between two blocks of a
+response is delivered by the next response, not by the rest of the one that asked for it.
 
 Records failing the test open no turn, release nothing, and are counted in `unknown_records`
 under the names `assistant:not-a-model-message` and `assistant:replayed-message`, with a note
