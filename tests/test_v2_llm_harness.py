@@ -1046,7 +1046,7 @@ def test_claude_history_is_moved_into_the_private_run_per_call(tmp_path, monkeyp
     artifacts = {entry["id"] for entry in execution["raw_artifacts"]}
     for number, prompt in [(1, "one"), (2, "two")]:
         name = f"00000000-0000-4000-8000-00000000000{number}.jsonl"
-        assert f"pi-session/call-{number}/{name}" in artifacts
+        assert f"claude-session/call-{number}/{name}" in artifacts
         native = json.loads((bundle / "raw" / "pi-sessions" / f"call-{number}" / name).read_text())
         assert native["args"][-1] == prompt
         assert "--no-session" not in native["args"]

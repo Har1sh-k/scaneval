@@ -1054,8 +1054,8 @@ class LlmHarnessAdapter(Adapter):
                      {"id": "driver-progress", "path": raw_dir / "driver-progress.log"},
                      {"id": "driver-config", "path": config_path}]
         session_notes: list[str] = []
-        pi_session_files = 0
-        captured_session_calls: set[str] = set()
+        # Listed now, registered once the driver's manifest says which backend each call used.
+        session_files: list[tuple[str, str, Path]] = []
         if pi_session_root is not None:
             try:
                 if enclosure.write(pi_session_root) is None:
@@ -1073,9 +1073,7 @@ class LlmHarnessAdapter(Adapter):
                         if enclosure.write(path) is None:
                             session_notes.append("pi session capture record escaped the private run directory")
                             continue
-                        artifacts.append({"id": f"pi-session/{call.name}/{entry.name}", "path": path})
-                        pi_session_files += 1
-                        captured_session_calls.add(call.name)
+                        session_files.append((call.name, entry.name, path))
             except FileNotFoundError:
                 pass  # A run that made no pi call has no history directory.
             except OSError as exc:
@@ -1187,15 +1185,18 @@ class LlmHarnessAdapter(Adapter):
         loss_message = accounting.message
         notes = notes_prefix + list(imported.notes) + plan_notes + session_notes + list(accounting.notes)
         if pi_session_root is not None:
-            pi_calls = output.get("pi_session_calls") if isinstance(output, dict) else None
-            expected_calls = output.get("pi_session_call_ids") if isinstance(output, dict) else None
-            notes.append(f"ScanEval-only pi session history: {pi_session_files} JSONL file(s) preserved for "
-                         f"{pi_calls if isinstance(pi_calls, int) else 'unknown'} logical pi call(s); "
-                         "separate call directories do not resume one another.")
-            if isinstance(expected_calls, list) and any(call not in captured_session_calls
-                                                        for call in expected_calls if isinstance(call, str)):
-                notes.append("Pi history is incomplete: at least one logical pi call has no session file. "
-                             "The observer trace and native history must not be treated as independent complete records.")
+            manifest = session_manifest(output)
+            backend_of = {entry["call"]: entry["backend"] for entry in manifest or ()}
+            registered: dict[str, set[str]] = {}
+            for call, name, path in session_files:
+                prefix = SESSION_BACKENDS.get(backend_of.get(call, ""), "native-session")
+                artifacts.append({"id": f"{prefix}/{call}/{name}", "path": path})
+                registered.setdefault(call, set()).add(name)
+            if manifest is None:
+                notes.append(f"The driver reported no session manifest, so the {len(session_files)} native session "
+                             "file(s) registered here cannot be attributed to calls, attempts or backends.")
+            else:
+                notes.extend(session_history_notes(manifest, registered))
         # What the boundary this run was observed at could and could not see. It is capability
         # dependent because the boundary is: the same adapter against an older harness build
         # sees less, and says so, rather than repeating a fixed sentence that is true of one of
