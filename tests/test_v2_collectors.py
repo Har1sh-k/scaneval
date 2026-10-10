@@ -1988,6 +1988,16 @@ def test_each_event_names_the_native_record_its_time_was_read_from(tmp_path: Pat
     assert when(first("tool.end")) == ("2026-10-10T03:04:00.000Z", "tool_result_record", 3)
 
 
+def test_sessions_imported_one_after_another_keep_the_order_they_ran_in(tmp_path: Path):
+    """Sequential import is not runtime order: the native times interleave the two sessions."""
+    events = (import_at(timed_session("a", 0), tmp_path, "a", EPOCH)
+              + import_at(timed_session("b", 1), tmp_path, "b", EPOCH))
+    assert [e["call_id"] for e in of_type(events, "model.request")] == ["a", "a", "b", "b"]
+
+    requests = sorted(of_type(events, "model.request"), key=lambda e: e["metadata"]["source_timestamp"])
+    assert [e["call_id"] for e in requests] == ["a", "b", "a", "b"]
+
+
 # --- more than one spelling of the same workspace --------------------------------------------
 
 # The shape of the real failure this pair of roots was added for: a harness handed the CLI
