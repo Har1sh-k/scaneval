@@ -294,6 +294,26 @@ def test_a_session_id_that_is_a_prefix_of_another_does_not_pick_up_its_files(tmp
     assert found == [projects / "-repo" / "abcdefgh.jsonl"]
 
 
+def session_file(directory: Path, session_id: str, *, cwd: str | None, named: str | None = None) -> Path:
+    """A minimal transcript whose records say where it ran and which session it is."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{session_id}.jsonl"
+    record = {"type": "user", "sessionId": named or session_id, "message": {"content": "go"}}
+    if cwd is not None:
+        record["cwd"] = cwd
+    path.write_text(json.dumps(record) + "\n")
+    return path
+
+
+WORKSPACE_SESSION = "11111111-2222-4333-8444-555555555555"
+OTHER_SESSION = "66666666-7777-4888-8999-000000000000"
+
+
+def test_project_directory_name_is_the_path_with_every_other_character_a_dash():
+    name = claude_code.project_directory_name("/private/var/folders/x_y/T/scaneval-trial.1/source")
+    assert name == "-private-var-folders-x-y-T-scaneval-trial-1-source"
+
+
 # --- turns ------------------------------------------------------------------------------
 
 
