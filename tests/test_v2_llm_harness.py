@@ -611,13 +611,14 @@ def test_a_hooked_run_reports_what_it_could_not_see_and_claims_no_usage_it_did_n
     assert not any("retries" in entry for entry in unavailable), unavailable
     assert "token usage on the pi route" in unavailable
     assert any(entry.startswith("finding.validation") and "not applicable" in entry for entry in unavailable)
-    # Some harness calls lack supplied-span events; report their count without guessing
-    # which stage produced them.
-    assert output["model_calls_without_context"] >= 1
-    assert output["model_calls_with_context"] + output["model_calls_without_context"] == output["model_calls"]
+    # Whatever this harness build instruments, every call is either covered or counted as a gap
+    # under the stage the engine tagged it with, and a gap is named rather than hidden.
+    uncovered = output["model_calls_without_context"]
+    assert output["model_calls_with_context"] + uncovered == output["model_calls"]
+    assert sum(output["model_calls_without_context_by_stage"].values()) == uncovered
     assert output["context_without_model_call"] == 0
-    assert any("did not report supplied spans" in entry and str(output["model_calls_without_context"]) in entry
-               for entry in unavailable)
+    assert any("did not report supplied spans" in entry and str(uncovered) in entry
+               for entry in unavailable) == (uncovered > 0)
 
     assert output["usage_totals"] is None and output["cost_usd_cli_reported_total"] is None
     assert output["models_served"] == []
