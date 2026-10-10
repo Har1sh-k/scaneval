@@ -363,6 +363,29 @@ right for a lookup and wrong for a capture report. `session_id_is_usable(session
 exported so an adapter can tell them apart: the first is a scanner record that cannot be
 trusted and is worth a note, the second is an ordinary run that kept no log.
 
+## A session nobody named
+
+`find_transcripts` needs an ID, and a harness may record IDs only for sessions that succeed.
+DeepSec writes `agentSessionId` only on the analysis entries of a batch that finished. A batch
+that failed, for example on an exhausted session limit, still leaves a transcript, but no record
+names it.
+
+`find_workspace_sessions` finds such sessions by working directory instead of by ID. Claude Code
+files a session under a project directory named after its working directory, with every
+character that is not an ASCII letter or digit replaced by `-`
+(`project_directory_name`). When the workspace was private to one invocation, that directory
+lists every session the invocation opened. It is bounded in three ways:
+
+- Only the directories named for the spellings in `workspace_root` are listed, never the rest
+  of `projects_dir`. The CLI shortens a name longer than 200 characters and adds a suffix, so a
+  long name is matched by its first 200 characters.
+- A transcript is adopted only when its records say they ran there. Every `cwd` must lie inside
+  the workspace, with at least one present, and every `sessionId` must match the file name.
+  Any other transcript is counted in `foreign` and not returned.
+- Each file goes through the same `lstat`, boundary, and no-follow read checks as an import.
+
+It returns main transcripts only. Pass each ID to `find_transcripts` for its subagent files.
+
 ## A transcript is a file somebody else is still writing
 
 The files `find_transcripts` returns are written by the CLI, by a process this collector
