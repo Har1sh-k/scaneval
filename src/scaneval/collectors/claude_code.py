@@ -97,6 +97,18 @@ SYNTHETIC_MODEL = "<synthetic>"
 API_ERRORS = ("authentication_failed", "billing_error", "rate_limit", "invalid_request",
               "server_error", "max_output_tokens", "unknown")
 
+# The text the CLI writes into a ``rate_limit`` API-error record when a usage limit, rather than
+# throttling, refused the request: "You've hit your session limit · resets 3am (America/Chicago)".
+# Read only off such a record, never off a model response, a tool result or anything a
+# repository could put in front of the model. The reset is kept exactly as written, with the
+# timezone the CLI named, and only when both are there; nothing converts it to an instant.
+LIMIT_MESSAGE = re.compile(
+    r"^You've hit your (?P<scope>[a-z0-9-]{1,20}) limit"
+    r"(?: \u00b7 resets (?P<at>[0-9]{1,2}(?::[0-9]{2})?\s?[ap]m) "
+    r"\((?P<tz>[A-Za-z]+(?:[/_+-][A-Za-z0-9]+){0,4})\))?\s*$")
+LIMIT_KINDS = {"session": "session_limit", "weekly": "weekly_limit"}
+
+
 def session_id_is_usable(session_id: Any) -> bool:
     """Whether this string may be looked up as a session ID at all.
 
