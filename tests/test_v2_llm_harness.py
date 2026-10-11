@@ -509,13 +509,14 @@ def test_the_runner_hooks_make_every_cli_attempt_a_paired_request_and_response(t
     requests = [event for event in events if event["type"] == "model.request"]
     responses = [event for event in events if event["type"] == "model.response"]
 
-    assert output["driver_version"] == "2.4.0"
+    assert output["driver_version"] == "2.4.1"
     assert output["hooks"] == {"runner": 1, "engine": 1}
     assert len(requests) == output["model_attempts"] >= output["model_calls"] >= 1
     for event in requests + responses:
         assert event["metadata"]["source"] == "harness_runner_hook"
         assert "attempt_id" in event, "a hooked attempt must say which attempt it was"
-        assert event["attempt_id"] == f"{event['call_id']}/attempt-{event['metadata']['attempt']}"
+        assert event["attempt_id"] == (
+            f"{event['call_id']}/{event['metadata']['runner_call_id']}/attempt-{event['metadata']['attempt']}")
     assert all(event["metadata"]["retries_observable"] is True for event in requests)
     assert all(event["metadata"]["route"] == "mock" for event in requests)
     assert all(event["metadata"]["max_attempts"] >= event["metadata"]["attempt"] >= 1 for event in requests)
@@ -1285,8 +1286,8 @@ def test_a_retried_call_records_each_attempt_and_the_usage_the_cli_reported(tmp_
     assert output["model_calls"] == 3 and output["model_attempts"] == 4
     assert output["model_call_failures"] == 2 and output["observed_routes"] == ["claude"]
     retried = [event for event in requests if event["call_id"] == "llm-bootstrap.hypothesis-1"]
-    assert [event["attempt_id"] for event in retried] == ["llm-bootstrap.hypothesis-1/attempt-1",
-                                                          "llm-bootstrap.hypothesis-1/attempt-2"]
+    assert [event["attempt_id"] for event in retried] == ["llm-bootstrap.hypothesis-1/call-1/attempt-1",
+                                                          "llm-bootstrap.hypothesis-1/call-1/attempt-2"]
     assert all(event["metadata"]["output_format"] == "json" for event in retried)
     first, final = [event for event in responses if event["call_id"] == "llm-bootstrap.hypothesis-1"]
     # Each attempt's own duration, as the runner measured it. The wrapper's elapsed time spans
@@ -1347,7 +1348,7 @@ def test_a_call_that_ended_in_a_throw_reports_the_attempt_the_runner_did_describ
              if event["type"] == "model.response" and event["call_id"] == "llm-static.file-1"]
 
     assert len(threw) == 1, "one attempt was reported, and it is the one the call ended on"
-    assert threw[0]["attempt_id"] == "llm-static.file-1/attempt-1"
+    assert threw[0]["attempt_id"] == "llm-static.file-1/call-2/attempt-1"
     assert threw[0]["metadata"]["attempt_record"] == "paired"
     assert threw[0]["metadata"]["will_retry"] is False
     assert threw[0]["metadata"]["exit_code"] == 1
@@ -1386,7 +1387,7 @@ def test_a_call_with_no_final_attempt_record_is_not_paired_into_an_attempt_it_ne
 
     assert len(unpaired) == 2, "the attempt that ran is reported, and so is the call that ended"
     attempted, ended = unpaired
-    assert attempted["attempt_id"] == "llm-static.file-2/attempt-1"
+    assert attempted["attempt_id"] == "llm-static.file-2/call-3/attempt-1"
     assert attempted["metadata"]["will_retry"] is True
     assert "attempt_id" not in ended, "no attempt record, so no attempt id to name"
     assert ended["capture_status"] == "partial"
@@ -1428,6 +1429,144 @@ export async function runRuntimeScan(options: any): Promise<any> {
     runtimeProfile: "full", degraded: false, observer: { version: 1, hookFailures: 0 } };
 }
 """
+
+
+PLANNER_RETRY_ENGINE = """
+export const HARNESS_OBSERVER_VERSION = 1;
+export async function runRuntimeScan(options: any): Promise<any> {
+  if (__REPORT_CONTEXT__) options.observer.onContextSupplied({
+    invocationId: "planner-1", stage: "planner", promptChars: 4, spans: [],
+    inputs: [{ kind: "file_inventory", chars: 4, items: 1, sha256: "c".repeat(64) }],
+  });
+  // The planner's outer retry retains its logical ID and prompt. The runner's own
+  // attempt counter starts over on the second runPi, just as the real runner's does.
+  for (let call = 0; call < 2; call++) {
+    try {
+      const result = await options.llmRunner.runPi({
+        args: ["-p", "--model", "test/mock", "plan"], cwd: options.repoPath,
+        timeoutMs: 1000, env: {}, meta: { invocationId: "planner-1", stage: "planner" },
+      });
+      if (result.code === 0) break;
+    } catch { /* A timeout also reaches this outer retry. */ }
+  }
+  return { newFindings: [], updatedFindings: [],
+    bootstrapScan: { llmCalls: 2, failedCalls: 0, status: "complete", hypothesisCoverage: 1 },
+    runtimeProfile: "full", degraded: false, observer: { version: 1, hookFailures: 0 } };
+}
+"""
+
+PLANNER_RETRY_RUNNER = """
+export const PI_RUNNER_HOOKS_VERSION = 1;
+export function resolveRunnerBinary(): string { return "pi"; }
+export function createDefaultPiRunner(options: any = {}) {
+  let calls = 0;
+  return { async runPi(invocation: any) {
+    calls++;
+    const failed = calls === 1;
+    // Two inner attempts on the failing call, one on the successful outer retry.
+    for (let attempt = 1; attempt <= (failed ? 2 : 1); attempt++) {
+      const start = { invocationId: invocation.meta?.invocationId, stage: "planner",
+        attempt, maxAttempts: 2, binary: "pi", modelRequested: "test/mock", thinking: null,
+        outputFormat: "text", promptChars: 4, timeoutMs: 1000 };
+      options.hooks?.onAttemptStart(start);
+      options.hooks?.onAttemptEnd({ ...start, durationMs: 1, code: failed ? 1 : 0,
+        stdoutChars: failed ? 0 : 2, stderrChars: failed ? 17 : 0,
+        willRetry: failed && attempt === 1,
+        ...(failed ? { failureKind: "timeout", error: "Command timed out" } : {}) });
+    }
+    if (failed && __THROW_TIMEOUT__) throw new Error("Command timed out");
+    return { code: failed ? 1 : 0, stdout: failed ? "" : "ok", stderr: failed ? "Command timed out" : "" };
+  } };
+}
+"""
+
+
+@pytest.mark.parametrize("hooked", [True, False], ids=["runner-hooks", "wrapper-only"])
+@pytest.mark.parametrize("reports_context", [True, False], ids=["context", "context-gap"])
+@pytest.mark.parametrize("throws", [True, False], ids=["throws", "nonzero-exit"])
+def test_planner_outer_retries_keep_unique_execution_ids_and_reconcile_context_counts(
+    tmp_path, hooked, reports_context, throws
+):
+    engine = PLANNER_RETRY_ENGINE.replace("__REPORT_CONTEXT__", str(reports_context).lower())
+    runner = PLANNER_RETRY_RUNNER.replace("__THROW_TIMEOUT__", str(throws).lower())
+    if not hooked:
+        runner = runner.replace("export const PI_RUNNER_HOOKS_VERSION = 1;", "")
+    root = _stub_harness(tmp_path, "planner-retry", engine=engine, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="planner-retry", runner="default",
+                                 capture_pi_sessions=False)
+    output = json.loads((bundle / "raw/driver-output.json").read_text())
+    events = [json.loads(line) for line in (bundle / "trace/events.jsonl").read_text().splitlines()]
+    requests = [event for event in events if event["type"] == "model.request"]
+    responses = [event for event in events if event["type"] == "model.response"]
+    assert output["model_calls"] == 2
+    assert output["model_calls_with_context"] == (2 if reports_context else 0)
+    assert output["model_calls_without_context"] == (0 if reports_context else 2)
+    assert output["model_calls_without_context_by_stage"] == ({} if reports_context else {"planner": 2})
+    assert output["context_without_model_call"] == 0
+    assert {event["call_id"] for event in requests + responses} == {"planner-1"}
+    assert [event["metadata"]["runner_call_id"] for event in requests] == (
+        ["call-1", "call-1", "call-2"] if hooked else ["call-1", "call-2"])
+    assert [event["metadata"]["runner_call_id"] for event in responses] == (
+        ["call-1", "call-1", "call-2"] if hooked else ["call-1", "call-2"])
+    assert all(event["capture_status"] == "complete" for event in requests)
+    if hooked:
+        expected = ["planner-1/call-1/attempt-1", "planner-1/call-1/attempt-2", "planner-1/call-2/attempt-1"]
+        assert [event["attempt_id"] for event in requests] == expected
+        assert [event["attempt_id"] for event in responses] == expected
+        assert [event["metadata"]["attempt"] for event in requests] == [1, 2, 1]
+        assert output["model_attempts"] == 3
+    else:
+        assert not any("attempt_id" in event for event in requests + responses)
+        assert output["model_attempts"] == 0
+
+
+def test_concurrent_runner_calls_sharing_a_logical_id_keep_their_own_events(tmp_path):
+    engine = """
+export async function runRuntimeScan(options: any) {
+  await Promise.all(["first", "second"].map(prompt => options.llmRunner.runPi({
+    args: ["-p", "--model", "test/mock", prompt], cwd: options.repoPath, timeoutMs: 1000,
+    env: {}, meta: { invocationId: "shared", stage: "planner" },
+  })));
+  return { newFindings: [], updatedFindings: [], runtimeProfile: "full", degraded: false,
+    bootstrapScan: { llmCalls: 2, failedCalls: 0, status: "complete", hypothesisCoverage: 1 } };
+}
+"""
+    runner = """
+export const PI_RUNNER_HOOKS_VERSION = 1;
+export function resolveRunnerBinary() { return "pi"; }
+export function createDefaultPiRunner(options: any) {
+  let release: () => void;
+  const bothStarted = new Promise<void>(resolve => { release = resolve; });
+  return { async runPi(invocation: any) {
+    const prompt = invocation.args.at(-1);
+    const start = { invocationId: invocation.meta.invocationId, stage: "planner", attempt: 1,
+      maxAttempts: 1, binary: "pi", modelRequested: "test/mock", thinking: null,
+      outputFormat: "text", promptChars: prompt.length, timeoutMs: 1000 };
+    options.hooks.onAttemptStart(start);
+    if (prompt === "first") await bothStarted;
+    else release();
+    options.hooks.onAttemptEnd({ ...start, durationMs: 1, code: 0, stdoutChars: prompt.length,
+      stderrChars: 0, willRetry: false });
+    return { code: 0, stdout: prompt, stderr: "" };
+  } };
+}
+"""
+    root = _stub_harness(tmp_path, "concurrent-shared-id", engine=engine, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="concurrent-shared-id", runner="default",
+                                 capture_pi_sessions=False)
+    output = json.loads((bundle / "raw/driver-output.json").read_text())
+    events = [json.loads(line) for line in (bundle / "trace/events.jsonl").read_text().splitlines()]
+    requests = [event for event in events if event["type"] == "model.request"]
+    responses = [event for event in events if event["type"] == "model.response"]
+    assert len(requests) == len(responses) == 2
+    expected = {"call-1": "first", "call-2": "second"}
+    assert {event["metadata"]["runner_call_id"]: event["content"]["args"][-1] for event in requests} == expected
+    assert {event["metadata"]["runner_call_id"]: event["content"]["stdout"] for event in responses} == expected
+    assert {event["attempt_id"] for event in requests} == {event["attempt_id"] for event in responses} == {
+        "shared/call-1/attempt-1", "shared/call-2/attempt-1"}
+    assert all(event["capture_status"] == "complete" for event in requests + responses)
+    assert output["model_calls"] == output["model_calls_without_context"] == 2
+    assert output["model_calls_without_context_by_stage"] == {"planner": 2}
 
 
 def _planner_run(tmp_path: Path, *, planner_reports: bool) -> tuple[dict, dict, list[dict]]:

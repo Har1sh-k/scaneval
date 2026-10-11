@@ -227,7 +227,7 @@ What the driver can see is a property of the harness build as much as of this ad
 
 Against a build that exports them, the driver additionally records:
 
-- one model request/response pair per **CLI attempt**, from inside the harness's own retry loop, so a retry is an observation rather than something folded into one event; the attempt number, the maximum, the retry decision and its backoff ride along, and each attempt joins its call by `call_id` with an `attempt_id` of `<call_id>/attempt-<n>`;
+- one model request/response pair per **CLI attempt**, from inside the harness's own retry loop, so a retry is an observation rather than something folded into one event; the attempt number, the maximum, the retry decision and its backoff ride along, and each attempt joins its call by `call_id` with an `attempt_id` of `<call_id>/<runner_call_id>/attempt-<n>`. The runner-call ID distinguishes outer retries that reuse the harness's logical call and restart the inner attempt counter;
 - on the claude route, the CLI's own token counts, its cost estimate, the turn count, the session id and the served model id, because the driver asks that route for `--output-format json` while the engine still receives exactly the text a text-mode run would have printed;
 - `context.selection` as the engine's own report of what it placed in each prompt: every span's path, line range, character count, the sha256 of exactly the text supplied, the role it played, and whether that text could be located in the file;
 - `finding.candidate` and `finding.filtered` under the engine's own candidate ids, alongside the submitted records.

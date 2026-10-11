@@ -24,7 +24,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const DRIVER_VERSION = "2.4.0";
+const DRIVER_VERSION = "2.4.1";
 
 interface DriverConfig {
   harness_root: string;
@@ -228,9 +228,11 @@ function describeInvocation(options: Record<string, unknown>, resolveBinary?: (a
   };
 }
 
-/** One logical model invocation: what the attempts of that call are joined against. */
+/** One runner invocation, linked to the harness's logical call and supplied context. */
 interface CallState {
   callId: string;
+  /** Unique runner invocation, even when an outer retry reuses the harness's logical ID. */
+  runnerCallId: string;
   view: InvocationView;
   route: string;
   /** The `willRetry: false` record, stashed for the wrapper to pair with the returned result. */
@@ -373,15 +375,17 @@ async function main(): Promise<void> {
   // route's tool dispatch happens in this process, so this records what was asked for,
   // never what the CLI did with it.
   const observedRoutes = new Set<string>();
+  // Runner hooks use this driver's unique ID internally. The emitted call_id stays the
+  // harness's logical ID so context and finding events retain their original association.
   const calls = new Map<string, CallState>();
   // Which invocations were seen from each side. Not every model call is instrumented -- the
   // Some harness stages do not report supplied spans, so count coverage rather than guessing
   // which stage caused each gap.
   const modelCallIds = new Set<string>();
   const contextCallIds = new Set<string>();
-  // The stage the engine itself tagged each call with, so a call nothing reported context for
-  // is counted under the engine's own name for it rather than one this driver guessed.
-  const callStages = new Map<string, string>();
+  // Count runner invocations, not distinct logical IDs: a planner may call its runner again
+  // after exhausting the runner's inner retries and reuse the same context and logical ID.
+  const runnerCalls: Array<{ callId: string; stage: string }> = [];
   const usageTotals: Record<string, number> = {};
   let usageObserved = false;
   let costTotal: number | null = null;
@@ -404,8 +408,8 @@ async function main(): Promise<void> {
     if (served) modelsServed.add(served);
   }
 
-  function attemptId(callId: string, attempt: number): string {
-    return `${callId}/attempt-${attempt}`;
+  function attemptId(state: CallState, attempt: number): string {
+    return `${state.callId}/${state.runnerCallId}/attempt-${attempt}`;
   }
 
   /** The structured half of a response event: what the claude json result object said. */
@@ -448,9 +452,10 @@ async function main(): Promise<void> {
         // Correlated or not, the request itself was fully observed; an attempt the driver
         // cannot tie back to a call it wrapped is reported as the partial observation it is.
         capture_status: correlated ? "complete" : "partial",
-        ...(state ? { call_id: state.callId, attempt_id: attemptId(state.callId, record.attempt) } : {}),
+        ...(state ? { call_id: state.callId, attempt_id: attemptId(state, record.attempt) } : {}),
         metadata: {
           source: "harness_runner_hook",
+          runner_call_id: state?.runnerCallId ?? null,
           // The mock runner spawns no CLI, so the binary the runner resolved off the argv
           // would name a process that never existed.
           route: config.runner === "mock" ? "mock" : state?.route ?? record.binary ?? "unknown",
@@ -484,10 +489,11 @@ async function main(): Promise<void> {
         // A retried attempt's stdout is not handed back through the runner, so this event
         // reports the attempt without the text it produced.
         capture_status: "partial",
-        ...(state ? { call_id: state.callId, attempt_id: attemptId(state.callId, record.attempt) } : {}),
+        ...(state ? { call_id: state.callId, attempt_id: attemptId(state, record.attempt) } : {}),
         duration_ms: Math.max(0, Math.round(record.durationMs)),
         metadata: {
           source: "harness_runner_hook",
+          runner_call_id: state?.runnerCallId ?? null,
           route: config.runner === "mock" ? "mock" : state?.route ?? record.binary ?? "unknown",
           model_requested: record.modelRequested,
           stage: record.stage ?? null,
@@ -532,7 +538,8 @@ async function main(): Promise<void> {
         capture_status: "partial",
         call_id: state.callId,
         duration_ms: elapsed,
-        metadata: { source: "driver_runner_wrapper", model_requested: state.view.model,
+        metadata: { source: "driver_runner_wrapper", runner_call_id: state.runnerCallId,
+                    model_requested: state.view.model,
                     exception: safeErrorMessage(error) },
       });
       return;
@@ -544,6 +551,7 @@ async function main(): Promise<void> {
       duration_ms: elapsed,
       metadata: {
         source: "driver_runner_wrapper",
+        runner_call_id: state.runnerCallId,
         model_requested: state.view.model,
         exit_code: result.code,
         stdout_chars: result.stdout.length,
@@ -565,13 +573,14 @@ async function main(): Promise<void> {
       // no attempt to name, so it carries no attempt id either. Both are partial.
       capture_status: record && result ? "complete" : "partial",
       call_id: state.callId,
-      ...(record ? { attempt_id: attemptId(state.callId, record.attempt) } : {}),
+      ...(record ? { attempt_id: attemptId(state, record.attempt) } : {}),
       // The attempt's own duration, as the runner measured it, so every attempt event in a
       // run is the same measurement. The wrapper's elapsed time spans the earlier attempts and
       // the backoffs between them, which is a different quantity and is recorded as one.
       duration_ms: record ? Math.max(0, Math.round(record.durationMs)) : elapsed,
       metadata: {
         source: "harness_runner_hook",
+        runner_call_id: state.runnerCallId,
         call_elapsed_ms: elapsed,
         route: state.route,
         model_requested: record?.modelRequested ?? state.view.model,
@@ -637,14 +646,13 @@ async function main(): Promise<void> {
       const view = describeInvocation(observedOptions as unknown as Record<string, unknown>, resolveBinary);
       const route = config.runner === "mock" ? "mock" : view.route;
       observedRoutes.add(route);
-      const state: CallState = { callId, view, route, final: null, attemptSessions: [] };
-      calls.set(callId, state);
+      const state: CallState = { callId, runnerCallId: minted, view, route, final: null, attemptSessions: [] };
+      calls.set(minted, state);
       modelCallIds.add(callId);
-      if (typeof meta.stage === "string" && meta.stage) callStages.set(callId, meta.stage);
-      // Injected so an untagged call still arrives at the hooks with an id to join on. The
-      // runners ignore meta; nothing the engine decides changes because of it.
-      const invocation = meta.invocationId === undefined
-        ? { ...observedOptions, meta: { ...meta, invocationId: callId } } : observedOptions;
+      runnerCalls.push({ callId, stage: typeof meta.stage === "string" && meta.stage ? meta.stage : "untagged" });
+      // The runner uses meta only for its hooks. A driver-owned key prevents concurrent or
+      // retried calls with the same harness ID from replacing each other's observation state.
+      const invocation = { ...observedOptions, meta: { ...meta, invocationId: minted } };
       const began = Date.now();
       if (runnerHooks === null) {
         await observer.emit({
@@ -655,6 +663,7 @@ async function main(): Promise<void> {
             // This driver's own wrapper around the harness runner, which is all an older
             // harness build exposes: one observation per logical call, taken from outside.
             source: "driver_runner_wrapper",
+            runner_call_id: minted,
             model_requested: view.model,
             thinking: view.thinking,
             route,
@@ -683,7 +692,7 @@ async function main(): Promise<void> {
       } finally {
         // Here rather than after the return, so a call that threw keeps its attempts' transcripts.
         if (claudeSessionDir !== null) archiveClaudeSessions(state, minted, returned, claudeSessionDir);
-        calls.delete(callId);
+        calls.delete(minted);
       }
     },
   };
@@ -929,11 +938,10 @@ async function main(): Promise<void> {
 
   // Model invocations the engine reported no context for. Measured, not assumed: which stages
   // are instrumented is the harness's business and changes as it instruments more of itself.
-  const untaggedIds = [...modelCallIds].filter((id) => !contextCallIds.has(id));
-  const untaggedCalls = untaggedIds.length;
+  const untagged = runnerCalls.filter(({ callId }) => !contextCallIds.has(callId));
+  const untaggedCalls = untagged.length;
   const untaggedByStage: Record<string, number> = {};
-  for (const id of untaggedIds) {
-    const stage = callStages.get(id) ?? "untagged";
+  for (const { stage } of untagged) {
     untaggedByStage[stage] = (untaggedByStage[stage] ?? 0) + 1;
   }
   const stagesListed = Object.entries(untaggedByStage).sort()
@@ -1001,9 +1009,9 @@ async function main(): Promise<void> {
     cost_usd_cli_reported_total: costTotal === null ? null : Math.round(costTotal * 1e6) / 1e6,
     models_served: [...modelsServed].sort(),
     observer_records: observerRecords,
-    // How many model invocations the engine reported context for, and how many it did not. An
-    // untagged call is an uninstrumented one, never a call that was given no context.
-    model_calls_with_context: [...modelCallIds].filter((id) => contextCallIds.has(id)).length,
+    // Runner invocations, including outer retries that share a harness call ID and its context.
+    // An untagged call is an uninstrumented one, never a call that was given no context.
+    model_calls_with_context: runnerCalls.length - untaggedCalls,
     model_calls_without_context: untaggedCalls,
     // The same calls by the stage the engine tagged each one with, "untagged" when it named none.
     model_calls_without_context_by_stage: Object.fromEntries(Object.entries(untaggedByStage).sort()),
