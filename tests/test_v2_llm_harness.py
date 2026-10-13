@@ -432,9 +432,9 @@ def test_mock_run_records_the_mock_route_and_its_policy_note(tmp_path):
     assert any("no model process is spawned" in note for note in execution["notes"])
     # 2.2.0 is the release that made the capture matrix depend on the harness build: the same
     # adapter now reports different categories against different harnesses, which is a change a
-    # reader of an old execution record must be able to date. 2.3.0 is the release that runs the
-    # harness's pr mode as well (changed deliberately from the value 2.2.0 this line pinned).
-    assert execution["adapter"]["version"] == "2.3.0"
+    # reader of an old execution record must be able to date. 2.3.0 added the harness's pr mode;
+    # 2.4.0 distinguishes a declared recovered planner timeout from an unresolved runner failure.
+    assert execution["adapter"]["version"] == "2.4.0"
 
 
 # Where an observation came from, as the trace event contract spells it. Two of these are this
@@ -509,7 +509,7 @@ def test_the_runner_hooks_make_every_cli_attempt_a_paired_request_and_response(t
     requests = [event for event in events if event["type"] == "model.request"]
     responses = [event for event in events if event["type"] == "model.response"]
 
-    assert output["driver_version"] == "2.4.1"
+    assert output["driver_version"] == "2.5.0"
     assert output["hooks"] == {"runner": 1, "engine": 1}
     assert len(requests) == output["model_attempts"] >= output["model_calls"] >= 1
     for event in requests + responses:
@@ -1532,6 +1532,406 @@ def test_planner_outer_retries_keep_unique_execution_ids_and_reconcile_context_c
         assert output["model_attempts"] == 0
 
 
+ACTUAL_PLANNER_RETRY_ENGINE = r'''
+import { runPlannerWithSingleTimeoutRetry, withPlannerInvocation } from __PLANNER_RETRY__;
+import { createIsolatedPiRunner } from __PI_RUNNER__;
+export const HARNESS_OBSERVER_VERSION = 1;
+export async function runRuntimeScan(options: any): Promise<any> {
+  options.observer.onContextSupplied({ invocationId: "planner-1", stage: "planner",
+    promptChars: 4, spans: [], inputs: [] });
+  const args: any = Object.freeze(["-p", "--model", "test/mock", "plan"]);
+  const env: any = Object.freeze({});
+  const before = JSON.stringify(args);
+  const outcome = await runPlannerWithSingleTimeoutRetry(
+    withPlannerInvocation(createIsolatedPiRunner(options.llmRunner), "planner-1"),
+    { args, cwd: options.repoPath, timeoutMs: 1000, env });
+  const recovered = outcome.result?.code === 0 && !outcome.timeoutReason;
+  if (recovered !== __EXPECT_RECOVERY__) throw new Error("unexpected planner retry outcome");
+  if (JSON.stringify(args) !== before || !Object.isFrozen(args) || !Object.isFrozen(env)) {
+    throw new Error("the observer changed planner invocation history");
+  }
+  __EXTRA_CALLS__
+  const notes = recovered
+    ? ["llm-planner-success", ...outcome.notes]
+    : [...outcome.notes, "llm-planner-timeout:timeout"];
+  return { newFindings: [], updatedFindings: [],
+    bootstrapPlan: { planner: recovered ? "llm" : "heuristic", notes },
+    bootstrapScan: { llmCalls: 1, failedCalls: 0, status: "ok", hypothesisCoverage: 1 },
+    runtimeProfile: "full", degraded: !recovered, observer: { version: 1, hookFailures: 0 } };
+}
+'''
+
+
+DECLARED_RETRY_RUNNER = r'''
+export const PI_RUNNER_HOOKS_VERSION = 1;
+export function resolveRunnerBinary(): string { return "pi"; }
+export function createDefaultPiRunner(options: any = {}) {
+  const failOn = new Set<number>(__FAIL_ON__);
+  let calls = 0;
+  return { async runPi(invocation: any) {
+    calls++;
+    const failed = failOn.has(calls);
+    const start = { invocationId: invocation.meta?.invocationId, stage: invocation.meta?.stage,
+      attempt: 1, maxAttempts: 1, binary: "pi", modelRequested: "test/mock", thinking: null,
+      outputFormat: "text", promptChars: invocation.args.at(-1).length, timeoutMs: 1000,
+      startedAt: new Date().toISOString() };
+    options.hooks?.onAttemptStart(start);
+    options.hooks?.onAttemptEnd({ ...start, durationMs: 1, code: failed ? 1 : 0,
+      stdoutChars: failed ? 0 : 2, stderrChars: failed ? 17 : 0, willRetry: false,
+      ...(failed ? { failureKind: "timeout", error: "Command timed out" } : {}) });
+    if (failed) throw new Error("Command timed out: synthetic-pi");
+    return { code: 0, stdout: "ok", stderr: "" };
+  } };
+}
+'''
+
+
+def _actual_planner_retry_run(tmp_path: Path, *, fail_on: list[int], recovered: bool,
+                              extra_calls: str = "") -> tuple[Path, dict, dict, list[dict]]:
+    planner_retry = SECUREVIBES / "src" / "runtime" / "planner-retry.ts"
+    if not planner_retry.is_file():
+        pytest.skip("securevibes-agent planner retry helper is not available")
+    engine = (ACTUAL_PLANNER_RETRY_ENGINE
+              .replace("__PLANNER_RETRY__", json.dumps(str(planner_retry)))
+              .replace("__PI_RUNNER__", json.dumps(str(planner_retry.with_name("pi-runner.ts"))))
+              .replace("__EXPECT_RECOVERY__", str(recovered).lower())
+              .replace("__EXTRA_CALLS__", extra_calls))
+    runner = DECLARED_RETRY_RUNNER.replace("__FAIL_ON__", json.dumps(fail_on))
+    root = _stub_harness(tmp_path, "actual-planner-retry", engine=engine, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="actual-planner-retry", runner="default",
+                                 capture_pi_sessions=False)
+    output = json.loads((bundle / "raw/driver-output.json").read_text())
+    execution = load_document(bundle / "execution.json", "execution-record")
+    events = [json.loads(line) for line in (bundle / "trace/events.jsonl").read_text().splitlines()]
+    return bundle, output, execution, events
+
+
+def test_actual_planner_timeout_retry_is_explicitly_recovered_without_erasing_failure_history(tmp_path):
+    _bundle, output, execution, events = _actual_planner_retry_run(
+        tmp_path, fail_on=[1], recovered=True)
+
+    assert execution["status"] == "success", execution.get("error")
+    assert output["model_calls"] == 2
+    assert output["model_call_failures"] == 1
+    assert output["model_call_failures_recovered"] == 1
+    assert output["model_call_failures_unrecovered"] == 0
+    assert output["planner_timeout_retry_declarations"] == 1
+    assert output["planner_timeout_failures_observed"] == 1
+    assert output["planner_timeout_recovery_candidates"] == 1
+    assert output["planner_timeout_recoveries"] == [{
+        "invocation_id": "planner-1", "failed_runner_call_id": "call-1",
+        "recovery_runner_call_id": "call-2"}]
+    responses = [event for event in events if event["type"] == "model.response"]
+    assert [event["metadata"]["runner_call_id"] for event in responses] == ["call-1", "call-2"]
+    assert responses[0]["metadata"]["error"] == "Command timed out"
+    assert responses[0]["capture_status"] == "partial"
+    assert responses[1]["content"]["stdout"] == "ok"
+    requests = [event for event in events if event["type"] == "model.request"]
+    assert [event["content"]["args"] for event in requests] == [
+        ["-p", "--model", "test/mock", "plan"], ["-p", "--model", "test/mock", "plan"]]
+    assert any("failed_runner_invocations=1 recovered_planner_timeouts=1 "
+               "unrecovered_runner_invocations=0" in note for note in execution["notes"])
+
+
+def test_declared_isolated_retry_recovers_by_request_value_without_emitting_its_environment(tmp_path):
+    engine = r'''
+export const HARNESS_OBSERVER_VERSION = 1;
+export async function runRuntimeScan(options: any): Promise<any> {
+  options.observer.onContextSupplied({ invocationId: "planner-1", stage: "planner",
+    promptChars: 4, spans: [], inputs: [] });
+  let isolated = 0;
+  const runner = { runPi: (invocation: any) => options.llmRunner.runPi({
+    ...invocation, args: invocation.args.map((arg: string) => arg), env: { ...invocation.env },
+    cwd: `${options.repoPath}/fresh-isolated-cwd-${++isolated}`,
+    meta: { ...invocation.meta, invocationId: "planner-1", stage: "planner" },
+  }) };
+  const invocation = { args: ["-p", "--model", "test/mock", "plan"], cwd: options.repoPath,
+    timeoutMs: 1000, env: { RETRY_TEST_SECRET: "must-not-appear-in-driver-output" } };
+  try { await runner.runPi(invocation); } catch { /* timeout-only helper retries once */ }
+  await runner.runPi(invocation);
+  return { newFindings: [], updatedFindings: [],
+    bootstrapPlan: { planner: "llm", notes: ["llm-planner-success", "llm-planner-timeout-retry:1"] },
+    bootstrapScan: { llmCalls: 1, failedCalls: 0, status: "ok", hypothesisCoverage: 1 },
+    runtimeProfile: "full", degraded: false, observer: { version: 1, hookFailures: 0 } };
+}
+'''
+    runner = DECLARED_RETRY_RUNNER.replace("__FAIL_ON__", "[1]")
+    root = _stub_harness(tmp_path, "declared-isolated-retry", engine=engine, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="declared-isolated-retry", runner="default",
+                                 capture_pi_sessions=False)
+    output = json.loads((bundle / "raw/driver-output.json").read_text())
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert output["model_call_failures"] == output["model_call_failures_recovered"] == 1
+    assert output["model_call_failures_unrecovered"] == 0
+    assert output["planner_timeout_recoveries"] == [{
+        "invocation_id": "planner-1", "failed_runner_call_id": "call-1",
+        "recovery_runner_call_id": "call-2"}]
+    assert "must-not-appear-in-driver-output" not in json.dumps(output)
+    assert execution["status"] == "success", execution.get("error")
+
+
+def test_exhausted_actual_planner_retry_keeps_every_failure_unrecovered(tmp_path):
+    _bundle, output, execution, _events = _actual_planner_retry_run(
+        tmp_path, fail_on=[1, 2], recovered=False)
+
+    assert execution["status"] == "partial"
+    assert execution["error"]["code"] == "llm_calls_failed"
+    assert output["model_call_failures"] == output["model_call_failures_unrecovered"] == 2
+    assert output["model_call_failures_recovered"] == 0
+    assert output["planner_timeout_failures_observed"] == 2
+    assert output["planner_timeout_recoveries"] == []
+
+
+INDEPENDENT_SAME_REF_ENGINE = r'''
+export const HARNESS_OBSERVER_VERSION = 1;
+export async function runRuntimeScan(options: any): Promise<any> {
+  options.observer.onContextSupplied({ invocationId: "planner-1", stage: "planner",
+    promptChars: 4, spans: [], inputs: [] });
+  const args: any = Object.freeze(["-p", "--model", "test/mock", "plan"]);
+  const env: any = Object.freeze({});
+  const invocation = { args, cwd: options.repoPath, timeoutMs: 1000, env,
+    meta: { invocationId: "planner-1", stage: "planner" } };
+  try { await options.llmRunner.runPi(invocation); } catch { /* independent failure */ }
+  await options.llmRunner.runPi(invocation);
+  return { newFindings: [], updatedFindings: [],
+    __PLAN_FIELDS__,
+    bootstrapScan: { llmCalls: 2, failedCalls: 0, status: "ok", hypothesisCoverage: 1 },
+    runtimeProfile: "full", degraded: false, observer: { version: 1, hookFailures: 0 } };
+}
+'''
+
+
+@pytest.mark.parametrize("plan_fields", [
+    'bootstrapPlan: { planner: "llm", notes: ["llm-planner-success"] }',
+    ('bootstrapPlan: { planner: "llm", notes: ["llm-planner-success"] }, '
+     'changePlan: { planner: "llm", notes: ["llm-planner-success", "llm-planner-timeout-retry:1"] }'),
+], ids=["no-declaration", "wrong-plan-declaration"])
+def test_sequential_same_reference_calls_are_not_a_declared_retry(tmp_path, plan_fields):
+    engine = INDEPENDENT_SAME_REF_ENGINE.replace("__PLAN_FIELDS__", plan_fields)
+    runner = DECLARED_RETRY_RUNNER.replace("__FAIL_ON__", "[1]")
+    root = _stub_harness(tmp_path, "independent-same-ref", engine=engine, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="independent-same-ref", runner="default",
+                                 capture_pi_sessions=False)
+    output = json.loads((bundle / "raw/driver-output.json").read_text())
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert output["planner_timeout_recovery_candidates"] == 1, "identity correlates but does not prove intent"
+    assert output["planner_timeout_retry_declarations"] == 0
+    assert output["model_call_failures"] == output["model_call_failures_unrecovered"] == 1
+    assert output["model_call_failures_recovered"] == 0
+    assert execution["status"] == "partial"
+
+
+def test_mutating_reused_args_after_a_timeout_cannot_form_a_recovery_pair(tmp_path):
+    engine = r'''
+export const HARNESS_OBSERVER_VERSION = 1;
+export async function runRuntimeScan(options: any): Promise<any> {
+  options.observer.onContextSupplied({ invocationId: "planner-1", stage: "planner",
+    promptChars: 4, spans: [], inputs: [] });
+  const args = ["-p", "--model", "test/mock", "plan"];
+  const env = {};
+  const invocation = { args, cwd: options.repoPath, timeoutMs: 1000, env,
+    meta: { invocationId: "planner-1", stage: "planner" } };
+  try { await options.llmRunner.runPi(invocation); } catch { /* first operation ended */ }
+  args[args.length - 1] = "different-plan";
+  await options.llmRunner.runPi(invocation);
+  return { newFindings: [], updatedFindings: [],
+    bootstrapPlan: { planner: "llm", notes: ["llm-planner-success", "llm-planner-timeout-retry:1"] },
+    bootstrapScan: { llmCalls: 2, failedCalls: 0, status: "ok", hypothesisCoverage: 1 },
+    runtimeProfile: "full", degraded: false, observer: { version: 1, hookFailures: 0 } };
+}
+'''
+    runner = DECLARED_RETRY_RUNNER.replace("__FAIL_ON__", "[1]")
+    root = _stub_harness(tmp_path, "mutated-planner-args", engine=engine, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="mutated-planner-args", runner="default",
+                                 capture_pi_sessions=False)
+    output = json.loads((bundle / "raw/driver-output.json").read_text())
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert output["planner_timeout_retry_declarations"] == 1
+    assert output["planner_timeout_recovery_candidates"] == 0
+    assert output["model_call_failures"] == output["model_call_failures_unrecovered"] == 1
+    assert output["model_call_failures_recovered"] == 0
+    assert execution["status"] == "partial"
+
+
+def test_malformed_retry_fingerprint_fields_are_unavailable_not_a_driver_failure(tmp_path):
+    engine = r'''
+export const HARNESS_OBSERVER_VERSION = 1;
+export async function runRuntimeScan(options: any): Promise<any> {
+  options.observer.onContextSupplied({ invocationId: "planner-1", stage: "planner",
+    promptChars: 4, spans: [], inputs: [] });
+  const invocation: any = { args: ["-p", "--model", "test/mock", "plan"],
+    cwd: options.repoPath, timeoutMs: 1000, env: undefined,
+    meta: { invocationId: "planner-1", stage: "planner" } };
+  try { await options.llmRunner.runPi(invocation); } catch { /* timeout-only helper retries */ }
+  await options.llmRunner.runPi(invocation);
+  return { newFindings: [], updatedFindings: [],
+    bootstrapPlan: { planner: "llm", notes: ["llm-planner-success", "llm-planner-timeout-retry:1"] },
+    bootstrapScan: { llmCalls: 1, failedCalls: 0, status: "ok", hypothesisCoverage: 1 },
+    runtimeProfile: "full", degraded: false, observer: { version: 1, hookFailures: 0 } };
+}
+'''
+    runner = DECLARED_RETRY_RUNNER.replace("__FAIL_ON__", "[1]")
+    root = _stub_harness(tmp_path, "malformed-retry-fields", engine=engine, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="malformed-retry-fields", runner="default",
+                                 capture_pi_sessions=False)
+    output = json.loads((bundle / "raw/driver-output.json").read_text())
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert output.get("error") is None, "optional correlation must not fail the driver"
+    assert output["model_calls"] == 2
+    assert output["planner_timeout_failures_observed"] == 1
+    assert output["planner_timeout_recovery_candidates"] == 0
+    assert output["model_call_failures"] == output["model_call_failures_unrecovered"] == 1
+    assert output["model_call_failures_recovered"] == 0
+    assert execution["status"] == "partial"
+
+
+def test_stale_active_plan_retry_note_does_not_manufacture_a_recovery(tmp_path):
+    engine = r'''
+export const HARNESS_OBSERVER_VERSION = 1;
+export async function runRuntimeScan(): Promise<any> {
+  return { newFindings: [], updatedFindings: [],
+    bootstrapPlan: { planner: "llm", notes: ["llm-planner-success", "llm-planner-timeout-retry:1"] },
+    bootstrapScan: { llmCalls: 0, failedCalls: 0, status: "ok", hypothesisCoverage: 1 },
+    runtimeProfile: "full", degraded: false, observer: { version: 1, hookFailures: 0 } };
+}
+'''
+    runner = DECLARED_RETRY_RUNNER.replace("__FAIL_ON__", "[]")
+    root = _stub_harness(tmp_path, "stale-planner-retry-note", engine=engine, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="stale-planner-retry-note", runner="default",
+                                 capture_pi_sessions=False)
+    output = json.loads((bundle / "raw/driver-output.json").read_text())
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert output["planner_timeout_retry_declarations"] == 1
+    assert output["planner_timeout_failures_observed"] == 0
+    assert output["planner_timeout_recovery_candidates"] == 0
+    assert output["planner_timeout_recoveries"] == []
+    assert output["model_call_failures"] == output["model_call_failures_unrecovered"] == 0
+    assert (execution.get("error") or {}).get("code") != "llm_calls_failed"
+
+
+def test_one_declared_retry_cannot_recover_an_independent_same_reference_pair(tmp_path):
+    extra = r'''
+  options.observer.onContextSupplied({ invocationId: "planner-independent", stage: "planner",
+    promptChars: 5, spans: [], inputs: [] });
+  const otherArgs: any = Object.freeze(["-p", "--model", "test/mock", "other"]);
+  const otherEnv: any = Object.freeze({});
+  const other = { args: otherArgs, cwd: options.repoPath, timeoutMs: 1000, env: otherEnv,
+    meta: { invocationId: "planner-independent", stage: "planner" } };
+  try { await options.llmRunner.runPi(other); } catch { /* not the helper's retry */ }
+  await options.llmRunner.runPi(other);
+'''
+    _bundle, output, execution, _events = _actual_planner_retry_run(
+        tmp_path, fail_on=[1, 3], recovered=True, extra_calls=extra)
+
+    assert output["planner_timeout_retry_declarations"] == 1
+    assert output["planner_timeout_failures_observed"] == 2
+    assert output["planner_timeout_recovery_candidates"] == 2
+    assert output["planner_timeout_recoveries"] == []
+    assert output["model_call_failures"] == output["model_call_failures_unrecovered"] == 2
+    assert execution["status"] == "partial"
+
+
+def test_recovered_planner_timeout_does_not_erase_an_independent_other_stage_failure(tmp_path):
+    extra = r'''
+  try {
+    await options.llmRunner.runPi({ args: ["-p", "--model", "test/mock", "analysis"],
+      cwd: options.repoPath, timeoutMs: 1000, env: {},
+      meta: { invocationId: "analysis-1", stage: "llm-static.file" } });
+  } catch { /* this failure is unrelated to the recovered planner timeout */ }
+'''
+    _bundle, output, execution, _events = _actual_planner_retry_run(
+        tmp_path, fail_on=[1, 3], recovered=True, extra_calls=extra)
+
+    assert output["planner_timeout_failures_observed"] == 1
+    assert output["planner_timeout_recoveries"] == [{
+        "invocation_id": "planner-1", "failed_runner_call_id": "call-1",
+        "recovery_runner_call_id": "call-2"}]
+    assert output["model_call_failures"] == 2
+    assert output["model_call_failures_recovered"] == 1
+    assert output["model_call_failures_unrecovered"] == 1
+    assert execution["status"] == "partial"
+
+
+def test_unfingerprintable_planner_timeout_makes_the_native_retry_note_ambiguous(tmp_path):
+    extra = r'''
+  try {
+    await options.llmRunner.runPi({ args: ["-p", "--model", "test/mock", "other-plan"],
+      cwd: options.repoPath, timeoutMs: 1000, env: {}, meta: { stage: "planner" } });
+  } catch { /* planner timeout with no logical invocation id */ }
+'''
+    _bundle, output, execution, _events = _actual_planner_retry_run(
+        tmp_path, fail_on=[1, 3], recovered=True, extra_calls=extra)
+
+    assert output["planner_timeout_retry_declarations"] == 1
+    assert output["planner_timeout_failures_observed"] == 2
+    assert output["planner_timeout_recovery_candidates"] == 1
+    assert output["planner_timeout_recoveries"] == []
+    assert output["model_call_failures"] == output["model_call_failures_unrecovered"] == 2
+    assert execution["status"] == "partial"
+
+
+CONCURRENT_SAME_REF_ENGINE = r'''
+export const HARNESS_OBSERVER_VERSION = 1;
+export async function runRuntimeScan(options: any): Promise<any> {
+  options.observer.onContextSupplied({ invocationId: "planner-1", stage: "planner",
+    promptChars: 4, spans: [], inputs: [] });
+  const invocation = { args: ["-p", "--model", "test/mock", "plan"], cwd: options.repoPath,
+    timeoutMs: 1000, env: {}, meta: { invocationId: "planner-1", stage: "planner" } };
+  await Promise.allSettled([options.llmRunner.runPi(invocation), options.llmRunner.runPi(invocation)]);
+  return { newFindings: [], updatedFindings: [],
+    bootstrapPlan: { planner: "llm", notes: ["llm-planner-success", "llm-planner-timeout-retry:1"] },
+    bootstrapScan: { llmCalls: 2, failedCalls: 0, status: "ok", hypothesisCoverage: 1 },
+    runtimeProfile: "full", degraded: false, observer: { version: 1, hookFailures: 0 } };
+}
+'''
+
+
+CONCURRENT_SAME_REF_RUNNER = r'''
+export const PI_RUNNER_HOOKS_VERSION = 1;
+export function resolveRunnerBinary(): string { return "pi"; }
+export function createDefaultPiRunner(options: any = {}) {
+  let calls = 0;
+  let release: () => void;
+  const bothStarted = new Promise<void>(resolve => { release = resolve; });
+  return { async runPi(invocation: any) {
+    calls++;
+    const call = calls;
+    const start = { invocationId: invocation.meta?.invocationId, stage: invocation.meta?.stage,
+      attempt: 1, maxAttempts: 1, binary: "pi", modelRequested: "test/mock", thinking: null,
+      outputFormat: "text", promptChars: 4, timeoutMs: 1000, startedAt: new Date().toISOString() };
+    options.hooks?.onAttemptStart(start);
+    if (call === 1) await bothStarted; else release();
+    const failed = call === 1;
+    options.hooks?.onAttemptEnd({ ...start, durationMs: 1, code: failed ? 1 : 0,
+      stdoutChars: failed ? 0 : 2, stderrChars: failed ? 17 : 0, willRetry: false,
+      ...(failed ? { failureKind: "timeout", error: "Command timed out" } : {}) });
+    if (failed) throw new Error("Command timed out: synthetic-pi");
+    return { code: 0, stdout: "ok", stderr: "" };
+  } };
+}
+'''
+
+
+def test_concurrent_calls_with_the_same_identity_cannot_be_a_recovery_pair(tmp_path):
+    root = _stub_harness(tmp_path, "concurrent-same-ref", engine=CONCURRENT_SAME_REF_ENGINE,
+                         runner=CONCURRENT_SAME_REF_RUNNER)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="concurrent-same-ref", runner="default",
+                                 capture_pi_sessions=False)
+    output = json.loads((bundle / "raw/driver-output.json").read_text())
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert output["planner_timeout_retry_declarations"] == 1
+    assert output["planner_timeout_recovery_candidates"] == 0
+    assert output["model_call_failures"] == output["model_call_failures_unrecovered"] == 1
+    assert output["model_call_failures_recovered"] == 0
+    assert execution["status"] == "partial"
+
+
 def test_concurrent_runner_calls_sharing_a_logical_id_keep_their_own_events(tmp_path):
     engine = """
 export async function runRuntimeScan(options: any) {
@@ -1694,6 +2094,69 @@ def test_unrecovered_model_call_makes_completed_scan_partial(tmp_path, monkeypat
     assert result["status"] == execution["status"] == "partial"
     assert result["error"]["code"] == execution["error"]["code"] == "llm_calls_failed"
     assert result["claims"][0]["native_cwe"] == ["CWE-287"]
+
+
+@pytest.mark.parametrize("partition,expected", [
+    ({"model_call_failures": 1, "model_call_failures_recovered": 1,
+      "model_call_failures_unrecovered": 0}, "success"),
+    ({"model_call_failures": 1, "model_call_failures_recovered": 1,
+      "model_call_failures_unrecovered": 1}, "partial"),
+], ids=["reconciled-recovery", "inconsistent-partition"])
+def test_only_a_reconciled_driver_failure_partition_can_clear_a_recovered_timeout(
+    tmp_path, monkeypatch, partition, expected
+):
+    output = {**DRIVER_OUTPUT, **partition}
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {}, output=output)
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert result["status"] == execution["status"] == expected
+    if expected == "partial":
+        assert result["error"]["code"] == "llm_calls_failed"
+    else:
+        assert result.get("error") is None
+
+
+RECOVERED_TIMEOUT_PARTITION = {
+    "model_call_failures": 1,
+    "model_call_failures_recovered": 1,
+    "model_call_failures_unrecovered": 0,
+}
+
+
+@pytest.mark.parametrize("summary", [
+    {"bootstrapScan": {"llmCalls": 1, "failedCalls": 0, "status": "inconclusive",
+                       "reasons": ["coverage incomplete"]},
+     "runtimeProfile": "lite", "degraded": True},
+    {"runtimeProfile": "lite", "degraded": False},
+    {"bootstrapScan": {"llmCalls": 1, "failedCalls": 0},
+     "runtimeProfile": "lite", "degraded": False},
+    {"bootstrapScan": {"llmCalls": 1, "failedCalls": 0, "status": "complete"},
+     "runtimeProfile": "degraded", "degraded": True,
+     "degradation": {"stage": "planner", "reason": "quota_exhausted", "fallback": "heuristic"}},
+], ids=["inconclusive", "missing-scan-record", "missing-scan-status", "native-degradation"])
+def test_recovered_timeout_does_not_mask_incomplete_native_scan_status(
+    tmp_path, monkeypatch, summary
+):
+    output = {**DRIVER_OUTPUT, **RECOVERED_TIMEOUT_PARTITION, "summary": summary}
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {}, output=output)
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert result["status"] == execution["status"] == "partial"
+    assert result["error"]["code"] == execution["error"]["code"] == "harness_inconclusive"
+
+
+def test_recovered_timeout_does_not_mask_import_loss(tmp_path, monkeypatch):
+    summary = {**DRIVER_OUTPUT["summary"],
+               "newFindings": [{"id": "SV-AUTH-AUTHBYPASS-001"}]}
+    output = {**DRIVER_OUTPUT, **RECOVERED_TIMEOUT_PARTITION, "summary": summary}
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {}, output=output)
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert result["status"] == execution["status"] == "partial"
+    assert result["error"]["code"] == execution["error"]["code"] == "import_loss"
 
 
 def _fake_harness_root(tmp_path: Path) -> Path:
@@ -2717,7 +3180,7 @@ def test_the_adapter_declares_full_and_pr_scans():
     adapter = get_adapter("llm-harness")
 
     assert adapter.scan_modes == frozenset({"full", "pr"})
-    assert adapter.adapter_version == "2.3.0"
+    assert adapter.adapter_version == "2.4.0"
 
 
 def test_a_pr_request_runs_the_harness_in_pr_mode_between_the_commits_the_request_names(tmp_path, monkeypatch):
@@ -2742,7 +3205,7 @@ def test_a_pr_request_runs_the_harness_in_pr_mode_between_the_commits_the_reques
     execution = load_document(bundle / "execution.json", "execution-record")
     assert result["status"] == "success" and result["location_basis"] == "pr_head"
     assert [claim["claim_id"] for claim in result["claims"]] == ["SV-AUTH-AUTHBYPASS-001"]
-    assert execution["provenance"]["mode"] == "pr" and execution["adapter"]["version"] == "2.3.0"
+    assert execution["provenance"]["mode"] == "pr" and execution["adapter"]["version"] == "2.4.0"
     assert execution["provenance"]["pr"]["prepared_state"] == "fresh"
     assert any(note.startswith("Prepared state: fresh.") for note in execution["notes"])
     assert all(not note.startswith("Prepared state") for note in

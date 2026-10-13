@@ -221,13 +221,14 @@ Three adapters are registered: `semgrep`, `llm-harness`, and `deepsec`. An adapt
 
 ## Observer connection: what is captured and what is not
 
-The TypeScript observer is connected to the own harness through [`llm_harness_driver.mts`](../src/scaneval/adapters/llm_harness_driver.mts), driver version `2.3.0`. Importing the SDK still captures nothing on its own; this driver is what emits.
+The TypeScript observer is connected to the own harness through [`llm_harness_driver.mts`](../src/scaneval/adapters/llm_harness_driver.mts), driver version `2.5.0`. Importing the SDK still captures nothing on its own; this driver is what emits.
 
 What the driver can see is a property of the harness build as much as of this adapter, and it never assumes. It feature-detects two optional surfaces the harness may export — the runner hooks (`PI_RUNNER_HOOKS_VERSION`) and the engine observer (`HARNESS_OBSERVER_VERSION`) — records which of them it found as `hooks` in its own output, and falls back independently for each one it does not find. A checkout exporting neither is observed exactly as it was before either existed: one `model.request`/`model.response` pair per logical call, `context.selection` from the harness's own progress notes, and `finding.submitted` from the returned summary. That fallback is what keeps an unpatched harness checkout working.
 
 Against a build that exports them, the driver additionally records:
 
 - one model request/response pair per **CLI attempt**, from inside the harness's own retry loop, so a retry is an observation rather than something folded into one event; the attempt number, the maximum, the retry decision and its backoff ride along, and each attempt joins its call by `call_id` with an `attempt_id` of `<call_id>/<runner_call_id>/attempt-<n>`. The runner-call ID distinguishes outer retries that reuse the harness's logical call and restart the inner attempt counter;
+- separate raw, recovered and unrecovered runner-failure counts. A successful outer planner timeout retry does not erase its failed invocation, but only the unrecovered remainder can make an otherwise completed scan partial; ambiguous retry attribution stays unrecovered;
 - on the claude route, the CLI's own token counts, its cost estimate, the turn count, the session id and the served model id, because the driver asks that route for `--output-format json` while the engine still receives exactly the text a text-mode run would have printed;
 - `context.selection` as the engine's own report of what it placed in each prompt: every span's path, line range, character count, the sha256 of exactly the text supplied, the role it played, and whether that text could be located in the file;
 - `finding.candidate` and `finding.filtered` under the engine's own candidate ids, alongside the submitted records.

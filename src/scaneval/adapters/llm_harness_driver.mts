@@ -20,11 +20,12 @@
 
 import { appendFileSync, copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const DRIVER_VERSION = "2.4.1";
+const DRIVER_VERSION = "2.5.0";
 
 interface DriverConfig {
   harness_root: string;
@@ -72,6 +73,32 @@ type PiResult = {
 };
 type PiInvocation = { args?: string[]; request?: unknown; cwd: string; timeoutMs: number; env: NodeJS.ProcessEnv; meta?: PiMeta };
 type PiRunner = { runPi(options: PiInvocation): Promise<PiResult> };
+
+// Compatibility fingerprint for the harness's current outer planner retry helper. Its isolation
+// wrapper gives every attempt a new argv array and temporary cwd, so identity and cwd cannot join
+// the calls. The hash covers the stable request values instead, including the source-bearing
+// prompt and environment, and is never written out. This is only correlation: the summary's
+// native retry note is still required before a failed call is classified as recovered.
+interface PlannerRetryIdentity {
+  invocationId: string;
+  requestFingerprint: string;
+}
+
+interface PendingPlannerTimeout {
+  identity: PlannerRetryIdentity;
+  runnerCallId: string;
+}
+
+interface ActivePlannerCall {
+  identity: PlannerRetryIdentity;
+  concurrent: boolean;
+}
+
+interface PlannerTimeoutRecovery {
+  invocation_id: string;
+  failed_runner_call_id: string;
+  recovery_runner_call_id: string;
+}
 
 // PiAttemptStart / PiAttemptRecord, as much of each as this driver reads.
 interface AttemptStart {
@@ -228,6 +255,52 @@ function describeInvocation(options: Record<string, unknown>, resolveBinary?: (a
   };
 }
 
+function plannerRetryIdentity(options: PiInvocation, invocationId: unknown, stage: unknown): PlannerRetryIdentity | null {
+  // The runner boundary is implemented by a pluggable JavaScript module, so its runtime value
+  // can be thinner or stranger than the TypeScript interface promises. Correlation is optional
+  // observation: malformed fields must make it unavailable, never make the runner call fail.
+  try {
+    if (stage !== "planner" || typeof invocationId !== "string" || !invocationId || !Array.isArray(options.args)
+        || !options.args.every((arg) => typeof arg === "string")
+        || typeof options.timeoutMs !== "number" || !Number.isFinite(options.timeoutMs)
+        || !options.env || typeof options.env !== "object" || Array.isArray(options.env)) return null;
+    const environment = Object.entries(options.env);
+    if (!environment.every(([, value]) => typeof value === "string" || value === undefined)) return null;
+    environment.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+    // Snapshot array values before the call can mutate them. Sorted environment entries make
+    // wrapper-created copies compare by value. Hashing avoids retaining or emitting API keys;
+    // length-delimited JSON keeps boundaries unambiguous.
+    const stableRequest = JSON.stringify([options.args.slice(), options.timeoutMs, environment]);
+    return { invocationId, requestFingerprint: createHash("sha256").update(stableRequest).digest("hex") };
+  } catch {
+    return null;
+  }
+}
+
+function samePlannerRetryIdentity(left: PlannerRetryIdentity, right: PlannerRetryIdentity): boolean {
+  return left.invocationId === right.invocationId
+    && left.requestFingerprint === right.requestFingerprint;
+}
+
+// Kept byte-for-byte equivalent to the current harness helper's timeout classifier. A different
+// failure is never eligible for its timeout-only outer retry compatibility rule.
+function isPlannerTimeoutMessage(message: string): boolean {
+  return /(?:^|[^a-z0-9_])(?:llm_)?(?:time(?:d)?\s+out|timeout|timed_out)(?:$|[^a-z0-9_])/i.test(message);
+}
+
+function declaredPlannerTimeoutRetries(summary: unknown, mode: DriverConfig["mode"]): number {
+  if (!summary || typeof summary !== "object") return 0;
+  const planKey = mode === "bootstrap" ? "bootstrapPlan" : "changePlan";
+  const plan = (summary as Record<string, unknown>)[planKey];
+  if (!plan || typeof plan !== "object") return 0;
+  const record = plan as Record<string, unknown>;
+  // A successful retry leaves the LLM planner in charge. An exhausted one returns the heuristic
+  // plan and is deliberately not a recovery declaration even though it carries the retry note.
+  if (record.planner !== "llm" || !Array.isArray(record.notes)
+      || !record.notes.includes("llm-planner-success")) return 0;
+  return record.notes.filter((note) => note === "llm-planner-timeout-retry:1").length;
+}
+
 /** One runner invocation, linked to the harness's logical call and supplied context. */
 interface CallState {
   callId: string;
@@ -334,6 +407,13 @@ async function main(): Promise<void> {
 
   let modelCalls = 0;
   let modelFailures = 0;
+  // A failed runner invocation is never erased. These two collections only establish whether
+  // the harness's timeout-only planner helper later recovered that particular failure.
+  const pendingPlannerTimeouts: PendingPlannerTimeout[] = [];
+  const activePlannerCalls: ActivePlannerCall[] = [];
+  const ambiguousPlannerRetryIdentities: PlannerRetryIdentity[] = [];
+  const plannerRecoveryCandidates: PlannerTimeoutRecovery[] = [];
+  let plannerTimeoutFailures = 0;
   let modelAttempts = 0;
   let piSessionCalls = 0;
   const piSessionCallIds: string[] = [];
@@ -643,13 +723,44 @@ async function main(): Promise<void> {
       // The engine's own id when it tagged the call, so a context.selection event and the model
       // events of the same invocation share one call_id; the driver's own id when it did not.
       const callId = meta.invocationId ?? minted;
+      const stage = typeof meta.stage === "string" && meta.stage ? meta.stage : "untagged";
+      const retryIdentity = plannerRetryIdentity(options, meta.invocationId, stage);
+      let activePlannerCall: ActivePlannerCall | null = null;
+      let retryOf: PendingPlannerTimeout | null = null;
+      if (retryIdentity) {
+        activePlannerCall = { identity: retryIdentity, concurrent: false };
+        for (const active of activePlannerCalls) {
+          if (!samePlannerRetryIdentity(active.identity, retryIdentity)) continue;
+          active.concurrent = true;
+          activePlannerCall.concurrent = true;
+        }
+        if (activePlannerCall.concurrent) {
+          // Once this exact invocation identity has overlapped, order cannot establish which
+          // operation a later call belongs to. Keep every failure unresolved for that identity.
+          if (!ambiguousPlannerRetryIdentities.some((entry) => samePlannerRetryIdentity(entry, retryIdentity))) {
+            ambiguousPlannerRetryIdentities.push(retryIdentity);
+          }
+          for (let index = pendingPlannerTimeouts.length - 1; index >= 0; index -= 1) {
+            if (samePlannerRetryIdentity(pendingPlannerTimeouts[index].identity, retryIdentity)) {
+              pendingPlannerTimeouts.splice(index, 1);
+            }
+          }
+        }
+        const ambiguous = ambiguousPlannerRetryIdentities.some((entry) => samePlannerRetryIdentity(entry, retryIdentity));
+        if (!ambiguous) {
+          const pendingIndex = pendingPlannerTimeouts.findIndex((entry) =>
+            samePlannerRetryIdentity(entry.identity, retryIdentity));
+          if (pendingIndex !== -1) retryOf = pendingPlannerTimeouts.splice(pendingIndex, 1)[0] ?? null;
+        }
+        activePlannerCalls.push(activePlannerCall);
+      }
       const view = describeInvocation(observedOptions as unknown as Record<string, unknown>, resolveBinary);
       const route = config.runner === "mock" ? "mock" : view.route;
       observedRoutes.add(route);
       const state: CallState = { callId, runnerCallId: minted, view, route, final: null, attemptSessions: [] };
       calls.set(minted, state);
       modelCallIds.add(callId);
-      runnerCalls.push({ callId, stage: typeof meta.stage === "string" && meta.stage ? meta.stage : "untagged" });
+      runnerCalls.push({ callId, stage });
       // The runner uses meta only for its hooks. A driver-owned key prevents concurrent or
       // retried calls with the same harness ID from replacing each other's observation state.
       const invocation = { ...observedOptions, meta: { ...meta, invocationId: minted } };
@@ -675,16 +786,25 @@ async function main(): Promise<void> {
         });
       }
       let returned: PiResult | null = null;
+      let callFailed = false;
+      let plannerTimedOut = false;
       try {
         const result = await baseRunner.runPi(invocation);
         returned = result;
-        if (result.code !== 0) modelFailures += 1;
+        if (result.code !== 0) {
+          modelFailures += 1;
+          callFailed = true;
+          plannerTimedOut = isPlannerTimeoutMessage(result.stderr || result.stdout || `pi exited with code ${result.code}`);
+        }
         const elapsed = Date.now() - began;
         if (runnerHooks === null) await emitUnhookedResponse(state, result, null, elapsed);
         else await emitHookedResponse(state, result, null, elapsed);
         return result;
       } catch (error) {
         modelFailures += 1;
+        callFailed = true;
+        const message = error instanceof Error ? error.message : String(error);
+        plannerTimedOut ||= isPlannerTimeoutMessage(message);
         const elapsed = Date.now() - began;
         if (runnerHooks === null) await emitUnhookedResponse(state, null, error, elapsed);
         else await emitHookedResponse(state, null, error, elapsed);
@@ -693,6 +813,25 @@ async function main(): Promise<void> {
         // Here rather than after the return, so a call that threw keeps its attempts' transcripts.
         if (claudeSessionDir !== null) archiveClaudeSessions(state, minted, returned, claudeSessionDir);
         calls.delete(minted);
+        if (activePlannerCall) {
+          const activeIndex = activePlannerCalls.indexOf(activePlannerCall);
+          if (activeIndex !== -1) activePlannerCalls.splice(activeIndex, 1);
+        }
+        const ambiguous = retryIdentity !== null && ambiguousPlannerRetryIdentities.some((entry) =>
+          samePlannerRetryIdentity(entry, retryIdentity));
+        // Count every planner timeout, including one too thin to fingerprint. A native retry
+        // declaration cannot safely recover some other pair while an unattributed planner
+        // timeout is present in the same run.
+        if (callFailed && plannerTimedOut && stage === "planner") plannerTimeoutFailures += 1;
+        if (retryOf && !callFailed && !ambiguous) {
+          plannerRecoveryCandidates.push({
+            invocation_id: retryIdentity!.invocationId,
+            failed_runner_call_id: retryOf.runnerCallId,
+            recovery_runner_call_id: minted,
+          });
+        } else if (!retryOf && callFailed && plannerTimedOut && retryIdentity && !ambiguous) {
+          pendingPlannerTimeouts.push({ identity: retryIdentity, runnerCallId: minted });
+        }
       }
     },
   };
@@ -851,6 +990,21 @@ async function main(): Promise<void> {
     failure = { name: error instanceof Error ? error.name : "Error", message: error instanceof Error ? error.message : String(error) };
   }
 
+  const plannerTimeoutRetryDeclarations = declaredPlannerTimeoutRetries(summary, config.mode);
+  // Neither side is sufficient alone: equal object identities are allowed for independent
+  // calls, while a native note without the matching observed lifecycle could describe a retry
+  // this runner never saw. Any ambiguity leaves every raw failure unresolved.
+  const contextualPlannerRecoveryCandidates = plannerRecoveryCandidates.filter((candidate) =>
+    contextCallIds.has(candidate.invocation_id));
+  const plannerTimeoutRecoveries = plannerTimeoutRetryDeclarations === 1
+    && plannerTimeoutFailures === 1
+    && plannerRecoveryCandidates.length === 1
+    && contextualPlannerRecoveryCandidates.length === 1
+    ? plannerRecoveryCandidates
+    : [];
+  const recoveredModelFailures = plannerTimeoutRecoveries.length;
+  const unrecoveredModelFailures = modelFailures - recoveredModelFailures;
+
   const record = (summary ?? {}) as { newFindings?: Array<Record<string, unknown>>; updatedFindings?: Array<Record<string, unknown>>; observer?: { hookFailures?: number } };
   const writtenFindings = [...(record.newFindings ?? []), ...(record.updatedFindings ?? [])];
   // Which of the two accounts of the submitted set this run emitted. The engine's own records
@@ -987,7 +1141,15 @@ async function main(): Promise<void> {
     finished_at: nowIso(),
     wall_ms: Date.now() - started,
     model_calls: modelCalls,
+    // Historical runner-invocation failures remain intact. Recovery is a separate, explicitly
+    // attributed count, and status readers use the unresolved remainder.
     model_call_failures: modelFailures,
+    model_call_failures_recovered: recoveredModelFailures,
+    model_call_failures_unrecovered: unrecoveredModelFailures,
+    planner_timeout_retry_declarations: plannerTimeoutRetryDeclarations,
+    planner_timeout_failures_observed: plannerTimeoutFailures,
+    planner_timeout_recovery_candidates: plannerRecoveryCandidates.length,
+    planner_timeout_recoveries: plannerTimeoutRecoveries,
     pi_session_calls: piSessionCalls,
     pi_session_call_ids: piSessionCallIds,
     // Claude transcripts are moved into the same per-call directories, so the adapter registers
