@@ -60,8 +60,38 @@ jobs:
           "$RUNNER_TEMP/scaneval-wheel-env/bin/scaneval" replay "$RUNNER_TEMP/scaneval-demo" --output "$RUNNER_TEMP/scaneval-replay.json"
           cmp "$RUNNER_TEMP/scaneval-demo/evaluation.json" "$RUNNER_TEMP/scaneval-replay.json"
 
+  oci_path_gate:
+    name: Decide whether OCI integration is relevant
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_oci: ${{ steps.filter.outputs.run_oci }}
+    steps:
+      # pull_request checks out GitHub's merge ref. Depth two contains the merge commit and its
+      # base parent, so HEAD^..HEAD is the complete PR change, not merely its last commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Match OCI-relevant paths
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          decision="$(python3 scripts/oci_ci_path_gate.py --event-name "$EVENT_NAME")"
+          case "$decision" in
+            true|false) ;;
+            *) echo "OCI path gate returned an invalid decision: $decision" >&2; exit 1 ;;
+          esac
+          echo "run_oci=$decision" >> "$GITHUB_OUTPUT"
+
   oci-integration:
     name: OCI backend against a real Docker engine
+    needs: oci_path_gate
+    # A failed filter must surface as a failed required check, never as a silently skipped Docker
+    # run. Pushes to main and workflow_dispatch return true without consulting the diff.
+    if: ${{ always() && (needs.oci_path_gate.result != 'success' || needs.oci_path_gate.outputs.run_oci != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -69,6 +99,11 @@ jobs:
       # Without this the module skips when no engine or image is present; here that is a failure.
       SCANEVAL_REQUIRE_DOCKER: '1'
     steps:
+      - name: Require a successful path decision
+        if: ${{ needs.oci_path_gate.result != 'success' }}
+        run: |
+          echo "The OCI path gate failed; refusing to hide the Docker check." >&2
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
