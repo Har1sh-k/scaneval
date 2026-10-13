@@ -6,9 +6,14 @@ ScanEval evaluates security scanners on versioned cases and records how instrume
 
 ## Quick start
 
-Requires Python 3.11+. Live runs also need Git and the configured scanner.
+Requires Git and Python 3.11+. Live runs also need the configured scanner.
+From a terminal on macOS or Linux:
 
 ```bash
+git clone https://github.com/Har1sh-k/scaneval.git
+cd scaneval
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install -e ".[dev]"
 scaneval demo results/diagnostic-demo
 scaneval replay results/diagnostic-demo --output results/diagnostic-replay.json
