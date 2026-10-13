@@ -672,6 +672,183 @@ def test_a_timeout_leaves_no_container_and_no_process_behind(scratch):
     assert container["name"] not in clients, "a docker client of the killed container is still running"
 
 
+MEMORY_LIMIT_PROBE = r'''
+import json, os, select, signal, sys, time
+from pathlib import Path
+
+expected = int(sys.argv[2])
+cgroup = Path("/sys/fs/cgroup")
+
+def integer(path):
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+def fields(path):
+    try:
+        rows = (line.split() for line in path.read_text().splitlines())
+        return {key: int(value) for key, value in rows}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+version = 2 if (cgroup / "cgroup.controllers").is_file() else None
+memory_limit = integer(cgroup / "memory.max") if version == 2 else None
+swap_limit = integer(cgroup / "memory.swap.max") if version == 2 else None
+oom_group = integer(cgroup / "memory.oom.group") if version == 2 else None
+events_path = cgroup / "memory.events.local"
+
+def counters():
+    found = fields(events_path) if version == 2 else {}
+    return {key: found.get(key) for key in ("max", "oom", "oom_kill")}
+
+counter_keys = ("max", "oom", "oom_kill")
+configuration_valid = (version == 2 and memory_limit == expected
+                       and swap_limit == 0 and oom_group == 0)
+report = {"cgroup_version": version, "expected_memory": expected,
+          "memory_limit": memory_limit, "swap_limit": swap_limit, "oom_group": oom_group,
+          "configuration_valid": configuration_valid}
+initial = counters()
+report["initial"] = initial
+configuration_valid = (configuration_valid
+                       and all(type(initial.get(key)) is int for key in counter_keys))
+report["configuration_valid"] = configuration_valid
+if not configuration_valid:
+    print(json.dumps(report, sort_keys=True))
+    raise SystemExit(23)
+
+def wait_for(pid, seconds=20):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        found, status = os.waitpid(pid, os.WNOHANG)
+        if found:
+            if os.WIFSIGNALED(status):
+                terminated = os.WTERMSIG(status)
+                return {"returncode": 128 + terminated, "termination_signal": terminated,
+                        "timed_out": False}
+            if os.WIFEXITED(status):
+                return {"returncode": os.WEXITSTATUS(status), "termination_signal": None,
+                        "timed_out": False}
+            return {"returncode": None, "termination_signal": None, "timed_out": False}
+        time.sleep(0.01)
+    os.kill(pid, signal.SIGKILL)
+    _, status = os.waitpid(pid, 0)
+    terminated = os.WTERMSIG(status) if os.WIFSIGNALED(status) else None
+    return {"returncode": 128 + terminated if terminated is not None else os.WEXITSTATUS(status),
+            "termination_signal": terminated, "timed_out": True}
+
+def start_child(kind):
+    ready_read, ready_write = os.pipe()
+    go_read, go_write = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(ready_read)
+        os.close(go_write)
+        try:
+            if kind == "oom":
+                Path("/proc/self/oom_score_adj").write_text("1000")
+                if integer(Path("/proc/self/oom_score_adj")) != 1000:
+                    raise RuntimeError("oom score adjustment was not applied")
+            os.write(ready_write, b"R")
+            os.close(ready_write)
+            if os.read(go_read, 1) != b"G":
+                os._exit(78)
+            os.close(go_read)
+            if kind == "control":
+                signal.pause()
+            hoard = []
+            for _ in range(64):
+                hoard.append(b"x" * (8 << 20))
+            os._exit(79)
+        except BaseException:
+            try:
+                os.write(ready_write, b"E")
+            except OSError:
+                pass
+            os._exit(77)
+    os.close(ready_write)
+    os.close(go_read)
+    readable, _, _ = select.select([ready_read], [], [], 5)
+    marker = os.read(ready_read, 1) if readable else b""
+    os.close(ready_read)
+    return pid, go_write, marker == b"R"
+
+control_pid, control_go, control_ready = start_child("control")
+before_control = counters()
+if control_ready:
+    os.write(control_go, b"G")
+    os.kill(control_pid, signal.SIGKILL)
+os.close(control_go)
+control = wait_for(control_pid)
+after_control = counters()
+
+oom_pid, oom_go, oom_ready = start_child("oom")
+before_oom = counters()
+if oom_ready:
+    os.write(oom_go, b"G")
+os.close(oom_go)
+oom = wait_for(oom_pid)
+after_oom = counters()
+deadline = time.monotonic() + 2
+while (time.monotonic() < deadline
+       and not all(after_oom[key] > before_oom[key] for key in counter_keys)):
+    time.sleep(0.01)
+    after_oom = counters()
+
+report.update(control_ready=control_ready, control=control,
+              before_control=before_control, after_control=after_control,
+              oom_ready=oom_ready, oom=oom, before_oom=before_oom, after_oom=after_oom,
+              supervisor_survived=True)
+print(json.dumps(report, sort_keys=True))
+raise SystemExit(23)
+'''
+
+
+def _has_memory_oom_evidence(report: dict, before_name: str, after_name: str, child_name: str) -> bool:
+    """Whether one supervised child has direct, local memory-cgroup OOM evidence."""
+    try:
+        if report["cgroup_version"] != 2:
+            return False
+        keys = ("max", "oom", "oom_kill")
+        before, after, child = report[before_name], report[after_name], report[child_name]
+        return (child["returncode"] == 137 and child["termination_signal"] == 9
+                and child["timed_out"] is False
+                and all(type(before[key]) is int and type(after[key]) is int
+                        and after[key] > before[key] for key in keys))
+    except (KeyError, TypeError):
+        return False
+
+
+def _memory_probe_summary(report: dict, container: dict) -> dict:
+    """Bounded failure context: observed limits, counters, child results, and engine metadata."""
+    return {key: report.get(key) for key in (
+        "cgroup_version", "expected_memory", "memory_limit", "swap_limit", "oom_group",
+        "configuration_valid", "control_ready", "control", "before_control", "after_control",
+        "oom_ready", "oom", "before_oom", "after_oom", "supervisor_survived")} | {
+            "engine_oom_killed": container.get("oom_killed"),
+            "engine_exit_code": container.get("exit_code"),
+            "engine_timed_out": container.get("timed_out"),
+        }
+
+
+@pytest.mark.parametrize(("child", "before", "after"), [
+    pytest.param({"returncode": 137, "termination_signal": None, "timed_out": False},
+                 {"max": 0, "oom": 0, "oom_kill": 0},
+                 {"max": 1, "oom": 1, "oom_kill": 1}, id="normal-exit-137"),
+    pytest.param({"returncode": 137, "termination_signal": 9, "timed_out": True},
+                 {"max": 0, "oom": 0, "oom_kill": 0},
+                 {"max": 1, "oom": 1, "oom_kill": 1}, id="timeout-kill"),
+    pytest.param({"returncode": 137, "termination_signal": 9, "timed_out": False},
+                 {"max": 0, "oom": 0}, {"max": 1, "oom": 1}, id="missing-counter"),
+    pytest.param({"returncode": 137, "termination_signal": 9, "timed_out": False},
+                 {"max": 1, "oom": 1, "oom_kill": 1},
+                 {"max": 1, "oom": 1, "oom_kill": 1}, id="non-increasing-counters"),
+])
+def test_memory_oom_evidence_rejects_signal_lookalikes_and_incomplete_counters(child, before, after):
+    report = {"cgroup_version": 2, "before": before, "after": after, "child": child}
+    assert not _has_memory_oom_evidence(report, "before", "after", "child")
+
+
 HUNGRY = r'''
 import sys
 hoard = []
@@ -704,16 +881,49 @@ print(len(children), failure)
 def test_memory_and_pids_limits_are_enforced_and_recorded(scratch):
     limits = {"memory_mb": 96, "tmpfs_mb": 16, "pids": 24}
     (scratch / "memory").mkdir()
-    bundle, _held = invoke(scratch / "memory", ScriptAdapter(HUNGRY), execution={"limits": limits})
-    result, execution = documents(bundle)
-    assert result["status"] == "error" and result["error"]["code"] == "exit_137"
-    [container] = execution["isolation"]["containers"]
-    assert container["oom_killed"] is True and container["exit_code"] == 137, {
-        key: container[key] for key in ("status", "exit_code", "oom_killed", "timed_out", "removed")}
+    described = _docker("info", "--format", "{{.CgroupVersion}}", timeout=60)
+    assert described.returncode == 0 and described.stdout.strip() in ("1", "2"), described.stderr
+    if described.stdout.strip() == "1":
+        bundle, _held = invoke(scratch / "memory", ScriptAdapter(HUNGRY), execution={"limits": limits})
+        result, execution = documents(bundle)
+        assert result["status"] == "error" and result["error"]["code"] == "exit_137"
+        [container] = execution["isolation"]["containers"]
+        assert container["oom_killed"] is True and container["exit_code"] == 137, {
+            key: container[key] for key in ("status", "exit_code", "oom_killed", "timed_out", "removed")}
+        assert "out-of-memory kill under the 96 MB limit" in execution["isolation"]["note"]
+        assert "allocated" not in (bundle / "raw" / "stdout.txt").read_text(encoding="utf-8")
+    else:
+        expected_memory = limits["memory_mb"] << 20
+        bundle, _held = invoke(
+            scratch / "memory", ScriptAdapter(MEMORY_LIMIT_PROBE, str(expected_memory)),
+            execution={"limits": limits})
+        result, execution = documents(bundle)
+        [container] = execution["isolation"]["containers"]
+        stdout_path = bundle / "raw" / "stdout.txt"
+        assert stdout_path.stat().st_size <= 4096
+        report = json.loads(read_regular_file(stdout_path))
+        summary = _memory_probe_summary(report, container)
+        assert report["configuration_valid"] is True, summary
+        assert report["memory_limit"] == report["expected_memory"] == expected_memory, summary
+        assert report["cgroup_version"] == 2 and report["swap_limit"] == 0, summary
+        assert report["oom_group"] == 0, summary
+        assert report["control_ready"] is True and report["control"] == {
+            "returncode": 137, "termination_signal": 9, "timed_out": False}, summary
+        assert report["after_control"] == report["before_control"], summary
+        assert not _has_memory_oom_evidence(
+            report, "before_control", "after_control", "control"), summary
+        assert report["oom_ready"] is True and report["oom"]["timed_out"] is False, summary
+        assert _has_memory_oom_evidence(report, "before_oom", "after_oom", "oom"), summary
+        assert report["supervisor_survived"] is True, summary
+        assert result["status"] == "error" and result["error"]["code"] == "exit_23", summary
+        assert container["exit_code"] == 23 and container["timed_out"] is False, summary
+        assert container["removed"] is True, summary
+        if container["oom_killed"]:
+            assert "out-of-memory kill under the 96 MB limit" in execution["isolation"]["note"]
+        else:
+            assert "out-of-memory kill" not in execution["isolation"]["note"]
     settings = execution["isolation"]["settings"]
     assert settings["memory_mb"] == settings["memory_swap_mb"] == 96 and settings["pids_limit"] == 24
-    assert "out-of-memory kill under the 96 MB limit" in execution["isolation"]["note"]
-    assert "allocated" not in (bundle / "raw" / "stdout.txt").read_text(encoding="utf-8")
 
     (scratch / "pids").mkdir()
     bundle, _held = invoke(scratch / "pids", ScriptAdapter(FORKER), execution={"limits": limits})
