@@ -457,7 +457,7 @@ class FakeDocker:
 
     def __init__(self, *, reachable: bool = True, images=(IMAGE, PROXY), invisible=(),
                  isolated_applies: bool = True, behavior=None, proxy_log: str = "",
-                 unstartable: bool = False) -> None:
+                 unstartable: bool = False, exit_state_lag: int = 0, oom_state_lag: int = 0) -> None:
         self.calls: list[list[str]] = []
         self.extra_envs: list[dict] = []
         self.reachable = reachable
@@ -469,6 +469,8 @@ class FakeDocker:
         self.behavior = behavior or (lambda container, out, err, stdin: 0)
         self.proxy_log = proxy_log
         self.unstartable = unstartable
+        self.exit_state_lag = exit_state_lag
+        self.oom_state_lag = oom_state_lag
         self.containers: dict[str, dict] = {}
         self.networks: dict[str, dict] = {}
 
@@ -527,6 +529,10 @@ class FakeDocker:
             container = self.containers.get(args[-1])
             if container is None or not container["state"]["Running"]:
                 return self.fail(f"Error response from daemon: container {args[-1]} is not running")
+            container.pop("pending_state", None)
+            container.pop("exit_state_lag", None)
+            container.pop("pending_oom", None)
+            container.pop("oom_state_lag", None)
             container["state"].update(Status="exited", Running=False, ExitCode=137)
             return self.ok(args[-1])
         if head == "rm":
@@ -538,6 +544,20 @@ class FakeDocker:
             if container is None:
                 return self.fail(f"Error: No such container: {name}")
             if "{{json .State}}" in args:
+                lag = container.get("exit_state_lag")
+                if lag is not None:
+                    if lag > 0:
+                        container["exit_state_lag"] = lag - 1
+                    else:
+                        container["state"].update(container.pop("pending_state"))
+                        container.pop("exit_state_lag")
+                oom_lag = container.get("oom_state_lag")
+                if oom_lag is not None:
+                    if oom_lag > 0:
+                        container["oom_state_lag"] = oom_lag - 1
+                    else:
+                        container["state"]["OOMKilled"] = container.pop("pending_oom")
+                        container.pop("oom_state_lag")
                 return self.ok(json.dumps(container["state"]))
             if "{{.Id}}" in args:
                 return self.ok(f"{name}-id")
@@ -592,7 +612,16 @@ class FakeDocker:
             on_timeout()
             return None, True
         code, oom = outcome if isinstance(outcome, tuple) else (outcome, False)
-        container["state"].update(Status="exited", Running=False, ExitCode=code, OOMKilled=oom)
+        final_state = {"Status": "exited", "Running": False, "ExitCode": code, "OOMKilled": oom}
+        if self.exit_state_lag:
+            container["pending_state"] = final_state
+            container["exit_state_lag"] = self.exit_state_lag
+        elif self.oom_state_lag and oom:
+            container["state"].update(final_state, OOMKilled=False)
+            container["pending_oom"] = True
+            container["oom_state_lag"] = self.oom_state_lag
+        else:
+            container["state"].update(final_state)
         return code, False
 
     def creates(self, role: str = "worker") -> list[list[str]]:
@@ -790,7 +819,11 @@ def test_a_backend_that_refused_before_any_container_passed_nothing_through(tmp_
     assert execution["environment"]["passthrough"] == []
 
 
-def test_a_timeout_kills_the_container_by_name_then_inspects_and_removes_it(tmp_path):
+def test_a_timeout_kills_the_container_by_name_then_inspects_and_removes_it(tmp_path, monkeypatch):
+    def unexpected_wait(_seconds):
+        raise AssertionError("a timed-out attach must not wait for OOM metadata")
+
+    monkeypatch.setattr(oci_module.time, "sleep", unexpected_wait)
     fake = FakeDocker(behavior=lambda *args: "timeout")
     bundle, _held = invoke(tmp_path, fake)
     result, execution = documents(bundle)
@@ -830,6 +863,108 @@ def test_an_oom_kill_is_read_from_inspection_and_recorded(tmp_path):
     assert container["oom_killed"] is True and container["exit_code"] == 137
     assert execution["isolation"]["settings"]["memory_mb"] == execution["isolation"]["settings"]["memory_swap_mb"] == 128
     assert "recorded an out-of-memory kill under the 128 MB limit" in execution["isolation"]["note"]
+
+
+def test_a_completed_attach_still_kills_a_container_the_engine_reports_running(tmp_path, monkeypatch):
+    """A completed client does not let a persistently running scanner escape cleanup."""
+    def unexpected_wait(_seconds):
+        raise AssertionError("a running state must be killed rather than treated as pending OOM metadata")
+
+    monkeypatch.setattr(oci_module.time, "sleep", unexpected_wait)
+    fake = FakeDocker(behavior=lambda *args: (137, True), exit_state_lag=1)
+    bundle, _held = invoke(tmp_path, fake, execution=settings(limits={"memory_mb": 128, "tmpfs_mb": 16}))
+    result, execution = documents(bundle)
+    assert result["status"] == "error" and result["error"]["code"] == "exit_137"
+    [container] = execution["isolation"]["containers"]
+    assert container["oom_killed"] is False and container["exit_code"] == 137
+    assert [call for call in fake.calls if call[0] == "kill" and call[-1] == container["name"]]
+
+
+def test_a_completed_attach_waits_for_late_oom_metadata_after_the_exit_state(tmp_path):
+    """The daemon can publish the exit before its separate OOM event reaches inspection."""
+    fake = FakeDocker(behavior=lambda *args: (137, True), oom_state_lag=1)
+    bundle, _held = invoke(tmp_path, fake, execution=settings(limits={"memory_mb": 128, "tmpfs_mb": 16}))
+    result, execution = documents(bundle)
+    assert result["status"] == "error" and result["error"]["code"] == "exit_137"
+    [container] = execution["isolation"]["containers"]
+    assert container["oom_killed"] is True and container["exit_code"] == 137
+    assert not [call for call in fake.calls if call[0] == "kill" and call[-1] == container["name"]]
+
+
+def test_exit_137_without_published_oom_evidence_remains_non_oom(tmp_path, monkeypatch):
+    """The grace period refreshes evidence; it never promotes signal 9 to an OOM claim."""
+    clock = [0.0]
+
+    def advance(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(oci_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(oci_module.time, "sleep", advance)
+    monkeypatch.setattr(oci_module, "ATTACHED_STATE_GRACE", 0.1)
+    monkeypatch.setattr(oci_module, "ATTACHED_STATE_POLL", 0.01)
+    fake = FakeDocker(behavior=lambda *args: (137, False))
+    bundle, _held = invoke(tmp_path, fake, execution=settings(limits={"memory_mb": 128, "tmpfs_mb": 16}))
+    result, execution = documents(bundle)
+    assert result["status"] == "error" and result["error"]["code"] == "exit_137"
+    [container] = execution["isolation"]["containers"]
+    assert container["oom_killed"] is False and container["exit_code"] == 137
+    assert "out-of-memory" not in execution["isolation"]["note"]
+    inspections = [call for call in fake.calls
+                   if call[:2] == ["container", "inspect"] and "{{json .State}}" in call]
+    assert len(inspections) >= 2
+
+
+@pytest.mark.parametrize("refresh_failure", ["nonzero", "malformed", "timeout"])
+def test_an_optional_oom_refresh_failure_preserves_the_terminal_state(tmp_path, monkeypatch, refresh_failure):
+    """Failure to improve valid exit evidence must not turn it into an unknown run."""
+    fake = FakeDocker(behavior=lambda *args: (137, False))
+    original_run = fake.run
+    inspections = 0
+
+    def fail_refresh(args, *, timeout, extra_env=None):
+        nonlocal inspections
+        if args[:2] == ["container", "inspect"] and "{{json .State}}" in args:
+            inspections += 1
+            if inspections > 1:
+                if refresh_failure == "nonzero":
+                    return DockerResult(1, "", "the engine declined the optional refresh")
+                if refresh_failure == "malformed":
+                    return DockerResult(0, "not-json", "")
+                raise IsolationError(f"docker container gave no answer within {timeout:g}s")
+        return original_run(args, timeout=timeout, extra_env=extra_env)
+
+    monkeypatch.setattr(fake, "run", fail_refresh)
+    bundle, _held = invoke(tmp_path, fake, execution=settings(limits={"memory_mb": 128, "tmpfs_mb": 16}))
+    result, execution = documents(bundle)
+    assert result["status"] == "error" and result["error"]["code"] == "exit_137"
+    [container] = execution["isolation"]["containers"]
+    assert container["oom_killed"] is False and container["exit_code"] == 137
+    assert container["removed"] is True and "out-of-memory" not in execution["isolation"]["note"]
+
+
+def test_client_exit_137_does_not_refresh_a_different_inspected_exit(tmp_path, monkeypatch):
+    """Both the client and inspected state must identify signal 9 before metadata is refreshed."""
+    def unexpected_wait(_seconds):
+        raise AssertionError("an inspected non-137 exit must take the normal fast path")
+
+    fake = FakeDocker(behavior=lambda *args: (137, False))
+    original_run = fake.run
+
+    def inspected_exit_one(args, *, timeout, extra_env=None):
+        found = original_run(args, timeout=timeout, extra_env=extra_env)
+        if args[:2] == ["container", "inspect"] and "{{json .State}}" in args and found.returncode == 0:
+            state = json.loads(found.stdout)
+            state["ExitCode"] = 1
+            return DockerResult(0, json.dumps(state), "")
+        return found
+
+    monkeypatch.setattr(oci_module.time, "sleep", unexpected_wait)
+    monkeypatch.setattr(fake, "run", inspected_exit_one)
+    bundle, _held = invoke(tmp_path, fake)
+    result, execution = documents(bundle)
+    assert result["status"] == "error" and result["error"]["code"] == "exit_1"
+    [container] = execution["isolation"]["containers"]
+    assert container["oom_killed"] is False and container["exit_code"] == 1
 
 
 def test_an_oom_kill_under_a_clean_exit_is_a_failure_not_a_clean_success(tmp_path):
