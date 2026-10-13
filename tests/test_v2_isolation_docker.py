@@ -708,7 +708,8 @@ def test_memory_and_pids_limits_are_enforced_and_recorded(scratch):
     result, execution = documents(bundle)
     assert result["status"] == "error" and result["error"]["code"] == "exit_137"
     [container] = execution["isolation"]["containers"]
-    assert container["oom_killed"] is True and container["exit_code"] == 137
+    assert container["oom_killed"] is True and container["exit_code"] == 137, {
+        key: container[key] for key in ("status", "exit_code", "oom_killed", "timed_out", "removed")}
     settings = execution["isolation"]["settings"]
     assert settings["memory_mb"] == settings["memory_swap_mb"] == 96 and settings["pids_limit"] == 24
     assert "out-of-memory kill under the 96 MB limit" in execution["isolation"]["note"]

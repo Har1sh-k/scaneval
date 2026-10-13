@@ -71,6 +71,11 @@ from . import PINNED_IMAGE, ExecutionSettings, IsolationError, Limits
 # has been killed.
 CONTROL_TIMEOUT = 120.0
 KILL_GRACE = 10.0
+# ``docker start --attach`` obtains the exit status through the engine's wait API, while
+# ``OOMKilled`` is independent inspected metadata. Refresh it briefly before removing a
+# signal-9 container, without inferring OOM from that signal.
+ATTACHED_STATE_GRACE = 1.0
+ATTACHED_STATE_POLL = 0.05
 PROXY_PORT = 3128
 PROXY_READY_SECONDS = 30.0
 # The egress log is written by this package's own proxy, but its lines name destinations the
@@ -473,7 +478,8 @@ class OciBackend:
                 # Whatever ended the attach, a timeout, an error, or the client returning while the
                 # container still runs, the container is stopped here and its state read before
                 # anything reads what it wrote, so no process of the scan outlives the command.
-                settled = self._settle(name, record)
+                settled = self._settle(
+                    name, record, refresh_oom=client_code == 137 and not timed_out)
         finally:
             record["removed"] = self._remove_container(name)
             record["wall_seconds"] = round(wall, 3)
@@ -492,16 +498,21 @@ class OciBackend:
                 "command reported success; its output is not a complete observation")
         return CommandResult(list(words), exit_code, timed_out, wall, Path(stdout_path), Path(stderr_path))
 
-    def _settle(self, name: str, record: dict) -> bool:
+    def _settle(self, name: str, record: dict, *, refresh_oom: bool = False) -> bool:
         """Kill *name* if it still runs and record its final state; whether the state was read.
 
         ``started`` is recorded from the engine's own start time rather than inferred from the
         client returning: a container whose start failed stays ``created`` with a zero start time
         and an exit code of its own, and counting it as run would record a scan nothing executed
-        as enforced. Never raises; a failure to reach the engine is recorded as the error.
+        as enforced. After a normally attached command exits 137, ``refresh_oom`` allows the
+        engine's separately published OOM state a bounded chance to arrive; 137 alone is never
+        treated as evidence of OOM. Never raises; a failure to reach the engine is recorded as
+        the error.
         """
         try:
             state = self._state(name)
+            if refresh_oom and state is not None and self._may_have_pending_oom(state):
+                state = self._refresh_oom_state(name, state)
             if state is not None and state.get("Running"):
                 self._kill(name)
                 state = self._state(name)
@@ -519,6 +530,32 @@ class OciBackend:
                       exit_code=code if isinstance(code, int) and not isinstance(code, bool) else None,
                       error=record["error"] or (_tail(state["Error"]) if state.get("Error") else None))
         return True
+
+    def _refresh_oom_state(self, name: str, state: dict) -> dict:
+        """Reinspect a terminal signal-9 state briefly for separately published OOM metadata."""
+        deadline = time.monotonic() + ATTACHED_STATE_GRACE
+        while self._may_have_pending_oom(state):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(ATTACHED_STATE_POLL, remaining))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                refreshed = self._state(name, timeout=max(0.001, min(CONTROL_TIMEOUT, remaining)))
+            except Exception:
+                break
+            if refreshed is None:
+                break
+            state = refreshed
+        return state
+
+    @staticmethod
+    def _may_have_pending_oom(state: dict) -> bool:
+        code = state.get("ExitCode")
+        return (state.get("Running") is False and type(code) is int and code == 137
+                and state.get("OOMKilled") is not True)
 
     def isolation_record(self) -> dict:
         """The 2.1 isolation block: what bounded this invocation's scanner processes, as it happened.
@@ -1001,9 +1038,9 @@ class OciBackend:
         labels = {**self._labels, "scaneval.role": role}
         return [word for key in sorted(labels) for word in ("--label", f"{key}={labels[key]}")]
 
-    def _state(self, name: str) -> dict | None:
+    def _state(self, name: str, *, timeout: float = CONTROL_TIMEOUT) -> dict | None:
         found = self._docker.run(["container", "inspect", "--format", "{{json .State}}", name],
-                                 timeout=CONTROL_TIMEOUT)
+                                 timeout=timeout)
         if found.returncode != 0:
             return None
         try:

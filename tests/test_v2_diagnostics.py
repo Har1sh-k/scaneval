@@ -983,18 +983,62 @@ def test_an_unlocated_span_with_no_usable_path_is_merely_unusable(tmp_path):
     assert only_target(document)["best"] == "unknown"
 
 
-def test_a_truncated_span_still_covers_the_lines_it_names(tmp_path):
-    """Contract 2 says a span's end line is that of the text supplied, so it is not discounted."""
+def test_a_verified_contiguous_truncated_span_still_covers_the_lines_it_names(tmp_path):
+    """An exact mapping keeps positive prefix coverage instead of discounting every truncation."""
     invocation = build_bundle(
         tmp_path, locations=[region("src/example.py", 10, 20)],
         events=[event(1, spans=[span("src/example.py", 1, 40, truncated=True,
-                                     original_chars=99999)])])
+                                     original_chars=99999,
+                                     source_mapping="verified_exact")])])
 
     document = diagnostics.context_coverage_for_invocation(invocation)
 
     assert only_target(document)["best"] == "included"
     assert document["capture"]["truncated_spans"] == 1
     assert document["capture"]["truncation_unknown_spans"] == 0
+
+
+def test_an_old_truncated_envelope_without_exact_mapping_cannot_prove_internal_lines(
+    tmp_path,
+):
+    """A v1 rendered declaration's envelope is provenance, not proof every line was supplied."""
+    invocation = build_bundle(
+        tmp_path, locations=[region("src/example.py", 15, 15)],
+        events=[event(1, spans=[span("src/example.py", 10, 20, truncated=True)])])
+
+    document = diagnostics.context_coverage_for_invocation(invocation)
+
+    target = only_target(document)
+    assert target["best"] == "unknown"
+    assert target["union"]["classification"] == "unknown"
+    assert target["by_invocation"][0]["overlap"] == "none"
+    assert target["by_invocation"][0]["reasons"] == ["unlocated_span_on_target_path"]
+    assert document["capture"]["unlocated_spans"] == 1
+
+
+@pytest.mark.parametrize("mapping", [None, True, {}, "verified", "unverified"])
+def test_a_truncated_span_needs_the_exact_closed_mapping_marker(tmp_path, mapping):
+    supplied = span("src/example.py", 1, 40, truncated=True, source_mapping=mapping)
+    invocation = build_bundle(
+        tmp_path, locations=[region("src/example.py", 10, 20)],
+        events=[event(1, spans=[supplied])])
+
+    document = diagnostics.context_coverage_for_invocation(invocation)
+
+    assert only_target(document)["best"] == "unknown"
+    assert document["capture"]["unlocated_spans"] == 1
+
+
+@pytest.mark.parametrize("mapping", [None, {}, "unverified"])
+def test_an_untruncated_span_keeps_backward_compatible_location_semantics(tmp_path, mapping):
+    supplied = span("src/example.py", 1, 40, truncated=False, source_mapping=mapping)
+    invocation = build_bundle(
+        tmp_path, locations=[region("src/example.py", 10, 20)],
+        events=[event(1, spans=[supplied])])
+
+    document = diagnostics.context_coverage_for_invocation(invocation)
+
+    assert only_target(document)["best"] == "included"
 
 
 @pytest.mark.parametrize("value,extra", [(None, {"truncated": None}), ("absent", {})])
@@ -1202,6 +1246,7 @@ def test_the_command_prints_the_document_with_sorted_keys_and_two_space_indent(t
     document = json.loads(out)
     assert out == json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
     assert document["diagnostic"] == "context_coverage"
+    assert document["diagnostic_version"] == 2
     assert only_target(document)["best"] == "included"
 
 

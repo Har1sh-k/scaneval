@@ -909,7 +909,7 @@ def session_history_notes(manifest: list[dict[str, Any]], registered: dict[str, 
 
 class LlmHarnessAdapter(Adapter):
     name = "llm-harness"
-    adapter_version = "2.3.0"
+    adapter_version = "2.4.0"
     requires_git = True
     # A full request runs the harness's bootstrap mode; a PR request runs its pr mode over the base
     # and head commits the request names (see the module docstring).
@@ -1346,9 +1346,34 @@ class LlmHarnessAdapter(Adapter):
         driver_failures = output.get("model_call_failures") if isinstance(output, dict) else None
         driver_failures = (driver_failures if isinstance(driver_failures, int) and
                            not isinstance(driver_failures, bool) and driver_failures >= 0 else None)
+        driver_recovered = output.get("model_call_failures_recovered") if isinstance(output, dict) else None
+        driver_recovered = (driver_recovered if isinstance(driver_recovered, int) and
+                            not isinstance(driver_recovered, bool) and driver_recovered >= 0 else None)
+        driver_unrecovered_reported = (output.get("model_call_failures_unrecovered")
+                                       if isinstance(output, dict) else None)
+        driver_unrecovered_reported = (
+            driver_unrecovered_reported
+            if isinstance(driver_unrecovered_reported, int)
+            and not isinstance(driver_unrecovered_reported, bool)
+            and driver_unrecovered_reported >= 0 else None)
+        # A new driver keeps its historical failure count and supplies a partition of it. Trust
+        # that partition only when all three integers reconcile; an older or malformed output
+        # falls back to treating every observed failure as unresolved.
+        if (driver_failures is not None and driver_recovered is not None
+                and driver_unrecovered_reported is not None
+                and driver_recovered + driver_unrecovered_reported == driver_failures):
+            driver_unrecovered = driver_unrecovered_reported
+        else:
+            driver_recovered = None
+            driver_unrecovered = driver_failures
         notes.append(f"Harness self-report: llm_calls={llm_calls} failed_calls={failed_calls} "
                      f"coverage={scan_stats.get('hypothesisCoverage')} status={scan_stats.get('status')} "
                      f"runtime_profile={usable_summary.get('runtimeProfile')} degraded={usable_summary.get('degraded')}")
+        if driver_failures is not None:
+            notes.append("ScanEval driver observation: "
+                         f"failed_runner_invocations={driver_failures} "
+                         f"recovered_planner_timeouts={driver_recovered if driver_recovered is not None else 'unavailable'} "
+                         f"unrecovered_runner_invocations={driver_unrecovered}.")
         if mode == "pr":
             advisories = scan_stats.get("advisories")
             if not scan_stats:
@@ -1366,16 +1391,29 @@ class LlmHarnessAdapter(Adapter):
         if llm_calls and failed_calls >= llm_calls:
             return NativeOutcome(status="partial", exit_code=result.exit_code,
                                  error={"code": "llm_path_failed", "message": with_loss("every harness model call failed; findings come from deterministic passes only")}, **base)
-        if failed_calls > 0 or (driver_failures is not None and driver_failures > 0):
+        if failed_calls > 0 or (driver_unrecovered is not None and driver_unrecovered > 0):
             return NativeOutcome(status="partial", exit_code=result.exit_code,
                                  error={"code": "llm_calls_failed",
                                         "message": with_loss(f"unrecovered model calls failed: harness={failed_calls}, "
-                                                             f"driver={driver_failures if driver_failures is not None else 'unavailable'}")},
+                                                             f"driver={driver_unrecovered if driver_unrecovered is not None else 'unavailable'} "
+                                                             f"(observed={driver_failures if driver_failures is not None else 'unavailable'}, "
+                                                             f"recovered={driver_recovered if driver_recovered is not None else 'unavailable'})")},
                                  **base)
-        if usable_summary.get("degradation") or scan_stats.get("status") == "inconclusive":
+        scan_status = scan_stats.get("status")
+        # Recovery clears exactly one observed timeout reason; it does not manufacture a
+        # successful native scan. Require the active mode's explicit terminal scan record when
+        # a recovery partition is what lowered the driver failure count. A PR-native skip is an
+        # explicit terminal scope decision, as above, rather than absent coverage.
+        recovery_without_complete_scan = (
+            driver_recovered is not None and driver_recovered > 0
+            and (not scan_stats or scan_status not in ({"ok", "complete", "skipped"}
+                                                        if mode == "pr" else {"ok", "complete"}))
+        )
+        if (usable_summary.get("degradation") or scan_status == "inconclusive"
+                or recovery_without_complete_scan):
             return NativeOutcome(status="partial", exit_code=result.exit_code,
                                  error={"code": "harness_inconclusive",
-                                        "message": with_loss(f"degradation={usable_summary.get('degradation')} scan_status={scan_stats.get('status')} reasons={scan_stats.get('reasons')}")}, **base)
+                                        "message": with_loss(f"degradation={usable_summary.get('degradation')} scan_status={scan_status} reasons={scan_stats.get('reasons')}")}, **base)
         if loss_message:
             # A scan whose findings did not all survive the import is not a clean run: it is
             # partial, and the count and the reason travel with it as an explicit error.

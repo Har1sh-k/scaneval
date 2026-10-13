@@ -2,8 +2,9 @@
 
 A run that missed a known vulnerability leaves two very different questions looking identical in
 the result: the model was never shown the code, or the model was shown the code and said nothing.
-Only the second is a detection failure. This module answers the first, and only the first, by
-joining the evaluator's accepted locations to the ``context.selection`` events a trace holds.
+Both are end-to-end detection failures; neither fact by itself assigns fault to the model. This
+module distinguishes the context-attribution half, and only that half, by joining the evaluator's
+accepted locations to the ``context.selection`` events a trace holds.
 
 The join happens here, after the run, because a label must never reach a scanner. Nothing in a
 trace names a target, a case, or a line the evaluator cares about; the spans a harness reports say
@@ -26,9 +27,9 @@ most interesting finding this can produce; reading one as a reason to discard a 
 sitting right there would be the same mistake pointing the other way.
 
 Not every span is a file position. A harness that reassembles fragments marks them
-``location_known: false``, and their line numbers count the supplied text rather than the file;
-they cover nothing here, and one landing on a target's own path is a reason the target's absence
-cannot be proved in that invocation.
+``location_known: false``, and an old truncated span without ``source_mapping: verified_exact``
+may name only a rendered source envelope. Both cover nothing here, and one landing on a target's
+own path is a reason the target's absence cannot be proved in that invocation.
 
 Only ``context.selection`` events are read. A model that pulled a file in through its own tool call
 is reported on ``tool.end`` spans, and counting those here would mix two claims with different
@@ -64,7 +65,7 @@ from .contracts import ContractError, load_document
 
 DIAGNOSTIC_NAME = "context_coverage"
 # The shape of this document. Bumped when a field changes meaning, not when a field is added.
-DIAGNOSTIC_VERSION = 1
+DIAGNOSTIC_VERSION = 2
 
 # Ordered best to worst. A rank comparison decides ``best`` and ``scattered``, so the order is
 # data rather than a chain of comparisons that could disagree with the table in the docs.
@@ -132,17 +133,19 @@ NOTES = (
     "delivered, and a lost event cannot un-deliver it. Where nothing was recorded at all - no "
     "trace, no context event, or a capture record claiming no observation - nothing at all may "
     "be concluded. An absent event is never evidence of absent activity.",
-    "A span marked location_known false carries text the harness reassembled out of fragments, "
-    "whose line numbers count the supplied text rather than the file. Such a span covers nothing "
-    "here, and one landing on a target's own path blocks absent for that invocation: the "
-    "target's lines may well have been inside it.",
+    "A span whose location is not known carries text from a named file without a dependable "
+    "file-line mapping. This includes location_known false and a truncated span without "
+    "source_mapping verified_exact. Such a span covers nothing here, and one landing on a "
+    "target's own path blocks absent for that invocation: the target's lines may well have "
+    "been inside it.",
     "An event that reported no spans at all, and a span this could not read, block absent for "
     "their invocation the same way. What a record does not say was supplied cannot be shown not "
     "to have been supplied, and a span missing its coordinates is a hole exactly where the "
     "answer would have come from.",
-    "A span's line range is the range of the text actually supplied, so a truncated span is not "
-    "discounted for being truncated. The truncated flag is read only for the counts in capture, "
-    "where a null value is counted as unknown and never as untruncated.",
+    "A truncated span establishes file-line coverage only when source_mapping is "
+    "verified_exact. That marker says the supplied bytes were uniquely matched to the named "
+    "source range; without it an enclosing source range is provenance, not proof that every "
+    "line reached the model. A null truncated value is counted as unknown, never as untruncated.",
     "Whether a candidate the harness produced was later filtered out is a different question. "
     "The finding.candidate, finding.validation, finding.filtered and finding.submitted events "
     "answer that one, and this diagnostic reads none of them.",
@@ -214,6 +217,14 @@ def _span_item(item: object) -> tuple[str, str, int, int] | None:
     ``True`` is read as not known to be one - ``False`` says so outright, and ``null`` is a
     harness saying it does not know, which is never a harness saying it does.
 
+    A located span carrying ``truncated: true`` needs the closed
+    ``source_mapping: verified_exact`` marker as well. Older harness records used truncation for
+    both exact prefixes and renderings that omitted members inside an enclosing declaration.
+    Their range therefore establishes provenance but not continuous line coverage. ScanEval's
+    driver adds the marker only after matching the prompt-fragment hash to one unique, exact
+    source slice with the same boundaries. A missing or malformed marker stays unlocated. An
+    untruncated span retains the earlier opt-in ``location_known`` semantics.
+
     Unusable means the item places text nowhere at all: it is not a mapping, its ``path`` is
     missing, not a string, or normalizes to nothing, or - for a located span - its lines are
     missing, are not integers (a bool is not an integer here, however Python counts it), start
@@ -229,6 +240,8 @@ def _span_item(item: object) -> tuple[str, str, int, int] | None:
     if not normalized:
         return None
     if item.get("location_known", True) is not True:
+        return (_UNLOCATED, normalized, 0, 0)
+    if item.get("truncated") is True and item.get("source_mapping") != "verified_exact":
         return (_UNLOCATED, normalized, 0, 0)
     start, end = item.get("start_line"), item.get("end_line")
     if isinstance(start, bool) or isinstance(end, bool):
@@ -338,8 +351,8 @@ class _ContextEvent:
                 continue
             usable += 1
             by_path.setdefault(path, []).append((start, end))
-            # Read for the counts alone. A present False is the only value that says untruncated;
-            # True and null and absent all leave it unknown, and none of the three changes a line.
+            # Read for the counts alone after mapping eligibility was settled above. A present
+            # False is the only value that says untruncated; null and absent leave it unknown.
             if item.get("truncated") is True:
                 truncated += 1
             elif item.get("truncated") is not False:

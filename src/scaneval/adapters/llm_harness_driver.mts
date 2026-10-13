@@ -18,13 +18,17 @@
 // Invoked by scaneval.adapters.llm_harness with the harness's own tsx:
 //   <harness>/node_modules/.bin/tsx llm_harness_driver.mts --config <driver-config.json>
 
-import { appendFileSync, copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import {
+  appendFileSync, closeSync, constants, copyFileSync, existsSync, fstatSync, lstatSync,
+  mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync,
+} from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const DRIVER_VERSION = "2.4.1";
+const DRIVER_VERSION = "2.5.0";
 
 interface DriverConfig {
   harness_root: string;
@@ -72,6 +76,32 @@ type PiResult = {
 };
 type PiInvocation = { args?: string[]; request?: unknown; cwd: string; timeoutMs: number; env: NodeJS.ProcessEnv; meta?: PiMeta };
 type PiRunner = { runPi(options: PiInvocation): Promise<PiResult> };
+
+// Compatibility fingerprint for the harness's current outer planner retry helper. Its isolation
+// wrapper gives every attempt a new argv array and temporary cwd, so identity and cwd cannot join
+// the calls. The hash covers the stable request values instead, including the source-bearing
+// prompt and environment, and is never written out. This is only correlation: the summary's
+// native retry note is still required before a failed call is classified as recovered.
+interface PlannerRetryIdentity {
+  invocationId: string;
+  requestFingerprint: string;
+}
+
+interface PendingPlannerTimeout {
+  identity: PlannerRetryIdentity;
+  runnerCallId: string;
+}
+
+interface ActivePlannerCall {
+  identity: PlannerRetryIdentity;
+  concurrent: boolean;
+}
+
+interface PlannerTimeoutRecovery {
+  invocation_id: string;
+  failed_runner_call_id: string;
+  recovery_runner_call_id: string;
+}
 
 // PiAttemptStart / PiAttemptRecord, as much of each as this driver reads.
 interface AttemptStart {
@@ -196,6 +226,8 @@ interface InvocationView {
   model: string | null;
   thinking: string | null;
   promptChars: number;
+  /** Kept inside the driver for source-map verification; emitted only through `content`. */
+  prompt: string;
   route: string;
   content: Record<string, unknown>;
 }
@@ -205,6 +237,8 @@ interface InvocationView {
 function describeInvocation(options: Record<string, unknown>, resolveBinary?: (args: string[]) => string): InvocationView {
   const args = Array.isArray(options.args) ? (options.args as string[]) : null;
   if (args) {
+    const last = args.length > 0 ? args[args.length - 1] : "";
+    const prompt = typeof last === "string" ? last : "";
     const flag = (name: string): string | null => {
       const index = args.indexOf(name);
       return index === -1 ? null : args[index + 1] ?? null;
@@ -212,20 +246,69 @@ function describeInvocation(options: Record<string, unknown>, resolveBinary?: (a
     return {
       model: flag("--model"),
       thinking: flag("--thinking"),
-      promptChars: args.length > 0 ? (args[args.length - 1] ?? "").length : 0,
+      promptChars: prompt.length,
+      prompt,
       route: resolveBinary ? resolveBinary(args) : "unknown",
       content: { args },
     };
   }
   const request = (options.request ?? {}) as { route?: { driver?: string; model?: string }; effort?: string; prompt?: string };
   const route = request.route ?? {};
+  const prompt = typeof request.prompt === "string" ? request.prompt : "";
   return {
     model: route.model ?? null,
     thinking: request.effort ?? null,
-    promptChars: (request.prompt ?? "").length,
+    promptChars: prompt.length,
+    prompt,
     route: route.driver ?? "unknown",
     content: { request: { route: { driver: route.driver ?? null, model: route.model ?? null }, effort: request.effort ?? null, prompt: request.prompt ?? null } },
   };
+}
+
+function plannerRetryIdentity(options: PiInvocation, invocationId: unknown, stage: unknown): PlannerRetryIdentity | null {
+  // The runner boundary is implemented by a pluggable JavaScript module, so its runtime value
+  // can be thinner or stranger than the TypeScript interface promises. Correlation is optional
+  // observation: malformed fields must make it unavailable, never make the runner call fail.
+  try {
+    if (stage !== "planner" || typeof invocationId !== "string" || !invocationId || !Array.isArray(options.args)
+        || !options.args.every((arg) => typeof arg === "string")
+        || typeof options.timeoutMs !== "number" || !Number.isFinite(options.timeoutMs)
+        || !options.env || typeof options.env !== "object" || Array.isArray(options.env)) return null;
+    const environment = Object.entries(options.env);
+    if (!environment.every(([, value]) => typeof value === "string" || value === undefined)) return null;
+    environment.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+    // Snapshot array values before the call can mutate them. Sorted environment entries make
+    // wrapper-created copies compare by value. Hashing avoids retaining or emitting API keys;
+    // length-delimited JSON keeps boundaries unambiguous.
+    const stableRequest = JSON.stringify([options.args.slice(), options.timeoutMs, environment]);
+    return { invocationId, requestFingerprint: createHash("sha256").update(stableRequest).digest("hex") };
+  } catch {
+    return null;
+  }
+}
+
+function samePlannerRetryIdentity(left: PlannerRetryIdentity, right: PlannerRetryIdentity): boolean {
+  return left.invocationId === right.invocationId
+    && left.requestFingerprint === right.requestFingerprint;
+}
+
+// Kept byte-for-byte equivalent to the current harness helper's timeout classifier. A different
+// failure is never eligible for its timeout-only outer retry compatibility rule.
+function isPlannerTimeoutMessage(message: string): boolean {
+  return /(?:^|[^a-z0-9_])(?:llm_)?(?:time(?:d)?\s+out|timeout|timed_out)(?:$|[^a-z0-9_])/i.test(message);
+}
+
+function declaredPlannerTimeoutRetries(summary: unknown, mode: DriverConfig["mode"]): number {
+  if (!summary || typeof summary !== "object") return 0;
+  const planKey = mode === "bootstrap" ? "bootstrapPlan" : "changePlan";
+  const plan = (summary as Record<string, unknown>)[planKey];
+  if (!plan || typeof plan !== "object") return 0;
+  const record = plan as Record<string, unknown>;
+  // A successful retry leaves the LLM planner in charge. An exhausted one returns the heuristic
+  // plan and is deliberately not a recovery declaration even though it carries the retry note.
+  if (record.planner !== "llm" || !Array.isArray(record.notes)
+      || !record.notes.includes("llm-planner-success")) return 0;
+  return record.notes.filter((note) => note === "llm-planner-timeout-retry:1").length;
 }
 
 /** One runner invocation, linked to the harness's logical call and supplied context. */
@@ -255,14 +338,234 @@ interface SessionEntry {
   transcript: "moved" | "not_found" | "session_id_not_reported" | "in_call_directory";
 }
 
-function suppliedSpan(span: Record<string, unknown>): Record<string, unknown> {
+const MAX_MAPPING_SOURCE_BYTES = 8 * 1024 * 1024;
+const MAX_MAPPING_RETAINED_SOURCE_BYTES = 32 * 1024 * 1024;
+const MAX_MAPPING_SOURCE_FILES = 256;
+const MAX_MAPPING_RETAINED_PROMPT_CHARS = 32 * 1024 * 1024;
+const MAX_MAPPING_RETAINED_PROMPT_RECORDS = 32768;
+const MAX_BUFFERED_CONTEXT_RECORDS = 32768;
+const MAX_MAPPING_LINE_CANDIDATES = 4096;
+const MAX_PROMPT_OCCURRENCES = 4096;
+const MAX_MAPPING_CANDIDATES_PER_RUN = 32768;
+const MAX_MAPPING_HASH_CHARS_PER_RUN = 64 * 1024 * 1024;
+const MAX_MAPPING_SEARCH_CHARS_PER_RUN = 128 * 1024 * 1024;
+const HEX_SHA256 = /^[0-9a-f]{64}$/;
+
+interface MappingBudget {
+  candidates: number;
+  hashChars: number;
+  searchChars: number;
+}
+
+function spendMappingWork(budget: MappingBudget, kind: "candidate" | "hash" | "search",
+                          amount: number): boolean {
+  if (!Number.isSafeInteger(amount) || amount < 0) return false;
+  if (kind === "candidate") {
+    if (budget.candidates + amount > MAX_MAPPING_CANDIDATES_PER_RUN) return false;
+    budget.candidates += amount;
+  } else if (kind === "hash") {
+    if (budget.hashChars + amount > MAX_MAPPING_HASH_CHARS_PER_RUN) return false;
+    budget.hashChars += amount;
+  } else {
+    if (budget.searchChars + amount > MAX_MAPPING_SEARCH_CHARS_PER_RUN) return false;
+    budget.searchChars += amount;
+  }
+  return true;
+}
+
+/** A regular UTF-8 file below the source-read bound, or null for every unsafe/unknown case. */
+function readMappingSource(repoRoot: string, observedPath: unknown): string | null {
+  if (typeof observedPath !== "string" || !observedPath || observedPath.startsWith("external:")) return null;
+  // `isAbsolute` is platform-specific, so reject both POSIX and Windows spellings explicitly.
+  if (isAbsolute(observedPath) || observedPath.startsWith("/") || observedPath.includes("\\")
+      || /^[A-Za-z]:/.test(observedPath) || observedPath.includes("\0")) return null;
+  const pieces = observedPath.split("/");
+  if (pieces.some((piece) => !piece || piece === "." || piece === "..")) return null;
+
+  let descriptor: number | null = null;
+  try {
+    const root = realpathSync(repoRoot);
+    let candidate = root;
+    for (let index = 0; index < pieces.length; index += 1) {
+      candidate = join(candidate, pieces[index] as string);
+      const status = lstatSync(candidate);
+      // Even an in-repository symlink is refused: otherwise a later retarget could turn a
+      // source verification into an external read between the path check and the open.
+      if (status.isSymbolicLink()) return null;
+      if (index < pieces.length - 1 && !status.isDirectory()) return null;
+    }
+    const status = lstatSync(candidate);
+    if (!status.isFile() || status.size > MAX_MAPPING_SOURCE_BYTES) return null;
+    const resolved = realpathSync(candidate);
+    const beneath = relative(root, resolved);
+    if (!beneath || beneath === ".." || beneath.startsWith(`..${sep}`) || isAbsolute(beneath)) return null;
+
+    // O_NONBLOCK makes a raced-in FIFO harmless; O_NOFOLLOW refuses a final-component symlink
+    // where the platform supports it. The identity checks make a changed path conservative;
+    // this is defense in depth, not a claim that pathname APIs provide an atomic openat walk.
+    descriptor = openSync(candidate, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile() || opened.size > MAX_MAPPING_SOURCE_BYTES
+        || opened.dev !== status.dev || opened.ino !== status.ino) return null;
+    const rechecked = lstatSync(candidate);
+    if (rechecked.isSymbolicLink() || !rechecked.isFile()
+        || rechecked.dev !== opened.dev || rechecked.ino !== opened.ino
+        || realpathSync(candidate) !== resolved) return null;
+
+    // Read at most the opened size plus one byte. A file appended after fstat is rejected after
+    // that sentinel byte instead of letting readFileSync grow without a bound.
+    const bytes = Buffer.allocUnsafe(opened.size + 1);
+    let read = 0;
+    while (read < bytes.length) {
+      const count = readSync(descriptor, bytes, read, bytes.length - read, null);
+      if (count === 0) break;
+      read += count;
+    }
+    const afterRead = fstatSync(descriptor);
+    if (read !== opened.size || afterRead.size !== opened.size
+        || afterRead.dev !== opened.dev || afterRead.ino !== opened.ino) return null;
+    const payload = bytes.subarray(0, read);
+    const text = payload.toString("utf8");
+    // Buffer's UTF-8 decoder substitutes malformed input. A substituted string is not the
+    // source bytes whose hash the harness saw, so reject it rather than verifying a different file.
+    if (!Buffer.from(text, "utf8").equals(payload)) return null;
+    return text;
+  } catch {
+    return null;
+  } finally {
+    if (descriptor !== null) {
+      try { closeSync(descriptor); } catch { /* The mapping simply remains unverified. */ }
+    }
+  }
+}
+
+function sha256Text(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+/** Locate two 1-based source lines in one bounded pass without allocating an index per line. */
+function lineWindows(text: string, start: number, end: number): {
+  startFirst: number; startAfter: number; endFirst: number; endAfter: number;
+} | null {
+  let line = 1;
+  let startFirst: number | null = start === 1 ? 0 : null;
+  let startAfter: number | null = null;
+  let endFirst: number | null = end === 1 ? 0 : null;
+  let endAfter: number | null = null;
+  for (let newline = text.indexOf("\n"); newline !== -1;
+       newline = text.indexOf("\n", newline + 1)) {
+    const next = newline + 1;
+    if (line === start) startAfter = next;
+    if (line === end) endAfter = next;
+    line += 1;
+    if (line === start) startFirst = next;
+    if (line === end) endFirst = next;
+    if (startAfter !== null && endAfter !== null) break;
+  }
+  if (startFirst === null || endFirst === null) return null;
+  return {
+    startFirst,
+    startAfter: startAfter ?? text.length,
+    endFirst,
+    endAfter: endAfter ?? text.length,
+  };
+}
+
+/** Whether `candidate` plus its declared synthetic suffix occurs with the reported digest. */
+function promptCarriesMarkedSpan(prompt: string, candidate: string, chars: number, digest: string,
+                                 budget: MappingBudget): boolean {
+  if (!spendMappingWork(budget, "search", prompt.length)) return false;
+  let occurrences = 0;
+  for (let offset = prompt.indexOf(candidate); offset !== -1;
+       offset = prompt.indexOf(candidate, offset + 1)) {
+    occurrences += 1;
+    if (occurrences > MAX_PROMPT_OCCURRENCES) return false;
+    const fragment = prompt.slice(offset, offset + chars);
+    if (!spendMappingWork(budget, "hash", fragment.length)) return false;
+    if (fragment.length === chars && fragment.slice(0, candidate.length) === candidate
+        && sha256Text(fragment) === digest) return true;
+  }
+  return false;
+}
+
+/**
+ * Prove an old v1 `truncated` range is one exact contiguous source slice.
+ *
+ * The old shape used the same flag for prefixes and rendered declarations. Its hash identifies
+ * prompt text, not a source map. Verification therefore needs all three facts: one unique source
+ * occurrence, derived start/end lines equal to the reported boundaries, and the same fragment in
+ * the actual correlated prompt. Work is bounded to one source line's possible starts.
+ */
+function verifiesExactTruncatedMapping(span: Record<string, unknown>, prompt: string,
+                                       source: string | null, budget: MappingBudget): boolean {
+  if (source === null) return false;
+  const start = span.startLine;
+  const end = span.endLine;
+  const chars = span.chars;
+  const digest = span.sha256;
+  const marker = span.markerChars === undefined ? 0 : span.markerChars;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || !Number.isSafeInteger(chars)
+      || !Number.isSafeInteger(marker) || typeof digest !== "string" || !HEX_SHA256.test(digest)
+      || (start as number) < 1 || (end as number) < (start as number)
+      || (chars as number) < 1 || (marker as number) < 0 || (marker as number) >= (chars as number)) {
+    return false;
+  }
+  const sourceChars = (chars as number) - (marker as number);
+  // Account for the one source pass before doing or allocating work based on its contents.
+  if (!spendMappingWork(budget, "search", source.length)) return false;
+  const windows = lineWindows(source, start as number, end as number);
+  if (windows === null
+      || windows.startAfter - windows.startFirst > MAX_MAPPING_LINE_CANDIDATES) return false;
+
+  let verified = 0;
+  for (let offset = windows.startFirst; offset < windows.startAfter; offset += 1) {
+    if (!spendMappingWork(budget, "candidate", 1)) return false;
+    const after = offset + sourceChars;
+    if (after > source.length || after <= windows.endFirst || after > windows.endAfter) continue;
+    const candidate = source.slice(offset, after);
+    let promptMatch = false;
+    if ((marker as number) === 0) {
+      // Hash first: only the matching candidate pays for whole-source uniqueness searches.
+      if (!spendMappingWork(budget, "hash", candidate.length)) return false;
+      if (sha256Text(candidate) !== digest) continue;
+      if (!spendMappingWork(budget, "search", source.length * 2 + prompt.length)) return false;
+      promptMatch = prompt.includes(candidate);
+    } else {
+      promptMatch = promptCarriesMarkedSpan(prompt, candidate, chars as number, digest, budget);
+      if (!promptMatch) continue;
+      if (!spendMappingWork(budget, "search", source.length * 2)) return false;
+    }
+    // A hash cannot select between identical source occurrences. The reported envelope is not
+    // used to break the tie, because that is the mapping under examination.
+    if (source.indexOf(candidate) !== offset || source.indexOf(candidate, offset + 1) !== -1) continue;
+    if (!promptMatch) continue;
+    verified += 1;
+    if (verified > 1) return false;
+  }
+  return verified === 1;
+}
+
+function suppliedSpan(span: Record<string, unknown>, prompt: string | null,
+                      sourceFor: (path: unknown) => string | null,
+                      budget: MappingBudget): Record<string, unknown> {
+  const truncated = typeof span.truncated === "boolean" ? span.truncated : null;
+  let locationKnown = span.locationKnown === undefined || span.locationKnown === true;
+  let mappingVerified = false;
+  if (locationKnown && truncated === true) {
+    mappingVerified = prompt !== null
+      && verifiesExactTruncatedMapping(span, prompt, sourceFor(span.path), budget);
+    locationKnown = mappingVerified;
+  } else if (locationKnown && truncated !== false) {
+    // A malformed v1 record cannot be silently converted into the untruncated case.
+    locationKnown = false;
+  }
   return {
     path: String(span.path ?? ""),
     start_line: wireNumber(span.startLine),
     end_line: wireNumber(span.endLine),
     chars: wireNumber(span.chars),
     sha256: String(span.sha256 ?? ""),
-    truncated: span.truncated === true,
+    truncated,
     original_chars: wireNumber(span.originalChars),
     // How many of `chars` are a synthetic truncation marker rather than supplied source, when
     // the engine says. Null means it did not, not that there was no marker.
@@ -272,7 +575,8 @@ function suppliedSpan(span: Record<string, unknown>): Record<string, unknown> {
     // supplied text could not be located and the lines are 1..N of that text instead. A
     // consumer joining spans against source locations must not treat those as file positions,
     // so the flag is always present here rather than only when it is false.
-    location_known: span.locationKnown !== false,
+    location_known: locationKnown,
+    ...(mappingVerified ? { source_mapping: "verified_exact" } : {}),
   };
 }
 
@@ -299,6 +603,46 @@ function suppliedInput(input: Record<string, unknown>): Record<string, unknown> 
     original_chars: wireNumber(input.originalChars),
     omitted_items: wireNumber(input.omittedItems),
   };
+}
+
+/** Copy exactly the hook fields this driver reads before returning to mutable caller code. */
+function snapshotContextRecord(record: Record<string, unknown>): {
+  record: Record<string, unknown> | null; callId: string | null;
+} {
+  let invocationId: unknown;
+  try {
+    invocationId = record.invocationId;
+  } catch {
+    return { record: null, callId: null };
+  }
+  const callId = typeof invocationId === "string" ? invocationId : null;
+  try {
+    const spansValue = record.spans;
+    const inputsValue = record.inputs;
+    const omittedPathsValue = record.omittedPaths;
+    const spans = Array.isArray(spansValue)
+      ? spansValue.map((span) => typeof span === "object" && span !== null ? { ...span } : span)
+      : spansValue;
+    const inputs = Array.isArray(inputsValue)
+      ? inputsValue.map((input) => typeof input === "object" && input !== null ? { ...input } : input)
+      : inputsValue;
+    return {
+      callId,
+      record: {
+        invocationId,
+        stage: record.stage,
+        promptChars: record.promptChars,
+        spans,
+        inputs,
+        truncatedSpans: record.truncatedSpans,
+        omittedPaths: Array.isArray(omittedPathsValue) ? [...omittedPathsValue] : omittedPathsValue,
+        hypothesisId: record.hypothesisId,
+        specialistId: record.specialistId,
+      },
+    };
+  } catch {
+    return { record: null, callId };
+  }
 }
 
 async function main(): Promise<void> {
@@ -334,6 +678,13 @@ async function main(): Promise<void> {
 
   let modelCalls = 0;
   let modelFailures = 0;
+  // A failed runner invocation is never erased. These two collections only establish whether
+  // the harness's timeout-only planner helper later recovered that particular failure.
+  const pendingPlannerTimeouts: PendingPlannerTimeout[] = [];
+  const activePlannerCalls: ActivePlannerCall[] = [];
+  const ambiguousPlannerRetryIdentities: PlannerRetryIdentity[] = [];
+  const plannerRecoveryCandidates: PlannerTimeoutRecovery[] = [];
+  let plannerTimeoutFailures = 0;
   let modelAttempts = 0;
   let piSessionCalls = 0;
   const piSessionCallIds: string[] = [];
@@ -383,6 +734,92 @@ async function main(): Promise<void> {
   // which stage caused each gap.
   const modelCallIds = new Set<string>();
   const contextCallIds = new Set<string>();
+  const mappingSourceCache = new Map<string, string | null>();
+  const mappingBudget: MappingBudget = { candidates: 0, hashChars: 0, searchChars: 0 };
+  let mappingSourceBytes = 0;
+  let mappingPromptChars = 0;
+  let mappingPromptRecords = 0;
+  let contextLifecycleOrder = 0;
+  let contextSnapshotFailures = 0;
+  let contextBufferExhausted = false;
+  type BufferedContext = {
+    record: Record<string, unknown>; order: number; sourceTimestamp: string; beforeFirstCall: boolean;
+  };
+  const bufferedContext: BufferedContext[] = [];
+  const contextsByCallId = new Map<string, BufferedContext[]>();
+  const promptsByCallId = new Map<string, Array<{ prompt: string; order: number }>>();
+  const promptRetentionFailed = new Set<string>();
+
+  function snapshotSource(path: unknown): string | null {
+    if (typeof path !== "string") return null;
+    if (!mappingSourceCache.has(path)) {
+      if (mappingSourceCache.size >= MAX_MAPPING_SOURCE_FILES) return null;
+      const source = readMappingSource(config.repo_path, path);
+      const bytes = source === null ? 0 : Buffer.byteLength(source, "utf8");
+      if (source !== null && mappingSourceBytes + bytes > MAX_MAPPING_RETAINED_SOURCE_BYTES) {
+        mappingSourceCache.set(path, null);
+      } else {
+        mappingSourceCache.set(path, source);
+        mappingSourceBytes += bytes;
+      }
+    }
+    return mappingSourceCache.get(path) ?? null;
+  }
+
+  function cachedSource(path: unknown): string | null {
+    return typeof path === "string" ? mappingSourceCache.get(path) ?? null : null;
+  }
+
+  /** Snapshot only source a potentially exact old truncated span could need, at call time. */
+  function snapshotContextSources(record: Record<string, unknown>): void {
+    if (config.trace_mode === "off") return;
+    if (!Array.isArray(record.spans)) return;
+    for (const raw of record.spans) {
+      if (typeof raw !== "object" || raw === null) continue;
+      const span = raw as Record<string, unknown>;
+      const located = span.locationKnown === undefined || span.locationKnown === true;
+      if (located && span.truncated === true) snapshotSource(span.path);
+    }
+  }
+
+  /** Emit one engine context record once its actual runner prompt is available. */
+  async function emitContextRecord(record: Record<string, unknown>, prompt: string | null,
+                                   sourceTimestamp: string): Promise<void> {
+    const spans = (Array.isArray(record.spans) ? record.spans : [])
+      .map((span) => typeof span === "object" && span !== null
+        ? span as Record<string, unknown> : {});
+    const inputs = (Array.isArray(record.inputs) ? record.inputs : [])
+      .filter((input): input is Record<string, unknown> => typeof input === "object" && input !== null);
+    await observer.emit({
+      type: "context.selection",
+      // The engine reports the whole set it supplied for this invocation, which is the one
+      // thing a derived self-report cannot claim. Mapping verification can make an individual
+      // old span unlocated; it does not make the event incomplete.
+      capture_status: "complete",
+      ...(typeof record.invocationId === "string" ? { call_id: record.invocationId } : {}),
+      metadata: {
+        source: "harness_emitted",
+        // Mapping verification is deferred until the logical call's lifecycle is known. Keep
+        // the callback time separate from the emitter's later event timestamp.
+        source_timestamp: sourceTimestamp,
+        source_timestamp_of: "harness_context_callback",
+        stage: record.stage ?? null,
+        prompt_chars: wireNumber(record.promptChars),
+        span_count: spans.length,
+        spans: spans.map((span) => suppliedSpan(span, prompt, cachedSource, mappingBudget)),
+        // The inputs that are not located source: an inventory, a change summary, an
+        // architecture description. A record with inputs and no spans is a prompt built
+        // from those, not a prompt given nothing.
+        input_count: inputs.length,
+        inputs: inputs.map(suppliedInput),
+        truncated_spans: wireNumber(record.truncatedSpans),
+        omitted_paths: Array.isArray(record.omittedPaths) ? record.omittedPaths : [],
+        hypothesis_id: record.hypothesisId ?? null,
+        specialist_id: record.specialistId ?? null,
+      },
+    });
+  }
+
   // Count runner invocations, not distinct logical IDs: a planner may call its runner again
   // after exhausting the runner's inner retries and reuse the same context and logical ID.
   const runnerCalls: Array<{ callId: string; stage: string }> = [];
@@ -643,13 +1080,73 @@ async function main(): Promise<void> {
       // The engine's own id when it tagged the call, so a context.selection event and the model
       // events of the same invocation share one call_id; the driver's own id when it did not.
       const callId = meta.invocationId ?? minted;
+      const stage = typeof meta.stage === "string" && meta.stage ? meta.stage : "untagged";
+      const retryIdentity = plannerRetryIdentity(options, meta.invocationId, stage);
+      let activePlannerCall: ActivePlannerCall | null = null;
+      let retryOf: PendingPlannerTimeout | null = null;
+      if (retryIdentity) {
+        activePlannerCall = { identity: retryIdentity, concurrent: false };
+        for (const active of activePlannerCalls) {
+          if (!samePlannerRetryIdentity(active.identity, retryIdentity)) continue;
+          active.concurrent = true;
+          activePlannerCall.concurrent = true;
+        }
+        if (activePlannerCall.concurrent) {
+          // Once this exact invocation identity has overlapped, order cannot establish which
+          // operation a later call belongs to. Keep every failure unresolved for that identity.
+          if (!ambiguousPlannerRetryIdentities.some((entry) => samePlannerRetryIdentity(entry, retryIdentity))) {
+            ambiguousPlannerRetryIdentities.push(retryIdentity);
+          }
+          for (let index = pendingPlannerTimeouts.length - 1; index >= 0; index -= 1) {
+            if (samePlannerRetryIdentity(pendingPlannerTimeouts[index].identity, retryIdentity)) {
+              pendingPlannerTimeouts.splice(index, 1);
+            }
+          }
+        }
+        const ambiguous = ambiguousPlannerRetryIdentities.some((entry) => samePlannerRetryIdentity(entry, retryIdentity));
+        if (!ambiguous) {
+          const pendingIndex = pendingPlannerTimeouts.findIndex((entry) =>
+            samePlannerRetryIdentity(entry.identity, retryIdentity));
+          if (pendingIndex !== -1) retryOf = pendingPlannerTimeouts.splice(pendingIndex, 1)[0] ?? null;
+        }
+        activePlannerCalls.push(activePlannerCall);
+      }
       const view = describeInvocation(observedOptions as unknown as Record<string, unknown>, resolveBinary);
       const route = config.runner === "mock" ? "mock" : view.route;
       observedRoutes.add(route);
       const state: CallState = { callId, runnerCallId: minted, view, route, final: null, attemptSessions: [] };
       calls.set(minted, state);
       modelCallIds.add(callId);
-      runnerCalls.push({ callId, stage: typeof meta.stage === "string" && meta.stage ? meta.stage : "untagged" });
+      runnerCalls.push({ callId, stage });
+      const callOrder = ++contextLifecycleOrder;
+      const mappingContexts = contextsByCallId.get(callId) ?? [];
+      if (config.trace_mode !== "off" && !contextBufferExhausted && mappingContexts.length > 0
+          && !promptRetentionFailed.has(callId)) {
+        const prompts = promptsByCallId.get(callId) ?? [];
+        if (mappingPromptRecords + 1 > MAX_MAPPING_RETAINED_PROMPT_RECORDS
+            || mappingPromptChars + view.prompt.length > MAX_MAPPING_RETAINED_PROMPT_CHARS) {
+          // Drop this ID's earlier prompts too: keeping a prefix of its lifecycle would let a
+          // later conflicting call disappear from the exact-mapping decision.
+          for (const retained of prompts) mappingPromptChars -= retained.prompt.length;
+          mappingPromptRecords -= prompts.length;
+          promptsByCallId.delete(callId);
+          promptRetentionFailed.add(callId);
+        } else {
+          prompts.push({ prompt: view.prompt, order: callOrder });
+          promptsByCallId.set(callId, prompts);
+          mappingPromptChars += view.prompt.length;
+          mappingPromptRecords += 1;
+        }
+      }
+      // Read source at the actual call boundary, not after a scanner had more time to mutate its
+      // workspace. Final attribution remains buffered until every reuse of this logical ID is
+      // known; a later conflicting prompt must be able to make the mapping conservative.
+      if (!promptRetentionFailed.has(callId)) {
+        for (const context of mappingContexts) {
+          if (context.order >= callOrder) continue;
+          snapshotContextSources(context.record);
+        }
+      }
       // The runner uses meta only for its hooks. A driver-owned key prevents concurrent or
       // retried calls with the same harness ID from replacing each other's observation state.
       const invocation = { ...observedOptions, meta: { ...meta, invocationId: minted } };
@@ -675,16 +1172,25 @@ async function main(): Promise<void> {
         });
       }
       let returned: PiResult | null = null;
+      let callFailed = false;
+      let plannerTimedOut = false;
       try {
         const result = await baseRunner.runPi(invocation);
         returned = result;
-        if (result.code !== 0) modelFailures += 1;
+        if (result.code !== 0) {
+          modelFailures += 1;
+          callFailed = true;
+          plannerTimedOut = isPlannerTimeoutMessage(result.stderr || result.stdout || `pi exited with code ${result.code}`);
+        }
         const elapsed = Date.now() - began;
         if (runnerHooks === null) await emitUnhookedResponse(state, result, null, elapsed);
         else await emitHookedResponse(state, result, null, elapsed);
         return result;
       } catch (error) {
         modelFailures += 1;
+        callFailed = true;
+        const message = error instanceof Error ? error.message : String(error);
+        plannerTimedOut ||= isPlannerTimeoutMessage(message);
         const elapsed = Date.now() - began;
         if (runnerHooks === null) await emitUnhookedResponse(state, null, error, elapsed);
         else await emitHookedResponse(state, null, error, elapsed);
@@ -693,6 +1199,25 @@ async function main(): Promise<void> {
         // Here rather than after the return, so a call that threw keeps its attempts' transcripts.
         if (claudeSessionDir !== null) archiveClaudeSessions(state, minted, returned, claudeSessionDir);
         calls.delete(minted);
+        if (activePlannerCall) {
+          const activeIndex = activePlannerCalls.indexOf(activePlannerCall);
+          if (activeIndex !== -1) activePlannerCalls.splice(activeIndex, 1);
+        }
+        const ambiguous = retryIdentity !== null && ambiguousPlannerRetryIdentities.some((entry) =>
+          samePlannerRetryIdentity(entry, retryIdentity));
+        // Count every planner timeout, including one too thin to fingerprint. A native retry
+        // declaration cannot safely recover some other pair while an unattributed planner
+        // timeout is present in the same run.
+        if (callFailed && plannerTimedOut && stage === "planner") plannerTimeoutFailures += 1;
+        if (retryOf && !callFailed && !ambiguous) {
+          plannerRecoveryCandidates.push({
+            invocation_id: retryIdentity!.invocationId,
+            failed_runner_call_id: retryOf.runnerCallId,
+            recovery_runner_call_id: minted,
+          });
+        } else if (!retryOf && callFailed && plannerTimedOut && retryIdentity && !ambiguous) {
+          pendingPlannerTimeouts.push({ identity: retryIdentity, runnerCallId: minted });
+        }
       }
     },
   };
@@ -713,33 +1238,71 @@ async function main(): Promise<void> {
   const harnessObserver = {
     onContextSupplied(record: Record<string, unknown>): void {
       observerRecords.context_selection += 1;
-      if (typeof record.invocationId === "string") contextCallIds.add(record.invocationId);
-      const spans = (Array.isArray(record.spans) ? record.spans : []) as Record<string, unknown>[];
-      const inputs = (Array.isArray(record.inputs) ? record.inputs : [])
-        .filter((input): input is Record<string, unknown> => typeof input === "object" && input !== null);
-      void observer.emit({
-        type: "context.selection",
-        // The engine reports the whole set it supplied for this invocation, which is the one
-        // thing a derived self-report cannot claim.
-        capture_status: "complete",
-        ...(typeof record.invocationId === "string" ? { call_id: record.invocationId } : {}),
-        metadata: {
-          source: "harness_emitted",
-          stage: record.stage ?? null,
-          prompt_chars: wireNumber(record.promptChars),
-          span_count: spans.length,
-          spans: spans.map(suppliedSpan),
-          // The inputs that are not located source: an inventory, a change summary, an
-          // architecture description. A record with inputs and no spans is a prompt built
-          // from those, not a prompt given nothing.
-          input_count: inputs.length,
-          inputs: inputs.map(suppliedInput),
-          truncated_spans: wireNumber(record.truncatedSpans),
-          omitted_paths: Array.isArray(record.omittedPaths) ? record.omittedPaths : [],
-          hypothesis_id: record.hypothesisId ?? null,
-          specialist_id: record.specialistId ?? null,
-        },
-      });
+      if (config.trace_mode === "off") {
+        try {
+          if (typeof record.invocationId === "string") contextCallIds.add(record.invocationId);
+        } catch {
+          contextSnapshotFailures += 1;
+        }
+        return;
+      }
+      const sourceTimestamp = nowIso();
+      const captured = snapshotContextRecord(record);
+      if (captured.record === null) {
+        // A hostile getter or proxy is an observation hole, not a reason to break the scan. A
+        // pathless partial event makes the loss visible to coverage diagnostics; where the ID
+        // was readable it is retained so the hole belongs to the right invocation.
+        contextSnapshotFailures += 1;
+        if (captured.callId !== null) contextCallIds.add(captured.callId);
+        void observer.emit({
+          type: "context.selection",
+          capture_status: "partial",
+          ...(captured.callId !== null ? { call_id: captured.callId } : {}),
+          metadata: {
+            source: "harness_emitted",
+            source_timestamp: sourceTimestamp,
+            source_timestamp_of: "harness_context_callback",
+            capture_gap: "context_snapshot_failed",
+          },
+        });
+        return;
+      }
+      const snapshot = captured.record;
+      if (typeof snapshot.invocationId === "string") {
+        contextCallIds.add(snapshot.invocationId);
+      }
+      const snapshotId = snapshot.invocationId;
+      const context = {
+        record: snapshot,
+        order: ++contextLifecycleOrder,
+        sourceTimestamp,
+        beforeFirstCall: typeof snapshotId === "string" && !modelCallIds.has(snapshotId),
+      };
+      if (contextBufferExhausted) {
+        void emitContextRecord(snapshot, null, sourceTimestamp);
+        return;
+      }
+      if (bufferedContext.length >= MAX_BUFFERED_CONTEXT_RECORDS) {
+        // Release the whole buffer in callback order and stop attempting exact mapping. Partial
+        // retention could make a later duplicate or conflicting lifecycle invisible.
+        contextBufferExhausted = true;
+        for (const pending of bufferedContext) {
+          void emitContextRecord(pending.record, null, pending.sourceTimestamp);
+        }
+        bufferedContext.length = 0;
+        contextsByCallId.clear();
+        promptsByCallId.clear();
+        mappingPromptChars = 0;
+        mappingPromptRecords = 0;
+        void emitContextRecord(snapshot, null, sourceTimestamp);
+        return;
+      }
+      bufferedContext.push(context);
+      if (typeof snapshot.invocationId === "string") {
+        const siblings = contextsByCallId.get(snapshot.invocationId) ?? [];
+        siblings.push(context);
+        contextsByCallId.set(snapshot.invocationId, siblings);
+      }
     },
     onFindingCandidate(record: Record<string, unknown>): void {
       observerRecords.finding_candidate += 1;
@@ -850,6 +1413,39 @@ async function main(): Promise<void> {
   } catch (error) {
     failure = { name: error instanceof Error ? error.name : "Error", message: error instanceof Error ? error.message : String(error) };
   }
+
+  // A v1 call ID is only a logical correlation key and can be reused by outer retries or even
+  // concurrent work. Exact mapping is proved only for one context record that preceded the
+  // first call and whose every joined call carried the same prompt. Duplicate records, a late
+  // callback, conflicting prompts, and a record with no call all stay unlocated. Events retain
+  // callback order even though they are emitted here, after the lifecycle is known.
+  for (const context of bufferedContext) {
+    const callId = context.record.invocationId;
+    const siblingContexts = typeof callId === "string" ? contextsByCallId.get(callId) ?? [] : [];
+    const calls = typeof callId === "string" ? promptsByCallId.get(callId) ?? [] : [];
+    const firstPrompt = calls[0]?.prompt;
+    const unambiguous = typeof callId === "string" && !promptRetentionFailed.has(callId)
+      && siblingContexts.length === 1 && calls.length > 0
+      && context.beforeFirstCall
+      && calls.every((call) => call.prompt === firstPrompt);
+    await emitContextRecord(context.record, unambiguous ? firstPrompt ?? null : null,
+                            context.sourceTimestamp);
+  }
+
+  const plannerTimeoutRetryDeclarations = declaredPlannerTimeoutRetries(summary, config.mode);
+  // Neither side is sufficient alone: equal request fingerprints are allowed for independent
+  // calls, while a native note without the matching observed lifecycle could describe a retry
+  // this runner never saw. Any ambiguity leaves every raw failure unresolved.
+  const contextualPlannerRecoveryCandidates = plannerRecoveryCandidates.filter((candidate) =>
+    contextCallIds.has(candidate.invocation_id));
+  const plannerTimeoutRecoveries = plannerTimeoutRetryDeclarations === 1
+    && plannerTimeoutFailures === 1
+    && plannerRecoveryCandidates.length === 1
+    && contextualPlannerRecoveryCandidates.length === 1
+    ? plannerRecoveryCandidates
+    : [];
+  const recoveredModelFailures = plannerTimeoutRecoveries.length;
+  const unrecoveredModelFailures = modelFailures - recoveredModelFailures;
 
   const record = (summary ?? {}) as { newFindings?: Array<Record<string, unknown>>; updatedFindings?: Array<Record<string, unknown>>; observer?: { hookFailures?: number } };
   const writtenFindings = [...(record.newFindings ?? []), ...(record.updatedFindings ?? [])];
@@ -987,7 +1583,15 @@ async function main(): Promise<void> {
     finished_at: nowIso(),
     wall_ms: Date.now() - started,
     model_calls: modelCalls,
+    // Historical runner-invocation failures remain intact. Recovery is a separate, explicitly
+    // attributed count, and status readers use the unresolved remainder.
     model_call_failures: modelFailures,
+    model_call_failures_recovered: recoveredModelFailures,
+    model_call_failures_unrecovered: unrecoveredModelFailures,
+    planner_timeout_retry_declarations: plannerTimeoutRetryDeclarations,
+    planner_timeout_failures_observed: plannerTimeoutFailures,
+    planner_timeout_recovery_candidates: plannerRecoveryCandidates.length,
+    planner_timeout_recoveries: plannerTimeoutRecoveries,
     pi_session_calls: piSessionCalls,
     pi_session_call_ids: piSessionCallIds,
     // Claude transcripts are moved into the same per-call directories, so the adapter registers
@@ -1009,6 +1613,9 @@ async function main(): Promise<void> {
     cost_usd_cli_reported_total: costTotal === null ? null : Math.round(costTotal * 1e6) / 1e6,
     models_served: [...modelsServed].sort(),
     observer_records: observerRecords,
+    // Snapshotting happens inside the callback so caller mutation cannot rewrite history. A
+    // throwing getter/proxy is contained and counted here rather than escaping into the scan.
+    driver_context_snapshot_failures: contextSnapshotFailures,
     // Runner invocations, including outer retries that share a harness call ID and its context.
     // An untagged call is an uninstrumented one, never a call that was given no context.
     model_calls_with_context: runnerCalls.length - untaggedCalls,
