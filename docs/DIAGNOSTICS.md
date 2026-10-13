@@ -16,9 +16,9 @@ When a scan misses a known vulnerability, two very different things look identic
 - the model was never shown the code, or
 - the model was shown the code and said nothing.
 
-Only the second is a detection failure. The first is a context-selection failure, and it is fixed
-somewhere else entirely — in the harness's file budget, its ranking, its chunking — by someone who
-would otherwise be tuning a prompt. This diagnostic separates the two.
+Both are end-to-end detection failures. The first points to context selection; the second says
+only that the miss occurred after the code was delivered, not that the model alone was at fault.
+This diagnostic separates those attribution questions without assigning blame.
 
 It answers: **for every labeled target of a case, was the target's code region delivered to the
 model in some invocation, and if so in which?**
@@ -30,8 +30,8 @@ Two halves that never meet before this point:
 - the **labels**: `accepted_locations` on the case pack's target — `path`, `start_line`,
   `end_line` — joined to the plan's targets by `target_id`.
 - the **trace**: `context.selection` events, whose `metadata.spans` say what the harness placed in
-  a prompt: `path`, `start_line`, `end_line`, `chars`, `sha256`, `truncated`, `role`
-  (Contract 3 in the observer vocabulary).
+  a prompt: `path`, `start_line`, `end_line`, `chars`, `sha256`, `truncated`, `role`, and, for
+  exact truncated mappings, `source_mapping` (Contract 3 in the observer vocabulary).
 
 Nothing in a trace names a target, a case, or a line the evaluator cares about, and nothing in a
 pack reaches a scanner. The join happens here, in the evaluator, after the run. That ordering is
@@ -69,10 +69,10 @@ slashes, dropping a leading `./`, and collapsing redundant separators — the sa
 `scaneval.scoring` applies to a claim location, so two modules comparing evaluator paths cannot
 disagree about spelling.
 
-A span marked `location_known: false` is excluded from that union. It carries text the harness
-reassembled out of fragments, so its line numbers run 1..N over what was placed in the prompt and
-name nothing in the file; counting them as file lines would report a target as delivered because
-some fragment happened to be the right number of lines long.
+A span marked `location_known: false` is excluded from that union. It carries text from a named
+file without a dependable file-line mapping; its line numbers may run 1..N over prompt text or
+may only be an enclosing source range. Counting them as file lines would report a target as
+delivered because some fragment happened to be the right number of lines long.
 
 The flag is opt-in, so absence is the ordinary case: a span that does not carry `location_known`
 at all, and one carrying `true`, are both read as file positions. An **explicit value other than
@@ -81,10 +81,18 @@ harness saying it does not know, which is never a harness saying it does. Such s
 as `unlocated_spans`, and the path they name is still held: see `unlocated_span_on_target_path`
 below.
 
-A span's line range is the range of the text **actually supplied** (Contract 2), so a truncated
-span is not discounted for being truncated. `truncated` is read only for the counts in `capture`,
-where only a present `false` says untruncated: `true`, `null` and absent all land in
-`truncation_unknown_spans`.
+A span carrying `truncated: true` establishes coverage only with
+`source_mapping: "verified_exact"`. Older v1 harness records used `truncated` for both exact
+prefixes and non-verbatim renderings, so an unverified range is only the source envelope from
+which text came; it does not prove every enclosed line was supplied. ScanEval's harness driver
+adds `verified_exact` only after the fragment hash matches the correlated prompt and one unique,
+contiguous source slice with exactly the reported start and end lines. A synthetic suffix counts
+in the fragment hash but is removed using `marker_chars` before matching source. Ambiguous
+repeats, mismatched or malformed fields, unavailable prompts, and refused source reads remain
+unlocated. Coverage remains line-granular: the proof locates the exact fragment, but its first or
+last line may be partial, and it says nothing about model attention or understanding. A present
+`false` keeps the historical untruncated semantics; `null` and absent are still counted as
+truncation unknown.
 
 | Observation | `classification` |
 |---|---|
@@ -211,12 +219,14 @@ The document carries these as `notes`, verbatim, every time:
 - **Partial capture weakens the negative claim, never the positive one.** An incomplete record
   turns `absent` into `unknown`; a record holding nothing turns everything into `unknown`. An
   absent event is never evidence of absent activity.
-- A span marked `location_known: false` **covers nothing**, and one on a target's own path blocks
-  `absent` for that invocation.
+- A span with no dependable source mapping **covers nothing**. That includes
+  `location_known: false` and `truncated: true` without `source_mapping: "verified_exact"`; one
+  on a target's own path blocks `absent` for that invocation.
 - A **missing or unreadable** span is a hole, not a negative: an event with no `spans` list, a
   span whose coordinates cannot be read, and a span with no readable path all block `absent`.
-- A span's line range is the range of the text actually supplied, so a **truncated** span is not
-  discounted; `truncated` feeds counts only, and `null` there is unknown, never untruncated.
+- A **truncated** span covers its reported lines only with the driver's
+  `source_mapping: "verified_exact"` proof. Without it, the range is provenance rather than a
+  continuous source map; `null` truncation remains unknown, never untruncated.
 - Whether a candidate the harness produced was later **filtered out** is a different question.
   `finding.candidate`, `finding.validation`, `finding.filtered` and `finding.submitted` answer that
   one; this diagnostic reads none of them.
@@ -308,8 +318,8 @@ capture                   the facts every classification here rests on
                           carrying impossible lines
   unusable_spans_without_path
                           the subset of those that named no readable path at all
-  unlocated_spans         spans whose location_known is present and not true: a path, no
-                          file position
+  unlocated_spans         spans with a path but no dependable file position: location_known is
+                          present and not true, or truncated is true without verified_exact
   truncated_spans         located spans claiming truncated: true
   truncation_unknown_spans
                           located spans whose truncated is absent or null

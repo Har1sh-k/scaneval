@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -966,14 +967,16 @@ def _stub_harness(tmp_path: Path, name: str, *, engine: str, runner: str,
 
 
 def _stub_harness_bundle(tmp_path: Path, root: Path, *, run_id: str, runner: str,
-                         trace_mode: str = "content", capture_pi_sessions: bool | None = None) -> Path:
+                         trace_mode: str = "content", capture_pi_sessions: bool | None = None,
+                         prepared: PreparedInput | None = None) -> Path:
     adapter = get_adapter("llm-harness")
     spec = SystemSpec(f"stub-{runner}", "llm-harness", {"harness": "securevibes-agent", "root": str(root),
                                                         "model": "test/mock-llm", "runner": runner,
                                                         **({"capture_pi_sessions": capture_pi_sessions}
                                                            if capture_pi_sessions is not None else {})})
     preparation = adapter.prepare(spec, tmp_path / "cache")
-    return run_invocation(prepared=_prepared(tmp_path), adapter=adapter, spec=spec, preparation=preparation,
+    return run_invocation(prepared=prepared or _prepared(tmp_path), adapter=adapter, spec=spec,
+                          preparation=preparation,
                           out_dir=tmp_path / "out", run_id=run_id, timeout_seconds=600,
                           trace_mode=trace_mode, network_policy="none", clock=CLOCK)
 
@@ -2060,6 +2063,305 @@ def test_a_supplied_span_that_could_not_be_located_says_so_rather_than_naming_fi
     submitted = next(event for event in events if event["type"] == "finding.submitted")
     assert submitted["metadata"]["candidate_ids"] == ["cand-1", "cand-2"]
     assert submitted["metadata"]["component"] == "AUTH", "the summary's own fields survive the join"
+
+
+MAPPING_SOURCE = (
+    "class Gate {\n"
+    "  first() {\n"
+    '    return "first";\n'
+    "  }\n"
+    "\n"
+    "  constructor() {\n"
+    "    this.secret = true;\n"
+    "  }\n"
+    "\n"
+    "  last() {\n"
+    '    return "last";\n'
+    "  }\n"
+    "}\n"
+)
+
+
+def _mapping_engine() -> str:
+    lines = MAPPING_SOURCE.splitlines(keepends=True)
+    prefix = "".join(lines[:4])
+    rendered = "".join(lines[:4] + lines[9:])
+    marker = "\n/* truncated */"
+    cut_rendered = rendered[:len(rendered) - 8]
+
+    def record(call_id: str, text: str, *, start: int, end: int, truncated,
+               marker_text: str = "", extra: str = "") -> str:
+        prompt_text = text + marker_text
+        digest = hashlib.sha256(prompt_text.encode()).hexdigest()
+        marker_field = f", markerChars: {len(marker_text)}" if marker_text else ""
+        return f'''{{
+          invocationId: {json.dumps(call_id)}, stage: "llm-static.file", promptChars: {len(prompt_text)},
+          spans: [{{ path: "src/context.ts", startLine: {start}, endLine: {end},
+            chars: {len(prompt_text)}, sha256: {json.dumps(digest)}, truncated: {json.dumps(truncated).lower()},
+            originalChars: {len(MAPPING_SOURCE)}, role: "primary"{marker_field}{extra} }}],
+          truncatedSpans: {1 if truncated is True else 0}, omittedPaths: [],
+          prompt: {json.dumps("before\n" + prompt_text + "\nafter")}
+        }}'''
+
+    records = [
+        record("full", MAPPING_SOURCE, start=1, end=13, truncated=False),
+        record("prefix", prefix, start=1, end=4, truncated=True),
+        record("prefix-marker", prefix, start=1, end=4, truncated=True, marker_text=marker),
+        record("rendered", rendered, start=1, end=13, truncated=True),
+        record("cut-rendered", cut_rendered, start=1, end=13, truncated=True,
+               marker_text=marker),
+        record("null-truncation", MAPPING_SOURCE, start=1, end=13, truncated=None),
+        record("null-location", MAPPING_SOURCE, start=1, end=13, truncated=False,
+               extra=", locationKnown: null"),
+        # This exact source is repeated on lines 4, 8, and 12. Its digest is real, but no one
+        # occurrence can be selected from the hash without inventing a source location.
+        record("repeated", "  }\n", start=4, end=4, truncated=True),
+    ]
+    return f'''
+export const HARNESS_OBSERVER_VERSION = 1;
+const RECORDS = [{",".join(records)}];
+export async function runRuntimeScan(options: any) {{
+  for (const record of RECORDS) {{
+    const {{ prompt, ...context }} = record;
+    options.observer.onContextSupplied(context);
+    await options.llmRunner.runPi({{
+      args: ["-p", "--model", "test/mock", prompt], cwd: options.repoPath,
+      timeoutMs: 1000, env: {{}}, meta: {{ invocationId: context.invocationId, stage: context.stage }},
+    }});
+  }}
+  options.observer.onScanComplete?.({{ hookFailures: 0, unattributablePayloads: 0 }});
+  return {{ newFindings: [], updatedFindings: [],
+    bootstrapScan: {{ llmCalls: RECORDS.length, failedCalls: 0, status: "complete", hypothesisCoverage: 1 }},
+    runtimeProfile: "full", degraded: false, observer: {{ version: 1, hookFailures: 0 }} }};
+}}
+'''
+
+
+def test_v1_truncated_spans_are_credited_only_after_exact_source_mapping(tmp_path):
+    """The actual driver distinguishes contiguous prefixes from rendered source envelopes.
+
+    This is the old v1 event shape: it has only ``truncated`` to distinguish a rendering, and
+    therefore cannot be trusted until the driver verifies the prompt hash against the bounded
+    source range. A marker is included in one positive control to prove it is excluded from the
+    source length while remaining part of the captured-fragment hash.
+    """
+    prepared = _prepared(tmp_path)
+    (prepared.source_dir / "src/context.ts").write_text(MAPPING_SOURCE, encoding="utf-8")
+    prepared = PreparedInput(prepared.input_id, prepared.source_dir,
+                             hash_exported_tree(prepared.source_dir)["tree_hash"],
+                             prepared.languages, prepared.provenance)
+    root = _stub_harness(tmp_path, "mapping-v1", engine=_mapping_engine(), runner=NO_HOOKS_RUNNER)
+
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="mapping-v1", runner="default",
+                                  prepared=prepared)
+    events = [json.loads(line) for line in
+              (bundle / "trace/events.jsonl").read_text(encoding="utf-8").splitlines()]
+    selections = {event["call_id"]: event
+                  for event in events if event["type"] == "context.selection"}
+    spans = {call_id: event["metadata"]["spans"][0]
+             for call_id, event in selections.items()}
+    requests = {event["call_id"]: event for event in events if event["type"] == "model.request"}
+
+    for call_id, event in selections.items():
+        assert event["metadata"]["source_timestamp_of"] == "harness_context_callback"
+        assert event["metadata"]["source_timestamp"] <= requests[call_id]["timestamp"]
+        assert requests[call_id]["timestamp"] <= event["timestamp"], \
+            "deferred emission keeps callback time separately instead of pretending it happened late"
+
+    assert spans["full"]["location_known"] is True
+    assert "source_mapping" not in spans["full"]
+    for call_id in ("prefix", "prefix-marker"):
+        assert spans[call_id]["location_known"] is True
+        assert spans[call_id]["source_mapping"] == "verified_exact"
+    for call_id in ("rendered", "cut-rendered", "null-truncation", "null-location", "repeated"):
+        assert spans[call_id]["location_known"] is False
+        assert spans[call_id].get("source_mapping") != "verified_exact"
+    assert spans["null-truncation"]["truncated"] is None
+
+
+def _reused_context_id_engine() -> str:
+    prefix = "".join(MAPPING_SOURCE.splitlines(keepends=True)[:4])
+    digest = hashlib.sha256(prefix.encode()).hexdigest()
+    context = f'''{{ invocationId, stage: "llm-static.file", promptChars: PROMPT.length,
+      spans: [{{ path: "src/context.ts", startLine: 1, endLine: 4, chars: SOURCE.length,
+        sha256: {json.dumps(digest)}, truncated: true, originalChars: {len(MAPPING_SOURCE)},
+        role: "primary" }}], truncatedSpans: 1, omittedPaths: [] }}'''
+    return f'''
+export const HARNESS_OBSERVER_VERSION = 1;
+const SOURCE = {json.dumps(prefix)};
+const PROMPT = `before\\n${{SOURCE}}\\nafter`;
+const OTHER_PROMPT = `different wrapper\\n${{SOURCE}}\\ndifferent end`;
+export async function runRuntimeScan(options: any) {{
+  const report = (invocationId: string) => options.observer.onContextSupplied({context});
+  const call = (invocationId: string, prompt: string) => options.llmRunner.runPi({{
+    args: ["-p", "--model", "test/mock", prompt], cwd: options.repoPath,
+    timeoutMs: 1000, env: {{}}, meta: {{ invocationId, stage: "llm-static.file" }},
+  }});
+  report("duplicate");
+  report("duplicate");
+  await call("duplicate", PROMPT);
+  await call("duplicate", OTHER_PROMPT);
+
+  await call("late", PROMPT);
+  report("late");
+  await call("late", PROMPT);
+
+  report("identical-retry");
+  await call("identical-retry", PROMPT);
+  await call("identical-retry", PROMPT);
+
+  report("conflicting-retry");
+  await call("conflicting-retry", PROMPT);
+  await call("conflicting-retry", OTHER_PROMPT);
+
+  const mutableSpan = {{ path: "src/context.ts", startLine: 1, endLine: 4,
+    chars: SOURCE.length, sha256: {json.dumps(digest)}, truncated: true,
+    originalChars: {len(MAPPING_SOURCE)}, role: "primary" }};
+  const mutableInput = {{ kind: "instructions", chars: 1, sha256: "c".repeat(64) }};
+  const mutableContext = {{ invocationId: "mutated", stage: "llm-static.file",
+    promptChars: PROMPT.length, spans: [mutableSpan], inputs: [mutableInput],
+    truncatedSpans: 1, omittedPaths: ["before.ts"] }};
+  options.observer.onContextSupplied(mutableContext);
+  mutableContext.invocationId = "changed-after-callback";
+  mutableContext.stage = "changed-after-callback";
+  mutableSpan.startLine = 99;
+  mutableSpan.sha256 = "0".repeat(64);
+  mutableInput.chars = 99;
+  mutableContext.omittedPaths[0] = "after.ts";
+  await call("mutated", PROMPT);
+
+  const unreadable = new Proxy({{ invocationId: "snapshot-failure" }}, {{
+    get(target, property, receiver) {{
+      if (property === "spans") throw new Error("unreadable context");
+      return Reflect.get(target, property, receiver);
+    }},
+  }});
+  options.observer.onContextSupplied(unreadable);
+  await call("snapshot-failure", PROMPT);
+  options.observer.onScanComplete?.({{ hookFailures: 0, unattributablePayloads: 0 }});
+  return {{ newFindings: [], updatedFindings: [],
+    bootstrapScan: {{ llmCalls: 10, failedCalls: 0, status: "complete", hypothesisCoverage: 1 }},
+    runtimeProfile: "full", degraded: false, observer: {{ version: 1, hookFailures: 0 }} }};
+}}
+'''
+
+
+def test_reused_context_ids_cannot_attach_mapping_proof_to_the_wrong_prompt(tmp_path):
+    prepared = _prepared(tmp_path)
+    (prepared.source_dir / "src/context.ts").write_text(MAPPING_SOURCE, encoding="utf-8")
+    prepared = PreparedInput(prepared.input_id, prepared.source_dir,
+                             hash_exported_tree(prepared.source_dir)["tree_hash"],
+                             prepared.languages, prepared.provenance)
+    root = _stub_harness(tmp_path, "mapping-reused-id", engine=_reused_context_id_engine(),
+                         runner=NO_HOOKS_RUNNER)
+
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="mapping-reused-id", runner="default",
+                                  prepared=prepared)
+    events = [json.loads(line) for line in
+              (bundle / "trace/events.jsonl").read_text(encoding="utf-8").splitlines()]
+    selections = [event for event in events if event["type"] == "context.selection"]
+    by_call: dict[str, list[dict]] = {}
+    for event in selections:
+        if event["metadata"].get("spans"):
+            by_call.setdefault(event["call_id"], []).append(event["metadata"]["spans"][0])
+
+    assert len(by_call["duplicate"]) == 2
+    for call_id in ("duplicate", "late", "conflicting-retry"):
+        assert all(span["location_known"] is False for span in by_call[call_id])
+        assert all("source_mapping" not in span for span in by_call[call_id])
+    assert len(by_call["identical-retry"]) == 1
+    assert by_call["identical-retry"][0]["location_known"] is True
+    assert by_call["identical-retry"][0]["source_mapping"] == "verified_exact"
+    mutated = next(event for event in selections if event["call_id"] == "mutated")
+    assert mutated["metadata"]["stage"] == "llm-static.file"
+    assert mutated["metadata"]["spans"][0]["start_line"] == 1
+    assert mutated["metadata"]["spans"][0]["source_mapping"] == "verified_exact"
+    assert mutated["metadata"]["inputs"][0]["chars"] == 1
+    assert mutated["metadata"]["omitted_paths"] == ["before.ts"]
+    assert "changed-after-callback" not in by_call
+    gap = next(event for event in selections if event.get("call_id") == "snapshot-failure")
+    assert gap["capture_status"] == "partial"
+    assert gap["metadata"]["capture_gap"] == "context_snapshot_failed"
+    assert "spans" not in gap["metadata"], "the unreadable record must be a hole, not an empty selection"
+    output = json.loads((bundle / "raw/driver-output.json").read_text(encoding="utf-8"))
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert output["driver_context_snapshot_failures"] == 1
+    assert execution["capture"]["context_selection"] == "partial"
+
+
+def _unsafe_mapping_engine() -> str:
+    digest = hashlib.sha256(MAPPING_SOURCE.encode()).hexdigest()
+    return f'''
+import {{ mkdirSync, symlinkSync, writeFileSync }} from "node:fs";
+import {{ execFileSync }} from "node:child_process";
+import {{ createHash }} from "node:crypto";
+import {{ join }} from "node:path";
+export const HARNESS_OBSERVER_VERSION = 1;
+const SOURCE = {json.dumps(MAPPING_SOURCE)};
+const SHA = {json.dumps(digest)};
+export async function runRuntimeScan(options: any) {{
+  const outside = join(options.repoPath, "..", "outside-context.ts");
+  writeFileSync(outside, SOURCE);
+  symlinkSync(outside, join(options.repoPath, "src", "external-link.ts"));
+  mkdirSync(join(options.repoPath, "src", "a-directory"));
+  writeFileSync(join(options.repoPath, "src", "oversized.ts"), Buffer.alloc(8 * 1024 * 1024 + 1, 120));
+  const longLine = "x".repeat(5000) + "\\n";
+  writeFileSync(join(options.repoPath, "src", "long-line.ts"), longLine);
+  execFileSync("/usr/bin/mkfifo", [join(options.repoPath, "src", "source.pipe")]);
+  const paths = [
+    ["traversal", "../outside-context.ts", SOURCE, SHA],
+    ["absolute", join(options.repoPath, "src", "context.ts"), SOURCE, SHA],
+    ["external", "external:context.ts", SOURCE, SHA],
+    ["symlink", "src/external-link.ts", SOURCE, SHA],
+    ["directory", "src/a-directory", SOURCE, SHA],
+    ["fifo", "src/source.pipe", SOURCE, SHA],
+    ["oversized", "src/oversized.ts", SOURCE, SHA],
+    ["long-line", "src/long-line.ts", longLine,
+      createHash("sha256").update(longLine, "utf8").digest("hex")],
+  ];
+  for (const [invocationId, path, text, sha256] of paths) {{
+    options.observer.onContextSupplied({{
+      invocationId, stage: "llm-static.file", promptChars: text.length,
+      spans: [{{ path, startLine: 1, endLine: invocationId === "long-line" ? 1 : 13,
+        chars: text.length, sha256, truncated: true, originalChars: text.length, role: "primary" }}],
+      truncatedSpans: 1, omittedPaths: [],
+    }});
+    await options.llmRunner.runPi({{
+      args: ["-p", "--model", "test/mock", `before\\n${{text}}\\nafter`],
+      cwd: options.repoPath, timeoutMs: 1000, env: {{}},
+      meta: {{ invocationId, stage: "llm-static.file" }},
+    }});
+  }}
+  options.observer.onScanComplete?.({{ hookFailures: 0, unattributablePayloads: 0 }});
+  return {{ newFindings: [], updatedFindings: [],
+    bootstrapScan: {{ llmCalls: paths.length, failedCalls: 0, status: "complete", hypothesisCoverage: 1 }},
+    runtimeProfile: "full", degraded: false, observer: {{ version: 1, hookFailures: 0 }} }};
+}}
+'''
+
+
+@mkfifo_required
+def test_source_mapping_verification_refuses_unsafe_or_unbounded_files(tmp_path):
+    """Mapping proof is a bounded repo read, never an ambient or blocking filesystem read."""
+    prepared = _prepared(tmp_path)
+    (prepared.source_dir / "src/context.ts").write_text(MAPPING_SOURCE, encoding="utf-8")
+    prepared = PreparedInput(prepared.input_id, prepared.source_dir,
+                             hash_exported_tree(prepared.source_dir)["tree_hash"],
+                             prepared.languages, prepared.provenance)
+    root = _stub_harness(tmp_path, "mapping-unsafe", engine=_unsafe_mapping_engine(),
+                         runner=NO_HOOKS_RUNNER)
+
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="mapping-unsafe", runner="default",
+                                  prepared=prepared)
+    events = [json.loads(line) for line in
+              (bundle / "trace/events.jsonl").read_text(encoding="utf-8").splitlines()]
+    spans = {event["call_id"]: event["metadata"]["spans"][0]
+             for event in events if event["type"] == "context.selection"}
+
+    assert set(spans) == {"traversal", "absolute", "external", "symlink", "directory", "fifo",
+                          "oversized", "long-line"}
+    assert all(span["location_known"] is False for span in spans.values())
+    assert all("source_mapping" not in span for span in spans.values())
 
 
 SECOND_FINDING = (FINDING.replace("SV-AUTH-AUTHBYPASS-001", "SV-INJ-CMDI-002")
