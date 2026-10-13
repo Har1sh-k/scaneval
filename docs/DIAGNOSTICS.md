@@ -37,8 +37,10 @@ Nothing in a trace names a target, a case, or a line the evaluator cares about, 
 pack reaches a scanner. The join happens here, in the evaluator, after the run. That ordering is
 what makes the answer evidence rather than a hint the harness could have acted on.
 
-Spans live in `metadata`, so this works in `metadata` trace mode as well as `content` mode. No
-file content is read and none is needed.
+Spans live in `metadata`, so this works in `metadata` trace mode as well as `content` mode. The
+diagnostic reader itself reads no file content and needs none. The own-harness driver may already
+have read bounded source files at capture time to derive a `source_mapping` proof; the diagnostic
+reads only that saved marker and the rest of the event metadata.
 
 ### Classification
 
@@ -287,7 +289,7 @@ way a score record is, and nothing binds to its shape.
 ```
 schema_version            "2.0"
 diagnostic                "context_coverage"
-diagnostic_version        integer; bumped when a field changes meaning
+diagnostic_version        2; bumped when a field changes meaning
 scaneval_version          the version that produced the document
 run_id, invocation_id, input_id, system_id
                           from the execution record, or null

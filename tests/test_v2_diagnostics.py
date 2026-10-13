@@ -1246,6 +1246,7 @@ def test_the_command_prints_the_document_with_sorted_keys_and_two_space_indent(t
     document = json.loads(out)
     assert out == json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
     assert document["diagnostic"] == "context_coverage"
+    assert document["diagnostic_version"] == 2
     assert only_target(document)["best"] == "included"
 
 
