@@ -2094,13 +2094,14 @@ def _mapping_engine() -> str:
         prompt_text = text + marker_text
         digest = hashlib.sha256(prompt_text.encode()).hexdigest()
         marker_field = f", markerChars: {len(marker_text)}" if marker_text else ""
+        prompt_json = json.dumps("before\n" + prompt_text + "\nafter")
         return f'''{{
           invocationId: {json.dumps(call_id)}, stage: "llm-static.file", promptChars: {len(prompt_text)},
           spans: [{{ path: "src/context.ts", startLine: {start}, endLine: {end},
             chars: {len(prompt_text)}, sha256: {json.dumps(digest)}, truncated: {json.dumps(truncated).lower()},
             originalChars: {len(MAPPING_SOURCE)}, role: "primary"{marker_field}{extra} }}],
           truncatedSpans: {1 if truncated is True else 0}, omittedPaths: [],
-          prompt: {json.dumps("before\n" + prompt_text + "\nafter")}
+          prompt: {prompt_json}
         }}'''
 
     records = [
