@@ -922,16 +922,28 @@ export async function runRuntimeScan(options: any): Promise<any> {
 
 
 def _tsx_root() -> Path:
-    """A checkout to borrow tsx and node_modules from, or a skip.
+    """The SDK's pinned tsx install, or an external checkout fallback, or a skip.
 
-    Which harness it is does not matter: these builds are written here and only need a node with
-    TypeScript loading in front of them.
+    The repository install comes first so fixture-driver tests run in CI, where no sibling harness
+    checkout exists. Which fallback harness it is does not matter: these builds are written here
+    and only need a node with TypeScript loading in front of them.
     """
-    root = next((candidate for candidate in (SECUREVIBES, FIELDGLASS)
+    root = next((candidate for candidate in (ROOT / "sdk" / "typescript", SECUREVIBES, FIELDGLASS)
                  if (candidate / "node_modules" / ".bin" / "tsx").exists()), None)
     if root is None:
-        pytest.skip("no harness checkout with node_modules to borrow tsx from")
+        pytest.skip("tsx is not installed in the TypeScript SDK or an external harness checkout")
     return root
+
+
+def test_fixture_driver_uses_the_sdk_tsx_without_external_harnesses(tmp_path, monkeypatch):
+    sdk_root = ROOT / "sdk" / "typescript"
+    assert (sdk_root / "node_modules" / ".bin" / "tsx").exists(), (
+        "fixture-driver tests require npm ci --prefix sdk/typescript"
+    )
+    monkeypatch.setitem(globals(), "SECUREVIBES", tmp_path / "missing-securevibes")
+    monkeypatch.setitem(globals(), "FIELDGLASS", tmp_path / "missing-fieldglass")
+
+    assert _tsx_root() == sdk_root
 
 
 def _stub_harness(tmp_path: Path, name: str, *, engine: str, runner: str,
