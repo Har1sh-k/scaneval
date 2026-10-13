@@ -11,10 +11,22 @@ Install ScanEval using the [setup guide](INITIAL_BUILD.md#try-it), then configur
 
 | Configuration | Required setup |
 |---|---|
-| [`run-semgrep.json`](../corpus/pilot/run-semgrep.json) | Install Semgrep. The adapter fetches the pinned ruleset rather than loading registry rules at scan time. |
+| [`run-semgrep.json`](../corpus/pilot/run-semgrep.json) | Install Semgrep **1.177.0** using the commands below. The adapter fetches the pinned ruleset rather than loading registry rules at scan time. |
 | [`run-harness.json`](../corpus/pilot/run-harness.json) | Haiku through securevibes-agent. Set `config.root` to your checkout with its dependencies installed. Build the [TypeScript Observer](OBSERVER_SDK.md) and authenticate the requested model route. |
 | [`run-harness-codex-sol.json`](../corpus/pilot/run-harness-codex-sol.json) | GPT-5.6 Sol through securevibes-agent and pi's OpenAI Codex provider. The checked-in path expands to `~/Documents/GitHub/securevibes-agent`; update it if your checkout lives elsewhere. |
 | [`run-deepsec.json`](../corpus/pilot/run-deepsec.json) | Set `config.deepsec_root` to an installed DeepSec workspace and configure CLI authentication. |
+
+For the Semgrep pilot, install the version named by the configuration in your active virtual
+environment and confirm it before running:
+
+```sh
+python -m pip install "semgrep==1.177.0"
+semgrep --version
+# Expected: 1.177.0
+```
+
+The adapter records the installed version; the configuration does not install or enforce it.
+The unpinned `official-adapters` extra alone does not guarantee this pilot version.
 
 Review model, budget, input, and tracing settings before running. The harness and DeepSec
 configurations make live model calls and can incur charges. Source preparation fetches pinned
