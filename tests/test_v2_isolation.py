@@ -881,7 +881,7 @@ def test_a_completed_attach_still_kills_a_container_the_engine_reports_running(t
 
 
 def test_a_completed_attach_waits_for_late_oom_metadata_after_the_exit_state(tmp_path):
-    """The daemon can publish the exit before its separate OOM event reaches inspection."""
+    """Refresh a terminal state when OOM metadata becomes visible just afterward."""
     fake = FakeDocker(behavior=lambda *args: (137, True), oom_state_lag=1)
     bundle, _held = invoke(tmp_path, fake, execution=settings(limits={"memory_mb": 128, "tmpfs_mb": 16}))
     result, execution = documents(bundle)

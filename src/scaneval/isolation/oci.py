@@ -72,8 +72,8 @@ from . import PINNED_IMAGE, ExecutionSettings, IsolationError, Limits
 CONTROL_TIMEOUT = 120.0
 KILL_GRACE = 10.0
 # ``docker start --attach`` obtains the exit status through the engine's wait API, while
-# ``OOMKilled`` is published by a separate engine event. Give that metadata a short, bounded
-# chance to catch up before the container is removed after a signal-9 exit.
+# ``OOMKilled`` is independent inspected metadata. Refresh it briefly before removing a
+# signal-9 container, without inferring OOM from that signal.
 ATTACHED_STATE_GRACE = 1.0
 ATTACHED_STATE_POLL = 0.05
 PROXY_PORT = 3128
