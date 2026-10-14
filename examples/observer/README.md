@@ -11,8 +11,8 @@ ruleset, and hold no truth label, so the findings they print are fabricated and 
 nothing about any scanner. Neither file evaluates, scores, or ranks anything.
 
 Their clock, ID factory, and tool duration are fixed constants rather than measurements, which
-is why two runs print the same bytes and why the timestamps below are in the future. A real
-harness passes the real clock and times real work.
+is why two runs print the same bytes. The timestamps are reproducible fixture data, not the
+current time. A real harness passes the real clock and times real work.
 
 ## The emitter follows the harness, not the scanned repository
 
@@ -26,38 +26,34 @@ languages runs one emitter per producer and gives each its own `producer_id`; th
 
 The two emitters are behaviorally matched against one wire contract,
 [`schema/v2/trace-event.schema.json`](../../schema/v2/trace-event.schema.json), and
-`tests/test_v2_observer_parity.py` runs both over the same inputs to pin that. One difference
-survives today: the Python emitter writes `metadata` after the optional link fields
-(`parent_event_id`, `call_id`, `attempt_id`, `candidate_id`, `claim_id`, `duration_ms`) and the
-TypeScript emitter writes it before them. The two lines parse to the same JSON object, and JSON
-object key order is not significant, but they are not byte identical. Compare traces as parsed
-events, not as text.
+`tests/test_v2_observer_parity.py` runs both over the same inputs to pin that. Both write
+top-level keys in the schema's declaration order, with optional link fields and `duration_ms`
+before `metadata`. Under the [shared parity contract](../../docs/OBSERVER_SDK.md#the-shared-parity-contract),
+the package JSONL sinks produce byte-identical lines when the inputs and injected sources match
+and the payload has no array-index key that JavaScript reorders. These fixtures meet those
+conditions.
 
 ## Run them
 
-Python, from the repository root, with no arguments:
+After completing the repository [quick start](../../README.md#quick-start), run the Python
+fixture from the repository root with no arguments:
 
 ```sh
 .venv/bin/python examples/observer/python_harness.py
 ```
 
-TypeScript, with any `tsx`, against the committed SDK build in `sdk/typescript/dist`:
+The TypeScript fixture requires Node.js and npm. Install the SDK's locked development tools,
+build it, and run its local `tsx`:
 
 ```sh
-tsx examples/observer/typescript_harness.mts
+npm ci --prefix sdk/typescript
+npm run build --prefix sdk/typescript
+./sdk/typescript/node_modules/.bin/tsx examples/observer/typescript_harness.mts
 ```
 
-This repository vendors no `tsx`. The output below came from the one in a sibling checkout:
-
-```sh
-../securevibes-agent/node_modules/.bin/tsx \
-  examples/observer/typescript_harness.mts
-```
-
-Build the SDK first if `sdk/typescript/dist/index.js` is missing
-(`npm --prefix sdk/typescript run build`). `tsx` prints a `module.register()` deprecation
-warning to stderr on current node; it comes from `tsx` itself and has nothing to do with the
-emitter.
+The build generates `sdk/typescript/dist/` locally; that directory is not tracked in Git. The
+fixture imports this generated build directly. The fenced blocks below are the exact standard
+output from the two fixture commands.
 
 Each harness demonstrates, in this order: a run with tracing off that records nothing; the same
 run with tracing turned on by the caller; model request and response events at the fake model
@@ -141,17 +137,16 @@ step 3  explicit flush
   capture state: dropped_events=0 capture_gap=false last_sink_error=none
 
 trace jsonl (9 lines)
-  {"schema_version":"2.0","event_id":"event-1","run_id":"run-observer-example","producer_id":"example-harness","sequence":0,"type":"model.request","category":"model","capture_status":"redacted","timestamp":"2026-09-20T12:00:00.000Z","metadata":{"model":"fake-model-v0","input_tokens":31},"call_id":"call-1","content":{"api_key":"[REDACTED]","prompt":"review app/runner.py"}}
-  {"schema_version":"2.0","event_id":"event-2","run_id":"run-observer-example","producer_id":"example-harness","sequence":1,"type":"model.response","category":"model","capture_status":"complete","timestamp":"2026-09-20T12:00:00.010Z","metadata":{"model":"fake-model-v0","output_tokens":18},"parent_event_id":"event-1","call_id":"call-1","content":{"text":"two candidates in app/runner.py","finish_reason":"stop"}}
-  {"schema_version":"2.0","event_id":"event-3","run_id":"run-observer-example","producer_id":"example-harness","sequence":2,"type":"tool.start","category":"tool","capture_status":"complete","timestamp":"2026-09-20T12:00:00.020Z","metadata":{"tool":"grep","path":"app/runner.py"},"call_id":"call-2","content":{"arguments":{"pattern":"shell=True"}}}
-  {"schema_version":"2.0","event_id":"event-4","run_id":"run-observer-example","producer_id":"example-harness","sequence":3,"type":"tool.end","category":"tool","capture_status":"complete","timestamp":"2026-09-20T12:00:00.030Z","metadata":{"tool":"grep","matched":2},"parent_event_id":"event-3","call_id":"call-2","duration_ms":7,"content":{"result":{"matched":2,"path":"app/runner.py"}}}
-  {"schema_version":"2.0","event_id":"event-5","run_id":"run-observer-example","producer_id":"example-harness","sequence":4,"type":"finding.candidate","category":"finding","capture_status":"complete","timestamp":"2026-09-20T12:00:00.040Z","metadata":{"rule":"py.subprocess-shell-true","path":"tests/fixtures/shell.py","line":8},"candidate_id":"candidate-1"}
-  {"schema_version":"2.0","event_id":"event-6","run_id":"run-observer-example","producer_id":"example-harness","sequence":5,"type":"finding.filtered","category":"finding","capture_status":"complete","timestamp":"2026-09-20T12:00:00.050Z","metadata":{"reason":"path is test fixture material"},"candidate_id":"candidate-1"}
-  {"schema_version":"2.0","event_id":"event-7","run_id":"run-observer-example","producer_id":"example-harness","sequence":6,"type":"finding.candidate","category":"finding","capture_status":"complete","timestamp":"2026-09-20T12:00:00.060Z","metadata":{"rule":"py.subprocess-shell-true","path":"app/runner.py","line":42},"candidate_id":"candidate-2"}
-  {"schema_version":"2.0","event_id":"event-8","run_id":"run-observer-example","producer_id":"example-harness","sequence":7,"type":"finding.validation","category":"finding","capture_status":"complete","timestamp":"2026-09-20T12:00:00.070Z","metadata":{"verdict":"kept","checked":"reachability"},"candidate_id":"candidate-2"}
-  {"schema_version":"2.0","event_id":"event-9","run_id":"run-observer-example","producer_id":"example-harness","sequence":8,"type":"finding.submitted","category":"finding","capture_status":"complete","timestamp":"2026-09-20T12:00:00.080Z","metadata":{"rule":"py.subprocess-shell-true","path":"app/runner.py","line":42},"candidate_id":"candidate-2","claim_id":"claim-1"}
+  {"schema_version":"2.0","event_id":"event-1","run_id":"run-observer-example","producer_id":"example-harness","sequence":0,"type":"model.request","category":"model","capture_status":"redacted","timestamp":"2026-09-20T12:00:00.000Z","call_id":"call-1","metadata":{"model":"fake-model-v0","input_tokens":31},"content":{"api_key":"[REDACTED]","prompt":"review app/runner.py"}}
+  {"schema_version":"2.0","event_id":"event-2","run_id":"run-observer-example","producer_id":"example-harness","sequence":1,"type":"model.response","category":"model","capture_status":"complete","timestamp":"2026-09-20T12:00:00.010Z","parent_event_id":"event-1","call_id":"call-1","metadata":{"model":"fake-model-v0","output_tokens":18},"content":{"text":"two candidates in app/runner.py","finish_reason":"stop"}}
+  {"schema_version":"2.0","event_id":"event-3","run_id":"run-observer-example","producer_id":"example-harness","sequence":2,"type":"tool.start","category":"tool","capture_status":"complete","timestamp":"2026-09-20T12:00:00.020Z","call_id":"call-2","metadata":{"tool":"grep","path":"app/runner.py"},"content":{"arguments":{"pattern":"shell=True"}}}
+  {"schema_version":"2.0","event_id":"event-4","run_id":"run-observer-example","producer_id":"example-harness","sequence":3,"type":"tool.end","category":"tool","capture_status":"complete","timestamp":"2026-09-20T12:00:00.030Z","parent_event_id":"event-3","call_id":"call-2","duration_ms":7,"metadata":{"tool":"grep","matched":2},"content":{"result":{"matched":2,"path":"app/runner.py"}}}
+  {"schema_version":"2.0","event_id":"event-5","run_id":"run-observer-example","producer_id":"example-harness","sequence":4,"type":"finding.candidate","category":"finding","capture_status":"complete","timestamp":"2026-09-20T12:00:00.040Z","candidate_id":"candidate-1","metadata":{"rule":"py.subprocess-shell-true","path":"tests/fixtures/shell.py","line":8}}
+  {"schema_version":"2.0","event_id":"event-6","run_id":"run-observer-example","producer_id":"example-harness","sequence":5,"type":"finding.filtered","category":"finding","capture_status":"complete","timestamp":"2026-09-20T12:00:00.050Z","candidate_id":"candidate-1","metadata":{"reason":"path is test fixture material"}}
+  {"schema_version":"2.0","event_id":"event-7","run_id":"run-observer-example","producer_id":"example-harness","sequence":6,"type":"finding.candidate","category":"finding","capture_status":"complete","timestamp":"2026-09-20T12:00:00.060Z","candidate_id":"candidate-2","metadata":{"rule":"py.subprocess-shell-true","path":"app/runner.py","line":42}}
+  {"schema_version":"2.0","event_id":"event-8","run_id":"run-observer-example","producer_id":"example-harness","sequence":7,"type":"finding.validation","category":"finding","capture_status":"complete","timestamp":"2026-09-20T12:00:00.070Z","candidate_id":"candidate-2","metadata":{"verdict":"kept","checked":"reachability"}}
+  {"schema_version":"2.0","event_id":"event-9","run_id":"run-observer-example","producer_id":"example-harness","sequence":8,"type":"finding.submitted","category":"finding","capture_status":"complete","timestamp":"2026-09-20T12:00:00.080Z","candidate_id":"candidate-2","claim_id":"claim-1","metadata":{"rule":"py.subprocess-shell-true","path":"app/runner.py","line":42}}
 ```
 
-The two runs differ only in the first line and in where each emitter places `metadata` inside a
-JSONL line. Event IDs, sequence numbers, timestamps, capture statuses, links, and payloads are
-the same.
+The two standard-output blocks differ only in the first line naming the implementation. Their
+nine JSONL lines are byte identical.
