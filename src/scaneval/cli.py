@@ -102,7 +102,7 @@ from .adapters.base import AdapterError
 # _is_stated is imported rather than re-implemented so a blank value is judged by one rule here,
 # in cases, and in review: a string made only of zero-width or control characters is not a value.
 from .cases import _is_stated
-from .contracts import CONTRACT_KINDS, ContractError, canonical_json, load_document
+from .contracts import CONTRACT_KINDS, ContractError, canonical_json, load_document, refuse_trial_path
 from .demo import SOURCE, demo_documents
 from .diagnostics import DiagnosticsError, context_coverage_for_invocation
 from .execution import ExecutionError
@@ -134,11 +134,6 @@ APPROVED_REVIEW_STATE = "human_approved"
 # Invocation statuses that delivered no usable scan. 'partial' and 'unsupported' are excluded:
 # a partial scan can still carry valid claims, and unsupported work stays in the denominator.
 INCOMPLETE_INVOCATION_STATUSES = ("error", "timeout", "skipped")
-# A trial directory: exported source beside the provenance record of that export.
-TRIAL_MARKER = "provenance.json"
-TRIAL_SOURCE = "source"
-
-
 def _write_new(path: Path, content: str) -> None:
     # Refuse overwrite, including symlinks, rather than destroy a prior run.
     with path.open("x", encoding="utf-8", newline="\n") as handle:
@@ -342,14 +337,7 @@ def _refuse_trial_path(output: Path) -> None:
     the obvious mistake and is not an isolation boundary. The decision ``gate`` writes is checked
     here too, and by :func:`_refuse_gate_path` against run directories.
     """
-    resolved = output.expanduser().resolve()
-    for directory in (resolved, *resolved.parents):
-        if (directory / TRIAL_MARKER).is_file() and (directory / TRIAL_SOURCE).is_dir():
-            where = ("which is itself the trial directory" if directory == resolved
-                     else f"inside the trial directory {directory}")
-            raise ContractError(
-                f"refusing to write {output} {where}; evaluator plans, packs, and decisions "
-                "stay outside an exported input tree")
+    refuse_trial_path(output)
 
 
 def load_bundle(directory: Path) -> tuple[dict, dict, dict]:

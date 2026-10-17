@@ -76,6 +76,7 @@ from .contracts import (
     canonical_sha256,
     input_identity,
     load_document,
+    refuse_trial_path,
     reject_nonfinite,
     validate_document,
 )
@@ -429,6 +430,7 @@ def _check_cache_root(cache_root: Path, out_dir: Path) -> None:
     immutable. The comparison is by resolved path only: it does not follow bind mounts or hard
     links, so it guards against the obvious mistake and is not an isolation boundary.
     """
+    refuse_trial_path(cache_root)
     cache = _resolved(cache_root)
     out = _resolved(out_dir)
     if _inside(cache, out):
