@@ -14,6 +14,8 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
+from .contracts import reject_nonfinite
+
 _VALIDATOR = Draft202012Validator(
     json.loads(files("scaneval").joinpath("schemas", "trace-event.schema.json").read_text()),
 )
@@ -47,6 +49,9 @@ def parse_trace(raw: bytes) -> TraceRead:
         try:
             event = json.loads(line.decode("utf-8"),
                                parse_constant=_reject_constant)
+            # A valid JSON numeric lexeme can overflow Python's float decoder
+            # (for example 1e999) without calling parse_constant.
+            reject_nonfinite(event)
             errors = list(_VALIDATOR.iter_errors(event))
             if not errors:
                 stamp = event["timestamp"]

@@ -32,3 +32,16 @@ def test_empty_missing_and_malformed_are_distinct(tmp_path):
     assert parse_trace(b'{}').state == "malformed"
     # A native producer namespace is not required to equal a bundle's invocation ID.
     assert parse_trace(json.dumps(wire_event(run_id="different-run")).encode()).state == "valid"
+
+
+@pytest.mark.parametrize("numeric", ["1e999", "-1e999", "NaN", "Infinity", "-Infinity"])
+def test_nonfinite_nested_values_are_rejected_without_losing_adjacent_records(numeric):
+    good = json.dumps(wire_event()).encode()
+    bad = json.dumps(wire_event(metadata={"nested": [{"value": "NUMBER"}]})).replace(
+        '"NUMBER"', numeric).encode()
+    parsed = parse_trace(good + b"\n" + bad + b"\n" + good)
+    assert parsed.state == "partial"
+    assert parsed.rejected_records == 1
+    assert len(parsed.events) == 2
+    # The retained evidence can be exported as strict JSON.
+    json.dumps(parsed.events, allow_nan=False)
