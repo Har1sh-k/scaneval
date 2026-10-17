@@ -3379,6 +3379,36 @@ def test_a_pr_input_without_its_synthetic_commits_is_refused_before_a_bundle_exi
     assert not (tmp_path / "out").exists()
 
 
+@pytest.mark.parametrize("kind", ["note", "symlink"])
+def test_mixed_unicode_and_surrogates_preserve_success_and_claims(tmp_path, kind):
+    mixed = "café東京😀" + chr(0xDCFF)
+    escaped = "café東京😀\\udcff"
+
+    class MixedAdapter(FakeAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            if kind == "note":
+                outcome.notes.append(mixed)
+            else:
+                try:
+                    (kwargs["raw_dir"] / "mixed-link").symlink_to(mixed)
+                except (OSError, ValueError) as exc:
+                    pytest.skip(f"filesystem refuses undecodable symlink target: {exc}")
+            return outcome
+
+    assert execution_module._recordable_text(mixed) == escaped
+    assert execution_module._recordable_text("café東京😀") == "café東京😀"
+    assert execution_module._recordable_text(chr(0xDCFF)) == "\\udcff"
+    bundle = run(tmp_path, MixedAdapter())
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert result["status"] == "success"
+    assert [claim["claim_id"] for claim in result["claims"]] == ["c1"]
+    assert any(escaped in note for note in execution["notes"])
+    assert not (bundle / "raw" / "mixed-link").is_symlink()
+    assert not os.path.lexists(bundle / "raw" / "mixed-link")
+
+
 @pytest.mark.parametrize("raw,valid_count", [(b'not JSON\n', 0), (b'{}\n', 0),
     (trace_json().encode() + b'not JSON\n', 1),
     (trace_json().encode() + trace_json().encode(), 2)])

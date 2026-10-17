@@ -720,7 +720,7 @@ def _recordable_text(value: str) -> str:
     try:
         value.encode("utf-8")
     except UnicodeEncodeError:
-        return value.encode("utf-8", "backslashreplace").decode("ascii")
+        return value.encode("utf-8", "backslashreplace").decode("utf-8")
     return value
 
 
