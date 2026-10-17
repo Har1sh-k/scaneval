@@ -395,10 +395,25 @@ def _runs_completed(ctx: _Context) -> Result:
     return PASS, observed, threshold, f"all {len(runs)} compared run(s) finished"
 
 
+def _path_contains(parent: str, child: str) -> bool:
+    def segments(path: str) -> list[str]:
+        result, part, escaped = [], "", False
+        for char in path:
+            if char == "." and not escaped:
+                result.append(part)
+                part = ""
+            else:
+                part += char
+            escaped = char == "\\" and not escaped
+        return result + [part]
+    a, b = segments(parent), segments(child)
+    return b[:len(a)] == a
+
+
 def _configuration_differences(ctx: _Context) -> Result:
     allowed = ctx.policy["configuration"]["allowed_differences"]
     keys = [row["key"] for row in ctx.comparison["configuration_differences"]]
-    unexpected = [key for key in keys if not any(key == name or key.startswith(f"{name}.") for name in allowed)]
+    unexpected = [key for key in keys if not any(_path_contains(name, key) for name in allowed)]
     observed = {"differences": keys, "not_allowed": unexpected}
     threshold = {"allowed_differences": allowed}
     if unexpected:
@@ -575,7 +590,7 @@ def _binding_problems(ctx: _Context, side: str) -> list[str]:
 
     An estimate binds when it names only that system, the policy's view and declared population, and
     runs of this comparison: every run it rests on must be one the comparison read, with the same
-    manifest and schedule digests, and every run of the comparison in which the system was scheduled
+    manifest and schedule digests and scoped saved-result identities, and every run of the comparison in which the system was scheduled
     must be among them, so it describes the compared workload and none other. This compares the
     documents' records; it cannot show the claims a person reviewed came from those runs. A first-B
     estimate also binds only when it leaves no invocation out for want of a measured native position:
@@ -617,6 +632,18 @@ def _binding_problems(ctx: _Context, side: str) -> list[str]:
     for run_id in ctx.comparison[side]["runs"]:
         if run_id not in named:
             problems.append(f"the {side}'s run {run_id} is not among the estimate's runs")
+    if not problems:
+        def binding_key(row: dict) -> tuple:
+            return row["run_id"], row["system_id"], row["mode"], row["profile"]
+        actual = {binding_key(row): row["sha256"] for run in ctx.comparison["runs"]
+                  for row in run.get("result_bindings", [])}
+        supplied = {binding_key(row): row["sha256"] for row in estimate.get("result_bindings", [])}
+        for run_id in ctx.comparison[side]["runs"]:
+            key = run_id, system, wanted["mode"], wanted["profile"]
+            if key not in actual or key not in supplied:
+                problems.append(f"result-content binding unavailable for {system} in run {run_id}; legacy or unreadable evidence")
+            elif actual[key] != supplied[key]:
+                problems.append(f"result-content digest differs for {system} in run {run_id}")
     return problems
 
 

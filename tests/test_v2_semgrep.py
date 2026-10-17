@@ -1180,7 +1180,7 @@ def test_semgrep_full_mode_argv_is_what_it_always_was_and_carries_no_baseline(tm
                                "--timeout", "30", "--jobs", "1", f"--config={tmp_path / 'rules' / 'python'}", "."]
     assert not any("baseline" in word for word in outcome.command)
     assert not any("PR mode" in note for note in outcome.notes)
-    assert outcome.omitted_paths is None, "a full scan reports no omission"
+    assert outcome.omitted_paths == [], "all inventoried input paths were scanned"
 
 
 def test_semgrep_pr_mode_adds_only_the_baseline_option_to_the_full_argv(tmp_path):
@@ -1584,13 +1584,13 @@ def test_semgrep_pr_mode_says_it_examined_nothing_exactly_when_it_omitted_every_
     assert outcome.omitted_paths == omitted and outcome.examined_nothing is nothing
 
 
-def test_semgrep_full_mode_reports_no_omission_and_does_not_say_whether_it_examined_anything(tmp_path):
+def test_semgrep_full_mode_records_complete_file_coverage(tmp_path):
     payload = json.dumps({"version": "9.9.9", "results": [], "paths": {"scanned": ["app.py"]}, "errors": []})
 
     outcome, _ = scan_with_fake(tmp_path, payload, 0)
 
     assert outcome.status == "success"
-    assert outcome.omitted_paths is None and outcome.examined_nothing is None
+    assert outcome.omitted_paths == [] and outcome.examined_nothing is False
 
 
 def test_semgrep_full_mode_still_treats_an_empty_scanned_list_as_nothing_scanned(tmp_path):

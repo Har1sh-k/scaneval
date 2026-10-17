@@ -505,3 +505,29 @@ def test_the_contract_ties_a_pr_input_to_its_change_set_and_to_a_scope_on_every_
     loose["inputs"][0]["change_set"]["extra"] = "field"
     with pytest.raises(ContractError, match="extra"):
         validate_document("evaluation-schedule", loose)
+
+@pytest.mark.parametrize('spelling', ['1.0', '1e0'])
+def test_integral_json_repetitions_build_schedule_without_changing_config(tmp_path, spelling):
+    import json
+    from scaneval.cli import main
+    document = config(repetitions=json.loads(spelling))
+    before = canonical_sha256(document)
+    path = tmp_path / 'run.json'
+    path.write_text(json.dumps(document).replace('1.0', spelling))
+    assert main(['validate', 'run-config', str(path)]) == 0
+    pack = two_snapshot_pack(tmp_path)
+    actual = build_schedule(document, pack, base_dir=tmp_path, created_at=CREATED_AT)
+    integer = {**document, 'repetitions': 1}
+    control = build_schedule(integer, pack, base_dir=tmp_path, created_at=CREATED_AT)
+    assert actual['assignments'] == control['assignments']
+    assert actual['pairs'] == control['pairs']
+    assert actual['config_sha256'] == before == canonical_sha256(document)
+    assert isinstance(document['repetitions'], float)
+
+
+@pytest.mark.parametrize('repetitions', [True, 1.5])
+def test_schedule_builder_refuses_invalid_repetitions(tmp_path, repetitions):
+    document = config()
+    document['repetitions'] = repetitions
+    with pytest.raises(ContractError):
+        build_schedule(document, two_snapshot_pack(tmp_path), base_dir=tmp_path, created_at=CREATED_AT)

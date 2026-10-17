@@ -9,6 +9,7 @@ import re
 import unicodedata
 from importlib.resources import files
 from os import PathLike
+from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -61,6 +62,26 @@ _LEVEL_RANK = {"L1": 1, "L2": 2, "L3": 3, "L4": 4}
 
 class ContractError(ValueError):
     """A contract document is malformed or violates a v2 invariant."""
+
+
+TRIAL_MARKER = "provenance.json"
+TRIAL_SOURCE = "source"
+
+
+def refuse_trial_path(output: Path) -> None:
+    """Refuse a write destination that resolves inside a materialized trial.
+
+    A trial is identified by a provenance record beside its exported source directory. This is
+    mistake prevention for controller-owned destinations, not a filesystem isolation boundary.
+    """
+    resolved = output.expanduser().resolve()
+    for directory in (resolved, *resolved.parents):
+        if (directory / TRIAL_MARKER).is_file() and (directory / TRIAL_SOURCE).is_dir():
+            where = ("which is itself the trial directory" if directory == resolved
+                     else f"inside the trial directory {directory}")
+            raise ContractError(
+                f"refusing to write {output} {where}; evaluator plans, packs, decisions, and "
+                "caches stay outside an exported input tree")
 
 
 def canonical_json(value: Any) -> str:
@@ -1703,7 +1724,7 @@ def _validate_evaluation_schedule(document: dict[str, Any]) -> None:
                 raise ContractError(f"{label}: every item of a frozen pr plan states its pr_scope")
             if item["mode"] == "full" and scoped:
                 raise ContractError(f"{label}: only a pr input's frozen plan carries pr_scope")
-    repetitions = document["repetitions"]
+    repetitions = int(document["repetitions"])
     expected = {f"{input_id}__{system['system_id']}__r{repetition}": (input_id, system["system_id"], repetition)
                 for input_id in inputs for system in document["systems"]
                 for repetition in range(1, repetitions + 1)}
@@ -1948,7 +1969,8 @@ def _check_slices(slices: list[dict[str, Any]], weightings: list[str]) -> None:
         if (block["slice"]["dimension"] == "all") != (block["slice"]["value"] is None):
             raise ContractError("only the 'all' slice has no value")
         if [detection["weighting"] for detection in block["detection"]] != list(weightings):
-            raise ContractError("each slice carries one detection block per weighting, in policy order")
+            raise ContractError(f"slice {block['slice']}: each slice carries one detection block per "
+                                f"weighting, in policy order {list(weightings)}")
 
 
 def _validate_comparison_report(document: dict[str, Any]) -> None:
@@ -1968,6 +1990,22 @@ def _validate_comparison_report(document: dict[str, Any]) -> None:
             slices = view["systems"][side]["slices"]
             _check_slices(slices, document["policy"]["views"])
             keys.append([block["slice"] for block in slices])
+        _check_slices(view["differences"], document["policy"]["views"])
+        for side, slices in [(side, view["systems"][side]["slices"])
+                             for side in ("baseline", "candidate")] + [("differences", view["differences"])]:
+            for block in slices:
+                for detection in block["detection"]:
+                    fields = (("full_output_recall", "coverage", "pairs", "random_order_diagnostic",
+                               "run_variability", "leave_one_project_out") if side != "differences" else
+                              ("full_output_recall", "pair_correctness", "pair_availability",
+                               "completed_mass", "assessable_mass"))
+                    for field in fields:
+                        present = detection[field] is not None
+                        if present != (detection["state"] == "ok"):
+                            raise ContractError(
+                                f"comparison {view['mode']}/{view['profile']} {side} "
+                                f"slice {block['slice']} weighting {detection['weighting']}: "
+                                f"{field} must be present exactly when detection state is ok")
         keys.append([block["slice"] for block in view["differences"]])
         if not keys[0] == keys[1] == keys[2]:
             raise ContractError("the baseline, the candidate, and the differences cover different slices")

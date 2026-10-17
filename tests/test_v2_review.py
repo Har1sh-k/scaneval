@@ -486,6 +486,54 @@ def test_a_failed_write_removes_the_files_that_call_created(tmp_path, monkeypatc
     assert [path for path in bundle.rglob("*") if path.is_file()] == []
 
 
+@pytest.mark.parametrize("filename", ["plan.json", "decisions.json", "review-record.json"])
+@pytest.mark.parametrize("phase", ["write", "flush", "close"])
+def test_post_creation_failure_removes_each_owned_evaluator_file_and_allows_retry(
+        tmp_path, monkeypatch, fail_created_write, filename, phase):
+    plan = make_plan()
+    decisions = draft_decisions(plan, make_result(default_claims()), default_pack())
+    record = review_record(plan, decisions, clock=CLOCK)
+    bundle = tmp_path / "bundle"
+    failure = fail_created_write(filename, phase)
+
+    with pytest.raises(OSError) as caught:
+        write_evaluator_records(bundle, plan, decisions, record)
+    assert caught.value is failure
+    assert [path for path in bundle.rglob("*") if path.is_file()] == []
+
+    monkeypatch.undo()
+    paths = write_evaluator_records(bundle, plan, decisions, record)
+    assert set(paths) == {"plan", "decisions", "record"}
+    assert review_status(bundle) == "draft"
+
+
+@pytest.mark.parametrize("filename", ["decisions.json", "review-record.json"])
+@pytest.mark.parametrize("phase", ["write", "flush", "close"])
+def test_post_creation_failure_preserves_an_equivalent_plan_and_unrelated_files(
+        tmp_path, monkeypatch, fail_created_write, filename, phase):
+    plan = make_plan()
+    decisions = draft_decisions(plan, make_result(default_claims()), default_pack())
+    record = review_record(plan, decisions, clock=CLOCK)
+    bundle = tmp_path / "bundle"
+    evaluator = bundle / "evaluator"
+    evaluator.mkdir(parents=True)
+    original = json.dumps(plan, indent=4).encode()
+    (evaluator / "plan.json").write_bytes(original)
+    (evaluator / "other.txt").write_bytes(b"another writer")
+    failure = fail_created_write(filename, phase)
+
+    with pytest.raises(OSError) as caught:
+        write_evaluator_records(bundle, plan, decisions, record)
+    assert caught.value is failure
+    assert sorted(path.name for path in evaluator.iterdir()) == ["other.txt", "plan.json"]
+    assert (evaluator / "plan.json").read_bytes() == original
+    assert (evaluator / "other.txt").read_bytes() == b"another writer"
+
+    monkeypatch.undo()
+    write_evaluator_records(bundle, plan, decisions, record)
+    assert (evaluator / "plan.json").read_bytes() == original
+
+
 def test_record_decisions_redrafts_after_a_human_edits_the_decisions_file(tmp_path):
     bundle, plan, result, decisions = written_bundle(tmp_path)
     (bundle / "result.json").write_text(canonical_json(result) + "\n", encoding="utf-8")

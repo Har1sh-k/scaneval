@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
 import os
@@ -98,6 +99,35 @@ def test_fetch_pins_exact_commit_and_second_fetch_verifies_cache(tmp_path, upstr
     again = fetch_snapshot(str(repo), first, cache)
     assert again.fetch_method == "cached"
     assert again.git_tree == snapshot.git_tree
+
+
+@pytest.mark.parametrize("callers", [2, 4])
+def test_concurrent_fetches_share_one_verified_snapshot_without_staging_collisions(
+        tmp_path, upstream, callers):
+    repo, first = upstream
+    cache = tmp_path / f"cache-{callers}"
+
+    with ThreadPoolExecutor(max_workers=callers) as pool:
+        snapshots = list(pool.map(lambda _: fetch_snapshot(str(repo), first, cache), range(callers)))
+
+    assert {snapshot.path for snapshot in snapshots} == {cache / cache_key(str(repo), first)}
+    assert {snapshot.git_tree for snapshot in snapshots} == {
+        verify_cached_snapshot(snapshots[0].path, first)
+    }
+    assert any(snapshot.fetch_method != "cached" for snapshot in snapshots)
+    assert not list(cache.glob("*.partial-*"))
+
+
+def test_published_snapshot_keeps_normal_directory_permissions(tmp_path, upstream):
+    """Runtime rules mounts must remain traversable by the configured container UID."""
+    import stat
+
+    repo, first = upstream
+    ordinary = tmp_path / "ordinary-directory"
+    ordinary.mkdir()
+    snapshot = fetch_snapshot(str(repo), first, tmp_path / "cache")
+    assert stat.S_IMODE(snapshot.path.stat().st_mode) == stat.S_IMODE(ordinary.stat().st_mode)
+    assert (snapshot.path / "app.py").read_text() == "print('v1')\n"
 
 
 def test_modified_cache_entry_is_rejected(tmp_path, upstream):
