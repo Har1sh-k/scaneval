@@ -386,8 +386,8 @@ def test_a_context_event_missing_a_required_field_blocks_absence_but_not_a_recor
     second = diagnostics.context_coverage_for_invocation(
         bundle(tmp_path / "missed", span("src/example.py", 100, 140)))
 
-    assert first["reasons"] == ["trace_events_malformed"]
-    assert first["capture"]["context_selection_events_malformed"] == 1
+    assert first["reasons"] == ["trace_lines_unparsed"]
+    assert first["capture"]["trace_lines_unparsed"] == 1
     assert only_target(first)["best"] == "included"
     assert only_target(second)["best"] == "unknown"
 
@@ -695,7 +695,7 @@ def test_one_producer_reusing_a_call_id_is_still_one_invocation(tmp_path):
 
 
 @pytest.mark.parametrize("producer_id", ["", 7, None], ids=["empty", "not-a-string", "absent"])
-def test_an_event_with_no_usable_producer_keeps_its_own_group(tmp_path, producer_id):
+def test_saved_events_with_invalid_producer_are_rejected(tmp_path, producer_id):
     first = event(1, call_id="call-1", spans=[span("src/a.py", 1, 5)])
     second = event(2, call_id="call-1", spans=[span("src/b.py", 1, 5)])
     for record in (first, second):
@@ -709,16 +709,13 @@ def test_an_event_with_no_usable_producer_keeps_its_own_group(tmp_path, producer
 
     document = diagnostics.context_coverage_for_invocation(invocation)
 
-    assert [entry["group_key"] for entry in document["invocations"]] == ["event-1", "event-2"]
-    assert [entry["producer_id"] for entry in document["invocations"]] == [None, None]
-    assert [entry["correlated"] for entry in document["invocations"]] == [False, False]
-    # The call ID is reported as carried even though the grouping could not rest on it.
-    assert [entry["call_id"] for entry in document["invocations"]] == ["call-1", "call-1"]
-    assert only_target(document)["best"] == "partial"
+    assert document["invocations"] == []
+    assert "trace_lines_unparsed" in document["reasons"]
+    assert only_target(document)["best"] == "unknown"
 
 
 @pytest.mark.parametrize("call_id", ["", 7, None], ids=["empty", "not-a-string", "absent"])
-def test_a_call_id_the_wire_contract_would_reject_is_treated_as_none_at_all(tmp_path, call_id):
+def test_saved_invalid_call_ids_are_rejected_and_absent_call_ids_remain_valid(tmp_path, call_id):
     """An empty or non-string call_id correlates nothing, so it must not correlate two events."""
     first = event(1, spans=[span("src/a.py", 1, 5)], call_id=None)
     second = event(2, spans=[span("src/b.py", 1, 5)], call_id=None)
@@ -729,8 +726,11 @@ def test_a_call_id_the_wire_contract_would_reject_is_treated_as_none_at_all(tmp_
 
     document = diagnostics.context_coverage_for_invocation(invocation)
 
-    assert [entry["call_id"] for entry in document["invocations"]] == [None, None]
-    assert [entry["group_key"] for entry in document["invocations"]] == ["event-1", "event-2"]
+    if call_id is None:
+        assert [entry["call_id"] for entry in document["invocations"]] == [None, None]
+    else:
+        assert document["invocations"] == []
+        assert "trace_lines_unparsed" in document["reasons"]
 
 
 def test_paths_are_compared_after_normalizing_separators_and_a_leading_dot(tmp_path):
@@ -1354,6 +1354,9 @@ def every_reason_the_module_can_emit(tmp_path: Path) -> set[str]:
         produced.update(document["reasons"])
         for target in document["targets"]:
             produced.update(target["reasons"])
+    direct = diagnostics.context_coverage(plan_targets=[], events=[{**event(1), "capture_status": None}],
+                                          execution_record=execution_record())
+    produced.update(direct["reasons"])
     produced.add("run_capture_facts_unavailable")  # only reachable through the pure function
     return produced
 

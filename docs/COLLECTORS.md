@@ -640,3 +640,20 @@ Credential keys remain structured for redaction. Metadata records `result_availa
 counts text-block characters only (or the legacy string result), not serialized object or
 image bytes. Zero text characters therefore does not imply an absent structured result.
 Metadata mode stores these counts and availability facts without result or error content.
+
+### Verified bounded Claude Read ranges
+
+Claude transcript and stream import accept optional `frozen_source=FrozenSource.capture(root)`
+(from `scaneval.collectors.source`). Capture this binding **before** native execution. DeepSec
+captures it before launching its processes and passes it to transcript imports. A workspace
+path alone is not an immutable binding; imports without this object keep bounded ranges unknown.
+The object retains source hashes and reads only regular files through directory descriptors,
+refusing symlinks and traversal. A changed or missing source file cannot verify a range.
+
+A bounded `Read` gains `source_mapping: verified_exact` only when its matched tool request,
+result path and coordinates, native content, actual numbered tool-result text, and the exact
+source slice all agree. The span includes `source_sha256` for the pre-scan file. Omitted lines,
+extra rendered envelopes and error results cannot verify. A context selection still requires
+a later genuine assistant turn; the marker claims source correspondence and delivery, never
+model attention. Whole-file semantics are unchanged. Metadata mode emits hashes and coordinates
+without source or tool-result content; verification does not enable content tracing.

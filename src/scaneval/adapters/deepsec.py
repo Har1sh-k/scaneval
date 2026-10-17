@@ -1518,7 +1518,8 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                 candidates: tuple[Candidate, ...], imported: DeepsecImport,
                 model_requested: str, thinking: str | None,
                 unreferenced: tuple[Session, ...] = (), failed_batches: int = 0,
-                transcripts: dict[str, tuple[Path, ...]] | None = None) -> TraceResult:
+                transcripts: dict[str, tuple[Path, ...]] | None = None,
+                frozen_source=None) -> TraceResult:
     """Write this run's trace and report what the observer and the transcript import saw.
 
     Ordering is the order the run happened in: the regex candidates first, then each agent
@@ -1603,6 +1604,7 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                     try:
                         summary = load(observer, Path(path), workspace_root=roots,
                                        call_id=call_id, sidechain=sidechain,
+                                       frozen_source=frozen_source,
                                        agent_id=Path(path).stem if sidechain else None)
                     except Exception as exc:  # noqa: BLE001 - same rule: the import, not the scan
                         notes.append(f"transcript {Path(path).name} could not be imported "
@@ -2164,6 +2166,9 @@ class DeepsecAdapter(Adapter):
         project = project_id_for(request, config.project_id)
         # Captured before the first process starts: DeepSec writes into the raw directory while
         # it runs, so every read below is checked against a boundary it cannot move.
+        from ..collectors.source import FrozenSource
+        frozen_source = (FrozenSource.capture(Path(source_dir))
+                         if trace_mode != "off" and trace_dir is not None else None)
         enclosure = Enclosure.capture(Path(source_dir), Path(raw_dir))
         workspace = build_workspace(Path(raw_dir), Path(source_dir), project, config)
         data_dir = workspace / "data" / project
@@ -2322,6 +2327,7 @@ class DeepsecAdapter(Adapter):
                     sessions=sessions, candidates=candidates, imported=imported,
                     model_requested=config.model, thinking=config.thinking_level,
                     unreferenced=history.unreferenced, transcripts=history.transcripts,
+                    frozen_source=frozen_source,
                     failed_batches=failed_batch_count(config.agent, records, statuses, output))
             except Exception as exc:  # noqa: BLE001
                 # The one place a trace failure is contained. A trace is instrumentation: losing

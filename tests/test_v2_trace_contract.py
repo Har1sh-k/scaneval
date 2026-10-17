@@ -35,3 +35,7 @@ def test_wire_schema_rejects_invalid_event_fields(key, value):
     event[key] = value
     validator = Draft202012Validator(SCHEMA, format_checker=FormatChecker())
     assert list(validator.iter_errors(event))
+
+
+def test_packaged_reader_schema_is_the_published_wire_schema():
+    assert json.loads((ROOT / "src/scaneval/schemas/trace-event.schema.json").read_text()) == SCHEMA

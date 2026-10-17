@@ -843,9 +843,14 @@ def _capture_record(capture: dict, capture_state: dict | None, trace_record: dic
         dropped = capture_state.get("dropped_events")
         if isinstance(dropped, int) and not isinstance(dropped, bool) and dropped > 0:
             reasons.append(f"{dropped} dropped event(s)")
+    if isinstance(trace_record, dict) and trace_record.get("capture_gap") is True:
+        reasons.append("a saved trace capture gap")
     events = trace_record.get("events") if isinstance(trace_record, dict) else None
     counted = isinstance(events, int) and not isinstance(events, bool) and events > 0
     recorded = dict(capture)
+    if counted and reasons:
+        recorded = {name: "partial" if value == "complete" else value
+                    for name, value in recorded.items()}
     unbacked = sorted(name for name, value in recorded.items()
                       if value in _OBSERVED_CAPTURE) if not counted else []
     for name in unbacked:
@@ -865,8 +870,8 @@ def _read_trace(outcome: NativeOutcome, staged_areas: list[tuple[Path, Path, Pat
     count. A number taken from a file the run never staged would describe something the bundle
     does not contain, and opening a named pipe for reading would block until something wrote to
     it, which nothing here ever does. A missing trace file is an unavailable count, not a
-    failure. A file that is not UTF-8 text raises, because a count taken from bytes this cannot
-    decode would be an invented number.
+    failure. Each nonblank record is validated as UTF-8 JSON and against the observer wire
+    schema. Rejected rows set a capture gap; valid rows and raw bytes survive.
 
     The read itself is :func:`read_regular_file`, so the regular-file requirement is proved by
     the same open that reads the bytes rather than by a check the scanner could have raced.
@@ -875,6 +880,7 @@ def _read_trace(outcome: NativeOutcome, staged_areas: list[tuple[Path, Path, Pat
                    else trace_dir / "events.jsonl")
     count = None
     recorded_trace_path = None
+    invalid = False
     if events_path.is_symlink():
         outcome.notes.append("declared trace file is a symbolic link; it was not read or counted")
     elif bundle.contains(events_path) is None:
@@ -888,10 +894,17 @@ def _read_trace(outcome: NativeOutcome, staged_areas: list[tuple[Path, Path, Pat
         except ValueError:
             outcome.notes.append("trace file left outside the bundle; its path is not recorded")
         else:
-            text = read_regular_file(events_path).decode("utf-8")
-            count = sum(1 for line in text.splitlines() if line.strip())
+            from .trace import parse_trace
+            parsed = parse_trace(read_regular_file(events_path))
+            count = len(parsed.events)
+            invalid = parsed.rejected_records > 0
+            if invalid:
+                outcome.notes.append(f"saved trace {parsed.state}: {parsed.physical_lines} physical "
+                                     f"lines, {count} valid events, "
+                                     f"{parsed.rejected_records} rejected records")
+                outcome.notes.extend(parsed.diagnostics)
     return {"path": recorded_trace_path, "events": count, "mode": trace_mode,
-            "capture_gap": (outcome.capture_state or {}).get("capture_gap"),
+            "capture_gap": True if invalid else (outcome.capture_state or {}).get("capture_gap"),
             "dropped_events": (outcome.capture_state or {}).get("dropped_events")}
 
 

@@ -632,14 +632,15 @@ def stub_collector(monkeypatch, tmp_path: Path, *, found: bool = True, subagent:
         return [main, sub] if subagent else [main]
 
     def import_transcript(observer, path, *, workspace_root, call_id, sidechain=False,
-                          agent_id=None):
+                          agent_id=None, frozen_source=None):
         # A sequence of spellings, exactly as WP-D's importers now accept it. Recorded as a
         # tuple of paths so a test can say which spellings the adapter offered and in what
         # order; a bare path is normalized to a one-tuple so an older collector still reads.
         roots = (workspace_root,) if isinstance(workspace_root, (str, Path)) else tuple(workspace_root)
         calls.append({"call": "import", "observer": observer, "path": Path(path),
                       "workspace_roots": tuple(Path(root) for root in roots), "call_id": call_id,
-                      "sidechain": sidechain, "agent_id": agent_id})
+                      "sidechain": sidechain, "agent_id": agent_id,
+                      "frozen_source": frozen_source})
         observer.emit(type="tool.start", category="tool", capture_status="partial",
                       call_id="toolu_1", metadata={"source": "claude_code_transcript",
                                                    "tool_name": "Read",
@@ -847,6 +848,7 @@ def test_a_clean_run_produces_claims_artifacts_and_a_trace_of_what_deepsec_recor
     assert imports[0]["path"].name == "session-aaaa.jsonl"
     assert imports[0]["call_id"].endswith("/session-aaaa")
     assert imports[0]["sidechain"] is False and imports[0]["agent_id"] is None
+    assert "src/server.js" in imports[0]["frozen_source"].hashes
     # The transcript was found once, by listing the workspace history, and never by looking
     # the session id up across the operator's other project directories.
     assert [call["call"] for call in calls if call["call"] in ("discover", "find")] == ["discover"]

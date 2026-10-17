@@ -2518,8 +2518,15 @@ def _stub_driver(monkeypatch, records: dict[str, str], *, state_dir: str = ".sec
         if config.get("trace_path"):
             trace_path = Path(config["trace_path"])
             trace_path.parent.mkdir(parents=True, exist_ok=True)
-            trace_path.write_text(
-                '{"type":"model.request"}\n{"type":"model.response"}\n', encoding="utf-8")
+            from scaneval.observer import Observer
+            events = []
+            observer = Observer(mode=config["trace_mode"], sink=events.append,
+                                run_id=config["run_id"], producer_id=config["producer_id"], clock=CLOCK)
+            observer.emit(type="model.request", capture_status="complete", metadata={})
+            observer.emit(type="model.response", capture_status="complete", metadata={})
+            observer.close()
+            assert len(events) == 2 and not observer.get_state().capture_gap
+            trace_path.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
         if output_as_pipe:
             os.mkfifo(Path(config["output_path"]))
         else:

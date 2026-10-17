@@ -34,6 +34,13 @@ from scaneval.materialize import compute_pr_history, diff_trees, hash_exported_t
 from scaneval.scoring import score
 
 
+
+def trace_json(event_type="model.request"):
+    return json.dumps({"schema_version": "2.0", "event_id": "event", "run_id": "native-run",
+                       "producer_id": "fixture", "sequence": 0, "type": event_type,
+                       "category": event_type.split(".")[0], "capture_status": "complete",
+                       "timestamp": "2026-09-20T00:00:00Z", "metadata": {}}) + "\n"
+
 CLOCK = lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)  # noqa: E731
 # A lone UTF-16 surrogate: canonical JSON keeps it and every contract check passes it, but UTF-8
 # cannot encode it, so it only fails at the moment the bytes are produced.
@@ -303,7 +310,7 @@ def test_no_path_handed_to_the_adapter_is_inside_the_run_directory(tmp_path):
                  trace_mode, trace_dir):
             seen.update({"source_dir": Path(source_dir), "raw_dir": Path(raw_dir),
                          "trace_dir": Path(trace_dir)})
-            (trace_dir / "events.jsonl").write_text('{"type":"model_request"}\n', encoding="utf-8")
+            (trace_dir / "events.jsonl").write_text(trace_json("model.request"), encoding="utf-8")
             outcome = super().scan(request=request, source_dir=source_dir, raw_dir=raw_dir, spec=spec,
                                    preparation=preparation, timeout_seconds=timeout_seconds,
                                    trace_mode=trace_mode, trace_dir=trace_dir)
@@ -422,11 +429,10 @@ def test_a_trace_file_that_is_not_utf8_is_recorded_as_a_failure_not_an_invented_
 
     result = load_document(bundle / "result.json", "scan-result")
     execution = load_document(bundle / "execution.json", "execution-record")
-    assert result["status"] == "error" and result["error"]["code"] == "outcome_contract_violation"
-    assert "trace file could not be read as UTF-8 text" in result["error"]["message"]
-    assert "UnicodeDecodeError" in result["error"]["message"]
-    assert execution["trace"] == {"path": None, "events": None, "mode": "metadata",
-                                  "capture_gap": None, "dropped_events": None}
+    assert result["status"] == "partial" and result["error"]["code"] == "trace_capture_gap"
+    assert execution["trace"]["events"] == 0
+    assert execution["trace"]["capture_gap"] is True
+    assert execution["trace"]["path"] == "trace/events.jsonl"
     # The undecodable file itself is kept exactly as the adapter wrote it.
     assert (bundle / "trace" / "events.jsonl").read_bytes().endswith(b"\xff\xfe\n")
 
@@ -684,7 +690,7 @@ def test_a_trace_path_holding_a_nul_byte_is_recorded_rather_than_raised(tmp_path
     class NulTraceAdapter(FakeAdapter):
         def scan(self, **kwargs):
             outcome = super().scan(**kwargs)
-            (kwargs["trace_dir"] / "events.jsonl").write_text('{"type":"model_request"}\n', encoding="utf-8")
+            (kwargs["trace_dir"] / "events.jsonl").write_text(trace_json("model.request"), encoding="utf-8")
             outcome.trace_path = Path(str(kwargs["trace_dir"] / "events.jsonl") + "\x00")
             return outcome
 
@@ -1810,7 +1816,7 @@ def test_a_run_whose_observer_reported_a_capture_gap_is_not_recorded_as_a_clean_
     class GappyAdapter(FakeAdapter):
         def scan(self, **kwargs):
             outcome = super().scan(**kwargs)
-            (kwargs["trace_dir"] / "events.jsonl").write_text('{"type":"model.request"}\n', encoding="utf-8")
+            (kwargs["trace_dir"] / "events.jsonl").write_text(trace_json("model.request"), encoding="utf-8")
             outcome.trace_path = kwargs["trace_dir"] / "events.jsonl"
             outcome.capture_state = {"capture_gap": True, "dropped_events": 4}
             return outcome
@@ -1838,7 +1844,7 @@ def test_a_run_whose_observer_reported_no_gap_is_still_a_clean_success(tmp_path)
     class CleanTraceAdapter(FakeAdapter):
         def scan(self, **kwargs):
             outcome = super().scan(**kwargs)
-            (kwargs["trace_dir"] / "events.jsonl").write_text('{"type":"model.request"}\n', encoding="utf-8")
+            (kwargs["trace_dir"] / "events.jsonl").write_text(trace_json("model.request"), encoding="utf-8")
             outcome.trace_path = kwargs["trace_dir"] / "events.jsonl"
             outcome.capture_state = {"capture_gap": False, "dropped_events": 0}
             return outcome
@@ -2093,7 +2099,7 @@ def test_a_failure_the_trace_read_does_not_contain_ends_the_invocation_with_no_d
         def scan(self, **kwargs):
             outcome = super().scan(**kwargs)
             events = Path(kwargs["trace_dir"]) / "events.jsonl"
-            events.write_text('{"type":"finding.submitted"}\n', encoding="utf-8")
+            events.write_text(trace_json("finding.submitted"), encoding="utf-8")
             outcome.trace_path = events
             return outcome
 
@@ -2234,7 +2240,7 @@ def test_a_hard_link_staged_into_the_bundle_is_copied_rather_than_left_aliasing_
     host = tmp_path / "host.json"
     host.write_text('{"host": "bytes"}\n', encoding="utf-8")
     host_events = tmp_path / "host-events.jsonl"
-    host_events.write_text('{"type":"one"}\n{"type":"two"}\n', encoding="utf-8")
+    host_events.write_text(trace_json() + trace_json(), encoding="utf-8")
 
     class LinkPlantingAdapter(FakeAdapter):
         def scan(self, **kwargs):
@@ -2264,7 +2270,7 @@ def test_a_hard_link_staged_into_the_bundle_is_copied_rather_than_left_aliasing_
     host.write_text("changed after the scan\n", encoding="utf-8")
     host_events.write_text("", encoding="utf-8")
     assert staged.read_text(encoding="utf-8") == '{"host": "bytes"}\n'
-    assert staged_events.read_text(encoding="utf-8").splitlines() == ['{"type":"one"}', '{"type":"two"}']
+    assert staged_events.read_text(encoding="utf-8") == trace_json() + trace_json()
     assert recorded["aliased"] == sha256_file(staged)[0], "the recorded hash still describes the bundle"
     assert any("hard links" in note and "aliased.json" in note for note in execution["notes"])
     assert any("hard links" in note and "events.jsonl" in note for note in execution["notes"])
@@ -2692,7 +2698,7 @@ class CompleteCaptureAdapter(FakeAdapter):
             return outcome
         events = Path(trace_dir) / "events.jsonl"
         if self.trace == "written":
-            events.write_text('{"type":"finding_submitted"}\n', encoding="utf-8")
+            events.write_text(trace_json("finding.submitted"), encoding="utf-8")
             outcome.trace_path = events
         elif self.trace == "symlink":
             events.symlink_to(Path(kwargs["raw_dir"]) / "native.json")
@@ -2729,7 +2735,7 @@ def test_no_capture_category_may_claim_observation_in_a_bundle_with_no_counted_t
     wrote them.
     """
     elsewhere = tmp_path / "elsewhere.jsonl"
-    elsewhere.write_text('{"type":"finding_submitted"}\n', encoding="utf-8")
+    elsewhere.write_text(trace_json("finding.submitted"), encoding="utf-8")
     bundle = run(tmp_path, CompleteCaptureAdapter(trace, elsewhere), trace_mode=trace_mode)
 
     result = load_document(bundle / "result.json", "scan-result")
@@ -3401,3 +3407,28 @@ def test_mixed_unicode_and_surrogates_preserve_success_and_claims(tmp_path, kind
     assert any(escaped in note for note in execution["notes"])
     assert not (bundle / "raw" / "mixed-link").is_symlink()
     assert not os.path.lexists(bundle / "raw" / "mixed-link")
+
+
+@pytest.mark.parametrize("raw,valid_count", [(b'not JSON\n', 0), (b'{}\n', 0),
+    (trace_json().encode() + b'not JSON\n', 1),
+    (trace_json().encode() + trace_json().encode(), 2)])
+def test_trace_wire_validation_reconciles_capture_preserves_findings_and_bytes(tmp_path, raw, valid_count):
+    class TraceAdapter(CompleteCaptureAdapter):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            outcome.trace_path.write_bytes(raw)
+            return outcome
+
+    bundle = run(tmp_path, TraceAdapter("written"), trace_mode="content")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    result = load_document(bundle / "result.json", "scan-result")
+    assert execution["trace"]["events"] == valid_count
+    assert (bundle / "trace/events.jsonl").read_bytes() == raw
+    assert result["claims"]
+    if valid_count < 2:
+        assert execution["trace"]["capture_gap"] is True
+        assert execution["capture"]["finding_submitted"] == ("partial" if valid_count else "unavailable")
+        assert result["status"] == "partial"
+    else:
+        # No finding event is present; observing zero findings in this category is allowed.
+        assert execution["capture"]["finding_submitted"] == "complete"

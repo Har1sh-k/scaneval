@@ -960,25 +960,12 @@ def _read_trace(path: Path) -> tuple[list[dict], int]:
     ``context.selection`` event that settles a target, so the count becomes a reason that turns
     every answer in the document ``unknown``.
     """
+    from .trace import read_trace
     try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, ValueError) as exc:
+        parsed = read_trace(path)
+    except OSError as exc:
         raise DiagnosticsError(f"could not read the trace {path.name}: {exc}") from exc
-    events: list[dict] = []
-    malformed = 0
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        try:
-            event = json.loads(line)
-        except ValueError:
-            malformed += 1
-            continue
-        if isinstance(event, dict):
-            events.append(event)
-        else:
-            malformed += 1
-    return events, malformed
+    return parsed.events, parsed.rejected_records
 
 
 def _pack_locations(pack: Mapping) -> dict[str, dict]:
