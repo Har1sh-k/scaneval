@@ -390,3 +390,23 @@ as nulls. This also applies to custom redactor output; explicit null elements re
 
 Array indices must also use ordinary writable, configurable data descriptors. Accessor
 indices and decorated data indices are refused without invoking getters.
+
+## Reading saved traces
+
+`scaneval.trace.read_trace(path)` and `parse_trace(raw_bytes)` return `TraceRead` with
+`events`, `physical_lines`, `rejected_records`, `diagnostics`, and `state` (`missing`,
+`empty`, `valid`, `malformed`, or `partial`). Blank physical lines are counted but are
+not rejected records. Each nonblank record must be UTF-8 JSON and satisfy the observer
+wire schema, including its timestamp format. Invalid records do not erase valid rows.
+Bundle ingestion preserves the original bytes and records validation losses as a capture
+gap; complete categories become partial when valid evidence survives, unavailable when
+none does. No category is downgraded merely because that category has zero events.
+
+A producer's `run_id` names its own run namespace and need not equal the bundle invocation
+ID. `sequence` is a nonnegative producer-local value; the wire schema promises neither a
+global order nor contiguous sequences across merged producers. Event IDs are link values;
+the wire schema does not impose global uniqueness. Repeated IDs remain physical records,
+including conflicting duplicates, and consumers must not silently deduplicate them or
+assume a link uniquely resolves without checking its namespace and candidates. This reader
+enforces the wire contract, not new cross-record identity rules. Callers must enforce
+filesystem containment before reading a path.

@@ -163,7 +163,7 @@ Every reason is listed in the top-level `reasons`. What each one costs is fixed 
 |---|---|
 | `trace_capture_gap` | the execution record's `trace.capture_gap` is true |
 | `trace_dropped_events` | the execution record's `trace.dropped_events` is above zero |
-| `trace_lines_unparsed` | a line of the trace would not parse as JSON |
+| `trace_lines_unparsed` | a nonblank trace record failed UTF-8, JSON, or observer wire-schema validation |
 | `trace_events_malformed` | a `context.selection` event lacked a field the schema requires |
 | `run_capture_facts_unavailable` | no execution record, or no readable `capture.context_selection` in it |
 | `execution_record_invalid` | the record parsed but breaks its contract |
@@ -308,7 +308,7 @@ capture                   the facts every classification here rests on
   trace_capture_gap       the observer's own gap report
   trace_dropped_events    the observer's own dropped count
   trace_file_read         whether this diagnostic actually read a trace file
-  trace_lines_unparsed    lines of the trace that would not parse
+  trace_lines_unparsed    trace records that failed UTF-8, JSON, or wire validation
   events_read             events read from the trace, or null when none was read
   context_selection_events
   context_selection_events_malformed
@@ -410,3 +410,8 @@ versus a trace holding no context event. `scaneval.diagnostics.DiagnosticsError`
 for inputs the diagnostic cannot be computed from at all — a directory that is not a bundle, an
 execution record that is not readable JSON, a bundle with no way to learn what its targets are.
 A capture gap is not one of those: a diagnostic about capture gaps has to survive one.
+
+Saved traces use `scaneval.trace.read_trace`, the same wire validation as bundle ingestion.
+Rejected records block absence claims; valid positive events survive a mixed stream. Raw
+trace bytes remain unchanged. `trace_events_malformed` also protects direct in-memory calls
+that pass context events without going through the saved-trace reader.
