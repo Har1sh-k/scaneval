@@ -178,7 +178,7 @@ class _Run:
 
     @property
     def repetitions(self) -> int:
-        return self.schedule["repetitions"]
+        return int(self.schedule["repetitions"])
 
 
 @dataclass(frozen=True)
@@ -627,10 +627,10 @@ class _Resampler:
     @property
     def draws(self) -> list[Counter]:
         if self._draws is None:
-            stream = Stream(self._uncertainty["seed"], label=self.label)
+            stream = Stream(int(self._uncertainty["seed"]), label=self.label)
             self._draws = [Counter(self.universe[index]
                                    for index in resample_with_replacement(len(self.universe), stream))
-                           for _ in range(self._uncertainty["replicates"])]
+                           for _ in range(int(self._uncertainty["replicates"]))]
         return self._draws
 
 
@@ -712,7 +712,7 @@ def _random_order_expectation(delivered: int, hits: int, budget: int) -> Fractio
     *hits* accepted claims in the first *budget* positions: the exact form of the probability
     :mod:`scaneval.scoring` computes in floating point. Zero for empty output and for no hit.
     """
-    drawn = min(budget, delivered)
+    drawn = min(int(budget), delivered)
     if not (delivered and hits):
         return Fraction(0)
     if delivered - hits < drawn:
@@ -1485,7 +1485,7 @@ def _view_facts(corpus: _Corpus, mode: str, profile: str, system_ids: Iterable[s
     return {
         "inputs": len(rows), "canonical_targets": len(targets), "canonical_controls": len(controls),
         "projects": sorted(projects), "workloads": sorted(workloads),
-        "review_budgets": sorted({budget for row in frozen for budget in row["plan"]["review_budgets"]}),
+        "review_budgets": sorted({int(budget) for row in frozen for budget in row["plan"]["review_budgets"]}),
         "targets_per_input": [{"targets": count, "inputs": per_input[count]} for count in sorted(per_input)],
         "inputs_without_frozen_plan": [
             {"run_id": run.run_id, "input_id": row["input_id"], "reason": row["plan"]["reason"]}

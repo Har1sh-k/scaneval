@@ -222,7 +222,7 @@ def observe(plan: dict, result: dict, decisions: dict) -> dict:
             "hit_claims": len(hits[target_id]),
             "unresolved_match": target_id in pending_targets,
         })
-    budgets = sorted(plan["review_budgets"])
+    budgets = sorted(int(budget) for budget in plan["review_budgets"])
     random_order = None
     if result["ranking"] == "unranked" and result["bundles_resolved"]:
         delivered = len(claims)

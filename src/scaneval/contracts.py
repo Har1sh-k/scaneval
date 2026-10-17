@@ -1703,7 +1703,7 @@ def _validate_evaluation_schedule(document: dict[str, Any]) -> None:
                 raise ContractError(f"{label}: every item of a frozen pr plan states its pr_scope")
             if item["mode"] == "full" and scoped:
                 raise ContractError(f"{label}: only a pr input's frozen plan carries pr_scope")
-    repetitions = document["repetitions"]
+    repetitions = int(document["repetitions"])
     expected = {f"{input_id}__{system['system_id']}__r{repetition}": (input_id, system["system_id"], repetition)
                 for input_id in inputs for system in document["systems"]
                 for repetition in range(1, repetitions + 1)}
