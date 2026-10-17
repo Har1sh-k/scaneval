@@ -93,14 +93,20 @@ def test_normal_and_timeout_preserve_both_output_streams(tmp_path, timeout):
     assert (tmp_path/'err').read_text() == 'err\n'
 
 
-@pytest.mark.parametrize('persistent_failure', [False, True])
-def test_cleanup_interrupts_preserve_original_and_still_reap_and_close(tmp_path, monkeypatch, persistent_failure):
+@pytest.mark.parametrize('persistent_failure,bad_note', [(False, False), (True, False), (True, True)])
+def test_cleanup_interrupts_preserve_original_and_still_reap_and_close(tmp_path, monkeypatch, persistent_failure, bad_note):
     real_popen = subprocess.Popen
     real_killpg = os.killpg
     processes = []
     attempts = []
     waits = []
-    original = ValueError('retained original exception')
+    class OriginalError(ValueError):
+        def add_note(self, note):
+            if bad_note:
+                raise KeyboardInterrupt('diagnostic recording interrupted')
+            super().add_note(note)
+
+    original = OriginalError('retained original exception')
 
     def start(*args, **kwargs):
         process = real_popen(*args, **kwargs)
@@ -136,7 +142,7 @@ def test_cleanup_interrupts_preserve_original_and_still_reap_and_close(tmp_path,
         assert all(0 <= timeout <= 5 for timeout in waits)
         assert processes[0].returncode == -signal.SIGKILL
         assert processes[0].stdin.closed
-        if persistent_failure:
+        if persistent_failure and not bad_note:
             assert 'process-group cleanup failed' in original.__notes__[0]
     finally:
         for process in processes:

@@ -216,7 +216,10 @@ def run_command(
                 except BaseException:
                     pass
             if not group_stopped:
-                original.add_note("scanner process-group cleanup failed after three attempts")
+                try:
+                    original.add_note("scanner process-group cleanup failed after three attempts")
+                except BaseException:
+                    pass
                 # A group operation can fail independently of direct-child termination.
                 try:
                     process.kill()
@@ -232,7 +235,10 @@ def run_command(
                 except BaseException:
                     pass
             if not reaped:
-                original.add_note("scanner could not be reaped within bounded cleanup attempts")
+                try:
+                    original.add_note("scanner could not be reaped within bounded cleanup attempts")
+                except BaseException:
+                    pass
             if process.stdin is not None:
                 try:
                     process.stdin.close()
