@@ -2307,3 +2307,21 @@ def test_arbitrary_tool_arguments_remain_structured_until_redaction(mode, collec
     assert "SYNTHETIC_SECRET" not in json.dumps(seen)
     assert ("return eval(raw)" in json.dumps(seen)) == (mode == "content")
     assert observer.get_state().dropped_events == 0
+
+
+@pytest.mark.parametrize("mode", ["metadata", "content"])
+@pytest.mark.parametrize("cost", [0, 0.00005, 0.0001, 0.01, 1e-300, 1e30, -1, float("nan"), float("inf"), "bad", True])
+def test_native_cost_does_not_discard_final_answer(mode, cost):
+    seen = []
+    observer = Observer(mode=mode, sink=seen.append)
+    records = [{"type": "assistant", "message": {"id": "a", "content": [{"type": "text", "text": "FINAL_ANSWER"}],
+                "usage": {"input_tokens": 1, "output_tokens": 2}}},
+               {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": cost, "num_turns": 1}]
+    claude_code.import_stream_json(observer, map(json.dumps, records), workspace_root="/workspace", call_id="call")
+    response = next(e for e in seen if e["type"] == "model.response")
+    assert response["metadata"]["usage"]["output_tokens"] == 2
+    assert ("FINAL_ANSWER" in json.dumps(response)) == (mode == "content")
+    assert observer.get_state().dropped_events == 0
+    if cost in (0.00005, 1e-300, 1e30):
+        assert response["metadata"]["invocation_cost_usd_cli_reported"] is None
+        assert float(response["metadata"]["invocation_cost_usd_cli_reported_text"]) == cost

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -1245,6 +1246,7 @@ class _State:
             # printed its totals against ever fills them.
             "invocation_usage": None,
             "invocation_cost_usd_cli_reported": None,
+            "invocation_cost_usd_cli_reported_text": None,
             "invocation_num_turns": None,
             "invocation_duration_api_ms": None,
             "stdout_chars": len(answer),
@@ -1329,9 +1331,13 @@ class _State:
         # neither can silently get the other.
         metadata["invocation_num_turns"] = _as_int(record.get("num_turns"))
         metadata["invocation_duration_api_ms"] = _as_int(record.get("duration_api_ms"))
-        metadata["invocation_cost_usd_cli_reported"] = (
-            cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None
-        )
+        valid_cost = (isinstance(cost, (int, float)) and not isinstance(cost, bool)
+                      and cost >= 0 and (not isinstance(cost, float) or math.isfinite(cost)))
+        # Preserve the native numeric value as text when the observer's shared numeric
+        # window cannot carry it. No rounding, and invalid costs affect only this field.
+        wire_cost = valid_cost and (cost == 0 or cost >= 1e-4) and cost <= 2**53 - 1
+        metadata["invocation_cost_usd_cli_reported"] = cost if wire_cost else None
+        metadata["invocation_cost_usd_cli_reported_text"] = str(cost) if valid_cost and not wire_cost else None
         metadata["invocation_usage"] = None
         if isinstance(usage, dict):
             mapped, available = _usage({"usage": usage})

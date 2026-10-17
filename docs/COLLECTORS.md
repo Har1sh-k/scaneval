@@ -624,3 +624,11 @@ produce. Their code is synthetic and their shape is copied from the real files.
 The last two exist to be *adversarial*: they are the input the closed-code-plus-bounded-summary
 rule above is there to survive, and the tests drive them in both recording modes. A change
 that let native failure prose back into `metadata` fails against them rather than shipping.
+
+Native Claude invocation cost uses `invocation_cost_usd_cli_reported` when it fits the
+observer numeric window. Otherwise a finite nonnegative amount is retained losslessly as
+`invocation_cost_usd_cli_reported_text` (a decimal string, possibly with an exponent, in USD),
+and the numeric field is null. Invalid amounts leave both fields null. These are invocation
+costs on the last response; per-turn `usage` remains token counts from that turn's message,
+and `invocation_usage` remains the separate invocation total. Neither cost representation
+changes token accounting or suppresses the final answer.
