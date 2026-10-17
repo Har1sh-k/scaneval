@@ -118,6 +118,18 @@ def test_concurrent_fetches_share_one_verified_snapshot_without_staging_collisio
     assert not list(cache.glob("*.partial-*"))
 
 
+def test_published_snapshot_keeps_normal_directory_permissions(tmp_path, upstream):
+    """Runtime rules mounts must remain traversable by the configured container UID."""
+    import stat
+
+    repo, first = upstream
+    ordinary = tmp_path / "ordinary-directory"
+    ordinary.mkdir()
+    snapshot = fetch_snapshot(str(repo), first, tmp_path / "cache")
+    assert stat.S_IMODE(snapshot.path.stat().st_mode) == stat.S_IMODE(ordinary.stat().st_mode)
+    assert (snapshot.path / "app.py").read_text() == "print('v1')\n"
+
+
 def test_modified_cache_entry_is_rejected(tmp_path, upstream):
     repo, first = upstream
     cache = tmp_path / "cache"

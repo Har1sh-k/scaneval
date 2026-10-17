@@ -43,6 +43,7 @@ import shutil
 import subprocess
 import tempfile
 from typing import Callable
+from uuid import uuid4
 
 from .contracts import ContractError, canonical_json, canonical_sha256, pr_diff_sha256, pr_input_hash
 
@@ -226,7 +227,10 @@ def fetch_snapshot(url: str, commit: str, cache_root: Path, *, timeout: float = 
     # Each caller owns its staging checkout.  A shared ``target.partial`` lets one
     # fetch delete another fetch's live checkout, while merely tolerating mkdir
     # races still leaves the cleanup and publication races intact.
-    staging = Path(tempfile.mkdtemp(prefix=target.name + ".partial-", dir=cache_root))
+    # Keep normal mkdir/umask permissions: the published checkout can also be a
+    # read-only rules mount used by a scanner running under another container UID.
+    staging = cache_root / f"{target.name}.partial-{uuid4().hex}"
+    staging.mkdir()
     try:
         _git(["init", "-q"], staging)
         for key, value in _LFS_CONFIG:
