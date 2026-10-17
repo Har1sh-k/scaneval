@@ -1,6 +1,7 @@
 """Full-scan coverage survives native skip suppression and gates quiet controls."""
 import json
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -89,3 +90,33 @@ def test_partial_scan_keeps_usable_findings_and_omissions(tmp_path):
     assert outcome.status == "partial"
     assert len(outcome.claims) == 1
     assert outcome.omitted_paths == ["control.py"]
+
+
+@semgrep_required
+def test_native_quiet_scan_preserves_ignored_control_coverage(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("value = 1\n")
+    (source / "control.py").write_text("value = 2\n")
+    (source / ".semgrepignore").write_text("control.py\n")
+    rules = tmp_path / "rules"
+    rules.mkdir()
+    (rules / "rule.yml").write_text(
+        "rules:\n  - id: harmless\n    languages: [python]\n    severity: INFO\n"
+        "    message: synthetic coverage test\n    pattern: __ABSENT_SENTINEL__\n")
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    binary = Path(sys.executable).with_name("semgrep")
+    spec = SystemSpec("semgrep", "semgrep", {"binary": str(binary) if binary.exists() else "semgrep"})
+    preparation = fake_preparation(tmp_path)
+    preparation["config_dirs"] = [str(rules)]
+    outcome = SemgrepAdapter().scan(
+        request={}, source_dir=source, raw_dir=raw, spec=spec, preparation=preparation,
+        timeout_seconds=60, trace_mode="off", trace_dir=None)
+    assert outcome.status == "success", outcome.error
+    native = json.loads((raw / "semgrep.json").read_text())
+    assert "app.py" in native["paths"]["scanned"]
+    assert "control.py" not in native["paths"]["scanned"]
+    assert "control.py" in outcome.omitted_paths
+    assert control_metrics(outcome, "control.py")["resolved"] == 0
+    assert control_metrics(outcome, "app.py")["resolved"] == 1
