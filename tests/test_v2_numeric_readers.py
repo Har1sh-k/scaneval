@@ -54,3 +54,24 @@ def test_integral_review_budget_uses_integer_metric_keys(spelling):
     assert actual['metrics'] == score(integer, result, decisions)['metrics']
     assert actual['metrics']['random_order_expected_recall'] == {'1': .25}
     assert canonical_sha256(plan) == before
+
+@pytest.mark.parametrize('case', ['missing', 'duplicate', 'pairs', 'full_output_recall', 'coverage'])
+def test_saved_comparison_reader_rejects_inconsistent_shapes(tmp_path, case):
+    comparison = small_comparison(tmp_path, 'reader')
+    view = comparison['views'][0]
+    if case == 'missing':
+        view['differences'][0]['detection'] = []
+    elif case == 'duplicate':
+        view['differences'][0]['detection'].append(deepcopy(view['differences'][0]['detection'][0]))
+    else:
+        view['systems']['baseline']['slices'][0]['detection'][0][case] = None
+    with pytest.raises(ContractError):
+        validate_document('comparison-report', comparison)
+    from test_v2_gate import full_policy
+    with pytest.raises(ContractError):
+        gate.evaluate_gate(full_policy(), comparison)
+    path, policy_path, output = (tmp_path / name for name in ['comparison.json', 'policy.json', 'decision.json'])
+    path.write_text(json.dumps(comparison))
+    policy_path.write_text(json.dumps(full_policy()))
+    assert main(['gate', '--policy', str(policy_path), '--comparison', str(path), '--output', str(output)]) == 2
+    assert not output.exists()
