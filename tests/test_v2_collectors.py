@@ -2357,3 +2357,25 @@ def test_codex_mcp_native_results_preserve_content_and_safe_counts(mode, payload
     else:
         expected = json.loads(json.dumps(payload["result"]).replace('"SECRET"', '"[REDACTED]"'))
         assert end["content"]["result"] == expected
+
+
+@pytest.mark.parametrize("mode", ["off", "metadata", "content"])
+@pytest.mark.parametrize("collector", ["claude", "codex"])
+def test_shell_bodies_follow_content_mode_contract(mode, collector):
+    command = "python -c 'print(123)'"
+    if collector == "claude":
+        records = [{"type": "assistant", "message": {"id": "a", "content": [
+            {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": command}}]}}]
+        importer = claude_code.import_stream_json
+    else:
+        records = [{"type": "turn.started"}, {"type": "item.started", "item": {
+            "id": "t", "type": "command_execution", "command": command}}]
+        importer = codex.import_exec_jsonl
+    seen = []
+    observer = Observer(mode=mode, sink=seen.append)
+    importer(observer, map(json.dumps, records), workspace_root="/workspace", call_id="call")
+    assert (command in json.dumps(seen)) == (mode == "content")
+    assert all(command not in json.dumps(e["metadata"]) for e in seen)
+    assert observer.get_state().dropped_events == 0
+    if mode == "off":
+        assert seen == []

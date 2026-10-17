@@ -291,8 +291,7 @@ def _tool_name(item: dict[str, Any]) -> str:
 def _input_summary(item: dict[str, Any], tracker: _Import) -> str | None:
     item_type = item.get("type")
     if item_type == "command_execution":
-        # The command text is where an operator path reaches metadata: Codex reads files by
-        # running a shell, so this string routinely holds absolute paths.
+        # Commands can contain source and credentials; metadata records only their shape.
         return tracker.argument_summary(item.get("command"))
     if item_type == "file_change":
         changes = item.get("changes")
@@ -429,6 +428,7 @@ def _tool_end(
         error_text = error.get("message") if isinstance(error, dict) else error
         error_text = error_text if isinstance(error_text, str) else None
         blocks = result.get("content") if isinstance(result, dict) else None
+        fields["metadata"]["status"] = status if status in ("in_progress", "completed", "failed", "error") else None
         fields["metadata"].update({
             "result_available": isinstance(result, (dict, str)),
             "result_content_blocks": len(blocks) if isinstance(blocks, list) else None,

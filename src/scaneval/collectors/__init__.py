@@ -62,9 +62,8 @@ CAPTURE_KEYS = (
     "finding_filtered",
 )
 
-# How much of a command or a tool input reaches ``metadata.input_summary``. Long enough to
-# identify the call in a trace, short enough that metadata stays a description of the run
-# rather than a second copy of it.
+# Maximum length of known path summaries and other explicitly selected metadata strings.
+# Arbitrary tool inputs and command bodies use argument_summary, never value prefixes.
 SUMMARY_CHARS = 120
 
 # What a path outside the workspace root is recorded as. The basename survives because a
