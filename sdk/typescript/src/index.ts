@@ -423,7 +423,20 @@ function copyJson(
   if (seen.has(value)) throw new TypeError("cyclic JSON value");
   seen.add(value);
   if (Array.isArray(value)) {
-    const result = value.map((item) => copyJson(item, seen, depth + 1));
+    const names = Object.getOwnPropertyNames(value);
+    if (Object.getOwnPropertySymbols(value).length || names.length !== value.length + 1) {
+      throw new TypeError("non-JSON array properties or holes");
+    }
+    const result: JsonValue[] = [];
+    for (let index = 0; index < value.length; index++) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !descriptor.enumerable || !descriptor.writable ||
+          !descriptor.configurable || !Object.hasOwn(descriptor, "value")) {
+        throw new TypeError("sparse or decorated JSON array element");
+      }
+      // Never invoke an indexed getter while taking the payload snapshot.
+      result.push(copyJson(descriptor.value, seen, depth + 1));
+    }
     seen.delete(value);
     return result;
   }

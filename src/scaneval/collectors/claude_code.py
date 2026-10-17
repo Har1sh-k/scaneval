@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -616,28 +617,12 @@ def _native_result(record: dict[str, Any]) -> Any:
 
 
 def _input_summary(tool_name: Any, tool_input: Any, tracker: _Import) -> str | None:
-    """One short, path-safe line identifying a tool call.
-
-    Paths are relativized here as they are everywhere else: an ``input_summary`` is metadata
-    and a native path in it would be an operator's home directory in a trace, arriving by a
-    field nobody thinks of as a path field.
-    """
-    if not isinstance(tool_input, dict):
-        return tracker.summarize(tool_input)
-    for key in PATH_INPUT_KEYS:
-        if isinstance(tool_input.get(key), str):
-            return clip(tracker.path(tool_input[key]))
-    if isinstance(tool_input.get("command"), str):
-        return tracker.summarize(tool_input["command"])
-    if isinstance(tool_input.get("pattern"), str):
-        where = tool_input.get("path")
-        located = tracker.path(where) if isinstance(where, str) else None
-        pattern = tool_input["pattern"]
-        return tracker.summarize(f"{pattern} in {located}" if located else pattern)
-    for key in ("description", "prompt", "url", "query"):
-        if isinstance(tool_input.get(key), str):
-            return tracker.summarize(tool_input[key])
-    return tracker.summarize(tool_input)
+    """Keep known file-tool paths useful; summarize arbitrary inputs structurally."""
+    if isinstance(tool_input, dict) and tool_name in ("Read", "Write", "Edit", "MultiEdit", "Glob", "Grep"):
+        for key in PATH_INPUT_KEYS:
+            if isinstance(tool_input.get(key), str):
+                return clip(tracker.path(tool_input[key]))
+    return tracker.argument_summary(tool_input)
 
 
 def _usage(message: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
@@ -1261,6 +1246,7 @@ class _State:
             # printed its totals against ever fills them.
             "invocation_usage": None,
             "invocation_cost_usd_cli_reported": None,
+            "invocation_cost_usd_cli_reported_text": None,
             "invocation_num_turns": None,
             "invocation_duration_api_ms": None,
             "stdout_chars": len(answer),
@@ -1345,9 +1331,13 @@ class _State:
         # neither can silently get the other.
         metadata["invocation_num_turns"] = _as_int(record.get("num_turns"))
         metadata["invocation_duration_api_ms"] = _as_int(record.get("duration_api_ms"))
-        metadata["invocation_cost_usd_cli_reported"] = (
-            cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None
-        )
+        valid_cost = (isinstance(cost, (int, float)) and not isinstance(cost, bool)
+                      and cost >= 0 and (not isinstance(cost, float) or math.isfinite(cost)))
+        # Preserve the native numeric value as text when the observer's shared numeric
+        # window cannot carry it. No rounding, and invalid costs affect only this field.
+        wire_cost = valid_cost and (cost == 0 or cost >= 1e-4) and cost <= 2**53 - 1
+        metadata["invocation_cost_usd_cli_reported"] = cost if wire_cost else None
+        metadata["invocation_cost_usd_cli_reported_text"] = str(cost) if valid_cost and not wire_cost else None
         metadata["invocation_usage"] = None
         if isinstance(usage, dict):
             mapped, available = _usage({"usage": usage})

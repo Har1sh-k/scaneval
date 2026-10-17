@@ -510,10 +510,10 @@ Two consequences, both enforced in code rather than left to care:
 
 1. **Paths never pass through.** Every path in an event is workspace-relative; anything
    outside every root becomes `external:<basename>` and is counted in the notes. This includes
-   paths *inside free text*: the absolute paths in a shell command are rewritten before the
-   command reaches `metadata.input_summary`, because a command is a string and strings are not
-   audited as path fields. `tests/test_v2_collectors.py::test_no_event_any_importer_emits_carries_an_absolute_path_in_its_metadata`
-   searches every string of every metadata payload for an absolute path.
+   known file-tool path summaries. Arbitrary arguments, shell commands, queries and prompts
+   use structural summaries (type and count), never value prefixes. Their full structured
+   values remain available under `content` in content mode, where credential keys are redacted
+   before serialization. Shell command bodies are content even when short.
 2. **Content only ever reaches `content`.** In `metadata` mode no file text is built into a
    payload at all — not dropped later, not built. `metadata` carries hashes, line ranges and
    sizes. This is Contract rule 5 and
@@ -624,3 +624,19 @@ produce. Their code is synthetic and their shape is copied from the real files.
 The last two exist to be *adversarial*: they are the input the closed-code-plus-bounded-summary
 rule above is there to survive, and the tests drive them in both recording modes. A change
 that let native failure prose back into `metadata` fails against them rather than shipping.
+
+Native Claude invocation cost uses `invocation_cost_usd_cli_reported` when it fits the
+observer numeric window. Otherwise a finite nonnegative amount is retained losslessly as
+`invocation_cost_usd_cli_reported_text` (a decimal string, possibly with an exponent, in USD),
+and the numeric field is null. Invalid amounts leave both fields null. These are invocation
+costs on the last response; per-turn `usage` remains token counts from that turn's message,
+and `invocation_usage` remains the separate invocation total. Neither cost representation
+changes token accounting or suppresses the final answer.
+
+Codex MCP object results retain their complete `content` blocks (including non-text blocks)
+and `structured_content` under `content.result`; native error messages use `content.error`.
+Credential keys remain structured for redaction. Metadata records `result_available`,
+`result_content_blocks`, `structured_result_available`, and `error_chars`; `result_chars`
+counts text-block characters only (or the legacy string result), not serialized object or
+image bytes. Zero text characters therefore does not imply an absent structured result.
+Metadata mode stores these counts and availability facts without result or error content.

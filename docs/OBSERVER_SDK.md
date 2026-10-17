@@ -383,3 +383,10 @@ Checked in `tests/test_v2_observer.py` except where another file is named, and n
 - **The constants and counts this guide states**: the values beside the Python constants, the four TypeScript vocabulary types in this file and in the SDK source, `MAX_PAYLOAD_DEPTH` and the levels it leaves, the safe-integer bound wherever it is spelled, the plain-decimal floor and the over-refusal floor, the number of event types and `observer.error`'s position among them, the three capture-state fields, and the two reserved strings `observer_capture_gap` and `observer instrumentation failure` (`test_the_constants_the_guide_states_are_the_constants_both_emitters_use`), with the payload-number window driven at the bounds it states (`test_the_payload_number_window_the_guide_states_is_the_one_the_emitter_enforces`).
 
 Prose, and pinned only by the tests it cites: the fourteen numbered rules of the parity contract and their rationale, the lifecycle descriptions, the divergence history, the per-row explanations under the capture matrix, the thread-safety limit and what it costs, what `emit` resolves with per failing hook, the order the status downgrades run in, and every claim about what a reader may conclude from an event or its absence. A cited test name is checked to exist; that the test holds the claim beside it is not something this file can check, and is a matter for review. Treat an uncited sentence here as a description written by someone reading the code, because that is what it is.
+
+TypeScript arrays must be dense, with enumerable indexed elements and no extra own string
+or symbol properties (apart from built-in `length`). Holes are refused rather than fabricated
+as nulls. This also applies to custom redactor output; explicit null elements remain valid.
+
+Array indices must also use ordinary writable, configurable data descriptors. Accessor
+indices and decorated data indices are refused without invoking getters.

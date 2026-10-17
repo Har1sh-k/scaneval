@@ -62,9 +62,8 @@ CAPTURE_KEYS = (
     "finding_filtered",
 )
 
-# How much of a command or a tool input reaches ``metadata.input_summary``. Long enough to
-# identify the call in a trace, short enough that metadata stays a description of the run
-# rather than a second copy of it.
+# Maximum length of known path summaries and other explicitly selected metadata strings.
+# Arbitrary tool inputs and command bodies use argument_summary, never value prefixes.
 SUMMARY_CHARS = 120
 
 # What a path outside the workspace root is recorded as. The basename survives because a
@@ -383,6 +382,16 @@ class _Import:
             return None
         rendered = value if isinstance(value, str) else json.dumps(value, sort_keys=True)
         return clip(relocate_paths(rendered, self.workspace_root), limit)
+
+    def argument_summary(self, value: Any) -> str:
+        """Describe shape only: arbitrary argument values belong in content."""
+        if isinstance(value, dict):
+            return f"object ({len(value)} fields)"
+        if isinstance(value, list):
+            return f"array ({len(value)} items)"
+        if isinstance(value, str):
+            return f"text ({len(value)} chars)"
+        return "null" if value is None else "scalar"
 
     def failure(self, kind: str | None, text: Any) -> str | None:
         """Classify a native failure. Returns the closed kind and nothing else.

@@ -57,7 +57,13 @@ WORKSPACE = "/workspace"
 REDACTED_ROOT = "/redacted"
 
 # Any absolute path on a POSIX machine, greedy enough to swallow a path embedded in prose.
-ABSOLUTE_PATH = re.compile(r"/(?:[A-Za-z0-9._@+-]+/)+[A-Za-z0-9._@+-]*")
+ABSOLUTE_PATH = re.compile(r"/(?:[^\s/\"'<>\\`|;,(){}\[\]:]+/)+[^\s/\"'<>\\`|;,(){}\[\]:]*")
+# Match the observer's focused credential-key policy without requiring an installed package
+# when this standalone publication utility is run from a checkout.
+SECRET_KEY = re.compile(
+    r"api[_-]?key|authorization|credential(?:s)?|cookie(?:s)?|password|secret(?:s)?|token|private[_-]?key",
+    re.IGNORECASE | re.ASCII,
+)
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 # Record fields kept on a message record. Everything else on the record is dropped, which is
@@ -96,7 +102,7 @@ TOOL_RESULT_KEEP = (
 FILE_KEEP = ("filePath", "content", "numLines", "startLine", "totalLines")
 CODEX_ITEM_KEEP = (
     "id", "type", "text", "command", "aggregated_output", "exit_code", "status", "query",
-    "server", "tool", "arguments", "changes", "path", "message",
+    "server", "tool", "arguments", "changes", "path", "message", "result", "error",
 )
 CODEX_KEEP = ("type", "thread_id", "item", "usage", "error", "message")
 
@@ -140,7 +146,7 @@ def scrub_text(text: Any, workspace: str) -> Any:
         # second pass that re-read an already-rewritten "/workspace/app.py" as a foreign path
         # would quietly demote it to "/redacted/app.py" and cost the fixture the very case it
         # exists to exercise.
-        if found.startswith(WORKSPACE) or found.startswith(REDACTED_ROOT):
+        if any(found == root or found.startswith(root + "/") for root in (WORKSPACE, REDACTED_ROOT)):
             return found
         if found == workspace or found.startswith(workspace.rstrip("/") + "/"):
             tail = found[len(workspace.rstrip("/")):]
@@ -165,7 +171,8 @@ def scrub_value(value: Any, workspace: str) -> Any:
     if isinstance(value, list):
         return [scrub_value(item, workspace) for item in value]
     if isinstance(value, dict):
-        return {key: scrub_value(item, workspace) for key, item in value.items()}
+        return {key: "[REDACTED]" if SECRET_KEY.fullmatch(key) else scrub_value(item, workspace)
+                for key, item in value.items()}
     return value
 
 
@@ -280,6 +287,12 @@ def codex_record(record: dict[str, Any], workspace: str, ids: Ids) -> dict[str, 
         out["thread_id"] = ids("thread", out["thread_id"])
     if isinstance(out.get("item"), dict):
         out["item"] = pick(out["item"], CODEX_ITEM_KEEP)
+        item = out["item"]
+        if item.get("type") == "mcp_tool_call":
+            if isinstance(item.get("result"), dict):
+                item["result"] = pick(item["result"], ("content", "structured_content", "_meta"))
+            if isinstance(item.get("error"), dict):
+                item["error"] = pick(item["error"], ("message",))
     if isinstance(out.get("usage"), dict):
         out["usage"] = pick(out["usage"], USAGE_KEEP)
     return scrub_value(out, workspace)
@@ -333,11 +346,15 @@ def sanitize(kind: str, text: str, workspace: str) -> str:
 def audit(text: str, workspace: str) -> list[str]:
     """Last line of defence: refuse to write a file that still names somebody's home."""
     offenders = []
-    home = re.compile(r"/(?:Users|home)/([A-Za-z0-9._-]+)/")
+    home = re.compile(r"/(?:Users|home)/([^/\s]+)/")
     for number, line in enumerate(text.splitlines(), start=1):
         match = home.search(line)
         if match:
             offenders.append(f"line {number}: {match.group(0)}")
+        for path in ABSOLUTE_PATH.findall(line):
+            if not any(path == root or path.startswith(root + "/")
+                       for root in (WORKSPACE, REDACTED_ROOT)):
+                offenders.append(f"line {number}: external absolute path")
         if workspace and workspace in line:
             offenders.append(f"line {number}: unscrubbed workspace path")
         if EMAIL.search(line) and "example.invalid" not in line:

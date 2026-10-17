@@ -1253,10 +1253,10 @@ def test_an_absolute_path_inside_a_shell_command_is_rewritten_before_it_reaches_
     assert relocate_paths(None, Path("/workspace")) is None
 
 
-def test_a_codex_command_summary_names_the_command_without_naming_the_machine():
+def test_a_codex_command_summary_reports_shape_without_command_content():
     events, _ = import_codex(CODEX)
     summaries = [e["metadata"]["input_summary"] for e in of_type(events, "tool.start")]
-    assert all("app.py" in summary for summary in summaries)
+    assert all(summary.startswith("text (") and summary.endswith(" chars)") for summary in summaries)
     assert all("/" not in summary.split()[0] for summary in summaries)
 
 
@@ -2284,4 +2284,98 @@ def test_codex_accepts_the_same_root_list_for_the_paths_in_its_commands():
     codex.import_exec_jsonl(
         observer, lines, workspace_root=(Path(HANDED), Path(REALPATH)), call_id="call-1"
     )
-    assert of_type(seen, "tool.start")[0]["metadata"]["input_summary"] == "nl -ba app.py"
+    assert of_type(seen, "tool.start")[0]["metadata"]["input_summary"] == f"text ({len(f'nl -ba {REALPATH}/app.py')} chars)"
+
+
+@pytest.mark.parametrize("mode", ["metadata", "content"])
+@pytest.mark.parametrize("collector", ["claude", "codex"])
+def test_arbitrary_tool_arguments_remain_structured_until_redaction(mode, collector):
+    args = {"code": "return eval(raw)", "nested": {"api_key": "SYNTHETIC_SECRET"}}
+    if collector == "claude":
+        records = [{"type": "assistant", "message": {"id": "a", "content": [
+            {"type": "tool_use", "id": "t", "name": "mcp__execute", "input": args}]}}]
+        importer = claude_code.import_stream_json
+    else:
+        records = [{"type": "turn.started"}, {"type": "item.started", "item": {
+            "id": "t", "type": "mcp_tool_call", "server": "fixture", "tool": "execute", "arguments": args}}]
+        importer = codex.import_exec_jsonl
+    seen = []
+    observer = Observer(mode=mode, sink=seen.append)
+    importer(observer, map(json.dumps, records), workspace_root="/workspace", call_id="call")
+    start = next(e for e in seen if e["type"] == "tool.start")
+    assert start["metadata"]["input_summary"] == "object (2 fields)"
+    assert "SYNTHETIC_SECRET" not in json.dumps(seen)
+    assert ("return eval(raw)" in json.dumps(seen)) == (mode == "content")
+    assert observer.get_state().dropped_events == 0
+
+
+@pytest.mark.parametrize("mode", ["metadata", "content"])
+@pytest.mark.parametrize("cost", [0, 0.00005, 0.0001, 0.01, 1e-300, 1e30, -1, float("nan"), float("inf"), "bad", True])
+def test_native_cost_does_not_discard_final_answer(mode, cost):
+    seen = []
+    observer = Observer(mode=mode, sink=seen.append)
+    records = [{"type": "assistant", "message": {"id": "a", "content": [{"type": "text", "text": "FINAL_ANSWER"}],
+                "usage": {"input_tokens": 1, "output_tokens": 2}}},
+               {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": cost, "num_turns": 1}]
+    claude_code.import_stream_json(observer, map(json.dumps, records), workspace_root="/workspace", call_id="call")
+    response = next(e for e in seen if e["type"] == "model.response")
+    assert response["metadata"]["usage"]["output_tokens"] == 2
+    assert ("FINAL_ANSWER" in json.dumps(response)) == (mode == "content")
+    assert observer.get_state().dropped_events == 0
+    if cost in (0.00005, 1e-300, 1e30):
+        assert response["metadata"]["invocation_cost_usd_cli_reported"] is None
+        assert float(response["metadata"]["invocation_cost_usd_cli_reported_text"]) == cost
+
+
+@pytest.mark.parametrize("mode", ["metadata", "content"])
+@pytest.mark.parametrize("payload", [
+    {"result": {"content": [{"type": "text", "text": "TOOL_TEXT"}], "structured_content": {"count": 1, "api_key": "SECRET"}}},
+    {"result": {"structured_content": {"finding": "TOOL_TEXT"}}},
+    {"result": {"content": [{"type": "image", "data": "IMAGE_DATA", "mimeType": "image/png"}]}},
+    {"error": {"message": "TOOL_ERROR"}},
+    {"result": "LEGACY_TEXT"},
+])
+def test_codex_mcp_native_results_preserve_content_and_safe_counts(mode, payload):
+    seen = []
+    observer = Observer(mode=mode, sink=seen.append)
+    item = {"id": "t", "type": "mcp_tool_call", "server": "fixture", "tool": "scan", "arguments": {}}
+    records = [{"type": "turn.started"}, {"type": "item.started", "item": item},
+               {"type": "item.completed", "item": {**item, **payload, "status": "failed" if "error" in payload else "completed"}},
+               {"type": "turn.completed"}]
+    summary = codex.import_exec_jsonl(observer, map(json.dumps, records), workspace_root="/workspace", call_id="call")
+    end = next(e for e in seen if e["type"] == "tool.end")
+    assert summary.tool_results == 1 and summary.unknown_records == 0
+    assert observer.get_state().dropped_events == 0
+    assert end["metadata"]["result_available"] == ("result" in payload)
+    expected_chars = 9 if "TOOL_TEXT" in json.dumps(payload) and "content" in payload.get("result", {}) else 11 if payload.get("result") == "LEGACY_TEXT" else 0
+    assert end["metadata"]["result_chars"] == expected_chars
+    assert "SECRET" not in json.dumps(seen)
+    if mode == "metadata":
+        assert "content" not in end
+    elif "error" in payload:
+        assert end["content"]["error"] == "TOOL_ERROR"
+    else:
+        expected = json.loads(json.dumps(payload["result"]).replace('"SECRET"', '"[REDACTED]"'))
+        assert end["content"]["result"] == expected
+
+
+@pytest.mark.parametrize("mode", ["off", "metadata", "content"])
+@pytest.mark.parametrize("collector", ["claude", "codex"])
+def test_shell_bodies_follow_content_mode_contract(mode, collector):
+    command = "python -c 'print(123)'"
+    if collector == "claude":
+        records = [{"type": "assistant", "message": {"id": "a", "content": [
+            {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": command}}]}}]
+        importer = claude_code.import_stream_json
+    else:
+        records = [{"type": "turn.started"}, {"type": "item.started", "item": {
+            "id": "t", "type": "command_execution", "command": command}}]
+        importer = codex.import_exec_jsonl
+    seen = []
+    observer = Observer(mode=mode, sink=seen.append)
+    importer(observer, map(json.dumps, records), workspace_root="/workspace", call_id="call")
+    assert (command in json.dumps(seen)) == (mode == "content")
+    assert all(command not in json.dumps(e["metadata"]) for e in seen)
+    assert observer.get_state().dropped_events == 0
+    if mode == "off":
+        assert seen == []
