@@ -201,23 +201,43 @@ def run_command(
             except ProcessLookupError:
                 pass
             process.wait(timeout=5)
-        except BaseException:
-            # Cancellation must retire the session we own before the caller removes its
-            # workspace. Cleanup failures must not replace the original exception.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            try:
-                process.wait(timeout=5)
-            except BaseException:
-                pass
-            finally:
-                if process.stdin is not None:
-                    try:
-                        process.stdin.close()
-                    except BaseException:
-                        pass
+        except BaseException as original:
+            # Retry interrupted cleanup without replacing the triggering exception. The
+            # attempts and total wait are bounded even if another signal handler raises.
+            group_stopped = False
+            for _ in range(3):
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    group_stopped = True
+                    break
+                except ProcessLookupError:
+                    group_stopped = True
+                    break
+                except BaseException:
+                    pass
+            if not group_stopped:
+                original.add_note("scanner process-group cleanup failed after three attempts")
+                # A group operation can fail independently of direct-child termination.
+                try:
+                    process.kill()
+                except BaseException:
+                    pass
+            deadline = time.monotonic() + 5
+            reaped = False
+            for _ in range(3):
+                try:
+                    process.wait(timeout=max(0, deadline - time.monotonic()))
+                    reaped = True
+                    break
+                except BaseException:
+                    pass
+            if not reaped:
+                original.add_note("scanner could not be reaped within bounded cleanup attempts")
+            if process.stdin is not None:
+                try:
+                    process.stdin.close()
+                except BaseException:
+                    pass
             raise
     wall = time.monotonic() - started
     return CommandResult(list(argv), None if timed_out else process.returncode, timed_out, wall, stdout_path, stderr_path)

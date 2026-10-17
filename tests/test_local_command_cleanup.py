@@ -91,3 +91,58 @@ def test_normal_and_timeout_preserve_both_output_streams(tmp_path, timeout):
     assert result.exit_code == (None if timeout else 0)
     assert (tmp_path/'out').read_text() == 'out\n'
     assert (tmp_path/'err').read_text() == 'err\n'
+
+
+@pytest.mark.parametrize('persistent_failure', [False, True])
+def test_cleanup_interrupts_preserve_original_and_still_reap_and_close(tmp_path, monkeypatch, persistent_failure):
+    real_popen = subprocess.Popen
+    real_killpg = os.killpg
+    processes = []
+    attempts = []
+    waits = []
+    original = ValueError('retained original exception')
+
+    def start(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        real_wait = process.wait
+        def fail(**kwargs):
+            raise original
+        def interrupted_wait(*args, **kwargs):
+            waits.append(kwargs['timeout'])
+            if len(waits) == 1:
+                raise KeyboardInterrupt('second interrupt during wait')
+            return real_wait(*args, **kwargs)
+        process.communicate = fail
+        process.wait = interrupted_wait
+        return process
+
+    def interrupted_killpg(pid, sig):
+        attempts.append(pid)
+        if persistent_failure or len(attempts) == 1:
+            raise KeyboardInterrupt('secondary interrupt during group kill')
+        return real_killpg(pid, sig)
+
+    monkeypatch.setattr(subprocess, 'Popen', start)
+    monkeypatch.setattr(os, 'killpg', interrupted_killpg)
+    try:
+        with pytest.raises(ValueError) as caught:
+            run_command([sys.executable, '-c', 'import time; time.sleep(60)'], cwd=tmp_path,
+                        timeout_seconds=60, env=build_env(), stdin_text='payload',
+                        stdout_path=tmp_path/'out', stderr_path=tmp_path/'err')
+        assert caught.value is original
+        assert len(attempts) == (3 if persistent_failure else 2)
+        assert len(waits) == 2
+        assert all(0 <= timeout <= 5 for timeout in waits)
+        assert processes[0].returncode == -signal.SIGKILL
+        assert processes[0].stdin.closed
+        if persistent_failure:
+            assert 'process-group cleanup failed' in original.__notes__[0]
+    finally:
+        for process in processes:
+            try:
+                real_killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            # Bypass the injected wait while ensuring the test never leaves its child.
+            real_popen.wait(process, timeout=5)
