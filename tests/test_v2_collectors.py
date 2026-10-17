@@ -1253,10 +1253,10 @@ def test_an_absolute_path_inside_a_shell_command_is_rewritten_before_it_reaches_
     assert relocate_paths(None, Path("/workspace")) is None
 
 
-def test_a_codex_command_summary_names_the_command_without_naming_the_machine():
+def test_a_codex_command_summary_reports_shape_without_command_content():
     events, _ = import_codex(CODEX)
     summaries = [e["metadata"]["input_summary"] for e in of_type(events, "tool.start")]
-    assert all("app.py" in summary for summary in summaries)
+    assert all(summary.startswith("text (") and summary.endswith(" chars)") for summary in summaries)
     assert all("/" not in summary.split()[0] for summary in summaries)
 
 
@@ -2284,4 +2284,26 @@ def test_codex_accepts_the_same_root_list_for_the_paths_in_its_commands():
     codex.import_exec_jsonl(
         observer, lines, workspace_root=(Path(HANDED), Path(REALPATH)), call_id="call-1"
     )
-    assert of_type(seen, "tool.start")[0]["metadata"]["input_summary"] == "nl -ba app.py"
+    assert of_type(seen, "tool.start")[0]["metadata"]["input_summary"] == f"text ({len(f'nl -ba {REALPATH}/app.py')} chars)"
+
+
+@pytest.mark.parametrize("mode", ["metadata", "content"])
+@pytest.mark.parametrize("collector", ["claude", "codex"])
+def test_arbitrary_tool_arguments_remain_structured_until_redaction(mode, collector):
+    args = {"code": "return eval(raw)", "nested": {"api_key": "SYNTHETIC_SECRET"}}
+    if collector == "claude":
+        records = [{"type": "assistant", "message": {"id": "a", "content": [
+            {"type": "tool_use", "id": "t", "name": "mcp__execute", "input": args}]}}]
+        importer = claude_code.import_stream_json
+    else:
+        records = [{"type": "turn.started"}, {"type": "item.started", "item": {
+            "id": "t", "type": "mcp_tool_call", "server": "fixture", "tool": "execute", "arguments": args}}]
+        importer = codex.import_exec_jsonl
+    seen = []
+    observer = Observer(mode=mode, sink=seen.append)
+    importer(observer, map(json.dumps, records), workspace_root="/workspace", call_id="call")
+    start = next(e for e in seen if e["type"] == "tool.start")
+    assert start["metadata"]["input_summary"] == "object (2 fields)"
+    assert "SYNTHETIC_SECRET" not in json.dumps(seen)
+    assert ("return eval(raw)" in json.dumps(seen)) == (mode == "content")
+    assert observer.get_state().dropped_events == 0

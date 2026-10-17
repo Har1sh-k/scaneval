@@ -293,7 +293,7 @@ def _input_summary(item: dict[str, Any], tracker: _Import) -> str | None:
     if item_type == "command_execution":
         # The command text is where an operator path reaches metadata: Codex reads files by
         # running a shell, so this string routinely holds absolute paths.
-        return tracker.summarize(item.get("command"))
+        return tracker.argument_summary(item.get("command"))
     if item_type == "file_change":
         changes = item.get("changes")
         if isinstance(changes, list) and changes:
@@ -311,10 +311,10 @@ def _input_summary(item: dict[str, Any], tracker: _Import) -> str | None:
                 return clip(", ".join(paths))
         return clip(tracker.path(item.get("path")))
     if item_type == "web_search":
-        return tracker.summarize(item.get("query"))
+        return tracker.argument_summary(item.get("query"))
     if item_type == "mcp_tool_call":
         arguments = item.get("arguments")
-        return tracker.summarize(arguments if arguments is not None else item.get("tool"))
+        return tracker.argument_summary(arguments)
     return None
 
 

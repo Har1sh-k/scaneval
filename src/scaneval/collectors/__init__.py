@@ -384,6 +384,16 @@ class _Import:
         rendered = value if isinstance(value, str) else json.dumps(value, sort_keys=True)
         return clip(relocate_paths(rendered, self.workspace_root), limit)
 
+    def argument_summary(self, value: Any) -> str:
+        """Describe shape only: arbitrary argument values belong in content."""
+        if isinstance(value, dict):
+            return f"object ({len(value)} fields)"
+        if isinstance(value, list):
+            return f"array ({len(value)} items)"
+        if isinstance(value, str):
+            return f"text ({len(value)} chars)"
+        return "null" if value is None else "scalar"
+
     def failure(self, kind: str | None, text: Any) -> str | None:
         """Classify a native failure. Returns the closed kind and nothing else.
 

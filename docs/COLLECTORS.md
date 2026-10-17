@@ -510,10 +510,10 @@ Two consequences, both enforced in code rather than left to care:
 
 1. **Paths never pass through.** Every path in an event is workspace-relative; anything
    outside every root becomes `external:<basename>` and is counted in the notes. This includes
-   paths *inside free text*: the absolute paths in a shell command are rewritten before the
-   command reaches `metadata.input_summary`, because a command is a string and strings are not
-   audited as path fields. `tests/test_v2_collectors.py::test_no_event_any_importer_emits_carries_an_absolute_path_in_its_metadata`
-   searches every string of every metadata payload for an absolute path.
+   known file-tool path summaries. Arbitrary arguments, shell commands, queries and prompts
+   use structural summaries (type and count), never value prefixes. Their full structured
+   values remain available under `content` in content mode, where credential keys are redacted
+   before serialization. Shell command bodies are content even when short.
 2. **Content only ever reaches `content`.** In `metadata` mode no file text is built into a
    payload at all — not dropped later, not built. `metadata` carries hashes, line ranges and
    sizes. This is Contract rule 5 and

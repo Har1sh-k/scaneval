@@ -616,28 +616,12 @@ def _native_result(record: dict[str, Any]) -> Any:
 
 
 def _input_summary(tool_name: Any, tool_input: Any, tracker: _Import) -> str | None:
-    """One short, path-safe line identifying a tool call.
-
-    Paths are relativized here as they are everywhere else: an ``input_summary`` is metadata
-    and a native path in it would be an operator's home directory in a trace, arriving by a
-    field nobody thinks of as a path field.
-    """
-    if not isinstance(tool_input, dict):
-        return tracker.summarize(tool_input)
-    for key in PATH_INPUT_KEYS:
-        if isinstance(tool_input.get(key), str):
-            return clip(tracker.path(tool_input[key]))
-    if isinstance(tool_input.get("command"), str):
-        return tracker.summarize(tool_input["command"])
-    if isinstance(tool_input.get("pattern"), str):
-        where = tool_input.get("path")
-        located = tracker.path(where) if isinstance(where, str) else None
-        pattern = tool_input["pattern"]
-        return tracker.summarize(f"{pattern} in {located}" if located else pattern)
-    for key in ("description", "prompt", "url", "query"):
-        if isinstance(tool_input.get(key), str):
-            return tracker.summarize(tool_input[key])
-    return tracker.summarize(tool_input)
+    """Keep known file-tool paths useful; summarize arbitrary inputs structurally."""
+    if isinstance(tool_input, dict) and tool_name in ("Read", "Write", "Edit", "MultiEdit", "Glob", "Grep"):
+        for key in PATH_INPUT_KEYS:
+            if isinstance(tool_input.get(key), str):
+                return clip(tracker.path(tool_input[key]))
+    return tracker.argument_summary(tool_input)
 
 
 def _usage(message: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
