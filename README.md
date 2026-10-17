@@ -70,6 +70,8 @@ The `llm-harness` adapter needs a local harness checkout and the built SDK. The 
 
 Guides: [Observer SDK](docs/OBSERVER_SDK.md), [native CLI collectors](docs/COLLECTORS.md), [context-coverage diagnostics](docs/DIAGNOSTICS.md).
 
+Implementation review: [Inspect AI visibility and observability comparison](docs/INSPECT_OBSERVABILITY_COMPARISON.md).
+
 ## Current limits
 
 - Full-scan execution, native PR execution (a case pack declares a change set and states which targets and controls each PR review scores), case packs, source export, review, scoring, replay, and reports are implemented.
