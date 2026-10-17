@@ -90,9 +90,18 @@ def test_generated_unavailable_detection_remains_supported(tmp_path):
 def test_supported_confidence_api_and_saved_cli(tmp_path, confidence, reviewed):
     run = one_system_run(tmp_path, 3)
     sample = precision.draw_sample(precision.build_frame([run], population='full'), size=2, seed=0)
-    reviews = review_all(sample, {unit['unit_id']: 'true' for unit in sample['selected']}) if reviewed else None
+    reviews = review_all(sample, {unit['unit_id']: ('true' if index == 0 else 'false')
+                                  for index, unit in enumerate(sample['selected'])}) if reviewed else None
     estimate = precision.estimate(sample, reviews, confidence=confidence)
     assert math.isfinite(estimate['interval']['z']) and estimate['interval']['z'] > 0
+    if reviewed:
+        interval = estimate['interval']
+        assert interval['state'] == 'ok'
+        assert interval['lower'] == max(0., .5 - interval['z'] * interval['standard_error'])
+        assert interval['upper'] == min(1., .5 + interval['z'] * interval['standard_error'])
+    if confidence == math.nextafter(1., 0.):
+        from statistics import NormalDist
+        assert estimate['interval']['z'] == -NormalDist().inv_cdf((1 - confidence) / 2)
     sample_path, output = tmp_path / 'sample.json', tmp_path / 'estimate.json'
     sample_path.write_text(json.dumps(sample))
     args = ['precision', 'estimate', str(sample_path), '--confidence', str(confidence), '--output', str(output)]
