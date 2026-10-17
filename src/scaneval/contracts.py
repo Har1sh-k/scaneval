@@ -1948,7 +1948,8 @@ def _check_slices(slices: list[dict[str, Any]], weightings: list[str]) -> None:
         if (block["slice"]["dimension"] == "all") != (block["slice"]["value"] is None):
             raise ContractError("only the 'all' slice has no value")
         if [detection["weighting"] for detection in block["detection"]] != list(weightings):
-            raise ContractError("each slice carries one detection block per weighting, in policy order")
+            raise ContractError(f"slice {block['slice']}: each slice carries one detection block per "
+                                f"weighting, in policy order {list(weightings)}")
 
 
 def _validate_comparison_report(document: dict[str, Any]) -> None:
