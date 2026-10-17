@@ -200,7 +200,25 @@ def run_command(
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            process.communicate()
+            process.wait(timeout=5)
+        except BaseException:
+            # Cancellation must retire the session we own before the caller removes its
+            # workspace. Cleanup failures must not replace the original exception.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except BaseException:
+                pass
+            finally:
+                if process.stdin is not None:
+                    try:
+                        process.stdin.close()
+                    except BaseException:
+                        pass
+            raise
     wall = time.monotonic() - started
     return CommandResult(list(argv), None if timed_out else process.returncode, timed_out, wall, stdout_path, stderr_path)
 
