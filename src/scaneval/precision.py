@@ -250,6 +250,13 @@ def _run_frame(run_dir: Path, manifest: dict, schedule: dict, systems: set[str],
     return rows, units
 
 
+def result_identity(rows: list[dict]) -> str:
+    """Identity of every scoped scheduled result, including assignments without output."""
+    return canonical_sha256(sorted(
+        [{"assignment_id": row["invocation_id"], "result_sha256": row["result_sha256"]}
+         for row in rows], key=lambda row: row["assignment_id"]))
+
+
 def build_frame(run_dirs: Sequence[str | PathLike[str]], *, population: str, budget: int | None = None,
                 systems: Iterable[str] | None = None, mode: str = "full",
                 profile: str = "standard") -> dict:
@@ -738,7 +745,9 @@ def _interval(resolved: list[dict], strata: list[dict], precision: Fraction | No
     because it is the normal approximation failing, not certainty. The interval covers sampling only;
     reviewer error, disagreement, and unresolved units are outside it.
     """
-    z = NormalDist().inv_cdf(0.5 + confidence / 2)
+    # Use the lower tail near one: the upper CDF can round to exactly one.
+    z = (-NormalDist().inv_cdf((1 - confidence) / 2) if confidence > 0.99
+         else NormalDist().inv_cdf(0.5 + confidence / 2))
     base = {"method": INTERVAL_METHOD, "confidence": confidence, "z": z, "variance": None,
             "standard_error": None, "lower": None, "upper": None, "insufficient_strata": []}
     if precision is None:
@@ -833,8 +842,8 @@ def estimate(sample: dict, reviews: dict | None = None, *,
     review history, and the frame's runs, so it names what it estimates.
     """
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) \
-            or not 0 < confidence < 1:
-        raise ContractError(f"confidence must be a number strictly between 0 and 1, not {confidence!r}")
+            or not 1e-15 <= confidence < 1:
+        raise ContractError(f"confidence must be a number at least 1e-15 and strictly below 1, not {confidence!r}")
     confidence = float(confidence)
     verify_sample(sample)
     if reviews is not None:
@@ -882,6 +891,13 @@ def estimate(sample: dict, reviews: dict | None = None, *,
         "population": deepcopy(frame["population"]),
         "exclusions": deepcopy(frame["exclusions"]),
         "runs": deepcopy(frame["runs"]),
+        "result_bindings": [{"run_id": run["run_id"], "system_id": system,
+                             "mode": frame["population"]["mode"],
+                             "profile": frame["population"]["profile"],
+                             "sha256": result_identity([row for row in frame["invocations"]
+                                 if row["run_id"] == run["run_id"] and row["system_id"] == system])}
+                            for run in frame["runs"] for system in frame["population"]["systems"]
+                            ],
         "design": deepcopy(sample["design"]),
         "coverage": coverage,
         "sample": {"selected_units": len(resolved), "classes": classes, "bases": bases},

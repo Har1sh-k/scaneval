@@ -927,6 +927,7 @@ def run_from_config(
     # one, so a run under a symlinked prefix (/tmp on macOS) stays consistent end to end.
     out_dir = _resolved(out_dir)
     config = load_document(config_path, "run-config")
+    repetitions = int(config["repetitions"])
     base = config_path.resolve().parent
     pack_path = base / config["pack"]
     cache_root = base / config.get("cache_root", DEFAULT_CACHE_ROOT)
@@ -934,7 +935,7 @@ def run_from_config(
 
     inputs, excluded_inputs = _input_specs(config, only_inputs, base, pack)
     systems = _selected(config["systems"], "system_id", only_systems, "systems")
-    _check_invocation_ids(inputs, systems, config["repetitions"])
+    _check_invocation_ids(inputs, systems, repetitions)
     _check_input_snapshots(pack, inputs)
     _check_blinding(config, pack, inputs, systems, workspace_root=workspace_root, cache_root=cache_root,
                     config_dir=base)
@@ -1018,13 +1019,13 @@ def run_from_config(
         prepared_by_id = {spec.input_id: prepared for spec, prepared in prepared_inputs}
         failures = {row["input_id"]: row["preparation_failure"] for row in manifest_inputs
                     if row["preparation_failure"] is not None}
-        total_invocations = len(inputs) * len(prepared_systems) * config["repetitions"]
+        total_invocations = len(inputs) * len(prepared_systems) * repetitions
         invocation_number = 0
         for spec in inputs:
             prepared = prepared_by_id.get(spec.input_id)
             for system in prepared_systems:
                 system_spec = system.spec
-                for repetition in range(1, config["repetitions"] + 1):
+                for repetition in range(1, repetitions + 1):
                     invocation_number += 1
                     row: dict[str, Any] = {
                         "invocation_id": execution.invocation_id(spec.input_id, system_spec.system_id, repetition),

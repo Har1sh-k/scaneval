@@ -97,7 +97,7 @@ With π_h = n_h/N_h, the Horvitz-Thompson total of class c is N̂_c = Σ over sa
 - the raw sample counts by class and by resolution basis, and every unit's final class;
 - the population's exclusions and the frame's **duplicate delivery burden** (copies per unit).
 
-The interval uses the stratified linearized variance of the ratio R = T/X, where X = T+F. Each sampled unit scores z = (1[true] − R·1[true or false])/X, and V̂ = Σ_h N_h² (1 − n_h/N_h) s²_h / n_h, where s²_h is the sample variance of z in stratum h. The interval is R ± z_{(1+c)/2}·√V̂, clipped to [0, 1], with confidence `--confidence` (default 0.95). Its states:
+The interval uses the stratified linearized variance of the ratio R = T/X, where X = T+F. Each sampled unit scores z = (1[true] − R·1[true or false])/X, and V̂ = Σ_h N_h² (1 − n_h/N_h) s²_h / n_h, where s²_h is the sample variance of z in stratum h. The interval is R ± z_{(1+c)/2}·√V̂, clipped to [0, 1], with confidence `--confidence` (default 0.95). Supported confidence values are finite numbers in `[1e-15, 1)`; booleans and smaller positive values are refused at the argument boundary because central probabilities lose precision near zero confidence. Near one, the quantile is evaluated from the symmetric lower tail so the largest float below one remains supported. This domain applies even when reviews are incomplete and no interval can be reported. Its states:
 
 - `ok`;
 - `census`: every stratum was taken whole, none left uncovered, so there is no sampling variance;
@@ -115,3 +115,16 @@ Totals are exact fractions, converted to floats once at the end. The estimate ca
 - An uncovered stratum is not estimated at all. Read coverage before reading precision.
 - A reviewed-true claim is an additional confirmed issue for precision. It earns no detection credit, and reaching the label set needs a separate reviewed label release.
 - Hashes and the review chain bind documents; they are not signatures. Nothing verifies who a reviewer is, whether two reviewers are independent, or that anyone read the claim. A history wiped whole reads as a fresh one. The estimate records the digest of the history it used, which is where such a wipe shows.
+
+Result freshness uses `result_bindings`, an optional additive 2.1 field in estimates and report run
+rows. Each binding names run, system, mode and profile and hashes the assignment-id-sorted list
+of `{assignment_id, result_sha256}` pairs, including null for scheduled assignments without output.
+Result digests cover canonical complete result documents, including claim text and evidence.
+The basis is independent of sampling population and recall review decisions. Other systems and
+views do not participate. Manifest and schedule checks still apply. Older 2.1 artifacts remain
+readable; missing binding evidence makes precision gates inconclusive with an unavailable reason.
+A changed identity produces a distinct digest mismatch reason. Regenerate estimates and comparisons
+from the saved runs to establish binding. This is content freshness, not provenance authentication.
+
+Writers continue to emit schema version 2.1. Readers from earlier releases that enforce their
+closed schemas may reject newly written binding fields; use an updated reader for these reports.
