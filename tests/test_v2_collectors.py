@@ -2325,3 +2325,35 @@ def test_native_cost_does_not_discard_final_answer(mode, cost):
     if cost in (0.00005, 1e-300, 1e30):
         assert response["metadata"]["invocation_cost_usd_cli_reported"] is None
         assert float(response["metadata"]["invocation_cost_usd_cli_reported_text"]) == cost
+
+
+@pytest.mark.parametrize("mode", ["metadata", "content"])
+@pytest.mark.parametrize("payload", [
+    {"result": {"content": [{"type": "text", "text": "TOOL_TEXT"}], "structured_content": {"count": 1, "api_key": "SECRET"}}},
+    {"result": {"structured_content": {"finding": "TOOL_TEXT"}}},
+    {"result": {"content": [{"type": "image", "data": "IMAGE_DATA", "mimeType": "image/png"}]}},
+    {"error": {"message": "TOOL_ERROR"}},
+    {"result": "LEGACY_TEXT"},
+])
+def test_codex_mcp_native_results_preserve_content_and_safe_counts(mode, payload):
+    seen = []
+    observer = Observer(mode=mode, sink=seen.append)
+    item = {"id": "t", "type": "mcp_tool_call", "server": "fixture", "tool": "scan", "arguments": {}}
+    records = [{"type": "turn.started"}, {"type": "item.started", "item": item},
+               {"type": "item.completed", "item": {**item, **payload, "status": "failed" if "error" in payload else "completed"}},
+               {"type": "turn.completed"}]
+    summary = codex.import_exec_jsonl(observer, map(json.dumps, records), workspace_root="/workspace", call_id="call")
+    end = next(e for e in seen if e["type"] == "tool.end")
+    assert summary.tool_results == 1 and summary.unknown_records == 0
+    assert observer.get_state().dropped_events == 0
+    assert end["metadata"]["result_available"] == ("result" in payload)
+    expected_chars = 9 if "TOOL_TEXT" in json.dumps(payload) and "content" in payload.get("result", {}) else 11 if payload.get("result") == "LEGACY_TEXT" else 0
+    assert end["metadata"]["result_chars"] == expected_chars
+    assert "SECRET" not in json.dumps(seen)
+    if mode == "metadata":
+        assert "content" not in end
+    elif "error" in payload:
+        assert end["content"]["error"] == "TOOL_ERROR"
+    else:
+        expected = json.loads(json.dumps(payload["result"]).replace('"SECRET"', '"[REDACTED]"'))
+        assert end["content"]["result"] == expected

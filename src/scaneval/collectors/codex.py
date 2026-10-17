@@ -319,6 +319,12 @@ def _input_summary(item: dict[str, Any], tracker: _Import) -> str | None:
 
 
 def _result_text(item: dict[str, Any]) -> str:
+    if item.get("type") == "mcp_tool_call" and isinstance(item.get("result"), dict):
+        blocks = item["result"].get("content")
+        if isinstance(blocks, list):
+            return "".join(block["text"] for block in blocks
+                           if isinstance(block, dict) and block.get("type") == "text"
+                           and isinstance(block.get("text"), str))
     for key in ("aggregated_output", "output", "result", "text"):
         value = item.get(key)
         if isinstance(value, str):
@@ -417,10 +423,30 @@ def _tool_end(
             "status": clip(status, 60) if isinstance(status, str) else None,
         },
     }
+    if item.get("type") == "mcp_tool_call":
+        result = item.get("result")
+        error = item.get("error")
+        error_text = error.get("message") if isinstance(error, dict) else error
+        error_text = error_text if isinstance(error_text, str) else None
+        blocks = result.get("content") if isinstance(result, dict) else None
+        fields["metadata"].update({
+            "result_available": isinstance(result, (dict, str)),
+            "result_content_blocks": len(blocks) if isinstance(blocks, list) else None,
+            "structured_result_available": isinstance(result, dict) and result.get("structured_content") is not None,
+            "error_chars": len(error_text) if error_text is not None else None,
+        })
+        if tracker.content_mode:
+            content = {}
+            if isinstance(result, (dict, str)):
+                content["result"] = result
+            if error_text is not None:
+                content["error"] = error_text
+            if content:
+                fields["content"] = content
     parent = (opened or {}).get("parent_event_id") or fallback_parent
     if parent:
         fields["parent_event_id"] = parent
-    if tracker.content_mode and text:
+    if tracker.content_mode and text and "content" not in fields:
         fields["content"] = {"result": text}
     tracker.emit(**fields)
     tracker.tool_results += 1

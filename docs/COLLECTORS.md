@@ -632,3 +632,11 @@ and the numeric field is null. Invalid amounts leave both fields null. These are
 costs on the last response; per-turn `usage` remains token counts from that turn's message,
 and `invocation_usage` remains the separate invocation total. Neither cost representation
 changes token accounting or suppresses the final answer.
+
+Codex MCP object results retain their complete `content` blocks (including non-text blocks)
+and `structured_content` under `content.result`; native error messages use `content.error`.
+Credential keys remain structured for redaction. Metadata records `result_available`,
+`result_content_blocks`, `structured_result_available`, and `error_chars`; `result_chars`
+counts text-block characters only (or the legacy string result), not serialized object or
+image bytes. Zero text characters therefore does not imply an absent structured result.
+Metadata mode stores these counts and availability facts without result or error content.
