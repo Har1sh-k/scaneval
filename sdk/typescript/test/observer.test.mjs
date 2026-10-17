@@ -876,3 +876,31 @@ test("a caller's run and producer ID are kept in off mode", async () => {
   assert.equal(recording.runId, "run-7");
   assert.equal(recording.producerId, "producer-1");
 });
+
+
+test("arrays refuse holes and extra own state before identity allocation", async () => {
+  const builds = [() => new Array(1), () => { const a = [1, 2]; delete a[0]; return a; },
+    () => Object.assign([1], {context: "hidden"}),
+    () => Object.assign([1], {[Symbol("hidden")]: 2}),
+    () => Object.defineProperty([1], "context", {value: 2}),
+    () => Object.defineProperty([1], "0", {value: 1, enumerable: false}),
+    () => Object.assign(new Array(1), {context: 2})];
+  for (const build of builds) {
+    for (const field of ["metadata", "content", "redactor"]) {
+      let allocated = 0; let timed = 0;
+      const observer = new Observer({mode: "content", sink: {write: () => {}},
+        runId: "run", producerId: "producer", idFactory: () => `id-${++allocated}`,
+        clock: () => { timed++; return new Date("2026-01-01T00:00:00Z"); },
+        ...(field === "redactor" ? {redactor: (key, value) => key === "bad" ? build() : value} : {})});
+      const before = [allocated, timed];
+      assert.equal(await observer.emit(event({[field === "redactor" ? "metadata" : field]: {bad: field === "redactor" ? 1 : build()}})), undefined);
+      assert.deepEqual([allocated, timed], before);
+      assert.equal(observer.getState().dropped_events, 1);
+      assert.equal(observer.getState().capture_gap, true);
+      const good = await observer.emit(event({metadata: {items: [1, null, [true, null]]}}));
+      assert.ok(good);
+      assert.deepEqual(good.metadata.items, [1, null, [true, null]]);
+      assert.equal(good.sequence, 0);
+    }
+  }
+});
