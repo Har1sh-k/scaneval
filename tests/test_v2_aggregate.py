@@ -2049,3 +2049,13 @@ def test_cli_compare_writes_a_new_report_or_refuses_with_exit_2(tmp_path, capsys
                           "--output", str(refused))
     assert code == 2 and "scaneval: system ghost is not scheduled" in err
     assert not refused.exists()
+
+
+def test_configuration_paths_preserve_literal_and_nested_keys():
+    left = {"config": {"scanner": {"enabled": False}, "scanner.enabled": "same", "": None}}
+    right = {"config": {"scanner": {"enabled": True}, "scanner.enabled": "same"}}
+    from scaneval import aggregate
+    differences = aggregate.configuration_differences(left, right)
+    assert {row["key"] for row in differences} == {"config.scanner.enabled", r"config.\e"}
+    assert aggregate.configuration_differences({"a.b": [1]}, {"a": {"b": [1]}})
+    assert aggregate.configuration_differences({"a": True}, {"a": 1})

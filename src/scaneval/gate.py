@@ -395,10 +395,25 @@ def _runs_completed(ctx: _Context) -> Result:
     return PASS, observed, threshold, f"all {len(runs)} compared run(s) finished"
 
 
+def _path_contains(parent: str, child: str) -> bool:
+    def segments(path: str) -> list[str]:
+        result, part, escaped = [], "", False
+        for char in path:
+            if char == "." and not escaped:
+                result.append(part)
+                part = ""
+            else:
+                part += char
+            escaped = char == "\\" and not escaped
+        return result + [part]
+    a, b = segments(parent), segments(child)
+    return b[:len(a)] == a
+
+
 def _configuration_differences(ctx: _Context) -> Result:
     allowed = ctx.policy["configuration"]["allowed_differences"]
     keys = [row["key"] for row in ctx.comparison["configuration_differences"]]
-    unexpected = [key for key in keys if not any(key == name or key.startswith(f"{name}.") for name in allowed)]
+    unexpected = [key for key in keys if not any(_path_contains(name, key) for name in allowed)]
     observed = {"differences": keys, "not_allowed": unexpected}
     threshold = {"allowed_differences": allowed}
     if unexpected:

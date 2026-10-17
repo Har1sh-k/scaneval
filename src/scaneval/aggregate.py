@@ -1711,12 +1711,17 @@ def _contract_gap(baseline: dict, candidate: dict, names: tuple[str, str]) -> st
     return "their frozen vulnerable/fixed pairs differ"
 
 
+def _path_segment(key: str) -> str:
+    """Escape keys while preserving ordinary dotted policy paths."""
+    return key.replace("\\", "\\\\").replace(".", "\\.") if key else "\\e"
+
+
 def _flatten(value: Any, prefix: str) -> dict[str, Any]:
     """Dotted keys to leaves: nested objects are walked, and a list or an empty object is one leaf."""
     if isinstance(value, dict) and value:
         flat: dict[str, Any] = {}
         for key in sorted(value):
-            flat.update(_flatten(value[key], f"{prefix}.{key}" if prefix else key))
+            flat.update(_flatten(value[key], f"{prefix}.{_path_segment(key)}" if prefix else _path_segment(key)))
         return flat
     return {prefix: value}
 
@@ -1725,8 +1730,8 @@ def configuration_differences(baseline: dict, candidate: dict) -> list[dict]:
     """Every dotted key whose value differs between two system configurations, sorted by key.
 
     Values are compared as canonical JSON, so ``1`` and ``true`` differ. ``absent_in`` names the side
-    that has no such key at all, which is different from a key present with a null value. A key that
-    itself contains a dot is not escaped.
+    that has no such key at all, which is different from a key present with a null value. Literal dots and backslashes in segments are backslash escaped; empty keys use ``\\e``.
+    Lists are atomic leaves.
     """
     left, right = _flatten(baseline, ""), _flatten(candidate, "")
     rows = []
