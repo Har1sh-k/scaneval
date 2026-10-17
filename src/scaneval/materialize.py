@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import errno
 import hashlib
 import os
 from pathlib import Path
@@ -42,6 +43,7 @@ import shutil
 import subprocess
 import tempfile
 from typing import Callable
+from uuid import uuid4
 
 from .contracts import ContractError, canonical_json, canonical_sha256, pr_diff_sha256, pr_input_hash
 
@@ -222,9 +224,12 @@ def fetch_snapshot(url: str, commit: str, cache_root: Path, *, timeout: float = 
         tree = verify_cached_snapshot(target, commit)
         return CachedSnapshot(target, url, commit, tree, "cached")
     cache_root.mkdir(parents=True, exist_ok=True)
-    staging = cache_root / (target.name + ".partial")
-    if staging.exists():
-        shutil.rmtree(staging)
+    # Each caller owns its staging checkout.  A shared ``target.partial`` lets one
+    # fetch delete another fetch's live checkout, while merely tolerating mkdir
+    # races still leaves the cleanup and publication races intact.
+    # Keep normal mkdir/umask permissions: the published checkout can also be a
+    # read-only rules mount used by a scanner running under another container UID.
+    staging = cache_root / f"{target.name}.partial-{uuid4().hex}"
     staging.mkdir()
     try:
         _git(["init", "-q"], staging)
@@ -241,10 +246,19 @@ def fetch_snapshot(url: str, commit: str, cache_root: Path, *, timeout: float = 
             _git(["fetch", "-q", "origin"], staging, timeout=timeout)
         _git(["checkout", "-q", "--detach", commit], staging)
         tree = verify_cached_snapshot(staging, commit)
-        staging.rename(target)
+        try:
+            staging.rename(target)
+        except OSError as exc:
+            if exc.errno not in (errno.EEXIST, errno.ENOTEMPTY) or not target.is_dir():
+                raise
+            # Another caller published first.  Its entry is useful only after the
+            # same immutable-cache verification used by a warm cache hit.
+            tree = verify_cached_snapshot(target, commit)
+            method = "cached"
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+    shutil.rmtree(staging, ignore_errors=True)
     return CachedSnapshot(target, url, commit, tree, method)
 
 
