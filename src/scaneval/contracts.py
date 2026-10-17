@@ -1968,6 +1968,22 @@ def _validate_comparison_report(document: dict[str, Any]) -> None:
             slices = view["systems"][side]["slices"]
             _check_slices(slices, document["policy"]["views"])
             keys.append([block["slice"] for block in slices])
+        _check_slices(view["differences"], document["policy"]["views"])
+        for side, slices in [(side, view["systems"][side]["slices"])
+                             for side in ("baseline", "candidate")] + [("differences", view["differences"])]:
+            for block in slices:
+                for detection in block["detection"]:
+                    fields = (("full_output_recall", "coverage", "pairs", "random_order_diagnostic",
+                               "run_variability", "leave_one_project_out") if side != "differences" else
+                              ("full_output_recall", "pair_correctness", "pair_availability",
+                               "completed_mass", "assessable_mass"))
+                    for field in fields:
+                        present = detection[field] is not None
+                        if present != (detection["state"] == "ok"):
+                            raise ContractError(
+                                f"comparison {view['mode']}/{view['profile']} {side} "
+                                f"slice {block['slice']} weighting {detection['weighting']}: "
+                                f"{field} must be present exactly when detection state is ok")
         keys.append([block["slice"] for block in view["differences"]])
         if not keys[0] == keys[1] == keys[2]:
             raise ContractError("the baseline, the candidate, and the differences cover different slices")
