@@ -389,7 +389,8 @@ class _Corpus:
 def _configuration(run: _Run, system_id: str) -> dict:
     """What one system is, as its run configured it: adapter, config, model, network policy, execution."""
     entry = next(item for item in run.config["systems"] if item["system_id"] == system_id)
-    return {"adapter": entry["adapter"], "config": entry["config"], "model_id": entry.get("model_id"),
+    return {"timeout_seconds": run.config["timeout_seconds"],
+            "adapter": entry["adapter"], "config": entry["config"], "model_id": entry.get("model_id"),
             "model_revision": entry.get("model_revision"),
             "network_policy": entry.get("network_policy", run.config["network_policy"]),
             "execution": entry.get("execution") or {"backend": "local"}}
