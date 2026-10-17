@@ -226,9 +226,10 @@ def build_schedule(config: dict, pack: dict, *, base_dir: Path, created_at: str,
     declare, and a blinded input whose map cannot be loaded, are refused, as the runner refuses
     them before anything is written. Nothing here creates a file.
     """
+    validate_document("run-config", config)
     selected_inputs = list(config["inputs"] if inputs is None else inputs)
     selected_systems = list(config["systems"] if systems is None else systems)
-    repetitions = config["repetitions"]
+    repetitions = int(config["repetitions"])
     rows = [_input_row(entry, pack, Path(base_dir), maps or {}) for entry in selected_inputs]
     system_rows = [_system_row(entry, config["network_policy"]) for entry in selected_systems]
     assignments = sorted(

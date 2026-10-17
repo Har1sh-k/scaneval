@@ -97,7 +97,7 @@ With π_h = n_h/N_h, the Horvitz-Thompson total of class c is N̂_c = Σ over sa
 - the raw sample counts by class and by resolution basis, and every unit's final class;
 - the population's exclusions and the frame's **duplicate delivery burden** (copies per unit).
 
-The interval uses the stratified linearized variance of the ratio R = T/X, where X = T+F. Each sampled unit scores z = (1[true] − R·1[true or false])/X, and V̂ = Σ_h N_h² (1 − n_h/N_h) s²_h / n_h, where s²_h is the sample variance of z in stratum h. The interval is R ± z_{(1+c)/2}·√V̂, clipped to [0, 1], with confidence `--confidence` (default 0.95). Its states:
+The interval uses the stratified linearized variance of the ratio R = T/X, where X = T+F. Each sampled unit scores z = (1[true] − R·1[true or false])/X, and V̂ = Σ_h N_h² (1 − n_h/N_h) s²_h / n_h, where s²_h is the sample variance of z in stratum h. The interval is R ± z_{(1+c)/2}·√V̂, clipped to [0, 1], with confidence `--confidence` (default 0.95). Supported confidence values are finite numbers in `[1e-15, 1)`; booleans and smaller positive values are refused at the argument boundary because central probabilities lose precision near zero confidence. Near one, the quantile is evaluated from the symmetric lower tail so the largest float below one remains supported. This domain applies even when reviews are incomplete and no interval can be reported. Its states:
 
 - `ok`;
 - `census`: every stratum was taken whole, none left uncovered, so there is no sampling variance;

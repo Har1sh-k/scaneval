@@ -994,11 +994,11 @@ def test_out_of_scope_is_reported_apart_and_a_single_draw_stratum_leaves_the_int
     assert estimated["interval"]["lower"] is None
 
 
-def test_the_confidence_is_refused_outside_zero_and_one(tmp_path):
+def test_the_confidence_is_refused_outside_supported_domain(tmp_path):
     sample = precision.draw_sample(precision.build_frame([one_system_run(tmp_path, 3)], population="full"),
                                    size=3, seed=0)
     for confidence in (0, 1, 1.5, True, "0.9"):
-        with pytest.raises(ContractError, match="confidence must be a number strictly between 0 and 1"):
+        with pytest.raises(ContractError, match="confidence must be a number at least 1e-15 and strictly below 1"):
             precision.estimate(sample, confidence=confidence)
     assert precision.estimate(sample, confidence=0.9)["interval"]["z"] == NormalDist().inv_cdf(0.95)
 
