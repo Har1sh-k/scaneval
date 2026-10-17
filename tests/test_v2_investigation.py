@@ -264,3 +264,45 @@ console.log('DOM unit harness: navigation, scoped links, filters, capture and ti
     harness.write_text("const DATA=" + json.dumps(document) + ";\nconst SCRIPT=" + json.dumps(_SCRIPT) + ";\n" + source)
     result = subprocess.run(["node", str(harness)], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("mutation", ["execution-tuple", "input-hash", "provenance"])
+def test_identity_and_prepared_input_mismatches_gate_joins(tmp_path, upstream, mutation):
+    run = make_run(tmp_path, upstream)
+    bundle = next((run / "invocations").iterdir())
+    if mutation == "execution-tuple":
+        path = bundle / "execution.json"
+        doc = json.loads(path.read_text())
+        doc.update(system_id="different-system", input_id="different-input", repetition=99)
+    elif mutation == "input-hash":
+        path = run / "run-manifest.json"
+        doc = json.loads(path.read_text())
+        doc["inputs"][0].update(input_hash="sha256:"+"0"*64, tree_hash="sha256:"+"0"*64)
+    else:
+        path = run / "inputs/snap-a/provenance.json"
+        doc = json.loads(path.read_text())
+        doc["profile"] = "altered"
+    path.write_text(json.dumps(doc))
+    inv = build_investigation(run)["invocations"][0]
+    assert inv["identity_binding"] == "unavailable_or_mismatched"
+    assert any(check["state"] == "mismatch" for check in inv["identity_diagnostics"])
+    assert inv["claims"][0]["event_state"] == "not_linked"
+    assert inv["claims"][0]["decisions"]  # readable supplied evidence remains
+    assert inv["bindings"]["decisions"] == inv["bindings"]["evaluation"] == "identity_mismatch"
+    assert inv["review_state"] == "stale"
+
+
+@pytest.mark.parametrize("append", [False, True])
+def test_valid_trace_prefix_loss_and_appended_rows_reconcile_effective_capture(tmp_path, upstream, append):
+    run = make_run(tmp_path, upstream)
+    bundle = next((run / "invocations").iterdir())
+    path = bundle / "trace/events.jsonl"
+    lines = path.read_text().splitlines()
+    path.write_text("\n".join(lines + [lines[0]] if append else lines[:1]))
+    inv = build_investigation(run)["invocations"][0]
+    assert inv["trace"]["state"] == "valid"
+    assert inv["trace"]["count_binding"] == "mismatch"
+    assert inv["capture"]["categories"]["model_requests"] == "complete"
+    assert inv["capture"]["effective_categories"]["model_requests"] == "partial"
+    assert inv["capture"]["validation_diagnostics"]
+    assert len(inv["events"]) == (6 if append else 1)

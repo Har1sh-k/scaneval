@@ -50,6 +50,8 @@ function render(){
   el('p',`Capture record: ${inv.capture.state}; trace: ${inv.trace.state}; review: ${inv.review_state} (recorded attribution).`,summary,'notice');
   el('p','Saved capture declarations and effective capture after trace validation:',summary);
   el('pre',json(inv.capture),summary);
+  el('p',`Invocation / prepared input binding: ${inv.identity_binding ?? 'unavailable'}`,summary);
+  if(inv.identity_binding !== 'current') detail(summary,'Identity and input binding diagnostics',inv.identity_diagnostics ?? []);
   el('p',`Usage: ${inv.usage.state}. Trace events: ${inv.trace.valid_events} valid; ${inv.trace.shown_events} exported; ${inv.trace.rejected_records ?? 'unavailable'} rejected.`,summary);
   detail(summary,'Recorded usage',inv.usage);
   if(inv.trace.diagnostics?.length)detail(summary,'Trace diagnostics',inv.trace.diagnostics);
@@ -97,7 +99,7 @@ function render(){
   }else{
     el('h3','Bindings and recorded review attribution',body);
     el('p','Hashes bind original saved bytes/documents, before export redaction. Stale or unavailable bindings do not authenticate judgments. Reviewer names are recorded attribution, not verified identity.',body,'notice');
-    detail(body,'Binding checks',inv.bindings ?? {});detail(body,'Manifest invocation',inv.manifest);
+    detail(body,'Binding checks',inv.bindings ?? {});detail(body,'Invocation and prepared input checks',inv.identity_diagnostics ?? []);detail(body,'Manifest invocation',inv.manifest);
     for(const [name,doc] of Object.entries(inv.documents)){
       const card=el('article',null,body);el('h4',`${name}: ${doc.state}`,card);
       el('p',`Original file: ${doc.path}`,card);el('p',`Original byte hash: ${doc.sha256 ?? 'unavailable'}`,card);

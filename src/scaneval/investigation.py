@@ -207,6 +207,38 @@ def _artifact_bindings(evidence: Evidence, prefix: str, result: dict) -> list[di
     return bindings
 
 
+def _identity_checks(evidence: Evidence, manifest: dict, row: dict, documents: dict) -> list[dict]:
+    execution = documents["execution"]["data"] or {}
+    result = documents["result"]["data"] or {}
+    checks = []
+    def check(field, expected, recorded):
+        state = "unavailable" if expected is None or recorded is None else "current" if expected == recorded else "mismatch"
+        checks.append({"field": field, "expected": expected, "recorded": recorded, "state": state})
+    check("execution.run_id", manifest["run_id"], execution.get("run_id"))
+    for field in ("invocation_id", "system_id", "input_id", "repetition"):
+        check("execution." + field, row[field], execution.get(field))
+    check("result.run_id", manifest["run_id"], result.get("run_id"))
+    check("result.system_id", row["system_id"], result.get("system_id"))
+    inputs = [item for item in manifest["inputs"] if item.get("input_id", item.get("snapshot_id")) == row["input_id"]]
+    prepared = inputs[0] if len(inputs) == 1 else {}
+    check("prepared_input.identity", row["input_id"], prepared.get("input_id", prepared.get("snapshot_id")))
+    expected_hash = prepared.get("input_hash", prepared.get("tree_hash"))
+    provenance = execution.get("provenance", {})
+    check("result.input_hash", expected_hash, result.get("input_hash"))
+    check("execution.provenance.input_hash", expected_hash, provenance.get("input_hash", provenance.get("tree_hash")))
+    check("execution.provenance.tree_hash", prepared.get("tree_hash"), provenance.get("tree_hash"))
+    if documents["plan"]["data"]:
+        check("plan.input_hash", expected_hash, documents["plan"]["data"].get("input_hash"))
+    path = prepared.get("provenance_path")
+    if path:
+        document = _document(evidence, path, None)
+        documents["input_provenance"] = document
+        check("execution.provenance.provenance_sha256", document["canonical_sha256"], provenance.get("provenance_sha256"))
+    else:
+        check("execution.provenance.provenance_sha256", None, provenance.get("provenance_sha256"))
+    return checks
+
+
 def _invocation(evidence: Evidence, manifest: dict, row: dict, filters: dict,
                 omissions: list[dict]) -> dict:
     invocation = {"invocation_id": row["invocation_id"], "manifest": row, "documents": {},
@@ -224,11 +256,10 @@ def _invocation(evidence: Evidence, manifest: dict, row: dict, filters: dict,
     data = {key: document["data"] or {} for key, document in documents.items()}
     execution, result = data["execution"], data["result"]
     invocation["status"] = execution.get("status", row["status"])
-    identity_current = (execution.get("run_id") == manifest["run_id"]
-                        and execution.get("invocation_id") == row["invocation_id"]
-                        and result.get("run_id") == manifest["run_id"]
-                        and result.get("system_id") == row["system_id"])
+    identity_checks = _identity_checks(evidence, manifest, row, documents)
+    identity_current = all(check["state"] == "current" for check in identity_checks)
     invocation["identity_binding"] = "current" if identity_current else "unavailable_or_mismatched"
+    invocation["identity_diagnostics"] = identity_checks
     invocation["capture"] = {"state": documents["execution"]["state"],
                              "categories": execution.get("capture", {}),
                              "trace_capture_gap": (execution.get("trace") or {}).get("capture_gap"),
@@ -247,9 +278,16 @@ def _invocation(evidence: Evidence, manifest: dict, row: dict, filters: dict,
     review_binding = _binding(documents, "review", [("decisions_sha256", "decisions"), ("plan_sha256", "plan")])
     if review_binding == "current" and (decisions_binding != "current" or data["review"].get("run_id") != result.get("run_id")):
         review_binding = "stale"
+    if not identity_current:
+        if decisions_binding == "current":
+            decisions_binding = "identity_mismatch"
+        if review_binding == "current":
+            review_binding = "stale"
     invocation["review_state"] = data["review"].get("state") if review_binding == "current" else review_binding
     invocation["bindings"] = {"decisions": decisions_binding, "review": review_binding,
         "evaluation": _binding(documents, "evaluation", [("result_sha256", "result"), ("plan_sha256", "plan"), ("decisions_sha256", "decisions")])}
+    if not identity_current and invocation["bindings"]["evaluation"] == "current":
+        invocation["bindings"]["evaluation"] = "identity_mismatch"
     trace_info = execution.get("trace")
     if isinstance(trace_info, dict) and isinstance(trace_info.get("path"), str):
         raw, trace = _read(evidence, prefix + "/" + trace_info["path"])
@@ -265,11 +303,17 @@ def _invocation(evidence: Evidence, manifest: dict, row: dict, filters: dict,
     all_rows, selected = _event_rows(events, manifest["run_id"], row["invocation_id"], mode, filters, omissions)
     trace.update(mode=mode, valid_events=len(events), shown_events=len(selected),
                  filtered_events=len(events) - len(selected), display_state="filtered_out" if events and not selected else trace["state"])
+    recorded_count = (trace_info or {}).get("events")
+    count_mismatch = type(recorded_count) is int and raw is not None and recorded_count != len(events)
+    trace["recorded_events"] = recorded_count
+    trace["count_binding"] = "mismatch" if count_mismatch else "current" if type(recorded_count) is int and raw is not None else "unavailable"
+    if count_mismatch:
+        trace["diagnostics"].append(f"saved trace count {recorded_count} differs from {len(events)} validated events; effective capture has a gap")
     invocation.update(trace=trace, events=selected)
     from .execution import _capture_record
     effective, capture_note = _capture_record(execution.get("capture", {}), trace_info,
         {"events": len(events) if raw is not None else None,
-         "capture_gap": bool(trace.get("rejected_records")) or bool((trace_info or {}).get("capture_gap"))})
+         "capture_gap": count_mismatch or bool(trace.get("rejected_records")) or bool((trace_info or {}).get("capture_gap"))})
     invocation["capture"]["effective_categories"] = effective
     invocation["capture"]["validation_diagnostics"] = [capture_note] if capture_note else []
     artifacts = _artifact_bindings(evidence, prefix, result)

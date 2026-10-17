@@ -37,6 +37,7 @@ The scorer reports known-target detection, recall within review budgets, and fal
 | `scaneval score --plan --result --decisions` | Score separately stored records. |
 | `scaneval replay <bundle>` | Recompute a saved bundle offline. |
 | `scaneval report <bundle> --output` | Render a standalone HTML report. |
+| `scaneval investigate <run> --output <new-directory>` | Export a local investigation view and JSON with judgments, trace links, capture states, and artifact bindings ([guide](docs/INVESTIGATION.md)). |
 | `scaneval corpus init\|add-snapshot\|import\|validate\|approve\|admit\|disposition` | Prepare case packs, run mechanical checks, and record explicit reviews and admissions. |
 | `scaneval corpus add-change-set\|pr-scope\|canonical` | Declare a base/head change set, state which targets and controls are scored in its PR review, and group records by canonical root cause. |
 | `scaneval plan --pack --snapshot-id --tree-hash --output` | Build an evaluation plan for one materialized input, or with `--mode pr --change-set-id` and the hashes that identify it, the PR plan of a change set. |

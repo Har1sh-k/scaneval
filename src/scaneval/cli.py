@@ -1536,6 +1536,12 @@ def build_parser() -> argparse.ArgumentParser:
     planning.add_argument("--diff-sha256", help="sha256:<64 hex> of the recorded diff between the two trees")
     _add_review_commands(sub)
     _add_diagnose_commands(sub)
+    investigation = sub.add_parser("investigate", help="export a local saved-run investigation view and JSON")
+    investigation.add_argument("run", type=Path)
+    investigation.add_argument("--output", type=Path, required=True, help="new directory outside saved runs and trials")
+    for flag, dest in (("type", "type"), ("producer", "producer_id"), ("call", "call_id"),
+                       ("candidate", "candidate_id"), ("claim", "claim_id")):
+        investigation.add_argument("--" + flag, dest=dest, action="append", help="exact event filter; repeat for OR")
     _add_blinding_commands(sub)
     _add_precision_commands(sub)
     running = sub.add_parser("run", help="execute one frozen run configuration into a new directory")
@@ -1553,12 +1559,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _investigate(args: argparse.Namespace) -> int:
+    from .investigation import export_investigation
+    filters = {field: getattr(args, field) for field in
+               ("type", "producer_id", "call_id", "candidate_id", "claim_id") if getattr(args, field)}
+    export_investigation(args.run, args.output, filters=filters)
+    print(f"Investigation: {args.output / 'index.html'}")
+    print(f"JSON export: {args.output / 'investigation.json'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "validate":
             load_document(args.path, args.kind)
             print(f"Valid {args.kind}: {args.path}")
+        elif args.command == "investigate":
+            return _investigate(args)
         elif args.command == "precision":
             return _precision(args)
         elif args.command == "gate":
