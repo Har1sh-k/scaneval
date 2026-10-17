@@ -387,3 +387,6 @@ Prose, and pinned only by the tests it cites: the fourteen numbered rules of the
 TypeScript arrays must be dense, with enumerable indexed elements and no extra own string
 or symbol properties (apart from built-in `length`). Holes are refused rather than fabricated
 as nulls. This also applies to custom redactor output; explicit null elements remain valid.
+
+Array indices must also use ordinary writable, configurable data descriptors. Accessor
+indices and decorated data indices are refused without invoking getters.

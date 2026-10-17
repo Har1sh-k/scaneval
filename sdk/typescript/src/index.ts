@@ -430,10 +430,12 @@ function copyJson(
     const result: JsonValue[] = [];
     for (let index = 0; index < value.length; index++) {
       const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-      if (!descriptor || !descriptor.enumerable) {
-        throw new TypeError("sparse or non-enumerable JSON array element");
+      if (!descriptor || !descriptor.enumerable || !descriptor.writable ||
+          !descriptor.configurable || !Object.hasOwn(descriptor, "value")) {
+        throw new TypeError("sparse or decorated JSON array element");
       }
-      result.push(copyJson(value[index], seen, depth + 1));
+      // Never invoke an indexed getter while taking the payload snapshot.
+      result.push(copyJson(descriptor.value, seen, depth + 1));
     }
     seen.delete(value);
     return result;

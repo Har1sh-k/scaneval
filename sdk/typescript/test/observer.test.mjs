@@ -904,3 +904,31 @@ test("arrays refuse holes and extra own state before identity allocation", async
     }
   }
 });
+
+
+test("array index descriptors are refused without invoking accessors", async () => {
+  for (const location of ["metadata", "content", "redactor"]) {
+    for (const kind of ["getter", "setter", "readonly", "nonconfigurable"]) {
+      let getters = 0; let identities = 0; let clocks = 0;
+      const array = [1];
+      const descriptor = kind === "getter" ? {get: () => { getters++; return 42; }}
+        : kind === "setter" ? {set: () => { getters++; }}
+        : kind === "readonly" ? {writable: false} : {configurable: false};
+      Object.defineProperty(array, "0", descriptor);
+      const observer = new Observer({mode: "content", runId: "run", producerId: "producer",
+        sink: {write: () => {}}, idFactory: () => `id-${++identities}`,
+        clock: () => { clocks++; return new Date("2026-01-01T00:00:00Z"); },
+        ...(location === "redactor" ? {redactor: (key, value) => key === "bad" ? array : value} : {})});
+      const before = [identities, clocks];
+      const field = location === "redactor" ? "metadata" : location;
+      assert.equal(await observer.emit(event({[field]: {bad: location === "redactor" ? 1 : array}})), undefined);
+      assert.equal(getters, 0);
+      assert.deepEqual([identities, clocks], before);
+      assert.equal(observer.getState().dropped_events, 1);
+      assert.equal(observer.getState().capture_gap, true);
+      const good = await observer.emit(event({metadata: {items: [1, null]}}));
+      assert.equal(good.sequence, 0);
+      assert.deepEqual(good.metadata.items, [1, null]);
+    }
+  }
+});
