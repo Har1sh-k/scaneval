@@ -389,7 +389,10 @@ class _Corpus:
 def _configuration(run: _Run, system_id: str) -> dict:
     """What one system is, as its run configured it: adapter, config, model, network policy, execution."""
     entry = next(item for item in run.config["systems"] if item["system_id"] == system_id)
-    return {"timeout_seconds": run.config["timeout_seconds"],
+    timeout = run.config["timeout_seconds"]
+    if isinstance(timeout, float) and timeout.is_integer():
+        timeout = int(timeout)
+    return {"timeout_seconds": timeout,
             "adapter": entry["adapter"], "config": entry["config"], "model_id": entry.get("model_id"),
             "model_revision": entry.get("model_revision"),
             "network_policy": entry.get("network_policy", run.config["network_policy"]),
@@ -1524,6 +1527,21 @@ def _view_warnings(facts: dict, results: Sequence[_SystemResult]) -> list[str]:
     return warnings
 
 
+def _result_bindings(run: _Run) -> list[dict]:
+    from .precision import _run_frame, result_identity
+    bindings = []
+    for mode, profile in sorted({(row["mode"], row["profile"]) for row in run.schedule["inputs"]}):
+        for system in run.system_ids:
+            try:
+                rows, _ = _run_frame(run.directory, run.manifest, run.schedule,
+                                     {system}, mode, profile, "full", None)
+            except (ContractError, OSError, ValueError, KeyError):
+                continue  # Invalid/legacy output cannot establish a freshness identity.
+            bindings.append({"run_id": run.run_id, "system_id": system, "mode": mode,
+                             "profile": profile, "sha256": result_identity(rows)})
+    return bindings
+
+
 def _run_row(corpus: _Corpus, run: _Run) -> dict:
     """One run as read: its hashes, its evidence digest, its failures, its execution timing, and what it covers.
 
@@ -1554,6 +1572,7 @@ def _run_row(corpus: _Corpus, run: _Run) -> dict:
         "run_id": run.run_id, "status": run.manifest["status"], "created_at": run.schedule["created_at"],
         "manifest_sha256": canonical_sha256(run.manifest), "schedule_sha256": canonical_sha256(run.schedule),
         "config_sha256": run.schedule["config_sha256"], "evidence_sha256": canonical_sha256(evidence),
+        "result_bindings": _result_bindings(run),
         "pack": run.schedule["pack"], "repetitions": run.repetitions,
         "configured_inputs": len(run.config["inputs"]), "inputs": len(run.schedule["inputs"]),
         "selection": deepcopy(run.manifest["selection"]),

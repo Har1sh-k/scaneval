@@ -2090,3 +2090,17 @@ def test_effective_timeout_in_system_identity(tmp_path):
     report = aggregate.compare([base, cand], baseline="baseline", candidate="candidate", policy=policy())
     assert report["configuration_differences"] == [
         {"key": "timeout_seconds", "baseline": 1, "candidate": 60, "absent_in": None}]
+
+
+def test_timeout_identity_normalizes_equivalent_numbers(tmp_path):
+    from scaneval.aggregate import _Run, _configuration, _systems
+    config = {"timeout_seconds": 60, "network_policy": "none", "systems": [
+        {"system_id": "same", "adapter": "fake", "config": {}}]}
+    schedule = {"systems": [{"system_id": "same"}]}
+    first = _Run("first", tmp_path, {}, schedule, config)
+    second = _Run("second", tmp_path, {}, schedule, {**config, "timeout_seconds": 60.0})
+    assert _configuration(first, 'same') == _configuration(second, 'same')
+    assert _systems([first, second])['same']['runs'] == ['first', 'second']
+    changed = _Run("changed", tmp_path, {}, schedule, {**config, "timeout_seconds": 120})
+    with pytest.raises(ContractError, match='configured differently'):
+        _systems([first, changed])
