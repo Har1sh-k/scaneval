@@ -45,3 +45,18 @@ def test_nonfinite_nested_values_are_rejected_without_losing_adjacent_records(nu
     assert len(parsed.events) == 2
     # The retained evidence can be exported as strict JSON.
     json.dumps(parsed.events, allow_nan=False)
+
+
+@pytest.mark.parametrize("duplicate", [
+    '"event_id": "first", "event_id": "second", ',
+    '"metadata": {"nested": {"key": "first", "key": "second"}}, ',
+])
+def test_duplicate_keys_are_rejected_without_last_value_winning(duplicate):
+    event = wire_event()
+    event.pop("event_id" if duplicate.startswith('"event_id"') else "metadata")
+    bad = ("{" + duplicate + json.dumps(event)[1:]).encode()
+    good = json.dumps(wire_event()).encode()
+    parsed = parse_trace(good + b"\n" + bad + b"\n" + good)
+    assert parsed.state == "partial"
+    assert parsed.rejected_records == 1
+    assert len(parsed.events) == 2

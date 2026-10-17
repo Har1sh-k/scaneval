@@ -14,7 +14,7 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
-from .contracts import reject_nonfinite
+from .contracts import _strict_object, reject_nonfinite
 
 _VALIDATOR = Draft202012Validator(
     json.loads(files("scaneval").joinpath("schemas", "trace-event.schema.json").read_text()),
@@ -48,7 +48,8 @@ def parse_trace(raw: bytes) -> TraceRead:
             continue
         try:
             event = json.loads(line.decode("utf-8"),
-                               parse_constant=_reject_constant)
+                               parse_constant=_reject_constant,
+                               object_pairs_hook=_strict_object)
             # A valid JSON numeric lexeme can overflow Python's float decoder
             # (for example 1e999) without calling parse_constant.
             reject_nonfinite(event)
