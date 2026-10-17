@@ -2141,6 +2141,32 @@ def test_blinding_check_dry_runs_every_variant_and_writes_nothing_to_the_map(tmp
     assert code == 2 and "has no variant for snapshot snap-zzz" in err
 
 
+@pytest.mark.parametrize("explicit_cache", [True, False])
+def test_blinding_check_refuses_explicit_and_default_caches_inside_a_trial(
+        tmp_path, widget, capsys, explicit_cache):
+    trial = tmp_path / "prepared"
+    (trial / "source").mkdir(parents=True)
+    (trial / "source" / "input.py").write_text("pass\n", encoding="utf-8")
+    (trial / "provenance.json").write_text("{}\n", encoding="utf-8")
+    pack = (tmp_path / "outside-pack.json") if explicit_cache else (trial / "pack.json")
+    write_pack(pack, widget)
+    path = tmp_path / "widget-map.json"
+    blinding.save_map(path, widget_map(widget))
+    cache = trial / "source" / "cache" if explicit_cache else trial / ".repos"
+    argv = ["blinding", "check", str(path), "--pack", str(pack)]
+    if explicit_cache:
+        argv.extend(["--cache-root", str(cache)])
+    before = {entry.relative_to(trial): entry.read_bytes()
+              for entry in trial.rglob("*") if entry.is_file()}
+
+    code, _, err = cli(capsys, *argv)
+
+    assert code == 2 and "inside the trial directory" in err
+    assert not cache.exists()
+    assert {entry.relative_to(trial): entry.read_bytes()
+            for entry in trial.rglob("*") if entry.is_file()} == before
+
+
 def test_blinding_check_names_at_most_ten_files_that_keep_a_cue_and_counts_the_rest():
     cues = {"path_count": 12, "paths": [{"path": f"docs/page-{index:02d}.md", "count": 12 - index}
                                         for index in range(12)]}

@@ -326,7 +326,8 @@ def _refuse_trial_path(output: Path) -> None:
     is given (``add-snapshot``, ``import``, ``validate --snapshot-id``, ``approve``, ``admit``,
     ``disposition``, ``add-change-set``, ``pr-scope``, ``canonical``, all through
     :func:`_pack_for_change`), the map ``blinding review`` rewrites,
-    the bundle ``review init``, ``review record`` and ``review approve`` write into, the output of
+    the source caches used by ``corpus validate --snapshot-id`` and ``blinding check``, the bundle
+    ``review init``, ``review record`` and ``review approve`` write into, the output of
     every ``precision`` command and the reviews file ``precision record`` appends to, and the trial
     ``corpus validate`` is about to export into. ``review status`` checks the bundle it reads as
     well, so every ``review`` subcommand refuses the same paths. Commands that only read are
@@ -470,6 +471,7 @@ def _corpus_validate(args: argparse.Namespace) -> int:
     pack = _pack_for_change(args)
     snapshot = cases.snapshot_by_id(pack, args.snapshot_id)
     cache_root = args.cache_root or args.pack.parent / runner.DEFAULT_CACHE_ROOT
+    _refuse_trial_path(cache_root)
     trial = None
     if args.trial_root is not None:
         trial = args.trial_root / args.snapshot_id
@@ -778,6 +780,7 @@ def _blinding_check(args: argparse.Namespace) -> int:
                                 f"it covers {', '.join(covered)}")
         covered = [args.snapshot_id]
     cache_root = args.cache_root or args.pack.parent / runner.DEFAULT_CACHE_ROOT
+    _refuse_trial_path(cache_root)
     identity = blinding.map_identity(document)
     print(f"Map {identity['map_id']} {identity['map_version']}: {identity['map_sha256']}; content "
           f"{blinding.content_digest(document)}")
