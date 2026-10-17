@@ -490,3 +490,49 @@ def test_the_cli_names_an_unprepared_input_and_exits_one(tmp_path, upstream, mon
     assert manifest["status"] == "completed"
     assert [row["input_id"] for row in manifest["inputs"] if row["preparation_failure"]] == ["snap-gone"]
     assert adapter.calls == 1
+
+@pytest.mark.parametrize('spelling', ['1.0', '1e0'])
+@pytest.mark.parametrize('entrypoint', ['api', 'cli'])
+def test_integral_json_repetitions_execute_once_and_preserve_config(tmp_path, upstream, monkeypatch,
+                                                                  spelling, entrypoint):
+    import json
+    from scaneval.contracts import canonical_sha256
+    repo, commit = upstream
+    write_pack(tmp_path / 'pack.json', repo, {'snap-a': commit})
+    path = tmp_path / 'run.json'
+    config = write_config(path, inputs=[{'snapshot_id': 'snap-a'}], repetitions=json.loads(spelling))
+    path.write_text(path.read_text().replace('1.0', spelling))
+    before_bytes, before_hash = path.read_bytes(), canonical_sha256(config)
+    adapter = FakeAdapter()
+    out = tmp_path / 'out'
+    assert main(['validate', 'run-config', str(path)]) == 0
+    if entrypoint == 'api':
+        manifest = run_from_config(path, out, clock=RUN_CLOCK, adapters={'fake': adapter})
+    else:
+        monkeypatch.setattr('scaneval.runner.get_adapter', lambda name: adapter)
+        assert main(['run', str(path), '--output', str(out)]) == 0
+        manifest = load_document(out / MANIFEST_NAME, 'run-manifest')
+    assert adapter.calls == 1
+    assert len(manifest['invocations']) == 1
+    assert manifest['invocations'][0]['invocation_id'] == 'snap-a__fake-a__r1'
+    assert manifest['config_sha256'] == before_hash
+    frozen = load_document(out / manifest['schedule_path'], 'evaluation-schedule')
+    assert frozen['config_sha256'] == before_hash
+    assert frozen['assignments'][0]['repetition'] == 1
+    assert path.read_bytes() == before_bytes
+    frozen_config = load_document(out / 'run-config.json', 'run-config')
+    assert canonical_sha256(frozen_config) == before_hash
+    assert isinstance(frozen_config['repetitions'], float)
+
+
+@pytest.mark.parametrize('repetitions', [True, 1.5])
+def test_invalid_repetitions_refused_by_run_api_and_cli(tmp_path, upstream, repetitions):
+    repo, commit = upstream
+    write_pack(tmp_path / 'pack.json', repo, {'snap-a': commit})
+    path = tmp_path / 'run.json'
+    write_config(path, inputs=[{'snapshot_id': 'snap-a'}], repetitions=repetitions)
+    out = tmp_path / 'out'
+    with pytest.raises(ContractError):
+        run_from_config(path, out, clock=RUN_CLOCK, adapters={'fake': FakeAdapter()})
+    assert main(['run', str(path), '--output', str(out)]) == 2
+    assert not out.exists()
