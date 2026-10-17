@@ -30,6 +30,7 @@ from scaneval.contracts import (
     pack_anchor_digest,
     pr_input_hash,
 )
+from scaneval.observer import Observer
 from scaneval.runner import MANIFEST_NAME, run_from_config
 from scaneval.scoring import score
 
@@ -187,7 +188,7 @@ class PrAdapter(Adapter):
         trace_path = None
         if trace_dir is not None:
             trace_path = Path(trace_dir) / "events.jsonl"
-            trace_path.write_text('{"type": "finding.submitted"}\n', encoding="utf-8")
+            trace_path.write_text(finding_trace(request["run_id"], trace_mode), encoding="utf-8")
         if self.status != "success":
             return NativeOutcome(status=self.status, exit_code=1, command=["fake", "scan"],
                                  error={"code": "scanner_failed", "message": "the fake scanner failed"})
@@ -504,6 +505,17 @@ def test_a_pack_that_declares_both_exports_freezes_the_eligibility_the_finished_
     assert any("outside change set cs-1" in note for note in frozen["plan"]["notes"])
 
 
+def finding_trace(run_id: str, mode: str = "metadata") -> str:
+    """One complete, deterministic observer event scoped to the scanner request."""
+    events = []
+    observer = Observer(mode=mode, sink=events.append, run_id=run_id, producer_id="fake-pr",
+                        clock=CLOCK, id_factory=lambda kind: f"fixture-{kind}")
+    observer.emit(type="finding.submitted", capture_status="complete", metadata={})
+    observer.close()
+    assert len(events) == 1 and not observer.get_state().capture_gap
+    return json.dumps(events[0]) + "\n"
+
+
 # --- the trace lands in the PR bundle -------------------------------------------------------------------
 
 
@@ -511,7 +523,7 @@ def test_the_trace_lands_in_the_pr_bundle(tmp_path, pull_request):
     manifest, out = run_pr(tmp_path, pull_request, trace_mode="metadata")
 
     bundle = bundle_of(out, "cs-1__fake-a__r1")
-    assert (bundle / "trace" / "events.jsonl").read_text(encoding="utf-8") == '{"type": "finding.submitted"}\n'
+    assert (bundle / "trace" / "events.jsonl").read_text(encoding="utf-8") == finding_trace(manifest["run_id"])
     execution = load_document(bundle / "execution.json", "execution-record")
     assert execution["trace"] == {"path": "trace/events.jsonl", "events": 1, "mode": "metadata",
                                   "capture_gap": False, "dropped_events": 0}
