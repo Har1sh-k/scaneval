@@ -720,6 +720,51 @@ def test_a_source_dir_that_is_not_the_declared_tree_is_refused(tmp_path):
         SourceTree.load(tmp_path / "README.md", HASH)
 
 
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n", b"\r"])
+@pytest.mark.parametrize("terminated", [False, True])
+def test_source_physical_lines_survive_case_checks_and_sarif_import(tmp_path, newline, terminated):
+    source = tmp_path / "source"
+    write_tree(source)
+    data = newline.join([b"x = 1", b"y = 2"] + ([b""] if terminated else []))
+    (source / "new.py").write_bytes(data)
+    digest = materialize.hash_exported_tree(source)["tree_hash"]
+    pack = make_pack(source, digest, target=("new.py", 2))
+    checks = pack["cases"][0]["validation"]["checks"]
+    assert next(check for check in checks if check["check"] == "line_ranges_within_files")["result"] == "pass"
+    log = tmp_path / "input.sarif"
+    log.write_bytes(encoded(minimal_log(results=[result_at("new.py", region={"startLine": 2})])))
+
+    outcome = import_sarif(log, pack=pack, snapshot_id="snap-a", tree_hash=digest,
+                           system_id="fixture", output=tmp_path / "bundle", source_dir=source, clock=CLOCK)
+
+    assert outcome.result["status"] == "success"
+    assert len(outcome.result["claims"]) == 1
+    assert outcome.record["source_binding"]["source_dir_verified"] is True
+    assert outcome.record["losses"] == []
+    assert (source / "new.py").read_bytes() == data
+    assert materialize.hash_exported_tree(source)["tree_hash"] == digest
+
+
+@pytest.mark.parametrize("data,count", [
+    (b"", 0), (b"x = 1", 1), (b"\r", 1), (b"\r\n", 1), (b"\n", 1),
+    (b"x\ry\nz\r\n", 3), (b"\r\r\n\n", 3),
+    (b"x" * 65535 + b"\r\ny\r", 2),  # CRLF straddles a streaming read boundary.
+    ("x\u2028y\u2029z".encode(), 1),
+])
+def test_source_line_bounds_include_empty_unterminated_and_mixed_endings(tmp_path, data, count):
+    path = tmp_path / "new.py"
+    path.write_bytes(data)
+    digest = materialize.hash_exported_tree(tmp_path)["tree_hash"]
+    tree = SourceTree.load(tmp_path, digest)
+    assert cases._count_lines(path) == count
+    if count:
+        only_claim(converted([result_at("new.py", region={"startLine": count})], tree=tree))
+    assert f"which has {count} line(s)" in only_loss(
+        converted([result_at("new.py", region={"startLine": count + 1})], tree=tree))
+    assert path.read_bytes() == data
+    assert materialize.hash_exported_tree(tmp_path)["tree_hash"] == digest
+
+
 @pytest.mark.parametrize("bases,root,message", [
     ({"A": "src"}, None, "must end with '/'"),
     ({"A": "../src/"}, None, "'..' segment"),

@@ -102,6 +102,7 @@ from .contracts import (
     validate_document,
 )
 from .kinds import cwe_ids, kind_for_cwes, mapping_version
+from .source import count_physical_lines
 
 
 PROFILE = "sarif-import-1"
@@ -617,7 +618,7 @@ class SourceTree:
         if path not in self._lines:
             descriptor = os.open(self.files[path], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             with os.fdopen(descriptor, "rb") as handle:
-                self._lines[path] = sum(1 for _ in handle)
+                self._lines[path] = count_physical_lines(handle)
         return self._lines[path]
 
     def check(self, path: str, lines: tuple[int, int] | None, label: str) -> None:

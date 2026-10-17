@@ -129,6 +129,7 @@ import re
 from typing import Any, Callable
 import unicodedata
 
+from .source import count_physical_lines
 from .contracts import (
     ContractError,
     admission_chain_digest,
@@ -433,9 +434,9 @@ def evidence(evidence_id: str, *, origin: str, kind: str, reference: str, note: 
 
 
 def _count_lines(path: Path) -> int:
-    """Count the newline-separated lines of *path*, reading its bytes and nothing else."""
+    """Count source physical lines, reading its bytes and nothing else."""
     with path.open("rb") as handle:
-        return sum(1 for _ in handle)
+        return count_physical_lines(handle)
 
 
 def exported_file_paths(source_dir: Path) -> set[str]:
