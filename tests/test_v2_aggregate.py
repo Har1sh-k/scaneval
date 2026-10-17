@@ -2059,3 +2059,34 @@ def test_configuration_paths_preserve_literal_and_nested_keys():
     assert {row["key"] for row in differences} == {"config.scanner.enabled", r"config.\e"}
     assert aggregate.configuration_differences({"a.b": [1]}, {"a": {"b": [1]}})
     assert aggregate.configuration_differences({"a": True}, {"a": 1})
+
+
+def test_collision_cannot_pass_empty_configuration_allowlist(tmp_path):
+    from scaneval import gate
+    from test_v2_gate import minimal_policy
+    run = write_run(tmp_path, "collision", [planned("i", targets=[target("T")])],
+                    systems=("baseline", "candidate"), configs={
+                        "baseline": {"config": {"a": {"b": False}, "a.b": "same"}},
+                        "candidate": {"config": {"a": {"b": True}, "a.b": "same"}}})
+    comparison = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=policy())
+    decision = gate.evaluate_gate(minimal_policy(), comparison)
+    checked = next(row for row in decision["requirements"] if row["id"] == "configuration.allowed_differences")
+    assert checked["status"] == "inconclusive"
+    assert checked["observed"]["not_allowed"] == ["config.a.b"]
+
+
+def test_effective_timeout_in_system_identity(tmp_path):
+    from scaneval.contracts import canonical_sha256
+    base = write_run(tmp_path, "short", [planned("i", targets=[target("T")])], systems=("baseline",))
+    cand = write_run(tmp_path, "long", [planned("i", targets=[target("T")])], systems=("candidate",))
+    config = json.loads((base / "run-config.json").read_text())
+    config["timeout_seconds"] = 1
+    (base / "run-config.json").write_text(canonical_json(config))
+    for name in ("run-manifest.json", "evaluator/schedule.json"):
+        path = base / name
+        doc = json.loads(path.read_text())
+        doc["config_sha256"] = canonical_sha256(config)
+        path.write_text(canonical_json(doc))
+    report = aggregate.compare([base, cand], baseline="baseline", candidate="candidate", policy=policy())
+    assert report["configuration_differences"] == [
+        {"key": "timeout_seconds", "baseline": 1, "candidate": 60, "absent_in": None}]

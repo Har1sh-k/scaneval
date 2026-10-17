@@ -71,3 +71,6 @@ Configuration paths retain ordinary dotted names. Within a key segment, escape l
 `\.` and literal backslashes as `\\`; encode an empty key as `\e`. These escaped strings are
 also the spelling used in `allowed_differences` (escape backslashes again in JSON). Lists and empty
 objects are atomic leaves. An allowed path includes its descendants at dot separators only.
+
+Trace collection mode may vary: it controls diagnostic collection, not the scanner deadline or
+scoring contract. Comparisons do not claim equal diagnostic overhead.
