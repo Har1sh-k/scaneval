@@ -33,6 +33,7 @@ from typing import Any, Callable, Iterable
 # _is_stated is imported rather than re-implemented so a reviewer name is judged by one rule
 # across the tool: what corpus approve refuses, review approve refuses the same way.
 from .cases import _is_stated, accepted_paths_for_targets, pack_sha256
+from .artifacts import write_new
 from .contracts import ContractError, canonical_json, canonical_sha256, load_document, validate_document
 
 
@@ -76,8 +77,7 @@ def _normalize(path: str) -> str:
 
 def _write_new(path: Path, content: str) -> None:
     # Refuse overwrite, including symlinks, rather than destroy a prior review.
-    with path.open("x", encoding="utf-8", newline="\n") as handle:
-        handle.write(content)
+    write_new(path, content)
 
 
 def _keep_mode(temporary: Path, existing: Path) -> None:

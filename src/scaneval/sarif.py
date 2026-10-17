@@ -91,6 +91,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import unquote
 
 from . import __version__, cases, materialize, report, review, scoring
+from .artifacts import write_new
 # _require_relative_path is imported rather than re-implemented so a location this importer records
 # is judged by the one rule the scan-result contract applies to every claim path.
 from .contracts import (
@@ -2042,8 +2043,7 @@ def _encoded(text: str, label: str) -> bytes:
 
 
 def _write_new(path: Path, payload: bytes) -> None:
-    with path.open("xb") as handle:
-        handle.write(payload)
+    write_new(path, payload)
 
 
 @dataclass(frozen=True)
@@ -2217,7 +2217,11 @@ def _write_bundle(bundle: Path, raw_path: str, data: bytes, *, result: dict, rec
         for path, payload in early:
             _write_new(path, payload)
             files.append(path)
-        directories.append(bundle / review.EVALUATOR_DIR)
+        evaluator = bundle / review.EVALUATOR_DIR
+        # This is a new bundle. If someone else made its evaluator directory,
+        # refuse it instead of adopting that writer's directory or plan.
+        evaluator.mkdir()
+        directories.append(evaluator)
         files.extend(review.write_evaluator_records(bundle, plan, decisions, review_record).values())
         for path, payload in late:
             _write_new(path, payload)

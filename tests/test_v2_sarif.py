@@ -1939,6 +1939,39 @@ def test_a_write_that_fails_part_way_removes_what_the_import_created(workspace, 
     assert not (workspace["out"] / "bundle").exists()
 
 
+@pytest.mark.parametrize("filename", sorted(Path(path).name for path in BUNDLE_FILES))
+@pytest.mark.parametrize("phase", ["write", "flush", "close"])
+def test_post_creation_failure_removes_sarif_artifacts_and_new_parents_then_allows_retry(
+        workspace, monkeypatch, fail_created_write, filename, phase):
+    failure = fail_created_write(filename, phase)
+    with pytest.raises(OSError) as caught:
+        imported(workspace, name="new/nested/bundle")
+    assert caught.value is failure
+    assert not workspace["out"].exists()
+
+    monkeypatch.undo()
+    outcome = imported(workspace, name="new/nested/bundle")
+    assert {path.relative_to(outcome.bundle).as_posix() for path in outcome.bundle.rglob("*")
+            if path.is_file()} == BUNDLE_FILES
+
+
+def test_failed_import_preserves_an_evaluator_directory_created_by_another_writer(workspace, monkeypatch):
+    real_mkdir = Path.mkdir
+    other_directory = workspace["out"] / "bundle" / "evaluator"
+
+    def mkdir(path, *args, **kwargs):
+        if path == other_directory and not path.exists():
+            # A competing writer wins exclusive creation between lookup and mkdir.
+            real_mkdir(path)
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    with pytest.raises(FileExistsError):
+        imported(workspace)
+    assert list((workspace["out"] / "bundle").iterdir()) == [other_directory]
+    assert list(other_directory.iterdir()) == []
+
+
 def test_a_failed_write_also_removes_the_parent_directories_the_import_made_and_only_those(workspace, monkeypatch):
     """The output's parents are created for it, so a write that fails part way left `new/nested` behind."""
 
