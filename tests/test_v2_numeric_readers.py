@@ -84,3 +84,33 @@ def test_generated_unavailable_detection_remains_supported(tmp_path):
     for block in comparison['views'][0]['differences'][0]['detection']:
         assert block['state'] == 'unavailable'
         assert block['full_output_recall'] is None
+
+@pytest.mark.parametrize('confidence', [.95, .99, math.nextafter(1., 0.), 1e-15])
+@pytest.mark.parametrize('reviewed', [False, True])
+def test_supported_confidence_api_and_saved_cli(tmp_path, confidence, reviewed):
+    run = one_system_run(tmp_path, 3)
+    sample = precision.draw_sample(precision.build_frame([run], population='full'), size=2, seed=0)
+    reviews = review_all(sample, {unit['unit_id']: 'true' for unit in sample['units']}) if reviewed else None
+    estimate = precision.estimate(sample, reviews, confidence=confidence)
+    assert math.isfinite(estimate['interval']['z']) and estimate['interval']['z'] > 0
+    sample_path, output = tmp_path / 'sample.json', tmp_path / 'estimate.json'
+    sample_path.write_text(json.dumps(sample))
+    args = ['precision', 'estimate', str(sample_path), '--confidence', str(confidence), '--output', str(output)]
+    if reviews:
+        reviews_path = tmp_path / 'reviews.json'
+        reviews_path.write_text(json.dumps(reviews))
+        args.extend(['--reviews', str(reviews_path)])
+    assert main(args) == 0
+    assert load_document(output, 'precision-estimate') == estimate
+
+
+@pytest.mark.parametrize('confidence', [0, 1, True, False, 1e-20, math.nextafter(0., 1.)])
+def test_unsupported_confidence_refused_before_output(tmp_path, confidence):
+    sample = precision.draw_sample(precision.build_frame([one_system_run(tmp_path, 2)], population='full'), size=1, seed=0)
+    with pytest.raises(ContractError, match='confidence'):
+        precision.estimate(sample, confidence=confidence)
+    path, output = tmp_path / 'sample.json', tmp_path / 'estimate.json'
+    path.write_text(json.dumps(sample))
+    if not isinstance(confidence, bool):
+        assert main(['precision', 'estimate', str(path), '--confidence', str(confidence), '--output', str(output)]) == 2
+        assert not output.exists()
