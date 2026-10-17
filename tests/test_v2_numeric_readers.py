@@ -38,3 +38,19 @@ def test_nonintegral_count_refusal(value):
     configured['uncertainty']['replicates'] = value
     with pytest.raises(ContractError):
         validate_document('aggregation-policy', configured)
+
+@pytest.mark.parametrize('spelling', ['1.0', '1e0'])
+def test_integral_review_budget_uses_integer_metric_keys(spelling):
+    from scaneval.scoring import score
+    from test_v2_scoring import make_plan, make_result, make_decisions, claim
+    plan = make_plan(controls=[])
+    plan['review_budgets'] = [json.loads(spelling)]
+    result = make_result([claim('a', 'first'), claim('b', 'second')], ranking='unranked')
+    decisions = make_decisions(result, matches=[('a', 'T1', 'accepted', 'fixture')])
+    before = canonical_sha256(plan)
+    actual = score(plan, result, decisions)
+    integer = deepcopy(plan)
+    integer['review_budgets'] = [1]
+    assert actual['metrics'] == score(integer, result, decisions)['metrics']
+    assert actual['metrics']['random_order_expected_recall'] == {'1': .25}
+    assert canonical_sha256(plan) == before
