@@ -648,8 +648,14 @@ def _empty_baseline_review(payload: dict, changes: tuple[Change, ...]) -> tuple[
 
 
 def _scanned_paths(scanned: list) -> set[str]:
-    """The paths in a ``paths.scanned`` list as paths inside the scanned tree, the way a claim location is read."""
-    return {_claim_path(item)[0] for item in scanned if isinstance(item, str)}
+    """Normalize usable relative coverage paths without changing claim location spelling."""
+    paths = set()
+    for item in scanned:
+        if isinstance(item, str):
+            path, invalid = _claim_path(item)
+            if not invalid:
+                paths.add(PurePosixPath(path).as_posix())
+    return paths
 
 
 def _full_input_paths(source: Path) -> set[str]:
@@ -681,7 +687,11 @@ def _full_coverage(paths: set[str], scanned: list, skipped: list,
         if isinstance(raw, str):
             path, invalid = _claim_path(raw)
             if not invalid:
+                path = PurePosixPath(path).as_posix()
                 omitted.add(path)
+                # Native skip entries may name directories. Match a component boundary so
+                # 'vendor' covers 'vendor/a.py', never 'vendor-other/a.py'.
+                omitted.update(item for item in paths if item.startswith(path + "/"))
     return sorted(omitted), not bool((paths & covered) - omitted)
 
 

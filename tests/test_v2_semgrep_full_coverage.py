@@ -12,11 +12,13 @@ from scaneval.scoring import score
 from test_v2_semgrep import PLACEABLE, fake_preparation, fake_semgrep, semgrep_required
 
 
-def run_scan(tmp_path, paths, *, claims=(), exit_code=0):
+def run_scan(tmp_path, paths, *, claims=(), exit_code=0, files=("app.py", "control.py")):
     source = tmp_path / "source"
     source.mkdir()
-    (source / "app.py").write_text("value = 1\n")
-    (source / "control.py").write_text("value = 2\n")
+    for path in files:
+        target = source / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("value = 1\n")
     raw = tmp_path / "raw"
     raw.mkdir()
     payload = {"version": "1.177.0", "results": list(claims), "errors": []}
@@ -83,6 +85,31 @@ def test_explicit_skip_wins_over_conflicting_scan_evidence(tmp_path):
                                  "skipped": [{"path": "./control.py", "reason": "timeout"}]})
     assert outcome.omitted_paths == ["control.py"]
     assert control_metrics(outcome, "control.py")["resolved"] == 0
+
+
+@pytest.mark.parametrize("path", ["control.py/", "./control.py", ".//control.py"])
+def test_skipped_path_spelling_is_normalized_for_saved_result_contract(tmp_path, path):
+    outcome = run_scan(tmp_path, {"scanned": ["app.py", "control.py"], "skipped": [path]})
+    assert outcome.omitted_paths == ["control.py"]
+    assert control_metrics(outcome, "control.py")["resolved"] == 0
+
+
+def test_directory_skips_cover_descendants_without_prefix_collisions(tmp_path):
+    files = ["vendor/control.py", "vendor-other/control.py"]
+    outcome = run_scan(tmp_path, {"scanned": files, "skipped": [{"path": "./vendor/"}]}, files=files)
+    assert outcome.omitted_paths == ["vendor", "vendor/control.py"]
+    assert outcome.examined_nothing is False
+    assert control_metrics(outcome, "vendor/control.py")["resolved"] == 0
+    assert control_metrics(outcome, "vendor-other/control.py")["resolved"] == 1
+
+
+@pytest.mark.parametrize("spelling", ["pkg//control.py", "pkg/./control.py", "pkg/control.py/"])
+def test_internal_path_segments_normalize_without_changing_claim_locations(tmp_path, spelling):
+    outcome = run_scan(tmp_path, {"scanned": ["pkg/control.py"], "skipped": [spelling]},
+                       files=["pkg/control.py"])
+    assert outcome.omitted_paths == ["pkg/control.py"]
+    assert outcome.examined_nothing is True
+    assert control_metrics(outcome, "pkg/control.py")["resolved"] == 0
 
 
 def test_partial_scan_keeps_usable_findings_and_omissions(tmp_path):
