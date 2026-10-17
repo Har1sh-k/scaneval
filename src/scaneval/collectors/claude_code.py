@@ -37,6 +37,8 @@ import re
 import stat
 from typing import Any, NamedTuple
 
+from .source import FrozenSource
+
 from . import (
     ImportSummary,
     _Import,
@@ -444,6 +446,7 @@ def import_transcript(
     *,
     workspace_root: Path | str | Sequence[Path | str],
     call_id: str,
+    frozen_source: FrozenSource | None = None,
     sidechain: bool = False,
     agent_id: str | None = None,
 ) -> ImportSummary:
@@ -495,6 +498,7 @@ def import_transcript(
         observer,
         lines,
         source=SOURCE_TRANSCRIPT,
+        frozen_source=frozen_source,
         workspace_root=workspace_root,
         call_id=call_id,
         sidechain=sidechain,
@@ -510,6 +514,7 @@ def import_stream_json(
     *,
     workspace_root: Path | str | Sequence[Path | str],
     call_id: str,
+    frozen_source: FrozenSource | None = None,
 ) -> ImportSummary:
     """Read ``claude -p --output-format stream-json --verbose`` output.
 
@@ -533,6 +538,7 @@ def import_stream_json(
         observer,
         lines,
         source=SOURCE_STREAM,
+        frozen_source=frozen_source,
         workspace_root=workspace_root,
         call_id=call_id,
         sidechain=False,
@@ -688,6 +694,59 @@ def _span_from_result(native: Any, tracker: _Import) -> tuple[dict[str, Any] | N
         "role": "other",
     }
     return span, delivered
+
+
+def _verify_bounded_read(span: dict[str, Any], text: str | None, delivered: str,
+                         opened: dict[str, Any] | None, native: Any, tracker: _Import) -> None:
+    """Mark only a matched bounded Read whose delivered text equals frozen source."""
+    frozen = getattr(tracker, "frozen_source", None)
+    if (frozen is None or span.get("truncated") is not True
+            or not opened or opened.get("tool_name") != "Read"):
+        return
+    request = opened.get("tool_input")
+    if not isinstance(request, dict):
+        return
+    path = request.get("file_path")
+    # Reject traversal even if normalizing it would land inside the workspace.
+    if not isinstance(path, str) or ".." in Path(path.replace("\\", "/")).parts:
+        return
+    relative, external = workspace_path(path, tracker.workspace_root)
+    if external or relative != span["path"]:
+        return
+    result_path = native["file"].get("filePath")
+    if not isinstance(result_path, str) or ".." in Path(result_path.replace("\\", "/")).parts:
+        return
+    start, count = request.get("offset", 1), request.get("limit")
+    if type(start) is not int or type(count) is not int or start < 1 or count < 1:
+        return
+    record = native["file"]
+    if (type(record.get("startLine")) is not int or type(record.get("numLines")) is not int
+            or record["startLine"] != start or record["numLines"] != count
+            or span["end_line"] != start + count - 1):
+        return
+    raw = frozen.verified_bytes(span["path"])
+    if raw is None:
+        return
+    try:
+        source = raw.decode("utf-8")
+    except UnicodeError:
+        return
+    lines = source.splitlines(keepends=True)
+    if start + count - 1 > len(lines) or record.get("totalLines") != len(lines):
+        return
+    exact = "".join(lines[start - 1:start - 1 + count])
+    if text != exact:
+        return
+    rendered = []
+    for expected, line in enumerate(delivered.splitlines(keepends=True), start):
+        match = re.fullmatch(r"[ ]*([0-9]+)\t(.*)", line, flags=re.DOTALL)
+        if not match or int(match.group(1)) != expected:
+            return
+        rendered.append(match.group(2))
+    if len(rendered) != count or "".join(rendered) != exact:
+        return
+    span["source_mapping"] = "verified_exact"
+    span["source_sha256"] = frozen.hashes[span["path"]]
 
 
 def _block_identity(block: dict[str, Any]) -> str:
@@ -852,6 +911,7 @@ def _import_records(
     agent_id: str | None,
     output_format: str | None,
     loss: str | None = None,
+    frozen_source: FrozenSource | None = None,
 ) -> ImportSummary:
     """The one reader both Claude formats go through."""
     tracker = _Import(
@@ -861,6 +921,7 @@ def _import_records(
         workspace_root=workspace_root,
         call_id=call_id,
     )
+    tracker.frozen_source = frozen_source
     numbered = parse_numbered_lines(lines, tracker)
 
     # First pass: the invocation-level facts that arrive after the turns they describe.
@@ -1400,6 +1461,7 @@ class _State:
         self.open_tools[tool_id] = {
             "parent_event_id": parent_event_id,
             "start_event_id": event_id,
+            "tool_input": tool_input if tool_id not in self.open_tools else None,
             "tool_name": tool_name if isinstance(tool_name, str) else None,
         }
 
@@ -1436,6 +1498,9 @@ class _State:
             tracker.unmatched_tool_results += 1
         delivered = block_text(block.get("content"))
         span, span_text = _span_from_result(native, tracker)
+        pending_span = dict(span) if span else None
+        if pending_span and not block.get("is_error"):
+            _verify_bounded_read(pending_span, span_text, delivered, opened, native, tracker)
         metadata: dict[str, Any] = {
             "source": self.source,
             "is_error": bool(block.get("is_error")),
@@ -1466,7 +1531,7 @@ class _State:
             # different fact from the model having received it: a transcript that stops right
             # here recorded a read whose output no turn ever consumed. The selection is
             # released by :meth:`flush` once a later assistant turn proves delivery.
-            self.pending_selections.append((span, span_text, end_event_id, self.origin))
+            self.pending_selections.append((pending_span, span_text, end_event_id, self.origin))
 
     def _context_selection(
         self,
