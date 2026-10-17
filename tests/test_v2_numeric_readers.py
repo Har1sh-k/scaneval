@@ -75,3 +75,12 @@ def test_saved_comparison_reader_rejects_inconsistent_shapes(tmp_path, case):
     policy_path.write_text(json.dumps(full_policy()))
     assert main(['gate', '--policy', str(policy_path), '--comparison', str(path), '--output', str(output)]) == 2
     assert not output.exists()
+
+def test_generated_unavailable_detection_remains_supported(tmp_path):
+    from test_v2_aggregate import write_run, planned
+    run = write_run(tmp_path, 'empty', [planned('input')], systems=('baseline', 'candidate'))
+    comparison = aggregate.compare([run], baseline='baseline', candidate='candidate', policy=policy(replicates=3))
+    validate_document('comparison-report', comparison)
+    for block in comparison['views'][0]['differences'][0]['detection']:
+        assert block['state'] == 'unavailable'
+        assert block['full_output_recall'] is None
