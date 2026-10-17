@@ -11,7 +11,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts/sanitize_native_trace.py
 
 
 @pytest.mark.parametrize("source,expected", [
-    ("/Users/AuditUser/project/private.py", "/redacted/private.py"),
+    ("/Users/user/project/private.py", "/redacted/private.py"),
     ("/Users/审计用户/project/private.py", "/redacted/private.py"),
     ("/home/José/project/private.py", "/redacted/private.py"),
     ("/workspace-private/client/private.py", "/redacted/private.py"),
