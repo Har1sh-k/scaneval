@@ -77,8 +77,15 @@ When the list is every path the change touches, as it is for an empty baseline r
 payload with no ``paths.scanned``, the result also says ``examined_nothing``
 (:func:`~scaneval.adapters.pr.examined_nothing`), and then no control earns quiet credit, one on a
 file the change leaves alone included: a diff scan that read none of the change reached no control.
-It says ``False`` when Semgrep scanned some path of the change. A full scan reports no omissions and
-says neither.
+It says ``False`` when Semgrep scanned some path of the change.
+
+A full scan inventories input paths before launching Semgrep and lists every path not shown in
+``paths.scanned`` as omitted, together with explicitly skipped relative paths. Missing coverage
+does not establish a skip reason, but cannot establish examination either. In particular, Semgrep
+1.177 suppresses ``paths.skipped`` under ``--quiet``; the input inventory still preserves those
+omissions. If no input path is shown examined, ``examined_nothing`` withholds all quiet credit.
+Claims and native success/partial status remain available; this is file coverage, not proof that
+every rule or semantic property was examined.
 """
 
 from __future__ import annotations
@@ -641,8 +648,51 @@ def _empty_baseline_review(payload: dict, changes: tuple[Change, ...]) -> tuple[
 
 
 def _scanned_paths(scanned: list) -> set[str]:
-    """The paths in a ``paths.scanned`` list as paths inside the scanned tree, the way a claim location is read."""
-    return {_claim_path(item)[0] for item in scanned if isinstance(item, str)}
+    """Normalize usable relative coverage paths without changing claim location spelling."""
+    paths = set()
+    for item in scanned:
+        if isinstance(item, str):
+            path, invalid = _claim_path(item)
+            if not invalid:
+                paths.add(PurePosixPath(path).as_posix())
+    return paths
+
+
+def _full_input_paths(source: Path) -> set[str]:
+    """Inventory names before scanning, without following directory symlinks or reading files."""
+    paths: set[str] = set()
+
+    def failed(exc: OSError) -> None:
+        raise AdapterError(f"could not inventory Semgrep input coverage: {exc}") from exc
+
+    for directory, directories, files in os.walk(source, followlinks=False, onerror=failed):
+        directories[:] = [name for name in directories if name != ".git"]
+        for name in files:
+            paths.add((Path(directory) / name).relative_to(source).as_posix())
+        # A directory alias is still an input path; never walk outside the input to inventory it.
+        for name in directories:
+            path = Path(directory) / name
+            if path.is_symlink():
+                paths.add(path.relative_to(source).as_posix())
+    return paths
+
+
+def _full_coverage(paths: set[str], scanned: list, skipped: list,
+                   scanned_reported: bool) -> tuple[list[str], bool]:
+    """Unknown or explicitly skipped paths cannot receive quiet-control credit."""
+    covered = _scanned_paths(scanned) if scanned_reported else set()
+    omitted = paths - covered
+    for entry in skipped:
+        raw = entry.get("path") if isinstance(entry, dict) else entry
+        if isinstance(raw, str):
+            path, invalid = _claim_path(raw)
+            if not invalid:
+                path = PurePosixPath(path).as_posix()
+                omitted.add(path)
+                # Native skip entries may name directories. Match a component boundary so
+                # 'vendor' covers 'vendor/a.py', never 'vendor-other/a.py'.
+                omitted.update(item for item in paths if item.startswith(path + "/"))
+    return sorted(omitted), not bool((paths & covered) - omitted)
 
 
 def _pr_omitted_paths(changes: tuple[Change, ...], scanned: list, scanned_reported: bool) -> list[str]:
@@ -843,6 +893,7 @@ class SemgrepAdapter(Adapter):
         jobs = _integer_config(spec, "jobs", 1, minimum=1)
         config_dirs, ruleset_commit, ruleset_tree_hash = _prepared_ruleset(preparation)
         changes: tuple[Change, ...] = ()
+        input_paths = _full_input_paths(Path(source_dir)) if pr is None else set()
         if pr is not None:
             if getattr(active_backend(), "name", None) == "oci":
                 return NativeOutcome(
@@ -918,14 +969,15 @@ class SemgrepAdapter(Adapter):
             return NativeOutcome(status="error", exit_code=result.exit_code,
                                  error={"code": "unparseable_output", "message": message[:2000]}, **base)
         base["notes"] = base["notes"] + notes
-        # What the result lists as omitted_paths, for the outcomes that carry the claims Semgrep reported, and whether
-        # that is every path the change touches, so that Semgrep scanned none of it: both ``None`` in a full scan, which
-        # reports no omission.
+        # Coverage is independent of successful finding import. Preserve usable claims while
+        # withholding quiet credit for paths that were skipped or whose examination is unknown.
         omitted = nothing_examined = None
         if pr is not None:
             base["notes"] += _pr_review_notes(payload, changes, scanned)
             omitted = _pr_omitted_paths(changes, scanned, scanned_reported)
             nothing_examined = examined_nothing(changes, omitted)
+        else:
+            omitted, nothing_examined = _full_coverage(input_paths, scanned, skipped, scanned_reported)
         base["tool_versions"]["semgrep_reported"] = reported_version
         # Import loss leaves the claim set incomplete, so the bundles it delivers are not
         # resolved: the scoring contract then refuses both completed-control and quiet credit.
