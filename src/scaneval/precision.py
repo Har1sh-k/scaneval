@@ -250,6 +250,13 @@ def _run_frame(run_dir: Path, manifest: dict, schedule: dict, systems: set[str],
     return rows, units
 
 
+def result_identity(rows: list[dict]) -> str:
+    """Identity of every scoped scheduled result, including assignments without output."""
+    return canonical_sha256(sorted(
+        [{"assignment_id": row["invocation_id"], "result_sha256": row["result_sha256"]}
+         for row in rows], key=lambda row: row["assignment_id"]))
+
+
 def build_frame(run_dirs: Sequence[str | PathLike[str]], *, population: str, budget: int | None = None,
                 systems: Iterable[str] | None = None, mode: str = "full",
                 profile: str = "standard") -> dict:
@@ -882,6 +889,13 @@ def estimate(sample: dict, reviews: dict | None = None, *,
         "population": deepcopy(frame["population"]),
         "exclusions": deepcopy(frame["exclusions"]),
         "runs": deepcopy(frame["runs"]),
+        "result_bindings": [{"run_id": run["run_id"], "system_id": system,
+                             "mode": frame["population"]["mode"],
+                             "profile": frame["population"]["profile"],
+                             "sha256": result_identity([row for row in frame["invocations"]
+                                 if row["run_id"] == run["run_id"] and row["system_id"] == system])}
+                            for run in frame["runs"] for system in frame["population"]["systems"]
+                            ],
         "design": deepcopy(sample["design"]),
         "coverage": coverage,
         "sample": {"selected_units": len(resolved), "classes": classes, "bases": bases},

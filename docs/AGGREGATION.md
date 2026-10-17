@@ -108,3 +108,9 @@ Differences are candidate minus baseline for each view, slice, and weighting. Th
 - An interval describes resampling of the observed projects or families. It does not show that the corpus represents other software, and a `degenerate` or `insufficient_clusters` state is not a narrow interval.
 - `reviewed` means a human-approved review record over a reviewed plan exists; the record is not verified here. Draft evidence is pipeline diagnostics, not benchmark evidence.
 - Usage figures are what scanners reported; an unknown cost is unknown, not free.
+
+The effective global `timeout_seconds` is part of system configuration identity. A system id
+ cannot aggregate different deadlines; comparisons expose deadline changes to the configuration
+ allowlist. There is no per-system deadline override. Adapter config, model identity, effective
+ network policy and execution backend also participate. Repetitions, profiles and frozen workload
+ follow the shared comparison contract; run timestamps, paths and observed execution timings may vary.

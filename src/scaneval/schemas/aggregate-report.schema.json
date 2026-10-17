@@ -1800,6 +1800,44 @@
               "minimum": 0
             }
           }
+        },
+        "result_bindings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "run_id",
+              "system_id",
+              "mode",
+              "profile",
+              "sha256"
+            ],
+            "properties": {
+              "run_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "system_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "mode": {
+                "type": "string",
+                "minLength": 1
+              },
+              "profile": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              }
+            }
+          },
+          "uniqueItems": true
         }
       }
     },

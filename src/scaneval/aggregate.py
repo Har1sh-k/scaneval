@@ -389,7 +389,11 @@ class _Corpus:
 def _configuration(run: _Run, system_id: str) -> dict:
     """What one system is, as its run configured it: adapter, config, model, network policy, execution."""
     entry = next(item for item in run.config["systems"] if item["system_id"] == system_id)
-    return {"adapter": entry["adapter"], "config": entry["config"], "model_id": entry.get("model_id"),
+    timeout = run.config["timeout_seconds"]
+    if isinstance(timeout, float) and timeout.is_integer():
+        timeout = int(timeout)
+    return {"timeout_seconds": timeout,
+            "adapter": entry["adapter"], "config": entry["config"], "model_id": entry.get("model_id"),
             "model_revision": entry.get("model_revision"),
             "network_policy": entry.get("network_policy", run.config["network_policy"]),
             "execution": entry.get("execution") or {"backend": "local"}}
@@ -1523,6 +1527,21 @@ def _view_warnings(facts: dict, results: Sequence[_SystemResult]) -> list[str]:
     return warnings
 
 
+def _result_bindings(run: _Run) -> list[dict]:
+    from .precision import _run_frame, result_identity
+    bindings = []
+    for mode, profile in sorted({(row["mode"], row["profile"]) for row in run.schedule["inputs"]}):
+        for system in run.system_ids:
+            try:
+                rows, _ = _run_frame(run.directory, run.manifest, run.schedule,
+                                     {system}, mode, profile, "full", None)
+            except (ContractError, OSError, ValueError, KeyError):
+                continue  # Invalid/legacy output cannot establish a freshness identity.
+            bindings.append({"run_id": run.run_id, "system_id": system, "mode": mode,
+                             "profile": profile, "sha256": result_identity(rows)})
+    return bindings
+
+
 def _run_row(corpus: _Corpus, run: _Run) -> dict:
     """One run as read: its hashes, its evidence digest, its failures, its execution timing, and what it covers.
 
@@ -1553,6 +1572,7 @@ def _run_row(corpus: _Corpus, run: _Run) -> dict:
         "run_id": run.run_id, "status": run.manifest["status"], "created_at": run.schedule["created_at"],
         "manifest_sha256": canonical_sha256(run.manifest), "schedule_sha256": canonical_sha256(run.schedule),
         "config_sha256": run.schedule["config_sha256"], "evidence_sha256": canonical_sha256(evidence),
+        "result_bindings": _result_bindings(run),
         "pack": run.schedule["pack"], "repetitions": run.repetitions,
         "configured_inputs": len(run.config["inputs"]), "inputs": len(run.schedule["inputs"]),
         "selection": deepcopy(run.manifest["selection"]),
@@ -1711,12 +1731,17 @@ def _contract_gap(baseline: dict, candidate: dict, names: tuple[str, str]) -> st
     return "their frozen vulnerable/fixed pairs differ"
 
 
+def _path_segment(key: str) -> str:
+    """Escape keys while preserving ordinary dotted policy paths."""
+    return key.replace("\\", "\\\\").replace(".", "\\.") if key else "\\e"
+
+
 def _flatten(value: Any, prefix: str) -> dict[str, Any]:
     """Dotted keys to leaves: nested objects are walked, and a list or an empty object is one leaf."""
     if isinstance(value, dict) and value:
         flat: dict[str, Any] = {}
         for key in sorted(value):
-            flat.update(_flatten(value[key], f"{prefix}.{key}" if prefix else key))
+            flat.update(_flatten(value[key], f"{prefix}.{_path_segment(key)}" if prefix else _path_segment(key)))
         return flat
     return {prefix: value}
 
@@ -1725,8 +1750,8 @@ def configuration_differences(baseline: dict, candidate: dict) -> list[dict]:
     """Every dotted key whose value differs between two system configurations, sorted by key.
 
     Values are compared as canonical JSON, so ``1`` and ``true`` differ. ``absent_in`` names the side
-    that has no such key at all, which is different from a key present with a null value. A key that
-    itself contains a dot is not escaped.
+    that has no such key at all, which is different from a key present with a null value. Literal dots and backslashes in segments are backslash escaped; empty keys use ``\\e``.
+    Lists are atomic leaves.
     """
     left, right = _flatten(baseline, ""), _flatten(candidate, "")
     rows = []

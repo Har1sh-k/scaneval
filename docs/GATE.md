@@ -66,3 +66,11 @@ The decision embeds its policy and records, by canonical digest, the policy, the
 - It recomputes nothing from run directories. It is exactly as trustworthy as the comparison and estimates it names, and hashes identify documents without authenticating an author or showing that a reviewer read anything.
 - It does not read pair correctness, mixed-intent correctness, or freshness, and it never reads a diagnostic as a metric.
 - An interval describes resampling of the projects or families observed. It does not show the corpus represents other software.
+
+Configuration paths retain ordinary dotted names. Within a key segment, escape literal dots as
+`\.` and literal backslashes as `\\`; encode an empty key as `\e`. These escaped strings are
+also the spelling used in `allowed_differences` (escape backslashes again in JSON). Lists and empty
+objects are atomic leaves. An allowed path includes its descendants at dot separators only.
+
+Trace collection mode may vary: it controls diagnostic collection, not the scanner deadline or
+scoring contract. Comparisons do not claim equal diagnostic overhead.

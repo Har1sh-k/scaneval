@@ -115,3 +115,16 @@ Totals are exact fractions, converted to floats once at the end. The estimate ca
 - An uncovered stratum is not estimated at all. Read coverage before reading precision.
 - A reviewed-true claim is an additional confirmed issue for precision. It earns no detection credit, and reaching the label set needs a separate reviewed label release.
 - Hashes and the review chain bind documents; they are not signatures. Nothing verifies who a reviewer is, whether two reviewers are independent, or that anyone read the claim. A history wiped whole reads as a fresh one. The estimate records the digest of the history it used, which is where such a wipe shows.
+
+Result freshness uses `result_bindings`, an optional additive 2.1 field in estimates and report run
+rows. Each binding names run, system, mode and profile and hashes the assignment-id-sorted list
+of `{assignment_id, result_sha256}` pairs, including null for scheduled assignments without output.
+Result digests cover canonical complete result documents, including claim text and evidence.
+The basis is independent of sampling population and recall review decisions. Other systems and
+views do not participate. Manifest and schedule checks still apply. Older 2.1 artifacts remain
+readable; missing binding evidence makes precision gates inconclusive with an unavailable reason.
+A changed identity produces a distinct digest mismatch reason. Regenerate estimates and comparisons
+from the saved runs to establish binding. This is content freshness, not provenance authentication.
+
+Writers continue to emit schema version 2.1. Readers from earlier releases that enforce their
+closed schemas may reject newly written binding fields; use an updated reader for these reports.

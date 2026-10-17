@@ -3781,3 +3781,55 @@ def test_a_semgrep_review_that_scanned_part_of_the_change_still_credits_a_contex
     block = pr_safe_controls(aggregate.aggregate([out], policy=aggregation_policy()), "baseline")
     assert (block["observations"], block["completed"], block["resolved"], block["unresolved"]) == (2, 2, 1, 1)
     assert block["completed_upper"]["value"] == 0.5
+
+
+def test_precision_result_content_identity_and_legacy_fail_closed(corpus, estimates):
+    policy = gate_policy(precision=precision_block())
+    estimate = estimates["improved"]
+    comparison = deepcopy(corpus["comparisons"]["improved"])
+    def binding(comp, est):
+        return requirement(gate.evaluate_gate(policy, comp, precision_candidate=est), "precision.binding")
+    assert binding(comparison, estimate)["status"] == "pass"
+    for row in comparison["runs"][0]["result_bindings"]:
+        if row["system_id"] == "improved":
+            row["sha256"] = digest("changed result content")
+    assert binding(comparison, estimate)["status"] == "inconclusive"
+    assert "result-content digest differs" in binding(comparison, estimate)["explanation"]
+    legacy = deepcopy(estimate)
+    del legacy["result_bindings"]
+    assert "binding unavailable" in binding(corpus["comparisons"]["improved"], legacy)["explanation"]
+    other = deepcopy(corpus["comparisons"]["improved"])
+    for row in other["runs"][0]["result_bindings"]:
+        if row["system_id"] != "improved":
+            row["sha256"] = digest("changed result content")
+    assert binding(other, estimate)["status"] == "pass"
+
+
+def test_changed_saved_claim_invalidates_precision_after_recall_refresh(corpus, tmp_path):
+    import shutil
+    from scaneval import review
+    run = tmp_path / 'freshness'
+    shutil.copytree(corpus['run'], run)
+    old = estimate_for(run, 'improved')
+    bundle = next((run / 'invocations').glob('*__improved__r1'))
+    path = bundle / 'result.json'
+    result = json.loads(path.read_text())
+    result['claims'][0]['allegation'] += ' changed without changing claim count'
+    path.write_text(canonical_json(result))
+    path = bundle / 'evaluator/decisions.json'
+    decisions = json.loads(path.read_text())
+    decisions['result_sha256'] = canonical_sha256(result)
+    path.write_text(canonical_json(decisions))
+    record = review.record_decisions(bundle, clock=CLOCK)
+    plan = json.loads((bundle / 'evaluator/plan.json').read_text())
+    record = review.approve_review(record, decisions, plan, reviewer='Fictional independent reviewer',
+                                   note='Synthetic recall refresh', clock=CLOCK)
+    (bundle / 'evaluator/review-record.json').write_text(canonical_json(record))
+    after = aggregate.compare([run], baseline='baseline', candidate='improved', policy=aggregation_policy())
+    checked = requirement(gate.evaluate_gate(gate_policy(precision=precision_block()), after,
+                          precision_candidate=old), 'precision.binding')
+    assert checked['status'] == 'inconclusive'
+    assert 'result-content digest differs' in checked['explanation']
+    fresh = estimate_for(run, 'improved')
+    assert requirement(gate.evaluate_gate(gate_policy(precision=precision_block()), after,
+                       precision_candidate=fresh), 'precision.binding')['status'] == 'pass'
