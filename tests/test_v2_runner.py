@@ -498,6 +498,61 @@ def test_a_cache_root_overlapping_the_output_is_refused_before_the_output_exists
     assert pilot["adapter"].prepared == 0
 
 
+@pytest.mark.parametrize("placement", ["explicit", "default", "symlink"])
+def test_cli_run_refuses_cache_roots_inside_an_existing_trial_before_writing(
+        tmp_path, upstream, capsys, placement):
+    repo, commit = upstream
+    trial = tmp_path / "prepared"
+    (trial / "source").mkdir(parents=True)
+    (trial / "source" / "frozen.py").write_text("pass\n", encoding="utf-8")
+    (trial / "provenance.json").write_text("{}\n", encoding="utf-8")
+    config_dir = trial / "source" if placement == "default" else tmp_path
+    write_pack(config_dir / "pack.json", repo, commit)
+    config_path = config_dir / "run.json"
+    cache_root = "cache"
+    if placement == "explicit":
+        cache_root = "prepared/source/cache"
+    elif placement == "symlink":
+        (tmp_path / "cache-alias").symlink_to(trial / "source", target_is_directory=True)
+        cache_root = "cache-alias/cache"
+    config = write_config(config_path, systems=[system_entry("fake-a", "fake")], cache_root=cache_root)
+    if placement == "default":
+        config.pop("cache_root")
+        config_path.write_text(canonical_json(config) + "\n", encoding="utf-8")
+    before = {path.relative_to(trial): path.read_bytes()
+              for path in trial.rglob("*") if path.is_file()}
+    out = tmp_path / "outside-run"
+
+    code = main(["run", str(config_path), "--output", str(out), "--quiet"])
+    error = capsys.readouterr().err
+
+    assert code == 2 and "inside the trial directory" in error
+    assert not out.exists()
+    assert {path.relative_to(trial): path.read_bytes()
+            for path in trial.rglob("*") if path.is_file()} == before
+
+
+def test_cli_run_accepts_an_outside_cache_control(tmp_path, upstream, capsys, monkeypatch):
+    repo, commit = upstream
+    write_pack(tmp_path / "pack.json", repo, commit)
+    config_path = tmp_path / "run.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake")], cache_root="outside-cache")
+    original = run_from_config
+
+    def with_fake_adapter(*args, **kwargs):
+        kwargs["adapters"] = {"fake": FakeAdapter()}
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr("scaneval.runner.run_from_config", with_fake_adapter)
+    out = tmp_path / "outside-run"
+
+    code = main(["run", str(config_path), "--output", str(out), "--quiet"])
+
+    assert code == 0 and capsys.readouterr().err == ""
+    assert list((tmp_path / "outside-cache").glob("*/.git"))
+    assert (out / "run-manifest.json").is_file()
+
+
 def test_an_adapter_module_that_is_not_installed_is_a_skipped_system(tmp_path, upstream, monkeypatch):
     """Resolution failure is a skip with its own type and message, never an empty scan."""
     repo, commit = upstream

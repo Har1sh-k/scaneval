@@ -9,6 +9,7 @@ import re
 import unicodedata
 from importlib.resources import files
 from os import PathLike
+from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -61,6 +62,26 @@ _LEVEL_RANK = {"L1": 1, "L2": 2, "L3": 3, "L4": 4}
 
 class ContractError(ValueError):
     """A contract document is malformed or violates a v2 invariant."""
+
+
+TRIAL_MARKER = "provenance.json"
+TRIAL_SOURCE = "source"
+
+
+def refuse_trial_path(output: Path) -> None:
+    """Refuse a write destination that resolves inside a materialized trial.
+
+    A trial is identified by a provenance record beside its exported source directory. This is
+    mistake prevention for controller-owned destinations, not a filesystem isolation boundary.
+    """
+    resolved = output.expanduser().resolve()
+    for directory in (resolved, *resolved.parents):
+        if (directory / TRIAL_MARKER).is_file() and (directory / TRIAL_SOURCE).is_dir():
+            where = ("which is itself the trial directory" if directory == resolved
+                     else f"inside the trial directory {directory}")
+            raise ContractError(
+                f"refusing to write {output} {where}; evaluator plans, packs, decisions, and "
+                "caches stay outside an exported input tree")
 
 
 def canonical_json(value: Any) -> str:

@@ -995,6 +995,23 @@ def test_corpus_validate_refuses_a_trial_root_inside_a_trial_directory(tmp_path,
     assert not nested.exists() and not (tmp_path / "second-cache").exists()
 
 
+def test_corpus_validate_refuses_a_cache_inside_a_trial_before_writing(tmp_path, capsys, checked_pack):
+    pack = checked_pack["pack"]
+    trial = tmp_path / "trial" / "snap-a"
+    cache = trial / "source" / "cache"
+    before = {path.relative_to(trial): path.read_bytes() for path in trial.rglob("*") if path.is_file()}
+    pack_before = pack.read_bytes()
+    capsys.readouterr()
+
+    code, _, err = cli(capsys, "corpus", "validate", str(pack), "--snapshot-id", "snap-a",
+                       "--cache-root", str(cache), "--trial-root", str(tmp_path / "fresh-trial"))
+
+    assert code == 2 and "inside the trial directory" in err
+    assert not cache.exists() and pack.read_bytes() == pack_before
+    assert {path.relative_to(trial): path.read_bytes()
+            for path in trial.rglob("*") if path.is_file()} == before
+
+
 def test_new_version_is_stripped_and_refused_when_it_repeats_the_current_version(tmp_path, capsys,
                                                                                 checked_pack):
     pack = checked_pack["pack"]
