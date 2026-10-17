@@ -90,7 +90,7 @@ def test_generated_unavailable_detection_remains_supported(tmp_path):
 def test_supported_confidence_api_and_saved_cli(tmp_path, confidence, reviewed):
     run = one_system_run(tmp_path, 3)
     sample = precision.draw_sample(precision.build_frame([run], population='full'), size=2, seed=0)
-    reviews = review_all(sample, {unit['unit_id']: 'true' for unit in sample['units']}) if reviewed else None
+    reviews = review_all(sample, {unit['unit_id']: 'true' for unit in sample['selected']}) if reviewed else None
     estimate = precision.estimate(sample, reviews, confidence=confidence)
     assert math.isfinite(estimate['interval']['z']) and estimate['interval']['z'] > 0
     sample_path, output = tmp_path / 'sample.json', tmp_path / 'estimate.json'
