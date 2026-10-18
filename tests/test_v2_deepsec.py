@@ -1802,16 +1802,20 @@ def test_a_session_with_a_transcript_gets_no_reconstructed_pair_beside_it(tmp_pa
     assert any("No call is described both ways." in note for note in execution["notes"])
 
 
-def test_a_session_without_a_transcript_gets_the_reconstructed_pair_as_the_fallback(tmp_path, monkeypatch):
+@pytest.mark.parametrize("agent,route", [("claude", "claude_agent_sdk"), ("codex", "codex"), ("pi", "pi")])
+def test_a_session_without_a_transcript_gets_the_reconstructed_pair_as_the_fallback(tmp_path, monkeypatch,
+                                                                                 agent, route):
     root = fake_deepsec_root(tmp_path)
     stub_collector(monkeypatch, tmp_path, found=False)
-    bundle = invoke(tmp_path, root)
+    bundle = invoke(tmp_path, root, agent=agent)
+    _result, execution = documents(bundle)
+    assert execution["tool_versions"]["agent"] == agent
     events = trace_events(bundle)
     requests = [event for event in events if event["type"] == "model.request"]
     responses = [event for event in events if event["type"] == "model.response"]
     assert len(requests) == len(responses) == 1
     assert requests[0]["metadata"]["transcript_imported"] is False
-    assert requests[0]["metadata"]["route"] == "claude_agent_sdk"
+    assert requests[0]["metadata"]["route"] == route
     assert requests[0]["metadata"]["retries_observable"] is False
     assert requests[0]["metadata"]["aggregation"] == "sum_of_per_file_shares"
     assert requests[0]["metadata"]["model_requested"] == "claude-haiku-4-5"
