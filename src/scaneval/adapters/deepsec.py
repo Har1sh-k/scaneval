@@ -1516,7 +1516,7 @@ def preserve_transcripts(sessions: tuple[Session, ...], transcripts: dict[str, t
 def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Path,
                 projects_dir: Path, records: Records, sessions: tuple[Session, ...],
                 candidates: tuple[Candidate, ...], imported: DeepsecImport,
-                model_requested: str, thinking: str | None,
+                agent: str, model_requested: str, thinking: str | None,
                 unreferenced: tuple[Session, ...] = (), failed_batches: int = 0,
                 transcripts: dict[str, tuple[Path, ...]] | None = None,
                 frozen_source=None) -> TraceResult:
@@ -1665,7 +1665,7 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
             observer.emit(
                 type="model.request", category="model", capture_status="partial",
                 call_id=call_id, attempt_id=attempt_id,
-                metadata={**shared, "route": "claude_agent_sdk",
+                metadata={**shared, "route": "claude_agent_sdk" if agent == "claude" else agent,
                           "model_requested": model_requested, "thinking": thinking,
                           "stage": "process", "attempt": 1, "max_attempts": 1,
                           "run_id_native": session.run_id,
@@ -2325,7 +2325,7 @@ class DeepsecAdapter(Adapter):
                     trace_dir=Path(trace_dir), trace_mode=trace_mode, run_id=request["run_id"],
                     source_dir=Path(source_dir), projects_dir=config.projects_dir, records=records,
                     sessions=sessions, candidates=candidates, imported=imported,
-                    model_requested=config.model, thinking=config.thinking_level,
+                    agent=config.agent, model_requested=config.model, thinking=config.thinking_level,
                     unreferenced=history.unreferenced, transcripts=history.transcripts,
                     frozen_source=frozen_source,
                     failed_batches=failed_batch_count(config.agent, records, statuses, output))
