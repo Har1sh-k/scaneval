@@ -3,68 +3,100 @@
   "status": "passed",
   "scope": "machine_review_of_static_target_labels",
   "human_in_loop_required": false,
-  "checked_at": "2026-10-22T17:46:48.481444+00:00",
-  "pack_sha256": "sha256:5450d1777cdfe3b338c3558587c3b11a001238d3f4972f96bf5d98ed4d0a6e7a",
-  "report_sha256": "sha256:ed12a0289fadd98d531a3419975491f3506c2f58f2b1d0e3219c2374781353a8",
+  "checked_at": "2026-10-22T19:12:21.982562+00:00",
+  "pack_sha256": "sha256:b274b2305324592bab732096a7a50e9e40042f37b051f259f51d27f0316ac2d1",
+  "report_sha256": "sha256:cc0a8c29f8ce5b33aefb8c89a2eb910097f02ac2cf0dbaa0144b83c87fa16c0a",
   "outcomes": {
     "abstain": 0,
-    "accept": 18,
+    "accept": 50,
     "revise": 0
   },
   "fresh_validation": {
-    "cases": 18,
-    "snapshots": 16,
-    "packet_artifacts": 159,
+    "cases": 50,
+    "snapshots": 48,
+    "packet_artifacts": 469,
     "checks": [
       "Pack schema, integrity anchor and exact case membership",
-      "Recomputed full exported source tree hashes against pins and provenance",
+      "Recomputed complete exported source tree hashes against pins and provenance",
       "Fresh L1 mechanical checks on an in-memory copy",
-      "Raw evidence SHA256, published CVE identity, candidate commit and parent metadata",
-      "Canonical packet hashes, exact judgment coverage, criteria, citation membership and physical line bounds",
-      "Actual saved response bytes, prompt and completed orchestrator receipt bound to the packet set",
-      "Saved report integrity and recomputed decision summary"
+      "Raw evidence SHA256, published CVE identities, candidate commits and parent metadata",
+      "Canonical packet hashes, exact 50 judgment coverage, criteria, citation membership and physical line bounds",
+      "Actual saved response bytes, retained prompt and completed orchestrator receipt bound to final packet set",
+      "Saved report integrity and recomputed effective decision summary"
     ],
     "exit_code": 0
   },
-  "command": "scaneval corpus machine-check corpus/diverse/pack.json --packets results/corpus-machine-review-20261022/packets-v2 --report corpus/diverse/machine-review.json",
-  "skill_validation": "quick_validate.py passed for the repository skill and installed ~/.codex/skills/cve-corpus-review copy; byte copies match.",
+  "command": "scaneval corpus machine-check corpus/diverse/pack.json --packets results/corpus-50-20261022/packets-final --report corpus/diverse/machine-review.json",
+  "check_output": "results/corpus-50-20261022/check-final.json",
   "tests": [
     {
-      "scope": "targeted machine validator tests",
-      "passed": 27,
-      "failed": 0
+      "scope": "Final corpus, CLI and machine-review suites",
+      "passed": 276,
+      "failed": 0,
+      "log": "results/corpus-50-20261022/tests-final.log"
     },
     {
-      "scope": "affected corpus/CLI/contracts/hygiene suite before final targeted hardening",
-      "passed": 380,
-      "skipped": 1,
+      "scope": "Final materializer suite",
+      "passed": 57,
       "failed": 0,
-      "log": "results/corpus-machine-review-20261022/tests.log"
+      "log": "results/corpus-50-20261022/materialize-tests-final.log"
     },
     {
-      "scope": "final machine validator, corpus and contracts suite",
-      "passed": 296,
+      "scope": "Blinding suite in combined materializer/blinding run",
+      "passed": 947,
       "failed": 0,
-      "log": "results/corpus-machine-review-20261022/tests-final.log"
+      "log": "results/corpus-50-20261022/materialize-tests.log",
+      "note": "Combined run had 1003 passes and one materializer test failure from macOS xcrun_db in TMPDIR. The scratch-cleanup assertion now excludes only that launcher cache; all 57 materializer tests then passed."
+    },
+    {
+      "scope": "Both case-distinction tests on case-sensitive APFS, in addition to default case-insensitive filesystem",
+      "passed": 2,
+      "failed": 0,
+      "log": "results/corpus-50-20261022/case-sensitive-tests.log"
     }
   ],
   "review_history": {
-    "initial_counts": {
-      "accept": 17,
-      "revise": 1,
-      "abstain": 0
-    },
-    "initial_report": "results/corpus-machine-review-20261022/review-initial.json",
-    "changed_case": "kubernetes-cve-2023-5528",
-    "unchanged_judgments_carried_forward": 17,
+    "new_cases_reviewed": 32,
+    "unchanged_judgments_carried_forward": 18,
+    "baseline_packet_equivalence": "results/corpus-50-20261022/baseline-packet-equivalence.json",
     "final_judge": "gpt-6-astra",
-    "identity_basis": "orchestrator_task_metadata"
+    "identity_basis": "orchestrator_task_metadata",
+    "contributing_agents": [
+      "/root/astra_corpus_judge",
+      "/root/astra_cve_review_skill"
+    ],
+    "aggregation_note": "Two 16-case reviews plus 18 judgments whose complete canonical packets remained identical. The final aggregation preserves actual rows; it is not a second independent semantic review of all 50 cases.",
+    "corrections": [
+      {
+        "case_id": "containerd-cve-2020-15157",
+        "change": "Explicitly require a credential callback that returns registry secrets for the attacker-controlled challenged host; corrected description and assumption re-reviewed.",
+        "audit": "results/corpus-50-20261022/astra-notes-a-v1.md"
+      },
+      {
+        "case_id": "jupyterhub-cve-2024-41942",
+        "change": "Narrow the PATCH reporting span from 292\u2013355 to 311\u2013335; corrected label re-reviewed with role-assignment helper.",
+        "audit": "results/corpus-50-20261022/astra-notes-b-v1.md"
+      }
+    ],
+    "final_notes": "results/corpus-50-20261022/astra-final-notes.md"
+  },
+  "export_integrity": {
+    "resolved_case": "twenty-cve-2026-55583",
+    "snapshot_id": "twenty-c8b9dace",
+    "issue": "The default Mac filesystem collapsed two tracked Price/price asset paths; the failed export was excluded.",
+    "resolution": "Re-fetch and export the same exact revision on a case-sensitive APFS image; all 22,694 regular files and complete tree hash match provenance.",
+    "image": "results/corpus-50-20261022/case-sensitive.sparsebundle",
+    "mountpoint": "results/corpus-50-20261022/case-sensitive",
+    "regression": "Export now refuses exact cache/export path mismatches. Both host filesystem modes were tested.",
+    "cross_filesystem_experiment": "results/corpus-50-20261022/cross-filesystem-check.json",
+    "astra_code_review": "results/corpus-50-20261022/materializer-review.md"
   },
   "limits": [
-    "Static target judgments apply under stated assumptions; no runtime exploit, fixed-control validation or benchmark scan was performed.",
-    "Hash checks establish consistency, not signed provider authenticity or semantic truth.",
-    "Transitive caller/helper inspection is bound by full export hashes; not all helpers have separate packet citation IDs.",
-    "The source caches, raw receipts and packet directories are local ignored artifacts; another checkout needs those artifacts to replay this command.",
-    "Existing legacy human-reviewed reporting scopes are not satisfied by these sidecar judgments."
+    "Static target judgments apply under stated assumptions. No runtime exploit, fixed-control validation or benchmark scan was performed.",
+    "Selection emphasizes contextual reasoning; traditional scanner misses and AI advantages remain unmeasured.",
+    "Hashes establish consistency, not signed provider authenticity or semantic truth. No Mythos 5.1 invocation is claimed.",
+    "Raw sources, receipts, response files and packets are local ignored artifacts. Replay requires them and the Twenty case-sensitive volume mounted at its recorded path.",
+    "Current adapters do not declare Java/Ruby support: six labels across four inputs remain unsupported until capabilities are verified.",
+    "Existing legacy human-reviewed reporting scopes are not satisfied by these machine sidecars; no human approvals or admissions were manufactured."
   ]
 }

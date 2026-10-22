@@ -203,6 +203,37 @@ def test_export_refuses_existing_source_and_unavailable_blinding(tmp_path, upstr
         export_snapshot(snapshot, trial)
 
 
+@pytest.mark.parametrize("paths", [("Name.py", "name.py"), ("Dir/a.py", "dir/b.py")])
+def test_export_preserves_case_distinctions_or_refuses_the_checkout(tmp_path, paths):
+    """Distinct Git paths must not be silently collapsed by the host filesystem."""
+    repo = tmp_path / "upstream"
+    repo.mkdir()
+    git("init", "-q", cwd=repo)
+    git("config", "core.ignorecase", "false", cwd=repo)
+    for rel in paths:
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("same bytes, distinct paths\n", encoding="utf-8")
+        blob = git("hash-object", "-w", rel, cwd=repo)
+        git("update-index", "--add", "--cacheinfo", f"100644,{blob},{rel}", cwd=repo)
+    git("commit", "-q", "-m", "case distinctions", cwd=repo)
+    snapshot = materialize_module.CachedSnapshot(
+        path=repo, url=str(repo), commit=git("rev-parse", "HEAD", cwd=repo),
+        git_tree=git("rev-parse", "HEAD^{tree}", cwd=repo), fetch_method="test",
+    )
+    trial = tmp_path / "trial"
+    if set(walk_regular_files(repo)) != set(paths):
+        with pytest.raises(MaterializationError, match="not represented exactly"):
+            export_snapshot(snapshot, trial)
+        assert not (trial / "provenance.json").exists()
+    else:
+        record = export_snapshot(snapshot, trial)
+        assert set(walk_regular_files(trial / "source")) == set(paths)
+        assert hash_exported_tree(trial / "source") == {
+            "tree_hash": record["trial"]["tree_hash"], "file_count": 2,
+        }
+
+
 def test_synthetic_history_is_single_neutral_commit_covering_ignored_files(tmp_path, upstream):
     repo, first = upstream
     snapshot = fetch_snapshot(str(repo), first, tmp_path / "cache")
@@ -1157,6 +1188,8 @@ def test_compute_pr_history_builds_in_a_scratch_copy_and_leaves_no_trace(tmp_pat
     assert set(history) == {"base_commit", "head_commit", "messages", "identity", "date"}
     assert (hash_exported_tree(head), hash_exported_tree(base)) == before
     assert not (head / ".git").exists() and not (base / ".git").exists()
-    assert list(scratch.iterdir()) == [], "the scratch copy is removed"
+    # macOS's /usr/bin/git launcher may cache its developer-tool lookup in TMPDIR.
+    # That external cache is unrelated to the temporary source copy under test.
+    assert [path for path in scratch.iterdir() if path.name != "xcrun_db"] == [], "the scratch copy is removed"
     other_head, other_base, _ = prepared_pr(tmp_path, pull_request, "second")
     assert prepare_pr_history(other_head, other_base) == history

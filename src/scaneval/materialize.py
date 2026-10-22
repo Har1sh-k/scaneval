@@ -488,6 +488,11 @@ def export_tree(snapshot: CachedSnapshot, source: Path) -> ExportedTree:
         raise MaterializationError(f"trial source directory already exists: {source}")
     listing = _git(["ls-tree", "-r", "-z", snapshot.commit], snapshot.path)
     entries = [item for item in listing.split("\0") if item]
+    # A clean Git status is insufficient on a case-insensitive filesystem: Git
+    # can list two paths while the checkout contains only one spelling. Check
+    # actual directory entries before copying so a case-sensitive destination
+    # cannot turn that alias into two falsely distinct source files.
+    origin_paths = walk_regular_files(snapshot.path, skip_top_level=STRIPPED_TOP_LEVEL)
     source.mkdir(parents=True)
     hashes: dict[str, str] = {}
     stripped: list[str] = []
@@ -509,6 +514,11 @@ def export_tree(snapshot: CachedSnapshot, source: Path) -> ExportedTree:
         if kind != "blob":
             skipped.append({"path": rel, "reason": f"unsupported entry kind {kind}"})
             continue
+        if rel not in origin_paths:
+            raise MaterializationError(
+                f"tracked path is not represented exactly in the cache: {rel}; "
+                "check for path collisions and use a case-sensitive filesystem"
+            )
         origin = snapshot.path / rel
         destination = source / rel
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -522,6 +532,11 @@ def export_tree(snapshot: CachedSnapshot, source: Path) -> ExportedTree:
         byte_count += size
         if _is_instruction_file(rel):
             instructions.append(rel)
+    if set(walk_regular_files(source)) != set(hashes):
+        raise MaterializationError(
+            "export filesystem did not preserve the tracked paths; "
+            "check for path collisions and use a case-sensitive filesystem"
+        )
     return ExportedTree(hashes, sorted(stripped), sorted(skipped, key=lambda item: item["path"]),
                         sorted(instructions), byte_count)
 

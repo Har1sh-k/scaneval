@@ -1,225 +1,123 @@
-# Diverse CVE corpus
+# CVE corpus
 
-[pack.json](pack.json) is the complete current corpus: **18 published CVEs from 11 repositories,
-across six target languages, in 16 pinned vulnerable source snapshots**. The original six are
-retained; twelve new cases cover GitLab, Kubernetes, Apache Airflow, Langflow and LangChain.
-Three GitLab targets share one full 17.3.1-ee repository export. A repository, snapshot, source
-location and repeated scan are not additional CVEs.
+[pack.json](pack.json) contains **50 unique published CVEs from 32 repositories, across seven target languages, in 48 complete pinned vulnerable source exports**. The original six cases remain. Three GitLab labels share one release snapshot; a location, snapshot or repeated scan is not an additional CVE.
 
-All 18 targets have passing L1 mechanical checks: source paths, line ranges, alias formats,
-evidence presence and export hashes (108 recorded checks). L1 checks existence and integrity,
-not whether a source span supports its allegation. **There are zero validated fixed controls or
-benchmark results.** Static labels are assessed separately through the machine-review workflow
-below; it requires no human approval. Whole-repository exports contain tracked regular files under the standard export
-profile; original Git history/controller state are removed and skipped symlinks/submodules are
-recorded in local provenance. Labeled spans are evaluator metadata, not condensed scanner inputs.
+The 32 additions emphasize authorization, identity binding, protocol semantics, shared state and indirect information disclosure. They include Next.js, Grafana, Argo CD, Harbor, MinIO, Keycloak, etcd, containerd, Requests, JupyterHub and Twenty. [selection-rationale.json](selection-rationale.json) explains the contextual reasoning required by each addition. These are selection hypotheses: **traditional-scanner misses and AI advantages remain unmeasured**.
+
+All cases have explicit source locations and deployment assumptions. Python checks identities, pins, byte hashes, ranges and review bindings; Astra assesses the static causal claims. No mandatory human step applies to that workflow. There are **zero scanner results and zero validated fixed controls**. Static acceptance does not establish exploit execution, practical reachability in every deployment, or scanner performance.
 
 ## Severity distribution
 
-| Published base severity | CVEs | Share |
+| Published severity | CVEs | Share |
 |---|---:|---:|
-| Critical | 4 | 22.2% |
-| High | 5 | 27.8% |
-| Medium | 6 | 33.3% |
-| Low | 3 | 16.7% |
-| Unrated | 0 | 0% |
+| Critical | 9 | 18% |
+| High | 13 | 26% |
+| Medium | 20 | 40% |
+| Low | 8 | 16% |
 
-[severity-distribution.json](severity-distribution.json) records every selected score, vector,
-version, source, retrieval date and alternative published rating. Policy: prefer a numeric CVSS
-rating in the CVE record's CNA container; within that authority prefer 3.1, then 3.0, then 4.0.
-If the CNA provides no numeric score, use GitHub's reviewed numeric CVSS with the same version
-preference. Sixteen selected ratings use CVSS 3.1; Codex and OpenAM use CVSS 4.0. Scores are copied
-from the sources, not invented from vulnerability type or adjusted to fill a severity quota.
-Do not average numeric scores across CVSS versions.
+[severity-distribution.json](severity-distribution.json) retains each score, vector, source and alternative rating. Prefer numeric CNA CVSS, then reviewed GitHub numeric CVSS only if CNA numeric scores are absent; within an authority prefer 3.1, then 3.0, then 4.0. The selected ratings use CVSS 3.1 for 47 cases and 4.0 for three. Scores are copied from primary records, never adjusted to fill quotas. Do not average numeric scores across versions.
 
-Stratum-changing disagreements and the known privilege-vector inconsistency remain visible:
+Preserved discrepancies include browser-use (CNA Medium versus GitHub Critical), Flowise (CNA v3.1 Medium versus v4.0 High), Airflow CVE-2023-47265 (vendor textual Low versus numeric Medium), and Langflow CVE-2026-42867 (published PR:N although the inspected route requires authentication). The ratings file preserves the complete alternative-score inventory, including the new additions.
 
-- browser-use: CNA CVSS 3.1 is Medium 4.0; the reviewed GitHub rating is Critical 9.3.
-- Flowise: the selected CNA CVSS 3.1 is Medium 6.5; CNA CVSS 4.0 is High 8.5, and GitHub CVSS 3.1 is Medium 5.9.
-- Airflow CVE-2023-47265: Apache's textual rating is Low; the fallback numeric GitHub CVSS 3.1 is Medium 5.4.
-- Langflow CVE-2026-42867: the published vector says PR:N, while the advisory text and inspected route require authentication. Its published Medium 6.5 is retained with that inconsistency flagged.
+This is a curated challenge set, not a random sample of production vulnerabilities. Report outcomes by project, severity and mechanism; cases from the same project or mechanism are correlated. Popular public CVEs may be recognized from training exposure or repository identity, which remains unmeasured.
 
-The full ratings file also retains disagreements within a stratum, including Kubernetes
-CVE-2023-5528 (CNA 7.2 versus GitHub 8.8, both High), and Apache's textual "important"
-rating for Airflow CVE-2024-45034. Qualitative severity is reported alongside its scoring version;
-the shared Low/Medium/High/Critical bands do not make numeric scores interchangeable across versions.
+## Twenty cases
 
-These are curated severity strata, not real-world prevalence estimates or exploit validation.
-Report results by case, project and severity; disclose rating-source/version sensitivity and small
-stratum sizes. Targets from the same repository, a shared snapshot or similar mechanisms are correlated.
+- **[CVE-2026-85055](https://github.com/twentyhq/twenty/security/advisories/GHSA-v93q-4jcx-7p9m):** unreadable fields still influence filters, revealing information through row/count results. Limited to permitted rows and observable, meaningful predicates; no unconditional recovery of high-entropy secrets is claimed.
+- **[CVE-2026-55583](https://github.com/twentyhq/twenty/security/advisories/GHSA-v39r-w5vg-j9pp):** an authenticated user with AI settings permission can read another workspace’s agent history using a known agent UUID because the shared-table query omits workspaceId. The label preserves authentication, AI permission and known-ID requirements; evaluation mutations are outside its scope.
 
-## Current inventory
+These replace two extra candidate cases from already represented projects, keeping the total at 50. Raw rejected/unused candidate artifacts are not counted as active labels.
 
-| Repository | CVE / selected rating source | Severity / CVSS | Target language | Mechanism | Vulnerable snapshot |
-|---|---|---|---|---|---|
-| browser-use/browser-use | [CVE-2025-47241](https://cveawg.mitre.org/api/cve/CVE-2025-47241) | Medium 4 | python | URL component mismatch | `browser-use-5a45bf83` |
-| openai/codex | [CVE-2025-59532](https://cveawg.mitre.org/api/cve/CVE-2025-59532) | High 8.6 | rust | Sandbox authority confusion | `codex-62258df9` |
-| oauth2-proxy/oauth2-proxy | [CVE-2025-54576](https://cveawg.mitre.org/api/cve/CVE-2025-54576) | Critical 9.1 | go | URL component mismatch | `oauth2-proxy-f4b33b64` |
-| OpenIdentityPlatform/OpenAM | [CVE-2026-33439](https://cveawg.mitre.org/api/cve/CVE-2026-33439) | Critical 9.3 | java | Unsafe object deserialization | `openam-ab64dedf` |
-| FlowiseAI/Flowise | [CVE-2025-71332](https://cveawg.mitre.org/api/cve/CVE-2025-71332) | Medium 6.5 | typescript | SQL syntax construction | `flowise-ca69a39b` |
-| crewjam/saml | [CVE-2022-41912](https://cveawg.mitre.org/api/cve/CVE-2022-41912) | Critical 9.1 | go | Signature-to-consumed-object binding | `saml-5e0ffd29` |
-| gitlab-org/gitlab | [CVE-2024-8124](https://cveawg.mitre.org/api/cve/CVE-2024-8124) | High 7.5 | ruby | Unbounded request processing | `gitlab-df018582` |
-| gitlab-org/gitlab | [CVE-2024-8641](https://cveawg.mitre.org/api/cve/CVE-2024-8641) | Medium 6.7 | ruby | Credential scope confusion | `gitlab-df018582` |
-| gitlab-org/gitlab | [CVE-2024-6685](https://cveawg.mitre.org/api/cve/CVE-2024-6685) | Low 3.1 | ruby | Role threshold mismatch | `gitlab-df018582` |
-| kubernetes/kubernetes | [CVE-2023-5528](https://cveawg.mitre.org/api/cve/CVE-2023-5528) | High 7.2 | go | Shell interpretation of storage paths | `kubernetes-58d08534` |
-| kubernetes/kubernetes | [CVE-2024-3177](https://cveawg.mitre.org/api/cve/CVE-2024-3177) | Low 2.7 | go | Missing alternate-field validation | `kubernetes-1a7ed955` |
-| kubernetes/kubernetes | [CVE-2020-8555](https://cveawg.mitre.org/api/cve/CVE-2020-8555) | Medium 6.3 | go | Response data exposed through error propagation | `kubernetes-69681d7d` |
-| apache/airflow | [CVE-2024-45034](https://api.github.com/advisories?cve_id=CVE-2024-45034) | High 8.8 | python | Untrusted Python module search path | `airflow-ceb60519` |
-| apache/airflow | [CVE-2023-47265](https://api.github.com/advisories?cve_id=CVE-2023-47265) | Medium 5.4 | python | Trusting stored HTML in a different user context | `airflow-cd296d20` |
-| langflow-ai/langflow | [CVE-2025-3248](https://cveawg.mitre.org/api/cve/CVE-2025-3248) | Critical 9.8 | python | Missing authentication before code validation | `langflow-e1ee081d` |
-| langflow-ai/langflow | [CVE-2026-42867](https://cveawg.mitre.org/api/cve/CVE-2026-42867) | Medium 6.5 | python | Missing filesystem containment | `langflow-937de018` |
-| langchain-ai/langchain | [CVE-2026-26013](https://cveawg.mitre.org/api/cve/CVE-2026-26013) | Low 3.7 | python | Unvalidated fetch during token counting | `langchain-0493b276` |
-| langchain-ai/langchain | [CVE-2026-34070](https://cveawg.mitre.org/api/cve/CVE-2026-34070) | High 7.5 | python | Untrusted paths in prompt configuration | `langchain-7563fceb` |
+## Inventory
 
-The [upstream evidence manifest](upstream-evidence.json) links 138 case-specific evidence
-receipts to 132 distinct fetched artifacts, including published CVE records, non-withdrawn
-advisories, candidate fix metadata/patches and pinned files. Newly exported label files match the
-fresh upstream raw files byte-for-byte. GitHub pins are parents of the exact candidate fixes.
-GitLab uses the vendor-affected 17.3.1-ee release; its candidate fixes occur in the 17.3.2 release
-comparison and agree with the inspected source. Machine review must assess each CVE-to-fix mapping,
-particularly CVE-2024-8641 whose linked issue returned HTTP 404. That case retains its release,
-security-commit and patch evidence without pretending the unavailable issue was read.
+| Repository | CVE | Severity | Language | Mechanism |
+|---|---|---|---|---|
+| browser-use/browser-use | [CVE-2025-47241](https://cveawg.mitre.org/api/cve/CVE-2025-47241) | Medium 4 | python | URL component mismatch |
+| openai/codex | [CVE-2025-59532](https://cveawg.mitre.org/api/cve/CVE-2025-59532) | High 8.6 | rust | Sandbox authority confusion |
+| oauth2-proxy/oauth2-proxy | [CVE-2025-54576](https://cveawg.mitre.org/api/cve/CVE-2025-54576) | Critical 9.1 | go | URL component mismatch |
+| OpenIdentityPlatform/OpenAM | [CVE-2026-33439](https://cveawg.mitre.org/api/cve/CVE-2026-33439) | Critical 9.3 | java | Unsafe object deserialization |
+| FlowiseAI/Flowise | [CVE-2025-71332](https://cveawg.mitre.org/api/cve/CVE-2025-71332) | Medium 6.5 | typescript | SQL syntax construction |
+| crewjam/saml | [CVE-2022-41912](https://cveawg.mitre.org/api/cve/CVE-2022-41912) | Critical 9.1 | go | Signature-to-consumed-object binding |
+| gitlab-org/gitlab | [CVE-2024-8124](https://cveawg.mitre.org/api/cve/CVE-2024-8124) | High 7.5 | ruby | Unbounded request processing |
+| gitlab-org/gitlab | [CVE-2024-8641](https://cveawg.mitre.org/api/cve/CVE-2024-8641) | Medium 6.7 | ruby | Credential scope confusion |
+| gitlab-org/gitlab | [CVE-2024-6685](https://cveawg.mitre.org/api/cve/CVE-2024-6685) | Low 3.1 | ruby | Role threshold mismatch |
+| kubernetes/kubernetes | [CVE-2023-5528](https://cveawg.mitre.org/api/cve/CVE-2023-5528) | High 7.2 | go | Shell interpretation of storage paths |
+| kubernetes/kubernetes | [CVE-2024-3177](https://cveawg.mitre.org/api/cve/CVE-2024-3177) | Low 2.7 | go | Missing alternate-field validation |
+| kubernetes/kubernetes | [CVE-2020-8555](https://cveawg.mitre.org/api/cve/CVE-2020-8555) | Medium 6.3 | go | Response data exposed through error propagation |
+| apache/airflow | [CVE-2024-45034](https://cveawg.mitre.org/api/cve/CVE-2024-45034) | High 8.8 | python | Untrusted Python module search path |
+| apache/airflow | [CVE-2023-47265](https://cveawg.mitre.org/api/cve/CVE-2023-47265) | Medium 5.4 | python | Trusting stored HTML in a different user context |
+| langflow-ai/langflow | [CVE-2025-3248](https://cveawg.mitre.org/api/cve/CVE-2025-3248) | Critical 9.8 | python | Missing authentication before code validation |
+| langflow-ai/langflow | [CVE-2026-42867](https://cveawg.mitre.org/api/cve/CVE-2026-42867) | Medium 6.5 | python | Missing filesystem containment |
+| langchain-ai/langchain | [CVE-2026-26013](https://cveawg.mitre.org/api/cve/CVE-2026-26013) | Low 3.7 | python | Unvalidated fetch during token counting |
+| langchain-ai/langchain | [CVE-2026-34070](https://cveawg.mitre.org/api/cve/CVE-2026-34070) | High 7.5 | python | Untrusted paths in prompt configuration |
+| vercel/next.js | [CVE-2025-29927](https://cveawg.mitre.org/api/cve/CVE-2025-29927) | Critical 9.1 | typescript | Trusting internal request headers |
+| vercel/next.js | [CVE-2024-46982](https://cveawg.mitre.org/api/cve/CVE-2024-46982) | High 7.5 | typescript | Request metadata changes cache eligibility |
+| grafana/grafana | [CVE-2021-39226](https://cveawg.mitre.org/api/cve/CVE-2021-39226) | Critical 9.8 | go | Router and ORM empty-key semantics |
+| grafana/grafana | [CVE-2022-31107](https://cveawg.mitre.org/api/cve/CVE-2022-31107) | High 7.1 | go | Federated account linking by mutable username |
+| argoproj/argo-cd | [CVE-2025-55190](https://cveawg.mitre.org/api/cve/CVE-2025-55190) | Critical 10 | go | Project read authority exposes stored credentials |
+| argoproj/argo-cd | [CVE-2024-41666](https://cveawg.mitre.org/api/cve/CVE-2024-41666) | Medium 4.7 | go | Long-lived session ignores permission revocation |
+| goharbor/harbor | [CVE-2024-22278](https://cveawg.mitre.org/api/cve/CVE-2024-22278) | Medium 6.4 | go | Role grants exceed intended configuration authority |
+| goharbor/harbor | [CVE-2020-29662](https://cveawg.mitre.org/api/cve/CVE-2020-29662) | Medium 5.3 | go | Authorization and routing disagree on trailing slash |
+| minio/minio | [CVE-2024-24747](https://cveawg.mitre.org/api/cve/CVE-2024-24747) | High 8.8 | go | Child credentials can change their own restriction |
+| minio/minio | [CVE-2021-21390](https://cveawg.mitre.org/api/cve/CVE-2021-21390) | Medium 6.5 | go | Streaming data consumed before signature verification |
+| keycloak/keycloak | [CVE-2023-3597](https://cveawg.mitre.org/api/cve/CVE-2023-3597) | Medium 5 | java | Credential enrollment does not demand existing assurance |
+| keycloak/keycloak | [CVE-2023-2422](https://cveawg.mitre.org/api/cve/CVE-2023-2422) | Medium 5.5 | java | Certificate-chain identity confused with leaf identity |
+| etcd-io/etcd | [CVE-2023-32082](https://cveawg.mitre.org/api/cve/CVE-2023-32082) | Low 3.1 | go | Alternate API omits key-read authorization |
+| containerd/containerd | [CVE-2020-15157](https://cveawg.mitre.org/api/cve/CVE-2020-15157) | Medium 6.1 | go | Registry credentials reused for foreign-layer host |
+| sigstore/cosign | [CVE-2022-23649](https://cveawg.mitre.org/api/cve/CVE-2022-23649) | Low 3.3 | go | Valid log proof not bound to current signature |
+| psf/requests | [CVE-2024-35195](https://cveawg.mitre.org/api/cve/CVE-2024-35195) | Medium 5.6 | python | Connection pool retains weaker verification state |
+| psf/requests | [CVE-2023-32681](https://cveawg.mitre.org/api/cve/CVE-2023-32681) | Medium 6.1 | python | Proxy credentials cross a TLS tunnel boundary |
+| urllib3/urllib3 | [CVE-2023-43804](https://cveawg.mitre.org/api/cve/CVE-2023-43804) | Medium 5.9 | python | Redirect policy forgets application cookie headers |
+| auth0/node-jsonwebtoken | [CVE-2022-23541](https://cveawg.mitre.org/api/cve/CVE-2022-23541) | Medium 5 | javascript | JWT algorithm and retrieved key type are not bound |
+| pallets/werkzeug | [CVE-2023-23934](https://cveawg.mitre.org/api/cve/CVE-2023-23934) | Low 2.6 | python | Browser and server disagree on nameless cookies |
+| fastify/fastify | [CVE-2022-41919](https://cveawg.mitre.org/api/cve/CVE-2022-41919) | Medium 4.2 | javascript | Content-type parser and browser preflight disagree |
+| sveltejs/kit | [CVE-2023-29008](https://cveawg.mitre.org/api/cve/CVE-2023-29008) | High 8.8 | javascript | Case-sensitive MIME classification bypasses CSRF guard |
+| jupyterhub/jupyterhub | [CVE-2024-41942](https://cveawg.mitre.org/api/cve/CVE-2024-41942) | High 7.2 | python | Delegated user administration grants full admin |
+| jupyterhub/jupyterhub | [CVE-2021-41247](https://cveawg.mitre.org/api/cve/CVE-2021-41247) | Low 3.5 | python | Concurrent requests restore cookies after logout |
+| tauri-apps/tauri | [CVE-2024-35222](https://cveawg.mitre.org/api/cve/CVE-2024-35222) | Medium 5.9 | rust | IPC authority is not bound to an initialized frame |
+| tauri-apps/tauri | [CVE-2022-39215](https://cveawg.mitre.org/api/cve/CVE-2022-39215) | High 8.3 | rust | Recursive directory traversal loses filesystem scope |
+| authelia/authelia | [CVE-2021-32637](https://cveawg.mitre.org/api/cve/CVE-2021-32637) | Critical 10 | go | Authentication error body retains successful HTTP status |
+| ory/kratos | [CVE-2024-45042](https://cveawg.mitre.org/api/cve/CVE-2024-45042) | Medium 4.4 | go | Cached assurance omits a configured authentication factor |
+| zitadel/zitadel | [CVE-2025-67494](https://cveawg.mitre.org/api/cve/CVE-2025-67494) | Critical 9.3 | typescript | Forwarded tenant header controls backend destination |
+| sigstore/cosign | [CVE-2026-24122](https://cveawg.mitre.org/api/cve/CVE-2026-24122) | Low 3.7 | go | Certificate validity checked at inconsistent times |
+| twentyhq/twenty | [CVE-2026-85055](https://cveawg.mitre.org/api/cve/CVE-2026-85055) | High 7.1 | typescript | Unreadable fields still influence observable query predicates |
+| twentyhq/twenty | [CVE-2026-55583](https://cveawg.mitre.org/api/cve/CVE-2026-55583) | High 7.6 | typescript | Workspace authentication is not tenant-scoped object authorization |
 
-The retired case collection and generated example applications remain removed. Local historical
-reports and source caches are excluded from current counts. There is one active pack with no
-duplicate CVE. Retaining a full repository does not label every other vulnerability it contains.
+## Evidence and source inputs
 
-## Validate and prepare
+[upstream-evidence.json](upstream-evidence.json) records primary-source URLs, successful retrieval receipts and byte hashes, exact revisions, repair mapping and local source/provenance paths. [snapshot-inventory.json](snapshot-inventory.json) records full export sizes and extension counts. Standard exports contain tracked regular files, retain ordinary project context and instruction files, strip Git history/controller state, and record skipped symlinks/submodules. They are not condensed vulnerability snippets.
 
-From the repository root with ScanEval installed:
+Most vulnerable pins are the first parent of an actual code repair. Exceptions and inferred mappings are explicit: the three GitLab targets use the affected 17.3.1 release; jsonwebtoken uses affected 8.5.1 because the advisory-linked repair parent already contained the relevant guard. Its earlier causal repair is tied to the later published fix by release comparison. Grafana OAuth, Harbor metadata and Twenty workspace mappings combine vendor release evidence with inspected patches. Kratos uses the actual code repair, excluding later empty documentary commits.
+
+Raw advisories, pinned exports and judge artifacts stay under ignored results/. Another checkout must recover those exact bytes before offline review replay. The tracked manifest is an index, not a substitute for missing source evidence. Prior 18-case selection review is historical: [18-case-selection-review.json](review-history/18-case-selection-review.json).
+
+The Twenty `c8b9dace` revision contains distinct `Price/` and `price/` asset paths. On this Mac its complete 22,694-file export lives on the case-sensitive APFS image `results/corpus-50-20261022/case-sensitive.sparsebundle`, mounted at `results/corpus-50-20261022/case-sensitive`; the manifest points there. Keep the image and mount it before replay. A normal case-insensitive checkout collapses two files and was rejected. Future materialization refuses path spellings that the cache or export filesystem cannot preserve. Linux or another case-sensitive filesystem can hold the same complete export directly.
 
 ```sh
-scaneval corpus validate corpus/diverse/pack.json
+# Only when the retained image is not already mounted:
+hdiutil attach results/corpus-50-20261022/case-sensitive.sparsebundle \
+  -mountpoint "$PWD/results/corpus-50-20261022/case-sensitive" -nobrowse
 ```
 
-This reports case/snapshot counts, recorded review state and `severity_counts`, with unrated cases
-reported separately. To materialize one exact source snapshot and refresh its checks:
-
-```sh
-scaneval corpus validate corpus/diverse/pack.json \
-  --snapshot-id gitlab-df018582 \
-  --cache-root .repos \
-  --trial-root results/diverse-source-check-01
-```
-
-Repeat with other snapshot IDs, choosing a new trial directory for a repeat export. The command
-records L1 checks, not scanner output or approval. Source caches and raw retrieval bodies stay in
-ignored `.repos/` and `results/`; tracked artifacts contain metadata, URLs and hashes.
+Current Semgrep, llm-harness and DeepSec adapters do not declare Java or Ruby support. **Six targets** (OpenAM, two Keycloak and three GitLab cases) span **four unsupported inputs**. Keep unsupported outcomes explicit until adapter capability is verified; accepted metadata is not evidence that an adapter can scan the language.
 
 ## Machine review without HITL
 
-The completed [Astra machine review](machine-review.json) accepts **18 of 18 static target labels**.
-The initial pass accepted 17 and requested one correction: the Windows Kubernetes case included
-an unmount location without an established attacker-controlled argument. The case now covers the
-supported local-volume `mklink` path. Astra re-reviewed that change and carried forward the other
-17 judgments only after their packet hashes matched. No exploit execution or scanner scan is
-claimed by these acceptances; case-specific deployment limitations remain in every judgment.
-[machine-validation.json](machine-validation.json) records the successful Python replay,
-artifact counts, test results and remaining auditability limits.
+Use the Astra-authored [CVE review skill](../../skills/cve-corpus-review/SKILL.md). The current [machine report](machine-review.json) and [validation record](machine-validation.json) are the authoritative outcome records for the bound pack. They distinguish accept, revise and abstain. Prior judgments may be carried forward only when their canonical evidence packet is unchanged. No human approvals or L2–L4 execution claims are manufactured.
 
-Use the Astra-authored [CVE review skill](../../skills/cve-corpus-review/SKILL.md). Python verifies
-pack/source/patch bindings, published CVE identity, candidate commit metadata, exact case coverage,
-citations and the judge receipt. The model assesses source semantics, the causal mechanism and
-contradictory evidence. Each case receives `accept`, `revise` or `abstain`; there is no human-review
-step in this workflow. Acceptance concerns static target labels under their stated assumptions.
+The final static review records **50 accept, zero revise and zero abstain**: 32 additions reviewed by two Astra tasks and 18 earlier judgments retained after complete packet equality checks. The review corrected containerd's credential-callback assumption and narrowed JupyterHub's reporting span before acceptance. Initial findings and actual re-review records are retained. Aggregation preserves the contributing judgments; it is not an independent second semantic review of every case.
 
 ```sh
+scaneval corpus validate corpus/diverse/pack.json
 scaneval corpus machine-prepare corpus/diverse/pack.json \
   --evidence corpus/diverse/upstream-evidence.json --repository-root . \
-  --output results/corpus-machine-review-20261022/packets-v2
-# Apply the skill to the packets, retaining the actual prompt, response and run receipt.
-scaneval corpus machine-record corpus/diverse/pack.json \
-  --packets results/corpus-machine-review-20261022/packets-v2 \
-  --judgments results/corpus-machine-review-20261022/judgments-v2.json \
-  --output corpus/diverse/machine-review.json
+  --output results/corpus-50-20261022/packets-final
+# Apply the skill, retaining the actual prompt, response and task receipt.
 scaneval corpus machine-check corpus/diverse/pack.json \
-  --packets results/corpus-machine-review-20261022/packets-v2 \
+  --packets results/corpus-50-20261022/packets-final \
   --report corpus/diverse/machine-review.json
 ```
 
-Use new output paths for another review. The commands do not call a paid model automatically.
-The manifest records relative local paths for its ignored evidence cache; another checkout must
-recover those exact artifacts before replay. `machine-check` exits 0 when every case is accepted,
-1 when valid records contain revisions/abstentions, and 2 for invalid or stale evidence.
+Use a fresh output path for a new preparation. machine-check exits 0 for complete acceptance, 1 for valid unresolved judgments and 2 for invalid/stale input or bindings. The workflow verifies static labels; later scanner findings require their own adjudication protocol.
 
-The sidecar preserves the actual model response and receipt hashes and never writes a human name
-or approval into the pack. Its acceptance is not an exploitation test, fixed-control outcome or
-scanner result. The existing runner can execute draft plans without human approval; legacy human
-reviewed reporting scopes remain distinct. Scanner-result adjudication and precision sampling
-need their own declared machine-judge protocol before performance claims are made.
-
-## Pending admission
-
-Each case's `admission-gate` evidence lists remaining deployment and empirical-validation work.
-These are requirements for the corresponding runtime/control claims, not a mandatory human gate
-or a prerequisite for every static-label acceptance. The retained cases:
-
-| Case | Required semantic validation |
-|---|---|
-| browser-use | Trace the navigation caller; compare colon-bearing userinfo on both pins with the same enabled domain allowlist. No network request is needed for the parsing check. |
-| Codex | Establish tool control of cwd; freeze WorkspaceWrite and one OS backend; map dispatcher and policy-builder locations and adapt the upstream cwd/policy-root regression. |
-| oauth2-proxy | Freeze a susceptible route expression, protected backend and header behavior; compare query-bearing requests and a benign allowed route. Scope the fix to `isAllowedPath` query handling. |
-| OpenAM | Inspect the vulnerable reader's class restrictions; establish the JATO request caller and reachable endpoint; freeze JDK/dependencies and the fixed helper's allowlist. Hold the pre-authentication target if critical caller source is unavailable. |
-| Flowise | Trace the actual import route, authentication and importer authority; establish ID flow to SQL; validate the fixed UUID guard and normal UUID import. The patch does not parameterize the query. |
-| SAML | Determine exactly which assertion is verified and which identity is consumed; adapt upstream `TestMultipleAssertions` with its pinned clock; map verifier and consumer locations on both pins. |
-
-
-The additions require these checks before labels and common context are frozen:
-
-| Case | Required semantic validation |
-|---|---|
-| GitLab CVE-2024-8124 | Trace the POST/callback and feature flag; measure bounded resource growth with the exact Ruby/Rails and request limits. No exponential-complexity claim from a regex alone. |
-| GitLab CVE-2024-8641 | Confirm candidate-fix mapping; trace CI_JOB_TOKEN exchange, user sign-in and session-cookie replay; compare middleware behavior with frozen flags and victim assumptions. |
-| GitLab CVE-2024-6685 | Compare Developer and Maintainer access through one runner-information route, including inheritance; identify the disclosed fields without assuming token theft. |
-| Kubernetes CVE-2023-5528 | Trace volume-author input into Windows cmd.exe and verify the privileged path with a Windows-compatible isolated regression. |
-| Kubernetes CVE-2024-3177 | Enable the explicit mountable-secrets annotation; compare ordinary, init and ephemeral envFrom paths and a permitted secret reference. |
-| Kubernetes CVE-2020-8555 | Validate the selected GlusterFS response/error/event disclosure path using harmless isolated responses. The patch redacts errors; it is not a general outbound-request block. |
-| Airflow CVE-2024-45034 | Freeze the Airflow 2 DAG-author/scheduler boundary and import search order; compare a harmless airflow_local_settings module marker. Normal task execution is not this allegation. |
-| Airflow CVE-2023-47265 | Trace stored parameter HTML to a distinct UI user's browser and compare default fixed rendering with opt-in raw HTML. |
-| Langflow CVE-2025-3248 | Verify router authentication and harmless definition-time execution; compare anonymous rejection after the patch. Authenticated code execution is not made safe by this fix. |
-| Langflow CVE-2026-42867 | Validate request schema, authentication, traversal/absolute paths and normal creation in a temporary storage tree; resolve the rating's privilege discrepancy separately. |
-| LangChain CVE-2026-26013 | Freeze token-counting caller and dependencies; validate a harmless destination test and confirm the fixed validation helper is installed. DNS rebinding is outside this target. |
-| LangChain CVE-2026-34070 | Freeze the untrusted-configuration caller and observable file contents; compare path forms with the dangerous-path opt-in disabled. Do not claim a symlink-resistant sandbox. |
-
-Candidate fixes are evidence only. Add a fixed snapshot and narrow control property after its
-behavior is validated; an unrelated real vulnerability is not a false alarm for that control.
-Zero validated controls means control outcomes are unavailable. A fixed control is only needed
-when claiming behavior on repaired code; detection of a known vulnerable target can be assessed
-separately. Use machine review above for static labels. Model selection critiques and mechanical
-checks alone do not establish a per-case semantic judgment.
-
-## Scanner inputs
-
-Freeze ordinary deployment configuration and caller context identically for every scanner before
-viewing outputs. Keep CVE identities, labeled locations, expected findings and exploit fixtures
-out of prompts. Hold targets whose required configuration cannot be supplied equally.
-
-**The current Semgrep, llm-harness and DeepSec adapters declare neither Java nor Ruby support.**
-They record OpenAM and the GitLab snapshot as unsupported. Corpus/request metadata accepts both
-languages, but capability and target-component coverage need verified adapter changes before an
-executable comparison. Unsupported inputs remain visible. Windows-specific Kubernetes semantics
-also require explicit context; running on a Mac does not validate a Windows exploit.
-
-A hypothetical three-scanner, three-repeat run over 16 input snapshots has 144 scheduled inputs,
-not 162: the three GitLab CVEs share one source scan per repetition. This is arithmetic only;
-no run configuration or benchmark batch was created. Failed, partial and unsupported inputs must
-be distinguished from completed misses. Fixed controls would add separate work after validation.
-
-[snapshot-inventory.json](snapshot-inventory.json) records file counts, bytes and extension
-breakdowns for every exported input. This measures workload size, not scanner coverage. Freeze
-each adapter's runtime/context budgets before scheduling scans; those budgets are still undeclared.
-
-A hit requires a supported causal security allegation under the frozen assumptions and a
-predeclared reporting location. Location/category/CVE-name matches alone are insufficient.
-One canonical target per CVE remains the counting unit; repeated spans, findings and scans do not
-multiply it. Reviewed precision requires a separately declared sampled-claims protocol.
-
-## Selection review
-
-The retained six received three earlier Mac CLI plan critiques requesting `claude-mythos-5-1`;
-all receipts reported both `claude-mythos-5-1` and `claude-fable-5-1`. Those critiques cover the
-original selection only. The expanded selection's requested Mythos 5.1 critique completed and
-also reported both models. [selection-review.json](selection-review.json) records that ambiguity,
-the concrete label corrections and the recommendation to keep 18 rather than add unverified IDs.
-The frozen pack is the pre-judgment input; its pending-review notes describe that input state.
-Public disclosure exposure is known; training exposure and recognition remain unmeasured.
+Before a benchmark, freeze scanner-visible caller/configuration context, adapter versions, budgets, repetitions and the run plan. Give scanners the same ordinary context, keeping CVE names, accepted locations, repair hints and judge answers outside scanner inputs. Preserve unsupported cases, errors, timeouts and incomplete coverage. Candidate repairs here are source evidence; claiming fixed-control behavior requires separate execution.

@@ -2,23 +2,23 @@
   "schema_version": "1.0",
   "review_kind": "machine",
   "scope": "static_labels",
-  "packet_set_sha256": "sha256:f9d485bb80fcb5797cf52b2ad6d5b608233434b0209c383d44ebb4c8cf8aaa5e",
-  "judgments_sha256": "sha256:4244ac0d9b318ce9ba45b692d0b915dfa3a1eea7ce1250a10e2a49271ec4e1c9",
+  "packet_set_sha256": "sha256:5f802131a57c4780729c094fa4df8f34152c4143448c8ab3fd34100759499e76",
+  "judgments_sha256": "sha256:068f2818ccc74eb57493303bef65ea2804f5120e197a345237e68d1a36f3afe9",
   "judgments": {
     "schema_version": "1.0",
     "review_kind": "machine",
     "scope": "static_labels",
     "provenance": {
-      "run_id": "/root/astra_corpus_judge:followup-v2",
+      "run_id": "/root/astra_corpus_judge:corpus-50-aggregate",
       "requested_model": "gpt-6-astra",
       "reported_model": "gpt-6-astra",
       "identity_basis": "orchestrator_task_metadata",
       "identity_ambiguous": false,
-      "prompt_sha256": "sha256:e1ca286cb80285db7f65e9d3f998c369b46d53bab59b9ff839c53ff845ece2be",
-      "receipt_path": "results/corpus-machine-review-20261022/astra-run-v2.json",
-      "receipt_sha256": "sha256:34dc9d3692c081df807165b26380a3ea7c37cd8806294e8bc5448b82f12b3f88",
-      "prompt_path": "results/corpus-machine-review-20261022/astra-review-v2.prompt.txt",
-      "reviewed_at": "2026-10-22T17:43:36.479473+00:00"
+      "prompt_sha256": "sha256:13a74dcdbbb9542dca8bdf57733a098e00f29950b04c585429e40f286fd884e3",
+      "receipt_path": "results/corpus-50-20261022/astra-run-final.json",
+      "receipt_sha256": "sha256:edb2dc1ff8516e5a34300b3ef7bb55fc05eb8747adf240ca42c6770c50b1cf6b",
+      "prompt_path": "results/corpus-50-20261022/astra-final.prompt.txt",
+      "reviewed_at": "2026-10-22T19:08:38.996714+00:00"
     },
     "judgments": [
       {
@@ -1090,25 +1090,1855 @@
           "No application or file-disclosure scenario was executed. The user-supplied-config and observable-output assumptions are necessary, as are readable files meeting the parser/extension constraints. The patch is not a general symlink-containment control.",
           "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
         ]
+      },
+      {
+        "case_id": "nextjs-cve-2025-29927",
+        "packet_sha256": "sha256:a0adaeca694ba66bae50af8aca3ada2f00ebf6a7fb7b7775d01f819f133c09eb",
+        "verdict": "accept",
+        "rationale": "The external router invokes the internal-header filter, but its list omits x-middleware-subrequest. The sandbox counts attacker-supplied repetitions of the middleware name and returns x-middleware-next before executing middleware at depth five. Both the omitted filter and early-return guard are relevant. The directly referenced repair filters chains lacking the process-specific internal identifier. Source at the verified parent supports middleware-only authorization bypass under the declared reachable-header and endpoint assumptions. Published severity provenance supports 3.1 9.1 (cna_cvss); differing authority ratings are retained in the case rather than recomputed.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 40,
+            "end_line": 59
+          },
+          {
+            "artifact_id": "source:packages/next/src/server/web/sandbox/sandbox.ts",
+            "start_line": 96,
+            "end_line": 114
+          },
+          {
+            "artifact_id": "source:packages/next/src/server/lib/server-ipc/utils.ts",
+            "start_line": 42,
+            "end_line": 61
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 177,
+            "end_line": 181
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Requires susceptible middleware authorization and header delivery; protected hosting/proxies or independent endpoint authorization can prevent impact.",
+          "Static source/advisory assessment only: no runtime reproduction, validated fixed control, human approval, deployment exploitability measurement or scanner-performance claim."
+        ]
+      },
+      {
+        "case_id": "nextjs-cve-2024-46982",
+        "packet_sha256": "sha256:e2f3cbf1bb2b3bbf3b78698b6d5470f2c526e390e0da04435c53404fd35ea749",
+        "verdict": "accept",
+        "rationale": "The pinned base server treats x-now-route-matches as evidence of SSG even for the scoped SSR Pages Router route. The SSR renderer calls getServerSideProps without setting zero revalidation, and base-server substitutes one second when the result omits revalidate. These three spans form the input, missing non-cacheability assignment, and cache-duration propagation. The directly referenced repair sets SSR revalidate to zero and removes the fallback. Shared-cache/content consequences remain deployment-dependent. Published severity provenance supports 3.1 7.5 (cna_cvss); differing authority ratings are retained in the case rather than recomputed.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 28,
+            "end_line": 49
+          },
+          {
+            "artifact_id": "source:packages/next/src/server/base-server.ts",
+            "start_line": 1793,
+            "end_line": 1803
+          },
+          {
+            "artifact_id": "source:packages/next/src/server/base-server.ts",
+            "start_line": 2574,
+            "end_line": 2580
+          },
+          {
+            "artifact_id": "source:packages/next/src/server/render.tsx",
+            "start_line": 1072,
+            "end_line": 1096
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Limited to non-dynamic SSR Pages Router routes in the stated mode; preview/no-cache behavior and independent response headers can alter caching. Cross-user impact needs an appropriate shared cache and content.",
+          "Static source/advisory assessment only: no runtime reproduction, validated fixed control, human approval, deployment exploitability measurement or scanner-performance claim."
+        ]
+      },
+      {
+        "case_id": "grafana-cve-2021-39226",
+        "packet_sha256": "sha256:efb51d79f68152acad60ec50fa355b13b6004ee778ee87957df265c259431d72",
+        "verdict": "accept",
+        "rationale": "The route map stores literal parameterized patterns; ServeHTTP fast-matches the literal request path and invokes its leaf with nil parameters. The unguarded public snapshot API passes the resulting empty key to the ORM struct lookup, which lacks an explicit key restriction; the CNA confirms snapshot disclosure for this literal path. The repair disables that shortcut for parameter markers and rejects an empty key. All three source spans support the deliberately narrowed reading claim; expiry handling and deletion distinctions are retained. Published severity provenance supports 3.1 9.8 (cna_cvss); differing authority ratings are retained in the case rather than recomputed.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 15,
+            "end_line": 24
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 49,
+            "end_line": 65
+          },
+          {
+            "artifact_id": "source:pkg/macaron/router.go",
+            "start_line": 289,
+            "end_line": 305
+          },
+          {
+            "artifact_id": "source:pkg/api/dashboard_snapshot.go",
+            "start_line": 147,
+            "end_line": 170
+          },
+          {
+            "artifact_id": "source:pkg/services/sqlstore/dashboard_snapshot.go",
+            "start_line": 90,
+            "end_line": 101
+          },
+          {
+            "artifact_id": "source:pkg/macaron/router.go",
+            "start_line": 53,
+            "end_line": 67
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 484,
+            "end_line": 488
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "A selected snapshot must be unexpired to be returned. ORM behavior is supported by the scoped query and primary advisory, not a local database execution. No deletion/database-walk claim is accepted.",
+          "Static source/advisory assessment only: no runtime reproduction, validated fixed control, human approval, deployment exploitability measurement or scanner-performance claim."
+        ]
+      },
+      {
+        "case_id": "grafana-cve-2022-31107",
+        "packet_sha256": "sha256:c9e799c74bb25da28b2177afa247ce0676dee881e88cdc5c5b213ed34b138e40",
+        "verdict": "accept",
+        "rationale": "OAuth SyncUser passes external identity, email and login into UpsertUser. After external-ID and email misses, LookupByOneOf resolves the attacker-controlled login to the victim; LookupAndUpdate then associates the external authentication record. The intervening user-mapping policy is explicit and OSS permits it. The repair gives OAuth email-only lookup parameters. CVE-to-fix mapping is an inference supported by the exact repair in the retained v9.0.2...v9.0.3 comparison and the matching CNA mechanism/fixed release, not a direct advisory commit link. Published severity provenance supports 3.1 7.1 (cna_cvss); differing authority ratings are retained in the case rather than recomputed.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "release-compare",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 62,
+            "end_line": 73
+          },
+          {
+            "artifact_id": "source:pkg/services/login/loginservice/loginservice.go",
+            "start_line": 44,
+            "end_line": 60
+          },
+          {
+            "artifact_id": "source:pkg/services/login/authinfoservice/service.go",
+            "start_line": 80,
+            "end_line": 112
+          },
+          {
+            "artifact_id": "source:pkg/services/login/authinfoservice/service.go",
+            "start_line": 130,
+            "end_line": 183
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 295,
+            "end_line": 320
+          },
+          {
+            "artifact_id": "context-2-vulnerable",
+            "start_line": 14,
+            "end_line": 16
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Requires an admitted OAuth identity, controllable colliding login, misses for prior binding/email, enabled victim and permissive mapping policy. Enterprise/provider restrictions may prevent it.",
+          "Static source/advisory assessment only: no runtime reproduction, validated fixed control, human approval, deployment exploitability measurement or scanner-performance claim."
+        ]
+      },
+      {
+        "case_id": "argo-cd-cve-2025-55190",
+        "packet_sha256": "sha256:033ac565e505288aac7b1b161df58984a1d1d030b45abd1c20b08fdfa6fdf18a",
+        "verdict": "accept",
+        "rationale": "GetDetailedProject enforces projects/get, then returns the helper-provided repositories without sanitization. Traced helpers retrieve project-indexed secrets and copy passwords, tokens and private keys into repository objects. The direct advisory-linked repair sanitizes each repository and cluster before returning them. The accepted server location is the actual disclosure boundary. The scoped claim requires project-scoped repository credentials and projects/get, not merely application management permissions. Published severity provenance supports 3.1 10 (cna_cvss); differing authority ratings are retained in the case rather than recomputed.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 230,
+            "end_line": 249
+          },
+          {
+            "artifact_id": "source:server/project/project.go",
+            "start_line": 303,
+            "end_line": 319
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 672,
+            "end_line": 693
+          },
+          {
+            "artifact_id": "context-2-vulnerable",
+            "start_line": 109,
+            "end_line": 135
+          },
+          {
+            "artifact_id": "context-3-vulnerable",
+            "start_line": 325,
+            "end_line": 343
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Requires reachable project details API, projects/get and stored project-scoped secrets. Downstream credential privilege and deployment impact are not measured.",
+          "Static source/advisory assessment only: no runtime reproduction, validated fixed control, human approval, deployment exploitability measurement or scanner-performance claim."
+        ]
+      },
+      {
+        "case_id": "argo-cd-cve-2024-41666",
+        "packet_sha256": "sha256:cc6547eb4d820497da9596d64fac9d9f88f951a24e1cdf6be5e1c2581b3f05d9",
+        "verdict": "accept",
+        "rationale": "The terminal entry checks applications/get and exec/create before opening the session. Subsequent websocket Read checks token validity and refresh but performs no RBAC recheck before accepting stdin. Removing exec permission alone need not invalidate the token, so the declared already-open session remains usable. The direct repair passes RBAC state into the session and checks both permissions during reads. The labeled read span is causally relevant without asserting bypass of initial authentication. Published severity provenance supports 3.1 4.7 (cna_cvss); differing authority ratings are retained in the case rather than recomputed.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 121,
+            "end_line": 158
+          },
+          {
+            "artifact_id": "source:server/application/websocket.go",
+            "start_line": 129,
+            "end_line": 158
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 144,
+            "end_line": 155
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Requires enabled terminal, initial permissions, an already-open session and a still-valid token. Repair inspection does not prove instantaneous cancellation of a read already blocked on the websocket.",
+          "Static source/advisory assessment only: no runtime reproduction, validated fixed control, human approval, deployment exploitability measurement or scanner-performance claim."
+        ]
+      },
+      {
+        "case_id": "harbor-cve-2024-22278",
+        "packet_sha256": "sha256:cbc057172d54a8d8ce9d8eee4e219d447885fbf37432e23d195e5159271750bd",
+        "verdict": "accept",
+        "rationale": "The maintainer role explicitly grants metadata create/update/delete. The metadata handlers enforce these grants, resolve the same project, validate metadata and perform mutations, so the guard exists but authorizes a role that should lack configuration authority. The repair removes exactly those grants. Mapping is inferred from the matching maintainer advisory and v2.10.2...v2.10.3 comparison containing this precise repair; the unrelated commit subject is not treated as proof. Same-project scope is supported. Published severity provenance supports 3.1 6.4 (cna_cvss); differing authority ratings are retained in the case rather than recomputed.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "release-compare",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 25,
+            "end_line": 34
+          },
+          {
+            "artifact_id": "source:src/common/rbac/project/rbac_role.go",
+            "start_line": 119,
+            "end_line": 128
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 46,
+            "end_line": 61
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 113,
+            "end_line": 131
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Restricted to a maintainer mutating administrator-reserved metadata in its own project; no cross-project access is established. Mapping remains explicitly inferred.",
+          "Static source/advisory assessment only: no runtime reproduction, validated fixed control, human approval, deployment exploitability measurement or scanner-performance claim."
+        ]
+      },
+      {
+        "case_id": "harbor-cve-2020-29662",
+        "packet_sha256": "sha256:d38395e806b55e9bc4d4d46eae1a16fa62c01cd2be92d46df311eaeedf5d0186",
+        "verdict": "accept",
+        "rationale": "The catalog regex matches only the path without a trailing slash. The slash variant therefore adds no catalog requirement to accessList, and the authorization caller iterates the empty list successfully. The direct repair adds the optional trailing slash. Both the matcher and access-list propagation spans are relevant. The declared downstream route/proxy compatibility is necessary; the consequence is repository-name disclosure, not image or credential access. Published severity provenance supports 3.1 5.3 (github_reviewed_cvss); differing authority ratings are retained in the case rather than recomputed.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 67,
+            "end_line": 73
+          },
+          {
+            "artifact_id": "source:src/server/middleware/patterns.go",
+            "start_line": 27,
+            "end_line": 31
+          },
+          {
+            "artifact_id": "source:src/server/middleware/v2auth/access.go",
+            "start_line": 67,
+            "end_line": 85
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 47,
+            "end_line": 71
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Requires downstream registry acceptance and proxy preservation of trailing slash. Normal catalog check is sysadmin; claim is name enumeration only.",
+          "Static source/advisory assessment only: no runtime reproduction, validated fixed control, human approval, deployment exploitability measurement or scanner-performance claim."
+        ]
+      },
+      {
+        "case_id": "minio-cve-2024-24747",
+        "packet_sha256": "sha256:64349a559294852d77aa613867016830348999ae5621c39067ffce7bb1b62507",
+        "verdict": "accept",
+        "rationale": "The update handler first evaluates explicit administrative permission, but on failure accepts matching parent identity and proceeds to parse NewPolicy and update the service account. IAM evaluation applies parent authority and inline restrictions, explaining why a restricted enabled child can alter its restriction toward its stronger parent. The direct repair removes the same-parent fallback and evaluates inline policy without owner bypass. Both the handler guard and policy propagation spans contribute to the narrow escalation claim. Published severity provenance supports 3.1 8.8 (cna_cvss); differing authority ratings are retained in the case rather than recomputed.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 44,
+            "end_line": 59
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 244,
+            "end_line": 268
+          },
+          {
+            "artifact_id": "source:cmd/admin-handlers-users.go",
+            "start_line": 777,
+            "end_line": 794
+          },
+          {
+            "artifact_id": "source:cmd/iam.go",
+            "start_line": 1847,
+            "end_line": 1881
+          },
+          {
+            "artifact_id": "source:cmd/admin-handlers-users.go",
+            "start_line": 816,
+            "end_line": 835
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Requires an enabled restricted child, reachable same-parent target and stronger parent authority; independent explicit denies and external policy controls may constrain the result.",
+          "Static source/advisory assessment only: no runtime reproduction, validated fixed control, human approval, deployment exploitability measurement or scanner-performance claim."
+        ]
+      },
+      {
+        "case_id": "minio-cve-2021-21390",
+        "packet_sha256": "sha256:afb0e3c48f8ff2896d3a97476918e9407d68a611451b9f06fd1d3ec231c02b7c",
+        "verdict": "accept",
+        "rationale": "The chunk reader fills and returns caller buffers before reaching the advertised chunk boundary where the signature is checked. The upload handler derives size from decoded-content-length and the hash reader limits consumption to that size, so the declared oversized chunk can leave the verifier unreached. Seed request authentication and PUT authorization still occur. The directly referenced repair reads a bounded whole chunk, verifies its signature, then returns its bytes. The source span supports the conditional chunk-integrity allegation. Published severity provenance supports 3.1 6.5 (cna_cvss); differing authority ratings are retained in the case rather than recomputed.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 338,
+            "end_line": 358
+          },
+          {
+            "artifact_id": "source:cmd/streaming-signature-v4.go",
+            "start_line": 264,
+            "end_line": 306
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 1425,
+            "end_line": 1440
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 1480,
+            "end_line": 1494
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 1543,
+            "end_line": 1549
+          },
+          {
+            "artifact_id": "context-2-vulnerable",
+            "start_line": 111,
+            "end_line": 125
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Requires an actively modifiable non-TLS stream, valid seed authentication and consumer completion before chunk boundary. An independently validated content checksum can block payload modification; TLS prevents the stated intermediary.",
+          "Static source/advisory assessment only: no runtime reproduction, validated fixed control, human approval, deployment exploitability measurement or scanner-performance claim."
+        ]
+      },
+      {
+        "case_id": "keycloak-cve-2023-3597",
+        "packet_sha256": "sha256:6b5a8d12709961155fda736139b2603ad1c525c97659286d70ec480227fd5581",
+        "verdict": "accept",
+        "rationale": "The pinned requested-LoA accessor reads only the client note. ConditionalLoaAuthenticator skips a configured higher level when that requested value is lower. The enabled app-initiated KC_ACTION dispatcher reaches UpdateTotp, which validates the supplied new secret/token and adds it; an existing OTP triggers a device-label requirement, not proof of the old factor. The relevant hunks of the directly referenced backport compute the maximum of client and credential-action assurance based on configured flow and existing credentials. All three labeled spans support this scoped step-up failure. Published severity provenance supports 3.1 5 (cna_cvss); differing authority ratings are retained in the case rather than recomputed.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 732,
+            "end_line": 763
+          },
+          {
+            "artifact_id": "source:services/src/main/java/org/keycloak/authentication/authenticators/util/AcrStore.java",
+            "start_line": 56,
+            "end_line": 65
+          },
+          {
+            "artifact_id": "source:services/src/main/java/org/keycloak/authentication/authenticators/conditional/ConditionalLoaAuthenticator.java",
+            "start_line": 52,
+            "end_line": 80
+          },
+          {
+            "artifact_id": "source:services/src/main/java/org/keycloak/authentication/requiredactions/UpdateTotp.java",
+            "start_line": 70,
+            "end_line": 121
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 1287,
+            "end_line": 1296
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 1320,
+            "end_line": 1335
+          },
+          {
+            "artifact_id": "context-2-vulnerable",
+            "start_line": 383,
+            "end_line": 388
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Requires the declared step-up flow, existing higher-level OTP, known password and enabled app-initiated CONFIGURE_TOTP. Normal OIDC/session checks still apply; unrelated backport changes are not part of the claim.",
+          "Static source/advisory assessment only: no runtime reproduction, validated fixed control, human approval, deployment exploitability measurement or scanner-performance claim."
+        ]
+      },
+      {
+        "case_id": "keycloak-cve-2023-2422",
+        "packet_sha256": "sha256:d61ffc9035c9f0efe0886f1eb58b8e684276f366f90905cfb6c6dfcf1e6b0478",
+        "verdict": "accept",
+        "rationale": "After selecting an enabled client and obtaining a nonempty trusted certificate chain, the authenticator searches every certificate for the configured subject or regex, then succeeds on any match. Under the explicitly matching-nonleaf assumption this authorizes the selected client although the leaf belongs elsewhere. The directly referenced repair matches certs[0] only. The broad source span contains the preceding guards and actual faulty match; the label correctly avoids claiming absent TLS chain validation. Published severity provenance supports 3.1 5.5 (cna_cvss); differing authority ratings are retained in the case rather than recomputed.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 24,
+            "end_line": 51
+          },
+          {
+            "artifact_id": "source:services/src/main/java/org/keycloak/authentication/authenticators/client/X509ClientAuthenticator.java",
+            "start_line": 99,
+            "end_line": 168
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Requires the selected enabled client configuration and a trusted presented chain with matching nonleaf subject. Does not demonstrate missing TLS trust validation or arbitrary client impersonation without that match.",
+          "Static source/advisory assessment only: no runtime reproduction, validated fixed control, human approval, deployment exploitability measurement or scanner-performance claim."
+        ]
+      },
+      {
+        "case_id": "etcd-cve-2023-32082",
+        "packet_sha256": "sha256:79dd6f80cae61ae3391e0c0cc74346ad7ab29c7cedd6a81c9ec3e2e5d3d5fca7",
+        "verdict": "accept",
+        "rationale": "The public lease RPC delegates to LeaseTimeToLive. At the verified pre-merge pin, Keys=true collects and returns lease key names without per-key read permission checks, for both local leader lookup and forwarded response. The advisory-linked merged PR metadata identifies the selected merge and its vulnerable parent; the retained component patch adds per-key IsRangePermitted and auth-revision checks. The accepted span is the actual unchecked disclosure operation, limited to names with RBAC enabled. Published severity provenance supports 3.1 3.1 (cna_cvss); differing authority ratings are retained in the case rather than recomputed.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-pr",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 20,
+            "end_line": 75
+          },
+          {
+            "artifact_id": "source:server/etcdserver/v3_server.go",
+            "start_line": 320,
+            "end_line": 365
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 62,
+            "end_line": 75
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Requires RBAC-enabled cluster and valid lease identifier; only key names, not values, are exposed. No live cluster was used.",
+          "Static source/advisory assessment only: no runtime reproduction, validated fixed control, human approval, deployment exploitability measurement or scanner-performance claim."
+        ]
+      },
+      {
+        "case_id": "containerd-cve-2020-15157",
+        "packet_sha256": "sha256:dd443088fd602fd01e0fd6bcea2de23802d1a83a75f686a2fabda6a7ac8ac2dc",
+        "verdict": "accept",
+        "rationale": "The revised label now explicitly requires credentials to be returned for the challenged foreign host. This resolves the initial material omission: the authorizer derives that host from the response and queries credentials(host), while the pinned ctr callback ignores host and supplies the configured credentials. Foreign descriptor URLs enter the same fetcher and authenticated retry path; the direct repair uses an auth-disabled copy for them. Both accepted fetcher spans are relevant. The original pre-packet finding is preserved separately, and this acceptance applies only to the corrected scope. Published severity provenance supports 3.1 6.1 (cna_cvss); differing authority ratings are retained in the case rather than recomputed.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 18,
+            "end_line": 37
+          },
+          {
+            "artifact_id": "source:remotes/docker/fetcher.go",
+            "start_line": 58,
+            "end_line": 76
+          },
+          {
+            "artifact_id": "source:remotes/docker/fetcher.go",
+            "start_line": 142,
+            "end_line": 163
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 416,
+            "end_line": 431
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 453,
+            "end_line": 465
+          },
+          {
+            "artifact_id": "context-2-vulnerable",
+            "start_line": 73,
+            "end_line": 97
+          },
+          {
+            "artifact_id": "context-2-vulnerable",
+            "start_line": 150,
+            "end_line": 157
+          },
+          {
+            "artifact_id": "context-3-vulnerable",
+            "start_line": 102,
+            "end_line": 107
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "A host-scoped callback returning no secret prevents disclosure. Applies to the susceptible containerd1.2 resolver path, including pinned ctr behavior, not Docker or1.3+.",
+          "Static source/advisory assessment only: no runtime reproduction, validated fixed control, human approval, deployment exploitability measurement or scanner-performance claim."
+        ]
+      },
+      {
+        "case_id": "cosign-cve-2022-23649",
+        "packet_sha256": "sha256:d17aeab39649c3ea90702048c6ff82d13a7c3f69a4d4873f30c00448e549a98b",
+        "verdict": "accept",
+        "rationale": "Ordinary OCI signature/claim checks run before VerifyBundle. Bundle verification authenticates the Rekor SET; on the certificate path it checks time and payload hash, but bundleHash extracts the payload hash without comparing the recorded signature to the actual OCI signature. A valid matching-payload bundle from another signature can therefore falsely establish inclusion under the stated passing-crypto assumptions. The directly referenced repair compares signatures before accepting the bundle. The label does not assert signature forgery or payload-hash bypass. Published severity provenance supports 3.1 3.3 (cna_cvss); differing authority ratings are retained in the case rather than recomputed.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 119,
+            "end_line": 155
+          },
+          {
+            "artifact_id": "source:pkg/cosign/verify.go",
+            "start_line": 581,
+            "end_line": 637
+          },
+          {
+            "artifact_id": "source:pkg/cosign/verify.go",
+            "start_line": 341,
+            "end_line": 388
+          },
+          {
+            "artifact_id": "source:pkg/cosign/verify.go",
+            "start_line": 674,
+            "end_line": 698
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Requires OCI metadata modification and a valid bundle for another signature with matching payload; other cryptographic/identity checks must pass. Keypair cert-absent early return is more permissive; attestations are outside this scoped standard-signature claim.",
+          "Static source/advisory assessment only: no runtime reproduction, validated fixed control, human approval, deployment exploitability measurement or scanner-performance claim."
+        ]
+      },
+      {
+        "case_id": "requests-cve-2024-35195",
+        "packet_sha256": "sha256:6b6737867f3ac3d6fab132094b3c9a865f6da206bf9eeb6efc1921702a435ee4",
+        "verdict": "accept",
+        "rationale": "The adapter selects a connection pool using URL/proxy without verification settings, then mutates pool certificate attributes through cert_verify. A previously established unverified TLS connection can remain reusable, so changing verify for the same session/host does not retroactively authenticate that connection. The advisory-linked merge and retained repair introduce verification settings into pool selection. Both the pool lookup and send/cert_verify ordering spans support the scoped reuse failure. Published severity provenance supports 3.1 5.6 (cna_cvss); differing authority ratings are retained in the case rather than recomputed.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 44,
+            "end_line": 63
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 73,
+            "end_line": 110
+          },
+          {
+            "artifact_id": "source:src/requests/adapters.py",
+            "start_line": 339,
+            "end_line": 357
+          },
+          {
+            "artifact_id": "source:src/requests/adapters.py",
+            "start_line": 455,
+            "end_line": 468
+          },
+          {
+            "artifact_id": "source:src/requests/adapters.py",
+            "start_line": 246,
+            "end_line": 275
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Requires same Session/host and a reusable connection initially established with verify=False; a fresh connection/session can remove the condition. No urllib3 runtime or TLS interception was executed.",
+          "Static source/advisory assessment only: no runtime reproduction, validated fixed control, human approval, deployment exploitability measurement or scanner-performance claim."
+        ]
+      },
+      {
+        "case_id": "requests-cve-2023-32681",
+        "packet_sha256": "sha256:d58df1fb26abde21bfb291c78aba687ec3e02e3a628aedd10ae4711be40651e0",
+        "verdict": "accept",
+        "rationale": "The redirect loop calls rebuild_proxies before resending the prepared request. At the vulnerable pin, rebuild_proxies removes an old proxy header but unconditionally reconstructs Proxy-Authorization from the selected scheme's proxy credentials, including for HTTPS. The standard adapter forwards request.headers into the tunneled request. The patch specifically excludes HTTPS from this reconstruction. The label preserves authenticated-proxy, redirect and attacker-observable-destination assumptions; public CVE identity, exact repair/parent and CNA severity agree.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "source:requests/sessions.py",
+            "start_line": 315,
+            "end_line": 328
+          },
+          {
+            "artifact_id": "source:requests/sessions.py",
+            "start_line": 244,
+            "end_line": 246
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 15,
+            "end_line": 25
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Static redirect/header trace only; no proxy network traffic was executed.",
+          "The proxy mapping must actually yield credentials for the redirected HTTPS scheme; merely configuring an unrelated proxy is insufficient."
+        ]
+      },
+      {
+        "case_id": "urllib3-cve-2023-43804",
+        "packet_sha256": "sha256:e97950f432988d94139d6e9b50d8c551f50edbbb21e42f7351efda9040b3499e",
+        "verdict": "accept",
+        "rationale": "Retry's default removal set contains Authorization but not Cookie; PoolManager compares the redirect origin and removes only headers in that set before recursively requesting the destination. Explicit sensitive Cookie headers therefore persist across the stated cross-origin redirect. The patch adds Cookie to the default set. This does not assert browser cookie-jar behavior or override user-defined policies. Raw CVE, repair parent, and selected CNA metric match.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "source:src/urllib3/util/retry.py",
+            "start_line": 234,
+            "end_line": 238
+          },
+          {
+            "artifact_id": "source:src/urllib3/poolmanager.py",
+            "start_line": 393,
+            "end_line": 418
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 33,
+            "end_line": 45
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No HTTP execution; applications that disable redirects or remove Cookie explicitly are outside the label.",
+          "The retained CNA score differs from reviewed GitHub's later CVSS4 rating; the declared CNA-first selection is followed."
+        ]
+      },
+      {
+        "case_id": "jsonwebtoken-cve-2022-23541",
+        "packet_sha256": "sha256:6ef43754b0a9f6c19ac7c5f4ffe6ed0005b3afe7a4a9255d8f217db53b3c6ba1",
+        "verdict": "accept",
+        "rationale": "At the retained v8.5.1 release, the untrusted decoded header is passed to the key callback; explicitly configured algorithms suppress PEM-based inference, and verification checks algorithm membership before passing the same public-key bytes to jws.verify without key-type compatibility enforcement. The stated mixed-algorithm, poorly bound callback and known-public-key assumptions support the narrowed HMAC confusion claim. The causal repair is inferred through the retained release comparison: ecdf6 adds KeyObjects and rejects HS with non-secret keys; the advisory links a later release commit. This is not misrepresented as a first-parent mapping. CNA severity agrees.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "source:verify.js",
+            "start_line": 81,
+            "end_line": 96
+          },
+          {
+            "artifact_id": "source:verify.js",
+            "start_line": 113,
+            "end_line": 133
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 713,
+            "end_line": 747
+          },
+          {
+            "artifact_id": "affected-release-tag",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "release-to-published-fix",
+            "start_line": 1,
+            "end_line": 1
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Static key/algorithm flow only; no forged token was generated or verified.",
+          "Default PEM algorithm inference alone does not establish this misconfiguration.",
+          "Repair mapping is an explicit release-history inference, not a direct advisory link to ecdf6."
+        ]
+      },
+      {
+        "case_id": "werkzeug-cve-2023-23934",
+        "packet_sha256": "sha256:b2ab75a0b02f17d914ba243da8ac36b46805fb9033d7bb259823697d862f4b77",
+        "verdict": "accept",
+        "rationale": "The nonempty key regex combined with search from the current position can skip a leading equals sign and reinterpret the value of a nameless cookie as a named cookie. The public parser only discards empty parsed keys, so it does not restore the lost distinction. The repair permits empty keys, anchors matching at the current offset and skips empty names. The label correctly requires affected browser/subdomain behavior and application selection of the malicious value, rather than universal browser impact. Direct mapping, first parent and CNA metric match.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "source:src/werkzeug/_internal.py",
+            "start_line": 35,
+            "end_line": 46
+          },
+          {
+            "artifact_id": "source:src/werkzeug/_internal.py",
+            "start_line": 381,
+            "end_line": 395
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 30,
+            "end_line": 61
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No browser or cookie-parser execution; browser acceptance and duplicate-cookie ordering remain explicit deployment conditions."
+        ]
+      },
+      {
+        "case_id": "fastify-cve-2022-41919",
+        "packet_sha256": "sha256:b32b1d09ffbe126c7d111aab12afd5815911a4f83622c658d35f957a00d0c5f4",
+        "verdict": "accept",
+        "rationale": "The vulnerable parser selects registered parsers by substring search over the full Content-Type string; application/json precedes text/plain, so a JSON substring in parameters of a browser-safelisted essence can select the JSON parser. The run/done path delivers the parsed body to the handler. The repair parses MIME type and distinguishes its essence from parameters. The label requires a JSON/preflight-dependent state-changing route, credential-bearing browser behavior and no independent CSRF defense. The direct CVE mapping, parent and CNA severity agree.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "source:lib/contentTypeParser.js",
+            "start_line": 92,
+            "end_line": 107
+          },
+          {
+            "artifact_id": "source:lib/contentTypeParser.js",
+            "start_line": 30,
+            "end_line": 36
+          },
+          {
+            "artifact_id": "source:lib/contentTypeParser.js",
+            "start_line": 170,
+            "end_line": 179
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 47,
+            "end_line": 70
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 97,
+            "end_line": 113
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No browser request or route execution; independent CSRF/origin defenses and SameSite policy can prevent exploitation."
+        ]
+      },
+      {
+        "case_id": "sveltekit-cve-2023-29008",
+        "packet_sha256": "sha256:f2965a8fb59a2bd002baa57507753ccd606378303d7bb27eb38b85742d0b410b",
+        "verdict": "accept",
+        "rationale": "is_content_type strips parameters but compares the essence case-sensitively. is_form_content_type feeds that result into respond's cross-origin state-changing-method guard, so an uppercase equivalent can bypass that guard. The repair lowercases the essence. The selected POST allegation is narrower than the guard's full method set and preserves accepting endpoint, credential and independent-defense conditions. The pinned parent, direct CVE repair reference and CNA metric agree.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "source:packages/kit/src/utils/http.js",
+            "start_line": 62,
+            "end_line": 64
+          },
+          {
+            "artifact_id": "source:packages/kit/src/utils/http.js",
+            "start_line": 70,
+            "end_line": 78
+          },
+          {
+            "artifact_id": "source:packages/kit/src/runtime/server/respond.js",
+            "start_line": 52,
+            "end_line": 67
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 35,
+            "end_line": 44
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Static server guard assessment; no browser behavior was executed, and the advisory's cookie/browser conditions remain necessary."
+        ]
+      },
+      {
+        "case_id": "jupyterhub-cve-2024-41942",
+        "packet_sha256": "sha256:69559922ed3bb767bacb85fc4d01cef14c86113e050628bd52f06fcd2cd57077",
+        "verdict": "accept",
+        "rationale": "Re-reviewed the corrected frozen accepted span311–335 against the pinned source and repair. It now exactly contains the admin:users PATCH handler: attacker-supplied admin is assigned at325–329 and assign_default_roles at330–331 grants the built-in admin role through roles.py283–284. The repair explicitly rejects granting admin without current_user.admin. The original broad292–355 span was revised; its initial revise judgment remains in astra-decisions-b-v1.json and astra-notes-b-v1.md. Identity, vulnerable pin, direct repair mapping, narrowed location, conditional escalation mechanism and CNA severity are supported.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "source:jupyterhub/apihandlers/users.py",
+            "start_line": 311,
+            "end_line": 335
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 48,
+            "end_line": 65
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 266,
+            "end_line": 290
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No authenticated API request was executed; admin:users is already highly privileged and scope filters must permit the chosen account."
+        ]
+      },
+      {
+        "case_id": "jupyterhub-cve-2021-41247",
+        "packet_sha256": "sha256:3d57610a4b27ab8113347c3c6c68bda68fb35b44718f5d07c62669c4735f42d8",
+        "verdict": "accept",
+        "rationale": "HubAuthenticated obtains a token from URL or Authorization header, validates it, and for token-authenticated HubOAuth requests persists that token into a cookie. Consequently a still-active JupyterLab tab using the page-config token can reissue a single-user credential cookie after another tab's logout. The repair limits persistence to URL tokens and clears PageConfig.token when loading server extensions. The label properly excludes restoration of Hub login. First-parent mapping, advisory and CNA severity agree.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "source:jupyterhub/services/auth.py",
+            "start_line": 930,
+            "end_line": 941
+          },
+          {
+            "artifact_id": "source:jupyterhub/services/auth.py",
+            "start_line": 437,
+            "end_line": 452
+          },
+          {
+            "artifact_id": "source:jupyterhub/services/auth.py",
+            "start_line": 491,
+            "end_line": 496
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 19,
+            "end_line": 29
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 45,
+            "end_line": 59
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No multiple-tab browser session was executed; this assessment is limited to single-user-server cookie reinstatement."
+        ]
+      },
+      {
+        "case_id": "tauri-cve-2024-35222",
+        "packet_sha256": "sha256:3fc20d65b02555f66dab5ebcbc7c8fbb432a544e51220a733ac21fc577a4c2d2",
+        "verdict": "accept",
+        "rationale": "The beta-pin IPC decoder constructs InvokeRequest from a frame message and dispatches it without an invoke-key requirement; on_message reaches capability resolution without a frame-initialization binding. The patch adds the runtime key to both transports and rejects a mismatching key before dispatch. Existing ACL checks still apply to plugin commands/app manifests, so the label's reachable meaningful-command assumption is material and appropriately avoids claiming unrestricted native execution. The retained GitHub advisory directly references this repair and explains parent-frame IPC exposure. Parent and CNA metric match.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "source:core/tauri/src/webview/mod.rs",
+            "start_line": 1131,
+            "end_line": 1135
+          },
+          {
+            "artifact_id": "source:core/tauri/src/webview/mod.rs",
+            "start_line": 1165,
+            "end_line": 1180
+          },
+          {
+            "artifact_id": "source:core/tauri/src/webview/mod.rs",
+            "start_line": 1197,
+            "end_line": 1225
+          },
+          {
+            "artifact_id": "source:core/tauri/src/ipc/protocol.rs",
+            "start_line": 255,
+            "end_line": 270
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 182,
+            "end_line": 213
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 406,
+            "end_line": 426
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No WebView execution; script execution in the remote iframe and a command reachable through the resulting ACL resolution are required.",
+          "The invoke key is a subframe boundary, not protection against a compromised initialized main WebView."
+        ]
+      },
+      {
+        "case_id": "tauri-cve-2022-39215",
+        "packet_sha256": "sha256:9044ed234b9779579214a78b0ec5a537741fd9d5e04a2c847a1e29d1dc7f6d7f",
+        "verdict": "accept",
+        "rationale": "The endpoint resolves and checks only the initially requested path, then calls recursive read_dir without scope. Its metadata-based is_dir follows symlinks, and recursion descends into such child paths without another scope check, exposing entry metadata outside the allowed tree. The patch threads scope into recursion and checks symlink destinations. The label correctly restricts impact to directory listings and requires an accessible out-of-scope target and an existing crafted link. Advisory repair linkage and parent are supported; CNA severity is retained despite a lower GitHub rating.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "source:core/tauri/src/endpoints/file_system.rs",
+            "start_line": 176,
+            "end_line": 197
+          },
+          {
+            "artifact_id": "source:core/tauri/src/endpoints/file_system.rs",
+            "start_line": 339,
+            "end_line": 357
+          },
+          {
+            "artifact_id": "source:core/tauri/src/api/dir.rs",
+            "start_line": 29,
+            "end_line": 60
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 79,
+            "end_line": 99
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 117,
+            "end_line": 132
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No filesystem traversal executed; no arbitrary file-content disclosure is claimed.",
+          "CNA8.3 is copied per policy; the reviewed GitHub5.8 disagreement remains disclosed."
+        ]
+      },
+      {
+        "case_id": "authelia-cve-2021-32637",
+        "packet_sha256": "sha256:d628952104b84631303c91ba447dcb95fcc02f375fad552ea87a6e19f575f49b",
+        "verdict": "accept",
+        "rationale": "VerifyGet immediately returns through ctx.Error when GetOriginalURL fails; Error only sets JSON content/body and logging, leaving the successful HTTP status unchanged. The same source shows URL parsing of forwarded/original headers and ReplyUnauthorized's explicit401 status. The repair substitutes ReplyUnauthorized on that failure path, matching the advisory's nginx auth_request status-based authorization bypass. The label explicitly requires a proxy that forwards the malformed value and still routes the outer request. Direct mapping, pin and CNA metric match.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "source:internal/handlers/handler_verify.go",
+            "start_line": 426,
+            "end_line": 433
+          },
+          {
+            "artifact_id": "source:internal/middlewares/authelia_context.go",
+            "start_line": 55,
+            "end_line": 65
+          },
+          {
+            "artifact_id": "source:internal/middlewares/authelia_context.go",
+            "start_line": 81,
+            "end_line": 84
+          },
+          {
+            "artifact_id": "source:internal/middlewares/authelia_context.go",
+            "start_line": 209,
+            "end_line": 215
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 16,
+            "end_line": 25
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No nginx integration or malformed request was executed; other proxies/normalization may reject the request first."
+        ]
+      },
+      {
+        "case_id": "kratos-cve-2024-45042",
+        "packet_sha256": "sha256:d18dd84528f64877215660457b006711590253bf70e9ed38b87828a290e1c7cc",
+        "verdict": "accept",
+        "rationale": "DoesSessionSatisfy trusts valid cached AvailableAAL and accepts an aal1 session when that cache understates available assurance. For unset values it recomputes through credential counters, but the code strategy lacks the active-credential counter interface at this pin, consistent with the code-only first-factor assumptions. Settings and whoami callers use this gate. The actual repair123e8078 adds code counters and refreshes understated assurance; its message links the advisory, unlike later empty documentary commits. The label preserves OTP possession, configured second factor and highest_available conditions and does not assert an elevated session AAL. CNA severity agrees.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "source:session/manager_http.go",
+            "start_line": 302,
+            "end_line": 342
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 4230,
+            "end_line": 4247
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 9760,
+            "end_line": 9789
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 348,
+            "end_line": 365
+          },
+          {
+            "artifact_id": "context-2-vulnerable",
+            "start_line": 1,
+            "end_line": 458
+          },
+          {
+            "artifact_id": "context-3-vulnerable",
+            "start_line": 229,
+            "end_line": 239
+          },
+          {
+            "artifact_id": "context-4-vulnerable",
+            "start_line": 404,
+            "end_line": 410
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No OTP login or second-factor flow was executed; stale available_aal and code-only first-factor configuration are essential.",
+          "The broad repair includes unrelated credential normalization; acceptance concerns only the described assurance gate."
+        ]
+      },
+      {
+        "case_id": "zitadel-cve-2025-67494",
+        "packet_sha256": "sha256:f2699888f5db7ead4dd571520b7903d334f54911b947c3763dca5d464db411df",
+        "verdict": "accept",
+        "rationale": "getServiceUrlFromHeaders gives attacker-forwarded x-zitadel-forward-host priority over ZITADEL_API_URL. createServiceForHost obtains server credentials and forwards that destination into transport creation; the unauthenticated loginname page invokes backend settings/org helpers with it. The repair binds the transport base URL to the configured API and separates tenant/public metadata. The label appropriately limits the finding to destination control under proxy-header and egress assumptions, rather than asserting arbitrary response disclosure. Direct CVE mapping, parent and CNA severity agree.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "source:apps/login/src/lib/service-url.ts",
+            "start_line": 18,
+            "end_line": 26
+          },
+          {
+            "artifact_id": "source:apps/login/src/lib/service-url.ts",
+            "start_line": 42,
+            "end_line": 44
+          },
+          {
+            "artifact_id": "source:apps/login/src/lib/service.ts",
+            "start_line": 21,
+            "end_line": 49
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 5293,
+            "end_line": 5301
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 5314,
+            "end_line": 5333
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 5396,
+            "end_line": 5409
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 26,
+            "end_line": 42
+          },
+          {
+            "artifact_id": "context-2-vulnerable",
+            "start_line": 1206,
+            "end_line": 1227
+          },
+          {
+            "artifact_id": "context-3-vulnerable",
+            "start_line": 10,
+            "end_line": 14
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No network request executed; reverse-proxy stripping/overwriting and egress controls can block this path.",
+          "Full response-byte disclosure is outside this narrowed static label."
+        ]
+      },
+      {
+        "case_id": "cosign-cve-2026-24122",
+        "packet_sha256": "sha256:caca641281c507b4252e13933271c92ebc500dfd4f399747bf9b8dff0ef2dad8",
+        "verdict": "accept",
+        "rationale": "Certificate-chain construction uses the leaf NotBefore timestamp, while verifyInternal later calls CheckExpiry only with the leaf and a trusted timestamp or current time. CheckExpiry compares only that certificate's bounds. A custom chain whose issuer expires before its leaf can therefore pass these checks at a time after issuer expiry, assuming signature/policy/transparency checks otherwise pass. The patch carries the built issuing chain to CheckExpiry and checks each issuer at the observation time. The label explicitly excludes public Sigstore PKI. Direct repair mapping, parent and CNA severity agree.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "source:pkg/cosign/verify.go",
+            "start_line": 364,
+            "end_line": 380
+          },
+          {
+            "artifact_id": "source:pkg/cosign/verify.go",
+            "start_line": 909,
+            "end_line": 940
+          },
+          {
+            "artifact_id": "source:pkg/cosign/verify.go",
+            "start_line": 1179,
+            "end_line": 1197
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 160,
+            "end_line": 166
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 170,
+            "end_line": 192
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 200,
+            "end_line": 236
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No certificates or signatures were generated or verified; a customized PKI with the stated validity mismatch is required.",
+          "Trusted timestamp selection is not assumed attacker-forgeable."
+        ]
+      },
+      {
+        "case_id": "twenty-cve-2026-85055",
+        "packet_sha256": "sha256:dc091b61ac17f19f87ce4793e34067797abc8fe2471b90006cb3969fb9bbf1fb",
+        "verdict": "accept",
+        "rationale": "The pinned filter parser resolves field metadata and translates direct/composite/relation predicates without checking field read permissions. The find-many query runner applies caller filters to both result and aggregation builders, while output-read restrictions are enforced separately; this supports a predicate oracle over otherwise permitted rows. The direct patch checks object/field readability before translation and filters unreadable saved-view fields. The label preserves record access and observable/guessable-domain assumptions, avoiding direct field output or cross-tenant claims. CNA CVSS4.0 is correctly preferred over GitHub's3.1 because the CNA has a numeric score.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "source:packages/twenty-server/src/engine/api/graphql/graphql-query-runner/graphql-query-parsers/graphql-query-filter/graphql-query-filter-field.parser.ts",
+            "start_line": 68,
+            "end_line": 94
+          },
+          {
+            "artifact_id": "source:packages/twenty-server/src/engine/api/graphql/graphql-query-runner/graphql-query-parsers/graphql-query-filter/graphql-query-filter-field.parser.ts",
+            "start_line": 96,
+            "end_line": 117
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 179,
+            "end_line": 190
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 78,
+            "end_line": 82
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 134,
+            "end_line": 138
+          },
+          {
+            "artifact_id": "context-1-vulnerable",
+            "start_line": 223,
+            "end_line": 229
+          },
+          {
+            "artifact_id": "context-2-vulnerable",
+            "start_line": 466,
+            "end_line": 487
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No GraphQL/REST query executed; inference requires observable results and suitable candidate values.",
+          "The source CNA7.1 CVSS4 rating and GitHub6.5 CVSS3.1 rating are distinct; no scores were recomputed."
+        ]
+      },
+      {
+        "case_id": "twenty-cve-2026-55583",
+        "packet_sha256": "sha256:77ebc126cb70b44363b7af16dd1eea3a85719a54a4117c7336e38c74a947cc78",
+        "verdict": "accept",
+        "rationale": "The pinned resolver's plain TypeORM query selects shared core.agentTurn rows only by agentId and loads messages/parts. Class guards validate the caller's workspace and AI setting permission, not ownership of the argument. The stored entity has an explicit workspaceId, and the repair passes authenticated workspaceId into a wrapper whose find merges that predicate. Release2.9 explicitly includes the repair PR, supporting the clearly labeled inferred CVE mapping. The current label is appropriately read-only and requires known victim agent UUID, multiple workspaces and caller permissions; it does not need the evaluation mutation or LLM execution. CNA severity agrees.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "source:packages/twenty-server/src/engine/metadata-modules/ai/ai-agent-monitor/resolvers/agent-turn.resolver.ts",
+            "start_line": 27,
+            "end_line": 34
+          },
+          {
+            "artifact_id": "source:packages/twenty-server/src/engine/metadata-modules/ai/ai-agent-monitor/resolvers/agent-turn.resolver.ts",
+            "start_line": 42,
+            "end_line": 50
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 4176,
+            "end_line": 4185
+          },
+          {
+            "artifact_id": "shared-entity",
+            "start_line": 18,
+            "end_line": 29
+          },
+          {
+            "artifact_id": "fixed-scope-helper",
+            "start_line": 42,
+            "end_line": 48
+          },
+          {
+            "artifact_id": "fixed-scope-helper",
+            "start_line": 168,
+            "end_line": 202
+          },
+          {
+            "artifact_id": "fixed-release",
+            "start_line": 1,
+            "end_line": 1
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No tenant query executed; UUID discovery/guessing is not established and must not be inferred.",
+          "Mapping is release-plus-source inference rather than a direct advisory-to-commit reference; only the read endpoint is assessed."
+        ]
       }
     ]
   },
   "summary": {
-    "case_count": 18,
+    "case_count": 50,
     "counts": {
-      "accept": 18,
+      "accept": 50,
       "revise": 0,
       "abstain": 0
     },
     "accepted_case_ids": [
       "airflow-cve-2023-47265",
       "airflow-cve-2024-45034",
+      "argo-cd-cve-2024-41666",
+      "argo-cd-cve-2025-55190",
+      "authelia-cve-2021-32637",
       "browser-use-cve-2025-47241",
       "codex-cve-2025-59532",
+      "containerd-cve-2020-15157",
+      "cosign-cve-2022-23649",
+      "cosign-cve-2026-24122",
+      "etcd-cve-2023-32082",
+      "fastify-cve-2022-41919",
       "flowise-cve-2025-71332",
       "gitlab-cve-2024-6685",
       "gitlab-cve-2024-8124",
       "gitlab-cve-2024-8641",
+      "grafana-cve-2021-39226",
+      "grafana-cve-2022-31107",
+      "harbor-cve-2020-29662",
+      "harbor-cve-2024-22278",
+      "jsonwebtoken-cve-2022-23541",
+      "jupyterhub-cve-2021-41247",
+      "jupyterhub-cve-2024-41942",
+      "keycloak-cve-2023-2422",
+      "keycloak-cve-2023-3597",
+      "kratos-cve-2024-45042",
       "kubernetes-cve-2020-8555",
       "kubernetes-cve-2023-5528",
       "kubernetes-cve-2024-3177",
@@ -1116,9 +2946,23 @@
       "langchain-cve-2026-34070",
       "langflow-cve-2025-3248",
       "langflow-cve-2026-42867",
+      "minio-cve-2021-21390",
+      "minio-cve-2024-24747",
+      "nextjs-cve-2024-46982",
+      "nextjs-cve-2025-29927",
       "oauth2-proxy-cve-2025-54576",
       "openam-cve-2026-33439",
-      "saml-cve-2022-41912"
+      "requests-cve-2023-32681",
+      "requests-cve-2024-35195",
+      "saml-cve-2022-41912",
+      "sveltekit-cve-2023-29008",
+      "tauri-cve-2022-39215",
+      "tauri-cve-2024-35222",
+      "twenty-cve-2026-55583",
+      "twenty-cve-2026-85055",
+      "urllib3-cve-2023-43804",
+      "werkzeug-cve-2023-23934",
+      "zitadel-cve-2025-67494"
     ],
     "decisions": [
       {
@@ -1228,9 +3072,201 @@
         "verdict": "accept",
         "judge_verdict": "accept",
         "reason": "CVE/GHSA directly map legacy prompt loading to 27add913, whose parent is the exported pin. load_prompt_from_config dispatches into helpers that read template_path or examples paths without absolute/parent-component rejection. The few-shot loader propagates paths through templates, nested example prompts and examples, then returns the loaded contents in prompt objects. Extension/format checks limit which files can be exposed but do not impose containment. The patch validates these paths by default and propagates an explicit dangerous-path opt-in. Both reporting locations support the conditional file-read/disclosure chain. CNA CVSS 3.1 7.5 is supported."
+      },
+      {
+        "case_id": "nextjs-cve-2025-29927",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The external router invokes the internal-header filter, but its list omits x-middleware-subrequest. The sandbox counts attacker-supplied repetitions of the middleware name and returns x-middleware-next before executing middleware at depth five. Both the omitted filter and early-return guard are relevant. The directly referenced repair filters chains lacking the process-specific internal identifier. Source at the verified parent supports middleware-only authorization bypass under the declared reachable-header and endpoint assumptions. Published severity provenance supports 3.1 9.1 (cna_cvss); differing authority ratings are retained in the case rather than recomputed."
+      },
+      {
+        "case_id": "nextjs-cve-2024-46982",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The pinned base server treats x-now-route-matches as evidence of SSG even for the scoped SSR Pages Router route. The SSR renderer calls getServerSideProps without setting zero revalidation, and base-server substitutes one second when the result omits revalidate. These three spans form the input, missing non-cacheability assignment, and cache-duration propagation. The directly referenced repair sets SSR revalidate to zero and removes the fallback. Shared-cache/content consequences remain deployment-dependent. Published severity provenance supports 3.1 7.5 (cna_cvss); differing authority ratings are retained in the case rather than recomputed."
+      },
+      {
+        "case_id": "grafana-cve-2021-39226",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The route map stores literal parameterized patterns; ServeHTTP fast-matches the literal request path and invokes its leaf with nil parameters. The unguarded public snapshot API passes the resulting empty key to the ORM struct lookup, which lacks an explicit key restriction; the CNA confirms snapshot disclosure for this literal path. The repair disables that shortcut for parameter markers and rejects an empty key. All three source spans support the deliberately narrowed reading claim; expiry handling and deletion distinctions are retained. Published severity provenance supports 3.1 9.8 (cna_cvss); differing authority ratings are retained in the case rather than recomputed."
+      },
+      {
+        "case_id": "grafana-cve-2022-31107",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "OAuth SyncUser passes external identity, email and login into UpsertUser. After external-ID and email misses, LookupByOneOf resolves the attacker-controlled login to the victim; LookupAndUpdate then associates the external authentication record. The intervening user-mapping policy is explicit and OSS permits it. The repair gives OAuth email-only lookup parameters. CVE-to-fix mapping is an inference supported by the exact repair in the retained v9.0.2...v9.0.3 comparison and the matching CNA mechanism/fixed release, not a direct advisory commit link. Published severity provenance supports 3.1 7.1 (cna_cvss); differing authority ratings are retained in the case rather than recomputed."
+      },
+      {
+        "case_id": "argo-cd-cve-2025-55190",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "GetDetailedProject enforces projects/get, then returns the helper-provided repositories without sanitization. Traced helpers retrieve project-indexed secrets and copy passwords, tokens and private keys into repository objects. The direct advisory-linked repair sanitizes each repository and cluster before returning them. The accepted server location is the actual disclosure boundary. The scoped claim requires project-scoped repository credentials and projects/get, not merely application management permissions. Published severity provenance supports 3.1 10 (cna_cvss); differing authority ratings are retained in the case rather than recomputed."
+      },
+      {
+        "case_id": "argo-cd-cve-2024-41666",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The terminal entry checks applications/get and exec/create before opening the session. Subsequent websocket Read checks token validity and refresh but performs no RBAC recheck before accepting stdin. Removing exec permission alone need not invalidate the token, so the declared already-open session remains usable. The direct repair passes RBAC state into the session and checks both permissions during reads. The labeled read span is causally relevant without asserting bypass of initial authentication. Published severity provenance supports 3.1 4.7 (cna_cvss); differing authority ratings are retained in the case rather than recomputed."
+      },
+      {
+        "case_id": "harbor-cve-2024-22278",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The maintainer role explicitly grants metadata create/update/delete. The metadata handlers enforce these grants, resolve the same project, validate metadata and perform mutations, so the guard exists but authorizes a role that should lack configuration authority. The repair removes exactly those grants. Mapping is inferred from the matching maintainer advisory and v2.10.2...v2.10.3 comparison containing this precise repair; the unrelated commit subject is not treated as proof. Same-project scope is supported. Published severity provenance supports 3.1 6.4 (cna_cvss); differing authority ratings are retained in the case rather than recomputed."
+      },
+      {
+        "case_id": "harbor-cve-2020-29662",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The catalog regex matches only the path without a trailing slash. The slash variant therefore adds no catalog requirement to accessList, and the authorization caller iterates the empty list successfully. The direct repair adds the optional trailing slash. Both the matcher and access-list propagation spans are relevant. The declared downstream route/proxy compatibility is necessary; the consequence is repository-name disclosure, not image or credential access. Published severity provenance supports 3.1 5.3 (github_reviewed_cvss); differing authority ratings are retained in the case rather than recomputed."
+      },
+      {
+        "case_id": "minio-cve-2024-24747",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The update handler first evaluates explicit administrative permission, but on failure accepts matching parent identity and proceeds to parse NewPolicy and update the service account. IAM evaluation applies parent authority and inline restrictions, explaining why a restricted enabled child can alter its restriction toward its stronger parent. The direct repair removes the same-parent fallback and evaluates inline policy without owner bypass. Both the handler guard and policy propagation spans contribute to the narrow escalation claim. Published severity provenance supports 3.1 8.8 (cna_cvss); differing authority ratings are retained in the case rather than recomputed."
+      },
+      {
+        "case_id": "minio-cve-2021-21390",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The chunk reader fills and returns caller buffers before reaching the advertised chunk boundary where the signature is checked. The upload handler derives size from decoded-content-length and the hash reader limits consumption to that size, so the declared oversized chunk can leave the verifier unreached. Seed request authentication and PUT authorization still occur. The directly referenced repair reads a bounded whole chunk, verifies its signature, then returns its bytes. The source span supports the conditional chunk-integrity allegation. Published severity provenance supports 3.1 6.5 (cna_cvss); differing authority ratings are retained in the case rather than recomputed."
+      },
+      {
+        "case_id": "keycloak-cve-2023-3597",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The pinned requested-LoA accessor reads only the client note. ConditionalLoaAuthenticator skips a configured higher level when that requested value is lower. The enabled app-initiated KC_ACTION dispatcher reaches UpdateTotp, which validates the supplied new secret/token and adds it; an existing OTP triggers a device-label requirement, not proof of the old factor. The relevant hunks of the directly referenced backport compute the maximum of client and credential-action assurance based on configured flow and existing credentials. All three labeled spans support this scoped step-up failure. Published severity provenance supports 3.1 5 (cna_cvss); differing authority ratings are retained in the case rather than recomputed."
+      },
+      {
+        "case_id": "keycloak-cve-2023-2422",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "After selecting an enabled client and obtaining a nonempty trusted certificate chain, the authenticator searches every certificate for the configured subject or regex, then succeeds on any match. Under the explicitly matching-nonleaf assumption this authorizes the selected client although the leaf belongs elsewhere. The directly referenced repair matches certs[0] only. The broad source span contains the preceding guards and actual faulty match; the label correctly avoids claiming absent TLS chain validation. Published severity provenance supports 3.1 5.5 (cna_cvss); differing authority ratings are retained in the case rather than recomputed."
+      },
+      {
+        "case_id": "etcd-cve-2023-32082",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The public lease RPC delegates to LeaseTimeToLive. At the verified pre-merge pin, Keys=true collects and returns lease key names without per-key read permission checks, for both local leader lookup and forwarded response. The advisory-linked merged PR metadata identifies the selected merge and its vulnerable parent; the retained component patch adds per-key IsRangePermitted and auth-revision checks. The accepted span is the actual unchecked disclosure operation, limited to names with RBAC enabled. Published severity provenance supports 3.1 3.1 (cna_cvss); differing authority ratings are retained in the case rather than recomputed."
+      },
+      {
+        "case_id": "containerd-cve-2020-15157",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The revised label now explicitly requires credentials to be returned for the challenged foreign host. This resolves the initial material omission: the authorizer derives that host from the response and queries credentials(host), while the pinned ctr callback ignores host and supplies the configured credentials. Foreign descriptor URLs enter the same fetcher and authenticated retry path; the direct repair uses an auth-disabled copy for them. Both accepted fetcher spans are relevant. The original pre-packet finding is preserved separately, and this acceptance applies only to the corrected scope. Published severity provenance supports 3.1 6.1 (cna_cvss); differing authority ratings are retained in the case rather than recomputed."
+      },
+      {
+        "case_id": "cosign-cve-2022-23649",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "Ordinary OCI signature/claim checks run before VerifyBundle. Bundle verification authenticates the Rekor SET; on the certificate path it checks time and payload hash, but bundleHash extracts the payload hash without comparing the recorded signature to the actual OCI signature. A valid matching-payload bundle from another signature can therefore falsely establish inclusion under the stated passing-crypto assumptions. The directly referenced repair compares signatures before accepting the bundle. The label does not assert signature forgery or payload-hash bypass. Published severity provenance supports 3.1 3.3 (cna_cvss); differing authority ratings are retained in the case rather than recomputed."
+      },
+      {
+        "case_id": "requests-cve-2024-35195",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The adapter selects a connection pool using URL/proxy without verification settings, then mutates pool certificate attributes through cert_verify. A previously established unverified TLS connection can remain reusable, so changing verify for the same session/host does not retroactively authenticate that connection. The advisory-linked merge and retained repair introduce verification settings into pool selection. Both the pool lookup and send/cert_verify ordering spans support the scoped reuse failure. Published severity provenance supports 3.1 5.6 (cna_cvss); differing authority ratings are retained in the case rather than recomputed."
+      },
+      {
+        "case_id": "requests-cve-2023-32681",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The redirect loop calls rebuild_proxies before resending the prepared request. At the vulnerable pin, rebuild_proxies removes an old proxy header but unconditionally reconstructs Proxy-Authorization from the selected scheme's proxy credentials, including for HTTPS. The standard adapter forwards request.headers into the tunneled request. The patch specifically excludes HTTPS from this reconstruction. The label preserves authenticated-proxy, redirect and attacker-observable-destination assumptions; public CVE identity, exact repair/parent and CNA severity agree."
+      },
+      {
+        "case_id": "urllib3-cve-2023-43804",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "Retry's default removal set contains Authorization but not Cookie; PoolManager compares the redirect origin and removes only headers in that set before recursively requesting the destination. Explicit sensitive Cookie headers therefore persist across the stated cross-origin redirect. The patch adds Cookie to the default set. This does not assert browser cookie-jar behavior or override user-defined policies. Raw CVE, repair parent, and selected CNA metric match."
+      },
+      {
+        "case_id": "jsonwebtoken-cve-2022-23541",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "At the retained v8.5.1 release, the untrusted decoded header is passed to the key callback; explicitly configured algorithms suppress PEM-based inference, and verification checks algorithm membership before passing the same public-key bytes to jws.verify without key-type compatibility enforcement. The stated mixed-algorithm, poorly bound callback and known-public-key assumptions support the narrowed HMAC confusion claim. The causal repair is inferred through the retained release comparison: ecdf6 adds KeyObjects and rejects HS with non-secret keys; the advisory links a later release commit. This is not misrepresented as a first-parent mapping. CNA severity agrees."
+      },
+      {
+        "case_id": "werkzeug-cve-2023-23934",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The nonempty key regex combined with search from the current position can skip a leading equals sign and reinterpret the value of a nameless cookie as a named cookie. The public parser only discards empty parsed keys, so it does not restore the lost distinction. The repair permits empty keys, anchors matching at the current offset and skips empty names. The label correctly requires affected browser/subdomain behavior and application selection of the malicious value, rather than universal browser impact. Direct mapping, first parent and CNA metric match."
+      },
+      {
+        "case_id": "fastify-cve-2022-41919",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The vulnerable parser selects registered parsers by substring search over the full Content-Type string; application/json precedes text/plain, so a JSON substring in parameters of a browser-safelisted essence can select the JSON parser. The run/done path delivers the parsed body to the handler. The repair parses MIME type and distinguishes its essence from parameters. The label requires a JSON/preflight-dependent state-changing route, credential-bearing browser behavior and no independent CSRF defense. The direct CVE mapping, parent and CNA severity agree."
+      },
+      {
+        "case_id": "sveltekit-cve-2023-29008",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "is_content_type strips parameters but compares the essence case-sensitively. is_form_content_type feeds that result into respond's cross-origin state-changing-method guard, so an uppercase equivalent can bypass that guard. The repair lowercases the essence. The selected POST allegation is narrower than the guard's full method set and preserves accepting endpoint, credential and independent-defense conditions. The pinned parent, direct CVE repair reference and CNA metric agree."
+      },
+      {
+        "case_id": "jupyterhub-cve-2024-41942",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "Re-reviewed the corrected frozen accepted span311–335 against the pinned source and repair. It now exactly contains the admin:users PATCH handler: attacker-supplied admin is assigned at325–329 and assign_default_roles at330–331 grants the built-in admin role through roles.py283–284. The repair explicitly rejects granting admin without current_user.admin. The original broad292–355 span was revised; its initial revise judgment remains in astra-decisions-b-v1.json and astra-notes-b-v1.md. Identity, vulnerable pin, direct repair mapping, narrowed location, conditional escalation mechanism and CNA severity are supported."
+      },
+      {
+        "case_id": "jupyterhub-cve-2021-41247",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "HubAuthenticated obtains a token from URL or Authorization header, validates it, and for token-authenticated HubOAuth requests persists that token into a cookie. Consequently a still-active JupyterLab tab using the page-config token can reissue a single-user credential cookie after another tab's logout. The repair limits persistence to URL tokens and clears PageConfig.token when loading server extensions. The label properly excludes restoration of Hub login. First-parent mapping, advisory and CNA severity agree."
+      },
+      {
+        "case_id": "tauri-cve-2024-35222",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The beta-pin IPC decoder constructs InvokeRequest from a frame message and dispatches it without an invoke-key requirement; on_message reaches capability resolution without a frame-initialization binding. The patch adds the runtime key to both transports and rejects a mismatching key before dispatch. Existing ACL checks still apply to plugin commands/app manifests, so the label's reachable meaningful-command assumption is material and appropriately avoids claiming unrestricted native execution. The retained GitHub advisory directly references this repair and explains parent-frame IPC exposure. Parent and CNA metric match."
+      },
+      {
+        "case_id": "tauri-cve-2022-39215",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The endpoint resolves and checks only the initially requested path, then calls recursive read_dir without scope. Its metadata-based is_dir follows symlinks, and recursion descends into such child paths without another scope check, exposing entry metadata outside the allowed tree. The patch threads scope into recursion and checks symlink destinations. The label correctly restricts impact to directory listings and requires an accessible out-of-scope target and an existing crafted link. Advisory repair linkage and parent are supported; CNA severity is retained despite a lower GitHub rating."
+      },
+      {
+        "case_id": "authelia-cve-2021-32637",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "VerifyGet immediately returns through ctx.Error when GetOriginalURL fails; Error only sets JSON content/body and logging, leaving the successful HTTP status unchanged. The same source shows URL parsing of forwarded/original headers and ReplyUnauthorized's explicit401 status. The repair substitutes ReplyUnauthorized on that failure path, matching the advisory's nginx auth_request status-based authorization bypass. The label explicitly requires a proxy that forwards the malformed value and still routes the outer request. Direct mapping, pin and CNA metric match."
+      },
+      {
+        "case_id": "kratos-cve-2024-45042",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "DoesSessionSatisfy trusts valid cached AvailableAAL and accepts an aal1 session when that cache understates available assurance. For unset values it recomputes through credential counters, but the code strategy lacks the active-credential counter interface at this pin, consistent with the code-only first-factor assumptions. Settings and whoami callers use this gate. The actual repair123e8078 adds code counters and refreshes understated assurance; its message links the advisory, unlike later empty documentary commits. The label preserves OTP possession, configured second factor and highest_available conditions and does not assert an elevated session AAL. CNA severity agrees."
+      },
+      {
+        "case_id": "zitadel-cve-2025-67494",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "getServiceUrlFromHeaders gives attacker-forwarded x-zitadel-forward-host priority over ZITADEL_API_URL. createServiceForHost obtains server credentials and forwards that destination into transport creation; the unauthenticated loginname page invokes backend settings/org helpers with it. The repair binds the transport base URL to the configured API and separates tenant/public metadata. The label appropriately limits the finding to destination control under proxy-header and egress assumptions, rather than asserting arbitrary response disclosure. Direct CVE mapping, parent and CNA severity agree."
+      },
+      {
+        "case_id": "cosign-cve-2026-24122",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "Certificate-chain construction uses the leaf NotBefore timestamp, while verifyInternal later calls CheckExpiry only with the leaf and a trusted timestamp or current time. CheckExpiry compares only that certificate's bounds. A custom chain whose issuer expires before its leaf can therefore pass these checks at a time after issuer expiry, assuming signature/policy/transparency checks otherwise pass. The patch carries the built issuing chain to CheckExpiry and checks each issuer at the observation time. The label explicitly excludes public Sigstore PKI. Direct repair mapping, parent and CNA severity agree."
+      },
+      {
+        "case_id": "twenty-cve-2026-85055",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The pinned filter parser resolves field metadata and translates direct/composite/relation predicates without checking field read permissions. The find-many query runner applies caller filters to both result and aggregation builders, while output-read restrictions are enforced separately; this supports a predicate oracle over otherwise permitted rows. The direct patch checks object/field readability before translation and filters unreadable saved-view fields. The label preserves record access and observable/guessable-domain assumptions, avoiding direct field output or cross-tenant claims. CNA CVSS4.0 is correctly preferred over GitHub's3.1 because the CNA has a numeric score."
+      },
+      {
+        "case_id": "twenty-cve-2026-55583",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The pinned resolver's plain TypeORM query selects shared core.agentTurn rows only by agentId and loads messages/parts. Class guards validate the caller's workspace and AI setting permission, not ownership of the argument. The stored entity has an explicit workspaceId, and the repair passes authenticated workspaceId into a wrapper whose find merges that predicate. Release2.9 explicitly includes the repair PR, supporting the clearly labeled inferred CVE mapping. The current label is appropriately read-only and requires known victim agent UUID, multiple workspaces and caller permissions; it does not need the evaluation mutation or LLM execution. CNA severity agrees."
       }
     ]
   },
   "claim": "Machine-reviewed static labels; no human approval, runtime validation or benchmark result.",
-  "report_sha256": "sha256:9c3f9d530fd06a50aec0d59470ff4d9374748fb73b099c0c19dd173691e4d8ee"
+  "report_sha256": "sha256:b5f95b3b2f04156118e98289726c87beca17560b674a9020c2786326ec782bf9"
 }

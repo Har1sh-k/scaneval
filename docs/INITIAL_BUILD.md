@@ -2,7 +2,7 @@
 
 This alpha implements step 1 of [the design's build order](DESIGN_DECISIONS.md#10-packaging-deliverables-and-build-order) and the first vertical slice of step 2. It is the supported execution and evaluation path, not the completed benchmark. Package version is `2.0.0a1`.
 
-No benchmark results are published. The [current corpus](../corpus/diverse/README.md) contains 18 CVEs across 11 repositories, represented by 16 pinned source snapshots. Its pack records L1 checks; static machine judgments live in a separate sidecar. Existing plans retain draft scope, and no scanner matching decision has been approved. The corpus guide records source provenance, severity distribution and the machine review workflow.
+No benchmark results are published. The [current corpus](../corpus/diverse/README.md) contains 50 CVEs across 32 repositories, represented by 48 pinned source snapshots. Its pack records L1 checks; static machine judgments live in a separate sidecar. Existing plans retain draft scope, and no scanner matching decision has been approved. The corpus guide records source provenance, severity distribution, contextual selection rationale and the machine review workflow.
 
 `corpus machine-prepare`, `machine-record`, and `machine-check` support Python-validated LLM review of static CVE labels without HITL. The [CVE review skill](../skills/cve-corpus-review/SKILL.md) defines the evidence rubric. These commands preserve actual responses and input hashes; they do not promote cases into the legacy human-review states described below. Runtime/control claims and scanner finding adjudication remain separate.
 
