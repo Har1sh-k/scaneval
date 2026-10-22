@@ -197,6 +197,58 @@ def test_interrupted_assignments_remain_missing_in_denominator(environment, tmp_
     assert result["reference_coverage_lower_bound"] == 0.5
 
 
+@pytest.mark.parametrize("phase", ["scanner-setup", "source-preparation"])
+def test_interrupted_preparation_preserves_a_replayable_schedule(environment, tmp_path, monkeypatch, phase):
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+    if phase == "scanner-setup":
+        monkeypatch.setattr(FixtureScanner, "prepare", interrupt)
+    else:
+        monkeypatch.setattr(benchmark, "prepare_task", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        run_fixture(environment, tmp_path, repetitions=2)
+    result = benchmark.score(tmp_path / "run")["systems"][0]
+    assert result["statuses"] == {"missing": 2}
+    assert result["planned_positive_annotations"] == 2
+    assert result["reference_coverage"] is None
+    assert result["reference_coverage_lower_bound"] == 0
+
+
+def test_completed_invocations_are_checkpointed_before_the_next_scan(environment, tmp_path, monkeypatch):
+    original = FixtureScanner.scan
+    calls = 0
+    def interrupt_second(scanner, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            # This is observable before run's finally executes, including on abrupt process exit.
+            saved = benchmark.score(tmp_path / "run")["systems"][0]
+            assert saved["statuses"] == {"missing": 1, "success": 1}
+            assert saved["planned_positive_annotations"] == 2
+            raise KeyboardInterrupt
+        return original(scanner, **kwargs)
+    monkeypatch.setattr(FixtureScanner, "scan", interrupt_second)
+    with pytest.raises(KeyboardInterrupt):
+        run_fixture(environment, tmp_path, repetitions=2)
+    output = tmp_path / "run"
+    result = benchmark.score(output, judgments_for(output))["systems"][0]
+    assert result["statuses"] == {"missing": 1, "success": 1}
+    assert result["reference_coverage"] is None
+    assert result["reference_coverage_lower_bound"] == 0.5
+
+
+def test_failed_checkpoint_keeps_the_previous_record(tmp_path, monkeypatch):
+    previous = {"completed": ["one"]}
+    benchmark._checkpoint(tmp_path, previous)
+    def fail_replace(*args):
+        raise OSError("fixture disk failure")
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    with pytest.raises(OSError, match="fixture disk failure"):
+        benchmark._checkpoint(tmp_path, {"completed": ["one", "two"]})
+    assert read_json(tmp_path / "benchmark-run.json") == previous
+    assert not list(tmp_path.glob(".benchmark-run-*.tmp"))
+
+
 def test_uncertain_decision_preserves_pending_state(environment, tmp_path):
     output = run_fixture(environment, tmp_path)
     result = benchmark.score(output, judgments_for(output, annotation_ids=[], status="uncertain"))["systems"][0]

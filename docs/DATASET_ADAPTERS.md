@@ -169,9 +169,13 @@ OCI option remains a separate workflow.
 `benchmark run` writes `plan.json`, `dataset.json`, `schedule.json`, prepared source
 trees, invocation bundles, and `benchmark-run.json`. It never overwrites a run.
 Failures during source or scanner preparation are retained. Runtime failures,
-partial outputs, unsupported cases, and timeouts remain in denominators. An
-interrupted run records completed assignments and treats unattempted ones as
-missing. The exit status is 1 if any recorded invocation is not successful.
+partial outputs, unsupported cases, and timeouts remain in denominators. The
+run record exists before scanner setup and is atomically checkpointed after each
+prepared input and completed invocation. An interrupted run retains completed
+assignments; assignments without a completed checkpoint remain missing, including
+an invocation interrupted while running. Interrupted runs can be inspected and
+scored but are not resumed by this command. The exit status is 1 if any recorded
+invocation is not successful.
 
 ## Machine judgments and deterministic scoring
 

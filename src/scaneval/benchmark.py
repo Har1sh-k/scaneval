@@ -8,13 +8,15 @@ from __future__ import annotations
 from collections import Counter
 from copy import deepcopy
 import math
+import os
 from pathlib import Path
 import re
+import tempfile
 
 from . import execution, materialize
 from .adapters import get_adapter
 from .adapters.base import SystemSpec
-from .contracts import (ContractError, canonical_sha256, load_document, pr_diff_sha256,
+from .contracts import (ContractError, canonical_json, canonical_sha256, load_document, pr_diff_sha256,
                         pr_input_hash, refuse_trial_path)
 from .datasets import read_json, validate_dataset, write_json
 
@@ -119,6 +121,22 @@ def prepare_task(task: dict, output: Path, cache: Path) -> execution.PreparedInp
                                    source_tree_hash=diff["head_tree_hash"], pr=identity, base_source_dir=output / "base/source")
 
 
+def _checkpoint(output: Path, record: dict) -> None:
+    """Atomically replace this run's own record, preserving the previous checkpoint on failure."""
+    data = (canonical_json(record) + "\n").encode("utf-8")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=output, prefix=".benchmark-run-", suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(output / "benchmark-run.json")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def run(plan: dict, dataset: dict, output: Path, cache: Path, *, progress=print) -> dict:
     """Run one frozen schedule; errors remain assigned work, never dropped rows."""
     validate_plan(plan, dataset)
@@ -135,14 +153,19 @@ def run(plan: dict, dataset: dict, output: Path, cache: Path, *, progress=print)
     tasks = {t["task_id"]: t for t in dataset["tasks"]}
     # Freeze the schedule before any fetching or scanner preparation.
     write_json(output / "schedule.json", {"plan_sha256": canonical_sha256(plan), "assignments": list(schedule(plan))})
-    for entry in plan["systems"]:
-        try:
-            adapter = get_adapter(entry["adapter"])
-            spec = SystemSpec(**entry)
-            systems[entry["system_id"]] = (adapter, spec, adapter.prepare(spec, cache))
-        except Exception as exc:
-            systems[entry["system_id"]] = f"system preparation failed: {type(exc).__name__}: {exc}"
+    record = {"schema_version": "1.0", "kind": "benchmark-run", "plan_sha256": canonical_sha256(plan),
+              "dataset_sha256": canonical_sha256(dataset), "tasks": task_records, "invocations": rows,
+              "execution_boundary": execution.LOCAL_ISOLATION}
+    # Even an interruption during installation has a replayable, entirely missing schedule.
+    _checkpoint(output, record)
     try:
+        for entry in plan["systems"]:
+            try:
+                adapter = get_adapter(entry["adapter"])
+                spec = SystemSpec(**entry)
+                systems[entry["system_id"]] = (adapter, spec, adapter.prepare(spec, cache))
+            except Exception as exc:
+                systems[entry["system_id"]] = f"system preparation failed: {type(exc).__name__}: {exc}"
         for tid in plan["task_ids"]:
             progress(f"Preparing {tid}")
             try:
@@ -152,6 +175,7 @@ def run(plan: dict, dataset: dict, output: Path, cache: Path, *, progress=print)
             except Exception as exc:
                 prepared = None
                 task_records[tid] = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+            _checkpoint(output, record)
             for assignment in (r for r in schedule(plan) if r["task_id"] == tid):
                 row = dict(assignment)
                 system = systems[row["system_id"]]
@@ -174,11 +198,9 @@ def run(plan: dict, dataset: dict, output: Path, cache: Path, *, progress=print)
                 except Exception as exc:
                     row.update(status="error", error=f"{type(exc).__name__}: {exc}")
                 rows.append(row)
+                _checkpoint(output, record)
     finally:
-        record = {"schema_version": "1.0", "kind": "benchmark-run", "plan_sha256": canonical_sha256(plan),
-                  "dataset_sha256": canonical_sha256(dataset), "tasks": task_records, "invocations": rows,
-                  "execution_boundary": execution.LOCAL_ISOLATION}
-        write_json(output / "benchmark-run.json", record)
+        _checkpoint(output, record)
     return record
 
 
