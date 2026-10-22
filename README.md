@@ -22,7 +22,7 @@ scaneval replay results/diagnostic-demo --output results/diagnostic-replay.json
 
 The demo uses fabricated evaluator fixtures, not a live scanner or admitted CVEs. It exercises scoring without model calls. Output paths must be new.
 
-Start with the [CVE corpus](corpus/diverse/README.md) for the 50 cases, severity sources, selection rationale and machine review. This is the repository's complete current corpus. The [execution guide](docs/INITIAL_BUILD.md#run-configuration) explains scanner configuration and review. To supply your own security fixes, findings, or documents, follow [bring your own corpus](docs/BRING_YOUR_OWN_CORPUS.md).
+Start with the [CVE corpus](corpus/diverse/README.md) for the 50 curated cases, severity sources, selection rationale and machine review. [Dataset adapters](docs/DATASET_ADAPTERS.md) add separate PR-review and CVE-detection tracks for AACR-Bench, ReviewBench, Martian, OpenSSF, and your own datasets. The [execution guide](docs/INITIAL_BUILD.md#run-configuration) explains scanner configuration and review. To supply your own security fixes, findings, or documents as case packs, follow [bring your own corpus](docs/BRING_YOUR_OWN_CORPUS.md).
 
 ## Evaluation
 
@@ -43,6 +43,8 @@ The scorer reports known-target detection, recall within review budgets, and fal
 | `scaneval corpus add-change-set\|pr-scope\|canonical` | Declare a base/head change set, state which targets and controls are scored in its PR review, and group records by canonical root cause. |
 | `scaneval plan --pack --snapshot-id --tree-hash --output` | Build an evaluation plan for one materialized input, or with `--mode pr --change-set-id` and the hashes that identify it, the PR plan of a change set. |
 | `scaneval run <config> --output <new dir>` | Run a frozen configuration and save its artifacts. |
+| `scaneval dataset list\|fetch\|import\|validate\|inspect` | Load a pinned public dataset, native JSON, or an installed Python dataset adapter ([guide](docs/DATASET_ADAPTERS.md)). |
+| `scaneval benchmark plan\|run\|judge-packet\|score` | Evaluate imported datasets with existing scanner adapters, frozen schedules, and supplied machine judgments. |
 | `scaneval blinding check\|review` | Dry-run a metadata blinding map against its snapshots, and record a named review of it. |
 | `scaneval import sarif <log> --pack --snapshot-id --tree-hash --system-id --output` | Import one run of a saved SARIF 2.1.0 log into a new bundle for review, offline. |
 | `scaneval review init\|record\|approve\|status` | Prepare and record the review of an invocation bundle. |
@@ -52,7 +54,7 @@ The scorer reports known-target detection, recall within review budgets, and fal
 | `scaneval precision sample\|queue\|record\|estimate` | Sample delivered claims from saved runs, record human reviews, and estimate reviewed precision. Does not change scores. |
 | `scaneval gate --policy --comparison --output` | Hold a comparison, and optionally precision estimates, to a gate policy and write a pass, fail, or inconclusive decision with every requirement explained. Promotes nothing. |
 
-Run `scaneval <command> --help` for required arguments. Only `corpus validate --snapshot-id`, `blinding check`, and `run` reach the network; contacts depend on the configured sources and scanners. Exit code `2` means the command could not be carried out, `1` means it ran and reports a negative result, and `0` means it ran and reports nothing wrong. None certifies that a security label is correct.
+Run `scaneval <command> --help` for required arguments. `corpus validate --snapshot-id`, `blinding check`, `run`, `dataset fetch`, and `benchmark run` can reach the network; contacts depend on the configured sources and scanners. Exit code `2` means the command could not be carried out, `1` means it ran and reports a negative result, and `0` means it ran and reports nothing wrong. None certifies that a security label is correct.
 
 ## Scanners and visibility
 
@@ -85,6 +87,7 @@ Implementation review: [Inspect AI visibility and observability comparison](docs
 - Reviewed precision comes only from people reviewing a seeded probability sample of delivered claims ([precision guide](docs/PRECISION.md)). It is not a repository false-positive rate.
 - A gate decision holds a saved comparison to a policy you write and says whether its requirements held ([gate guide](docs/GATE.md)). It promotes nothing: the workflow that owns the harness decides.
 - Fifty CVEs are selected in the [diverse corpus](corpus/diverse/README.md), including GitLab, Kubernetes, Airflow, Langflow, LangChain and Twenty. The [Astra-authored review skill](skills/cve-corpus-review/SKILL.md) supports machine review without a human gate; shared deployment context, claim-specific runtime validation and scanner preflight remain separate work. Java and Ruby are accepted by the corpus contract, but the current adapters still record them as unsupported. No representative benchmark or scanner comparison is claimed.
+- External [dataset tracks](corpus/benchmarks/README.md) provide 469 PR cases and 223 additional OpenSSF CVE cases. Their publisher labels remain separate from the curated corpus. Dataset benchmark runs use the local execution backend; scoring measures reference coverage and named fixed controls, not true precision or an official upstream leaderboard score. Missing or uncertain semantic judgments remain explicit.
 
 [Current capabilities](docs/INITIAL_BUILD.md) describes the implementation. [Design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) describe the broader contract and planned work.
 

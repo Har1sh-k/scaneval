@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from io import BytesIO
 
 import pytest
 
@@ -189,3 +190,22 @@ def test_cli_does_not_write_labels_into_trial(native, tmp_path):
     (tmp_path / "source").mkdir()
     with pytest.raises(ContractError, match="inside the trial"):
         datasets.write_json(tmp_path / "source/dataset.json", native)
+
+
+def test_fetch_checks_locked_bytes_and_never_overwrites(tmp_path, monkeypatch):
+    data = b'{"pinned":true}'
+    lock = {"repository": "owner/repo", "revision": "a" * 40, "files": [
+        {"path": "dataset.json", "url": "https://raw.githubusercontent.com/owner/repo/" + "a" * 40 + "/dataset.json",
+         "bytes": len(data), "sha256": "sha256:" + hashlib.sha256(data).hexdigest()}]}
+    monkeypatch.setattr(builtin, "source_lock", lambda _: lock)
+    monkeypatch.setattr(builtin, "urlopen", lambda *a, **kw: BytesIO(data))
+    output = tmp_path / "release"
+    builtin.fetch_source("example", output)
+    assert (output / "dataset.json").read_bytes() == data
+    with pytest.raises(FileExistsError):
+        builtin.fetch_source("example", output)
+    monkeypatch.setattr(builtin, "urlopen", lambda *a, **kw: BytesIO(b"wrong"))
+    bad = tmp_path / "bad"
+    with pytest.raises(ContractError, match="mismatch"):
+        builtin.fetch_source("example", bad)
+    assert not bad.exists()

@@ -123,3 +123,121 @@ Each source is scored separately; matching and denominator choices must be
 reported with results. Imported annotations are not additional machine-reviewed
 labels in the existing 50-CVE corpus, and imported vendor labels do not become
 ScanEval human approvals.
+
+## Execute and evaluate a dataset
+
+The common dataset format feeds the scanner runner through `benchmark` commands.
+The execution uses ScanEval's existing source export, neutral Git history, adapter
+capability checks, private workspaces, raw output capture, timeouts, and usage
+records. A PR task invokes the tool's PR workflow. A CVE task invokes a full
+snapshot scan. Unsupported languages and modes remain scheduled observations.
+
+Create `systems.json` as a JSON array of scanner specifications. Each element uses
+the same `system_id`, `adapter`, `config`, and optional `model_id`/`model_revision`
+fields as the [existing runner configuration](INITIAL_BUILD.md#run-configuration).
+Copy your configured systems array; installing a dataset does not install a
+scanner or select a model. The existing scanner adapters are `semgrep`,
+`llm-harness`, and `deepsec`.
+
+```sh
+scaneval benchmark plan --dataset results/aacr-bench.json \
+  --systems systems.json --run-id aacr-comparison-v1 --repetitions 3 \
+  --output results/aacr-plan.json
+
+scaneval benchmark run --plan results/aacr-plan.json \
+  --dataset results/aacr-bench.json --cache .repos/benchmark-sources \
+  --output results/aacr-run
+
+scaneval benchmark judge-packet results/aacr-run --output results/aacr-judge-packet.json
+```
+
+Use repeated `--task TASK_ID` arguments when planning a selected subset. Selection
+and repetitions are frozen before any scanner runs. Use a separate plan and run
+ID for a smoke test. Keep tool/model versions, rules, and budgets fixed for a
+comparison. Dataset identity includes all annotations and metadata; changing it
+invalidates an existing plan.
+
+The dataset runner currently uses the local backend, recorded as unenforced in
+the run and invocation records. Filesystem and network isolation are not implied
+by putting labels outside scanner workspaces. The existing case-pack runner's
+OCI option remains a separate workflow.
+
+`benchmark run` writes `plan.json`, `dataset.json`, `schedule.json`, prepared source
+trees, invocation bundles, and `benchmark-run.json`. It never overwrites a run.
+Failures during source or scanner preparation are retained. Runtime failures,
+partial outputs, unsupported cases, and timeouts remain in denominators. An
+interrupted run records completed assignments and treats unattempted ones as
+missing. The exit status is 1 if any recorded invocation is not successful.
+
+## Machine judgments and deterministic scoring
+
+The judge packet contains each delivered claim and the task's reference
+annotations, with upstream correctness labels withheld. The packet also names
+the saved source trees so a judge can inspect context. Invocation IDs can expose
+tool names; this is not a blinded judge protocol. Source trees are checked for
+changes before the packet is emitted.
+
+Give the packet to a Codex/LLM judge or another semantic matcher. No human approval
+is required. It must match the same concrete issue, not merely a shared path,
+line, keyword, or CWE. A judgment response has this shape (replace the illustrative
+IDs and hash with the actual packet's values):
+
+```json
+{
+  "schema_version": "1.0",
+  "packet_sha256": "sha256:<canonical packet hash printed by judge-packet>",
+  "judge": {"kind": "llm", "name": "my-judge", "model": "exact-model-revision"},
+  "decisions": [
+    {
+      "invocation_id": "task__system__r1",
+      "claim_id": "claim-1",
+      "annotation_ids": ["a00001"],
+      "status": "decided",
+      "reason": "Both describe the same unchecked authorization path."
+    }
+  ]
+}
+```
+
+An unmatched claim uses `annotation_ids: []`. An unresolved judgment uses
+`status: "uncertain"` and an empty annotation list. Preserve the judge's actual
+prompt, response, and execution receipt alongside this response for publication;
+the scorer verifies bindings but does not authenticate a claimed model identity.
+It makes no model call itself. Test fixtures use `judge.kind: "test"` and are not
+benchmark evidence.
+
+```sh
+scaneval benchmark score results/aacr-run \
+  --judgments results/aacr-judgments.json --output results/aacr-score.json
+```
+
+Re-running score with the same saved inputs produces the same document, offline.
+The report names its protocol, source and plan hashes, judge, judgment hash, status
+counts, severity breakdown, runtime, available token counts, and known cost.
+Unknown cost is `null`, with a count of invocations that reported cost.
+
+The `scaneval-reference-coverage-1` protocol uses these rules:
+
+- Reference coverage is distinct positive annotations covered divided by all
+  positive annotations assigned to that system across the scheduled repetitions.
+  Errors, timeouts, unsupported tasks, and missing results do not shrink that
+  denominator. Each repetition has its own annotation coverage.
+- One claim may cover several annotations. A repeated claim contributes to
+  `novel_reference_match_rate` only when it covers a previously uncovered positive
+  annotation in that invocation. Generated claims are counted in delivered order.
+- A match to a rejected annotation is reported separately. It never grants
+  positive coverage or quiet-control credit.
+- Fixed controls report `alerted`, `quiet`, and `unresolved`. Silence earns quiet
+  credit only for a successful completed scan with resolved bundles, no known
+  omitted paths or empty examination, and no pending claim judgments. A partial
+  or failed scan cannot earn quiet credit.
+- Missing or uncertain judgments leave the final coverage rate `null`; confirmed
+  coverage is still reported as a lower bound. Confirmed execution failures can
+  produce a completed zero-coverage observation.
+
+Reference coverage is not a count of unique real vulnerabilities. The match rate
+is not precision: unmatched findings may identify valid issues absent from the
+dataset. This protocol also differs from each publisher's own matching, dedup,
+scope, and missing-result rules. Report it as a ScanEval evaluation of the pinned
+dataset, not as that publisher's official leaderboard score. Do not combine the
+four datasets into a single unlabeled score.

@@ -17,7 +17,8 @@
         "root": {"type": "string", "minLength": 1},
         "languages": {
           "type": "array", "minItems": 1, "uniqueItems": true,
-          "items": {"enum": ["python", "typescript", "javascript", "go", "rust", "java", "ruby"]}
+          "items": {"type": "string", "minLength": 1},
+          "description": "Dataset-declared languages. Adapters enforce their supported_languages; an unknown language is retained as unsupported, never relabeled."
         },
         "mode": {"enum": ["full", "pr"]},
         "profile": {"enum": ["standard", "metadata_blinded"]},

@@ -8,7 +8,6 @@ import json
 from pathlib import Path
 import re
 import shutil
-from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from ..contracts import ContractError, canonical_sha256, refuse_trial_path

@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from collections import Counter
 from importlib.resources import files
 import json
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
 from urllib.parse import urlsplit
 
