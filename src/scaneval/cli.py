@@ -1531,6 +1531,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
+    from .datasets.cli import add_commands as add_dataset_commands
+    add_dataset_commands(sub)
     validate = sub.add_parser("validate", help="validate a versioned JSON contract")
     validate.add_argument("kind", choices=sorted(CONTRACT_KINDS))
     validate.add_argument("path", type=Path)
@@ -1602,6 +1604,9 @@ def _investigate(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "dataset":
+            from .datasets.cli import dispatch
+            return dispatch(args)
         if args.command == "validate":
             load_document(args.path, args.kind)
             print(f"Valid {args.kind}: {args.path}")
