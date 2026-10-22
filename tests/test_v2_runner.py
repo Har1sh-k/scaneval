@@ -393,6 +393,16 @@ def test_a_workspace_root_inside_evaluator_storage_is_refused(tmp_path, pilot):
     assert pilot["adapter"].prepared == 0
 
 
+def test_a_missing_workspace_root_is_refused_before_the_run_starts(tmp_path, pilot):
+    """A workspace root that does not exist yet fails before anything is prepared or written."""
+    out = tmp_path / "out"
+    with pytest.raises(ContractError, match="is not an existing directory; create it before the run"):
+        run_from_config(pilot["config_path"], out, clock=CLOCK, workspace_root=tmp_path / "not-created",
+                        adapters={"fake": pilot["adapter"]})
+    assert not out.exists() and not (tmp_path / "not-created").exists()
+    assert pilot["adapter"].prepared == 0
+
+
 def test_an_interrupt_on_the_second_invocation_leaves_a_failed_manifest_listing_the_first(tmp_path, upstream):
     """A run stopped part way still records what finished, and the failure is not a scan outcome."""
     repo, commit = upstream
