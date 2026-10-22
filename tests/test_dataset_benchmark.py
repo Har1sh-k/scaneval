@@ -37,7 +37,8 @@ class FixtureScanner(Adapter):
         if "unsafe" in text or request["input"]["mode"] == "pr" or spec.config.get("always_flag"):
             claims = [{"claim_id": "c1", "allegation": "request reaches query", "kind": "unmapped",
                        "primary_location": {"path": "app.py", "start_line": 1, "end_line": 1}}]
-        status = spec.config.get("status", "success")
+        statuses = spec.config.get("statuses")
+        status = statuses[len(self.calls) - 1] if statuses else spec.config.get("status", "success")
         return NativeOutcome(status=status, exit_code=0, command=["fixture-only"], claims=claims,
                              bundles_resolved=status == "success", usage={"cost_usd": None})
 
@@ -118,6 +119,7 @@ def test_pr_end_to_end_repeat_runs_and_offline_scores(environment, tmp_path):
     assert result["planned_positive_annotations"] == 2
     assert result["covered_positive_annotations"] == 2
     assert result["reference_coverage"] == 1
+    assert (result["generated_claims"], result["scorable_claims"], result["excluded_claims"]) == (2, 2, 0)
     assert result["by_severity"]["high"] == {"planned": 2, "covered": 2}
     assert result["cost_usd"] == {"known_invocations": 0, "total_known": None}
 
@@ -134,6 +136,7 @@ def test_fixed_control_alerts_and_partial_silence_are_not_quiet(environment, tmp
     output = run_fixture(cve_dataset(environment), tmp_path, config={"always_flag": True, "status": "partial"})
     result = benchmark.score(output, judgments_for(output))["systems"][0]
     assert result["statuses"] == {"partial": 2}
+    assert (result["generated_claims"], result["scorable_claims"], result["excluded_claims"]) == (2, 2, 0)
     assert result["fixed_controls"] == {"planned": 1, "alerted": 1, "quiet": 0, "unresolved": 0}
 
 
@@ -172,6 +175,71 @@ def test_fetch_failure_retains_scheduled_denominator(environment, tmp_path, monk
     assert result["statuses"] == {"error": 3}
     assert result["planned_positive_annotations"] == 3
     assert result["reference_coverage"] == 0
+    assert result["runtime_seconds"] == {"known_invocations": 0, "total": None, "mean": None}
+
+
+def test_system_setup_failure_has_unknown_runtime_and_keeps_failure(environment, tmp_path, monkeypatch):
+    def fail(*args, **kwargs):
+        raise RuntimeError("test setup failure")
+    monkeypatch.setattr(FixtureScanner, "prepare", fail)
+    output = run_fixture(environment, tmp_path)
+    result = benchmark.score(output)["systems"][0]
+    assert result["statuses"] == {"error": 1}
+    assert result["planned_positive_annotations"] == 1
+    assert result["reference_coverage"] == 0
+    assert result["runtime_seconds"] == {"known_invocations": 0, "total": None, "mean": None}
+
+
+@pytest.mark.parametrize("failed_status", ["timeout", "error"])
+def test_failed_claims_are_retained_but_excluded_from_matching(environment, tmp_path, failed_status):
+    output = run_fixture(environment, tmp_path, repetitions=2,
+                         config={"statuses": ["success", failed_status]})
+    packet = benchmark.judge_packet(output)
+    assert [(row["generated_claims"], row["scorable_claims"], row["excluded_claims"], len(row["claims"]))
+            for row in packet["invocations"]] == [(1, 1, 0, 1), (1, 0, 1, 0)]
+    failed = packet["invocations"][1]
+    retained = read_json(output / "invocations" / failed["invocation_id"] / "result.json")
+    assert len(retained["claims"]) == 1
+
+    judgments = judgments_for(output)
+    result = benchmark.score(output, judgments)["systems"][0]
+    assert result["statuses"] == {failed_status: 1, "success": 1}
+    assert result["judging_complete"] is True
+    assert result["reference_coverage"] == 0.5
+    assert result["novel_reference_match_rate"] == 1
+    assert (result["generated_claims"], result["scorable_claims"], result["excluded_claims"]) == (2, 1, 1)
+    assert result["unjudged_or_uncertain_claims"] == 0
+
+    judgments["decisions"].append({"invocation_id": failed["invocation_id"], "claim_id": "c1",
+                                   "annotation_ids": ["issue"], "status": "decided",
+                                   "reason": "Excluded claims cannot be submitted for matching."})
+    with pytest.raises(ContractError, match="unknown or duplicate judged claim"):
+        benchmark.score(output, judgments)
+
+
+def test_failed_only_claims_do_not_resolve_fixed_controls(environment, tmp_path):
+    output = run_fixture(cve_dataset(environment), tmp_path,
+                         config={"always_flag": True, "status": "error"})
+    result = benchmark.score(output)["systems"][0]
+    assert result["judging_complete"] is True
+    assert result["reference_coverage"] == 0
+    assert result["novel_reference_match_rate"] is None
+    assert (result["generated_claims"], result["scorable_claims"], result["excluded_claims"]) == (2, 0, 2)
+    assert result["fixed_controls"] == {"planned": 1, "alerted": 0, "quiet": 0, "unresolved": 1}
+
+
+def test_claim_eligibility_is_isolated_per_system(environment, tmp_path):
+    systems = [
+        {"system_id": "complete", "adapter": "fixture", "config": {}},
+        {"system_id": "failed", "adapter": "fixture", "config": {"status": "timeout"}},
+    ]
+    plan = benchmark.build_plan(environment, systems, run_id="fixture-run", repetitions=1)
+    output = tmp_path / "run"
+    benchmark.run(plan, environment, output, tmp_path / "cache", progress=lambda _: None)
+    scores = {row["system_id"]: row for row in benchmark.score(output, judgments_for(output))["systems"]}
+    assert (scores["complete"]["scorable_claims"], scores["complete"]["reference_coverage"]) == (1, 1)
+    assert (scores["failed"]["generated_claims"], scores["failed"]["scorable_claims"],
+            scores["failed"]["excluded_claims"], scores["failed"]["reference_coverage"]) == (1, 0, 1, 0)
 
 
 def test_negative_comment_is_not_a_safe_control(environment, tmp_path):
@@ -195,6 +263,7 @@ def test_interrupted_assignments_remain_missing_in_denominator(environment, tmp_
     assert result["planned_positive_annotations"] == 2
     assert result["reference_coverage"] is None
     assert result["reference_coverage_lower_bound"] == 0.5
+    assert (result["generated_claims"], result["scorable_claims"], result["excluded_claims"]) == (1, 1, 0)
 
 
 @pytest.mark.parametrize("phase", ["scanner-setup", "source-preparation"])
@@ -349,6 +418,37 @@ def test_changed_execution_receipt_is_not_replayable(environment, tmp_path):
         benchmark.judge_packet(output)
 
 
+@pytest.mark.parametrize("variant", ["snapshot", "pr-head", "pr-base"])
+def test_frozen_provenance_must_name_dataset_commits(environment, tmp_path, variant):
+    dataset = cve_dataset(environment) if variant == "snapshot" else environment
+    output = run_fixture(dataset, tmp_path)
+    task_id = "vulnerable" if variant == "snapshot" else "change"
+    provenance_path = output / "inputs" / task_id / "provenance.json"
+    provenance = read_json(provenance_path)
+    if variant == "snapshot":
+        provenance["source"]["commit"] = environment["tasks"][0]["commit"]
+    elif variant == "pr-head":
+        provenance["head"]["source"]["commit"] = environment["tasks"][0]["base_commit"]
+    else:
+        provenance["base"]["source"]["commit"] = environment["tasks"][0]["commit"]
+    provenance_path.write_text(json.dumps(provenance))
+
+    provenance_sha256 = canonical_sha256(provenance)
+    record_path = output / "benchmark-run.json"
+    record = read_json(record_path)
+    record["tasks"][task_id]["provenance_sha256"] = provenance_sha256
+    invocation = next(row for row in record["invocations"] if row["task_id"] == task_id)
+    receipt_path = output / "invocations" / invocation["invocation_id"] / "execution.json"
+    receipt = read_json(receipt_path)
+    receipt["provenance"]["provenance_sha256"] = provenance_sha256
+    receipt_path.write_text(json.dumps(receipt))
+    invocation["execution_sha256"] = canonical_sha256(receipt)
+    record_path.write_text(json.dumps(record))
+
+    with pytest.raises(ContractError, match="wrong original commit"):
+        benchmark.judge_packet(output)
+
+
 def test_copied_receipt_cannot_reassign_a_repetition(environment, tmp_path):
     output = run_fixture(environment, tmp_path, repetitions=2)
     path = output / "benchmark-run.json"
@@ -375,10 +475,25 @@ def test_plan_rejects_changed_labels_and_unknown_selection(environment):
         benchmark.build_plan(environment, systems, run_id="frozen", task_ids=["absent"])
 
 
+def test_plan_rejects_stale_scoring_protocol(environment):
+    systems = [{"system_id": "fixture", "adapter": "fixture"}]
+    plan = benchmark.build_plan(environment, systems, run_id="frozen")
+    plan["protocol"] = "scaneval-reference-coverage-1"
+    with pytest.raises(ContractError, match="protocol scaneval-reference-coverage-2"):
+        benchmark.validate_plan(plan, environment)
+
+
 def test_plan_rejects_case_colliding_systems(environment):
     systems = [{"system_id": name, "adapter": "fixture"} for name in ("scanner", "SCANNER")]
     with pytest.raises(ContractError, match="duplicate system_id"):
         benchmark.build_plan(environment, systems, run_id="frozen")
+
+
+@pytest.mark.parametrize("field", ["execution", "network_policy"])
+def test_plan_names_unsupported_case_pack_system_fields(environment, field):
+    system = {"system_id": "fixture", "adapter": "fixture", field: {}}
+    with pytest.raises(ContractError, match=rf"unsupported benchmark system fields: {field}"):
+        benchmark.build_plan(environment, [system], run_id="frozen")
 
 
 def test_plan_rejects_case_colliding_composite_invocations(environment):

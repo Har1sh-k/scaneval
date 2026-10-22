@@ -139,9 +139,11 @@ snapshot scan. Unsupported languages and modes remain scheduled observations.
 Create `systems.json` as a JSON array of scanner specifications. Each element uses
 the same `system_id`, `adapter`, `config`, and optional `model_id`/`model_revision`
 fields as the [existing runner configuration](INITIAL_BUILD.md#run-configuration).
-Copy your configured systems array; installing a dataset does not install a
-scanner or select a model. The existing scanner adapters are `semgrep`,
-`llm-harness`, and `deepsec`.
+When adapting an existing systems array, retain only those fields. The case-pack
+runner's `execution` and `network_policy` keys are intentionally unsupported here;
+the benchmark validator rejects them rather than silently discarding isolation
+choices. Installing a dataset does not install a scanner or select a model. The
+existing scanner adapters are `semgrep`, `llm-harness`, and `deepsec`.
 
 ```sh
 scaneval benchmark plan --dataset results/aacr-bench.json \
@@ -179,8 +181,12 @@ invocation is not successful.
 
 ## Machine judgments and deterministic scoring
 
-The judge packet contains each delivered claim and the task's reference
-annotations, with upstream correctness labels withheld. The packet also names
+The judge packet contains each claim eligible for matching and the task's reference
+annotations. The explicit correctness `label` field is omitted, but task and
+annotation IDs, publisher ordering, annotation text, and source context may reveal
+variant or label cues. This is neither tool-blinded nor label-blinded evaluation.
+Repository, claim, and annotation content is untrusted evidence for the matcher,
+not instructions. The packet also names
 the saved source trees so a judge can inspect context. Invocation IDs can expose
 tool names; this is not a blinded judge protocol. Before emitting the packet,
 ScanEval verifies the execution and provenance digests, rehashes the saved source,
@@ -226,17 +232,29 @@ scaneval benchmark score results/aacr-run \
 Re-running score with the same saved inputs produces the same document, offline.
 The report names its protocol, source and plan hashes, judge, judgment hash, status
 counts, severity breakdown, runtime, available token counts, and known cost.
-Unknown cost is `null`, with a count of invocations that reported cost.
+Unknown cost and runtime totals are `null`, with counts of invocations that
+reported each value. A runtime total with some missing invocations is the sum of
+known values only.
 
-The `scaneval-reference-coverage-1` protocol uses these rules:
+The `scaneval-reference-coverage-2` protocol uses these rules:
 
 - Reference coverage is distinct positive annotations covered divided by all
   positive annotations assigned to that system across the scheduled repetitions.
   Errors, timeouts, unsupported tasks, and missing results do not shrink that
   denominator. Each repetition has its own annotation coverage.
-- One claim may cover several annotations. A repeated claim contributes to
+- `generated_claims` counts every normalized claim retained in result artifacts.
+  Only claims from `success` and `partial` results are `scorable_claims`; claims
+  from all other statuses are `excluded_claims`. Excluded claims remain in the
+  saved result for audit but are omitted from the packet's matchable `claims`, do
+  not require judgments, and do not enter pending/uncertain counts or the match-rate
+  denominator. Packet invocation counts make this exclusion explicit.
+- One scorable claim may cover several annotations. A repeated claim contributes to
   `novel_reference_match_rate` only when it covers a previously uncovered positive
-  annotation in that invocation. Generated claims are counted in delivered order.
+  annotation in that invocation. Its denominator is `scorable_claims`, counted in
+  delivered order. The protocol identifier changed from version 1 because this
+  denominator and the required judgment set changed. This prerelease refuses
+  protocol-v1 plans, packets, and judgments; create a new v2 plan and run rather
+  than silently migrating or reusing old results.
 - A match to a rejected annotation is reported separately. It never grants
   positive coverage or quiet-control credit.
 - Fixed controls report `alerted`, `quiet`, and `unresolved`. Silence earns quiet
