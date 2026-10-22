@@ -66,9 +66,9 @@ def validate_dataset(document: dict) -> dict:
     seen = set()
     for task in document["tasks"]:
         identifier = task["task_id"]
-        if identifier in seen:
-            raise ContractError(f"duplicate task_id: {identifier}")
-        seen.add(identifier)
+        if identifier.casefold() in seen:
+            raise ContractError(f"duplicate task_id on a case-insensitive filesystem: {identifier}")
+        seen.add(identifier.casefold())
         repository_url(task["repository_url"])
         for url in task.get("mirror_urls", []):
             repository_url(url)

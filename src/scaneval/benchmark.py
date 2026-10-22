@@ -68,15 +68,16 @@ def validate_plan(plan: dict, dataset: dict) -> dict:
         _require(isinstance(system, dict) and set(system) <= {"system_id", "adapter", "config", "model_id", "model_revision"}
                  and {"system_id", "adapter"} <= set(system), "invalid benchmark system specification")
         sid = system["system_id"]
-        _require(isinstance(sid, str) and ID.fullmatch(sid) and sid not in seen, "invalid or duplicate system_id")
-        seen.add(sid)
+        _require(isinstance(sid, str) and ID.fullmatch(sid) and sid.casefold() not in seen,
+                 "invalid or duplicate system_id (case-insensitive)")
+        seen.add(sid.casefold())
         _require(isinstance(system["adapter"], str) and system["adapter"], "system needs adapter name")
         _require(isinstance(system.get("config", {}), dict), "system config must be an object")
         for field in ("model_id", "model_revision"):
             _require(field not in system or isinstance(system[field], str) and system[field], f"invalid {field}")
     # Composite invocation IDs must also be unambiguous.
     ids = [row["invocation_id"] for row in schedule(plan)]
-    _require(len(ids) == len(set(ids)), "planned invocation IDs collide")
+    _require(len(ids) == len({i.casefold() for i in ids}), "planned invocation IDs collide (case-insensitive)")
     _require(all(len(i.encode("utf-8")) <= 240 for i in ids), "planned invocation ID is too long for a file name")
     canonical_sha256(plan)
     return plan

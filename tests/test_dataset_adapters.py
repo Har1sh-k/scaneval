@@ -140,6 +140,27 @@ def test_native_rejects_unusable_or_ambiguous_data(native, mutation):
         validate_dataset(native)
 
 
+def test_native_refuses_case_collisions_before_creating_task_directories(native):
+    first = native["tasks"][0]
+    native["tasks"].append({**deepcopy(first), "task_id": first["task_id"].upper()})
+    with pytest.raises(ContractError, match="case-insensitive"):
+        validate_dataset(native)
+
+
+@pytest.mark.parametrize("location", [
+    ("dataset_id",), ("tasks", 0, "task_id"), ("tasks", 0, "case_id"),
+    ("tasks", 0, "commit"), ("tasks", 0, "base_commit"),
+    ("tasks", 0, "annotations", 0, "annotation_id"),
+])
+def test_native_refuses_trailing_newline_in_ids_and_commits(native, location):
+    parent = native
+    for key in location[:-1]:
+        parent = parent[key]
+    parent[location[-1]] += "\n"
+    with pytest.raises(ContractError, match="does not match"):
+        validate_dataset(native)
+
+
 def test_source_hash_mismatch_is_not_a_new_dataset(tmp_path, monkeypatch):
     release(tmp_path, monkeypatch, "aacr-bench", {"file.json": {"data": "original"}})
     (tmp_path / "file.json").write_text('{"data":"changed"}')

@@ -375,6 +375,21 @@ def test_plan_rejects_changed_labels_and_unknown_selection(environment):
         benchmark.build_plan(environment, systems, run_id="frozen", task_ids=["absent"])
 
 
+def test_plan_rejects_case_colliding_systems(environment):
+    systems = [{"system_id": name, "adapter": "fixture"} for name in ("scanner", "SCANNER")]
+    with pytest.raises(ContractError, match="duplicate system_id"):
+        benchmark.build_plan(environment, systems, run_id="frozen")
+
+
+def test_plan_rejects_case_colliding_composite_invocations(environment):
+    first = environment["tasks"][0]
+    first["task_id"] = "first"
+    environment["tasks"].append({**deepcopy(first), "task_id": "FIRST__second"})
+    systems = [{"system_id": name, "adapter": "fixture"} for name in ("second__THIRD", "third")]
+    with pytest.raises(ContractError, match="invocation IDs collide"):
+        benchmark.build_plan(environment, systems, run_id="frozen")
+
+
 def test_cli_native_dataset_to_run_and_report(environment, tmp_path):
     dataset, systems, plan = [tmp_path / name for name in ("dataset.json", "systems.json", "plan.json")]
     write_json(dataset, environment)
