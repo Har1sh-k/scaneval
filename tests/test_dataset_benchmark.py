@@ -247,6 +247,71 @@ def test_judge_does_not_read_changed_source(environment, tmp_path):
         benchmark.judge_packet(output)
 
 
+@pytest.mark.parametrize("variant", ["snapshot", "pr-head", "pr-base"])
+def test_source_and_provenance_replacement_cannot_reuse_judgments(environment, tmp_path, variant):
+    dataset = cve_dataset(environment) if variant == "snapshot" else environment
+    output = run_fixture(dataset, tmp_path)
+    judgments = judgments_for(output)
+    tid = "vulnerable" if variant == "snapshot" else "change"
+    trial = output / "inputs" / tid
+    source = trial / ("base/source" if variant == "pr-base" else "source")
+    (source / "app.py").write_text("unrelated_replacement()\n")
+    provenance_path = trial / "provenance.json"
+    provenance = read_json(provenance_path)
+    snapshot = provenance if variant == "snapshot" else provenance[variant.removeprefix("pr-")]
+    snapshot["trial"]["tree_hash"] = materialize.hash_exported_tree(source)["tree_hash"]
+    provenance_path.write_text(json.dumps(provenance))
+    with pytest.raises(ContractError, match="provenance changed before judging"):
+        benchmark.score(output, judgments)
+
+
+def test_pr_mode_change_is_checked_against_original_input(environment, tmp_path):
+    output = run_fixture(environment, tmp_path)
+    source = output / "inputs/change/source/app.py"
+    source.chmod(source.stat().st_mode ^ 0o111)
+    # Content hashes alone do not detect a change in the executable bit.
+    with pytest.raises(ContractError, match="source differs from scanned input"):
+        benchmark.judge_packet(output)
+
+
+def test_judge_packet_binds_the_verified_source_and_execution(environment, tmp_path):
+    output = run_fixture(environment, tmp_path)
+    packet = benchmark.judge_packet(output)
+    row = packet["invocations"][0]
+    bundle = output / "invocations" / row["invocation_id"]
+    result = read_json(bundle / "result.json")
+    receipt = read_json(bundle / "execution.json")
+    assert row["source_binding"]["input_hash"] == result["input_hash"]
+    assert row["source_binding"]["provenance_sha256"] == receipt["provenance"]["provenance_sha256"]
+    assert row["execution_sha256"] == canonical_sha256(receipt)
+    assert row["source_binding"]["head_tree_hash"] != row["source_binding"]["base_tree_hash"]
+
+
+def test_changed_execution_receipt_is_not_replayable(environment, tmp_path):
+    output = run_fixture(environment, tmp_path)
+    path = next((output / "invocations").glob("*/execution.json"))
+    receipt = read_json(path)
+    receipt["provenance"]["provenance_sha256"] = "sha256:" + "0" * 64
+    path.write_text(json.dumps(receipt))
+    with pytest.raises(ContractError, match="saved execution changed"):
+        benchmark.judge_packet(output)
+
+
+def test_copied_receipt_cannot_reassign_a_repetition(environment, tmp_path):
+    output = run_fixture(environment, tmp_path, repetitions=2)
+    path = output / "benchmark-run.json"
+    record = read_json(path)
+    first, second = record["invocations"]
+    original = output / "invocations" / first["invocation_id"] / "execution.json"
+    replacement = output / "invocations" / second["invocation_id"] / "execution.json"
+    replacement.write_bytes(original.read_bytes())
+    # Even a replacement digest must still fit the scheduled assignment.
+    second["execution_sha256"] = first["execution_sha256"]
+    path.write_text(json.dumps(record))
+    with pytest.raises(ContractError, match="execution identity mismatch"):
+        benchmark.saved_run(output)
+
+
 def test_plan_rejects_changed_labels_and_unknown_selection(environment):
     systems = [{"system_id": "fixture", "adapter": "fixture"}]
     plan = benchmark.build_plan(environment, systems, run_id="frozen")

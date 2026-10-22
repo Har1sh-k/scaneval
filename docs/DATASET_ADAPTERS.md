@@ -178,8 +178,12 @@ missing. The exit status is 1 if any recorded invocation is not successful.
 The judge packet contains each delivered claim and the task's reference
 annotations, with upstream correctness labels withheld. The packet also names
 the saved source trees so a judge can inspect context. Invocation IDs can expose
-tool names; this is not a blinded judge protocol. Source trees are checked for
-changes before the packet is emitted.
+tool names; this is not a blinded judge protocol. Before emitting the packet,
+ScanEval verifies the execution and provenance digests, rehashes the saved source,
+and compares its input identity with the scanner result. PR inputs include both
+trees and a recomputed diff. The packet carries these verified identities, so
+replacing source and its neighboring provenance cannot reuse old judgments. These
+are consistency checks over retained artifacts, not signed or tamper-proof records.
 
 Give the packet to a Codex/LLM judge or another semantic matcher. No human approval
 is required. It must match the same concrete issue, not merely a shared path,

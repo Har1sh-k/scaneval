@@ -14,7 +14,8 @@ import re
 from . import execution, materialize
 from .adapters import get_adapter
 from .adapters.base import SystemSpec
-from .contracts import ContractError, canonical_sha256, load_document, refuse_trial_path
+from .contracts import (ContractError, canonical_sha256, load_document, pr_diff_sha256,
+                        pr_input_hash, refuse_trial_path)
 from .datasets import read_json, validate_dataset, write_json
 
 PROTOCOL = "scaneval-reference-coverage-1"
@@ -146,7 +147,8 @@ def run(plan: dict, dataset: dict, output: Path, cache: Path, *, progress=print)
             progress(f"Preparing {tid}")
             try:
                 prepared = prepare_task(tasks[tid], output / "inputs" / tid, cache)
-                task_records[tid] = {"input_hash": prepared.binding_hash, "status": "prepared"}
+                task_records[tid] = {"input_hash": prepared.binding_hash, "status": "prepared",
+                                     "provenance_sha256": canonical_sha256(prepared.provenance)}
             except Exception as exc:
                 prepared = None
                 task_records[tid] = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
@@ -166,7 +168,9 @@ def run(plan: dict, dataset: dict, output: Path, cache: Path, *, progress=print)
                         timeout_seconds=plan["timeout_seconds"], trace_mode=plan["trace_mode"],
                         network_policy="unrestricted")
                     result = load_document(bundle / "result.json", "scan-result")
-                    row.update(status=result["status"], result_sha256=canonical_sha256(result))
+                    receipt = load_document(bundle / "execution.json", "execution-record")
+                    row.update(status=result["status"], result_sha256=canonical_sha256(result),
+                               execution_sha256=canonical_sha256(receipt))
                 except Exception as exc:
                     row.update(status="error", error=f"{type(exc).__name__}: {exc}")
                 rows.append(row)
@@ -203,10 +207,21 @@ def saved_run(directory: Path):
             _require(path.is_file(), f"recorded result missing: {iid}")
             result = load_document(path, "scan-result")
             _require(canonical_sha256(result) == row["result_sha256"], f"saved result changed: {iid}")
+            task_record = record["tasks"][row["task_id"]]
             _require(result["run_id"] == plan["run_id"] and result["system_id"] == row["system_id"]
-                     and result["input_hash"] == record["tasks"][row["task_id"]]["input_hash"]
+                     and result["input_hash"] == task_record["input_hash"]
                      and result["status"] == row["status"], f"result identity mismatch: {iid}")
+            receipt = load_document(path.with_name("execution.json"), "execution-record")
+            _require(canonical_sha256(receipt) == row.get("execution_sha256"), f"saved execution changed: {iid}")
+            provenance = receipt["provenance"]
+            _require(receipt["run_id"] == plan["run_id"] and receipt["invocation_id"] == iid
+                     and receipt["input_id"] == row["task_id"] and receipt["system_id"] == row["system_id"]
+                     and receipt["repetition"] == row["repetition"] and receipt["status"] == row["status"]
+                     and provenance.get("input_hash", provenance["tree_hash"]) == result["input_hash"]
+                     and provenance["provenance_sha256"] == task_record.get("provenance_sha256"),
+                     f"execution identity mismatch: {iid}")
             row["result"] = result
+            row["execution"] = receipt
         else:
             _require(row["status"] in ("error", "missing"), f"unrecorded result claims completion: {iid}")
         observations.append(row)
@@ -217,16 +232,35 @@ def judge_packet(directory: Path) -> dict:
     plan, dataset, observations = saved_run(directory)
     tasks = {t["task_id"]: t for t in dataset["tasks"]}
     # A judge opening the saved source must see the exact trees the scanner saw.
-    for tid in {row["task_id"] for row in observations if "result" in row}:
+    bindings = {}
+    for row in observations:
+        if "result" not in row or row["task_id"] in bindings:
+            continue
+        tid = row["task_id"]
         trial = directory / "inputs" / tid
         provenance = read_json(trial / "provenance.json")
+        provenance_hash = canonical_sha256(provenance)
+        _require(provenance_hash == row["execution"]["provenance"]["provenance_sha256"],
+                 f"saved provenance changed before judging: {tid}")
         if tasks[tid]["variant"] == "pr":
+            trees = {}
             for side, path in (("head", trial / "source"), ("base", trial / "base/source")):
-                _require(materialize.hash_exported_tree(path)["tree_hash"] == provenance[side]["trial"]["tree_hash"],
+                trees[side] = materialize.hash_exported_tree(path)["tree_hash"]
+                _require(trees[side] == provenance[side]["trial"]["tree_hash"],
                          f"saved {side} source changed before judging: {tid}")
+            changes = materialize.diff_trees(trial / "base/source", trial / "source")
+            diff_hash = pr_diff_sha256(trees["base"], trees["head"], changes)
+            binding = {"input_hash": pr_input_hash(trees["base"], trees["head"], diff_hash),
+                       "head_tree_hash": trees["head"], "base_tree_hash": trees["base"],
+                       "diff_sha256": diff_hash}
         else:
-            _require(materialize.hash_exported_tree(trial / "source")["tree_hash"] == provenance["trial"]["tree_hash"],
+            tree_hash = materialize.hash_exported_tree(trial / "source")["tree_hash"]
+            _require(tree_hash == provenance["trial"]["tree_hash"],
                      f"saved source changed before judging: {tid}")
+            binding = {"input_hash": tree_hash, "tree_hash": tree_hash}
+        _require(binding["input_hash"] == row["result"]["input_hash"],
+                 f"saved source differs from scanned input: {tid}")
+        bindings[tid] = {**binding, "provenance_sha256": provenance_hash}
     return {"schema_version": "1.0", "kind": "benchmark-judge-packet", "protocol": PROTOCOL,
             "plan_sha256": canonical_sha256(plan), "dataset_sha256": canonical_sha256(dataset),
             "instructions": (
@@ -242,6 +276,8 @@ def judge_packet(directory: Path) -> dict:
             "invocations": [
                 {"invocation_id": row["invocation_id"], "task_id": row["task_id"],
                  "status": row["status"], "result_sha256": row.get("result_sha256"),
+                 "execution_sha256": row.get("execution_sha256"),
+                 "source_binding": bindings.get(row["task_id"]) if "result" in row else None,
                  "source_root": f"inputs/{row['task_id']}/source",
                  "base_source_root": f"inputs/{row['task_id']}/base/source" if plan["mode"] == "pr-review" else None,
                  "claims": row.get("result", {}).get("claims", []),
