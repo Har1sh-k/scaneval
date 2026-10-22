@@ -2,7 +2,7 @@
 
 ScanEval evaluates security scanners on versioned cases and records how instrumented harnesses reach their findings. The evaluator uses structured outputs and recorded review decisions, not an LLM judge.
 
-> Alpha (`2.0.0a1`). No benchmark results are published. The three cases in [the draft pilot](docs/PILOT.md) have mechanical checks only, with no human-approved labels or matching decisions and no controls. Scanner outputs and traces stay local.
+> Alpha (`2.0.0a1`). No benchmark results are published. The [selected CVE corpus](corpus/diverse/README.md) contains 18 CVEs from 11 repositories across six target languages: 4 Critical, 5 High, 6 Medium and 3 Low by the documented published-CVSS policy. Its 16 pinned vulnerable exports have mechanical checks and a separate machine-review workflow for static labels. Fixed controls remain unvalidated. Scanner outputs and traces stay local.
 
 ## Quick start
 
@@ -22,7 +22,7 @@ scaneval replay results/diagnostic-demo --output results/diagnostic-replay.json
 
 The demo uses fabricated evaluator fixtures, not a live scanner or admitted CVEs. It exercises scoring without model calls. Output paths must be new.
 
-For a live run, use the [pilot guide](docs/PILOT.md) to configure a scanner, prepare pinned sources, run, and review the output. To supply your own security fixes, findings, or documents, follow [bring your own corpus](docs/BRING_YOUR_OWN_CORPUS.md).
+Start with the [CVE corpus](corpus/diverse/README.md) for the 18 cases, severity sources and remaining admission requirements. This is the repository's complete current corpus. The [execution guide](docs/INITIAL_BUILD.md#run-configuration) explains scanner configuration and review. To supply your own security fixes, findings, or documents, follow [bring your own corpus](docs/BRING_YOUR_OWN_CORPUS.md).
 
 ## Evaluation
 
@@ -39,6 +39,7 @@ The scorer reports known-target detection, recall within review budgets, and fal
 | `scaneval report <bundle> --output` | Render a standalone HTML report. |
 | `scaneval investigate <run> --output <new-directory>` | Export a local investigation view and JSON with judgments, trace links, capture states, and artifact bindings ([guide](docs/INVESTIGATION.md)). |
 | `scaneval corpus init\|add-snapshot\|import\|validate\|approve\|admit\|disposition` | Prepare case packs, run mechanical checks, and record explicit reviews and admissions. |
+| `scaneval corpus machine-prepare\|machine-record\|machine-check` | Prepare evidence packets and validate machine judgments of static CVE labels without HITL. |
 | `scaneval corpus add-change-set\|pr-scope\|canonical` | Declare a base/head change set, state which targets and controls are scored in its PR review, and group records by canonical root cause. |
 | `scaneval plan --pack --snapshot-id --tree-hash --output` | Build an evaluation plan for one materialized input, or with `--mode pr --change-set-id` and the hashes that identify it, the PR plan of a change set. |
 | `scaneval run <config> --output <new dir>` | Run a frozen configuration and save its artifacts. |
@@ -83,7 +84,7 @@ Implementation review: [Inspect AI visibility and observability comparison](docs
 - Corpus aggregation and paired comparison read saved, frozen run directories ([aggregation](docs/AGGREGATION.md)). They compute no reviewed precision and decide no promotion.
 - Reviewed precision comes only from people reviewing a seeded probability sample of delivered claims ([precision guide](docs/PRECISION.md)). It is not a repository false-positive rate.
 - A gate decision holds a saved comparison to a policy you write and says whether its requirements held ([gate guide](docs/GATE.md)). It promotes nothing: the workflow that owns the harness decides.
-- The initial public workload is not selected. The pilot is an integration exercise, not a representative benchmark or scanner comparison.
+- Eighteen CVEs are selected in the [diverse corpus](corpus/diverse/README.md), including GitLab, Kubernetes, Airflow, Langflow and LangChain. The [Astra-authored review skill](skills/cve-corpus-review/SKILL.md) supports machine review without a human gate; shared deployment context, claim-specific runtime validation and scanner preflight remain separate work. Java and Ruby are accepted by the corpus contract, but the current adapters still record them as unsupported. No representative benchmark or scanner comparison is claimed.
 
 [Current capabilities](docs/INITIAL_BUILD.md) describes the implementation. [Design decisions](docs/DESIGN_DECISIONS.md) and [evaluation math](docs/EVALUATION_MATH.md) describe the broader contract and planned work.
 
@@ -102,7 +103,7 @@ Tests use local fixtures and mock model runners. They do not launch paid model e
 | `src/scaneval/schemas/` | Versioned evaluation contracts |
 | `sdk/typescript/` | TypeScript Observer SDK |
 | `schema/v2/` | Shared trace contract and conformance fixtures |
-| `corpus/pilot/` | Draft case pack and frozen run configurations |
+| `corpus/diverse/` | 18 selected CVEs, sourced severity distribution, pinned sources and admission requirements |
 | `scripts/sanitize_native_trace.py` | Scrub native records for collector fixtures |
 | `tests/` | Contract, scoring, runner, adapter, Observer, and collector tests |
 | `docs/` | Public design and usage guides |

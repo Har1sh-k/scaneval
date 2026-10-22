@@ -17,7 +17,7 @@
         "root": {"type": "string", "minLength": 1},
         "languages": {
           "type": "array", "minItems": 1, "uniqueItems": true,
-          "items": {"enum": ["python", "typescript", "javascript", "go", "rust"]}
+          "items": {"enum": ["python", "typescript", "javascript", "go", "rust", "java", "ruby"]}
         },
         "mode": {"enum": ["full", "pr"]},
         "profile": {"enum": ["standard", "metadata_blinded"]},

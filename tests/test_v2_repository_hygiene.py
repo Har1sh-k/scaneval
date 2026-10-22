@@ -82,7 +82,7 @@ def test_no_run_record_is_published():
     assert not found, "run records must not be committed:\n" + "\n".join(found)
 
 
-@pytest.mark.parametrize("config", sorted((ROOT / "corpus" / "pilot").glob("run-*.json")))
+@pytest.mark.parametrize("config", sorted((ROOT / "corpus").glob("*/run-*.json")))
 def test_every_published_run_configuration_is_portable(config: Path):
     """The configurations are the reproduction path, so they must not pin to one machine."""
     text = config.read_text(encoding="utf-8")

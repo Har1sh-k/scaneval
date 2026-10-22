@@ -1,0 +1,658 @@
+{
+  "schema_version": "1.0",
+  "pack_id": "diverse-2026-10",
+  "pack_version": "0.3.0-draft",
+  "policy": "Published severity is stratification metadata. CNA numeric CVSS takes priority; prefer 3.1, then 3.0, then 4.0 within an authority. Fall back to GitHub reviewed numeric CVSS only if CNA numeric scores are unavailable. Preserve alternative ratings and source discrepancies in severity-distribution.json. Do not average numeric CVSS scores across versions.",
+  "case_count": 18,
+  "repository_count": 11,
+  "snapshot_count": 16,
+  "language_count": 6,
+  "severity_counts": {
+    "critical": 4,
+    "high": 5,
+    "medium": 6,
+    "low": 3,
+    "none": 0
+  },
+  "unrated": 0,
+  "cvss_version_counts": {
+    "3.1": 16,
+    "4.0": 2
+  },
+  "cases": [
+    {
+      "case_id": "browser-use-cve-2025-47241",
+      "cve": "CVE-2025-47241",
+      "repository": "browser-use/browser-use",
+      "selected": {
+        "level": "medium",
+        "score": 4,
+        "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:L/A:N",
+        "source": "https://cveawg.mitre.org/api/cve/CVE-2025-47241",
+        "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed. Other published ratings: github_reviewed_cvss CVSS 3.1 9.3 critical. See severity-distribution.json for vectors and sources."
+      },
+      "ratings": [
+        {
+          "level": "medium",
+          "score": 4,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:L/A:N",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2025-47241",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "critical",
+          "score": 9.3,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:L",
+          "source": "https://api.github.com/advisories/GHSA-x39x-9qw5-ghrf",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [],
+      "published_ghsa_label": "critical"
+    },
+    {
+      "case_id": "codex-cve-2025-59532",
+      "cve": "CVE-2025-59532",
+      "repository": "openai/codex",
+      "selected": {
+        "level": "high",
+        "score": 8.6,
+        "cvss_version": "4.0",
+        "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+        "source": "https://cveawg.mitre.org/api/cve/CVE-2025-59532",
+        "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed."
+      },
+      "ratings": [
+        {
+          "level": "high",
+          "score": 8.6,
+          "cvss_version": "4.0",
+          "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2025-59532",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "high",
+          "score": 8.6,
+          "cvss_version": "4.0",
+          "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+          "source": "https://api.github.com/advisories/GHSA-w5fx-fh39-j5rw",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [],
+      "published_ghsa_label": "high"
+    },
+    {
+      "case_id": "oauth2-proxy-cve-2025-54576",
+      "cve": "CVE-2025-54576",
+      "repository": "oauth2-proxy/oauth2-proxy",
+      "selected": {
+        "level": "critical",
+        "score": 9.1,
+        "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+        "source": "https://cveawg.mitre.org/api/cve/CVE-2025-54576",
+        "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed."
+      },
+      "ratings": [
+        {
+          "level": "critical",
+          "score": 9.1,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2025-54576",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "critical",
+          "score": 9.1,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+          "source": "https://api.github.com/advisories/GHSA-7rh7-c77v-6434",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [],
+      "published_ghsa_label": "critical"
+    },
+    {
+      "case_id": "openam-cve-2026-33439",
+      "cve": "CVE-2026-33439",
+      "repository": "OpenIdentityPlatform/OpenAM",
+      "selected": {
+        "level": "critical",
+        "score": 9.3,
+        "cvss_version": "4.0",
+        "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+        "source": "https://cveawg.mitre.org/api/cve/CVE-2026-33439",
+        "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed."
+      },
+      "ratings": [
+        {
+          "level": "critical",
+          "score": 9.3,
+          "cvss_version": "4.0",
+          "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2026-33439",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "critical",
+          "score": 9.3,
+          "cvss_version": "4.0",
+          "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+          "source": "https://api.github.com/advisories/GHSA-2cqq-rpvq-g5qj",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [],
+      "published_ghsa_label": "critical"
+    },
+    {
+      "case_id": "flowise-cve-2025-71332",
+      "cve": "CVE-2025-71332",
+      "repository": "FlowiseAI/Flowise",
+      "selected": {
+        "level": "medium",
+        "score": 6.5,
+        "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:N",
+        "source": "https://cveawg.mitre.org/api/cve/CVE-2025-71332",
+        "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed. Other published ratings: cna_cvss CVSS 4.0 8.5 high; github_reviewed_cvss CVSS 3.1 5.9 medium. See severity-distribution.json for vectors and sources."
+      },
+      "ratings": [
+        {
+          "level": "medium",
+          "score": 6.5,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:N",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2025-71332",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "high",
+          "score": 8.5,
+          "cvss_version": "4.0",
+          "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2025-71332",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "medium",
+          "score": 5.9,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:R/S:C/C:L/I:L/A:L",
+          "source": "https://api.github.com/advisories/GHSA-9c4c-g95m-c8cp",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [],
+      "published_ghsa_label": "medium"
+    },
+    {
+      "case_id": "saml-cve-2022-41912",
+      "cve": "CVE-2022-41912",
+      "repository": "crewjam/saml",
+      "selected": {
+        "level": "critical",
+        "score": 9.1,
+        "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+        "source": "https://cveawg.mitre.org/api/cve/CVE-2022-41912",
+        "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed."
+      },
+      "ratings": [
+        {
+          "level": "critical",
+          "score": 9.1,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2022-41912",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "critical",
+          "score": 9.1,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+          "source": "https://api.github.com/advisories/GHSA-j2jp-wvqg-wc2g",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [],
+      "published_ghsa_label": "critical"
+    },
+    {
+      "case_id": "gitlab-cve-2024-8124",
+      "cve": "CVE-2024-8124",
+      "repository": "gitlab-org/gitlab",
+      "selected": {
+        "level": "high",
+        "score": 7.5,
+        "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+        "source": "https://cveawg.mitre.org/api/cve/CVE-2024-8124",
+        "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed."
+      },
+      "ratings": [
+        {
+          "level": "high",
+          "score": 7.5,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2024-8124",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "high",
+          "score": 7.5,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+          "source": "https://api.github.com/advisories?cve_id=CVE-2024-8124",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [],
+      "published_ghsa_label": "high"
+    },
+    {
+      "case_id": "gitlab-cve-2024-8641",
+      "cve": "CVE-2024-8641",
+      "repository": "gitlab-org/gitlab",
+      "selected": {
+        "level": "medium",
+        "score": 6.7,
+        "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:H/I:H/A:L",
+        "source": "https://cveawg.mitre.org/api/cve/CVE-2024-8641",
+        "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed."
+      },
+      "ratings": [
+        {
+          "level": "medium",
+          "score": 6.7,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:H/I:H/A:L",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2024-8641",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "medium",
+          "score": 6.7,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:H/I:H/A:L",
+          "source": "https://api.github.com/advisories?cve_id=CVE-2024-8641",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [],
+      "published_ghsa_label": "medium"
+    },
+    {
+      "case_id": "gitlab-cve-2024-6685",
+      "cve": "CVE-2024-6685",
+      "repository": "gitlab-org/gitlab",
+      "selected": {
+        "level": "low",
+        "score": 3.1,
+        "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:L/I:N/A:N",
+        "source": "https://cveawg.mitre.org/api/cve/CVE-2024-6685",
+        "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed."
+      },
+      "ratings": [
+        {
+          "level": "low",
+          "score": 3.1,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:L/I:N/A:N",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2024-6685",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "low",
+          "score": 3.1,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:L/I:N/A:N",
+          "source": "https://api.github.com/advisories?cve_id=CVE-2024-6685",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [],
+      "published_ghsa_label": "low"
+    },
+    {
+      "case_id": "kubernetes-cve-2023-5528",
+      "cve": "CVE-2023-5528",
+      "repository": "kubernetes/kubernetes",
+      "selected": {
+        "level": "high",
+        "score": 7.2,
+        "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H",
+        "source": "https://cveawg.mitre.org/api/cve/CVE-2023-5528",
+        "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed. Other published ratings: github_reviewed_cvss CVSS 3.1 8.8 high. See severity-distribution.json for vectors and sources."
+      },
+      "ratings": [
+        {
+          "level": "high",
+          "score": 7.2,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2023-5528",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "high",
+          "score": 8.8,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+          "source": "https://api.github.com/advisories?cve_id=CVE-2023-5528",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [],
+      "published_ghsa_label": "high"
+    },
+    {
+      "case_id": "kubernetes-cve-2024-3177",
+      "cve": "CVE-2024-3177",
+      "repository": "kubernetes/kubernetes",
+      "selected": {
+        "level": "low",
+        "score": 2.7,
+        "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:N/A:N",
+        "source": "https://cveawg.mitre.org/api/cve/CVE-2024-3177",
+        "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed."
+      },
+      "ratings": [
+        {
+          "level": "low",
+          "score": 2.7,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:N/A:N",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2024-3177",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "low",
+          "score": 2.7,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:N/A:N",
+          "source": "https://api.github.com/advisories?cve_id=CVE-2024-3177",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [],
+      "published_ghsa_label": "low"
+    },
+    {
+      "case_id": "kubernetes-cve-2020-8555",
+      "cve": "CVE-2020-8555",
+      "repository": "kubernetes/kubernetes",
+      "selected": {
+        "level": "medium",
+        "score": 6.3,
+        "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:N/A:N",
+        "source": "https://cveawg.mitre.org/api/cve/CVE-2020-8555",
+        "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed."
+      },
+      "ratings": [
+        {
+          "level": "medium",
+          "score": 6.3,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:N/A:N",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2020-8555",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "medium",
+          "score": 6.3,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:N/A:N",
+          "source": "https://api.github.com/advisories?cve_id=CVE-2020-8555",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [],
+      "published_ghsa_label": "medium"
+    },
+    {
+      "case_id": "airflow-cve-2024-45034",
+      "cve": "CVE-2024-45034",
+      "repository": "apache/airflow",
+      "selected": {
+        "level": "high",
+        "score": 8.8,
+        "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+        "source": "https://api.github.com/advisories?cve_id=CVE-2024-45034",
+        "source_kind": "github_reviewed_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed. CNA textual rating: important. Other published ratings: github_reviewed_cvss CVSS 4.0 8.7 high. See severity-distribution.json for vectors and sources."
+      },
+      "ratings": [
+        {
+          "level": "high",
+          "score": 8.8,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+          "source": "https://api.github.com/advisories?cve_id=CVE-2024-45034",
+          "source_kind": "github_reviewed_cvss"
+        },
+        {
+          "level": "high",
+          "score": 8.7,
+          "cvss_version": "4.0",
+          "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+          "source": "https://api.github.com/advisories?cve_id=CVE-2024-45034",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [
+        "important"
+      ],
+      "published_ghsa_label": "high"
+    },
+    {
+      "case_id": "airflow-cve-2023-47265",
+      "cve": "CVE-2023-47265",
+      "repository": "apache/airflow",
+      "selected": {
+        "level": "medium",
+        "score": 5.4,
+        "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N",
+        "source": "https://api.github.com/advisories?cve_id=CVE-2023-47265",
+        "source_kind": "github_reviewed_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed. CNA textual rating: low."
+      },
+      "ratings": [
+        {
+          "level": "medium",
+          "score": 5.4,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N",
+          "source": "https://api.github.com/advisories?cve_id=CVE-2023-47265",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [
+        "low"
+      ],
+      "published_ghsa_label": "medium"
+    },
+    {
+      "case_id": "langflow-cve-2025-3248",
+      "cve": "CVE-2025-3248",
+      "repository": "langflow-ai/langflow",
+      "selected": {
+        "level": "critical",
+        "score": 9.8,
+        "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "source": "https://cveawg.mitre.org/api/cve/CVE-2025-3248",
+        "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed. Other published ratings: github_reviewed_cvss CVSS 4.0 9.3 critical. See severity-distribution.json for vectors and sources."
+      },
+      "ratings": [
+        {
+          "level": "critical",
+          "score": 9.8,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2025-3248",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "critical",
+          "score": 9.3,
+          "cvss_version": "4.0",
+          "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:A",
+          "source": "https://api.github.com/advisories?cve_id=CVE-2025-3248",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [],
+      "published_ghsa_label": "critical"
+    },
+    {
+      "case_id": "langflow-cve-2026-42867",
+      "cve": "CVE-2026-42867",
+      "repository": "langflow-ai/langflow",
+      "selected": {
+        "level": "medium",
+        "score": 6.5,
+        "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L",
+        "source": "https://cveawg.mitre.org/api/cve/CVE-2026-42867",
+        "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed. Source discrepancy: published vector PR:N; advisory text and inspected endpoint require an authenticated current user. Retained as a published rating, not an endorsement of its assumptions."
+      },
+      "ratings": [
+        {
+          "level": "medium",
+          "score": 6.5,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2026-42867",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "medium",
+          "score": 6.5,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L",
+          "source": "https://api.github.com/advisories?cve_id=CVE-2026-42867",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [],
+      "published_ghsa_label": "medium"
+    },
+    {
+      "case_id": "langchain-cve-2026-26013",
+      "cve": "CVE-2026-26013",
+      "repository": "langchain-ai/langchain",
+      "selected": {
+        "level": "low",
+        "score": 3.7,
+        "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L",
+        "source": "https://cveawg.mitre.org/api/cve/CVE-2026-26013",
+        "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed."
+      },
+      "ratings": [
+        {
+          "level": "low",
+          "score": 3.7,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2026-26013",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "low",
+          "score": 3.7,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L",
+          "source": "https://api.github.com/advisories?cve_id=CVE-2026-26013",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [],
+      "published_ghsa_label": "low"
+    },
+    {
+      "case_id": "langchain-cve-2026-34070",
+      "cve": "CVE-2026-34070",
+      "repository": "langchain-ai/langchain",
+      "selected": {
+        "level": "high",
+        "score": 7.5,
+        "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+        "source": "https://cveawg.mitre.org/api/cve/CVE-2026-34070",
+        "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22",
+        "note": "CNA numeric CVSS is preferred; within an authority prefer 3.1, then 3.0, then 4.0. Use GitHub reviewed CVSS only if the CNA supplies no numeric score. Scores are copied, not recomputed."
+      },
+      "ratings": [
+        {
+          "level": "high",
+          "score": 7.5,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+          "source": "https://cveawg.mitre.org/api/cve/CVE-2026-34070",
+          "source_kind": "cna_cvss"
+        },
+        {
+          "level": "high",
+          "score": 7.5,
+          "cvss_version": "3.1",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+          "source": "https://api.github.com/advisories?cve_id=CVE-2026-34070",
+          "source_kind": "github_reviewed_cvss"
+        }
+      ],
+      "cna_textual_ratings": [],
+      "published_ghsa_label": "high"
+    }
+  ]
+}

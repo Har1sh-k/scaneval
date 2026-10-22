@@ -316,6 +316,44 @@
         "sha256": {
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "severity_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Published severity distribution of the entire pack, not a scanner result or the selected invocation denominator.",
+          "required": [
+            "critical",
+            "high",
+            "medium",
+            "low",
+            "none"
+          ],
+          "properties": {
+            "critical": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "high": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "medium": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "low": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "none": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "severity_unrated": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },

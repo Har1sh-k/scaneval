@@ -1,0 +1,1236 @@
+{
+  "schema_version": "1.0",
+  "review_kind": "machine",
+  "scope": "static_labels",
+  "packet_set_sha256": "sha256:f9d485bb80fcb5797cf52b2ad6d5b608233434b0209c383d44ebb4c8cf8aaa5e",
+  "judgments_sha256": "sha256:4244ac0d9b318ce9ba45b692d0b915dfa3a1eea7ce1250a10e2a49271ec4e1c9",
+  "judgments": {
+    "schema_version": "1.0",
+    "review_kind": "machine",
+    "scope": "static_labels",
+    "provenance": {
+      "run_id": "/root/astra_corpus_judge:followup-v2",
+      "requested_model": "gpt-6-astra",
+      "reported_model": "gpt-6-astra",
+      "identity_basis": "orchestrator_task_metadata",
+      "identity_ambiguous": false,
+      "prompt_sha256": "sha256:e1ca286cb80285db7f65e9d3f998c369b46d53bab59b9ff839c53ff845ece2be",
+      "receipt_path": "results/corpus-machine-review-20261022/astra-run-v2.json",
+      "receipt_sha256": "sha256:34dc9d3692c081df807165b26380a3ea7c37cd8806294e8bc5448b82f12b3f88",
+      "prompt_path": "results/corpus-machine-review-20261022/astra-review-v2.prompt.txt",
+      "reviewed_at": "2026-10-22T17:43:36.479473+00:00"
+    },
+    "judgments": [
+      {
+        "case_id": "browser-use-cve-2025-47241",
+        "packet_sha256": "sha256:ae3254d654718e437e8fc4491fe90903ded93491c4522907e1ad20d675ae4a4c",
+        "verdict": "accept",
+        "rationale": "The published CVE and GHSA identify userinfo/authority confusion and link PR 1561; the raw PR commit list contains ebdeb613 and its parent is the exported pin. navigate_to applies the guard before page.goto. With allowed.test in allowed_domains, https://allowed.test:pw@blocked.test/ yields the allowed authority prefix while its hostname is blocked.test. The patch switches to hostname. The source location is the actual authorization guard. The CNA 4.0 CVSS 3.1 rating is accurately selected over the conflicting GitHub 9.3 rating.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-pr-commits",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 14,
+            "end_line": 35
+          },
+          {
+            "artifact_id": "source:browser_use/browser/context.py",
+            "start_line": 738,
+            "end_line": 783
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Post-navigation checks and browser credential/URL normalization can affect later behavior; no browser request or runtime exploit was executed. The allegation is the pre-navigation allowlist bypass, not cloud-metadata SSRF.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      },
+      {
+        "case_id": "codex-cve-2025-59532",
+        "packet_sha256": "sha256:3c5231253e757a11d469e2b370dca9fbbbdd2aba25ea0cdde5ec8c039baf15bb",
+        "verdict": "accept",
+        "rationale": "The published advisory directly names fix 8595237 and the model-generated cwd sandbox error; its parent matches the export. ExecParams.cwd is passed to both sandbox constructors at the reporting location. Additional pinned caller inspection found ShellToolCallParams.workdir joined into cwd, and WorkspaceWrite adds that cwd to writable roots. Patch hunks separate command_cwd from turn_context.cwd and feed the latter into policy construction. This supports the scoped workspace authority-confusion label, with the CNA CVSS 4.0 score 8.6 copied accurately.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 118,
+            "end_line": 195
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 196,
+            "end_line": 287
+          },
+          {
+            "artifact_id": "source:codex-rs/core/src/exec.rs",
+            "start_line": 81,
+            "end_line": 129
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Backend-specific filesystem permissions, read-only subpaths and approval behavior were not exercised. The bug does not establish a network sandbox bypass.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      },
+      {
+        "case_id": "oauth2-proxy-cve-2025-54576",
+        "packet_sha256": "sha256:d6084b42cff87f48ee1aeb473773ac4e6b3d464009a796cb8b5e4056a80f584e",
+        "verdict": "accept",
+        "rationale": "CVE/GHSA directly link the exact fix and vulnerable source revision. GetRequestURI preserves query text (or the configured forwarded URI), and isAllowedPath applies the skip-route regex to it; isAllowedRoute and IsAllowedRequest use that decision to skip authentication. A broad expression such as ^/api/.*/status can match /api/private?x=/status although the backend path is private. Both reported locations carry this flow. The patch substitutes path-only extraction. Published CNA CVSS 3.1 9.1 matches the label.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 49,
+            "end_line": 96
+          },
+          {
+            "artifact_id": "source:pkg/requests/util/util.go",
+            "start_line": 35,
+            "end_line": 53
+          },
+          {
+            "artifact_id": "source:oauthproxy.go",
+            "start_line": 572,
+            "end_line": 599
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Acceptance assumes the stated susceptible regex and protected backend route; exact proxy-header trust configuration remains to be frozen. Later fragment/header parsing issues and a complete fixed control are outside this review.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      },
+      {
+        "case_id": "openam-cve-2026-33439",
+        "packet_sha256": "sha256:da591592f598a4e4e12729386f14a4c10aaa6946fedc29443b57aa68197775d7",
+        "verdict": "accept",
+        "rationale": "The published CVE and GHSA identify the clientSession route and the GHSA references fix 014007c; metadata makes the exported revision its parent. Encoder.deserialize wraps caller bytes in ApplicationObjectInputStream and calls readObject. The GHSA supplies the request/JATO rendering trace; read-only inspection of the bundled jato-2005-05-04.jar independently found getParameter(\"jato.clientSession\"), decodeHttp64 and Encoder.deserialize calls, and ApplicationObjectInputStream.resolveClass loading named classes without a whitelist. The pinned IOUtils implementation uses WhitelistObjectInputStream, consistent with the patch delegation. The sink location supports unsafe deserialization under the declared endpoint/filter assumptions. CNA CVSS 4.0 9.3 is supported.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 91,
+            "end_line": 118
+          },
+          {
+            "artifact_id": "source:jato-shaded/src/main/java/com/iplanet/jato/util/Encoder.java",
+            "start_line": 117,
+            "end_line": 130
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No Java application or gadget was executed; javap was unavailable, so a local Python classfile reader inspected constant-pool references and method bytecode. The advisory reproduction is published evidence, not this review executing it. Exact deployed JDK, Jakarta transformation, gadget availability, endpoint reachability and configured whitelist remain unvalidated.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      },
+      {
+        "case_id": "flowise-cve-2025-71332",
+        "packet_sha256": "sha256:298ab052d80be47b92d60c4b8fb2d4e4c137f210019006038bd754190812176d",
+        "verdict": "accept",
+        "rationale": "CVE and GHSA describe importChatflows id injection; the GHSA PR 4226 and its metadata bind fix f963e5a, whose parent is the export. Pinned route/controller inspection confirms POST importchatflows passes req.body.Chatflows to this service. The service quotes each supplied id without escaping, then interpolates the concatenated list into QueryBuilder.where before subsequent flowData parsing. Caller permission to import does not authorize SQL syntax. The patch validates UUIDs before query construction, not parameterization. CNA CVSS 3.1 6.5 is the stated selection despite alternate CNA 4.0 and GitHub scores.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-pr",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 38,
+            "end_line": 62
+          },
+          {
+            "artifact_id": "source:packages/server/src/services/chatflows/index.ts",
+            "start_line": 221,
+            "end_line": 269
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Authentication mode, database driver, exact error observability and practical extraction are not execution-tested. Static acceptance is conditional on the stated import permission and does not claim an unauthenticated route.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      },
+      {
+        "case_id": "saml-cve-2022-41912",
+        "packet_sha256": "sha256:b06bbf896ecf4489bb9c84b9493a07a07781b7ac951d215e37e50bd221d52bc7",
+        "verdict": "accept",
+        "rationale": "The CVE directly maps to aee3fb1, whose parent is the exported pin. ParseXMLResponse unmarshals a Response independently from the etree tree; validateXMLResponse calls validateSigned but consumes resp.Assertion. findChild returns the first matching child, so validateSigned can check a different Assertion from the identity object populated by unmarshalling a multiple-assertion response. The reporting location implements that incomplete signature check. The patch parses each assertion from the same element it validates and returns a validated assertion; its TestMultipleAssertions is corroborating unexecuted regression evidence. CNA CVSS 3.1 9.1 is supported.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 475,
+            "end_line": 558
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 614,
+            "end_line": 635
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 1169,
+            "end_line": 1207
+          },
+          {
+            "artifact_id": "source:service_provider.go",
+            "start_line": 792,
+            "end_line": 828
+          },
+          {
+            "artifact_id": "source:service_provider.go",
+            "start_line": 837,
+            "end_line": 882
+          },
+          {
+            "artifact_id": "source:service_provider.go",
+            "start_line": 1015,
+            "end_line": 1040
+          },
+          {
+            "artifact_id": "source:service_provider.go",
+            "start_line": 1079,
+            "end_line": 1119
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Request ID, issuer, destination, time and assertion-condition checks remain applicable. A usable signed assertion/trust context is still required for the mismatch route; no fixture or fixed regression was executed.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      },
+      {
+        "case_id": "gitlab-cve-2024-8124",
+        "packet_sha256": "sha256:2bc9be2c3a04dfd15b93a7c916651012eb17ac346cb23beb54b0802b48c1bb12",
+        "verdict": "accept",
+        "rationale": "CVE 8124 links issue 480533, whose raw report identifies glm_source and the same scan/flatten line. The 17.3.1 tag record binds df018582; this version is affected, and the release comparison contains fix 878cda6. preferred_language reaches marketing_site_language when no valid preference cookie short-circuits it; scan materializes every locale match and flatten allocates another collection. The patch replaces this with an anchored marketing-host match and bounded captures. Both entry and allocation locations are relevant. CNA CVSS 3.1 7.5 is supported.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "issue",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "gitlab-low-section",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "gitlab-compare",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 16,
+            "end_line": 36
+          },
+          {
+            "artifact_id": "source:app/controllers/concerns/preferred_language_switcher.rb",
+            "start_line": 10,
+            "end_line": 20
+          },
+          {
+            "artifact_id": "source:app/controllers/concerns/preferred_language_switcher.rb",
+            "start_line": 40,
+            "end_line": 47
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No resource-growth benchmark, POST flood or deployment request-limit test was run. The callback feature flag and absence of a usable preference cookie matter; the issue report supplies a candidate route, not a locally reproduced outage.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      },
+      {
+        "case_id": "gitlab-cve-2024-8641",
+        "packet_sha256": "sha256:2d8b09162d18723240cd49385fcbb5f6d3b07634cb1c460b40752c4b83b69de2",
+        "verdict": "accept",
+        "rationale": "Published CVE/release text identifies CI_JOB_TOKEN-to-session escalation. The release tag binds affected 17.3.1 to the export, and the comparison contains cafae257, whose security branch/message specifically describes the job-token exchange. Pinned JWT authentication callers resolve usable build tokens to the build user; dependency-proxy tokens contain user_id. At both reporting locations the controller resolves that user and calls sign_in, excluding project bots/service accounts rather than preserving restricted job scope. The patch installs StripCookies for /v2 before ActionDispatch::Cookies, addressing session-cookie issuance. CNA CVSS 3.1 6.7 is supported.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "gitlab-low-section",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "gitlab-compare",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "gitlab-release",
+            "start_line": 26,
+            "end_line": 28
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 22,
+            "end_line": 69
+          },
+          {
+            "artifact_id": "source:app/controllers/groups/dependency_proxy/application_controller.rb",
+            "start_line": 20,
+            "end_line": 40
+          },
+          {
+            "artifact_id": "source:app/controllers/groups/dependency_proxy/application_controller.rb",
+            "start_line": 62,
+            "end_line": 78
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "Mapping uses release, commit metadata and causal patch triangulation because the private issue is not a packet artifact. User eligibility, live job-token validity, feature flags, middleware order and actual Set-Cookie behavior were not runtime-tested.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      },
+      {
+        "case_id": "gitlab-cve-2024-6685",
+        "packet_sha256": "sha256:add3a62204a3fdfea64142e2d78b3659c3672930ee5d6e4d0c987851e0362d7d",
+        "verdict": "accept",
+        "rationale": "CVE 6685 links issue 472012; its disclosure states only Maintainers/Owners should view group runners and identifies the GraphQL information path. The affected 17.3.1 tag binds the export and the comparison contains fix 084025e, whose branch includes issue 472012. RunnerPolicy admits Developer group/project associations and grants read_runner in the reported rules; anonymous prevention does not block authenticated Developers. The patch raises these association thresholds to Maintainer. Both locations support the scoped information-disclosure label. CNA CVSS 3.1 3.1 is supported.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "issue",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "gitlab-low-section",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "gitlab-compare",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 19,
+            "end_line": 101
+          },
+          {
+            "artifact_id": "source:app/policies/ci/runner_policy.rb",
+            "start_line": 32,
+            "end_line": 71
+          },
+          {
+            "artifact_id": "source:app/policies/ci/runner_policy.rb",
+            "start_line": 78,
+            "end_line": 103
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "The issue requires a known or guessed runner identifier and a qualifying relationship. No GraphQL request was executed; this does not establish token theft or permission to execute jobs. The CVE record has a malformed unrelated 17.2 range, but its 17.3 affected interval supports this pin.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      },
+      {
+        "case_id": "kubernetes-cve-2023-5528",
+        "packet_sha256": "sha256:b121c32b9888d8806b161b07aa8e09ab6a42246aeb36bc0afc3be2bce29e59b6",
+        "verdict": "accept",
+        "rationale": "Re-review of the changed packet supports its narrowed Local.Path-to-mklink claim. The published CVE and issue 121879 map to PR 121881/merge 620bc81; the export is its first parent and the CNA CVSS 3.1 score 7.2 is accurately retained. Pinned local.go NewMounter/getGlobalLocalPath propagate Local.Path for a directory, then SetUpAt checks backsteps and mount state before MakeAbsolutePath and MountSensitiveWithoutSystemd. The Windows wrapper delegates to MountSensitive, whose bind branch normalizes slash/drive syntax but does not remove cmd metacharacters; mklinkSource then reaches cmd /c mklink at the sole reporting location. The patch replaces shell invocation with os.Symlink. The revision explicitly excludes the unestablished rmdir target allegation, resolving the original location blocker. Acceptance is conditional on the stated Local.Path reaching this helper, including the preceding file-type and mount-state checks; it does not assert that an arbitrary nonexistent injected path reaches the sink.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-pr",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "issue",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 11,
+            "end_line": 30
+          },
+          {
+            "artifact_id": "source:staging/src/k8s.io/mount-utils/mount_windows.go",
+            "start_line": 62,
+            "end_line": 99
+          },
+          {
+            "artifact_id": "source:staging/src/k8s.io/mount-utils/mount_windows.go",
+            "start_line": 148,
+            "end_line": 159
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "The source directory must pass getGlobalLocalPath/GetFileType, backstep and relevant mount-state checks. These checks do not sanitize cmd metacharacters, but practical availability of a qualifying crafted path on the Windows node is not established merely by pod/PV creation permission.",
+          "No Windows runtime, injected command, privileged kubelet behavior or fixed control was executed. Actual Windows path/argument handling, node filesystem state and kubelet identity remain deployment/runtime validation requirements.",
+          "The unmount/rmdir hunk is excluded from accepted vulnerability locations; no attacker-controlled unmount target is claimed.",
+          "Static acceptance does not establish scanner readiness, frozen deployment context, licensing review or human approval."
+        ]
+      },
+      {
+        "case_id": "kubernetes-cve-2024-3177",
+        "packet_sha256": "sha256:8e7c8fad46fe9aa35027b4acd7e05961211c701a387dc31e59d5c449ae7440cb",
+        "verdict": "accept",
+        "rationale": "The CVE and official issue describe envFrom omission in all three container classes. Issue 124336 cites the relevant PR family, and fix 7c861b1 is the release cherry-pick containing exactly these guards, with the exported pin as parent. Validate dispatches ephemeral-container updates separately and applies enforced mountable-secret checks on pod creation. The reported loops validate Env.SecretKeyRef but omit EnvFrom.SecretRef, enabling an unlisted named secret to cross the policy boundary. The patch adds the omitted allowlist check to init, ordinary and ephemeral loops. CNA CVSS 3.1 2.7 matches.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "issue",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 12,
+            "end_line": 57
+          },
+          {
+            "artifact_id": "source:plugin/pkg/admission/serviceaccount/admission.go",
+            "start_line": 178,
+            "end_line": 237
+          },
+          {
+            "artifact_id": "source:plugin/pkg/admission/serviceaccount/admission.go",
+            "start_line": 269,
+            "end_line": 280
+          },
+          {
+            "artifact_id": "source:plugin/pkg/admission/serviceaccount/admission.go",
+            "start_line": 315,
+            "end_line": 362
+          },
+          {
+            "artifact_id": "source:plugin/pkg/admission/serviceaccount/admission.go",
+            "start_line": 366,
+            "end_line": 392
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "The public issue appears to transpose release-version labels for some PR numbers; commit metadata and patch content establish this cherry-pick mapping. No cluster was deployed, and default/non-enforced service accounts are outside the declared target.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      },
+      {
+        "case_id": "kubernetes-cve-2020-8555",
+        "packet_sha256": "sha256:d9345f853db4582518a60d475a82d31af7d77c5debac0bd735bcbe058ba8d9d1",
+        "verdict": "accept",
+        "rationale": "CVE and issue 91542 identify half-blind controller SSRF and map master to PR 89794/merge 01df16a, whose parent is the export. StorageClass resturl populates p.url; CreateVolume constructs the Heketi client and propagates VolumeCreate errors. Pinned vendor inspection confirms POST to host+/volumes and response-body-to-error conversion. Provision returns the error, and the controller emits it in a claim event at the third reporting location. The patch removes client error detail from events while retaining outbound requests. All three locations support the scoped request-plus-disclosure chain. CNA CVSS 3.1 6.3 is correctly selected.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-pr",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "issue",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 30,
+            "end_line": 38
+          },
+          {
+            "artifact_id": "source:pkg/volume/glusterfs/glusterfs.go",
+            "start_line": 718,
+            "end_line": 739
+          },
+          {
+            "artifact_id": "source:pkg/volume/glusterfs/glusterfs.go",
+            "start_line": 796,
+            "end_line": 819
+          },
+          {
+            "artifact_id": "source:pkg/volume/glusterfs/glusterfs.go",
+            "start_line": 984,
+            "end_line": 1010
+          },
+          {
+            "artifact_id": "source:pkg/controller/volume/persistentvolume/pv_controller.go",
+            "start_line": 1489,
+            "end_line": 1501
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No network request or event observation was executed. Reachable endpoint behavior, response status/body and event-reader privileges remain deployment assumptions; this is not a claim that the patch blocks all outbound SSRF.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      },
+      {
+        "case_id": "airflow-cve-2024-45034",
+        "packet_sha256": "sha256:9892e2217a13a80e1cf94192f8b4d7005125560e83676a88ea6cca1e501c24d7",
+        "verdict": "accept",
+        "rationale": "Published CVE/GHSA map the scheduler local-settings problem to PR 41672 and the backported commit 03e01e7; its parent matches the export. initialize calls prepare_syspath before import_local_settings. prepare_syspath adds the DAG folder, and import_local_settings executes import airflow_local_settings, so a DAG author can supply scheduler configuration code under the stated no-earlier-shadowing assumption. The patch splits path setup and delays adding the DAG folder until after this import. Each reported location participates in that order-dependent boundary crossing. CNA has textual important severity only, so the declared fallback to GitHub reviewed CVSS 3.1 8.8 is supported.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-pr",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 16,
+            "end_line": 57
+          },
+          {
+            "artifact_id": "source:airflow/settings.py",
+            "start_line": 678,
+            "end_line": 690
+          },
+          {
+            "artifact_id": "source:airflow/settings.py",
+            "start_line": 724,
+            "end_line": 737
+          },
+          {
+            "artifact_id": "source:airflow/settings.py",
+            "start_line": 771,
+            "end_line": 781
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No scheduler was launched. Existing sys.path entries, cached modules and operator-author trust determine deployment applicability; author task execution alone is not this allegation.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      },
+      {
+        "case_id": "airflow-cve-2023-47265",
+        "packet_sha256": "sha256:0191fcf84d82b0cf9d470d1d5ae53b651bdbb7e80c042e3d23a48557d39d2ba2",
+        "verdict": "accept",
+        "rationale": "CVE/GHSA describe DAG-author script-bearing descriptions and link PR 35460/fix 0b995602, whose parent is the export. The trigger view copies DAG parameters and marks description_html/custom_html_form as Markup without sanitizing; the pinned trigger template renders those fields into the page. A distinct authorized viewer therefore crosses the author-to-browser trust boundary. The patch adds allow_raw_html_descriptions defaulting False and removes/trust-gates raw HTML. The reported Markup location is causally relevant. CNA textual low and GitHub reviewed CVSS 3.1 5.4 differ; the label correctly uses its declared numeric fallback.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-pr",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 33,
+            "end_line": 47
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 267,
+            "end_line": 325
+          },
+          {
+            "artifact_id": "source:airflow/www/views.py",
+            "start_line": 1955,
+            "end_line": 1990
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No browser execution was tested. Victim access to a valid DAG trigger form and browser policy remain deployment conditions. The allegation does not imply escaping the browser sandbox or additional server-code authority.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      },
+      {
+        "case_id": "langflow-cve-2025-3248",
+        "packet_sha256": "sha256:7312b7928292029f4b5c965070aa3faddbd87c3f2ac60d8b1a0332046daa7927",
+        "verdict": "accept",
+        "rationale": "CVE/GHSA link the unauthenticated validate/code issue to PR 6911 and faac4db, whose parent matches the exported pin. The APIRouter endpoint has no active-user dependency and passes code.code to validate_code. The helper compiles and execs FunctionDef nodes; Python definition-time expressions/decorators can execute even though ordinary function bodies are not called. Pinned router inspection confirms validate_router inclusion without an added dependency. Both entry and helper locations are relevant. The patch adds CurrentActiveUser rather than a code sandbox. CNA CVSS 3.1 9.8 is supported.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-pr",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 34,
+            "end_line": 54
+          },
+          {
+            "artifact_id": "source:src/backend/base/langflow/api/v1/validate.py",
+            "start_line": 9,
+            "end_line": 22
+          },
+          {
+            "artifact_id": "source:src/backend/base/langflow/utils/validate.py",
+            "start_line": 24,
+            "end_line": 63
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No submitted Python code was executed. External authentication gateways, deployment middleware and authentication configuration must match the stated assumptions; the patch does not constrain code executed for an authorized user.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      },
+      {
+        "case_id": "langflow-cve-2026-42867",
+        "packet_sha256": "sha256:546eab64e8f917b687dc2952fabd5143521d9ba7f337cb60cbe64da905e6dee0",
+        "verdict": "accept",
+        "rationale": "CVE/GHSA link creation-endpoint traversal to PR 12337; its metadata binds merge 41d34b2 and the exported first parent. The endpoint accepts a current user and a name string, only strips spaces/checks length, then joins name with root/user and mkdirs before writing embedding_metadata.json. Absolute paths replace the prefix and parent components escape it. The existing _resolve_kb_path containment helper is not used on this creation path. The patch resolves the user and candidate paths and checks is_relative_to before creation. The location includes the actual writes. Published CNA CVSS 3.1 6.5 is copied faithfully, including its explicitly disclosed PR:N versus authenticated-endpoint inconsistency.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-pr",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 45,
+            "end_line": 60
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 86,
+            "end_line": 104
+          },
+          {
+            "artifact_id": "source:src/backend/base/langflow/api/v1/knowledge_bases.py",
+            "start_line": 70,
+            "end_line": 129
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No filesystem write through the application was executed. Directory existence and process permissions constrain impact; generated metadata is not an arbitrary file-content write primitive. Other knowledge-base endpoints and race/symlink properties are not validated.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      },
+      {
+        "case_id": "langchain-cve-2026-26013",
+        "packet_sha256": "sha256:18941e3fb82f25b4617d6c44a6f39219035ec9dc84fc9679a02ef1839daf927b",
+        "verdict": "accept",
+        "rationale": "The published CVE/GHSA directly reference fix 2b4b1dc, whose parent is the export, and describe ChatOpenAI image token counting. The entry loops over image_url content and calls _url_to_size unless detail is low. That helper checks dependency availability and URL syntax, then directly calls httpx.get without restricting destination; the fetch precedes image decoding. Both reported spans include the relevant operations. The patch adds validate_safe_url and an image-fetch opt-out. CNA CVSS 3.1 3.7 matches the label.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 690,
+            "end_line": 747
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 749,
+            "end_line": 788
+          },
+          {
+            "artifact_id": "source:libs/partners/openai/langchain_openai/chat_models/base.py",
+            "start_line": 1822,
+            "end_line": 1842
+          },
+          {
+            "artifact_id": "source:libs/partners/openai/langchain_openai/chat_models/base.py",
+            "start_line": 3513,
+            "end_line": 3540
+          },
+          {
+            "artifact_id": "source:libs/partners/openai/langchain_openai/chat_models/base.py",
+            "start_line": 3551,
+            "end_line": 3558
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "The advisory package names langchain-core while the sink is in langchain-openai; the exact monorepo commit and source establish this case, not a complete package-version applicability matrix. The patched import failure logs a warning and continues fetching, so protection requires a compatible core dependency. No SSRF request, DNS-rebinding resistance, response disclosure or fixed control was tested.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      },
+      {
+        "case_id": "langchain-cve-2026-34070",
+        "packet_sha256": "sha256:51c272fbfc0e89b8eac08f1cfc961751bc058bd0d0c765d31471fe55f03ac490",
+        "verdict": "accept",
+        "rationale": "CVE/GHSA directly map legacy prompt loading to 27add913, whose parent is the exported pin. load_prompt_from_config dispatches into helpers that read template_path or examples paths without absolute/parent-component rejection. The few-shot loader propagates paths through templates, nested example prompts and examples, then returns the loaded contents in prompt objects. Extension/format checks limit which files can be exposed but do not impose containment. The patch validates these paths by default and propagates an explicit dangerous-path opt-in. Both reporting locations support the conditional file-read/disclosure chain. CNA CVSS 3.1 7.5 is supported.",
+        "criteria": {
+          "identity": "supported",
+          "pin": "supported",
+          "mapping": "supported",
+          "locations": "supported",
+          "mechanism": "supported",
+          "severity": "supported"
+        },
+        "citations": [
+          {
+            "artifact_id": "cve",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-commit",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "ghsa-search",
+            "start_line": 1,
+            "end_line": 1
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 132,
+            "end_line": 157
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 189,
+            "end_line": 220
+          },
+          {
+            "artifact_id": "fix-patch",
+            "start_line": 225,
+            "end_line": 260
+          },
+          {
+            "artifact_id": "source:libs/core/langchain_core/prompts/loading.py",
+            "start_line": 20,
+            "end_line": 81
+          },
+          {
+            "artifact_id": "source:libs/core/langchain_core/prompts/loading.py",
+            "start_line": 95,
+            "end_line": 125
+          }
+        ],
+        "blockers": [],
+        "limitations": [
+          "No application or file-disclosure scenario was executed. The user-supplied-config and observable-output assumptions are necessary, as are readable files meeting the parser/extension constraints. The patch is not a general symlink-containment control.",
+          "Static label review only. Runtime reproduction, deployment-context freeze, fixed-control validation, licensing review and scanner readiness are separate and are not established here."
+        ]
+      }
+    ]
+  },
+  "summary": {
+    "case_count": 18,
+    "counts": {
+      "accept": 18,
+      "revise": 0,
+      "abstain": 0
+    },
+    "accepted_case_ids": [
+      "airflow-cve-2023-47265",
+      "airflow-cve-2024-45034",
+      "browser-use-cve-2025-47241",
+      "codex-cve-2025-59532",
+      "flowise-cve-2025-71332",
+      "gitlab-cve-2024-6685",
+      "gitlab-cve-2024-8124",
+      "gitlab-cve-2024-8641",
+      "kubernetes-cve-2020-8555",
+      "kubernetes-cve-2023-5528",
+      "kubernetes-cve-2024-3177",
+      "langchain-cve-2026-26013",
+      "langchain-cve-2026-34070",
+      "langflow-cve-2025-3248",
+      "langflow-cve-2026-42867",
+      "oauth2-proxy-cve-2025-54576",
+      "openam-cve-2026-33439",
+      "saml-cve-2022-41912"
+    ],
+    "decisions": [
+      {
+        "case_id": "browser-use-cve-2025-47241",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The published CVE and GHSA identify userinfo/authority confusion and link PR 1561; the raw PR commit list contains ebdeb613 and its parent is the exported pin. navigate_to applies the guard before page.goto. With allowed.test in allowed_domains, https://allowed.test:pw@blocked.test/ yields the allowed authority prefix while its hostname is blocked.test. The patch switches to hostname. The source location is the actual authorization guard. The CNA 4.0 CVSS 3.1 rating is accurately selected over the conflicting GitHub 9.3 rating."
+      },
+      {
+        "case_id": "codex-cve-2025-59532",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The published advisory directly names fix 8595237 and the model-generated cwd sandbox error; its parent matches the export. ExecParams.cwd is passed to both sandbox constructors at the reporting location. Additional pinned caller inspection found ShellToolCallParams.workdir joined into cwd, and WorkspaceWrite adds that cwd to writable roots. Patch hunks separate command_cwd from turn_context.cwd and feed the latter into policy construction. This supports the scoped workspace authority-confusion label, with the CNA CVSS 4.0 score 8.6 copied accurately."
+      },
+      {
+        "case_id": "oauth2-proxy-cve-2025-54576",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "CVE/GHSA directly link the exact fix and vulnerable source revision. GetRequestURI preserves query text (or the configured forwarded URI), and isAllowedPath applies the skip-route regex to it; isAllowedRoute and IsAllowedRequest use that decision to skip authentication. A broad expression such as ^/api/.*/status can match /api/private?x=/status although the backend path is private. Both reported locations carry this flow. The patch substitutes path-only extraction. Published CNA CVSS 3.1 9.1 matches the label."
+      },
+      {
+        "case_id": "openam-cve-2026-33439",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The published CVE and GHSA identify the clientSession route and the GHSA references fix 014007c; metadata makes the exported revision its parent. Encoder.deserialize wraps caller bytes in ApplicationObjectInputStream and calls readObject. The GHSA supplies the request/JATO rendering trace; read-only inspection of the bundled jato-2005-05-04.jar independently found getParameter(\"jato.clientSession\"), decodeHttp64 and Encoder.deserialize calls, and ApplicationObjectInputStream.resolveClass loading named classes without a whitelist. The pinned IOUtils implementation uses WhitelistObjectInputStream, consistent with the patch delegation. The sink location supports unsafe deserialization under the declared endpoint/filter assumptions. CNA CVSS 4.0 9.3 is supported."
+      },
+      {
+        "case_id": "flowise-cve-2025-71332",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "CVE and GHSA describe importChatflows id injection; the GHSA PR 4226 and its metadata bind fix f963e5a, whose parent is the export. Pinned route/controller inspection confirms POST importchatflows passes req.body.Chatflows to this service. The service quotes each supplied id without escaping, then interpolates the concatenated list into QueryBuilder.where before subsequent flowData parsing. Caller permission to import does not authorize SQL syntax. The patch validates UUIDs before query construction, not parameterization. CNA CVSS 3.1 6.5 is the stated selection despite alternate CNA 4.0 and GitHub scores."
+      },
+      {
+        "case_id": "saml-cve-2022-41912",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The CVE directly maps to aee3fb1, whose parent is the exported pin. ParseXMLResponse unmarshals a Response independently from the etree tree; validateXMLResponse calls validateSigned but consumes resp.Assertion. findChild returns the first matching child, so validateSigned can check a different Assertion from the identity object populated by unmarshalling a multiple-assertion response. The reporting location implements that incomplete signature check. The patch parses each assertion from the same element it validates and returns a validated assertion; its TestMultipleAssertions is corroborating unexecuted regression evidence. CNA CVSS 3.1 9.1 is supported."
+      },
+      {
+        "case_id": "gitlab-cve-2024-8124",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "CVE 8124 links issue 480533, whose raw report identifies glm_source and the same scan/flatten line. The 17.3.1 tag record binds df018582; this version is affected, and the release comparison contains fix 878cda6. preferred_language reaches marketing_site_language when no valid preference cookie short-circuits it; scan materializes every locale match and flatten allocates another collection. The patch replaces this with an anchored marketing-host match and bounded captures. Both entry and allocation locations are relevant. CNA CVSS 3.1 7.5 is supported."
+      },
+      {
+        "case_id": "gitlab-cve-2024-8641",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "Published CVE/release text identifies CI_JOB_TOKEN-to-session escalation. The release tag binds affected 17.3.1 to the export, and the comparison contains cafae257, whose security branch/message specifically describes the job-token exchange. Pinned JWT authentication callers resolve usable build tokens to the build user; dependency-proxy tokens contain user_id. At both reporting locations the controller resolves that user and calls sign_in, excluding project bots/service accounts rather than preserving restricted job scope. The patch installs StripCookies for /v2 before ActionDispatch::Cookies, addressing session-cookie issuance. CNA CVSS 3.1 6.7 is supported."
+      },
+      {
+        "case_id": "gitlab-cve-2024-6685",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "CVE 6685 links issue 472012; its disclosure states only Maintainers/Owners should view group runners and identifies the GraphQL information path. The affected 17.3.1 tag binds the export and the comparison contains fix 084025e, whose branch includes issue 472012. RunnerPolicy admits Developer group/project associations and grants read_runner in the reported rules; anonymous prevention does not block authenticated Developers. The patch raises these association thresholds to Maintainer. Both locations support the scoped information-disclosure label. CNA CVSS 3.1 3.1 is supported."
+      },
+      {
+        "case_id": "kubernetes-cve-2023-5528",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "Re-review of the changed packet supports its narrowed Local.Path-to-mklink claim. The published CVE and issue 121879 map to PR 121881/merge 620bc81; the export is its first parent and the CNA CVSS 3.1 score 7.2 is accurately retained. Pinned local.go NewMounter/getGlobalLocalPath propagate Local.Path for a directory, then SetUpAt checks backsteps and mount state before MakeAbsolutePath and MountSensitiveWithoutSystemd. The Windows wrapper delegates to MountSensitive, whose bind branch normalizes slash/drive syntax but does not remove cmd metacharacters; mklinkSource then reaches cmd /c mklink at the sole reporting location. The patch replaces shell invocation with os.Symlink. The revision explicitly excludes the unestablished rmdir target allegation, resolving the original location blocker. Acceptance is conditional on the stated Local.Path reaching this helper, including the preceding file-type and mount-state checks; it does not assert that an arbitrary nonexistent injected path reaches the sink."
+      },
+      {
+        "case_id": "kubernetes-cve-2024-3177",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The CVE and official issue describe envFrom omission in all three container classes. Issue 124336 cites the relevant PR family, and fix 7c861b1 is the release cherry-pick containing exactly these guards, with the exported pin as parent. Validate dispatches ephemeral-container updates separately and applies enforced mountable-secret checks on pod creation. The reported loops validate Env.SecretKeyRef but omit EnvFrom.SecretRef, enabling an unlisted named secret to cross the policy boundary. The patch adds the omitted allowlist check to init, ordinary and ephemeral loops. CNA CVSS 3.1 2.7 matches."
+      },
+      {
+        "case_id": "kubernetes-cve-2020-8555",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "CVE and issue 91542 identify half-blind controller SSRF and map master to PR 89794/merge 01df16a, whose parent is the export. StorageClass resturl populates p.url; CreateVolume constructs the Heketi client and propagates VolumeCreate errors. Pinned vendor inspection confirms POST to host+/volumes and response-body-to-error conversion. Provision returns the error, and the controller emits it in a claim event at the third reporting location. The patch removes client error detail from events while retaining outbound requests. All three locations support the scoped request-plus-disclosure chain. CNA CVSS 3.1 6.3 is correctly selected."
+      },
+      {
+        "case_id": "airflow-cve-2024-45034",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "Published CVE/GHSA map the scheduler local-settings problem to PR 41672 and the backported commit 03e01e7; its parent matches the export. initialize calls prepare_syspath before import_local_settings. prepare_syspath adds the DAG folder, and import_local_settings executes import airflow_local_settings, so a DAG author can supply scheduler configuration code under the stated no-earlier-shadowing assumption. The patch splits path setup and delays adding the DAG folder until after this import. Each reported location participates in that order-dependent boundary crossing. CNA has textual important severity only, so the declared fallback to GitHub reviewed CVSS 3.1 8.8 is supported."
+      },
+      {
+        "case_id": "airflow-cve-2023-47265",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "CVE/GHSA describe DAG-author script-bearing descriptions and link PR 35460/fix 0b995602, whose parent is the export. The trigger view copies DAG parameters and marks description_html/custom_html_form as Markup without sanitizing; the pinned trigger template renders those fields into the page. A distinct authorized viewer therefore crosses the author-to-browser trust boundary. The patch adds allow_raw_html_descriptions defaulting False and removes/trust-gates raw HTML. The reported Markup location is causally relevant. CNA textual low and GitHub reviewed CVSS 3.1 5.4 differ; the label correctly uses its declared numeric fallback."
+      },
+      {
+        "case_id": "langflow-cve-2025-3248",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "CVE/GHSA link the unauthenticated validate/code issue to PR 6911 and faac4db, whose parent matches the exported pin. The APIRouter endpoint has no active-user dependency and passes code.code to validate_code. The helper compiles and execs FunctionDef nodes; Python definition-time expressions/decorators can execute even though ordinary function bodies are not called. Pinned router inspection confirms validate_router inclusion without an added dependency. Both entry and helper locations are relevant. The patch adds CurrentActiveUser rather than a code sandbox. CNA CVSS 3.1 9.8 is supported."
+      },
+      {
+        "case_id": "langflow-cve-2026-42867",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "CVE/GHSA link creation-endpoint traversal to PR 12337; its metadata binds merge 41d34b2 and the exported first parent. The endpoint accepts a current user and a name string, only strips spaces/checks length, then joins name with root/user and mkdirs before writing embedding_metadata.json. Absolute paths replace the prefix and parent components escape it. The existing _resolve_kb_path containment helper is not used on this creation path. The patch resolves the user and candidate paths and checks is_relative_to before creation. The location includes the actual writes. Published CNA CVSS 3.1 6.5 is copied faithfully, including its explicitly disclosed PR:N versus authenticated-endpoint inconsistency."
+      },
+      {
+        "case_id": "langchain-cve-2026-26013",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "The published CVE/GHSA directly reference fix 2b4b1dc, whose parent is the export, and describe ChatOpenAI image token counting. The entry loops over image_url content and calls _url_to_size unless detail is low. That helper checks dependency availability and URL syntax, then directly calls httpx.get without restricting destination; the fetch precedes image decoding. Both reported spans include the relevant operations. The patch adds validate_safe_url and an image-fetch opt-out. CNA CVSS 3.1 3.7 matches the label."
+      },
+      {
+        "case_id": "langchain-cve-2026-34070",
+        "verdict": "accept",
+        "judge_verdict": "accept",
+        "reason": "CVE/GHSA directly map legacy prompt loading to 27add913, whose parent is the exported pin. load_prompt_from_config dispatches into helpers that read template_path or examples paths without absolute/parent-component rejection. The few-shot loader propagates paths through templates, nested example prompts and examples, then returns the loaded contents in prompt objects. Extension/format checks limit which files can be exposed but do not impose containment. The patch validates these paths by default and propagates an explicit dangerous-path opt-in. Both reporting locations support the conditional file-read/disclosure chain. CNA CVSS 3.1 7.5 is supported."
+      }
+    ]
+  },
+  "claim": "Machine-reviewed static labels; no human approval, runtime validation or benchmark result.",
+  "report_sha256": "sha256:9c3f9d530fd06a50aec0d59470ff4d9374748fb73b099c0c19dd173691e4d8ee"
+}

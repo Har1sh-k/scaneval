@@ -32,13 +32,15 @@ Two comparisons use the same evaluation contracts:
 
 Report each workload separately, with full-repository scans and native PR review also separate. Scanners receive ordinary task inputs, not a selected CVE, expected location, or hint that a vulnerability must exist. Any combined workload result needs predeclared membership and weights; do not let available CVE counts determine them implicitly. Use a workload-specific scorecard, not one composite leaderboard score.
 
-The first release compares systems on public workloads only. Repositories and snapshots are not selected yet: assess candidates against the admission rules, then freeze the release manifest before comparison. The draft pilot below is not that manifest. Results describe performance on the frozen workload, not resistance to benchmark-specific tuning. A sealed or private slice is not a first-release requirement; organization-owned packs remain supported by the design.
+The first release compares systems on public workloads only. Eleven repositories and their candidate snapshots are selected below: assess them against the admission rules, then freeze the release manifest before comparison. The draft corpus is not that manifest. Results describe performance on the frozen workload, not resistance to benchmark-specific tuning. A sealed or private slice is not a first-release requirement; organization-owned packs remain supported by the design.
 
 SecureVibes may appear in the first comparison; inclusion and independent reviewer assignment remain publication decisions. If included, disclose the authors' relationship to it and apply the same workload, scoring, and review rules. Disputed findings involving it should be adjudicated by a reviewer not involved in the tool. Record who reviewed them and do not claim independent adjudication where it was unavailable. No special adapter or scoring path is needed.
 
 ### Current starting point
 
-The [draft pilot](PILOT.md) has three cases across three repository snapshots. They have mechanical checks but no human-approved labels or matching decisions, and no controls. They exercise integration; they do not establish release coverage or scanner performance.
+The [current corpus](../corpus/diverse/README.md) has 18 CVEs across 16 repository snapshots, 11 repositories and six target languages. Its documented severity policy yields 4 Critical, 5 High, 6 Medium and 3 Low cases. They have mechanical checks but no human-approved labels, admissions, matching decisions or validated controls. The retired corpus is excluded from all current counts. Selection does not establish scanner performance or representative coverage; shared projects and mechanism families require separate reporting.
+
+The current corpus uses [machine static-label review](../corpus/diverse/README.md#machine-review-without-hitl), with no mandatory human gate. Python checks and evidence-bound model judgments produce separate accept/revise/abstain records. The human-review protocol below describes the existing higher-assurance reporting track; machine review does not impersonate it. Draft scans can run without HITL, while a machine-judged scanner-results protocol still needs its own declared rules.
 
 Each release reports workload and component-role coverage alongside a kind-by-language-by-repository matrix for admitted targets and controls. Show counts, denominators, and uncertainty; mark sparse slices and avoid generalizing from them. No universal minimum such as ten targets from three repositories is assumed. The release's workload and language claims must follow its admitted corpus.
 
@@ -138,7 +140,7 @@ A repair is a fixed-target control. It is also a capability-safe control only if
 
 ### Authoring and maintaining a safe control
 
-1. **Select candidates.** Cover distinct operations, trust boundaries, guard mechanisms, and language/framework patterns across the ten-repository pilot. Prioritize documented repairs and ordinary intentional capabilities. Tool alerts can suggest candidates, but do not select the entire control set from one evaluated tool's mistakes. Record selection provenance and freeze the released set before comparison.
+1. **Select candidates.** Cover distinct operations, trust boundaries, guard mechanisms, and language/framework patterns across the selected repositories. Prioritize documented repairs and ordinary intentional capabilities. Tool alerts can suggest candidates, but do not select the entire control set from one evaluated tool's mistakes. Record selection provenance and freeze the released set before comparison.
 2. **State the property.** Assign a stable control ID and pin the exact snapshot/tree, scan scope, operation symbol/range, related evidence locations, and control type: capability-safe, fixed-target, or both. State the allowed actors/inputs, deployment assumptions, and the specific allegation the evidence rules out. A region is an evidence anchor, not a blanket safe zone.
 3. **Establish evidence.** Follow relevant callers, data handling, authorization decisions, and guard placement, including across files. Record the invariant and supporting code/test artifacts. Guard names, comments, scanner agreement, or a closed ticket are not sufficient. If the property cannot be established, retain a draft rather than a safe label. An optional [Jev audit](#11-optional-jev-annotation-audit) can check the draft evidence before human approval.
 4. **Review independently.** A curator prepares the record; a second reviewer checks the property, assumptions, and L3/L4 evidence. Adjudicate disagreements or leave them unresolved. Record reviewers, decisions, and accepted claim/location matching rules. Revalidate affected controls when code, dependencies, or assumptions change; do not copy a label automatically to a later snapshot.
@@ -228,7 +230,7 @@ Automate clear matches with validated, versioned matching rules. Arbitrary prose
 
 Importers split native results only where separate allegations are explicitly structured, using frozen label-blind splitting/order rules. Bundles requiring interpretation go to recorded human review; replay reuses those decisions. Budgeted scoring remains pending for an unresolved bundle, rather than treating it as one cheap claim or dropping it. Do not split one issue merely because it has several evidence locations or paths.
 
-For the pilot, detect exact structured duplicates using a versioned canonical payload: allegation, canonical kind, native rule identity, primary/related locations, and supplied flow/evidence details. Normalize path separators and text line endings; exclude delivery IDs, ranks, and timestamps. The same allegation/kind/primary-location tuple is only a duplicate-review hint because distinct flows can share it. Record review decisions for ambiguous semantic duplicates. Keep all delivered copies: duplicates consume review positions and burden but earn no additional target credit.
+Detect exact structured duplicates using a versioned canonical payload: allegation, canonical kind, native rule identity, primary/related locations, and supplied flow/evidence details. Normalize path separators and text line endings; exclude delivery IDs, ranks, and timestamps. The same allegation/kind/primary-location tuple is only a duplicate-review hint because distinct flows can share it. Record review decisions for ambiguous semantic duplicates. Keep all delivered copies: duplicates consume review positions and burden but earn no additional target credit.
 
 Preserve a product's declared native review order and tie-breaking, frozen before label matching. If no meaningful native order is supplied, mark output unranked. Report full-output recall plus an optional expected recall over uniform random orderings of the delivered claims, including duplicates, as a diagnostic. This is not a measured prioritization score or a promotion metric; repetition of a claim can change that expectation. Keep native-order and random-order results separate. The [math specification](EVALUATION_MATH.md#unranked-output-diagnostic) defines the diagnostic without rerunning the scanner.
 
@@ -304,7 +306,7 @@ The interfaces below are proposed, not implemented:
 harness: my_harness.benchmark:scan
 input_profile: standard           # standard | metadata_blinded
 corpora:
-  - manifest: releases/pilot/manifest.yaml
+  - manifest: releases/current/manifest.yaml
 models: [model_a, model_b, model_c]  # aliases for pinned configurations
 selection:
   mode: stratified_sample          # all | fixed_manifest | stratified_sample
@@ -316,7 +318,7 @@ selection:
 execution:
   shuffle_order: true
   order_seed: 43
-repetitions: 3                     # example pilot setting
+repetitions: 3                     # example comparison setting
 review_budgets:                    # example reporting cutoffs, not scan limits
   full: [5, 10, 20, 50]
   pr: [5, 10, 20]
@@ -433,7 +435,7 @@ The separate engineering-agent project may automate the workflow below. Building
 
 ## 9. Bring your own test cases
 
-An organization can build a private benchmark around its own code and use its feedback to refine its harness. Support namespaced, versioned packs through the same schemas, adapters, observer SDK, and scorer. This workflow belongs in the first end-to-end pilot; building the separate improvement agent does not.
+An organization can build a private benchmark around its own code and use its feedback to refine its harness. Support namespaced, versioned packs through the same schemas, adapters, observer SDK, and scorer. This workflow belongs in the end-to-end workflow; building the separate improvement agent does not.
 
 This helps teams:
 
@@ -488,7 +490,7 @@ Version the engine, schemas, SDK/connectors, adapters, mappings, scorer, corpus,
 | Deliverable | Acceptance check |
 |---|---|
 | D1. Core protocol and evaluator | Versioned schemas; validate/plan/run/import/score/report interfaces; offline score replay without an agent framework or LLM judge. |
-| D2. Versioned CVE corpus release | Admitted repositories/snapshots frozen in a release manifest; workflow/role annotations, source provenance, targets, families, coverage, splits, validation records, hashes, and preparation recipes; safe-capability pilot aiming for ten repositories with independent property/evidence review; visible control gaps and private-pack starter template. |
+| D2. Versioned CVE corpus release | Admitted repositories/snapshots frozen in a release manifest; workflow/role annotations, source provenance, targets, families, coverage, splits, validation records, hashes, and preparation recipes; safe-capability controls across distinct repositories with independent property/evidence review; visible control gaps and private-pack starter template. |
 | D3. Integrations and backend decision | Own-harness adapter with observer SDK integration, callback/native-trace connectors, pinned CLI scanner, SARIF/native import, multi-model execution, parity/conformance tests, and an Inspect/Harbor/direct-runner comparison. |
 | D4. Reproducible run and observability bundle | Raw/canonical predictions, status, setup/usage/cost, policy and version provenance, model/tool calls, model-visible context and finding-lifecycle events with per-category capture status, and evaluator-side decisions. Equivalent inputs score identically across paths; diagnostic claims require their supporting capture. |
 | D5. Detection report and review pack | Workload-separated scorecards: known-target detection rate (full recall) and budget curves with first-hit ranks, target density, conditional control bounds/coverage, sampled review, uncertainty, cost, local trace timeline, and baseline/candidate comparison. Native ranking and unranked diagnostics labeled separately; imported vendor runs marked independently verified or unverified. |
@@ -499,7 +501,7 @@ Build in this order:
 
 1. Contracts and scorer fixtures: unique targets, claim budgets, unknowns, duplicates, shared snapshots, partial/error states, and unavailable controls.
 2. A small end-to-end real-case slice with our own harness and one pinned scanner: grouped inputs, isolation, controls, canonical outputs, and replay. Include the observer SDK at shared boundaries, context selection, and finding lifecycle stages without replacing the harness. Exercise the case-authoring skill with imported findings, repository fixes, and a supporting document on an approved sample pack, then carry it through a baseline/candidate comparison.
-3. Native PR integration, review workflow, repeated-run pilot, backend comparison, and buyer report. Expand validated coverage, including the ten-repository safe-control pilot.
+3. Native PR integration, review workflow, repeated-run comparison, backend comparison, and buyer report. Expand validated coverage, including independently reviewed safe controls.
 4. Broader protected splits, release gates, and selected follow-on experiments.
 
 Maintain one supported CLI and evaluator. The retired scripts, adapters, scoring schemas, and import compatibility path are not fallbacks. Any prior case evidence must pass the current intake and review requirements; old labels and scores are not inherited. Keep usage guides aligned with the implemented contracts and mark planned features explicitly.
@@ -518,7 +520,7 @@ For candidate capability-safe and fixed-target controls:
 
 Pilot on independently reviewed safe, unsafe, and incomplete-context examples, plus known annotation errors and possible duplicates. Compare human-only and Jev-assisted review against those frozen labels. Track incorrect safety-supporting suggestions, missed problems, false warnings, reviewer time, and API cost; inspect unflagged records too. Adopt only if the assistance saves review effort without weakening label quality. Private-code submission follows the provider/data-egress approval rules in Section 9.
 
-Deliver a review queue and adopt/skip report with input hashes, question/model versions, raw suggestions, and human outcomes. No Jev calls during scoring or replay. Jev inside an evaluated harness is a different experiment. [TypeSafe's question interface](https://docs.typesafe.ai/primitives) and [commit-miner's evidence protocol](https://github.com/devanshbatham/commit-miner/blob/main/docs/JEV_PROTOCOL.md) motivate this pilot, not claims of established annotation accuracy.
+Deliver a review queue and adopt/skip report with input hashes, question/model versions, raw suggestions, and human outcomes. No Jev calls during scoring or replay. Jev inside an evaluated harness is a different experiment. [TypeSafe's question interface](https://docs.typesafe.ai/primitives) and [commit-miner's evidence protocol](https://github.com/devanshbatham/commit-miner/blob/main/docs/JEV_PROTOCOL.md) motivate this optional audit, not claims of established annotation accuracy.
 
 TypeSafe's [Security Incidents evaluation](https://evals.typesafe.ai/security_incidents) illustrates bounded judgments combined by code into workflow decisions; it does not validate CVE annotation or SAST accuracy. Its [documented Jev limitations](https://docs.typesafe.ai/model-jaggedness/jev-1.13) reinforce keeping counting, date comparisons, and exact checks in code. Stable confidence values alone do not establish correctness or calibration on our cases.
 
@@ -527,6 +529,6 @@ TypeSafe's [Security Incidents evaluation](https://evals.typesafe.ai/security_in
 - Select repositories and snapshots through admission review, then freeze the workload, product editions/model snapshots, network profiles, scan limits, and full/PR review-budget grids.
 - Approve coverage priorities, evidence requirements, and protected project/snapshot groups before seeing comparative scores.
 - Sampling proportions, severity mix, repository caps, and cross-workload weights remain open decisions. The workload classes and candidate list do not fix that distribution.
-- Set pilot uncertainty goals and promotion tolerances; leave backend selection to D3's comparison.
+- Set uncertainty goals and promotion tolerances; leave backend selection to D3's comparison.
 - Verify corpus redistribution and named-result publication permissions under the actual licenses. Anonymization is not an assumed workaround.
 - A project rename is planned; the current name and example CLI/library names are placeholders. Avoid unsupported first/only, zero-day, and contamination-free claims.

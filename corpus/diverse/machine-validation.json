@@ -1,0 +1,70 @@
+{
+  "schema_version": "1.0",
+  "status": "passed",
+  "scope": "machine_review_of_static_target_labels",
+  "human_in_loop_required": false,
+  "checked_at": "2026-10-22T17:46:48.481444+00:00",
+  "pack_sha256": "sha256:5450d1777cdfe3b338c3558587c3b11a001238d3f4972f96bf5d98ed4d0a6e7a",
+  "report_sha256": "sha256:ed12a0289fadd98d531a3419975491f3506c2f58f2b1d0e3219c2374781353a8",
+  "outcomes": {
+    "abstain": 0,
+    "accept": 18,
+    "revise": 0
+  },
+  "fresh_validation": {
+    "cases": 18,
+    "snapshots": 16,
+    "packet_artifacts": 159,
+    "checks": [
+      "Pack schema, integrity anchor and exact case membership",
+      "Recomputed full exported source tree hashes against pins and provenance",
+      "Fresh L1 mechanical checks on an in-memory copy",
+      "Raw evidence SHA256, published CVE identity, candidate commit and parent metadata",
+      "Canonical packet hashes, exact judgment coverage, criteria, citation membership and physical line bounds",
+      "Actual saved response bytes, prompt and completed orchestrator receipt bound to the packet set",
+      "Saved report integrity and recomputed decision summary"
+    ],
+    "exit_code": 0
+  },
+  "command": "scaneval corpus machine-check corpus/diverse/pack.json --packets results/corpus-machine-review-20261022/packets-v2 --report corpus/diverse/machine-review.json",
+  "skill_validation": "quick_validate.py passed for the repository skill and installed ~/.codex/skills/cve-corpus-review copy; byte copies match.",
+  "tests": [
+    {
+      "scope": "targeted machine validator tests",
+      "passed": 27,
+      "failed": 0
+    },
+    {
+      "scope": "affected corpus/CLI/contracts/hygiene suite before final targeted hardening",
+      "passed": 380,
+      "skipped": 1,
+      "failed": 0,
+      "log": "results/corpus-machine-review-20261022/tests.log"
+    },
+    {
+      "scope": "final machine validator, corpus and contracts suite",
+      "passed": 296,
+      "failed": 0,
+      "log": "results/corpus-machine-review-20261022/tests-final.log"
+    }
+  ],
+  "review_history": {
+    "initial_counts": {
+      "accept": 17,
+      "revise": 1,
+      "abstain": 0
+    },
+    "initial_report": "results/corpus-machine-review-20261022/review-initial.json",
+    "changed_case": "kubernetes-cve-2023-5528",
+    "unchanged_judgments_carried_forward": 17,
+    "final_judge": "gpt-6-astra",
+    "identity_basis": "orchestrator_task_metadata"
+  },
+  "limits": [
+    "Static target judgments apply under stated assumptions; no runtime exploit, fixed-control validation or benchmark scan was performed.",
+    "Hash checks establish consistency, not signed provider authenticity or semantic truth.",
+    "Transitive caller/helper inspection is bound by full export hashes; not all helpers have separate packet citation IDs.",
+    "The source caches, raw receipts and packet directories are local ignored artifacts; another checkout needs those artifacts to replay this command.",
+    "Existing legacy human-reviewed reporting scopes are not satisfied by these sidecar judgments."
+  ]
+}

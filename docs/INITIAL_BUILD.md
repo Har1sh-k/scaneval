@@ -2,7 +2,9 @@
 
 This alpha implements step 1 of [the design's build order](DESIGN_DECISIONS.md#10-packaging-deliverables-and-build-order) and the first vertical slice of step 2. It is the supported execution and evaluation path, not the completed benchmark. Package version is `2.0.0a1`.
 
-No benchmark results are published. Every case in the pilot pack carries mechanical checks only, so every plan built from it has draft scope; no matching decision has been approved. The [pilot guide](PILOT.md) explains prerequisites, local execution, and review requirements. It contains no scanner results.
+No benchmark results are published. The [current corpus](../corpus/diverse/README.md) contains 18 CVEs across 11 repositories, represented by 16 pinned source snapshots. Its pack records L1 checks; static machine judgments live in a separate sidecar. Existing plans retain draft scope, and no scanner matching decision has been approved. The corpus guide records source provenance, severity distribution and the machine review workflow.
+
+`corpus machine-prepare`, `machine-record`, and `machine-check` support Python-validated LLM review of static CVE labels without HITL. The [CVE review skill](../skills/cve-corpus-review/SKILL.md) defines the evidence rubric. These commands preserve actual responses and input hashes; they do not promote cases into the legacy human-review states described below. Runtime/control claims and scanner finding adjudication remain separate.
 
 ## What works
 
@@ -286,7 +288,7 @@ A human edits `evaluator/decisions.json`. `review record` then re-drafts the rev
 
 ## Run configuration
 
-A run configuration is a frozen document naming the pack, the inputs, the systems, the repetition count, the timeout, the trace mode, and the network policy. The four pilot configurations are [`corpus/pilot/run-semgrep.json`](../corpus/pilot/run-semgrep.json), [`corpus/pilot/run-harness.json`](../corpus/pilot/run-harness.json), [`corpus/pilot/run-harness-codex-sol.json`](../corpus/pilot/run-harness-codex-sol.json), and [`corpus/pilot/run-deepsec.json`](../corpus/pilot/run-deepsec.json). The harness and DeepSec configurations name installed workspaces with a leading `~`, so they expand for the operator rather than pinning one machine. The two harness configurations keep Haiku and GPT-5.6 Sol runs explicit instead of silently changing the model behind one filename.
+A run configuration is a frozen document naming the pack, the inputs, the systems, the repetition count, the timeout, the trace mode, and the network policy. Follow the [worked configuration](BRING_YOUR_OWN_CORPUS.md#6-running-an-evaluation-on-the-pack) and [adapter descriptions](#adapters), using snapshot IDs from the [current corpus](../corpus/diverse/README.md). Freeze scanner versions, rules, models, coverage and deployment context before comparison. The current corpus does not yet provide a frozen comparison configuration. Installed harness and DeepSec workspaces are operator-specific; a leading `~` expands for the operator.
 
 A 2.1 configuration can also name each input with `input_id` (its directory and invocation name, never shown to a scanner), choose its `profile`, name the reviewed `blinding_map` of a `metadata_blinded` input by a path relative to the configuration, and give a system an `execution` backend (`local`, or `oci` as described in the [threat model](THREAT_MODEL.md)). A native PR input names a change set the pack declares (`{"mode": "pr", "change_set_id": "..."}`, and no `snapshot_id`); one the pack does not declare is refused when the configuration is read, before the output directory exists, and a full scan of the head never stands in for it. A PR input's default `input_id` is its change set id.
 
@@ -418,8 +420,8 @@ npm test
 
 ## Limits
 
-- **No detection result exists.** Every case carries mechanical checks only, every plan is draft scope, no matching decision has been approved, and confirmed detection is zero. Any recall figure printed today comes from decisions with no recorded human approval.
-- **No controls.** The pilot pack defines no negative controls, so control rates are N/A rather than zero, and no fixed-state snapshot has been prepared.
+- **No benchmark detection result exists.** The current corpus carries mechanical checks only and its plans have draft scope. Human label review and matching decisions remain pending; detection is unmeasured.
+- **No validated controls.** The current corpus defines no negative controls, so control rates are N/A rather than zero. Candidate fix commits are recorded as evidence pending validation.
 - **Directory separation is not isolation.** Outside the `oci` backend the declared network policy is recorded, not enforced. Path checks refuse the obvious mistake and do not follow bind mounts or hard links. The `oci` backend holds Semgrep only, trusts the engine, its kernel, and the image, and leaves writable mounts without a size bound; see [the threat model](THREAT_MODEL.md).
 - **Hashes identify documents.** They do not authenticate an author, verify a source snapshot, or prove that a reviewer read anything.
 - **Omissions are partly reported.** Only the PR reviews of `semgrep` and `deepsec` list the paths their scanner did not examine, and only paths the change touches. A full scan's ignore rules and limits and the own harness's selection of files in a PR review are not covered, and a control on an unchanged context file is withheld only when the review examined none of the change, so a quiet assessment over any other still earns credit.

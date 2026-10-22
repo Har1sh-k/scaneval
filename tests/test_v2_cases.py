@@ -204,6 +204,46 @@ def export(tmp_path: Path, *, also: tuple[str, ...] = ()) -> Path:
     return source
 
 
+@pytest.mark.parametrize("schema_version", ["2.0", "2.1"])
+@pytest.mark.parametrize(("level", "score"), [("none", 0), ("low", 0.1), ("low", 3.9),
+    ("medium", 4.0), ("medium", 6.9), ("high", 7.0), ("high", 8.9), ("critical", 9.0), ("critical", 10.0)])
+def test_published_severity_round_trips_and_is_bound_by_the_pack_anchor(tmp_path, schema_version, level, score):
+    pack = make_pack()
+    pack["schema_version"] = schema_version
+    pack["cases"][0]["severity"] = {
+        "level": level, "score": score, "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+        "source": "https://example.invalid/advisory", "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22", "note": "Source metadata; full vector arithmetic is not validated here.",
+    }
+    reanchor(pack)
+    path = tmp_path / "pack.json"
+    save_pack(path, pack)
+    assert load_pack(path)["cases"][0]["severity"] == pack["cases"][0]["severity"]
+    summary = pack_summary(pack)
+    assert summary["severity_counts"][level] == 1 and summary["severity_unrated"] == 0
+    pack["cases"][0]["severity"]["source"] += "/changed"
+    with pytest.raises(ContractError, match="anchor"):
+        validate_document("case-pack", pack)
+
+
+@pytest.mark.parametrize("schema_version", ["2.0", "2.1"])
+@pytest.mark.parametrize("change", [{"level": "low"}, {"score": 10.1}, {"score": -1},
+    {"cvss_version": "4.0"}, {"source": ""}])
+def test_published_severity_rejects_inconsistent_or_unsourced_ratings(schema_version, change):
+    pack = make_pack()
+    pack["schema_version"] = schema_version
+    pack["cases"][0]["severity"] = {
+        "level": "high", "score": 7.5, "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+        "source": "https://example.invalid/advisory", "source_kind": "cna_cvss",
+        "retrieved": "2026-10-22", "note": "Published rating.", **change,
+    }
+    reanchor(pack)
+    with pytest.raises(ContractError):
+        validate_document("case-pack", pack)
+
+
 def test_new_pack_and_draft_case_are_valid_and_explicitly_unreviewed(tmp_path):
     pack = make_pack()
     case = pack["cases"][0]
@@ -1086,23 +1126,12 @@ def test_an_approval_recorded_before_digests_covers_no_current_labels(tmp_path):
     assert approval_is_current(document, document["cases"][0]) is False
 
 
-PILOT_PACK = Path(__file__).resolve().parents[1] / "corpus" / "pilot" / "pack.json"
+CURRENT_PACK = Path(__file__).resolve().parents[1] / "corpus" / "diverse" / "pack.json"
 
 
-@pytest.mark.skipif(not PILOT_PACK.is_file(), reason="no pilot pack in this checkout")
-def test_the_shipped_pilot_pack_loads_with_one_anchored_check_set_per_snapshot_and_plans():
-    """Changed deliberately, back to what it asserted before the check-set record existed.
-
-    The pilot pack once recorded its mechanical checks as a bare array, before a check set was
-    one anchored record, and this test asserted that such a pack is refused until it is
-    re-recorded. It has been: each case's stale checks were reset to draft, the pack was anchored
-    over what it then held, and ``corpus validate --snapshot-id`` re-ran the L1 checks against the
-    same exports, recording one check set per snapshot and promoting every case back to
-    ``mechanically_checked``. So the pack loads, every referenced snapshot carries a passing
-    anchored check set, and every snapshot plans, which is what the shipped corpus has to be able
-    to do for a frozen run configuration to start at all.
-    """
-    pack = load_pack(PILOT_PACK)
+def test_the_shipped_corpus_loads_with_one_anchored_check_set_per_snapshot_and_plans():
+    """The shipped source checks load and plan without claiming human approval."""
+    pack = load_pack(CURRENT_PACK)
 
     assert pack["anchor_sha256"]
     assert pack_summary(pack)["review_states"]["human_approved"] == 0
@@ -1116,6 +1145,26 @@ def test_the_shipped_pilot_pack_loads_with_one_anchored_check_set_per_snapshot_a
         assert plan["scope"] == "draft"
         assert plan["targets"] or plan["controls"], notes
         assert not any("after the review" in note for note in notes)
+
+
+def test_shipped_inventory_severity_and_provenance_describe_the_same_cases():
+    pack = load_pack(CURRENT_PACK)
+    distribution = json.loads(CURRENT_PACK.with_name("severity-distribution.json").read_text())
+    provenance = json.loads(CURRENT_PACK.with_name("upstream-evidence.json").read_text())
+    ids = {case["case_id"] for case in pack["cases"]}
+    assert ids == {row["case_id"] for row in distribution["cases"]}
+    assert ids == {row["case_id"] for row in provenance["cases"]}
+    aliases = [alias for case in pack["cases"] for alias in case["canonical_target"]["aliases"]
+               if alias.startswith("CVE-")]
+    assert len(aliases) == len(set(aliases)) == distribution["case_count"] == provenance["unique_cves"]
+    assert len(pack["snapshots"]) == distribution["snapshot_count"]
+    assert distribution["severity_counts"] == pack_summary(pack)["severity_counts"]
+    assert distribution["unrated"] == pack_summary(pack)["severity_unrated"] == 0
+    for case in pack["cases"]:
+        row = next(r for r in distribution["cases"] if r["case_id"] == case["case_id"])
+        assert row["selected"] == case["severity"]
+        assert any(r["case_id"] == case["case_id"] and r["url"] == case["severity"]["source"]
+                   for r in provenance["sources"])
 
 
 def test_the_contract_refuses_a_level_no_recorded_approval_carries(tmp_path):
