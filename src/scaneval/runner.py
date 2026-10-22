@@ -401,7 +401,7 @@ def _check_invocation_ids(inputs: list[_InputSpec], systems: list[dict], repetit
 
 def _check_workspace_root(workspace_root: Path | None, out_dir: Path, cache_root: Path,
                           input_dirs: list[Path]) -> None:
-    """Refuse a scanner workspace that would sit inside evaluator-owned storage.
+    """Refuse a scanner workspace that would sit inside evaluator-owned storage, or does not exist.
 
     A workspace under the run output, the immutable source cache, or an exported input would
     put the scanner's private copy where evaluator artifacts live, where it would be hashed,
@@ -420,6 +420,12 @@ def _check_workspace_root(workspace_root: Path | None, out_dir: Path, cache_root
             raise ContractError(
                 f"workspace_root {workspace} resolves inside {label} ({owned}); give the scanner "
                 "a workspace outside the evaluator's directories")
+    # Every invocation makes its private workspace inside this directory. Refused here, before the
+    # output directory exists, rather than as an error inside the first invocation after inputs
+    # and systems were prepared, which left a failed run behind.
+    if not workspace.is_dir():
+        raise ContractError(
+            f"workspace_root {workspace} is not an existing directory; create it before the run")
 
 
 def _check_cache_root(cache_root: Path, out_dir: Path) -> None:
