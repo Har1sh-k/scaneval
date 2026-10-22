@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from io import BytesIO
+import tomllib
 
 import pytest
 
@@ -209,3 +210,22 @@ def test_fetch_checks_locked_bytes_and_never_overwrites(tmp_path, monkeypatch):
     with pytest.raises(ContractError, match="mismatch"):
         builtin.fetch_source("example", bad)
     assert not bad.exists()
+
+
+def test_installable_example_registers_and_imports_jsonl(native, tmp_path, monkeypatch):
+    example = Path(__file__).resolve().parents[1] / "examples/dataset_plugin"
+    project = tomllib.loads((example / "pyproject.toml").read_text())["project"]
+    entrypoints = project["entry-points"]["scaneval.datasets"]
+    distribution = tmp_path / "scaneval_example_dataset-0.1.0.dist-info"
+    distribution.mkdir()
+    (distribution / "METADATA").write_text("Metadata-Version: 2.1\nName: scaneval-example-dataset\nVersion: 0.1.0\n")
+    (distribution / "entry_points.txt").write_text("[scaneval.datasets]\n" + "\n".join(
+        f"{name} = {target}" for name, target in entrypoints.items()) + "\n")
+    monkeypatch.syspath_prepend(str(example))
+    monkeypatch.syspath_prepend(str(tmp_path))
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "dataset.json").write_text(json.dumps({k: v for k, v in native.items() if k != "tasks"}))
+    (source / "tasks.jsonl").write_text("\n".join(json.dumps(t) for t in native["tasks"]) + "\n")
+    assert "example-jsonl" in datasets.adapter_names()
+    assert datasets.import_dataset("example-jsonl", source) == native

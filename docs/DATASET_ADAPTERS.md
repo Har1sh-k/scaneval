@@ -94,6 +94,10 @@ registry or evaluator. The plugin is trusted installed Python code; a JSON
 dataset itself cannot cause a plugin to be imported. Duplicate plugin names are
 refused and built-in names cannot be replaced by a plugin.
 
+An [installable JSONL example](../examples/dataset_plugin/README.md) includes the
+complete package and entry point. It feeds the same benchmark commands after
+import, so a third-party adapter does not need its own runner or scorer.
+
 ## Source-specific details
 
 AACR-Bench preserves correct and incorrect comments, their producer information,
