@@ -190,6 +190,10 @@ def attest_history(repository: Path, source_dir: Path, *, head_commit: str,
         timestamp, oid = line.split()
         commit_times.append((int(timestamp), oid))
     earliest, earliest_commit = min(commit_times)
+    try:
+        earliest_at = datetime.fromtimestamp(earliest, timezone.utc).isoformat()
+    except (ValueError, OverflowError, OSError) as exc:
+        raise MaterializationError("bounded history has an out-of-range committer timestamp") from exc
     git_tree = _git(["rev-parse", f"{head}^{{tree}}"], repository).strip()
     refs = [{"name": "HEAD", "target": head, "symbolic": False}]
     config_hash = "sha256:" + hashlib.sha256(_CONFIG.encode()).hexdigest()
@@ -197,7 +201,7 @@ def attest_history(repository: Path, source_dir: Path, *, head_commit: str,
         "status": "available", "policy": HISTORY_POLICY, "head_commit": head, "git_tree": git_tree,
         "reachable_commit_count": len(parents), "object_count": len(stored),
         "earliest_commit": earliest_commit,
-        "earliest_committed_at": datetime.fromtimestamp(earliest, timezone.utc).isoformat(),
+        "earliest_committed_at": earliest_at,
         "root_commits": sorted(oid for oid, row in parents.items() if not row), "refs": refs,
         "history_digest": canonical_sha256({"policy": HISTORY_POLICY, "head": head, "objects": reachable,
                                              "parents": parents, "refs": refs, "config": config_hash,

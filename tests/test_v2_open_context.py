@@ -137,3 +137,15 @@ def test_excluded_controller_state_anywhere_in_ancestry_is_refused(tmp_path):
     with pytest.raises(MaterializationError, match="evaluator or harness state"):
         export_history(newer, tmp_path / "controller.git", source_dir=tmp_path / "controller-input" / "source",
                        expected_tree_hash=record["trial"]["tree_hash"])
+
+
+def test_out_of_range_original_commit_time_is_a_structured_refusal(tmp_path):
+    snapshot, source, digest, *_ = history_fixture(tmp_path)
+    payload = (f"tree {snapshot.git_tree}\nauthor Fixture <f@example.test> 99999999999999 +0000\n"
+               "committer Fixture <f@example.test> 99999999999999 +0000\n\nOriginal out-of-range date\n")
+    head = subprocess.check_output(["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+                                   cwd=snapshot.path, input=payload.encode()).decode().strip()
+    git(snapshot.path, "update-ref", "refs/heads/out-of-range", head)
+    unusual = CachedSnapshot(snapshot.path, snapshot.url, head, snapshot.git_tree, "fixture")
+    with pytest.raises(MaterializationError, match="out-of-range committer timestamp"):
+        export_history(unusual, tmp_path / "unusual.git", source_dir=source, expected_tree_hash=digest)
