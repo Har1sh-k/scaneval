@@ -114,6 +114,18 @@ def validate_settings(settings):
             **({"search_endpoint": search} if search else {})}
 
 
+def is_public_address(raw):
+    """The same address predicate applies to live transport and saved hop evidence."""
+    try:
+        ip = ipaddress.ip_address(raw)
+    except ValueError:
+        return False
+    return (isinstance(raw, str) and "%" not in raw and ip.is_global and not (
+        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
+        or ip.is_reserved or ip.is_unspecified or (isinstance(ip, ipaddress.IPv6Address) and
+            (ip.ipv4_mapped is not None or any(ip in network for network in _TRANSLATORS)))))
+
+
 def public_addresses(host, port=443):
     """Reject mixed public/private answers and return the exact addresses callers may connect."""
     answers = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
@@ -122,15 +134,7 @@ def public_addresses(host, port=443):
     safe = []
     for family, kind, protocol, _canon, address in answers:
         raw = address[0]
-        try:
-            ip = ipaddress.ip_address(raw)
-        except ValueError as exc:
-            raise RetrievalDenied("destination resolved to an invalid address",
-                                  resolved_addresses=[item[4][0] for item in answers]) from exc
-        if ("%" in raw or not ip.is_global or ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_multicast or ip.is_reserved or ip.is_unspecified
-                or (isinstance(ip, ipaddress.IPv6Address) and
-                    (ip.ipv4_mapped is not None or any(ip in network for network in _TRANSLATORS)))):
+        if not is_public_address(raw):
             raise RetrievalDenied("destination has a private, local, reserved, or translated address",
                                   resolved_addresses=[item[4][0] for item in answers])
         item = (family, kind, protocol, address)

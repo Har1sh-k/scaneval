@@ -11,15 +11,73 @@ import hashlib
 import json
 from pathlib import Path
 import re
+from urllib.parse import urljoin, urlencode, urlsplit
 
 from .contracts import ContractError, canonical_sha256
 from .materialize import MaterializationError
 from .open_context import HISTORY_POLICY, validate_policy
-from .isolation.public_retrieval import validate_settings
+from .isolation.public_retrieval import (MAX_REDIRECTS, is_public_address, parse_url, validate_settings)
 
 
 def _reason(code: str, message: str) -> dict:
     return {"code": code, "message": message}
+
+
+def _validate_hops(event: dict, policy: dict) -> None:
+    """Check structural transport facts without doing DNS or trusting an outcome label."""
+    chain = event["redirect_chain"]
+    if not isinstance(chain, list) or len(chain) > MAX_REDIRECTS + 1:
+        raise ContractError("retrieval redirect chain has an invalid type or length")
+    fetched = event["outcome"] in ("ok", "http_error")
+    if fetched and not chain:
+        raise ContractError("successful retrieval has no recorded transport hop")
+    target = event["url"]
+    if event["operation"] == "search" and chain:
+        endpoint, query = policy.get("search_endpoint"), event["query"]
+        if not endpoint or not isinstance(query, str) or not query:
+            raise ContractError("search transport lacks its configured endpoint or query")
+        expected = endpoint + ("&" if urlsplit(endpoint).query else "?") + urlencode({"q": query})
+        if target != expected:
+            raise ContractError("search URL contradicts its configured endpoint and query")
+    redirects = (301, 302, 303, 307, 308)
+    for index, hop in enumerate(chain):
+        if not isinstance(hop, dict) or {"url", "status", "location", "resolved_addresses",
+                "attempted_addresses", "connected_address"} - set(hop):
+            raise ContractError("retrieval hop lacks required transport provenance")
+        url, origin, host = parse_url(hop["url"])
+        if (url != hop["url"] or parse_url(target)[0] != url or origin not in policy["allowed_origins"]
+                or host in policy["denied_hosts"]):
+            raise ContractError("retrieval hop contradicts the declared destination policy or redirect target")
+        resolved, attempted, connected = (hop[key] for key in
+                                         ("resolved_addresses", "attempted_addresses", "connected_address"))
+        for addresses in (resolved, attempted):
+            if addresses is not None and (not isinstance(addresses, list)
+                    or any(not isinstance(address, str) for address in addresses)):
+                raise ContractError("retrieval hop addresses are malformed")
+        if connected is not None and not isinstance(connected, str):
+            raise ContractError("retrieval connected address is malformed")
+        status = hop["status"]
+        if status is not None and (type(status) is not int or not 100 <= status <= 599):
+            raise ContractError("retrieval hop HTTP status is invalid")
+        transported = bool(attempted or connected or status is not None)
+        if transported and (not resolved or not all(is_public_address(address) for address in resolved)
+                or not attempted or any(address not in resolved for address in attempted)
+                or (connected is not None and connected not in attempted)
+                or (status is not None and connected is None)):
+            raise ContractError("retrieval transport contradicts its validated public addresses")
+        # Private/mixed resolutions are valid evidence of a rejected attempt only before connect.
+        if resolved and not all(is_public_address(address) for address in resolved) and event["outcome"] != "denied":
+            raise ContractError("non-public resolution was not recorded as denied")
+        location = hop["location"]
+        if location is not None and (not isinstance(location, str) or status not in redirects):
+            raise ContractError("retrieval redirect location contradicts its status")
+        if index < len(chain) - 1:
+            if status not in redirects or not location:
+                raise ContractError("retrieval chain continues without a redirect")
+            target = urljoin(url, location)
+        elif fetched and (status is None or status in redirects
+                or (event["outcome"] == "ok") != (200 <= status < 300)):
+            raise ContractError("retrieval outcome contradicts the terminal HTTP status")
 
 
 def classify_condition(bundle: Path, execution: dict, policy: dict, evidence: dict) -> dict:
@@ -169,6 +227,9 @@ def classify_condition(bundle: Path, execution: dict, policy: dict, evidence: di
                     event.get("source") == "unavailable" and event["outcome"] == "denied")
                 if not source_valid or event.get("operation") not in ("fetch", "search"):
                     raise ContractError("retrieval event has an unknown integration boundary")
+                if not isinstance(actual_policy, dict):
+                    raise ContractError("retrieval hops cannot be checked without the actual policy")
+                _validate_hops(event, actual_policy)
                 if event.get("capture_error"):
                     gaps.append(_reason("retrieval_content_capture_failed", "A fetched response could not be retained as declared."))
                 if event["outcome"] in ("ok", "http_error") and (

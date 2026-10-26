@@ -112,3 +112,69 @@ def test_unstarted_backend_retains_policy_hash_without_a_false_mismatch(tmp_path
         assert not any(reason["code"] == "retrieval_policy_mismatch" for reason in result["reasons"])
     finally:
         assert backend.close() == []
+
+
+def captured_event(tmp_path, *, outcome="ok"):
+    execution, evidence = history_evidence(tmp_path)
+    execution["network_policy"]["enforced"] = True
+    execution["isolation"].update(enforced=True,
+        containers=[{"role": role, "started": True, "removed": True} for role in ("worker", "proxy")],
+        network={"policy": "public_research", "enforced": True, "mode": "internal network with egress proxy",
+                 "proxy": {"allow": ["example.com:443"]}, "networks": [{"role": "int", "internal": True,
+                 "gateway_mode_ipv4": "isolated", "gateways": [], "ipv6": False}]})
+    start = {"id": "one", "operation": "fetch", "url": "https://example.com/", "query": None,
+             "source": "scanner_native", "source_assurance": "self_reported", "started_at": "2026-10-25T00:00:00Z"}
+    body = b"fixture"
+    digest = hashlib.sha256(body).hexdigest()
+    event = {**start, "finished_at": "2026-10-25T00:00:01Z", "outcome": outcome,
+        "redirect_chain": [{"url": start["url"], "status": 200, "location": None,
+             "resolved_addresses": ["93.184.215.14"], "attempted_addresses": ["93.184.215.14"],
+             "connected_address": "93.184.215.14"}], "content_sha256": "sha256:" + digest,
+        "byte_count": len(body), "capture_status": "preserved", "content_path": "content/" + digest + ".bin",
+        "content_entered_model": None}
+    return execution, evidence, start, event, body
+
+
+def save_event(tmp_path, execution, start, event, body):
+    capture = journal_capture(tmp_path, [start], [event], state="recorded")
+    capture["preserved"] = int(event["capture_status"] == "preserved")
+    capture["denied"] = int(event["outcome"] == "denied")
+    if capture["preserved"]:
+        directory = tmp_path / "raw/retrieval-provenance/content"
+        directory.mkdir()
+        (directory / event["content_path"].split("/")[-1]).write_bytes(body)
+    execution["isolation"]["retrieval"] = capture
+
+
+@pytest.mark.parametrize("mutation", [None, "private", "mixed", "outside_dns", "redirect_type",
+    "redirect_target", "origin", "status", "missing_connected", "denied_host"])
+def test_successful_hops_must_consistently_observe_the_actual_public_policy(tmp_path, mutation):
+    execution, evidence, start, event, body = captured_event(tmp_path)
+    hop = event["redirect_chain"][0]
+    if mutation == "private":
+        hop.update(resolved_addresses=["127.0.0.1"], attempted_addresses=["127.0.0.1"], connected_address="127.0.0.1")
+    elif mutation == "mixed": hop["resolved_addresses"].append("127.0.0.1")
+    elif mutation == "outside_dns": hop["connected_address"] = "1.1.1.1"
+    elif mutation == "redirect_type": event["redirect_chain"] = {}
+    elif mutation == "redirect_target":
+        event["redirect_chain"].insert(0, {**hop, "status": 302, "location": "/different"})
+    elif mutation == "origin": hop["url"] = "https://other.example/"
+    elif mutation == "status": hop["status"] = 500
+    elif mutation == "missing_connected": hop["connected_address"] = None
+    save_event(tmp_path, execution, start, event, body)
+    if mutation == "denied_host":
+        actual = {**RETRIEVAL, "denied_hosts": ["example.com"]}
+        execution["isolation"]["retrieval"].update(policy=actual, policy_sha256=canonical_sha256(actual))
+    result = classify_condition(tmp_path, execution, POLICY, evidence)
+    assert result["status"] == ("attested" if mutation is None else "failed")
+    if mutation is not None:
+        assert any(reason["code"] == "retrieval_artifact_mismatch" for reason in result["reasons"])
+
+
+def test_denied_private_resolution_is_valid_evidence_without_a_connection(tmp_path):
+    execution, evidence, start, event, body = captured_event(tmp_path, outcome="denied")
+    event.update(content_sha256=None, byte_count=0, capture_status="unavailable", content_path=None)
+    event["redirect_chain"][0].update(status=None, resolved_addresses=["93.184.215.14", "127.0.0.1"],
+                                     attempted_addresses=[], connected_address=None)
+    save_event(tmp_path, execution, start, event, body)
+    assert classify_condition(tmp_path, execution, POLICY, evidence)["status"] == "attested"
