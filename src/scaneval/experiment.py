@@ -364,3 +364,13 @@ def validate_frozen(document: dict) -> dict:
     if len(keys) != len(set(keys)):
         raise ContractError("duplicate experiment condition assignment")
     return document
+
+
+def execute(*args, **kwargs) -> dict:
+    from .experiment_execution import execute as execute_matrix
+    return execute_matrix(*args, **kwargs)
+
+
+def freeze_file(*args, **kwargs) -> dict:
+    from .experiment_execution import freeze_file as freeze_matrix
+    return freeze_matrix(*args, **kwargs)
