@@ -58,6 +58,10 @@ def test_original_ancestors_only_with_no_hidden_descendants(tmp_path):
     assert not (workspace / ".git" / "logs").exists()
     assert not (workspace / ".git" / "hooks").exists()
     assert git(workspace, "remote") == ""
+    assert git(workspace, "ls-files") == "source.py"
+    assert git(workspace, "status", "--porcelain") == ""
+    assert git(workspace, "diff", "--name-status", "HEAD") == ""
+    assert evidence["git_index_sha256"].startswith("sha256:")
 
 
 def test_metadata_and_content_tampering_are_refused(tmp_path):
@@ -112,6 +116,10 @@ def test_harmless_symlink_stays_unfollowed_but_its_history_is_declared(tmp_path)
     assert not (linked_source / "readme-link").exists()
     assert evidence["source_export_omissions"][0]["path"] == "readme-link"
     assert evidence["source_export_omissions"][0]["history_exposure"] == "original_object_preserved"
+    install_history(tmp_path / "linked.git", linked_source, expected=evidence)
+    assert "readme-link" in git(linked_source, "ls-files").splitlines()
+    assert git(linked_source, "status", "--porcelain") == ""
+    assert git(linked_source, "diff", "--name-status", "HEAD") == ""
 
 
 def test_excluded_controller_state_anywhere_in_ancestry_is_refused(tmp_path):

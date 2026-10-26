@@ -77,7 +77,7 @@ def _metadata_files(directory: Path) -> list[str]:
                 raise MaterializationError("bounded history contains a link or special file")
             if stat.S_ISREG(mode.st_mode):
                 rel = path.relative_to(directory).as_posix()
-                if rel not in ("HEAD", "config") and not (
+                if rel not in ("HEAD", "config", "index") and not (
                     re.fullmatch(r"objects/pack/pack-[0-9a-f]{40}\.(pack|idx|rev)", rel)):
                     raise MaterializationError(f"bounded history contains forbidden metadata: {rel}")
                 allowed.append(rel)
@@ -85,8 +85,8 @@ def _metadata_files(directory: Path) -> list[str]:
                 "objects", "objects/info", "objects/pack", "refs", "refs/heads", "refs/tags",
             ):
                 raise MaterializationError("bounded history contains a forbidden metadata directory")
-    if set(("HEAD", "config")) - set(allowed):
-        raise MaterializationError("bounded history lacks HEAD or config")
+    if set(("HEAD", "config", "index")) - set(allowed):
+        raise MaterializationError("bounded history lacks HEAD, config, or its evaluated-tree index")
     if (directory / "config").read_text() != _CONFIG:
         raise MaterializationError("bounded history configuration differs from its hermetic policy")
     return sorted(allowed)
@@ -132,6 +132,33 @@ def _source_binding(repository: Path, source_dir: Path, head: str, expected_tree
     return actual, sorted(omitted, key=lambda item: item["path"])
 
 
+def _index_binding(repository: Path, head: str, omissions: list) -> str:
+    """Require ordinary stage-zero HEAD entries, skipping only explicit export omissions."""
+    expected = {}
+    for item in _binary_git(["ls-tree", "-r", "-z", head], repository).split(b"\0"):
+        if item:
+            metadata, name = item.split(b"\t", 1)
+            mode, _kind, oid = metadata.decode("ascii").split()
+            expected[name] = (mode, oid, "0")
+    staged = {}
+    for item in _binary_git(["ls-files", "--stage", "-z"], repository).split(b"\0"):
+        if item:
+            metadata, name = item.split(b"\t", 1)
+            if name in staged:
+                raise MaterializationError("bounded history index contains unresolved stages")
+            staged[name] = tuple(metadata.decode("ascii").split())
+    flags = {}
+    for item in _binary_git(["ls-files", "-v", "-z"], repository).split(b"\0"):
+        if item:
+            flag, name = item.split(b" ", 1)
+            flags[name] = flag
+    omitted = {entry["path"].encode("utf-8") for entry in omissions}
+    if staged != expected or set(flags) != set(expected) or any(
+            flag != (b"S" if name in omitted else b"H") for name, flag in flags.items()):
+        raise MaterializationError("bounded history index does not bind to HEAD and declared export omissions")
+    return sha256_file(repository / ".git" / "index")[0]
+
+
 def attest_history(repository: Path, source_dir: Path, *, head_commit: str,
                    expected_tree_hash: str) -> dict:
     """Verify both reachable and *all stored* objects; refs alone cannot exclude descendant fixes."""
@@ -157,6 +184,7 @@ def attest_history(repository: Path, source_dir: Path, *, head_commit: str,
     if _git(["log", "--full-history", "--format=%H", head, "--", *sorted(STRIPPED_TOP_LEVEL)], repository).strip():
         raise MaterializationError("bounded history exposes excluded evaluator or harness state")
     source_hash, omissions = _source_binding(repository, source_dir, head, expected_tree_hash)
+    index_hash = _index_binding(repository, head, omissions)
     commit_times = []
     for line in _git(["log", "--format=%ct %H", head], repository).splitlines():
         timestamp, oid = line.split()
@@ -172,8 +200,10 @@ def attest_history(repository: Path, source_dir: Path, *, head_commit: str,
         "earliest_committed_at": datetime.fromtimestamp(earliest, timezone.utc).isoformat(),
         "root_commits": sorted(oid for oid, row in parents.items() if not row), "refs": refs,
         "history_digest": canonical_sha256({"policy": HISTORY_POLICY, "head": head, "objects": reachable,
-                                             "parents": parents, "refs": refs, "config": config_hash}),
+                                             "parents": parents, "refs": refs, "config": config_hash,
+                                             "index": index_hash}),
         "source_tree_hash": source_hash, "git_config_sha256": config_hash,
+        "git_index_sha256": index_hash,
         "source_export_omissions": omissions,
         "capture": "constructed_and_verified",
     }
@@ -221,6 +251,13 @@ def export_history(snapshot: CachedSnapshot, destination: Path, *, source_dir: P
             result = subprocess.run(argv, cwd=clean, env=env, stdin=stream, capture_output=True, timeout=900)
             if result.returncode:
                 raise MaterializationError("bounded ancestor pack could not be indexed")
+        _source_hash, omissions = _source_binding(clean, source_dir, head, expected_tree_hash)
+        # read-tree writes a stat-free v2 index and invokes no checkout, attributes, filters, or
+        # hooks. Thus it is deterministic and does not rewrite the exported source bytes.
+        _git(["-c", "index.version=2", "read-tree", head], clean)
+        if omissions:
+            _binary_git(["update-index", "--skip-worktree", "-z", "--stdin"], clean,
+                        data=b"".join(entry["path"].encode("utf-8") + b"\0" for entry in omissions))
         evidence = attest_history(clean, source_dir, head_commit=head, expected_tree_hash=expected_tree_hash)
         shutil.copytree(git_dir, destination)
         return evidence

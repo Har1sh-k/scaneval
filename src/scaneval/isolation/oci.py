@@ -1048,11 +1048,12 @@ class OciBackend:
         if self.settings.network_policy == "public_research":
             values.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_SYSTEM": "/dev/null",
                            "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ATTR_NOSYSTEM": "1",
-                           "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "",
-                           "GIT_CONFIG_COUNT": "3", "GIT_CONFIG_KEY_0": "core.hooksPath",
+                           "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "GIT_OPTIONAL_LOCKS": "0",
+                           "GIT_CONFIG_COUNT": "4", "GIT_CONFIG_KEY_0": "core.hooksPath",
                            "GIT_CONFIG_VALUE_0": "/dev/null", "GIT_CONFIG_KEY_1": "core.attributesFile",
                            "GIT_CONFIG_VALUE_1": "/dev/null", "GIT_CONFIG_KEY_2": "core.excludesFile",
-                           "GIT_CONFIG_VALUE_2": "/dev/null"})
+                           "GIT_CONFIG_VALUE_2": "/dev/null", "GIT_CONFIG_KEY_3": "safe.directory",
+                           "GIT_CONFIG_VALUE_3": str(self._workspace() / "source")})
         names: list[str] = []
         secret: dict[str, str] = {}
         recorded = []

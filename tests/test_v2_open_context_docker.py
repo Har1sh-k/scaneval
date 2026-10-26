@@ -18,6 +18,7 @@ from scaneval.contracts import load_document
 
 from test_v2_isolation_docker import PYTHON_IMAGE, ScriptAdapter, pilot, run_id, scratch, scratch_parent  # noqa: F401
 from test_v2_open_context import history_fixture
+from test_v2_open_context_runner import create_fixture
 
 
 RETRIEVAL = {"policy": "recorded_public_v1", "allowed_origins": ["https://example.com", "https://127.0.0.1"],
@@ -145,3 +146,16 @@ print('Recorded benign retrieval fixture completed.')
     failed = conditions.classify_observation(bundle)
     assert failed["status"] == "failed"
     assert any(reason["code"] == "retrieval_artifact_mismatch" for reason in failed["reasons"])
+
+
+def test_documented_semgrep_fixture_runs_with_real_tracked_history(scratch):
+    config = create_fixture(scratch / "documented-example")
+    out = config.parent / "run"
+    manifest = run_from_config(config, out, workspace_root=config.parent / "work")
+    [row] = manifest["invocations"]
+    assert row["status"] == "success" and row["claim_records"] == 1, row
+    record = load_document(out / row["bundle_path"] / "condition.json", "condition-record")
+    assert record["status"] == "attested", record
+    assert record["details"]["history"]["reachable_commit_count"] == 2
+    assert record["details"]["retrieval"]["attempts"] == 0
+    assert record["history"] == "bounded_ancestor_history"
