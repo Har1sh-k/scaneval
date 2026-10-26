@@ -125,3 +125,34 @@ def test_duplicate_exclusions_and_identity_cues_fail_before_scanning():
     matrix["run_order"] = {"method": "fixed", "seed": 1}
     with pytest.raises(ContractError, match="does not use a random seed"):
         experiment.validate_matrix(matrix)
+
+
+def strict_preflight_matrix():
+    document = declaration()
+    snapshot = {"snapshot_id": "source", "repository": {"name": "AcmeCorp", "url": "https://example.com/AcmeCorp/project"},
+                "commit": "a" * 40}
+    pack = {"snapshots": [snapshot], "cases": [{"target": {"snapshot_id": "source", "accepted_locations": []}, "controls": [],
+        "canonical_target": {"aliases": ["CVE-2025-12345"]}, "evidence": []}]}
+    mapping = {"variants": [{"snapshot_id": "source"}], "pseudonyms": [],
+        "identity_policy": {"policy_id": "scaneval.identity-reduced", "version": "1", "answer_aliases": [
+            {"category": "target_alias", "value": "CVE-2025-12345", "forms": []}]}}
+    return {"declaration": document, "pack": pack, "population": [{"snapshot_id": "source"}], "maps": {"map": mapping}}
+
+
+@pytest.mark.parametrize("cue", ["alias", "repository", "revision", "model", "path", "default_tmp", "coverage"])
+def test_strict_matrix_preflight_reuses_alias_repository_revision_and_path_checks(tmp_path, monkeypatch, cue):
+    pytest.importorskip("scaneval.identity_policy", reason="strict identity dependency must be restacked before integration")
+    matrix = strict_preflight_matrix()
+    system = matrix["declaration"]["systems"][0]
+    output, workspace = tmp_path / "out", tmp_path / "work"
+    if cue == "alias": system["config"]["note"] = "CVE-2025-12345"
+    elif cue == "repository": system["config"]["note"] = "AcmeCorp"
+    elif cue == "revision": system["config"]["note"] = "a" * 12
+    elif cue == "model": system["model_id"] = "CVE-2025-12345-model"
+    elif cue == "path": output = tmp_path / "CVE-2025-12345"
+    elif cue == "default_tmp":
+        workspace = None
+        monkeypatch.setattr(experiment.tempfile, "gettempdir", lambda: "/tmp/CVE-2025-12345")
+    else: matrix["maps"]["map"]["identity_policy"]["answer_aliases"] = []
+    with pytest.raises(ContractError, match="strict identity"):
+        experiment.check_identity_cues(matrix, output_dir=output, workspace_root=workspace)

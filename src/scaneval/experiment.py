@@ -11,6 +11,7 @@ from copy import deepcopy
 from importlib.resources import files
 import json
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -222,12 +223,42 @@ def check_identity_cues(matrix: dict, *, output_dir: Path | None = None,
     candidate = {"run_id": declaration["experiment_id"] + ".identity_reduced", "systems": [
         {key: system.get(key) for key in ("system_id", "adapter", "config", "model_id", "model_revision")}
         for system in declaration["systems"]],
-        "output_dir": str(output_dir) if output_dir else None,
-        "workspace_root": str(workspace_root) if workspace_root else None}
+        "input_ids": declaration.get("population", {}).get("snapshot_ids", []),
+        "paths": []}
+    for path in (output_dir, workspace_root):
+        if path is not None:
+            named = Path(path).expanduser().absolute()
+            candidate["paths"].extend([str(named), str(named.resolve())])
+    if output_dir is not None:
+        identity_root = Path(output_dir) / "cells/identity_reduced"
+        candidate["paths"].extend(str(path) for path in (identity_root, identity_root / "cache"))
+        if workspace_root is None:
+            candidate["paths"].append(tempfile.gettempdir())
     for mapping in matrix.get("maps", {}).values():
         leaked = blinding.leaked_originals(mapping, candidate)
         if leaked:
             raise ContractError("identity-reduced experiment identifiers/configuration/paths retain reviewed original cues: " + ", ".join(leaked))
+        if mapping.get("identity_policy") is not None:
+            pack = matrix.get("pack")
+            if not isinstance(pack, dict):
+                raise ContractError("strict identity preflight requires the frozen pack")
+            for source in matrix["population"]:
+                if source["snapshot_id"] in {variant["snapshot_id"] for variant in mapping["variants"]}:
+                    _identity_preflight(mapping, pack, source["snapshot_id"], candidate)
+
+
+def _identity_preflight(mapping: dict, pack: dict, snapshot_id: str, candidate: dict) -> None:
+    from .identity_policy import policy_coverage, scanner_identity_gaps, snapshot_requirements
+    requirements, _paths = snapshot_requirements(pack, snapshot_id)
+    coverage = policy_coverage(mapping.get("identity_policy"), requirements)
+    if coverage["state"] != "available":
+        raise ContractError("strict identity policy does not cover the frozen pack: " + "; ".join(coverage["reasons"]))
+    snapshot = cases.snapshot_by_id(pack, snapshot_id)
+    gaps = scanner_identity_gaps(candidate, policy=mapping["identity_policy"],
+                                 repository=snapshot["repository"], commits=[snapshot["commit"]])
+    if gaps:
+        raise ContractError("identity-reduced matrix metadata exposes a strict identity cue: " +
+                            ", ".join(sorted({gap["category"] for gap in gaps})))
 
 
 def _assignments(document: dict, name: str, population: list[dict]) -> list[dict]:
@@ -299,6 +330,7 @@ def freeze(document: dict, *, base_dir: Path, created_at: str, adapters: dict | 
                 if mapping["repository"]["url"] != cases.snapshot_by_id(pack, snapshot_id)["repository"]["url"]:
                     raise ContractError("identity map repository differs from the exact source repository")
                 blinding.check_scoring_paths(mapping, pack, snapshot_id)
+                _identity_preflight(mapping, pack, snapshot_id, {})
                 digest = blinding.map_sha256(mapping)
                 maps[digest] = mapping
                 map_bindings[map_path] = digest
