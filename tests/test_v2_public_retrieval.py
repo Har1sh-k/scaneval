@@ -110,6 +110,21 @@ def test_undeclared_and_credential_redirects_are_denied(tmp_path, monkeypatch):
     redirect = recorder.retrieve({"url": "https://research.example/start"})
     assert denied["outcome"] == "denied" and redirect["outcome"] == "denied"
     assert len(denied["redirect_chain"]) == 0
+    assert "secret:token" not in (tmp_path / "retrieval.jsonl").read_text()
+    assert redirect["redirect_chain"][0]["location"] == "https://[redacted]@research.example/next"
+
+
+@pytest.mark.parametrize("url", ["https://user:credential-value@research.example/",
+                                 "https://user:credential-\nvalue@research.example/",
+                                 "https://user%3Acredential-value@research.example/",
+                                 "https://user:credential-value@bad@research.example/"])
+def test_denied_url_userinfo_never_enters_capture_or_returned_provenance(tmp_path, url):
+    recorder = retrieval.Recorder(str(tmp_path), POLICY)
+    result = recorder.retrieve({"url": url})
+    assert result["outcome"] == "denied" and result["capture_status"] == "unavailable"
+    assert "credential-value" not in json.dumps(result) and "credential-\\nvalue" not in json.dumps(result)
+    assert "credential-value" not in (tmp_path / "retrieval.jsonl").read_text()
+    assert "credential-\\nvalue" not in (tmp_path / "retrieval.jsonl").read_text()
 
 
 def test_failures_http_errors_and_hash_only_capture_are_not_empty_success(tmp_path, monkeypatch):

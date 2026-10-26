@@ -14,6 +14,7 @@ import http.server
 import ipaddress
 import json
 import os
+import re
 import socket
 import ssl
 import threading
@@ -36,6 +37,17 @@ SOURCES = ("scanner_native", "browser_tool")
 
 class RetrievalDenied(ValueError):
     pass
+
+
+def recorded_url(value):
+    """Keep the attempted destination while excluding explicit URL userinfo from evidence.
+
+    This also handles malformed credentialed URLs before parse_url rejects them. A query is
+    untrusted research data, not a secret-injection channel; callers must not put secrets in it.
+    """
+    if not isinstance(value, str):
+        return None
+    return re.sub(r"(//)[^/?#]*@", r"\1[redacted]@", value, count=1)
 
 
 def parse_url(value):
@@ -183,7 +195,7 @@ class Recorder:
                 target = endpoint + separator + urllib.parse.urlencode({"q": query})
             else:
                 target = request.get("url")
-            event["url"] = target if isinstance(target, str) else None
+            event["url"] = recorded_url(target)
             deadline = time.monotonic() + 60
             for redirect in range(MAX_REDIRECTS + 1):
                 url, origin, host = parse_url(target)
@@ -206,7 +218,7 @@ class Recorder:
                                connected_address=connection.connected_address)
                     if response.status in (301, 302, 303, 307, 308):
                         location = response.getheader("Location")
-                        hop["location"] = location
+                        hop["location"] = recorded_url(location)
                         if not location or redirect == MAX_REDIRECTS:
                             raise RetrievalDenied("redirect is missing a target or exceeds the redirect limit")
                         target = urllib.parse.urljoin(url, location)
