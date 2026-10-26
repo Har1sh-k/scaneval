@@ -179,6 +179,9 @@ def attest_history(repository: Path, source_dir: Path, *, head_commit: str,
     stored = sorted(_git(["cat-file", "--batch-all-objects", "--batch-check=%(objectname)"], repository).splitlines())
     if reachable != stored:
         raise MaterializationError("bounded history contains unreachable or missing objects")
+    # Inventories only inspect object names and headers. Inflate and checksum every stored
+    # payload as well, including ancestor-only blobs that the evaluated tree never reads.
+    _git(["fsck", "--full", "--no-reflogs", "--no-dangling", "--no-progress"], repository)
     # Removing these paths from an export cannot remove their original blobs from exact ancestor
     # history. Refuse such a history explicitly, rather than rewriting commits or claiming absence.
     if _git(["log", "--full-history", "--format=%H", head, "--", *sorted(STRIPPED_TOP_LEVEL)], repository).strip():
@@ -275,9 +278,13 @@ def install_history(history_dir: Path, source_dir: Path, *, expected: dict) -> d
     target = source_dir / ".git"
     if target.exists() or target.is_symlink():
         raise MaterializationError("open_context workspace already contains Git metadata")
-    shutil.copytree(history_dir, target)
-    actual = attest_history(source_dir, source_dir, head_commit=expected["head_commit"],
-                            expected_tree_hash=expected["source_tree_hash"])
-    if actual != expected:
-        raise MaterializationError("bounded history differs from its preparation attestation")
+    try:
+        shutil.copytree(history_dir, target)
+        actual = attest_history(source_dir, source_dir, head_commit=expected["head_commit"],
+                                expected_tree_hash=expected["source_tree_hash"])
+        if actual != expected:
+            raise MaterializationError("bounded history differs from its preparation attestation")
+    except BaseException:
+        shutil.rmtree(target, ignore_errors=True)
+        raise
     return actual

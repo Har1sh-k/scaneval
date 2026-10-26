@@ -77,6 +77,24 @@ def test_metadata_and_content_tampering_are_refused(tmp_path):
         install_history(directory, source, expected=evidence)
 
 
+def test_corrupt_ancestor_blob_is_refused_even_when_object_names_are_unchanged(tmp_path):
+    snapshot, source, digest, ancestor, *_ = history_fixture(tmp_path)
+    history = tmp_path / "bounded.git"
+    evidence = export_history(snapshot, history, source_dir=source, expected_tree_hash=digest)
+    ancestor_blob = git(snapshot.path, "rev-parse", ancestor + ":source.py")
+    index = next((history / "objects/pack").glob("*.idx"))
+    listing = git(tmp_path, "verify-pack", "-v", str(index))
+    row = next(line.split() for line in listing.splitlines() if line.startswith(ancestor_blob + " "))
+    pack = index.with_suffix(".pack")
+    raw = bytearray(pack.read_bytes())
+    raw[int(row[4]) + 4] ^= 1
+    pack.chmod(0o644)
+    pack.write_bytes(raw)
+    with pytest.raises(MaterializationError, match="git fsck .*failed"):
+        install_history(history, source, expected=evidence)
+    assert not (source / ".git").exists()
+
+
 def test_history_is_deterministic_and_upstream_config_hooks_do_not_cross(tmp_path, monkeypatch):
     snapshot, source, digest, *_ = history_fixture(tmp_path)
     sentinel = tmp_path / "HOOK_RAN"
