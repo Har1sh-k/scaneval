@@ -9,13 +9,17 @@ from scaneval import experiment
 from scaneval import experiment_execution as execution
 from scaneval.adapters import get_adapter
 from scaneval.contracts import ContractError, canonical_sha256
+from scaneval.adapters.base import SystemSpec
+from scaneval.execution import PreparedInput, run_invocation
+from scaneval.materialize import hash_exported_tree
+from test_v2_conditions import Offline, Enforced
 from test_v2_experiment_matrix import declaration
 
 
 def frozen_shell():
     document = declaration()
     population = [{"snapshot_id": "source"}]
-    mapping = {"fixture": "reviewed map bytes are validated by the separate freeze layer"}
+    mapping = {"pseudonyms": [{"original": "AcmeCorp", "replacement": "Neutral"}]}
     digest = canonical_sha256(mapping)
     cells = []
     for cell in document["conditions"]:
@@ -23,7 +27,7 @@ def frozen_shell():
         cells.append({"name": cell["name"], "config": config, "config_sha256": canonical_sha256(config),
                       "assignments": experiment._assignments(document, cell["name"], population)})
     adapter = get_adapter("semgrep")
-    return {"experiment_id": "fixture", "experiment_version": "1", "matrix_sha256": "sha256:" + "a" * 64,
+    return {"stage": "frozen", "experiment_id": "fixture", "experiment_version": "1", "matrix_sha256": "sha256:" + "a" * 64,
         "pack": {}, "maps": {digest: mapping}, "cells": cells, "cell_order": list(experiment.NAMES),
         "assignments": [row for cell in cells for row in cell["assignments"]],
         "systems": [{**document["systems"][0], "adapter_identity": {"name": adapter.name, "version": adapter.adapter_version}}],
@@ -56,7 +60,8 @@ def test_every_cell_and_assignment_is_on_disk_before_first_runner(tmp_path, monk
     monkeypatch.setattr(execution.runner, "run_from_config", runner)
     manifest = execution.execute(tmp_path / "frozen.json", output)
     assert calls == matrix["cell_order"] and manifest["assignments"] == 6
-    assert manifest["status"] == "completed" and len(manifest["cells"]) == 3
+    assert manifest["status"] == "incomplete" and len(manifest["cells"]) == 3
+    assert all(len(cell["assignment_states"]) == 2 for cell in manifest["cells"])
 
 
 def test_a_failed_cell_keeps_all_assignments_and_other_cells_run(tmp_path, monkeypatch):
@@ -87,15 +92,19 @@ def test_runtime_adapter_drift_refuses_before_any_output_or_scan(tmp_path, monke
 
 def test_result_binding_rejects_relabeling_and_changed_result_bytes(tmp_path):
     matrix = frozen_shell()
-    cell = matrix["cells"][0]
+    cell = matrix["cells"][1]
     root = tmp_path / "run"
-    bundle = root / "invocations" / cell["assignments"][0]["assignment_id"]
-    bundle.mkdir(parents=True)
-    result = {"schema_version": "2.0", "run_id": cell["config"]["run_id"], "system_id": "scan",
-              "input_hash": "sha256:" + "d" * 64, "status": "success", "ranking": "unranked",
-              "claims": [], "bundles_resolved": True, "usage": {"wall_seconds": 0}}
-    (bundle / "result.json").write_text(json.dumps(result))
-    execution._bind_run(matrix, cell, root)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("print('fixture')\n")
+    tree = hash_exported_tree(source)["tree_hash"]
+    prepared = PreparedInput("source", source, tree, ("python",), {"profile": "standard", "trial": {"tree_hash": tree}},
+                             condition={"name": "closed_book_standard", "policy": {}})
+    bundle = run_invocation(prepared=prepared, adapter=Offline(), spec=SystemSpec("scan", "fixture", {}),
+        preparation={}, out_dir=root / "invocations", run_id=cell["config"]["run_id"],
+        network_policy="none", backend=Enforced("none"))
+    states = execution._bind_run(matrix, cell, root)
+    assert [row["status"] for row in states] == ["incomplete", "missing"]
     assignment = cell["assignments"][0]
     assert execution.verify_binding(bundle, matrix, cell, assignment=assignment)["matrix_sha256"] == matrix["matrix_sha256"]
     other = deepcopy(assignment)
@@ -105,6 +114,58 @@ def test_result_binding_rejects_relabeling_and_changed_result_bytes(tmp_path):
     (bundle / "result.json").write_text('{"fixture":false}')
     with pytest.raises(ContractError, match="artifacts changed"):
         execution.verify_binding(bundle, matrix, cell, assignment=assignment)
+
+
+def test_missing_mandatory_run_artifacts_and_symlink_root_do_not_verify(tmp_path):
+    matrix = frozen_shell()
+    cell = matrix["cells"][0]
+    root = tmp_path / "run"
+    root.mkdir()
+    execution._bind_run(matrix, cell, root)
+    with pytest.raises(ContractError, match="required saved artifacts"):
+        execution.verify_binding(root, matrix, cell)
+    alias = tmp_path / "linked-run"
+    alias.symlink_to(root, target_is_directory=True)
+    with pytest.raises(ContractError, match="symbolic link"):
+        execution.verify_binding(alias, matrix, cell)
+
+
+def test_completed_return_without_bundles_remains_explicitly_incomplete(tmp_path, monkeypatch):
+    matrix = frozen_shell()
+    staged_executor(monkeypatch, matrix)
+    monkeypatch.setattr(execution.runner, "run_from_config", lambda *_args, **_kwargs: {"status": "completed"})
+    result = execution.execute(tmp_path / "frozen.json", tmp_path / "out")
+    assert result["status"] == "incomplete"
+    assert all(row["status"] == "incomplete" and not row["recorded_bindings"] for row in result["cells"])
+    assert sum(item["status"] == "missing" for row in result["cells"] for item in row["assignment_states"]) == 6
+
+
+def test_misnamed_invocation_cannot_stand_for_frozen_assignment(tmp_path):
+    matrix = frozen_shell()
+    root = tmp_path / "run"
+    (root / "invocations" / "source.blinded__scan__r1").mkdir(parents=True)
+    with pytest.raises(ContractError, match="unexpected invocation"):
+        execution._bind_run(matrix, matrix["cells"][0], root)
+
+
+def test_interrupt_preserves_current_and_unstarted_cells(tmp_path, monkeypatch):
+    matrix = frozen_shell()
+    staged_executor(monkeypatch, matrix)
+    calls = []
+    def runner(*_args, **_kwargs):
+        calls.append(True)
+        if len(calls) == 2:
+            raise KeyboardInterrupt("fixture interrupt")
+        return {"status": "completed"}
+    monkeypatch.setattr(execution.runner, "run_from_config", runner)
+    output = tmp_path / "out"
+    with pytest.raises(KeyboardInterrupt):
+        execution.execute(tmp_path / "frozen.json", output)
+    manifest = execution.read_json(output / execution.EXECUTION_FILE)
+    assert manifest["status"] == "interrupted"
+    assert [row["status"] for row in manifest["cells"]] == ["incomplete", "interrupted", "not_started"]
+    assert manifest["cells"][1]["error"]["type"] == "KeyboardInterrupt"
+    assert len(manifest["cells"][2]["assignment_states"]) == 2
 
 
 def test_a_later_staged_cell_changed_between_runs_is_never_invoked(tmp_path, monkeypatch):
