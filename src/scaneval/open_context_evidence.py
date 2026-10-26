@@ -107,6 +107,8 @@ def classify_condition(bundle: Path, execution: dict, policy: dict, evidence: di
                     raise ContractError("retrieval event lacks required capture provenance")
                 if event.get("source") not in ("scanner_native", "browser_tool") or event.get("operation") not in ("fetch", "search"):
                     raise ContractError("retrieval event has an unknown integration boundary")
+                if event.get("capture_error"):
+                    gaps.append(_reason("retrieval_content_capture_failed", "A fetched response could not be retained as declared."))
                 if event["outcome"] in ("ok", "http_error") and (
                         not isinstance(event["content_sha256"], str) or
                         not re.fullmatch(r"sha256:[0-9a-f]{64}", event["content_sha256"]) or

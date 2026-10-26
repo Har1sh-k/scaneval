@@ -18,6 +18,7 @@ import re
 import socket
 import ssl
 import threading
+import tempfile
 import time
 import urllib.parse
 import uuid
@@ -169,6 +170,21 @@ class Recorder:
             self.stream.write(line + "\n")
             self.stream.flush()
 
+    def retain(self, digest, body):
+        """Publish only a complete response; a failed write leaves no digest-named fragment."""
+        evidence = os.path.join(self.directory, "content")
+        os.makedirs(evidence, exist_ok=True)
+        path = os.path.join(evidence, digest + ".bin")
+        with self.lock:
+            descriptor, temporary = tempfile.mkstemp(prefix=".capture-", suffix=".part", dir=evidence)
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(body)
+                os.replace(temporary, path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+
     def retrieve(self, request, operation="fetch"):
         event = {"id": uuid.uuid4().hex, "operation": operation, "source": "scanner_native",
                  "query": None, "url": None, "started_at": now(), "finished_at": None,
@@ -234,13 +250,13 @@ class Recorder:
                                  content_sha256="sha256:" + digest, byte_count=len(body),
                                  capture_status="hash_only")
                     if self.settings["capture"] == "content":
-                        evidence = os.path.join(self.directory, "content")
-                        os.makedirs(evidence, exist_ok=True)
-                        path = os.path.join(evidence, digest + ".bin")
-                        with self.lock:
-                            if not os.path.exists(path):
-                                with open(path, "xb") as stream:
-                                    stream.write(body)
+                        try:
+                            self.retain(digest, body)
+                        except OSError as exc:
+                            body = None
+                            event.update(outcome="failed", capture_status="unavailable",
+                                         capture_error=type(exc).__name__, error="content_capture_failed")
+                            break
                         event.update(capture_status="preserved", content_path="content/" + digest + ".bin")
                     break
                 finally:

@@ -155,6 +155,36 @@ def test_real_http_response_truncated_content_length_is_not_preserved_as_success
     assert event["content_sha256"] is None and not (tmp_path / "content").exists()
 
 
+def test_partial_capture_write_leaves_no_fragment_and_returns_no_content(tmp_path, monkeypatch):
+    transport(monkeypatch, [Response()])
+    recorder = retrieval.Recorder(str(tmp_path), POLICY)
+    original = retrieval.os.fdopen
+    class FullDisk:
+        def __init__(self, stream): self.stream = stream
+        def __enter__(self): return self
+        def __exit__(self, *_args): self.stream.close()
+        def write(self, data):
+            self.stream.write(data[:3])
+            raise OSError("fixture full disk")
+    monkeypatch.setattr(retrieval.os, "fdopen", lambda *args: FullDisk(original(*args)))
+    event = recorder.retrieve({"url": "https://research.example/"})
+    assert event["outcome"] == "failed" and event["capture_status"] == "unavailable"
+    assert event["capture_error"] == "OSError" and event["content_base64"] is None
+    assert event["content_path"] is None
+    assert list((tmp_path / "content").iterdir()) == []
+
+
+def test_existing_corrupt_digest_file_is_replaced_only_by_complete_content(tmp_path, monkeypatch):
+    transport(monkeypatch, [Response()])
+    recorder = retrieval.Recorder(str(tmp_path), POLICY)
+    content = tmp_path / "content"
+    content.mkdir()
+    path = content / (hashlib.sha256(b"public evidence").hexdigest() + ".bin")
+    path.write_bytes(b"old truncated fragment")
+    event = recorder.retrieve({"url": "https://research.example/"})
+    assert event["capture_status"] == "preserved" and path.read_bytes() == b"public evidence"
+
+
 def test_public_research_configuration_requires_enforcement_and_safe_explicit_policy():
     with pytest.raises(IsolationError, match="oci"):
         resolve_execution(None, "public_research")
