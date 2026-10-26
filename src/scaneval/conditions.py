@@ -540,7 +540,7 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None,
             failed.append(_reason("original_history_present", "Original ancestor history is incompatible with a closed-book source condition."))
     elif declaration["name"] == "open_context":
         try:
-            from . import open_context
+            from . import open_context_evidence as open_context
         except ImportError:
             open_context = None
         classify = getattr(open_context, "classify_condition", None)

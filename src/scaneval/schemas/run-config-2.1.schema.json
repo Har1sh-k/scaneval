@@ -118,6 +118,7 @@
             "enum": [
               "none",
               "model_provider_only",
+              "public_research",
               "unrestricted"
             ]
           },
@@ -190,6 +191,20 @@
                   }
                 }
               },
+              "retrieval": {
+                "type": "object",
+                "description": "Recorded retrieval policy for public_research; validated before any scanner starts.",
+                "additionalProperties": false,
+                "required": ["policy", "allowed_origins", "capture", "retention"],
+                "properties": {
+                  "policy": {"const": "recorded_public_v1"},
+                  "allowed_origins": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+                  "denied_hosts": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+                  "search_endpoint": {"type": "string", "minLength": 1},
+                  "capture": {"enum": ["content", "hashes"]},
+                  "retention": {"enum": ["bundle", "hashes_only"]}
+                }
+              },
               "limits": {
                 "type": "object",
                 "additionalProperties": false,
@@ -244,6 +259,7 @@
       "enum": [
         "none",
         "model_provider_only",
+        "public_research",
         "unrestricted"
       ]
     },

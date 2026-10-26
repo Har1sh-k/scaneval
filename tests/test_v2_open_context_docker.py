@@ -12,13 +12,18 @@ from scaneval.adapters.base import build_env, run_command
 from scaneval.isolation import resolve_execution
 from scaneval.isolation.oci import OciBackend
 from scaneval.open_context import export_history, install_history
+from scaneval.runner import run_from_config
+from scaneval import conditions
+from scaneval.contracts import load_document
 
-from test_v2_isolation_docker import PYTHON_IMAGE, run_id, scratch, scratch_parent  # noqa: F401
+from test_v2_isolation_docker import PYTHON_IMAGE, ScriptAdapter, pilot, run_id, scratch, scratch_parent  # noqa: F401
 from test_v2_open_context import history_fixture
 
 
 RETRIEVAL = {"policy": "recorded_public_v1", "allowed_origins": ["https://example.com", "https://127.0.0.1"],
              "capture": "content", "retention": "bundle"}
+CONDITION = {"name": "open_context", "policy": {"history": "ancestor_history_v1", "retrieval": "recorded_public_v1",
+              "web_mode": "live", "capture": "content", "retention": "bundle"}}
 
 
 def test_live_recorded_retrieval_and_private_denial_run_inside_real_boundary(scratch):
@@ -99,3 +104,44 @@ print(json.dumps({'live':live['outcome'], 'live_capture':live['capture_status'],
         assert all(item["removed"] for item in record["containers"])
     finally:
         assert backend.close() == []
+
+
+def test_configured_runner_saves_and_revalidates_open_context_observation(scratch):
+    config = pilot(scratch, [{"system_id": "research-fixture", "adapter": "script", "config": {},
+        "execution": {"backend": "oci", "image": PYTHON_IMAGE, "proxy_image": PYTHON_IMAGE,
+                      "egress": [{"host": "example.com", "port": 443}], "retrieval": RETRIEVAL}}],
+        policy="public_research")
+    declaration = json.loads(config.read_text())
+    declaration["inputs"][0]["condition"] = CONDITION
+    config.write_text(json.dumps(declaration))
+    script = """
+import json, os, urllib.request
+request = urllib.request.Request(os.environ['SCANEVAL_RETRIEVAL_URL']+'/fetch',
+    data=json.dumps({'url':'https://example.com/'}).encode(), headers={'Content-Type':'application/json'})
+with urllib.request.urlopen(request, timeout=60) as response:
+    result=json.load(response)
+assert result['outcome']=='ok' and result['content_entered_model'] is None
+print('Recorded benign retrieval fixture completed.')
+"""
+    out = scratch / "out"
+    manifest = run_from_config(config, out, workspace_root=scratch / "work", adapters={"script": ScriptAdapter(script)})
+    [row] = manifest["invocations"]
+    assert row["status"] == "success", row
+    bundle = out / row["bundle_path"]
+    record = load_document(bundle / "condition.json", "condition-record")
+    assert record["condition"] == "open_context" and record["status"] == "attested", record
+    assert record["history"] == "bounded_ancestor_history" and record["retrieval"] == "recorded"
+    assert record["provider_retrieval"] == "unverifiable"
+    assert record["details"]["model_consumption"] == {"observed": 0, "unknown": 1}
+    assert record["assurance"]["network"] == "external_enforcement"
+    assert conditions.classify_observation(bundle) == record
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["condition"] == CONDITION
+    assert execution["isolation"]["retrieval"]["attempts"] == 1
+    assert manifest["inputs"][0]["condition"] == CONDITION
+    schedule = load_document(out / "evaluator/schedule.json", "evaluation-schedule")
+    assert schedule["inputs"][0]["condition"] == CONDITION
+    (bundle / "raw/retrieval-provenance/events.jsonl").unlink()
+    failed = conditions.classify_observation(bundle)
+    assert failed["status"] == "failed"
+    assert any(reason["code"] == "retrieval_artifact_mismatch" for reason in failed["reasons"])
