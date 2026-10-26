@@ -560,6 +560,8 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None,
                     failed.append(_reason("condition_extension_artifact", str(exc)))
             for key in ("history", "retrieval", "network", "provider_retrieval"):
                 if key in details:
+                    if key == "history" and record["history"] != "bounded_ancestor_history":
+                        continue  # An extension cannot overwrite a failed or unavailable mechanical Git audit.
                     record[key] = details[key]
             if details.get("status") == "failed":
                 failed.extend(details.get("reasons", []))

@@ -599,7 +599,8 @@ class OciBackend:
         return {"backend": "oci", "enforced": ran, "note": note, "runtime": dict(self._runtime),
                 "image": image, "settings": self._settings_record(), "mounts": mounts,
                 "network": network, "containers": [dict(item) for item in self._containers],
-                **({"retrieval": self._retrieval or {"capture_status": "unavailable", "policy": self.settings.retrieval}}
+                **({"retrieval": self._retrieval or {"capture_status": "unavailable", "policy": self.settings.retrieval,
+                                                     "policy_sha256": canonical_sha256(self.settings.retrieval)}}
                    if self.settings.network_policy == "public_research" else {})}
 
     def close(self) -> list[str]:

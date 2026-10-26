@@ -56,7 +56,23 @@ def classify_condition(bundle: Path, execution: dict, policy: dict, evidence: di
             and isinstance(history.get("head_commit"), str) and re.fullmatch(r"[0-9a-f]{40}", history["head_commit"])
             and isinstance(history.get("history_digest"), str) and re.fullmatch(r"sha256:[0-9a-f]{64}", history["history_digest"])
             and history.get("refs") == [{"name": "HEAD", "target": history.get("head_commit"), "symbolic": False}]):
-        result["history"] = "bounded_ancestor_history"
+        try:
+            bound = _json(_bytes(bundle, "input-provenance.json")).get("history")
+            if history != bound:
+                raise ContractError("installed ancestor history differs from execution-bound input provenance")
+            mechanical = evidence.get("history") or {}
+            before, after = mechanical.get("before") or {}, mechanical.get("after") or {}
+            if (before.get("state") == "unexpected" or after.get("state") == "unexpected"
+                    or (before.get("state") == after.get("state") == "bounded_ancestor_history"
+                        and (not before.get("git_files_sha256") or before.get("git_files_sha256") != after.get("git_files_sha256")))):
+                result["history"] = "unexpected"
+                failures.append(_reason("history_audit_mismatch", "The mechanical Git audit found changed or unexpected metadata."))
+            elif before.get("state") == after.get("state") == "bounded_ancestor_history" and before.get("git_files_sha256"):
+                result["history"] = "bounded_ancestor_history"
+            else:
+                gaps.append(_reason("history_audit_gap", "The bounded history lacks matching before/after mechanical audits."))
+        except ContractError as exc:
+            failures.append(_reason("history_provenance_mismatch", str(exc)))
     else:
         gaps.append(_reason("bounded_history_unavailable", "No matching constructed ancestor-history attestation is saved."))
     network = isolation.get("network") or {}
@@ -99,9 +115,10 @@ def classify_condition(bundle: Path, execution: dict, policy: dict, evidence: di
             failures.append(_reason("retrieval_policy_mismatch", "The actual retrieval policy differs from the condition declaration."))
     else:
         gaps.append(_reason("retrieval_policy_unavailable", "The execution did not retain its actual retrieval policy."))
-    if retrieval.get("capture_status") != "recorded":
+    complete_capture = retrieval.get("capture_status") == "recorded"
+    if not complete_capture:
         gaps.append(_reason("retrieval_capture_gap", "Recorded retrieval capture is unavailable; missing events do not establish no retrieval."))
-    else:
+    if complete_capture or retrieval.get("events_path") is not None or retrieval.get("attempts_path") is not None:
         try:
             relative = retrieval.get("events_path")
             if relative != "raw/retrieval-provenance/events.jsonl":
@@ -120,17 +137,23 @@ def classify_condition(bundle: Path, execution: dict, policy: dict, evidence: di
             if attempts_hash != retrieval.get("attempts_sha256"):
                 raise ContractError("retrieval attempt journal contradicts its execution-record hash")
             attempts = [_json(line) for line in attempts_raw.splitlines()]
-            if ({item.get("id") for item in attempts} != {item.get("id") for item in events}
-                    or len(attempts) != len(events) or retrieval.get("incomplete_attempts") != 0
-                    or retrieval.get("completed_attempts") != len(events)):
-                raise ContractError("retrieval starts and completions do not establish complete API capture")
+            if any(not isinstance(item.get("id"), str) for item in attempts + events):
+                raise ContractError("retrieval attempt/completion ids are missing or malformed")
+            start_ids, end_ids = {item["id"] for item in attempts}, {item["id"] for item in events}
+            pending = start_ids - end_ids
+            if (len(start_ids) != len(attempts) or len(end_ids) != len(events) or not end_ids <= start_ids
+                    or type(retrieval.get("incomplete_attempts")) is not int
+                    or type(retrieval.get("completed_attempts")) is not int
+                    or retrieval.get("incomplete_attempts") != len(pending)
+                    or retrieval.get("completed_attempts") != len(events) or (complete_capture and pending)):
+                raise ContractError("retrieval starts and completions contradict their recorded coverage")
             by_id = {item["id"]: item for item in attempts}
             request_fields = {"url", "query", "operation", "source", "source_assurance", "started_at"}
             if any(request_fields - set(item) for item in attempts) or any(
                     any(event.get(key) != by_id[event["id"]].get(key) for key in request_fields) for event in events):
                 raise ContractError("retrieval completion provenance differs from its started request")
             artifacts.append({"role": "retrieval_attempts", "path": attempts_path, "sha256": attempts_hash})
-            if type(retrieval.get("attempts")) is not int or len(events) != retrieval["attempts"]:
+            if type(retrieval.get("attempts")) is not int or len(attempts) != retrieval["attempts"]:
                 raise ContractError("retrieval event count contradicts its execution record")
             seen = set()
             retained = set()
@@ -183,11 +206,15 @@ def classify_condition(bundle: Path, execution: dict, policy: dict, evidence: di
                       "hash_only": sum(event.get("capture_status") == "hash_only" for event in events)}
             if any(type(retrieval.get(key)) is not int or retrieval[key] != count for key, count in counts.items()):
                 raise ContractError("retrieval coverage counts contradict saved event bytes")
-            result["retrieval"] = "recorded"
-            result["assurance"]["retrieval"] = "recorded"
-            details["attempts"] = len(events)
-            details["retrieval_coverage"] = "Complete only for the recorded retrieval API; provider, opaque-tunnel, and direct-socket gaps remain."
-        except (ContractError, ValueError, TypeError, UnicodeError) as exc:
+            if complete_capture:
+                result["retrieval"] = "recorded"
+                result["assurance"]["retrieval"] = "recorded"
+            details["attempts"] = len(attempts)
+            details["completed_attempts"] = len(events)
+            details["retrieval_coverage"] = (
+                "Complete only for the recorded retrieval API; provider, opaque-tunnel, and direct-socket gaps remain."
+                if complete_capture else "Partial API capture; unfinished requests and provider/opaque/direct-socket gaps remain.")
+        except (ContractError, ValueError, TypeError, UnicodeError, LookupError) as exc:
             failures.append(_reason("retrieval_artifact_mismatch", str(exc)))
     if any(item.get("role") == "worker" and item.get("started") and not item.get("removed")
            for item in isolation.get("containers", [])):
