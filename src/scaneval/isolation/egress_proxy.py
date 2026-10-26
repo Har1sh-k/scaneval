@@ -33,6 +33,7 @@ import argparse
 import datetime
 import json
 import os
+import runpy
 import select
 import socket
 import socketserver
@@ -206,14 +207,26 @@ class Handler(socketserver.BaseRequestHandler):
             reply(client, 403, "Forbidden")
             return
         try:
-            upstream = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
+            if server.public_api is not None:
+                upstream, addresses, connected_address = server.public_api["connect_public"](
+                    host, port, CONNECT_TIMEOUT)
+            else:
+                upstream = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
+        except ValueError as exc:
+            server.log.write(event="deny", reason=str(exc), host=host, port=port,
+                             source="direct_process_egress", capture_status="endpoint_only")
+            reply(client, 403, "Forbidden")
+            return
         except OSError as exc:
             server.log.write(event="allow", host=host, port=port, outcome="connect_failed",
                              error=type(exc).__name__)
             reply(client, 502, "Bad Gateway")
             return
         with upstream:
-            server.log.write(event="allow", host=host, port=port, outcome="connected")
+            server.log.write(event="allow", host=host, port=port, outcome="connected",
+                             source="direct_process_egress", capture_status="endpoint_only",
+                             **({"resolved_addresses": addresses, "connected_address": connected_address}
+                                if server.public_api is not None else {}))
             client.settimeout(IDLE_TIMEOUT)
             upstream.settimeout(IDLE_TIMEOUT)
             try:
@@ -239,6 +252,10 @@ def main(argv=None):
     parser.add_argument("--log-dir", required=True)
     parser.add_argument("--allow", action="append", default=[], help="host:port, repeatable")
     parser.add_argument("--bind", default="0.0.0.0", help=argparse.SUPPRESS)
+    parser.add_argument("--public-only", action="store_true")
+    parser.add_argument("--retrieval-module")
+    parser.add_argument("--retrieval-settings")
+    parser.add_argument("--retrieval-port", type=int, default=3129)
     args = parser.parse_args(argv)
     allow = set()
     for value in args.allow:
@@ -250,6 +267,15 @@ def main(argv=None):
         parser.error("at least one --allow host:port is required; a proxy that forwards nothing is not needed")
     log = EgressLog(args.log_dir)
     server = Server((args.bind, args.port), Handler)
+    server.public_api = None
+    if args.public_only:
+        if not args.retrieval_module or not args.retrieval_settings:
+            parser.error("public-only mode requires the recorded retrieval module and settings")
+        server.public_api = runpy.run_path(args.retrieval_module, run_name="scaneval_recorded_retrieval")
+        with open(args.retrieval_settings, encoding="utf-8") as stream:
+            retrieval_settings = json.load(stream)
+        server.retrieval = server.public_api["start"](
+            args.log_dir, retrieval_settings, args.retrieval_port, args.bind)
     server.allow = frozenset(allow)
     server.log = log
     server.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
