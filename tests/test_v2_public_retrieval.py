@@ -283,3 +283,17 @@ def test_attempt_journal_is_flushed_before_dns_or_transport(tmp_path, monkeypatc
     monkeypatch.setattr(socket, "getaddrinfo", resolve)
     event = recorder.retrieve({"url": "https://research.example/"})
     assert seen == [event["id"]]
+
+
+def test_trickling_body_cannot_reset_the_retrieval_budget(tmp_path, monkeypatch):
+    clock = [0.0]
+    class Trickle(Response):
+        length = None
+        def read1(self, _limit):
+            clock[0] = 61.0
+            return b"fragment"
+    transport(monkeypatch, [Trickle()])
+    monkeypatch.setattr(retrieval.time, "monotonic", lambda: clock[0])
+    event = retrieval.Recorder(str(tmp_path), POLICY).retrieve({"url": "https://research.example/"})
+    assert event["outcome"] == "failed" and event["error"] == "TimeoutError"
+    assert event["content_base64"] is None and event["capture_status"] == "unavailable"

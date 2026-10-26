@@ -146,11 +146,17 @@ def connect_public(host, port=443, timeout=TIMEOUT):
     return connection, [item[3][0] for item in addresses], connected
 
 
-def _connect_validated(addresses, timeout, attempted=None):
+def _connect_validated(addresses, timeout, attempted=None, deadline=None):
+    if not isinstance(timeout, (int, float)) or timeout <= 0:
+        timeout = TIMEOUT
     last = None
     for family, kind, protocol, address in addresses:
         connection = socket.socket(family, kind, protocol)
-        connection.settimeout(timeout)
+        remaining = deadline - time.monotonic() if deadline is not None else timeout
+        if remaining <= 0:
+            connection.close()
+            raise TimeoutError("retrieval exceeded its connection deadline")
+        connection.settimeout(min(timeout, remaining))
         try:
             if attempted is not None:
                 attempted.append(address[0])
@@ -174,9 +180,11 @@ class PublicHTTPS(http.client.HTTPSConnection):
             self.resolved_addresses = exc.resolved_addresses
             raise
         self.resolved_addresses = self.validated_addresses = [item[3][0] for item in addresses]
-        connection, self.connected_address = _connect_validated(addresses, self.timeout, self.attempted_addresses)
+        connection, self.connected_address = _connect_validated(
+            addresses, self.timeout, self.attempted_addresses, getattr(self, "deadline", None))
         try:
             self.sock = self._context.wrap_socket(connection, server_hostname=self.host)
+            self.active_socket = self.sock
         except BaseException:
             connection.close()
             raise
@@ -184,6 +192,33 @@ class PublicHTTPS(http.client.HTTPSConnection):
 
 def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds")
+
+
+def read_body(response, connection, deadline):
+    """Check the remaining run budget between body chunks, including trickling responses."""
+    if not hasattr(response, "read1"):
+        body = response.read(MAX_RESPONSE + 1)
+    else:
+        chunks = []
+        count = 0
+        while count <= MAX_RESPONSE:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("retrieval exceeded its body deadline")
+            active = getattr(connection, "active_socket", getattr(connection, "sock", None))
+            if active is not None:
+                active.settimeout(min(TIMEOUT, remaining))
+            chunk = response.read1(min(65536, MAX_RESPONSE + 1 - count))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            count += len(chunk)
+            if getattr(response, "length", None) == 0:
+                break
+        body = b"".join(chunks)
+    if time.monotonic() >= deadline:
+        raise TimeoutError("retrieval exceeded its body deadline")
+    return body
 
 
 class Recorder:
@@ -276,6 +311,7 @@ class Recorder:
                 path = parts.path + (("?" + parts.query) if parts.query else "")
                 connection = PublicHTTPS(host, port=443, timeout=min(TIMEOUT, max(1, deadline - time.monotonic())),
                                          context=ssl.create_default_context())
+                connection.deadline = deadline
                 hop = {"url": url, "status": None, "location": None}
                 event["redirect_chain"].append(hop)
                 try:
@@ -291,7 +327,7 @@ class Recorder:
                             raise RetrievalDenied("redirect is missing a target or exceeds the redirect limit")
                         target = urllib.parse.urljoin(url, location)
                         continue
-                    body = response.read(MAX_RESPONSE + 1)
+                    body = read_body(response, connection, deadline)
                     if len(body) > MAX_RESPONSE:
                         body = None
                         raise RetrievalDenied("response exceeds the retained-content limit")
