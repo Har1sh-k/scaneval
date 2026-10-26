@@ -83,7 +83,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
-from . import __version__, review, scoring
+from . import __version__, conditions, review, scoring
 from .contracts import (
     WEIGHT_TOLERANCE,
     ContractError,
@@ -205,6 +205,7 @@ class _Observation:
     unscored: int = 0
     unregistered: int = 0
     timing: tuple[datetime | None, datetime | None, float] | None = None
+    condition: dict | None = field(default=None, repr=False)
 
     @property
     def executed(self) -> bool:
@@ -363,8 +364,11 @@ def _observe(run: _Run, assignment: dict, row: dict | None, prepared: dict | Non
             planned_ids = {item[key] for item in plan[kind]}
             unscored += len(frozen_ids - planned_ids)
             unregistered += len(planned_ids - frozen_ids)
+    scheduled_input = next(item for item in run.schedule["inputs"] if item["input_id"] == assignment["input_id"])
+    condition = conditions.classify_observation(bundle, condition=scheduled_input.get("condition"))
     return _Observation(**identity, status=result["status"], scope=scope, observed=observed,
-                        review_state=state, unscored=unscored, unregistered=unregistered, timing=timing)
+                        review_state=state, unscored=unscored, unregistered=unregistered, timing=timing,
+                        condition=condition)
 
 
 @dataclass
@@ -493,7 +497,60 @@ def _load_corpus(run_dirs: Iterable[str | PathLike[str]]) -> _Corpus:
             observations[key] = _observe(
                 run, assignment, rows.get(assignment["assignment_id"]), prepared.get(assignment["input_id"]),
                 manifest_systems.get(assignment["system_id"]), inputs[key[:2]]["plan"])
-    return _Corpus(runs, observations, targets, controls, inputs, systems)
+    corpus = _Corpus(runs, observations, targets, controls, inputs, systems)
+    _refuse_condition_mixing(corpus)
+    return corpus
+
+
+def _condition_rows(corpus: _Corpus) -> list[dict]:
+    rows = []
+    roots = {run.run_id: str(run.directory) for run in corpus.runs}
+    for key, observation in sorted(corpus.observations.items()):
+        planned = corpus.inputs[key[:2]]
+        declaration = conditions.resolve_condition(planned.get("condition"), profile=planned["profile"], mode=planned["mode"])
+        record = observation.condition
+        rows.append({"run_id": observation.run_id, "assignment_id": observation.assignment_id,
+                     "system_id": observation.system_id, "mode": planned["mode"], "profile": planned["profile"],
+                     "condition": record["condition"] if record else declaration["name"],
+                     "status": record["status"] if record else "unavailable",
+                     "policy_sha256": record["policy_sha256"] if record else canonical_sha256(declaration),
+                     "reasons": [{"code": item["code"], "message": item["message"].replace(roots[observation.run_id], "<run>")}
+                                 for item in record["reasons"]] if record else [{"code": observation.reason or "unavailable",
+                                                                    "message": "No readable invocation evidence is available."}],
+                     "record_sha256": canonical_sha256(record) if record else None})
+    return rows
+
+
+def _refuse_condition_mixing(corpus: _Corpus) -> None:
+    """A mode/profile metric view may not pool observations from different condition strata.
+
+    Assignments that never produced a readable result stay in the operational denominator; they
+    contain no measured observation to pool. Their missing condition evidence is still reported.
+    """
+    strata: dict[tuple[str, str], set[tuple[str, str, str]]] = defaultdict(set)
+    for key, observation in corpus.observations.items():
+        if observation.condition is not None:
+            planned = corpus.inputs[key[:2]]
+            strata[(planned["mode"], planned["profile"])].add(
+                (observation.condition["condition"], observation.condition["status"], observation.condition["policy_sha256"]))
+    for (mode, profile), found in sorted(strata.items()):
+        if len(found) > 1:
+            names = ", ".join(f"{name}/{status} ({policy})" for name, status, policy in sorted(found))
+            raise ContractError(f"{mode}/{profile} mixes evaluation condition strata ({names}); "
+                                "aggregate each condition/status separately. Use conditions.condition_coverage "
+                                "or classify_observation to inspect all assignments without pooling metrics.")
+
+
+def _condition_coverage(corpus: _Corpus) -> list[dict]:
+    grouped: dict[tuple[str, ...], list[dict]] = defaultdict(list)
+    for row in _condition_rows(corpus):
+        grouped[(row["system_id"], row["mode"], row["profile"], row["condition"], row["status"], row["policy_sha256"])].append(row)
+    return [{"system_id": system, "mode": mode, "profile": profile, "condition": name,
+             "status": status, "observations": len(rows),
+             "policy_sha256": policy,
+             "assignments": [{key: row[key] for key in ("run_id", "assignment_id", "reasons", "record_sha256")}
+                             for row in rows]}
+            for (system, mode, profile, name, status, policy), rows in sorted(grouped.items())]
 
 
 # --- weights ------------------------------------------------------------------------------------
@@ -1563,6 +1620,7 @@ def _run_row(corpus: _Corpus, run: _Run) -> dict:
         elapsed = span if span >= 0 else None
     evidence = [{"assignment_id": item.assignment_id, "status": item.status, "reason": item.reason,
                  "review_state": item.review_state,
+                 "condition_sha256": canonical_sha256(item.condition) if item.condition is not None else None,
                  **({key: item.observed[key] for key in ("result_sha256", "plan_sha256", "decisions_sha256")}
                     if item.observed is not None else {})}
                 for item in observations]
@@ -1667,6 +1725,7 @@ def aggregate(run_dirs: Iterable[str | PathLike[str]], *, policy: dict | None = 
         "runs": [_run_row(corpus, run) for run in corpus.runs],
         "systems": [_system_row(system_id, info) for system_id, info in corpus.systems.items()],
         "profile_coverage": _profile_coverage(corpus),
+        "condition_coverage": _condition_coverage(corpus),
         "views": views,
         "notes": _notes(context.policy),
     }
@@ -1692,6 +1751,7 @@ def _contract(corpus: _Corpus, system_id: str) -> dict:
             continue
         for row in run.schedule["inputs"]:
             inputs.append({**{name: row[name] for name in _CONTRACT_FIELDS},
+                           "condition": conditions.resolve_condition(row.get("condition"), profile=row["profile"], mode=row["mode"]),
                            "plan": {key: value for key, value in row["plan"].items() if key != "notes"},
                            "repetitions": run.repetitions})
         pairs.extend(run.schedule["pairs"])
@@ -1881,6 +1941,7 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
                      "pairs": len(structure["pairs"])},
         "configuration_differences": configuration_differences(corpus.systems[baseline]["configuration"],
                                                                corpus.systems[candidate]["configuration"]),
+        "condition_coverage": [row for row in _condition_coverage(corpus) if row["system_id"] in (baseline, candidate)],
         "views": views,
         "notes": _notes(context.policy),
     }
@@ -1919,13 +1980,21 @@ def summary(report: dict) -> list[str]:
                                f"{_interval_text(metric['interval'])}")
             lines.append(f"  {system['system_id']} scope={system['evidence_scope']} full_output_recall "
                          f"{' '.join(recalls)} completion={_number(whole['completion']['value'])}")
+    lines.extend(_condition_summary(report))
     return lines
+
+
+def _condition_summary(report: dict) -> list[str]:
+    return [f"condition {row['condition']} status={row['status']} system={row['system_id']} "
+            f"profile={row['profile']} observations={row['observations']}"
+            for row in report.get("condition_coverage", [])]
 
 
 def comparison_summary(report: dict) -> list[str]:
     """One line per view and weighting of a comparison: the full-output recall difference."""
     lines = [f"baseline={report['baseline']['system_id']} candidate={report['candidate']['system_id']} "
              f"configuration_differences={len(report['configuration_differences'])}"]
+    lines.extend(_condition_summary(report))
     for view in report["views"]:
         scope = view["evidence_scope"]
         lines.append(f"view {view['mode']}/{view['profile']} scope baseline={scope['baseline']} "

@@ -38,6 +38,14 @@ An input is scored on the targets and controls its schedule froze before the run
 
 Each (mode, profile) pair is a separate view: `standard`, `metadata_blinded`, and `identity_reduced` are never pooled. `profile_coverage` lists, per mode, the canonical targets each profile carries and those it lacks. Within a view, every system has one block per slice: `all`, each project, and each workload. Weights are renormalized within each slice.
 
+`condition_coverage` records each system's evaluation condition, policy digest, status, assignment
+count, and reasons. Readable observations with different condition names, policies, or statuses
+cannot share a mode/profile metric view: aggregation and comparison refuse that mixture before
+computing metrics. Missing/skipped assignments remain in the operational denominator and are
+reported as unavailable. Legacy bundles without condition evidence remain readable and classify
+conservatively. Use `scaneval condition bundle-a bundle-b` to inspect mixed collections and their
+separate coverage without pooling results; see [closed-book standard](CLOSED_BOOK.md).
+
 Observations are keyed by run and input, so one input scanned by two runs is two positive inputs. Each is averaged over its own repetition count `k`.
 
 | Weight | Rule |
