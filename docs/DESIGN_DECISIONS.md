@@ -185,18 +185,19 @@ Record bootstrap/indexing as setup, include it in total cost, and distinguish fr
 
 ### Configurable identity profiles
 
-Support only these two values for `input_profile`, with `standard` as the default. Both inherit the isolation controls above; neither exposes original Git history or benchmark answers.
+Support these values for `input_profile`, with `standard` as the default. All inherit the isolation controls above; none exposes original Git history or benchmark answers.
 
 | Profile | Allowed changes | Use |
 |---|---|---|
 | `standard` | Preserve ordinary project identity and code. | Default buyer evaluation. |
 | `metadata_blinded` | Reviewed changes to non-runtime branding, documentation identifiers, and display metadata. | Lower-risk, partial blinding. |
+| `identity_reduced` | The same reviewed edits, plus reviewed removal of hash-pinned identity-only documentation and repository instruction files. | Stronger identity-cue sensitivity check. |
 
 Neither profile renames packages/modules, imports, source identifiers, or source paths, or changes dependencies, executable logic, or security configuration. A manifest field is not automatically non-runtime metadata. If its role is uncertain, leave it unchanged and record the remaining identity cue. Preserve architectural context, deployment assumptions, and security guidance in documentation.
 
-For `metadata_blinded`, use a reviewed per-repository allowlist and deterministic replacement map. Record changed fields, input hashes, validation evidence, and retained identity cues. Apply the same map to related base/head or vulnerable/fixed inputs and freeze it across compared systems. Reject unvalidated edits; if no valid transformation is available, mark blinding unavailable rather than silently substituting `standard`. Report profile results and coverage separately.
+For either transformed profile, use a reviewed per-repository allowlist and deterministic map. Record changed fields, removed paths, input hashes, validation evidence, and retained identity cues. Apply the same map to related base/head or vulnerable/fixed inputs and freeze it across compared systems. `metadata_blinded` refuses every removal. `identity_reduced` permits removal only of documentation classified as identity-only and files scanners may load as repository instructions; every removal is pinned to exact bytes for every variant, and no labeled target or control path may be removed. Reject unvalidated transformations; if no valid transformation is available, mark the profile unavailable rather than silently substituting `standard`. Report profile results and coverage separately.
 
-This reduces selected identity cues; package names and recognizable code may still reveal the original repository. Do not describe it as full anonymization or proof against memorization. Source/package renaming is outside the current design.
+These profiles reduce selected identity cues; package names, paths, and recognizable code may still reveal the original repository. Do not describe either as full anonymization or proof against memorization. Source/package/path renaming is outside the current design.
 
 ## 4. Scoring without exhaustive repository labels
 
@@ -302,7 +303,7 @@ The interfaces below are proposed, not implemented:
 
 ```yaml
 harness: my_harness.benchmark:scan
-input_profile: standard           # standard | metadata_blinded
+input_profile: standard           # standard | metadata_blinded | identity_reduced
 corpora:
   - manifest: releases/pilot/manifest.yaml
 models: [model_a, model_b, model_c]  # aliases for pinned configurations
@@ -371,7 +372,7 @@ The own-harness connector wraps the shared model client and tool dispatcher, the
 
 Deterministic queries can establish recorded tool calls, content included in a request, and documented candidate-to-report changes. Absence of an event establishes absence of an action only when capture is complete for that action. Security interpretation still needs validated matching rules or frozen human review.
 
-Run an optional recognition check under both `standard` and `metadata_blinded`. For a verified repository name or CVE/GHSA association, record where it first appears in captured input, tool results, or model output, and whether it was already available in captured context. Keep association maps evaluator-side and exclude evaluator artifacts from the search. No prompt asks the model to announce identifiers. This observation has no score effect: no prior recorded source is not proof of recall, and no mention is not proof of no recognition. Only submitted findings earn detection credit; filtered hypotheses remain debugging evidence.
+Run an optional recognition check under each compared identity profile. For a verified repository name or CVE/GHSA association, record where it first appears in captured input, tool results, or model output, and whether it was already available in captured context. Keep association maps evaluator-side and exclude evaluator artifacts from the search. No prompt asks the model to announce identifiers. This observation has no score effect: no prior recorded source is not proof of recall, and no mention is not proof of no recognition. Only submitted findings earn detection credit; filtered hypotheses remain debugging evidence.
 
 For example, a tool event records returned span A; a linked context event excludes A; the complete outgoing request confirms that exact span is absent. The supported conclusion is that A was not delivered in that request, not that the model never knew equivalent information or would have detected the issue if A were included. Separately, a candidate ID followed by a filter event and no submitted claim establishes that the harness discarded that candidate. Missing events leave these diagnoses unknown. These queries require no LLM judge.
 
@@ -393,7 +394,7 @@ Use the earliest known credible public answer-bearing artifact, not just CVE pub
 |---|---|
 | Identity-only knowledge | Fresh separate session with repo/version, optionally a targeted path, but no code, diagnosis, or candidate CVE. Bound answers and allow `UNKNOWN`; verify associations. Another valid advisory is not hallucination merely because it is not the selected target. |
 | Vulnerable/fixed discrimination | Reuse eligible planned observations. Compare the same root-cause allegation across validated states. This measures discrimination, not whether memory caused the original hit. |
-| Metadata sensitivity | Optional paired comparison of `standard` and `metadata_blinded` on the same inputs and budgets. Record exactly which metadata changed. Remaining identity cues and changes to useful context limit interpretation; no source renaming is included. |
+| Identity sensitivity | Optional paired comparison of `standard` with `metadata_blinded` or `identity_reduced` on the same inputs and budgets. Record every edit and removal. Remaining identity cues and changes to useful context limit interpretation; no source/path renaming is included. |
 | Retrieval visibility | Record relevant content entering model context. A request alone is not evidence that a page was read. Matched retrieval-enabled/offline trials can estimate a behavioral effect, not inspect memory. |
 
 Start with fixed-state observations and inexpensive probes where the actual product supports them. Do not substitute its presumed base model or feed probe answers into scored sessions. Freeze the probe wording/output contract: at most one CVE and one GHSA, or `UNKNOWN`, with blind and path-targeted results separate. Use verified pre-cutoff associations as positive controls and unaffected-version controls; decoy paths are negative controls only for explicitly path-scoped questions. Repeat surprising associations in fresh sessions.

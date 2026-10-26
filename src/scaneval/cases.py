@@ -139,6 +139,7 @@ from .contracts import (
     claimed_level_gap,
     covering_review,
     effective_level,
+    IDENTITY_PROFILES,
     input_identity,
     label_digest,
     latest_review,
@@ -1417,11 +1418,11 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
     This builds a plan. It does not approve, admit, re-check, or correct anything, and a case
     left out here is unplanned for this input, not judged wrong.
     """
-    blinded = (profile or "standard") == "metadata_blinded"
+    blinded = (profile or "standard") in IDENTITY_PROFILES
     if blinded != (blinding is not None):
         raise ContractError(
-            "a metadata_blinded input is planned with the identity of the map it was transformed "
-            "with, and no other input carries one")
+            "a metadata_blinded or identity_reduced input is planned with the identity of the map "
+            "it was transformed with, and no other input carries one")
     if change_set_id is None:
         if any(value is not None for value in (base_tree_hash, head_tree_hash, diff_sha256)):
             raise ContractError(

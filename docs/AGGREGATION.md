@@ -36,7 +36,7 @@ An input is scored on the targets and controls its schedule froze before the run
 
 ## Views, slices, and weights
 
-Each (mode, profile) pair is a separate view: `standard` and `metadata_blinded` are never pooled. `profile_coverage` lists, per mode, the canonical targets each profile carries and those it lacks. Within a view, every system has one block per slice: `all`, each project, and each workload. Weights are renormalized within each slice.
+Each (mode, profile) pair is a separate view: `standard`, `metadata_blinded`, and `identity_reduced` are never pooled. `profile_coverage` lists, per mode, the canonical targets each profile carries and those it lacks. Within a view, every system has one block per slice: `all`, each project, and each workload. Weights are renormalized within each slice.
 
 Observations are keyed by run and input, so one input scanned by two runs is two positive inputs. Each is averaged over its own repetition count `k`.
 

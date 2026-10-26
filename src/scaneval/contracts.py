@@ -1168,9 +1168,11 @@ def _validate_evaluation_plan(document: dict[str, Any]) -> None:
             raise ContractError("every item of a pr plan states its pr_scope")
         if not is_pr and scoped:
             raise ContractError("only a pr plan carries pr_scope")
-        blinded = provenance.get("profile") == "metadata_blinded"
+        blinded = provenance.get("profile") in IDENTITY_PROFILES
         if blinded != ("blinding" in provenance):
-            raise ContractError("provenance.blinding is required exactly when the profile is metadata_blinded")
+            raise ContractError(
+                "provenance.blinding is required exactly when the profile is metadata_blinded or "
+                "identity_reduced")
     levels = [item["validation_level"] for item in document["targets"]]
     levels += [item["validation_level"] for item in document["controls"]]
     allowed = {"reviewed": {"L3", "L4"}, "draft": {"L1", "L2", "L3", "L4"},
@@ -1542,21 +1544,26 @@ def _validate_review_record(document: dict[str, Any]) -> None:
 
 _PINNED_IMAGE = re.compile(r"^(?:[^@\s]+@sha256:[0-9a-f]{64}|sha256:[0-9a-f]{64})$")
 BLINDED_INPUT_SUFFIX = ".blinded"
+IDENTITY_REDUCED_INPUT_SUFFIX = ".identity-reduced"
+IDENTITY_PROFILES = frozenset({"metadata_blinded", "identity_reduced"})
 
 
 def input_identity(entry: dict[str, Any]) -> str:
     """The evaluator-side id of one configured input: its ``input_id``, or the default for its shape.
 
     A full input defaults to its snapshot id and a PR input to its change set id, each with
-    :data:`BLINDED_INPUT_SUFFIX` when the input is metadata-blinded, so a standard and a blinded
-    input of one snapshot can sit in one run. A 2.0 configuration has only snapshot ids, and this
-    returns exactly that for it. The id names directories and invocations on the evaluator side
-    and is never shown to a scanner.
+    :data:`BLINDED_INPUT_SUFFIX` when the input is metadata-blinded, or
+    :data:`IDENTITY_REDUCED_INPUT_SUFFIX` when it is identity-reduced, so all three profiles of
+    one snapshot can sit in one run. A 2.0 configuration has only snapshot ids, and this returns
+    exactly that for it. The id names directories and invocations on the evaluator side and is
+    never shown to a scanner.
     """
     if entry.get("input_id"):
         return entry["input_id"]
     base = entry.get("change_set_id") if entry.get("mode", "full") == "pr" else entry.get("snapshot_id")
-    return f"{base}{BLINDED_INPUT_SUFFIX}" if entry.get("profile") == "metadata_blinded" else base
+    suffix = {"metadata_blinded": BLINDED_INPUT_SUFFIX,
+              "identity_reduced": IDENTITY_REDUCED_INPUT_SUFFIX}.get(entry.get("profile"), "")
+    return f"{base}{suffix}"
 
 
 def pr_diff_sha256(base_tree_hash: str, head_tree_hash: str, changes: dict[str, Any]) -> str:
@@ -1605,10 +1612,11 @@ def _validate_run_config(document: dict[str, Any]) -> None:
             raise ContractError(f"{label}: a full input names a snapshot_id and no change_set_id")
         if mode == "pr" and ("change_set_id" not in item or "snapshot_id" in item):
             raise ContractError(f"{label}: a pr input names a change_set_id and no snapshot_id")
-        blinded = item.get("profile", "standard") == "metadata_blinded"
+        blinded = item.get("profile", "standard") in IDENTITY_PROFILES
         if blinded != ("blinding_map" in item):
             raise ContractError(
-                f"{label}: blinding_map is required exactly when profile is metadata_blinded")
+                f"{label}: blinding_map is required exactly when profile is metadata_blinded or "
+                "identity_reduced")
     _unique([input_identity(item) for item in document["inputs"]], "input id")
     for index, system in enumerate(document["systems"]):
         execution = system.get("execution") or {"backend": "local"}
@@ -1715,8 +1723,10 @@ def _validate_evaluation_schedule(document: dict[str, Any]) -> None:
                     or change_set["head_snapshot_id"] != item["snapshot_id"]):
                 raise ContractError(f"{label}: its change set block must be the change set it names, ending "
                                     "at the snapshot the input reads, which is the head")
-        if (item["profile"] == "metadata_blinded") != (item["blinding"] is not None):
-            raise ContractError(f"{label}: a blinding map is named exactly when the profile is metadata_blinded")
+        if (item["profile"] in IDENTITY_PROFILES) != (item["blinding"] is not None):
+            raise ContractError(
+                f"{label}: a blinding map is named exactly when the profile is metadata_blinded or "
+                "identity_reduced")
         if item["plan"]["state"] == "frozen":
             scoped = [entry for entry in item["plan"]["targets"] + item["plan"]["controls"] if "pr_scope" in entry]
             everything = len(item["plan"]["targets"]) + len(item["plan"]["controls"])
@@ -1789,7 +1799,9 @@ def _validate_blinding_map(document: dict[str, Any]) -> None:
     snapshot. Edits are unique by id and by path, each path a normalized relative POSIX path, each
     rationale stated, a ``display_metadata`` edit carrying a stated ``role_check``, each replaced
     token a declared original, and exactly one expectation per variant, whose occurrence counts
-    name exactly the edit's replacements. The review history is a chain (kind ``blinding_review``)
+    name exactly the edit's replacements. Removals are likewise unique and normalized, state one
+    expectation per variant, and cannot name a path an edit names. At least one edit or removal is
+    required. The review history is a chain (kind ``blinding_review``)
     whose end ``reviews_sha256`` records, present exactly when a review is, and every review names
     its reviewer. Approval, path classes, and file hashes are not asked here:
     :mod:`scaneval.blinding` asks them against the export, where a refusal is that input's own
@@ -1824,6 +1836,9 @@ def _validate_blinding_map(document: dict[str, Any]) -> None:
     variants = [variant["snapshot_id"] for variant in document["variants"]]
     _unique(variants, "variants.snapshot_id")
     edits = document["edits"]
+    removals = document.get("removals", [])
+    if not edits and not removals:
+        raise ContractError("a blinding map must declare at least one edit or removal")
     _unique([edit["edit_id"] for edit in edits], "edits.edit_id")
     _unique([edit["path"] for edit in edits], "edits.path")
     for edit in edits:
@@ -1851,6 +1866,24 @@ def _validate_blinding_map(document: dict[str, Any]) -> None:
             if entry["state"] == "present" and set(entry["occurrences"]) != set(edit["replacements"]):
                 raise ContractError(f"{label}: the occurrence counts for {entry['snapshot_id']} must name "
                                     "exactly the tokens the edit replaces")
+    _unique([removal["removal_id"] for removal in removals], "removals.removal_id")
+    _unique([removal["path"] for removal in removals], "removals.path")
+    overlap = sorted({edit["path"] for edit in edits} & {removal["path"] for removal in removals})
+    if overlap:
+        raise ContractError(f"a path cannot be both edited and removed: {overlap}")
+    for removal in removals:
+        label = f"removal {removal['removal_id']}"
+        path = removal["path"]
+        _require_relative_path(path, f"{label}.path")
+        if "\\" in path or any(part in ("", ".") for part in path.split("/")):
+            raise ContractError(f"{label}.path must be a normalized relative POSIX path, not {path!r}")
+        if not is_stated(removal["rationale"]):
+            raise ContractError(f"{label} must state its rationale")
+        expected = [entry["snapshot_id"] for entry in removal["expected"]]
+        _unique(expected, f"{label} expected.snapshot_id")
+        if set(expected) != set(variants):
+            raise ContractError(f"{label} must state one expectation for every variant and no other: "
+                                f"it names {sorted(expected)}, the map covers {sorted(variants)}")
     reviews = document["reviews"]
     for index, review in enumerate(reviews):
         if not is_stated(review["reviewer"]):

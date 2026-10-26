@@ -49,7 +49,7 @@ from .contracts import ContractError, canonical_json, canonical_sha256, pr_diff_
 
 
 SCHEMA_VERSION = "2.0"
-PROFILES = ("standard", "metadata_blinded")
+PROFILES = ("standard", "metadata_blinded", "identity_reduced")
 # The scratch directories a scanning harness writes inside the tree it was handed. This is the
 # source of truth for that set: the export strips them, and adapters derive their ``state_dirs``
 # from it, so a directory one of them treats as harness scratch is never ordinary content to the
@@ -455,22 +455,24 @@ def export_snapshot(
     """Copy the tracked regular files of *snapshot* into ``trial_dir/source`` and record provenance.
 
     The ``standard`` profile writes exactly the export and the record this function has always
-    written; ``blinding_map`` and ``snapshot_id`` play no part in it. ``metadata_blinded`` needs
-    the reviewed replacement map and the pack snapshot id its variants are keyed by, and is
-    delegated to :func:`scaneval.blinding.export_blinded`: the original export goes to
-    ``trial_dir/original/source``, which no scanner is handed, and the transformed copy to
-    ``trial_dir/source``. A map that is not approved or does not fit this export is refused with
-    the reason, and without a map blinding is reported unavailable; neither is ever silently
-    replaced by ``standard``.
+    written; ``blinding_map`` and ``snapshot_id`` play no part in it. ``metadata_blinded`` and
+    ``identity_reduced`` need a reviewed transformation map and the pack snapshot id its variants
+    are keyed by. The original export goes to ``trial_dir/original/source``, which no scanner is
+    handed, and the transformed copy to ``trial_dir/source``. A map that is not approved or does
+    not fit this export is refused with the reason, and without a map the selected transformation
+    is unavailable; neither is ever silently replaced by ``standard``.
     """
     if profile not in PROFILES:
         raise MaterializationError(f"unknown input profile {profile!r}; expected one of {PROFILES}")
-    if profile == "metadata_blinded":
+    if profile in ("metadata_blinded", "identity_reduced"):
         if blinding_map is None:
-            raise MaterializationError("metadata blinding unavailable: no reviewed replacement map was supplied")
+            unavailable = "metadata blinding" if profile == "metadata_blinded" else "identity reduction"
+            raise MaterializationError(
+                f"{unavailable} unavailable: no reviewed identity transformation map was supplied")
         # Imported here because the blinding module builds on this one.
-        from .blinding import export_blinded
-        return export_blinded(snapshot, trial_dir, blinding_map, snapshot_id=snapshot_id, clock=clock)
+        from .blinding import export_blinded, export_identity_reduced
+        exporter = export_identity_reduced if profile == "identity_reduced" else export_blinded
+        return exporter(snapshot, trial_dir, blinding_map, snapshot_id=snapshot_id, clock=clock)
     source = trial_dir / "source"
     if source.exists():
         raise MaterializationError(f"trial source directory already exists: {source}")
@@ -905,9 +907,9 @@ def export_pr(base: CachedSnapshot, head: CachedSnapshot, trial_dir: Path, *, pr
     """Export the two snapshots of a change set into one trial and record the change between them.
 
     The head goes to ``trial_dir/source``, exactly where a full input's export goes, and the base
-    to ``trial_dir/base/source``. Under ``metadata_blinded`` both are transformed with the one
-    reviewed map, so its variants must cover both snapshots and a base and a head carry one set of
-    pseudonyms, and the originals stay evaluator-side under ``original/source`` and
+    to ``trial_dir/base/source``. Under either transformed identity profile both are transformed
+    with one reviewed map, so its variants must cover both snapshots and a base and a head carry
+    one transformation, and the originals stay evaluator-side under ``original/source`` and
     ``original/base/source``; the labels and mechanical checks refer to those, and a scanner is
     handed only the transformed trees. A map that is unapproved, or does not fit either export,
     refuses the whole input with its reason: neither snapshot is ever exported standard in its
@@ -927,20 +929,23 @@ def export_pr(base: CachedSnapshot, head: CachedSnapshot, trial_dir: Path, *, pr
     base_source = trial_dir / PR_BASE_DIR / "source"
     if base_source.exists() or base_source.is_symlink():
         raise MaterializationError(f"trial source directory already exists: {base_source}")
-    if profile == "metadata_blinded":
+    if profile in ("metadata_blinded", "identity_reduced"):
         if blinding_map is None:
-            raise MaterializationError("metadata blinding unavailable: no reviewed replacement map was supplied")
+            unavailable = "metadata blinding" if profile == "metadata_blinded" else "identity reduction"
+            raise MaterializationError(
+                f"{unavailable} unavailable: no reviewed identity transformation map was supplied")
         # Both snapshots are asked everything that needs no export before either is exported, so a map
         # that does not fit one of them leaves no half-blinded input behind.
         from .blinding import preflight
         for snapshot, snapshot_id in ((head, head_snapshot_id), (base, base_snapshot_id)):
-            preflight(blinding_map, snapshot_id, snapshot)
+            preflight(blinding_map, snapshot_id, snapshot, profile=profile)
     head_record = export_snapshot(head, trial_dir, profile=profile, blinding_map=blinding_map,
                                   snapshot_id=head_snapshot_id, clock=clock)
-    if profile == "metadata_blinded":
-        from .blinding import export_blinded
-        base_record = export_blinded(base, trial_dir, blinding_map, snapshot_id=base_snapshot_id,
-                                     clock=clock, variant_dir=PR_BASE_DIR)
+    if profile in ("metadata_blinded", "identity_reduced"):
+        from .blinding import export_blinded, export_identity_reduced
+        exporter = export_identity_reduced if profile == "identity_reduced" else export_blinded
+        base_record = exporter(base, trial_dir, blinding_map, snapshot_id=base_snapshot_id,
+                               clock=clock, variant_dir=PR_BASE_DIR)
     else:
         base_record = provenance_record(base, profile, export_tree(base, base_source), clock=clock)
         base_record["trial"]["root"] = f"{PR_BASE_DIR}/source"

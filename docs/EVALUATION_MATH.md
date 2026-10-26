@@ -8,7 +8,7 @@ Sections 1 through 6 define core reporting and planning. Sections 7 and 8 cover 
 
 Let $s$ identify a system configuration, $i$ a canonical target, $m$ a planned scan input/scope, and $r$ one of its $k_m$ assigned repetitions. A PR input is a base/head pair under its declared review scope, not two scanner runs.
 
-Report `standard` and `metadata_blinded` scores separately. Cross-profile contrasts use a common validated case set with exclusions shown, not unequal denominators.
+Report `standard`, `metadata_blinded`, and `identity_reduced` scores separately. Cross-profile contrasts use a common validated case set with exclusions shown, not unequal denominators.
 
 Apply the metrics separately to the [declared workflows](DESIGN_DECISIONS.md#workload-classification): conventional applications, conventional automation, AI-assisted applications, and agentic applications. Workflow and mechanism annotations describe the evaluated inputs, not repository-wide labels. Component role is a separate reporting dimension. Restrict eligibility and normalize the relevant weights within each slice. Preserve canonical-target identity across overlapping views; do not pool their counts as independent targets. Any cross-workload summary requires predeclared membership and weights. Sampling proportions, severity mix, and repository caps remain undecided; no allocation formula or fixed distribution is adopted here.
 
@@ -301,19 +301,19 @@ Do not pool different snapshots as identical trials or treat feedback-driven ret
 
 These contrasts are outside the initial release and promotion gates. Estimating $I$ requires matched identity conditions, not a pre/post split. Estimating $R$ additionally requires both temporal strata and a defensible comparison between them. Sparse strata increase uncertainty and weaken inference; they do not by themselves make every contrast mathematically inestimable. Missing conditions make the corresponding contrast unavailable.
 
-Let $\ell\in\{O,M\}$ select `standard` ($O$) or `metadata_blinded` ($M$). These are the only supported identity profiles; package/import and source-identifier renaming are excluded. On matched validated pairs, define:
+Let $\ell\in\{O,M,D\}$ select `standard` ($O$), `metadata_blinded` ($M$), or `identity_reduced` ($D$). Package/import, source-identifier, and source-path renaming are excluded. Choose and preregister a contrast such as $O-M$ or $O-D$; do not select it after seeing results. On matched validated pairs, define for the chosen reduced condition $X\in\{M,D\}$:
 
 $$
 S_\ell
 =P(\text{target hit}\mid V,\ell)
 -P(\text{same root cause falsely alleged}\mid F,\ell),
 \qquad
-I=S_O-S_M,
+I_X=S_O-S_X,
 \qquad
-R=I_{\mathrm{pre}}-I_{\mathrm{post}}.
+R_X=I_{X,\mathrm{pre}}-I_{X,\mathrm{post}}.
 $$
 
-Use the same hit definition, pair sets, weights, and predeclared missing/completion policy. Freeze the approved metadata transformation across paired inputs and systems; report unavailable variants and remaining identity cues. $I$ measures the effect of those metadata changes, not removal of all repository identity; $R$ is the temporal triple difference. Neither is a probability of recall. Causal interpretation needs comparable cases, stable transformation/context effects, and genuinely unexposed post-cutoff cases. Even metadata edits can alter useful context. [Test of Time](https://aclanthology.org/2026.acl-long.1693/) shows why temporal signals can depend on question construction.
+Use the same hit definition, pair sets, weights, and predeclared missing/completion policy. Freeze the approved transformation across paired inputs and systems; report unavailable variants, removed paths, and remaining identity cues. $I_X$ measures the effect of that specific transformation, not removal of all repository identity; $R_X$ is the temporal triple difference. Neither is a probability of recall. Causal interpretation needs comparable cases, stable transformation/context effects, and genuinely unexposed post-cutoff cases. Identity edits and documentation removal can both alter useful context. [Test of Time](https://aclanthology.org/2026.acl-long.1693/) shows why temporal signals can depend on question construction.
 
 Rolling fixed controls alone do not isolate a patch effect. A tightly matched experiment must be selected and validated separately.
 

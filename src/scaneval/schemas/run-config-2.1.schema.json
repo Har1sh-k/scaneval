@@ -44,7 +44,7 @@
           "input_id": {
             "type": "string",
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
-            "description": "Evaluator-side input identity; defaults to the snapshot id for a full input and to the change set id for a PR input, with a '.blinded' suffix for a metadata-blinded one. Never shown to a scanner."
+            "description": "Evaluator-side input identity; defaults to the snapshot id for a full input and to the change set id for a PR input, with '.blinded' or '.identity-reduced' for a transformed profile. Never shown to a scanner."
           },
           "snapshot_id": {
             "type": "string",
@@ -66,14 +66,15 @@
           "profile": {
             "enum": [
               "standard",
-              "metadata_blinded"
+              "metadata_blinded",
+              "identity_reduced"
             ],
             "default": "standard"
           },
           "blinding_map": {
             "type": "string",
             "minLength": 1,
-            "description": "Path to the reviewed blinding map, relative to this file. Required exactly when profile is metadata_blinded."
+            "description": "Path to the reviewed identity transformation map, relative to this file. Required exactly when profile is metadata_blinded or identity_reduced."
           }
         }
       }

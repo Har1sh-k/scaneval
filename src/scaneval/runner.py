@@ -13,7 +13,7 @@ Layout, all evaluator-side; a scanner only ever sees a private workspace copy of
 Inputs are named by their input id (:func:`scaneval.contracts.input_identity`): a 2.0
 configuration's snapshot id, or a 2.1 configuration's ``input_id`` or its default, which for a
 native PR input is its change set id. Invocation ids join that id, the system id, and the
-repetition. A metadata-blinded input's directory also keeps the original export under
+repetition. A transformed identity profile's directory also keeps the original export under
 ``original/source``; it is evaluator-side like everything else here, and only the transformed
 ``source`` is ever copied into a scanner workspace. A native PR input's directory holds two
 exports, the head in ``source`` and the base in ``base/source``, and a scanner is handed the head
@@ -72,6 +72,7 @@ from .adapters import get_adapter
 from .adapters.base import Adapter, AdapterError, SystemSpec
 from .contracts import (
     ContractError,
+    IDENTITY_PROFILES,
     canonical_json,
     canonical_sha256,
     input_identity,
@@ -307,10 +308,10 @@ def _input_specs(config: dict, only: set[str] | None, base: Path,
                 raise ContractError(f"{label} is a native PR input that cannot be run: {exc}") from exc
             snapshot_id = change_set["head_snapshot_id"]
         document = None
-        if profile == "metadata_blinded":
+        if profile in IDENTITY_PROFILES:
             if "blinding_map" not in entry:
                 raise ContractError(
-                    f"{label} asks for metadata_blinded, but a {config['schema_version']} run "
+                    f"{label} asks for {profile}, but a {config['schema_version']} run "
                     "configuration cannot name the reviewed blinding map it needs; write it at "
                     "schema_version 2.1 with blinding_map, since blinding is never replaced by the "
                     "standard export")
@@ -328,10 +329,11 @@ def _check_blinding(config: dict, pack: dict, inputs: list[_InputSpec], systems:
                     config_dir: Path | None = None) -> None:
     """Refuse blinded inputs that disagree about their map, or that a system or a path would unblind.
 
-    Related inputs, those whose snapshots are fetched from one repository, are blinded with one
-    map: the same map id and the same content digest, so a vulnerable and a fixed snapshot, or a
-    base and a head, carry the same pseudonyms and a comparison between them compares one
-    transformation. A map's own fit to each export is asked when the input is prepared.
+    Related inputs within one transformed profile, those whose snapshots are fetched from one
+    repository, use one map: the same map id and content digest, so a vulnerable and a fixed
+    snapshot, or a base and a head, carry one transformation. Different profiles may use different
+    maps because ``metadata_blinded`` forbids the removals ``identity_reduced`` requires. A map's
+    own fit to each export is asked when the input is prepared.
 
     A scanner is told the run id, and a system's id, model id, model revision, and configuration
     reach its request or its adapter, so any of them naming an original token of a blinded input's
@@ -345,17 +347,28 @@ def _check_blinding(config: dict, pack: dict, inputs: list[_InputSpec], systems:
     in when no *workspace_root* is given, and any path a scanner finds for itself.
     """
     blinded = [spec for spec in inputs if spec.blinding_map is not None]
-    by_repository: dict[str, _InputSpec] = {}
+
+    by_repository_profile: dict[tuple[str, str], _InputSpec] = {}
     for spec in blinded:
         url = cases.snapshot_by_id(pack, spec.snapshot_id)["repository"]["url"]
-        first = by_repository.setdefault(url, spec)
+        first = by_repository_profile.setdefault((url, spec.profile), spec)
         if (first.blinding_map["map_id"], blinding.content_digest(first.blinding_map)) != (
                 spec.blinding_map["map_id"], blinding.content_digest(spec.blinding_map)):
             raise ContractError(
                 f"inputs {first.input_id} and {spec.input_id} are blinded snapshots of one repository "
-                f"({url}) but name different maps ({first.blinding_map['map_id']} and "
+                f"({url}) in profile {spec.profile} but name different maps "
+                f"({first.blinding_map['map_id']} and "
                 f"{spec.blinding_map['map_id']}, or one map's content in two versions); related inputs "
-                "are blinded with one map")
+                "within one profile use one map")
+        if spec.profile == "identity_reduced":
+            snapshot_ids = [spec.snapshot_id]
+            if spec.change_set is not None:
+                snapshot_ids.append(spec.change_set["base_snapshot_id"])
+            for snapshot_id in snapshot_ids:
+                try:
+                    blinding.check_scoring_paths(spec.blinding_map, pack, snapshot_id)
+                except ContractError as exc:
+                    raise ContractError(f"input {spec.input_id}: {exc}") from exc
     paths = (("workspace_root", workspace_root), ("cache_root", cache_root),
              ("the configuration directory", config_dir))
     for spec in blinded:

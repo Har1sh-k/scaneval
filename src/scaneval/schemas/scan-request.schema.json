@@ -20,7 +20,7 @@
           "items": {"enum": ["python", "typescript", "javascript", "go", "rust"]}
         },
         "mode": {"enum": ["full", "pr"]},
-        "profile": {"enum": ["standard", "metadata_blinded"]},
+        "profile": {"enum": ["standard", "metadata_blinded", "identity_reduced"]},
         "pr": {
           "type": "object", "additionalProperties": false,
           "required": ["base", "head"],
