@@ -1160,6 +1160,24 @@ def run_invocation(
         raise ExecutionError(f"unknown network policy {network_policy!r}")
     if trace_mode not in ("off", "metadata", "content"):
         raise ExecutionError(f"unknown trace mode {trace_mode!r}")
+    from . import conditions
+    condition = conditions.resolve_condition(prepared.condition, profile=prepared.profile, mode=prepared.mode)
+    if condition["name"] == "open_context":
+        from .isolation.oci import OciBackend
+        from .open_context import validate_policy
+        try:
+            validate_policy(condition["policy"])
+        except MaterializationError as exc:
+            raise ExecutionError(str(exc)) from exc
+        if (not isinstance(backend, OciBackend) or backend.settings.network_policy != "public_research"
+                or network_policy != "public_research" or getattr(adapter, "oci_compatible", False) is not True):
+            raise ExecutionError("open_context requires an OCI public_research backend and an OCI-compatible adapter")
+        if prepared.profile != "standard" or prepared.mode != "full":
+            raise ExecutionError("open_context requires a standard full input")
+        actual = backend.settings.retrieval or {}
+        if actual.get("policy") != condition["policy"]["retrieval"] or any(
+                actual.get(key) != condition["policy"][key] for key in ("capture", "retention")):
+            raise ExecutionError("open_context backend retrieval policy differs from the declared condition")
     unsupported = [lang for lang in prepared.languages if lang not in adapter.supported_languages]
     # Hashed before anything is created: the provenance is the caller's, it is fixed before the
     # scan, and a value it cannot be hashed from would otherwise surface while the execution

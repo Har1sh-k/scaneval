@@ -9,6 +9,9 @@ import pytest
 from scaneval.contracts import ContractError, validate_document
 from scaneval.runner import run_from_config
 from scaneval import materialize
+from scaneval.adapters.base import SystemSpec
+from scaneval.execution import ExecutionError, PreparedInput, run_invocation
+from test_v2_conditions import Offline, Enforced
 
 
 create_fixture = runpy.run_path(str(Path(__file__).parents[1] / "examples/open_context_fixture.py"))["create"]
@@ -58,3 +61,24 @@ def test_declared_provider_route_cannot_override_denied_evaluator_infrastructure
     document["systems"][0]["execution"]["retrieval"]["denied_hosts"] = ["example.com"]
     with pytest.raises(ContractError, match="denied evaluator infrastructure"):
         validate_document("run-config", document)
+
+
+@pytest.mark.parametrize("backend", [None, Enforced("none"), Enforced("public_research")])
+def test_direct_invocation_cannot_downgrade_open_context_to_an_unenforced_scan(tmp_path, backend):
+    config = create_fixture(tmp_path / "fixture")
+    document = json.loads(config.read_text())
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("print('fixture')\n")
+    digest = materialize.hash_exported_tree(source)["tree_hash"]
+    prepared = PreparedInput("fixture", source, digest, ("python",), {},
+                             condition=document["inputs"][0]["condition"])
+    called = []
+    adapter = Offline(mutate=lambda _source: called.append(True))
+    adapter.oci_compatible = True
+    out = tmp_path / "out"
+    with pytest.raises(ExecutionError, match="requires an OCI public_research backend"):
+        run_invocation(prepared=prepared, adapter=adapter, spec=SystemSpec("fixture", "fixture", {}),
+                       preparation={}, out_dir=out, run_id="open-fixture", network_policy="public_research",
+                       backend=backend)
+    assert called == [] and not out.exists()
