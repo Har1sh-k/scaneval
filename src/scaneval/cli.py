@@ -1311,7 +1311,7 @@ def _add_blinding_commands(sub: argparse._SubParsersAction) -> None:
     checked.add_argument("map", type=Path, help="the blinding map to apply; never written")
     checked.add_argument("--pack", required=True, type=Path, help="the pack declaring the variants' snapshots")
     checked.add_argument("--snapshot-id", help="check this variant only")
-    checked.add_argument("--profile", choices=blinding.IDENTITY_PROFILES, default="metadata_blinded",
+    checked.add_argument("--profile", choices=sorted(blinding.IDENTITY_PROFILES), default="metadata_blinded",
                          help="profile to validate the map for (default metadata_blinded)")
     checked.add_argument("--cache-root", type=Path, help="source cache; default .repos beside the pack")
 

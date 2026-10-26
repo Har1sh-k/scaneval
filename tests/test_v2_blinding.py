@@ -505,6 +505,7 @@ def test_identity_reduced_records_a_variant_where_a_reviewed_removal_is_absent(t
 
 @pytest.mark.parametrize("path", ["src/templates/email.txt", "app/prompts/system.md",
                                   "tests/fixtures/payload.txt", "docs/prompts/system.md", "docs/prompt/system.md",
+                                  "docs/_static/payload.txt",
                                   "notes/identity.md", "system-prompt.md",
                                   ".claude/hooks/helper.py", ".claude/settings.json",
                                   ".codex/settings.toml", ".cursor/mcp.json",
