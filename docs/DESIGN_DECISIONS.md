@@ -191,13 +191,25 @@ Support these values for `input_profile`, with `standard` as the default. All in
 |---|---|---|
 | `standard` | Preserve ordinary project identity and code. | Default buyer evaluation. |
 | `metadata_blinded` | Reviewed changes to non-runtime branding, documentation identifiers, and display metadata. | Lower-risk, partial blinding. |
-| `identity_reduced` | The same reviewed edits, plus reviewed removal of hash-pinned identity-only documentation and repository instruction files. | Stronger identity-cue sensitivity check. |
+| `identity_reduced` | The same reviewed edits, hash-pinned identity-document/instruction removals, and verified edits of supported package URL leaves under an explicit strict policy. | Stronger identity-cue sensitivity check, with recorded residuals and export availability. |
 
 No input profile renames packages/modules, imports, source identifiers, or source paths, or changes dependencies, executable logic, or security configuration. A manifest field is not automatically non-runtime metadata. If its role is uncertain, leave it unchanged and record the remaining identity cue. Preserve architectural context, deployment assumptions, and security guidance in documentation.
 
 For either transformed profile, use a reviewed per-repository allowlist and deterministic map. Record changed fields, removed paths, input hashes, validation evidence, and retained identity cues. Apply the same map to related base/head or vulnerable/fixed inputs and freeze it across compared systems. `metadata_blinded` refuses every removal. `identity_reduced` permits removal only of documentation classified as identity-only and files scanners may load as repository instructions; every removal is pinned to exact bytes for every variant, and no labeled target or control path may be removed. Reject unvalidated transformations; if no valid transformation is available, mark the profile unavailable rather than silently substituting `standard`. Report profile results and coverage separately.
 
-These profiles reduce selected identity cues; package names, paths, and recognizable code may still reveal the original repository. Do not describe either as full anonymization or proof against memorization. Source/package/path renaming is outside the current design.
+The [strict export policy](IDENTITY_REDUCTION.md) declares pack-derived answer aliases/advisories
+and reviewed normalized forms, supported instruction equivalents, and artifact exclusions under
+a bound policy/version. Explicit strict failure stops preparation and retains evaluator evidence.
+Basic profile-only exports remain usable with an unavailable strict summary. JSON/TOML metadata
+edits change only selected parsed URL leaves after role review and exact file-hash checks; unsafe,
+ambiguous, or scoring-overlapping changes stay unchanged and are disclosed. Supported URL leaves
+without an applied review remain residual cues. Narrow historical-advisory prose removal requires
+an explicit policy and role check; security configuration and `SECURITY.md` stay protected.
+Deterministic evaluator manifests bind configuration/map/tool versions and original/transformed
+trees, and preserve transformations, skips, instruction dispositions, and residual categories.
+Export availability is separate from verified runtime isolation and paired-condition reporting.
+
+These profiles reduce selected identity cues; package names, paths, and recognizable code may still reveal the original repository. A behavioral difference can reflect removal of useful context; a null difference does not establish absence of prior exposure. Do not describe either as full anonymization or proof against memorization. Source/package/path renaming is outside the current design.
 
 ## 4. Scoring without exhaustive repository labels
 

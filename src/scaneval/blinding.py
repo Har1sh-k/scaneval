@@ -3,7 +3,9 @@
 The ``metadata_blinded`` input profile (``docs/DESIGN_DECISIONS.md``, configurable identity
 profiles) reduces selected identity cues through reviewed token edits in documentation and display
 metadata. ``identity_reduced`` applies those edits and may additionally remove reviewed,
-hash-pinned identity-only documentation and repository instruction files. Neither profile renames
+hash-pinned identity-only documentation and repository instruction files. An explicit strict
+policy also supports narrowly verified metadata URL leaves, answer coverage, and residual evidence.
+Neither profile renames
 a package, module, import, source identifier, or path, or changes source, a dependency, license,
 build, CI, or security configuration. Package names and recognizable code may still reveal the
 repository, and every export records which cues remain. These are sensitivity conditions, not
@@ -25,7 +27,7 @@ review rejected it or reopened the question, and one edited after the approval i
 recorded are all refused. The tool records the reviewer name a person supplies and never supplies
 one. Like every chain in this package, this makes a quiet deletion visible; it is not a signature.
 
-Application is all-or-nothing. Every check runs before the transformed tree exists, and a
+Application checks the map and original before copying a transformed tree, and a
 refusal raises :class:`~scaneval.materialize.MaterializationError` naming the reason: the map is
 unapproved; it is for another repository; its variant for this snapshot is missing or pinned to
 another commit or export tree (a stale map); an edit names a path outside documentation and
@@ -39,7 +41,8 @@ files. Only then is the original export copied, reviewed occurrences replaced, a
 omitted. The result is verified: it holds exactly the original paths minus removals; every untouched
 file is byte-identical; every remaining file keeps its mode; and edited lines map one-for-one to the
 original. Labels are checked against the evaluator-side original, and a run separately refuses a
-removal of any labeled scoring path.
+removal of any labeled scoring path. Unsafe metadata leaf edits are retained and disclosed;
+strict final inspection removes candidate scanner trees on policy failure and saves refusal evidence.
 
 Structure. A replacement is written into a file as text, without quoting, so an edit of a JSON,
 TOML, INI, or YAML display file (``.json``, ``.toml``, ``.ini``, ``.cfg``, ``.yml``, ``.yaml``) is
@@ -58,8 +61,9 @@ as, so a replacement that turns a string into one is refused. A YAML file outsid
 YAML or not, cannot be verified, and its edit is refused. Documentation is not asked for structure,
 and no other display file is verified.
 
-What this does not do: parse source, discover identity cues on its own, decide whether a field is
-read at runtime (a ``display_metadata`` edit carries the reviewer's stated ``role_check`` for that),
+Inspection inventories supported instruction documents and URL leaves and checks declared answer
+aliases/forms. It does not infer every source identity or decide whether a field is
+read at runtime (a metadata edit carries the reviewer's stated ``role_check`` for that),
 verify a structure it does not read (a comment, the whitespace between values), or establish that a
 scanner cannot recognize the repository.
 """
@@ -407,7 +411,8 @@ def removal_path_gap(path: str, role: str, *, identity_policy: dict | None = Non
     ``identity_document`` is limited to conventional root documents and documentation directories,
     excluding runtime-like directories. ``instruction_file`` is limited to recognized instruction
     names and textual instruction documents, not scripts or configuration under assistant roots.
-    Protected license, attribution, dependency, build, CI, and security paths are never removable.
+    License, attribution, dependency, build, CI, and security configuration stay protected. An
+    explicit strict policy and role check permit a narrow historical-advisory prose exception.
     Source and every unclassified path are never removable. This reads the path only; exact bytes
     and variant presence are checked against the original export before a transformed tree exists.
     """
