@@ -136,8 +136,9 @@ REMOVABLE_DOCUMENTATION_ROOTS = frozenset({"doc", "docs", "documentation", "manu
 REMOVABLE_ROOT_DOCUMENTS = frozenset({"readme", "changelog", "changes", "history", "news",
                                      "release-notes", "release_notes", "releasenotes", "releases"})
 # A documentation suffix does not turn templates, prompts, or test payloads into identity prose.
-RUNTIME_REMOVAL_DIRECTORIES = frozenset({"src", "lib", "app", "apps", "test", "tests", "fixtures",
-                                         "templates", "prompts", "static", "public", "assets", "scripts", "bin"})
+RUNTIME_REMOVAL_DIRECTORIES = frozenset({"src", "lib", "app", "apps", "test", "tests", "fixture", "fixtures",
+                                         "template", "templates", "prompt", "prompts", "static", "public",
+                                         "assets", "scripts", "bin"})
 DISPLAY_SUFFIXES = frozenset({".yml", ".yaml", ".toml", ".json", ".cfg", ".ini"})
 # Refused whatever the suffix or role. File names compare case-insensitively.
 FORBIDDEN_NAME_PREFIXES = ("license", "licence", "copying", "copyright", "notice", "authors", "contributors",

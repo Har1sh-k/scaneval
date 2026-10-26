@@ -755,8 +755,15 @@ The review covers `content_sha256`, the map without its reviews. Any later edit 
 unapproved until someone reviews it again, and `--decision reject` or `unresolved` withdraws an
 approval explicitly. As with `corpus approve`, the name is recorded, not verified.
 
-**Reduce whole-file identity cues.** To run the stronger `identity_reduced` condition, add a
-`removals` array to the same reviewed map. A removal is not a glob: it names one normalized path,
+**Reduce whole-file identity cues.** Create a separate map for the `identity_reduced` profile:
+
+```sh
+cp "$BYOC/reporting-map.json" "$BYOC/reporting-identity-reduced-map.json"
+```
+
+In the copy, set `map_id` to `acme-reporting-service-identity-reduced`, remove the `readme-title`
+edit, and add the `removals` array below. The original metadata map keeps its README edit and has
+no removals. The copy needs its own review after these changes. A removal names one normalized path,
 why that file is identity-only, and the exact bytes expected in every variant. Use
 `identity_document` for documentation and `instruction_file` for files such as `AGENTS.md` or
 `CLAUDE.md` that a scanner may load as project instructions:
@@ -773,15 +780,28 @@ why that file is identity-only, and the exact bytes expected in every variant. U
 ]
 ```
 
-An edited path cannot also be removed. Source, dependency, license/attribution, build, CI, and
-security paths are refused, as is every path that does not fit its declared role. A run also
-refuses removal of an accepted target or control location. The original export remains under
+An edited path cannot also be removed. Identity documents must be recognized root documents or
+lie under conventional documentation directories such as `docs/`, `doc/`, or `releases/`.
+Runtime templates, prompts, and test fixtures are refused even when their suffix is `.md` or
+`.txt`. Instruction removals accept recognized instruction names and textual instruction
+documents; scripts and configuration under `.claude/`, `.codex/`, or `.cursor/` stay protected.
+Source, dependency, license/attribution, build, CI, and security paths are refused. Both the dry
+run and a real run refuse removal of an accepted target or control location. The original export remains under
 evaluator control, while the scanner receives a tree with the reviewed files absent. Check this
 condition explicitly before review:
 
 ```sh
-$SB blinding check "$BYOC/reporting-map.json" --pack "$BYOC/pack.json" \
+$SB blinding check "$BYOC/reporting-identity-reduced-map.json" --pack "$BYOC/pack.json" \
   --profile identity_reduced --cache-root "$BYOC/.repos"
+```
+
+Until the copy is reviewed, the check reports its transformations and exits one because its old
+approval no longer covers the changed content. After inspecting the removals, record a new review:
+
+```sh
+$SB blinding review "$BYOC/reporting-identity-reduced-map.json" --reviewer "Example Reviewer (fictional)" \
+  --role independent_reviewer --decision approve \
+  --note "Checked each removal against original bytes; no runtime or scoring file is removed."
 ```
 
 Do not call the result anonymous. Paths, package/import names, source identifiers, and recognizable
@@ -831,12 +851,13 @@ scaneval: the run id names 'Acme', an original identity token of blinding map ac
 exit=2
 ```
 
-With a neutral run id both inputs run:
+With a neutral run id all three inputs run:
 
 ```
 $ $SB run "$BYOC/run-blinded.json" --output "$BYOC/runs/blinded" --workspace-root "$BYOC/workspaces"
 reporting-main__semgrep-local-rules__r1 status=success claims=1 plan=draft review=draft
 reporting-main.blinded__semgrep-local-rules__r1 status=success claims=1 plan=draft review=draft
+reporting-main.identity-reduced__semgrep-local-rules__r1 status=success claims=1 plan=draft review=draft
 Manifest: /private/tmp/byoc/runs/blinded/run-manifest.json
 Schedule: /private/tmp/byoc/runs/blinded/evaluator/schedule.json
 ```
@@ -868,6 +889,7 @@ sees it. After the README edit's rationale is reworded without a new review, the
 ```
 reporting-main__semgrep-local-rules__r1 status=success claims=1 plan=draft review=draft
 reporting-main.blinded__semgrep-local-rules__r1 status=skipped claims=None plan=None review=None
+reporting-main.identity-reduced__semgrep-local-rules__r1 status=success claims=1 plan=draft review=draft
 Manifest: /private/tmp/byoc/runs/edited/run-manifest.json
 Schedule: /private/tmp/byoc/runs/edited/evaluator/schedule.json
 scaneval: input reporting-main.blinded could not be prepared: MaterializationError: blinding map refused: map acme-reporting-service 1: the latest approval, by Example Reviewer (fictional) (independent_reviewer) at 2026-09-30T01:19:25+00:00, covers content sha256:fc626885d14212555e2cb4873e53b0d04605c8340dd2b8618a15c1af273f3121, but the map now hashes to sha256:87ca782566c26b6dba8d889e80f6c93040d242867b4fd5370d75e5ce1b0d4488; it was edited after it was approved
@@ -878,6 +900,10 @@ exit=1
 Report standard and blinded results separately: the schedule pairs vulnerable and fixed inputs only
 within one profile. A blinded result says the listed cues were absent from the scanned text, not
 that the scanner could not recognize the repository.
+
+This is the reviewed-export foundation for identity sensitivity analysis. Automatic alias and safe
+metadata policies, validation of a complete identity-reduced experimental condition, and a paired
+condition report remain follow-up work. A profile name alone does not establish that condition.
 
 ### A native PR input
 
@@ -1196,7 +1222,7 @@ These are limits of the current implementation, not guarantees about your enviro
 | Credentials | `--url`, `--historical-url`, and `--repo` refuse a URL whose authority carries userinfo, except the bare `git` user of an ssh clone URL. The run configuration has no credential field. Scanner subprocesses receive only `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR`, `TERM`, `USER`, `SHELL` unless the adapter adds more. | The check reads the URL authority only: a token in a path, a query, or an scp-style `git@host:path` address is not detected. The `llm-harness` adapter adds `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, and `XDG_CONFIG_HOME` to that passthrough, and `deepsec` adds `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, so provider keys in your environment do reach those scanner processes; neither is recorded. `NODE_OPTIONS` is deliberately passed by neither, because node executes what it names and a `--require` in your environment would run code inside the scanner while the record showed only a variable name. |
 | Traces | `trace_mode` is `off`, `metadata`, or `content`. Metadata mode omits content. Content mode stores a cloned, redacted copy of metadata and content, including the outgoing model request, in the bundle's `trace/` directory. | Content-mode traces therefore contain the source that was sent to the model. Treat a content-mode bundle as source material, with the same handling rules. The default redactor replaces common credential-looking keys; it is not a secret scanner. |
 | Directory separation | Evaluator files live in `evaluator/` and in the pack; the scanner receives a private workspace copy of one export. The trial-path check refuses writing evaluator material inside an exported tree, and the runner refuses a workspace inside evaluator storage. | These compare resolved paths. They follow no bind mount or hard link, and they are not a sandbox. Directory separation documents the evaluator boundary; it does not enforce it. |
-| Exported trees | The export carries tracked regular files only, strips `.git`, `.securevibes`, `.scaneval`, and `.repos`, records skipped submodules and symlinks, and records retained instruction files such as `CLAUDE.md` or `AGENTS.md` as identity cues. A blinded export also keeps the original export evaluator-side and records every edit and every remaining cue. | It is not a sandbox, and instruction files stay in the tree under both profiles. Blinding never renames a package, import, identifier, or path, so a blinded tree is not anonymous. |
+| Exported trees | The export carries tracked regular files only, strips `.git`, `.securevibes`, `.scaneval`, and `.repos`, records skipped submodules and symlinks, and records retained instruction files such as `CLAUDE.md` or `AGENTS.md` as identity cues. A transformed export also keeps the original export evaluator-side and records every edit, removal, and declared cue that remains. | It is not a sandbox. Instruction files stay under `standard` and `metadata_blinded`; `identity_reduced` can remove reviewed instruction documents. Transformation never renames a package, import, identifier, or path, so the tree is not anonymous. |
 | Pack edits | A pack is replaced atomically through a temporary file and a rename, keeping the previous permission bits. | No previous version is kept on disk. Keep the pack under version control if you need history or a correction trail. |
 
 ## 9. What is not implemented yet
