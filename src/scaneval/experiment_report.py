@@ -8,7 +8,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from . import aggregate, blinding, cases, conditions, experiment, review, scoring
-from .contracts import ContractError, canonical_json, canonical_sha256, load_document
+from .contracts import ContractError, canonical_json, canonical_sha256, load_document, refuse_trial_path
 from .experiment_execution import (artifact_hash, load_matrix, read_json, verify_binding,
                                    _verify_run_semantics, _write)
 from .isolation import resolve_execution
@@ -354,6 +354,8 @@ def _load_rows(matrix: dict, directory: Path) -> list[dict]:
 
 
 def report(directory: Path, *, output: Path | None = None) -> dict:
+    if output is not None:
+        refuse_trial_path(output)
     directory = Path(directory).expanduser().resolve()
     matrix = experiment.validate_frozen(load_matrix(directory / "matrix.json"))
     corpus_scope = evidence_scope(source["plan"]["scope"] for source in matrix["population"])
@@ -379,9 +381,13 @@ def report(directory: Path, *, output: Path | None = None) -> dict:
                                  "resolved": value["resolved"] and value["eligible"]})
                 paired_rows[(name, system["system_id"])].append(value)
             strata = []
-            for status, policy, scope in sorted({(row["condition_status"], row["condition_policy_sha256"] or "unavailable", row["scope"]) for row in selected}):
-                group = [row for row in selected if row["condition_status"] == status and (row["condition_policy_sha256"] or "unavailable") == policy and row["scope"] == scope]
-                strata.append({"condition_status": status, "policy_sha256": policy, "evidence_scope": scope, "metrics": metrics_helper(group)})
+            def stratum(row):
+                return (row["condition_status"], row["condition_policy_sha256"] or "unavailable",
+                        row["scope"], row["runtime_sha256"] or "unavailable", row["eligible"])
+            for status, policy, scope, runtime, eligible_state in sorted({stratum(row) for row in selected}):
+                group = [row for row in selected if stratum(row) == (status, policy, scope, runtime, eligible_state)]
+                strata.append({"condition_status": status, "policy_sha256": policy, "evidence_scope": scope,
+                               "runtime_sha256": runtime, "eligible": eligible_state, "metrics": metrics_helper(group)})
             cells.append({"condition": name, "system_id": system["system_id"], "assignments_scheduled": len(selected),
                 "evidence_scope": evidence_scope(row["scope"] for row in selected), "corpus_evidence_scope": corpus_scope,
                 "condition_coverage": dict(Counter(row["condition_status"] for row in selected)),
