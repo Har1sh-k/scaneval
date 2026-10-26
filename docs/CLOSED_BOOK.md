@@ -70,6 +70,23 @@ so remote-model observations remain `declared_only` even with enforced inference
 and a saved assertion that retrieval was disabled. It never infers absence of hidden provider
 retrieval.
 
+The named `identity_reduced` condition uses the same full-scan history, retrieval, network,
+and provider restrictions, plus a verified strict identity policy. The profile alone or a
+reviewed removal map without that policy cannot attest it. Each invocation saves
+`evaluator/identity-transform.json` and `evaluator/identity-context.json`. The latter contains
+the configured case pack, reviewed map, and source snapshot identity; its pack is frozen before
+mechanical checks add runtime evidence. These artifacts stay on the evaluator side, outside
+requests, scanner source trees, and OCI mounts. The condition record binds both their exact
+bytes and canonical documents through the saved evidence references.
+
+Reclassification recomputes the policy, required answers, accepted source paths, map digest,
+source snapshot, original/transformed tree bindings, manifest accounting, and structural
+blockers. It checks the saved summary against that manifest rather than trusting
+`validation.state`. The source inspection itself is the exporter's recorded observation bound
+to the executed tree: a standalone invocation bundle does not contain the source tree for
+fresh inspection. `details.identity_reduction` states this distinction explicitly. A valid PR
+transformation can still be recorded, but PR scans are outside the named full-scan condition.
+
 Read saved bundles without executing a scanner or consulting the network:
 
 ```console

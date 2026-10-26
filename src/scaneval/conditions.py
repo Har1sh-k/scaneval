@@ -467,7 +467,8 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None,
     (failed if record["history"] == "unexpected" else gaps).extend(history_reasons)
     if execution["provenance"]["source_modified"]:
         failed.append(_reason("source_modified", "The executed source changed from the frozen input."))
-    if declaration["name"] == "closed_book_standard":
+    identity_unavailable = False
+    if declaration["name"] in ("closed_book_standard", "identity_reduced"):
         record["network"], network_failures, network_gaps = _network(execution, controls)
         failed.extend(network_failures)
         gaps.extend(network_gaps)
@@ -483,10 +484,25 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None,
         gaps.extend(provider_gaps)
         if controls.get("inference") not in ("offline", "remote"):
             gaps.append(_reason("inference_unverified", "The saved adapter controls do not establish offline or remote inference."))
-        if profile != "standard" or mode != "full":
-            failed.append(_reason("ineligible_input", "closed_book_standard requires the standard full-scan source profile."))
+        if declaration["name"] == "closed_book_standard":
+            if profile != "standard" or mode != "full":
+                failed.append(_reason("ineligible_input", "closed_book_standard requires the standard full-scan source profile."))
+        else:
+            from .conditions_identity import verify_saved_identity
+            identity = verify_saved_identity(root, execution, documents.get("provenance", {}), evidence, artifacts)
+            record["details"]["identity_reduction"] = identity["details"]
+            record["assurance"]["identity"] = "saved_manifest_verified" if identity["state"] == "available" else "unavailable"
+            summary = identity["details"].get("summary", {})
+            record["retained_identity_cues"] = {"residual_categories": summary.get("residual_categories", []),
+                                                "counts": summary.get("counts", {}),
+                                                "source_identifiers": "residuals_reported"}
+            if identity["state"] == "failed":
+                failed.extend(identity["reasons"])
+            elif identity["state"] != "available":
+                identity_unavailable = True
+                gaps.extend(identity["reasons"])
         if record["history"] == "bounded_ancestor_history":
-            failed.append(_reason("original_history_present", "Original ancestor history is incompatible with closed-book standard."))
+            failed.append(_reason("original_history_present", "Original ancestor history is incompatible with a closed-book source condition."))
     elif declaration["name"] == "open_context":
         try:
             from . import open_context
@@ -514,17 +530,15 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None,
                 failed.extend(details.get("reasons", []))
             elif details.get("status") != "attested":
                 gaps.extend(details.get("reasons", []))
-    else:
-        gaps.append(_reason("identity_condition_unavailable", "An identity transformation is distinct from closed-book attestation."))
     legacy = not all(key in documents for key in ("evidence", "provenance", "configuration", "policy"))
     eligibility_failures = {"unexpected_history", "history_changed", "non_neutral_history", "source_modified",
                             "ineligible_input", "original_history_present", "unrestricted_network", "offline_network_policy",
                             "remote_inference_policy", "unrelated_egress", "retrieval_enabled", "retrieval_observed",
                             "provider_retrieval_enabled"}
-    inferred_ineligible = (not declared and declaration["name"] == "closed_book_standard" and failed
+    inferred_ineligible = (not declared and declaration["name"] in ("closed_book_standard", "identity_reduced") and failed
                            and all(row["code"] in eligibility_failures for row in failed))
     record["status"] = ("unavailable" if inferred_ineligible else "failed" if failed
-                        else "unavailable" if execution["status"] == "unsupported" or legacy
+                        else "unavailable" if execution["status"] == "unsupported" or legacy or identity_unavailable
                         else "declared_only" if gaps else "attested")
     record["reasons"] = failed + gaps
     if not record["reasons"]:

@@ -1239,6 +1239,16 @@ def _validate_condition_record(document: dict[str, Any]) -> None:
                     or document["retrieval"] not in ("disabled", "observed_none")
                     or document["provider_retrieval"] not in ("disabled", "not_applicable")):
                 raise ContractError("closed_book_standard attestation requires standard identity and verified history/retrieval restrictions")
+        if document["condition"] == "identity_reduced":
+            identity = document["details"].get("identity_reduction") or {}
+            if (document["identity_profile"] != "identity_reduced" or document.get("mode") != "full"
+                    or document["history"] not in ("original_absent", "neutral_synthetic")
+                    or document["retrieval"] not in ("disabled", "observed_none")
+                    or document["provider_retrieval"] not in ("disabled", "not_applicable")
+                    or not {"identity_manifest", "identity_context"} <= roles
+                    or identity.get("transformation_verified") is not True
+                    or ((identity.get("summary") or {}).get("validation") or {}).get("state") != "available"):
+                raise ContractError("identity_reduced attestation requires full-scan strict manifest/context verification and closed retrieval controls")
 
 
 def _validate_case_pack(document: dict[str, Any]) -> None:
@@ -1643,6 +1653,8 @@ def _validate_run_config(document: dict[str, Any]) -> None:
             condition = resolve_condition(item["condition"], profile=item.get("profile", "standard"), mode=mode)
             if condition["name"] == "closed_book_standard" and (item.get("profile", "standard") != "standard" or mode != "full"):
                 raise ContractError(f"{label}: closed_book_standard requires a standard full-scan input")
+            if condition["name"] == "identity_reduced" and (item.get("profile", "standard") != "identity_reduced" or mode != "full"):
+                raise ContractError(f"{label}: the named identity_reduced condition requires an identity_reduced full-scan input")
             if condition["name"] == "open_context":
                 try:
                     from . import open_context  # noqa: F401

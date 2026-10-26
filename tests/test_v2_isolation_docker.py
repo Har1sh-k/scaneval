@@ -1187,3 +1187,49 @@ def test_semgrep_runs_end_to_end_in_the_pinned_official_image(scratch):
     condition = classify_observation(bundle)
     assert condition["condition"] == "closed_book_standard" and condition["status"] == "attested"
     assert condition["history"] == "original_absent" and condition["retrieval"] == "disabled"
+
+
+def test_strict_identity_context_stays_outside_real_oci_scanner_mounts(scratch):
+    import test_v2_blinding as fixture
+    from test_v2_identity_exports import strict_map
+    from scaneval import blinding, conditions
+    from scaneval.contracts import pack_anchor_digest
+
+    input_fixture = fixture.build_widget(scratch / "source-fixture", fixture.FILES)
+    pack = fixture.write_pack(scratch / "pack.json", input_fixture, checked=True)
+    marker = "FIXTURE-PRIVATE-ANSWER-63"
+    pack["cases"][0]["canonical_target"]["aliases"] = [marker]
+    pack["anchor_sha256"] = pack_anchor_digest(pack)
+    cases.save_pack(scratch / "pack.json", pack)
+    mapping = strict_map(input_fixture, answer_aliases=[{"category": "target_alias", "value": marker, "forms": []}])
+    blinding.save_map(scratch / "map.json", mapping)
+    rules = scratch / "rules"
+    rules_commit = repository(rules, {"python/shell.yaml": SHELL_RULE})
+    config = {"schema_version": "2.1", "run_id": run_id(scratch), "pack": "pack.json", "cache_root": "cache",
+              "inputs": [{"snapshot_id": "snap-a", "profile": "identity_reduced", "blinding_map": "map.json",
+                          "condition": {"name": "identity_reduced", "policy": {}}}],
+              "systems": [{"system_id": "semgrep-oci", "adapter": "semgrep",
+                           "config": {"ruleset": {"url": str(rules), "commit": rules_commit, "paths": ["python"]}},
+                           "execution": {"backend": "oci", "image": SEMGREP_IMAGE}}],
+              "repetitions": 1, "timeout_seconds": 120, "trace_mode": "off", "network_policy": "none"}
+    config_path = scratch / "config.json"
+    config_path.write_text(canonical_json(config))
+    (scratch / "work").mkdir()
+    output = scratch / "out"
+    manifest = run_from_config(config_path, output, clock=CLOCK, workspace_root=scratch / "work")
+    bundle = only_bundle(output, manifest)
+    result, execution = documents(bundle)
+    assert result["status"] == "success", result.get("error")
+    condition = conditions.classify_observation(bundle)
+    assert condition["status"] == "attested" and condition["condition"] == "identity_reduced"
+    context = bundle / "evaluator" / "identity-context.json"
+    assert marker in context.read_text()
+    assert marker not in (bundle / "request.json").read_text()
+    exported = output / "inputs" / manifest["inputs"][0]["input_id"] / "source"
+    assert not any(path.name in {"identity-context.json", "identity-transform.json", "pack.json", "map.json"}
+                   for path in exported.rglob("*"))
+    for mount in execution["isolation"]["mounts"]:
+        target = Path(mount["target"]).expanduser().resolve()
+        assert not target.is_relative_to(bundle) and target != context
+        assert "identity-context.json" not in mount["target"] and "identity-transform.json" not in mount["target"]
+    assert leftovers(scratch) == []

@@ -99,7 +99,7 @@ filesystem policy are declared here and must be enforced outside this process.
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import errno
 import hashlib
@@ -176,6 +176,7 @@ class PreparedInput:
     pr: dict | None = None
     base_source_dir: Path | None = None
     identity_manifest: dict | None = None
+    identity_context: dict | None = field(default=None, repr=False, compare=False)
     condition: dict | None = None
     history_dir: Path | None = None
     history_evidence: dict | None = None
@@ -1203,6 +1204,17 @@ def run_invocation(
     policy_bytes = _canonical_bytes({**condition, "declared": prepared.condition is not None})
     configuration_bytes = _canonical_bytes(configuration)
     provenance_bytes = _canonical_bytes(prepared.provenance)
+    identity_documents: list[tuple[str, bytes]] = []
+    identity_references = {}
+    for role, value, relative in (
+        ("identity_manifest", prepared.identity_manifest, "evaluator/identity-transform.json"),
+        ("identity_context", prepared.identity_context, "evaluator/identity-context.json"),
+    ):
+        if value is not None:
+            payload = _canonical_bytes(value)
+            identity_documents.append((relative, payload))
+            identity_references[role] = {"path": relative, "sha256": "sha256:" + hashlib.sha256(payload).hexdigest(),
+                                         "canonical_sha256": canonical_sha256(value)}
     bundle = out_dir / invocation_id(prepared.input_id, spec.system_id, repetition)
     bundle.mkdir(parents=True, exist_ok=False)
     raw_dir = bundle / "raw"
@@ -1703,12 +1715,15 @@ def run_invocation(
             raise ExecutionError(f"the invocation could not be recorded: {again}") from again
     evidence, _rendered = _recordable_document({
         "history": {"before": history_before, "after": history_after}, "controls": controls,
-        "history_evidence": installed_history, "trace": trace_evidence or None})
+        "history_evidence": installed_history, "trace": trace_evidence or None, **identity_references})
+    if identity_documents:
+        (bundle / "evaluator").mkdir(exist_ok=True)
     _write_new_documents([(bundle / "result.json", result_bytes),
                           (bundle / "execution.json", execution_bytes),
                           (bundle / conditions.EVIDENCE_FILE, _canonical_bytes(evidence)),
                           (bundle / conditions.POLICY_FILE, policy_bytes),
                           (bundle / conditions.CONFIGURATION_FILE, configuration_bytes),
-                          (bundle / conditions.PROVENANCE_FILE, provenance_bytes)])
+                          (bundle / conditions.PROVENANCE_FILE, provenance_bytes),
+                          *[(bundle / relative, payload) for relative, payload in identity_documents]])
     _write_new(bundle / conditions.RECORD_FILE, conditions.classify_observation(bundle))
     return bundle

@@ -31,7 +31,8 @@
     "assurance": {"type": "object", "additionalProperties": false, "required": ["network", "retrieval", "provider"], "properties": {
       "network": {"enum": ["declared", "external_enforcement"]},
       "retrieval": {"enum": ["capture_gap", "tool_enabled", "tool_disabling", "complete_observation", "recorded", "self_report"]},
-      "provider": {"type": "string"}
+      "provider": {"type": "string"},
+      "identity": {"enum":["saved_manifest_verified","unavailable"]}
     }},
     "provider": {"type": "object"},
     "details": {"type": "object"},
