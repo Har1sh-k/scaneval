@@ -27,6 +27,17 @@ def test_real_git_status_stat_refresh_does_not_change_neutral_history(tmp_path, 
     assert record["status"] == expected and record["history"] == "neutral_synthetic"
 
 
+def test_real_git_derived_offset_cache_does_not_change_neutral_history(tmp_path):
+    def refresh(source):
+        path = source / "app.py"
+        stamp = path.stat().st_mtime_ns + 2_000_000_000
+        os.utime(path, ns=(stamp, stamp))
+        assert git(source, "-c", "index.recordEndOfIndexEntries=true", "status", "--short") == ""
+        assert b"EOIE" in (source / ".git" / "index").read_bytes()
+    _bundle, record = invoke(tmp_path, Offline(git=True, mutate=refresh))
+    assert record["status"] == "attested" and record["history"] == "neutral_synthetic"
+
+
 @pytest.fixture
 def index_bytes(tmp_path):
     source = tmp_path / "index-source"
@@ -70,6 +81,22 @@ def test_unknown_index_formats_extensions_and_checksums_are_refused(index_bytes)
     corrupt[-1] ^= 1
     with pytest.raises(MaterializationError, match="checksum"):
         git_index_semantic_sha256(corrupt)
+
+
+def test_real_intent_to_add_extended_flag_remains_semantically_bound(tmp_path):
+    source = tmp_path / "intent-index"
+    source.mkdir()
+    (source / "app.py").write_text("print(1)\n")
+    prepare_synthetic_history(source)
+    (source / "extra.py").write_text("print(2)\n")
+    git(source, "add", "--intent-to-add", "extra.py")
+    raw = (source / ".git" / "index").read_bytes()
+    path_offset = raw.index(b"extra.py\0")
+    flags = int.from_bytes(raw[path_offset - 2:path_offset], "big")
+    assert flags & 0x2000
+    changed = bytearray(raw)
+    changed[path_offset - 2:path_offset] = (flags & ~0x2000).to_bytes(2, "big")
+    assert git_index_semantic_sha256(checksum(changed)) != git_index_semantic_sha256(raw)
 
 
 def test_staged_index_change_fails_even_when_source_bytes_do_not_change(tmp_path):

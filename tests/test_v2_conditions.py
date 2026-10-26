@@ -123,6 +123,34 @@ def test_an_eligible_inferred_condition_can_be_classified_from_saved_evidence(tm
     assert record["status"] == "attested" and record["declared"] is False
 
 
+@pytest.mark.parametrize("policy", ["none", "unrestricted"])
+def test_expectation_keyword_cannot_change_saved_declaration_state(tmp_path, policy):
+    bundle, record = invoke(tmp_path, declared=False, policy=policy)
+    assert conditions.classify_observation(bundle, condition=conditions.resolve_condition()) == record
+
+
+@pytest.mark.parametrize("change", ["source", "history"])
+def test_inferred_ineligible_source_or_history_is_unavailable(tmp_path, change):
+    def mutate(source):
+        if change == "source":
+            (source / "app.py").write_text("print('modified')\n")
+        else:
+            (source / "history.data").write_bytes(b"# v2 git bundle\nfixture\n")
+    _bundle, record = invoke(tmp_path, Offline(mutate=mutate), declared=False)
+    assert record["status"] == "unavailable" and record["declared"] is False
+
+
+def test_inferred_condition_still_fails_genuine_artifact_binding_corruption(tmp_path):
+    bundle, _record = invoke(tmp_path, declared=False)
+    (bundle / conditions.RECORD_FILE).unlink()
+    path = bundle / conditions.CONFIGURATION_FILE
+    configuration = json.loads(path.read_text())
+    configuration["config"] = {"different": True}
+    path.write_text(canonical_json(configuration))
+    record = conditions.classify_observation(bundle)
+    assert record["status"] == "failed" and "configuration_mismatch" in codes(record)
+
+
 def test_undeclared_pr_keeps_neutral_history_but_is_outside_closed_book_standard(tmp_path):
     from test_v2_execution import pr_input, run, PrAdapter
     bundle = run(tmp_path, PrAdapter(), pr_input(tmp_path))
@@ -223,11 +251,17 @@ def test_complete_local_tool_observation_ignores_benign_retrieval_mentions(tmp_p
 
 
 @pytest.mark.parametrize("name,state", [("WebSearch", "enabled"), ("Bash", "capture_gap"),
-                                         ("mcp:browser/navigate", "enabled"), ("mcp:api/web_search", "enabled")])
+                                         ("mcp:browser/navigate", "enabled"), ("mcp:api/web_search", "enabled"),
+                                         ("mcp:web_search", "enabled"), ("mcp__playwright__navigate", "enabled")])
 def test_structured_retrieval_is_distinct_from_opaque_shell_observation(tmp_path, name, state):
     _bundle, record = invoke(tmp_path, Offline(tools=False, events=[{"metadata": {"tool_name": name, "input_summary": "curl https://example.com"}}]))
     assert record["retrieval"] == state
     assert record["status"] == ("failed" if state == "enabled" else "declared_only")
+
+
+def test_browser_and_web_options_are_not_retrieval_enabling_flags(tmp_path):
+    _bundle, record = invoke(tmp_path, config={"browser.headless": True, "web.cache": True})
+    assert record["status"] == "attested" and "retrieval_enabled" not in codes(record)
 
 
 def test_same_count_trace_substitution_fails_without_a_previous_condition_record(tmp_path):
@@ -286,6 +320,16 @@ def test_remote_inference_is_distinct_from_provider_retrieval_assurance(tmp_path
     assert record["network"] == "enforced" and record["provider_retrieval"] == "unverifiable"
     assert record["status"] == "declared_only" and "provider_unverifiable" in codes(record)
     assert record["provider"]["capability"] == "configurable" and record["provider"]["control"] == "disabled"
+
+
+def test_adapter_model_namespace_is_bound_to_adapter_config_not_system_label(tmp_path):
+    class Routed(Remote):
+        def scan(self, **kwargs):
+            outcome = super().scan(**kwargs)
+            outcome.model_identity = {"requested": "provider/model-a", "resolved": None, "verification": "self_reported"}
+            return outcome
+    _bundle, record = invoke(tmp_path, Routed(), policy="model_provider_only", model_id="model-a", config={"model": "provider/model-a"})
+    assert record["status"] == "declared_only" and "model_identity_mismatch" not in codes(record)
 
 
 def test_remote_route_cannot_allow_unrelated_egress(tmp_path):

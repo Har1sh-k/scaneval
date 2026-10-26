@@ -618,7 +618,7 @@ def git_index_semantic_sha256(raw: bytes) -> str:
     Format: https://git-scm.com/docs/gitformat-index . This intentionally supports only the
     ordinary index this package creates. Unknown versions/extensions, sparse/split indexes,
     invalid checksums, paths, flags, modes, padding, and ordering are refused. Cache extensions
-    TREE/EOIE/IEOT stay byte-bound; no parser interprets or follows their object references.
+    TREE stays byte-bound; derived EOIE/IEOT offsets are validated and omitted from identity.
     """
     if (len(raw) < 32 or raw[:4] != b"DIRC"
             or hashlib.sha1(raw[:-20], usedforsecurity=False).digest() != raw[-20:]):
@@ -667,6 +667,8 @@ def git_index_semantic_sha256(raw: bytes) -> str:
         entries.append({"path_hex": path.hex(), "mode": mode, "oid": oid,
                         "flags": flags & 0xB000, "extended_flags": extended})
     extensions = []
+    entries_end = offset
+    extension_headers = bytearray()
     while offset < end:
         if offset + 8 > end:
             raise MaterializationError("Git index extension is truncated")
@@ -675,8 +677,21 @@ def git_index_semantic_sha256(raw: bytes) -> str:
         offset += 8
         if signature not in (b"TREE", b"EOIE", b"IEOT") or offset + length > end:
             raise MaterializationError("Git index contains an unknown or truncated extension")
-        extensions.append({"signature": signature.decode("ascii"),
-                           "sha256": "sha256:" + hashlib.sha256(raw[offset:offset + length]).hexdigest()})
+        payload = raw[offset:offset + length]
+        if signature == b"EOIE":
+            if (length != 24 or int.from_bytes(payload[:4], "big") != entries_end or offset + length != end
+                    or payload[4:] != hashlib.sha1(extension_headers, usedforsecurity=False).digest()):
+                raise MaterializationError("Git index end-of-entries cache is invalid")
+        elif signature == b"IEOT":
+            if length < 4 or (length - 4) % 8 or int.from_bytes(payload[:4], "big") != 1:
+                raise MaterializationError("Git index entry-offset cache is invalid")
+            for position in range(4, length, 8):
+                if not 12 <= int.from_bytes(payload[position:position + 4], "big") < entries_end:
+                    raise MaterializationError("Git index entry-offset cache points outside its entries")
+        else:
+            extensions.append({"signature": signature.decode("ascii"),
+                               "sha256": "sha256:" + hashlib.sha256(payload).hexdigest()})
+        extension_headers.extend(signature + length.to_bytes(4, "big"))
         offset += length
     return canonical_sha256({"entries": entries, "extensions": extensions})
 

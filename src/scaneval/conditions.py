@@ -152,7 +152,7 @@ def _configured_retrieval(config: dict) -> bool:
             if any(isinstance(item, str) and _is_retrieval_tool(item) for item in listed):
                 return True
         if normalized in {*TOOLS, "web", "browsing", "web_retrieval", "provider_retrieval",
-                          "enable_browser", "enable_web_search", "enable_retrieval"} or _is_retrieval_tool(normalized):
+                          "enable_browser", "enable_web_search", "enable_retrieval"} or normalized in _RETRIEVAL_TOOLS:
             if value is True or isinstance(value, str) and value.casefold() in {"on", "true", "yes", "enabled", "allowed"}:
                 return True
             if isinstance(value, dict) and any(value.get(key) is True or isinstance(value.get(key), str)
@@ -166,11 +166,13 @@ def _configured_retrieval(config: dict) -> bool:
 
 def _is_retrieval_tool(name: str) -> bool:
     normalized = name.casefold()
-    if normalized in _RETRIEVAL_TOOLS or normalized.startswith(("mcp__browser__", "mcp__web__", "browser.", "web.")):
+    if normalized in _RETRIEVAL_TOOLS or normalized.startswith(("mcp__browser__", "mcp__web__", "mcp__playwright__", "browser.", "web.")):
         return True
     if normalized.startswith("mcp:") and "/" in normalized:
         server, tool = normalized[4:].split("/", 1)
         return server in {"web", "browser", "playwright"} or tool in _RETRIEVAL_TOOLS
+    if normalized.startswith("mcp:"):
+        return normalized[4:] in _RETRIEVAL_TOOLS
     return False
 
 
@@ -193,11 +195,11 @@ def _history(evidence: dict, execution: dict) -> tuple[str, list[dict]]:
                 pr = execution["provenance"].get("pr") or {}
                 valid = (neutral.get("messages") == PR_HISTORY_MESSAGES
                          and neutral.get("identity") == PR_HISTORY_IDENTITY and neutral.get("date") == PR_HISTORY_DATE
-                         and all(re.fullmatch(r"[0-9a-f]{40}", neutral.get(key, ""))
+                         and all(isinstance(neutral.get(key), str) and re.fullmatch(r"[0-9a-f]{40}", neutral[key])
                                  and neutral[key] == pr.get(key) for key in ("base_commit", "head_commit")))
             else:
                 valid = (neutral.get("message") == "snapshot" and neutral.get("identity") == "ScanEval <scaneval@localhost>"
-                         and re.fullmatch(r"[0-9a-f]{40}", neutral.get("commit", "")))
+                         and isinstance(neutral.get("commit"), str) and re.fullmatch(r"[0-9a-f]{40}", neutral["commit"]))
             if not valid:
                 return "unexpected", [_reason("non_neutral_history", "The saved synthetic history is not the minimal neutral snapshot repository.")]
     return states[0], []
@@ -225,7 +227,8 @@ def _network(execution: dict, controls: dict) -> tuple[str, list[dict], list[dic
         proxy = actual.get("proxy") or {}
         allowed = proxy.get("allow")
         hosts = (controls.get("provider") or {}).get("inference_hosts")
-        if not isinstance(allowed, list) or not allowed or not isinstance(hosts, list) or not hosts:
+        if (not isinstance(allowed, list) or not allowed or not all(isinstance(item, str) for item in allowed)
+                or not isinstance(hosts, list) or not hosts):
             enforced = False
             gaps.append(_reason("provider_route_gap", "Saved evidence does not bind the egress allowlist to remote-inference hosts."))
         elif set(allowed) - set(hosts):
@@ -363,8 +366,9 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None,
     except ContractError as exc:
         failed.append(_reason("invalid_condition_policy", str(exc)))
         declaration = resolve_condition(profile=profile, mode=mode)
-    declared = (condition is not None or (saved_policy or {}).get("declared") is True
-                or (saved_policy is None and execution.get("condition") is not None))
+    # The keyword carries an expectation from a schedule/caller. It cannot turn an inferred
+    # observation into an explicitly declared one or make reclassification depend on the caller.
+    declared = (saved_policy or {}).get("declared") is True
     record = {"schema_version": "2.1", "condition": declaration["name"], "status": "unavailable",
               "identity_profile": profile, "history": "unavailable", "retrieval": "capture_gap",
               "mode": mode,
@@ -422,10 +426,18 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None,
                              or request["input"]["tree_hash"] != execution["provenance"]["tree_hash"]))):
         failed.append(_reason("observation_binding_mismatch", "Saved request, execution, and result do not describe the same observation."))
     provenance = documents.get("provenance")
-    if provenance is not None and (canonical_sha256(provenance) != execution["provenance"]["provenance_sha256"]
-            or provenance.get("profile") != profile
-            or (provenance.get("trial") or {}).get("tree_hash") != execution["provenance"]["tree_hash"]):
-        failed.append(_reason("input_provenance_mismatch", "Saved input provenance does not bind to the executed source tree."))
+    if provenance is not None:
+        source_record = provenance.get("head", provenance) if mode == "pr" else provenance
+        source_record = source_record if isinstance(source_record, dict) else {}
+        recorded_profile = provenance.get("profile", source_record.get("profile"))
+        trial = source_record.get("trial")
+        recorded_tree = trial.get("tree_hash") if isinstance(trial, dict) else None
+        if (canonical_sha256(provenance) != execution["provenance"]["provenance_sha256"]
+                or recorded_profile is not None and recorded_profile != profile
+                or recorded_tree is not None and recorded_tree != execution["provenance"]["tree_hash"]):
+            failed.append(_reason("input_provenance_mismatch", "Saved input provenance contradicts the executed source tree."))
+        elif recorded_profile is None or recorded_tree is None:
+            gaps.append(_reason("input_provenance_incomplete", "Saved preparation notes do not establish the full export profile and tree identity."))
     configuration = documents.get("configuration", {})
     if configuration and (configuration.get("system_id") != execution["system_id"]
             or configuration.get("config") != execution["system_config"]
@@ -440,7 +452,9 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None,
                            for key in ("model_id", "model_revision")):
             failed.append(_reason("model_configuration_mismatch", "The saved model identity/revision differs from the invocation request."))
         requested_model = (execution.get("model_identity") or {}).get("requested")
-        if configuration.get("model_id") and requested_model is not None and configuration["model_id"] != requested_model:
+        adapter_config = configuration.get("config")
+        adapter_model = adapter_config.get("model") if isinstance(adapter_config, dict) else None
+        if isinstance(adapter_model, str) and requested_model is not None and adapter_model != requested_model:
             failed.append(_reason("model_identity_mismatch", "The executed model identity differs from the saved requested model."))
     if execution.get("condition") is not None and execution["condition"] != declaration:
         failed.append(_reason("condition_policy_mismatch", "The saved policy differs from the execution's condition."))
@@ -503,10 +517,12 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None,
     else:
         gaps.append(_reason("identity_condition_unavailable", "An identity transformation is distinct from closed-book attestation."))
     legacy = not all(key in documents for key in ("evidence", "provenance", "configuration", "policy"))
-    inferred_ineligible = (not declared and declaration["name"] == "closed_book_standard"
-                           and (profile != "standard" or mode != "full"
-                                or execution["network_policy"]["declared"] not in ("none", "model_provider_only")
-                                or record["retrieval"] == "enabled"))
+    eligibility_failures = {"unexpected_history", "history_changed", "non_neutral_history", "source_modified",
+                            "ineligible_input", "original_history_present", "unrestricted_network", "offline_network_policy",
+                            "remote_inference_policy", "unrelated_egress", "retrieval_enabled", "retrieval_observed",
+                            "provider_retrieval_enabled"}
+    inferred_ineligible = (not declared and declaration["name"] == "closed_book_standard" and failed
+                           and all(row["code"] in eligibility_failures for row in failed))
     record["status"] = ("unavailable" if inferred_ineligible else "failed" if failed
                         else "unavailable" if execution["status"] == "unsupported" or legacy
                         else "declared_only" if gaps else "attested")
