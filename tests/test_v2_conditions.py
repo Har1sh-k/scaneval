@@ -350,6 +350,22 @@ def test_legacy_classification_is_independent_of_bundle_location(tmp_path):
     assert str(tmp_path) not in canonical_json(first)
 
 
+def test_historical_provenance_without_optional_cue_inventory_remains_readable(tmp_path):
+    bundle, _record = invoke(tmp_path)
+    (bundle / conditions.RECORD_FILE).unlink()
+    path = bundle / conditions.PROVENANCE_FILE
+    provenance = json.loads(path.read_text())
+    provenance.pop("retained_identity_cues")
+    path.write_text(canonical_json(provenance))
+    execution_path = bundle / "execution.json"
+    execution = json.loads(execution_path.read_text())
+    execution["provenance"]["provenance_sha256"] = canonical_sha256(provenance)
+    execution_path.write_text(canonical_json(execution))
+    record = conditions.classify_observation(bundle)
+    assert record["status"] == "attested"
+    assert record["retained_identity_cues"]["instruction_files"] == ["AGENTS.md"]
+
+
 def test_condition_schema_refuses_attestation_of_an_unenforced_declaration(tmp_path):
     _bundle, record = invoke(tmp_path)
     record["network"] = "unenforced"

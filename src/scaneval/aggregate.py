@@ -307,7 +307,7 @@ def _timing(bundle: Path, run: _Run, assignment: dict, result: dict) -> tuple | 
 
 
 def _observe(run: _Run, assignment: dict, row: dict | None, prepared: dict | None, system: dict | None,
-             frozen: dict) -> _Observation:
+             scheduled_input: dict) -> _Observation:
     """What *run* says about one *assignment*: a read bundle, or a failure and why.
 
     The reason of a failure is the first that applies: ``missing_row`` (the manifest has no row, as in
@@ -319,6 +319,7 @@ def _observe(run: _Run, assignment: dict, row: dict | None, prepared: dict | Non
     identity = {"run_id": run.run_id, "input_id": assignment["input_id"],
                 "system_id": assignment["system_id"], "repetition": assignment["repetition"],
                 "assignment_id": assignment["assignment_id"]}
+    frozen = scheduled_input["plan"]
     planned = frozen["state"] == "frozen"
 
     def failure(status: str, reason: str) -> _Observation:
@@ -364,8 +365,15 @@ def _observe(run: _Run, assignment: dict, row: dict | None, prepared: dict | Non
             planned_ids = {item[key] for item in plan[kind]}
             unscored += len(frozen_ids - planned_ids)
             unregistered += len(planned_ids - frozen_ids)
-    scheduled_input = next(item for item in run.schedule["inputs"] if item["input_id"] == assignment["input_id"])
-    condition = conditions.classify_observation(bundle, condition=scheduled_input.get("condition"))
+    try:
+        condition = conditions.classify_observation(bundle, condition=scheduled_input.get("condition"),
+                                                    identity_profile=scheduled_input["profile"], input_mode=scheduled_input["mode"])
+    except ContractError as exc:
+        declaration = conditions.resolve_condition(scheduled_input.get("condition"), profile=scheduled_input["profile"], mode=scheduled_input["mode"])
+        condition = {"condition": declaration["name"], "status": "failed", "identity_profile": scheduled_input["profile"],
+                     "mode": scheduled_input["mode"], "system_id": assignment["system_id"],
+                     "policy_sha256": canonical_sha256(declaration),
+                     "reasons": [{"code": "unusable_condition_evidence", "message": f"Condition evidence for {assignment['assignment_id']} is unusable: {str(exc).replace(str(run.directory), '<run>')}"}]}
     return _Observation(**identity, status=result["status"], scope=scope, observed=observed,
                         review_state=state, unscored=unscored, unregistered=unregistered, timing=timing,
                         condition=condition)
@@ -496,10 +504,8 @@ def _load_corpus(run_dirs: Iterable[str | PathLike[str]]) -> _Corpus:
             key = (run.run_id, assignment["input_id"], assignment["system_id"], assignment["repetition"])
             observations[key] = _observe(
                 run, assignment, rows.get(assignment["assignment_id"]), prepared.get(assignment["input_id"]),
-                manifest_systems.get(assignment["system_id"]), inputs[key[:2]]["plan"])
-    corpus = _Corpus(runs, observations, targets, controls, inputs, systems)
-    _refuse_condition_mixing(corpus)
-    return corpus
+                manifest_systems.get(assignment["system_id"]), inputs[key[:2]])
+    return _Corpus(runs, observations, targets, controls, inputs, systems)
 
 
 def _condition_rows(corpus: _Corpus) -> list[dict]:
@@ -517,28 +523,32 @@ def _condition_rows(corpus: _Corpus) -> list[dict]:
                      "reasons": [{"code": item["code"], "message": item["message"].replace(roots[observation.run_id], "<run>")}
                                  for item in record["reasons"]] if record else [{"code": observation.reason or "unavailable",
                                                                     "message": "No readable invocation evidence is available."}],
-                     "record_sha256": canonical_sha256(record) if record else None})
+                     "record_identity_sha256": conditions.record_identity(record) if record else None})
     return rows
 
 
-def _refuse_condition_mixing(corpus: _Corpus) -> None:
+def _refuse_condition_mixing(corpus: _Corpus, system_ids: Iterable[str] | None = None) -> None:
     """A mode/profile metric view may not pool observations from different condition strata.
 
     Assignments that never produced a readable result stay in the operational denominator; they
     contain no measured observation to pool. Their missing condition evidence is still reported.
     """
-    strata: dict[tuple[str, str], set[tuple[str, str, str]]] = defaultdict(set)
+    selected = set(corpus.systems) if system_ids is None else set(system_ids)
+    strata: dict[tuple[str, str, str], set[tuple[str, str, str]]] = defaultdict(set)
     for key, observation in corpus.observations.items():
-        if observation.condition is not None:
+        denominator_only = (observation.status in ("partial", "unsupported", "error", "timeout")
+                            and observation.observed is not None
+                            and observation.observed["claims"]["records"] == 0)
+        if observation.system_id in selected and observation.condition is not None and not denominator_only:
             planned = corpus.inputs[key[:2]]
-            strata[(planned["mode"], planned["profile"])].add(
+            strata[(observation.system_id, planned["mode"], planned["profile"])].add(
                 (observation.condition["condition"], observation.condition["status"], observation.condition["policy_sha256"]))
-    for (mode, profile), found in sorted(strata.items()):
+    for (system_id, mode, profile), found in sorted(strata.items()):
         if len(found) > 1:
             names = ", ".join(f"{name}/{status} ({policy})" for name, status, policy in sorted(found))
-            raise ContractError(f"{mode}/{profile} mixes evaluation condition strata ({names}); "
-                                "aggregate each condition/status separately. Use conditions.condition_coverage "
-                                "or classify_observation to inspect all assignments without pooling metrics.")
+            raise ContractError(f"{system_id} {mode}/{profile} mixes evaluation condition strata ({names}); "
+                                "use scaneval aggregate --by-condition for separate metrics and full missingness, "
+                                "or scaneval condition to inspect invocation evidence.")
 
 
 def _condition_coverage(corpus: _Corpus) -> list[dict]:
@@ -548,7 +558,7 @@ def _condition_coverage(corpus: _Corpus) -> list[dict]:
     return [{"system_id": system, "mode": mode, "profile": profile, "condition": name,
              "status": status, "observations": len(rows),
              "policy_sha256": policy,
-             "assignments": [{key: row[key] for key in ("run_id", "assignment_id", "reasons", "record_sha256")}
+             "assignments": [{key: row[key] for key in ("run_id", "assignment_id", "reasons", "record_identity_sha256")}
                              for row in rows]}
             for (system, mode, profile, name, status, policy), rows in sorted(grouped.items())]
 
@@ -1603,6 +1613,7 @@ def _run_row(corpus: _Corpus, run: _Run) -> dict:
     """One run as read: its hashes, its evidence digest, its failures, its execution timing, and what it covers.
 
     The evidence digest hashes, per assignment in id order, its status, failure reason, review state,
+    the versioned structural condition identity (artifact hashes and reason codes, excluding prose),
     and the result, plan, and decisions digests of its bundle, so a report binds to exact evidence.
     ``selection`` is the manifest's record of what the run was narrowed to, and ``configured_inputs``
     counts the inputs its configuration names beside ``inputs``, those its schedule covers: a run
@@ -1620,7 +1631,7 @@ def _run_row(corpus: _Corpus, run: _Run) -> dict:
         elapsed = span if span >= 0 else None
     evidence = [{"assignment_id": item.assignment_id, "status": item.status, "reason": item.reason,
                  "review_state": item.review_state,
-                 "condition_sha256": canonical_sha256(item.condition) if item.condition is not None else None,
+                 "condition_identity_sha256": conditions.record_identity(item.condition) if item.condition is not None else None,
                  **({key: item.observed[key] for key in ("result_sha256", "plan_sha256", "decisions_sha256")}
                     if item.observed is not None else {})}
                 for item in observations]
@@ -1708,6 +1719,7 @@ def aggregate(run_dirs: Iterable[str | PathLike[str]], *, policy: dict | None = 
     """
     context = _Context(_load_corpus(run_dirs), resolve_policy(policy))
     corpus = context.corpus
+    _refuse_condition_mixing(corpus)
     views = []
     for mode, profile in _view_keys(corpus, corpus.systems):
         system_ids = _systems_in_view(corpus, mode, profile)
@@ -1721,6 +1733,7 @@ def aggregate(run_dirs: Iterable[str | PathLike[str]], *, policy: dict | None = 
                       "warnings": _view_warnings(facts, results)})
     report = {
         "schema_version": SCHEMA_VERSION, "evaluator_version": __version__,
+        "condition_digest_format": conditions.IDENTITY_FORMAT,
         "policy": context.policy, "policy_sha256": canonical_sha256(context.policy),
         "runs": [_run_row(corpus, run) for run in corpus.runs],
         "systems": [_system_row(system_id, info) for system_id, info in corpus.systems.items()],
@@ -1909,6 +1922,7 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
     for system_id in (baseline, candidate):
         if system_id not in corpus.systems:
             raise ContractError(f"system {system_id} is not scheduled in any of the given runs")
+    _refuse_condition_mixing(corpus, (baseline, candidate))
     contracts = {system_id: _contract(corpus, system_id) for system_id in (baseline, candidate)}
     gap = _contract_gap(contracts[baseline], contracts[candidate], (baseline, candidate))
     if gap is not None:
@@ -1932,6 +1946,7 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
     structure = contracts[baseline]
     report = {
         "schema_version": SCHEMA_VERSION, "evaluator_version": __version__,
+        "condition_digest_format": conditions.IDENTITY_FORMAT,
         "policy": context.policy, "policy_sha256": canonical_sha256(context.policy),
         "runs": [_run_row(corpus, run) for run in corpus.runs
                  if baseline in run.system_ids or candidate in run.system_ids],

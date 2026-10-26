@@ -17,6 +17,7 @@
     "notes"
   ],
   "properties": {
+    "condition_digest_format": {"const": "condition-structural-v1"},
     "condition_coverage": {
       "type": "array", "items": {
         "type": "object", "additionalProperties": false,
@@ -29,10 +30,12 @@
           "policy_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
           "observations": {"type": "integer", "minimum": 0},
           "assignments": {"type": "array", "items": {"type": "object", "additionalProperties": false,
-            "required": ["run_id", "assignment_id", "reasons", "record_sha256"], "properties": {
+            "required": ["run_id", "assignment_id", "reasons"],
+            "anyOf": [{"required":["record_sha256"]},{"required":["record_identity_sha256"]}], "properties": {
               "run_id": {"type": "string"}, "assignment_id": {"type": "string"},
               "reasons": {"type": "array", "items": {"type": "object", "required": ["code", "message"], "additionalProperties": false, "properties": {"code": {"type": "string"}, "message": {"type": "string"}}}},
-              "record_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"}
+              "record_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+              "record_identity_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"}
             }}}
         }
       }

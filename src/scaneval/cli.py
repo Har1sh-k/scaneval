@@ -957,6 +957,9 @@ def _aggregate(args: argparse.Namespace) -> int:
 def _condition(args: argparse.Namespace) -> int:
     """Reclassify saved artifacts and report every condition stratum without scoring claims."""
     from . import conditions
+    for bundle in args.bundles:
+        if not bundle.expanduser().resolve().is_dir():
+            raise ContractError(f"condition bundle is not a directory: {bundle}")
     records = [conditions.classify_observation(bundle) for bundle in args.bundles]
     report = {"observations": records, "coverage": conditions.condition_coverage(records)}
     if args.output:

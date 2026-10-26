@@ -46,6 +46,7 @@ The scorer reports known-target detection, recall within review budgets, and fal
 | `scaneval import sarif <log> --pack --snapshot-id --tree-hash --system-id --output` | Import one run of a saved SARIF 2.1.0 log into a new bundle for review, offline. |
 | `scaneval review init\|record\|approve\|status` | Prepare and record the review of an invocation bundle. |
 | `scaneval diagnose context-coverage <bundle>` | Compare captured context spans with labeled targets. Does not change scores. |
+| `scaneval condition <bundle>... [--output]` | Inspect saved condition evidence and separate system/policy/status coverage, offline. |
 | `scaneval aggregate <run dir>... --output` | Weight every scheduled assignment of saved runs into corpus metrics with cluster-bootstrap intervals. |
 | `scaneval compare <run dir>... --baseline --candidate --output` | Compare two systems assigned the same frozen work, with paired intervals. Decides no promotion. |
 | `scaneval precision sample\|queue\|record\|estimate` | Sample delivered claims from saved runs, record human reviews, and estimate reviewed precision. Does not change scores. |

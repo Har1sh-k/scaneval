@@ -46,6 +46,16 @@ reported as unavailable. Legacy bundles without condition evidence remain readab
 conservatively. Use `scaneval condition bundle-a bundle-b` to inspect mixed collections and their
 separate coverage without pooling results; see [closed-book standard](CLOSED_BOOK.md).
 
+Condition-aware writers include optional-for-compatibility `condition_coverage` and
+`condition_digest_format: condition-structural-v1` fields in 2.1 reports. The structural identity
+hash includes every condition-record field and saved artifact hash, with human-readable reason
+messages replaced by reason codes, wrapped with that format identifier. It is named
+`record_identity_sha256`, rather than a byte hash of the complete record. Run `evidence_sha256`
+now includes `condition_identity_sha256`, and paired `structure_sha256` includes the resolved
+condition declaration. Regenerated reports therefore have different digest compositions from
+reports written before condition support; old reports still validate but their gate bindings
+do not apply to regenerated reports.
+
 Observations are keyed by run and input, so one input scanned by two runs is two positive inputs. Each is averaged over its own repetition count `k`.
 
 | Weight | Rule |

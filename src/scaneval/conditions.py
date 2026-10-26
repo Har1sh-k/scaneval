@@ -28,6 +28,7 @@ PROVENANCE_FILE = "input-provenance.json"
 EVIDENCE_FILE = "condition-evidence.json"
 STATUSES = ("attested", "declared_only", "failed", "unavailable")
 NAMES = ("closed_book_standard", "open_context", "identity_reduced")
+IDENTITY_FORMAT = "condition-structural-v1"
 TOOLS = ("browser", "web_search", "remote_fetch", "package_install", "scanner_update")
 _LOCAL_TOOLS = frozenset({"read", "write", "edit", "multiedit", "glob", "grep", "ls",
                           "read_file", "list_directory", "search_files", "apply_patch"})
@@ -122,13 +123,24 @@ def _verify_previous(root: Path, record: dict) -> dict:
         try:
             previous = _json(_bytes(root, RECORD_FILE))
             validate_document(KIND, previous)
-            if previous != record:
+            if record_identity(previous) != record_identity(record):
                 record["status"] = "failed"
                 record["reasons"].insert(0, _reason("stale_condition_record", "The saved condition record does not match the exact artifacts now present."))
         except ContractError as exc:
             record["status"] = "failed"
             record["reasons"].insert(0, _reason("invalid_condition_record", str(exc)))
     return validate_document(KIND, record)
+
+
+def record_identity(record: dict) -> str:
+    """Versioned structural identity, including artifact hashes and reason codes, excluding prose.
+
+    This is deliberately named an identity digest, not the byte hash of ``condition.json``.
+    Human-readable reason messages may differ by operating system or locale without changing
+    saved evidence or the condition's structural conclusion.
+    """
+    projection = {**record, "reasons": [{"code": row["code"]} for row in record["reasons"]]}
+    return canonical_sha256({"format": IDENTITY_FORMAT, "record": projection})
 
 
 def _configured_retrieval(config: dict) -> bool:
@@ -310,7 +322,8 @@ def _provider(root: Path, execution: dict, configuration: dict, controls: dict,
     return "unverifiable", detail, [], [_reason("provider_unverifiable", "No applicable saved provider attestation establishes that provider retrieval was disabled.")]
 
 
-def classify_observation(bundle: str | Path, *, condition: dict | None = None) -> dict:
+def classify_observation(bundle: str | Path, *, condition: dict | None = None,
+                         identity_profile: str | None = None, input_mode: str | None = None) -> dict:
     """Classify one saved bundle; never promote legacy declarations to attested evidence.
 
     Missing execution/input/trace evidence produces an unavailable or declared-only record. An
@@ -337,18 +350,24 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None) -
             documents[role] = value
             artifacts.append({"role": role, "path": relative, "sha256": _digest(raw)})
         except ContractError as exc:
-            gaps.append(_reason("missing_" + role, str(exc)))
+            (failed if role == "policy" and (root / relative).exists() else gaps).append(
+                _reason("invalid_condition_policy" if role == "policy" and (root / relative).exists() else "missing_" + role, str(exc)))
     execution, result, request = (documents.get(name, {}) for name in ("execution", "result", "request"))
-    profile = (execution.get("provenance") or {}).get("profile", (request.get("input") or {}).get("profile", "standard"))
-    mode = (execution.get("provenance") or {}).get("mode", (request.get("input") or {}).get("mode", "full"))
+    profile = (execution.get("provenance") or {}).get("profile", (request.get("input") or {}).get("profile", identity_profile or "standard"))
+    mode = (execution.get("provenance") or {}).get("mode", (request.get("input") or {}).get("mode", input_mode or "full"))
     saved_policy = documents.get("policy")
     policy = ({key: value for key, value in saved_policy.items() if key != "declared"}
               if saved_policy is not None else None)
-    declaration = resolve_condition(condition or policy or execution.get("condition"), profile=profile, mode=mode)
+    try:
+        declaration = resolve_condition(condition or policy or execution.get("condition"), profile=profile, mode=mode)
+    except ContractError as exc:
+        failed.append(_reason("invalid_condition_policy", str(exc)))
+        declaration = resolve_condition(profile=profile, mode=mode)
     declared = (condition is not None or (saved_policy or {}).get("declared") is True
                 or (saved_policy is None and execution.get("condition") is not None))
     record = {"schema_version": "2.1", "condition": declaration["name"], "status": "unavailable",
               "identity_profile": profile, "history": "unavailable", "retrieval": "capture_gap",
+              "mode": mode,
               "declared": declared,
               "network": "unenforced", "provider_retrieval": "unverifiable",
               "run_id": execution.get("run_id", result.get("run_id", "unknown")),
@@ -392,7 +411,8 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None) -
         except ContractError as exc:
             gaps.append(_reason("trace_unavailable", str(exc)))
     if not execution or not result:
-        record["reasons"] = gaps
+        record["status"] = "failed" if failed else "unavailable"
+        record["reasons"] = failed + gaps
         return _verify_previous(root, record)
     expected_input = execution["provenance"].get("input_hash", execution["provenance"]["tree_hash"])
     if (execution["run_id"] != result["run_id"] or execution["system_id"] != result["system_id"]
@@ -498,6 +518,8 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None) -
 
 def condition_coverage(records: Iterable[dict]) -> list[dict]:
     """Count each condition/status stratum explicitly without pooling detection metrics."""
-    counts = Counter((row["condition"], row["status"], row["identity_profile"]) for row in records)
-    return [{"condition": name, "status": status, "identity_profile": profile, "observations": count}
-            for (name, status, profile), count in sorted(counts.items())]
+    counts = Counter((row.get("system_id", "unknown"), row.get("mode", "full"), row["condition"],
+                      row["status"], row["identity_profile"], row["policy_sha256"]) for row in records)
+    return [{"system_id": system, "mode": mode, "condition": name, "status": status,
+             "identity_profile": profile, "policy_sha256": policy, "observations": count}
+            for (system, mode, name, status, profile, policy), count in sorted(counts.items())]
