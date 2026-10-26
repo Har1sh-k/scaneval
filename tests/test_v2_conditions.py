@@ -70,7 +70,7 @@ class Enforced:
                 "network": network, "containers": containers}
 
 
-def invoke(tmp_path, adapter=None, *, policy="none", enforced=True, config=None, model_id=None):
+def invoke(tmp_path, adapter=None, *, policy="none", enforced=True, config=None, model_id=None, declared=True):
     source = tmp_path / "source"
     source.mkdir()
     for name, text in {"app.py": "print('hello')\n", "AGENTS.md": "Read the project.\n",
@@ -80,7 +80,8 @@ def invoke(tmp_path, adapter=None, *, policy="none", enforced=True, config=None,
     provenance = {"profile": "standard", "trial": {"tree_hash": tree}, "instruction_files": ["AGENTS.md"],
                   "retained_identity_cues": {"instruction_files": ["AGENTS.md"], "documentation": ["README.md"],
                                                "package_metadata": ["package.json"], "source_identifiers": "retained"}}
-    prepared = PreparedInput("input", source, tree, ("python",), provenance)
+    prepared = PreparedInput("input", source, tree, ("python",), provenance,
+                             condition={"name": "closed_book_standard", "policy": {}} if declared else None)
     adapter = adapter or Offline()
     bundle = run_invocation(prepared=prepared, adapter=adapter,
                             spec=SystemSpec("scanner", "fixture", config or {}, model_id=model_id), preparation={},
@@ -108,6 +109,59 @@ def test_local_declaration_is_never_attested(tmp_path):
     _bundle, record = invoke(tmp_path, enforced=False)
     assert record["status"] == "declared_only" and record["network"] == "unenforced"
     assert "network_unenforced" in codes(record)
+
+
+def test_undeclared_unrestricted_input_is_unavailable_not_a_requested_condition_failure(tmp_path):
+    _bundle, record = invoke(tmp_path, policy="unrestricted", declared=False)
+    assert record["status"] == "unavailable" and record["declared"] is False
+    assert "unrestricted_network" in codes(record)
+
+
+def test_an_eligible_inferred_condition_can_be_classified_from_saved_evidence(tmp_path):
+    _bundle, record = invoke(tmp_path, declared=False)
+    assert record["status"] == "attested" and record["declared"] is False
+
+
+def test_undeclared_pr_keeps_neutral_history_but_is_outside_closed_book_standard(tmp_path):
+    from test_v2_execution import pr_input, run, PrAdapter
+    bundle = run(tmp_path, PrAdapter(), pr_input(tmp_path))
+    record = load_document(bundle / conditions.RECORD_FILE, conditions.KIND)
+    assert record["history"] == "neutral_synthetic"
+    assert record["status"] == "unavailable" and record["declared"] is False
+    assert "non_neutral_history" not in codes(record)
+
+
+def test_missing_open_context_extension_refuses_before_creating_output(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    tree = hash_exported_tree(source)["tree_hash"]
+    prepared = PreparedInput("input", source, tree, ("python",), {"profile": "standard", "trial": {"tree_hash": tree}},
+                             condition={"name": "open_context", "policy": {}})
+    from scaneval.execution import ExecutionError
+    with pytest.raises(ExecutionError, match="open_context is unavailable"):
+        run_invocation(prepared=prepared, adapter=Offline(), spec=SystemSpec("scanner", "fixture"),
+                       preparation={}, out_dir=tmp_path / "out", run_id="missing-extension")
+    assert not (tmp_path / "out").exists()
+
+
+def test_unencodable_configuration_refuses_before_creating_output(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    tree = hash_exported_tree(source)["tree_hash"]
+    prepared = PreparedInput("input", source, tree, ("python",), {})
+    with pytest.raises(ContractError, match="UTF-8"):
+        run_invocation(prepared=prepared, adapter=Offline(), spec=SystemSpec("scanner", "fixture", {"bad": chr(0xD800)}),
+                       preparation={}, out_dir=tmp_path / "out", run_id="unencodable")
+    assert not (tmp_path / "out").exists()
+
+
+def test_prescan_history_read_error_has_execution_error_context(tmp_path, monkeypatch):
+    from scaneval import execution
+    def unreadable(*args, **kwargs):
+        raise PermissionError("audit fixture denied")
+    monkeypatch.setattr(execution, "audit_condition_history", unreadable)
+    with pytest.raises(execution.ExecutionError, match="exported history could not be audited.*PermissionError"):
+        invoke(tmp_path)
 
 
 def test_neutral_single_commit_history_is_recorded_and_unchanged(tmp_path):

@@ -12,7 +12,10 @@ An explicit declaration in a 2.1 run configuration is:
 {"snapshot_id":"snapshot-a","profile":"standard","condition":{"name":"closed_book_standard","policy":{}}}
 ```
 
-New standard full scans default to that condition. The declaration requests classification; it
+New eligible standard full scans infer that condition when it was not explicitly configured.
+The saved policy and result distinguish declared from inferred conditions. An inferred PR input
+or unrestricted-network input is unavailable for this condition, rather than a failure of a
+condition the operator never requested. An explicit declaration requests classification; it
 does not attest the run. A condition is independent of a source profile: an open-context input
 also keeps ordinary repository identity, and an identity-reduced input requires its own
 transformation evidence. Condition names and policy are frozen in the schedule and manifest

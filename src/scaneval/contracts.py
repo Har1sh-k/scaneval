@@ -1643,6 +1643,11 @@ def _validate_run_config(document: dict[str, Any]) -> None:
             condition = resolve_condition(item["condition"], profile=item.get("profile", "standard"), mode=mode)
             if condition["name"] == "closed_book_standard" and (item.get("profile", "standard") != "standard" or mode != "full"):
                 raise ContractError(f"{label}: closed_book_standard requires a standard full-scan input")
+            if condition["name"] == "open_context":
+                try:
+                    from . import open_context  # noqa: F401
+                except ImportError as exc:
+                    raise ContractError(f"{label}: open_context is unavailable: its bounded-history extension is not installed") from exc
     _unique([input_identity(item) for item in document["inputs"]], "input id")
     for index, system in enumerate(document["systems"]):
         execution = system.get("execution") or {"backend": "local"}

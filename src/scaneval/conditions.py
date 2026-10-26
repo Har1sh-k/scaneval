@@ -157,8 +157,17 @@ def _history(evidence: dict, execution: dict) -> tuple[str, list[dict]]:
             return "unexpected", [_reason("history_changed", "The repository metadata changed during execution.")]
         if states[0] == "neutral_synthetic":
             neutral = execution["provenance"].get("synthetic_history") or {}
-            if (neutral.get("message") != "snapshot" or neutral.get("identity") != "ScanEval <scaneval@localhost>"
-                    or not re.fullmatch(r"[0-9a-f]{40}", neutral.get("commit", ""))):
+            if execution["provenance"].get("mode") == "pr":
+                from .materialize import PR_HISTORY_DATE, PR_HISTORY_IDENTITY, PR_HISTORY_MESSAGES
+                pr = execution["provenance"].get("pr") or {}
+                valid = (neutral.get("messages") == PR_HISTORY_MESSAGES
+                         and neutral.get("identity") == PR_HISTORY_IDENTITY and neutral.get("date") == PR_HISTORY_DATE
+                         and all(re.fullmatch(r"[0-9a-f]{40}", neutral.get(key, ""))
+                                 and neutral[key] == pr.get(key) for key in ("base_commit", "head_commit")))
+            else:
+                valid = (neutral.get("message") == "snapshot" and neutral.get("identity") == "ScanEval <scaneval@localhost>"
+                         and re.fullmatch(r"[0-9a-f]{40}", neutral.get("commit", "")))
+            if not valid:
                 return "unexpected", [_reason("non_neutral_history", "The saved synthetic history is not the minimal neutral snapshot repository.")]
     return states[0], []
 
@@ -313,9 +322,15 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None) -
     execution, result, request = (documents.get(name, {}) for name in ("execution", "result", "request"))
     profile = (execution.get("provenance") or {}).get("profile", (request.get("input") or {}).get("profile", "standard"))
     mode = (execution.get("provenance") or {}).get("mode", (request.get("input") or {}).get("mode", "full"))
-    declaration = resolve_condition(condition or documents.get("policy") or execution.get("condition"), profile=profile, mode=mode)
+    saved_policy = documents.get("policy")
+    policy = ({key: value for key, value in saved_policy.items() if key != "declared"}
+              if saved_policy is not None else None)
+    declaration = resolve_condition(condition or policy or execution.get("condition"), profile=profile, mode=mode)
+    declared = (condition is not None or (saved_policy or {}).get("declared") is True
+                or (saved_policy is None and execution.get("condition") is not None))
     record = {"schema_version": "2.1", "condition": declaration["name"], "status": "unavailable",
               "identity_profile": profile, "history": "unavailable", "retrieval": "capture_gap",
+              "declared": declared,
               "network": "unenforced", "provider_retrieval": "unverifiable",
               "run_id": execution.get("run_id", result.get("run_id", "unknown")),
               "invocation_id": execution.get("invocation_id", root.name),
@@ -366,7 +381,7 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None) -
         failed.append(_reason("configuration_mismatch", "The saved configuration differs from the execution record."))
     if execution.get("condition") is not None and execution["condition"] != declaration:
         failed.append(_reason("condition_policy_mismatch", "The saved policy differs from the execution's condition."))
-    if documents.get("policy") is not None and documents["policy"] != declaration:
+    if policy is not None and policy != declaration:
         failed.append(_reason("condition_policy_mismatch", "The requested condition differs from the saved condition policy."))
     evidence = documents.get("evidence", {})
     controls = evidence.get("controls") or {}
@@ -424,7 +439,12 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None) -
     else:
         gaps.append(_reason("identity_condition_unavailable", "An identity transformation is distinct from closed-book attestation."))
     legacy = not all(key in documents for key in ("evidence", "provenance", "configuration", "policy"))
-    record["status"] = ("failed" if failed else "unavailable" if execution["status"] == "unsupported" or legacy
+    inferred_ineligible = (not declared and declaration["name"] == "closed_book_standard"
+                           and (profile != "standard" or mode != "full"
+                                or execution["network_policy"]["declared"] not in ("none", "model_provider_only")
+                                or record["retrieval"] == "enabled"))
+    record["status"] = ("unavailable" if inferred_ineligible else "failed" if failed
+                        else "unavailable" if execution["status"] == "unsupported" or legacy
                         else "declared_only" if gaps else "attested")
     record["reasons"] = failed + gaps
     if not record["reasons"]:

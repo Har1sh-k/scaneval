@@ -127,7 +127,7 @@ from .materialize import (
 )
 
 
-NETWORK_POLICIES = ("none", "model_provider_only", "unrestricted", "public_research")
+NETWORK_POLICIES = ("none", "model_provider_only", "unrestricted")
 _USAGE_KEYS = ("wall_seconds", "setup_seconds", "cost_usd", "input_tokens", "output_tokens")
 
 
@@ -1180,23 +1180,28 @@ def run_invocation(
     # Decided from what the adapter declares and never from what its scan would do: an input whose
     # mode the adapter does not carry out is recorded as unsupported and scan() is never called.
     mode_unsupported = prepared.mode not in adapter.scan_modes
-    bundle = out_dir / invocation_id(prepared.input_id, spec.system_id, repetition)
-    bundle.mkdir(parents=True, exist_ok=False)
-    raw_dir = bundle / "raw"
-    trace_dir = bundle / "trace" if trace_mode != "off" else None
-    bundle_area = _enclose(bundle)
     request = build_request(run_id, prepared, spec, timeout_seconds=timeout_seconds, trace_mode=trace_mode,
                             pr=request_pr)
     from . import conditions
     condition = conditions.resolve_condition(prepared.condition, profile=prepared.profile, mode=prepared.mode)
+    if condition["name"] == "open_context":
+        try:
+            from . import open_context
+        except ImportError as exc:
+            raise ExecutionError("open_context is unavailable: its bounded-history extension is not installed") from exc
     configuration = {"system_id": spec.system_id, "adapter": spec.adapter, "config": dict(spec.config),
                      "model_id": spec.model_id, "model_revision": spec.model_revision,
                      "network_policy": network_policy}
     # Freeze before the scanner can mutate any adapter state; publish with the execution pair,
     # so a failed final write leaves the historical request/raw-only recovery layout intact.
-    policy_bytes = _canonical_bytes(condition)
+    policy_bytes = _canonical_bytes({**condition, "declared": prepared.condition is not None})
     configuration_bytes = _canonical_bytes(configuration)
     provenance_bytes = _canonical_bytes(prepared.provenance)
+    bundle = out_dir / invocation_id(prepared.input_id, spec.system_id, repetition)
+    bundle.mkdir(parents=True, exist_ok=False)
+    raw_dir = bundle / "raw"
+    trace_dir = bundle / "trace" if trace_mode != "off" else None
+    bundle_area = _enclose(bundle)
     _write_new(bundle / "request.json", request)
 
     state_dirs = frozenset(getattr(adapter, "state_dirs", ()))
@@ -1288,7 +1293,10 @@ def run_invocation(
                 synthetic = _pr_history(source, prepared)
         elif adapter.requires_git and not (source / ".git").exists():
             synthetic = prepare_synthetic_history(source)
-        history_before = audit_condition_history(source, synthetic=synthetic, bounded=installed_history)
+        try:
+            history_before = audit_condition_history(source, synthetic=synthetic, bounded=installed_history)
+        except (OSError, MaterializationError) as exc:
+            raise ExecutionError(f"the exported history could not be audited: {_failure_message(exc)}") from exc
         if mode_unsupported:
             outcome = NativeOutcome(status="unsupported", exit_code=None, command=[],
                                     error={"code": "unsupported_mode",

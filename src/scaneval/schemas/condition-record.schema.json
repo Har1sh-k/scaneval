@@ -10,6 +10,7 @@
     "schema_version": {"const": "2.1"},
     "condition": {"enum": ["closed_book_standard", "open_context", "identity_reduced"]},
     "status": {"enum": ["attested", "declared_only", "failed", "unavailable"]},
+    "declared": {"type": "boolean", "description": "Whether a condition was explicitly configured, rather than conservatively inferred from saved evidence."},
     "identity_profile": {"type": "string", "minLength": 1},
     "history": {"enum": ["original_absent", "neutral_synthetic", "bounded_ancestor_history", "unexpected", "unavailable"]},
     "retrieval": {"enum": ["disabled", "observed_none", "capture_gap", "enabled", "recorded", "unavailable"]},

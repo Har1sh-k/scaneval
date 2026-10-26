@@ -192,8 +192,7 @@
           "enum": [
             "none",
             "model_provider_only",
-            "unrestricted",
-            "public_research"
+            "unrestricted"
           ]
         },
         "enforced": {

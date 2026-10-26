@@ -31,6 +31,8 @@ def test_aggregation_reports_legacy_condition_coverage_and_refuses_mixed_status(
     execution = json.loads(execution_path.read_text())
     execution["network_policy"]["declared"] = "unrestricted"
     execution_path.write_text(canonical_json(execution))
+    (bundle / "condition-policy.json").write_text(canonical_json({
+        "name": "closed_book_standard", "policy": {}, "declared": True}))
     with pytest.raises(ContractError, match="mixes evaluation condition strata"):
         aggregate.aggregate([run], policy=policy(replicates=10))
 
