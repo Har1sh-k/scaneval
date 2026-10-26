@@ -96,6 +96,7 @@ def test_preserved_fetch_and_real_search_url_have_complete_attempt_provenance(tm
     assert result["source_assurance"] == "self_reported"
     assert base64.b64decode(result["content_base64"]) == b"public evidence"
     assert (tmp_path / result["content_path"]).read_bytes() == b"public evidence"
+    assert (tmp_path / result["content_path"]).stat().st_mode & 0o777 == 0o644
     assert result["content_sha256"] == "sha256:" + hashlib.sha256(b"public evidence").hexdigest()
     assert result["started_at"] <= result["finished_at"]
     assert search["query"] == "repository vulnerable function" and "q=repository+vulnerable+function" in search["url"]

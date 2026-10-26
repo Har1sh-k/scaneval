@@ -262,6 +262,7 @@ class Recorder:
         with self.lock:
             descriptor, temporary = tempfile.mkstemp(prefix=".capture-", suffix=".part", dir=evidence)
             try:
+                os.fchmod(descriptor, 0o644)  # Host collection must read files owned by container uid 65534.
                 with os.fdopen(descriptor, "wb") as stream:
                     stream.write(body)
                 os.replace(temporary, path)

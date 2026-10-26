@@ -63,6 +63,11 @@ def depth_two_clone(source: Path, destination: Path) -> Path:
     [
         ("src/scaneval/isolation/oci.py", True),
         ("src/scaneval/execution.py", True),
+        ("src/scaneval/open_context.py", True),
+        ("src/scaneval/open_context_evidence.py", True),
+        ("tests/test_v2_open_context_docker.py", True),
+        ("tests/test_v2_public_retrieval.py", True),
+        ("examples/open_context_fixture.py", True),
         ("src/scaneval/cli.py", True),
         ("src/scaneval/__init__.py", True),
         ("src/scaneval/cases.py", True),
