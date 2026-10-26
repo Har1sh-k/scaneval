@@ -308,11 +308,13 @@ def _provider(root: Path, execution: dict, configuration: dict, controls: dict,
     capability = provider.get("capability", "unverifiable")
     control = provider.get("control", "unverifiable")
     detail = {"capability": capability, "control": control, "attestation": "missing"}
-    if controls.get("inference") == "offline" and capability == "not_applicable":
-        detail["attestation"] = "not_applicable"
-        return "not_applicable", detail, [], []
     if control == "enabled":
         return "enabled", detail, [_reason("provider_retrieval_enabled", "Provider-hosted retrieval is enabled.")], []
+    if controls.get("inference") == "offline" and capability == "not_applicable":
+        if control == "not_applicable" and provider.get("attestation") is None:
+            detail["attestation"] = "not_applicable"
+            return "not_applicable", detail, [], []
+        return "unverifiable", detail, [], [_reason("provider_controls_inconsistent", "The offline provider exemption requires not-applicable capability and control with no provider assertion.")]
     reference = provider.get("attestation")
     if isinstance(reference, dict):
         try:

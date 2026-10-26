@@ -354,6 +354,33 @@ class Remote(Offline):
         return value
 
 
+def test_enabled_provider_retrieval_overrides_offline_capability_exemption(tmp_path):
+    class ContradictoryProvider(Offline):
+        def condition_controls(self, spec, preparation):
+            value = super().condition_controls(spec, preparation)
+            value["provider"]["control"] = "enabled"
+            return value
+    _bundle, record = invoke(tmp_path, ContradictoryProvider())
+    assert record["provider_retrieval"] == "enabled" and record["status"] == "failed"
+    assert "provider_retrieval_enabled" in codes(record)
+
+
+@pytest.mark.parametrize("provider", [
+    {"capability": "not_applicable", "control": "disabled"},
+    {"capability": "not_applicable"},
+    {"capability": "not_applicable", "control": "not_applicable", "attestation": {"path": "assertion.json"}},
+])
+def test_offline_provider_exemption_requires_coherent_not_applicable_controls(tmp_path, provider):
+    class IncoherentProvider(Offline):
+        def condition_controls(self, spec, preparation):
+            value = super().condition_controls(spec, preparation)
+            value["provider"] = provider
+            return value
+    _bundle, record = invoke(tmp_path, IncoherentProvider())
+    assert record["provider_retrieval"] == "unverifiable" and record["status"] == "declared_only"
+    assert "provider_controls_inconsistent" in codes(record)
+
+
 def test_remote_inference_is_distinct_from_provider_retrieval_assurance(tmp_path):
     _bundle, record = invoke(tmp_path, Remote(), policy="model_provider_only", model_id="model-a")
     assert record["network"] == "enforced" and record["provider_retrieval"] == "unverifiable"

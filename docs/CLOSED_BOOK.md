@@ -69,7 +69,8 @@ separately from local network enforcement. A registered JSON assertion can be bo
 invocation but remains self-reported. This build has no trusted provider-attestation verifier,
 so remote-model observations remain `declared_only` even with enforced inference-only egress
 and a saved assertion that retrieval was disabled. It never infers absence of hidden provider
-retrieval.
+retrieval. Explicitly enabled provider retrieval takes precedence over an offline capability
+label; inconsistent not-applicable controls cannot attest the provider exemption.
 
 The named `identity_reduced` condition uses the same full-scan history, retrieval, network,
 and provider restrictions, plus a verified strict identity policy. The profile alone or a
