@@ -126,4 +126,4 @@ jobs:
       - name: OCI integration tests
         # Real containers, local fixture services, and benign example.com retrieval; no model
         # or target application is called. Native Linux also checks cross-UID capture reads.
-        run: python -m pytest -q -rs tests/test_v2_isolation_docker.py tests/test_v2_open_context_docker.py
+        run: python -m pytest -q -rs tests/test_v2_isolation_docker.py tests/test_v2_open_context_docker.py tests/test_v2_experiment_docker.py
