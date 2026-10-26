@@ -223,8 +223,9 @@ def check_identity_cues(matrix: dict, *, output_dir: Path | None = None,
     candidate = {"run_id": declaration["experiment_id"] + ".identity_reduced", "systems": [
         {key: system.get(key) for key in ("system_id", "adapter", "config", "model_id", "model_revision")}
         for system in declaration["systems"]],
-        "input_ids": declaration.get("population", {}).get("snapshot_ids", []),
         "paths": []}
+    # Snapshot/input identifiers name private schedules, packs, and bundles. They are absent
+    # from build_request and the neutral scanner workspace, so do not treat them as supplied cues.
     for path in (output_dir, workspace_root):
         if path is not None:
             named = Path(path).expanduser().absolute()

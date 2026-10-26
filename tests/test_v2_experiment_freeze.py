@@ -1,6 +1,7 @@
 """Real pack/map semantic freeze checks; no scanner or target application executes."""
 
 from copy import deepcopy
+from dataclasses import replace
 import importlib.util
 from pathlib import Path
 
@@ -98,3 +99,52 @@ def test_actual_identity_workspace_preflight_refuses_before_any_runner(real_froz
     with pytest.raises(ContractError, match="reviewed original cues|strict identity"):
         experiment.execute(frozen, output)
     assert not called and not output.exists()
+
+
+def test_private_cve_snapshot_id_freezes_without_weakening_true_scanner_field_checks(declared_fixture):
+    from scaneval import cases
+    from scaneval.adapters.base import SystemSpec
+    from scaneval.contracts import pack_anchor_digest
+    from scaneval.execution import PreparedInput, build_request
+
+    path, declaration = declared_fixture
+    alias = "CVE-2025-12345"
+    pack = cases.load_pack(path.parent / "pack.json")
+    snapshot = pack["snapshots"][0]
+    snapshot["snapshot_id"] = alias
+    case = pack["cases"][0]
+    case["target"]["snapshot_id"] = alias
+    case["canonical_target"]["aliases"] = [alias]
+    case["validation"].update(level=None, review_state="draft", checks=[], check_sets={})
+    pack["anchor_sha256"] = pack_anchor_digest(pack)
+    cases.mechanical_checks(pack, alias, path.parent / "probe/source", snapshot["tree_hash"])
+    cases.save_pack(path.parent / "pack.json", pack)
+    mapping = blinding.load_map(path.parent / "map.json")
+    mapping["variants"][0]["snapshot_id"] = alias
+    for removal in mapping["removals"]:
+        for expected in removal["expected"]:
+            expected["snapshot_id"] = alias
+    mapping["identity_policy"]["answer_aliases"] = [{"category": "target_alias", "value": alias, "forms": []}]
+    mapping["reviews"] = []
+    mapping.pop("reviews_sha256", None)
+    blinding.record_review(mapping, reviewer="Fictional diagnostic map reviewer", role="independent_reviewer",
+                           decision="approve", note="Consistent private fixture ID rename; no real corpus approval.")
+    blinding.save_map(path.parent / "map.json", mapping)
+    declaration["population"]["snapshot_ids"] = [alias]
+    declaration["conditions"][2]["transformation_maps"] = {alias: "map.json"}
+    frozen = experiment.freeze(declaration, base_dir=path.parent, created_at="2000-01-01T00:00:00Z")
+    assert experiment.validate_frozen(frozen) is frozen
+    assert all(assignment["snapshot_id"] == alias for assignment in frozen["assignments"])
+
+    prepared = PreparedInput("neutral-id", path.parent / "probe/source", snapshot["tree_hash"], ("python",), {},
+                             profile="identity_reduced")
+    arguments = {"timeout_seconds": 120, "trace_mode": "metadata"}
+    request = build_request("diagnostic-matrix.identity_reduced", prepared, SystemSpec("semgrep", "semgrep"), **arguments)
+    renamed_request = build_request("diagnostic-matrix.identity_reduced", replace(prepared, input_id=alias),
+                                    SystemSpec("semgrep", "semgrep"), **arguments)
+    assert canonical_json(request).encode() == canonical_json(renamed_request).encode()
+    assert alias not in canonical_json(renamed_request)
+
+    declaration["experiment_id"] = alias + "-study"
+    with pytest.raises(ContractError, match="strict identity cue"):
+        experiment.freeze(declaration, base_dir=path.parent, created_at="2000-01-01T00:00:00Z")
