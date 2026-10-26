@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaneval.dev/schemas/v2/experiment-matrix.schema.json",
+  "title": "ScanEval three-condition experiment matrix",
+  "oneOf": [{"$ref":"#/$defs/declaration"},{"$ref":"#/$defs/frozen"}],
+  "$defs": {
+    "id": {"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "digest": {"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    "names": {"enum":["open_context","closed_book_standard","identity_reduced"]},
+    "system": {
+      "type":"object","additionalProperties":false,
+      "required":["system_id","adapter","config","inference","execution"],
+      "properties": {
+        "system_id":{"$ref":"#/$defs/id"},"adapter":{"type":"string","minLength":1},
+        "config":{"type":"object"},"inference":{"enum":["offline","remote"]},
+        "model_id":{"type":"string","minLength":1},"model_revision":{"type":"string","minLength":1},
+        "execution":{"type":"object"}
+      }
+    },
+    "context": {
+      "type":"object","additionalProperties":false,"required":["network_policy"],
+      "properties": {
+        "network_policy":{"enum":["none","model_provider_only","public_research"]},
+        "execution": {"type":"object","additionalProperties":false,"properties":{
+          "egress":{"type":"array","items":{"type":"object"}},
+          "proxy_image":{"type":"string","minLength":1},"retrieval":{"type":"object"}
+        }}
+      }
+    },
+    "condition": {
+      "type":"object","additionalProperties":false,
+      "required":["name","profile","history","retrieval","identity","policy","system_context"],
+      "properties": {
+        "name":{"$ref":"#/$defs/names"},"profile":{"enum":["standard","identity_reduced"]},
+        "history":{"enum":["none","bounded_ancestor"]},"retrieval":{"enum":["disabled","recorded_public"]},
+        "identity":{"enum":["preserved","reduced"]},"policy":{"type":"object"},
+        "system_context":{"type":"object","additionalProperties":{"$ref":"#/$defs/context"}},
+        "transformation_maps":{"type":"object","additionalProperties":{"type":"string","minLength":1}}
+      }
+    },
+    "declaration": {
+      "type":"object","additionalProperties":false,
+      "required":["schema_version","stage","experiment_id","experiment_version","pack","population","systems","conditions","repetitions","timeout_seconds","trace_mode","run_order","required_capture","allowed_differences","exclusions","missingness","adjudication","aggregation_policy","uncertainty"],
+      "properties": {
+        "schema_version":{"const":"2.1"},"stage":{"const":"declared"},
+        "experiment_id":{"$ref":"#/$defs/id"},"experiment_version":{"type":"string","minLength":1},
+        "pack":{"type":"string","minLength":1},
+        "population": {"type":"object","additionalProperties":false,
+          "required":["snapshot_ids","canonical_target_ids","canonical_control_ids","source_property"],
+          "properties": {
+            "snapshot_ids":{"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"string","minLength":1}},
+            "canonical_target_ids":{"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"string","minLength":1}},
+            "canonical_control_ids":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1}},
+            "source_property":{"type":"string","minLength":1}
+          }
+        },
+        "systems":{"type":"array","minItems":1,"items":{"$ref":"#/$defs/system"}},
+        "conditions":{"type":"array","minItems":3,"maxItems":3,"items":{"$ref":"#/$defs/condition"}},
+        "repetitions":{"type":"integer","minimum":1},"timeout_seconds":{"type":"number","exclusiveMinimum":0},
+        "trace_mode":{"enum":["metadata","content"]},
+        "run_order": {"type":"object","additionalProperties":false,"required":["method"],"properties":{
+          "method":{"enum":["fixed","seeded_cell_order"]},"seed":{"type":"integer","minimum":0},
+          "cells":{"type":"array","minItems":3,"maxItems":3,"uniqueItems":true,"items":{"$ref":"#/$defs/names"}}
+        }},
+        "required_capture":{"type":"object","additionalProperties":{"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"string","minLength":1}}},
+        "allowed_differences":{"type":"array","uniqueItems":true,"items":{"enum":["profile","transformation_map","history","network","retrieval"]}},
+        "exclusions":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["snapshot_id","reason"],"properties":{"snapshot_id":{"type":"string","minLength":1},"reason":{"type":"string","minLength":1}}}},
+        "missingness":{"const":"report_unavailable"},
+        "adjudication":{"type":"object","additionalProperties":false,"required":["policy_id","version","matching"],"properties":{"policy_id":{"type":"string","minLength":1},"version":{"type":"string","minLength":1},"matching":{"const":"exact_structured_v2"}}},
+        "aggregation_policy":{"type":"object"},
+        "uncertainty":{"type":"object","additionalProperties":false,"required":["method"],"properties":{
+          "method":{"enum":["none","paired_cluster_bootstrap"]},"replicates":{"type":"integer","minimum":2},
+          "confidence":{"type":"number","exclusiveMinimum":0,"exclusiveMaximum":1},"seed":{"type":"integer","minimum":0},"min_clusters":{"type":"integer","minimum":2}
+        }},
+        "extensions":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["cell_id","history","retrieval","identity","execution"],"properties":{
+          "cell_id":{"enum":["git_only","web_only"]},"history":{"enum":["none","bounded_ancestor"]},
+          "retrieval":{"enum":["disabled","recorded_public"]},"identity":{"const":"preserved"},"execution":{"const":"not_implemented"}
+        }}}
+      }
+    },
+    "frozen": {
+      "type":"object","additionalProperties":false,
+      "required":["schema_version","stage","experiment_id","experiment_version","created_at","matrix_sha256","declaration","pack","maps","population","systems","cells","assignments","cell_order","bindings"],
+      "properties": {
+        "schema_version":{"const":"2.1"},"stage":{"const":"frozen"},"experiment_id":{"$ref":"#/$defs/id"},
+        "experiment_version":{"type":"string","minLength":1},"created_at":{"type":"string","minLength":1},
+        "matrix_sha256":{"$ref":"#/$defs/digest"},"declaration":{"$ref":"#/$defs/declaration"},
+        "pack":{"type":"object"},"maps":{"type":"object","additionalProperties":{"type":"object"}},
+        "population":{"type":"array","minItems":1,"items":{"type":"object"}},
+        "systems":{"type":"array","minItems":1,"items":{"type":"object"}},
+        "cells":{"type":"array","minItems":3,"maxItems":3,"items":{"type":"object"}},
+        "assignments":{"type":"array","minItems":3,"items":{"type":"object"}},
+        "cell_order":{"type":"array","minItems":3,"maxItems":3,"uniqueItems":true,"items":{"$ref":"#/$defs/names"}},
+        "bindings":{"type":"object","additionalProperties":{"$ref":"#/$defs/digest"}}
+      }
+    }
+  }
+}
