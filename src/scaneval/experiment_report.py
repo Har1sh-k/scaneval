@@ -8,7 +8,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from . import aggregate, blinding, cases, conditions, experiment, review, scoring
-from .contracts import ContractError, canonical_sha256, load_document
+from .contracts import ContractError, canonical_json, canonical_sha256, load_document
 from .experiment_execution import (artifact_hash, load_matrix, read_json, verify_binding,
                                    _verify_run_semantics, _write)
 from .isolation import resolve_execution
@@ -21,6 +21,31 @@ CONTRASTS = (
     ("closed_book_standard", "identity_reduced", "Sensitivity to removed repository identity context",
      "Context sensitivity does not establish memorization; no difference does not establish its absence."),
 )
+
+
+def evidence_scope(scopes) -> str:
+    values = set(scopes)
+    if not values:
+        return "unavailable"
+    if values - {"reviewed", "draft", "diagnostic"}:
+        raise ContractError("matrix observations contain an unknown evidence scope")
+    if "diagnostic" in values and len(values) > 1:
+        raise ContractError("diagnostic fixtures cannot be pooled with draft or reviewed corpus evidence")
+    return "diagnostic" if values == {"diagnostic"} else "draft" if "draft" in values else "reviewed"
+
+
+def label_contract(pack: dict) -> dict:
+    """Permit refreshed mechanical-check timestamps, retaining labels/reviews/eligibility intact."""
+    value = deepcopy(pack)
+    value.pop("anchor_sha256", None)
+    for case in value["cases"]:
+        validation = case["validation"]
+        validation["checks"] = sorted(
+            [{key: item for key, item in check.items() if key != "at"} for check in validation["checks"]],
+            key=canonical_json)
+        for check_set in validation.get("check_sets", {}).values():
+            check_set.pop("checks_sha256", None)  # Recomputed by the case contract from the refreshed checks.
+    return value
 
 
 def weighted_bounds(rows: list[dict]) -> dict:
@@ -52,6 +77,7 @@ def paired_effect(left: list[dict], right: list[dict], *, uncertainty: dict, lab
     """Retain every planned pair, with per-cell known contributions and missingness bounds."""
     def key(row): return row["snapshot_id"], row["canonical_id"], row["system_id"], row["repetition"]
     left_by, right_by = {key(row): row for row in left}, {key(row): row for row in right}
+    scope = evidence_scope(row.get("scope", "draft") for row in left + right)
     if len(left_by) != len(left) or len(right_by) != len(right):
         raise ContractError("duplicate paired target observations")
     if set(left_by) != set(right_by):
@@ -84,7 +110,7 @@ def paired_effect(left: list[dict], right: list[dict], *, uncertainty: dict, lab
     resolved_pairs = [row for row in pairs if row["resolved"]]
     subset = weighted_bounds(resolved_pairs)
     interval = _paired_interval(pairs, uncertainty, label)
-    return {"planned_pairs": len(pairs), "comparable_pairs": sum(row["comparable"] for row in pairs),
+    return {"evidence_scope": scope, "planned_pairs": len(pairs), "comparable_pairs": sum(row["comparable"] for row in pairs),
             "resolved_pairs": len(resolved_pairs), "unpaired_or_unresolved": len(pairs) - len(resolved_pairs),
             "full_population_effect": full, "resolved_subset_effect": subset,
             "resolved_subset_note": "Conditional on the explicitly reported resolved subset; not the full-population effect.",
@@ -154,12 +180,16 @@ def _runtime(execution: dict, system: dict, matrix: dict, controls: dict) -> tup
     model = execution.get("model_identity")
     identity = {key: (model or {}).get(key) for key in ("requested", "resolved", "verification")}
     if system["inference"] == "remote":
-        if identity["requested"] != system["model_id"]:
+        if identity["requested"] != system["config"].get("model", system["model_id"]):
             reasons.append("requested_model_drift")
-        if identity["verification"] != "verified" or identity["resolved"] != system["model_revision"]:
-            reasons.append("served_model_revision_unverified_or_different")
+        if identity["verification"] != "verified" or identity["resolved"] is None:
+            reasons.append("served_model_revision_unverified")
+        elif identity["resolved"] != system["model_revision"]:
+            reasons.append("served_model_revision_drift")
     elif model is not None and identity["verification"] != "not_applicable":
         reasons.append("unexpected_model_in_offline_system")
+    elif model is None and controls.get("inference") == "offline":
+        identity["verification"] = "not_applicable"
     return {"adapter": execution["adapter"], "tool_versions": versions, "model_identity": identity,
             "config_sha256": canonical_sha256(execution["system_config"]), "resources": resources,
             "scanner_image": (isolation.get("image") or {}).get("reference"),
@@ -183,6 +213,9 @@ def _source_binding(bundle: Path, matrix: dict, cell: dict, source: dict, execut
     mapping = matrix["maps"]["sha256:" + Path(input_spec["blinding_map"]).stem]
     if context.get("pack") != matrix["pack"] or context.get("map") != mapping or context.get("snapshot_id") != source["snapshot_id"]:
         raise ContractError("saved strict identity context differs from the frozen pack/map/source")
+    recorded_map = execution["provenance"].get("blinding") or {}
+    if any(recorded_map.get(key) != value for key, value in blinding.map_identity(mapping).items()):
+        raise ContractError("execution uses a different identity transformation map")
     from .identity_policy import load_manifest, snapshot_requirements
     requirements, paths = snapshot_requirements(matrix["pack"], source["snapshot_id"])
     summary = provenance.get("identity_reduction")
@@ -205,7 +238,7 @@ def _capability_gaps(required: list[str], condition: dict, execution: dict, sour
         "retrieval_events": condition.get("retrieval") == "recorded",
         "identity_manifest": source.get("identity_validation") == "available",
         "tool_controls": condition.get("retrieval") in ("disabled", "observed_none")}
-    for category in ("model_requests", "tool_calls", "context_spans"):
+    for category in ("model_requests", "tool_calls", "context_selection", "finding_lifecycle"):
         available[category] = execution.get("capture", {}).get(category) in ("complete", "not_applicable")
     return ["required_capture_unavailable:" + name for name in required if not available.get(name, False)]
 
@@ -245,11 +278,14 @@ def _load_rows(matrix: dict, directory: Path) -> list[dict]:
     systems = {row["system_id"]: row for row in matrix["systems"]}
     for cell in matrix["cells"]:
         root = directory / "runs" / cell["name"]
-        manifest, cell_error = None, None
+        manifest, run_pack, cell_error = None, None, None
         try:
             verify_binding(root, matrix, cell)
             _verify_run_semantics(matrix, cell, root)
             manifest = load_document(root / "run-manifest.json", "run-manifest")
+            run_pack = load_document(root / "evaluator/pack.json", "case-pack")
+            if label_contract(run_pack) != label_contract(matrix["pack"]):
+                raise ContractError("runtime corpus labels, source bindings, review state, or eligibility differ from the frozen pack")
         except (OSError, ContractError) as exc:
             cell_error = str(exc)
         by_id = {row["invocation_id"]: row for row in (manifest or {}).get("invocations", [])}
@@ -260,7 +296,8 @@ def _load_rows(matrix: dict, directory: Path) -> list[dict]:
                    "review_state": "missing", "observed": None, "planned_targets": planned["targets"],
                    "planned_controls": planned["controls"], "eligible": False, "reasons": [],
                    "condition_status": "unavailable", "condition_policy_sha256": None, "project": source["project"],
-                   "source_property": source["source_property"], "runtime_sha256": None}
+                   "source_property": source["source_property"], "runtime_sha256": None,
+                   "corpus_scope": source["plan"]["scope"], "scope": matrix["declaration"].get("evidence_scope", source["plan"]["scope"])}
             rows.append(row)
             observed_row = by_id.get(assignment["assignment_id"])
             if cell_error is not None:
@@ -284,8 +321,12 @@ def _load_rows(matrix: dict, directory: Path) -> list[dict]:
                 observed = scoring.observe(plan, result, decisions)
                 row.update(status=result["status"], reason=None, observed=observed, result=result, decisions=decisions,
                     review_state=review.review_status(bundle),
+                    actual_plan_scope=plan["scope"],
                     target_canonical={target["target_id"]: target["canonical_id"] for target in planned["targets"]})
-                expected_plan = {**deepcopy(source["plan"]), "input_hash": result["input_hash"]}
+                expected_plan, _notes = cases.build_plan(
+                    run_pack, source["snapshot_id"], source["source_tree_hash"], mode="full",
+                    input_id=source["snapshot_id"], input_hash=result["input_hash"], profile=cell["config"]["inputs"][0]["profile"],
+                    blinding=execution["provenance"].get("blinding"))
                 if plan != expected_plan:
                     row["reasons"].append("frozen_plan_eligibility_or_label_drift")
                 condition = conditions.classify_observation(bundle)
@@ -315,6 +356,7 @@ def _load_rows(matrix: dict, directory: Path) -> list[dict]:
 def report(directory: Path, *, output: Path | None = None) -> dict:
     directory = Path(directory).expanduser().resolve()
     matrix = experiment.validate_frozen(load_matrix(directory / "matrix.json"))
+    corpus_scope = evidence_scope(source["plan"]["scope"] for source in matrix["population"])
     rows = _load_rows(matrix, directory)
     check_adjudication_consistency(rows)
     metrics_helper = getattr(aggregate, "condition_metrics", None)
@@ -331,21 +373,23 @@ def report(directory: Path, *, output: Path | None = None) -> dict:
                 observation = by_assignment[target["assignment_id"]]
                 value = {**target, "snapshot_id": observation["snapshot_id"], "project": observation["project"],
                          "eligible": observation["eligible"], "reasons": observation["reasons"],
-                         "runtime_sha256": observation["runtime_sha256"]}
+                         "runtime_sha256": observation["runtime_sha256"], "scope": observation["scope"]}
                 lower, upper = _range(value)
                 eligible.append({**value, "lower": lower, "upper": upper,
                                  "resolved": value["resolved"] and value["eligible"]})
                 paired_rows[(name, system["system_id"])].append(value)
             strata = []
-            for status, policy in sorted({(row["condition_status"], row["condition_policy_sha256"] or "unavailable") for row in selected}):
-                group = [row for row in selected if row["condition_status"] == status and (row["condition_policy_sha256"] or "unavailable") == policy]
-                strata.append({"condition_status": status, "policy_sha256": policy, "metrics": metrics_helper(group)})
+            for status, policy, scope in sorted({(row["condition_status"], row["condition_policy_sha256"] or "unavailable", row["scope"]) for row in selected}):
+                group = [row for row in selected if row["condition_status"] == status and (row["condition_policy_sha256"] or "unavailable") == policy and row["scope"] == scope]
+                strata.append({"condition_status": status, "policy_sha256": policy, "evidence_scope": scope, "metrics": metrics_helper(group)})
             cells.append({"condition": name, "system_id": system["system_id"], "assignments_scheduled": len(selected),
+                "evidence_scope": evidence_scope(row["scope"] for row in selected), "corpus_evidence_scope": corpus_scope,
                 "condition_coverage": dict(Counter(row["condition_status"] for row in selected)),
                 "eligible_assignments": sum(row["eligible"] for row in selected),
                 "target_detection": weighted_bounds(eligible), "strata": strata,
                 "completion": raw["completion"], "support": raw["support"], "statuses": raw["statuses"],
                 "claims": raw["claims"], "usage": raw["usage"],
+                "served_model_verification": dict(Counter((row.get("runtime", {}).get("model_identity", {}).get("verification") or "unavailable") for row in selected)),
                 "history_coverage": dict(Counter(row.get("condition_record", {}).get("history", "unavailable") for row in selected)),
                 "retrieval_coverage": dict(Counter(row.get("condition_record", {}).get("retrieval", "unavailable") for row in selected)),
                 "identity_coverage": dict(Counter(row.get("source_binding", {}).get("identity_validation", "unavailable") for row in selected))})
@@ -359,6 +403,7 @@ def report(directory: Path, *, output: Path | None = None) -> dict:
     public_rows = [{key: value for key, value in row.items() if key not in {"observed", "result", "decisions", "planned_targets", "planned_controls", "condition_record", "target_canonical"}} for row in rows]
     result = {"schema_version": "2.1", "report_version": "1", "experiment_id": matrix["experiment_id"],
         "experiment_version": matrix["experiment_version"], "matrix_sha256": matrix["matrix_sha256"],
+        "evidence_scope": matrix["declaration"].get("evidence_scope", corpus_scope), "corpus_evidence_scope": corpus_scope,
         "aggregation_policy": experiment.resolve_aggregation_policy(matrix["declaration"]["aggregation_policy"]),
         "assignments_scheduled": len(matrix["assignments"]), "conditions": cells, "contrasts": contrasts,
         "observations": public_rows, "predeclared_exclusions": matrix["declaration"]["exclusions"],

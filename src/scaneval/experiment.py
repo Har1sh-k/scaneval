@@ -30,7 +30,7 @@ CONTEXT_DIFFERENCES = frozenset({"profile", "transformation_map", "history", "ne
 _CONTEXT_EXECUTION = frozenset({"egress", "proxy_image", "retrieval"})
 AGGREGATION_POLICY = {"policy_id": "scaneval.matrix.equal-canonical-target", "version": "1"}
 CAPABILITIES = frozenset({"external_isolation", "history", "retrieval_events", "identity_manifest",
-                          "tool_controls", "model_requests", "tool_calls", "context_spans"})
+                          "tool_controls", "model_requests", "tool_calls", "context_selection", "finding_lifecycle"})
 
 
 def resolve_aggregation_policy(value: dict) -> dict:

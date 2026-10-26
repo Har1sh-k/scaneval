@@ -3,7 +3,8 @@ from copy import deepcopy
 import pytest
 
 from scaneval.contracts import ContractError
-from scaneval.experiment_report import check_adjudication_consistency, paired_effect, weighted_bounds
+from scaneval.experiment_report import (check_adjudication_consistency, evidence_scope, label_contract,
+                                       paired_effect, weighted_bounds, _runtime)
 
 
 def outcome(target, value, *, snapshot=None, repetition=1, resolved=True, eligible=True, runtime="same"):
@@ -98,3 +99,48 @@ def test_false_allegation_and_accepted_hit_cannot_contradict_between_cells():
     false["decisions"]["control_assessments"] = [{"control_id": "control", "decision": "false_allegation", "claim_ids": ["other"]}]
     with pytest.raises(ContractError, match="both accepted and judged false"):
         check_adjudication_consistency([adjudication("accepted"), false])
+
+
+def test_evidence_scope_is_independent_of_approved_finding_reviews():
+    assert evidence_scope(["draft", "reviewed"]) == "draft"
+    assert evidence_scope(["diagnostic", "diagnostic"]) == "diagnostic"
+    left, right = outcome("A", True), outcome("A", False)
+    left["scope"], right["scope"] = "diagnostic", "reviewed"
+    with pytest.raises(ContractError, match="diagnostic fixtures cannot be pooled"):
+        paired_effect([left], [right], uncertainty={"method": "none"}, label="fixture")
+
+
+def test_refreshed_mechanical_timestamps_do_not_allow_label_or_review_drift():
+    pack = {"anchor_sha256": "old", "snapshots": [{"snapshot_id": "source", "commit": "original"}],
+        "cases": [{"target": {"description": "same security property"}, "validation": {
+            "level": "L1", "review_state": "mechanically_checked", "reviews": [],
+            "checks": [{"check": "exists", "at": "old", "result": "pass"}],
+            "check_sets": {"source": {"tree_hash": "same", "result": "pass", "checks_sha256": "old"}}}}]}
+    refreshed = deepcopy(pack)
+    refreshed["anchor_sha256"] = "new"
+    refreshed["cases"][0]["validation"]["checks"][0]["at"] = "new"
+    refreshed["cases"][0]["validation"]["check_sets"]["source"]["checks_sha256"] = "new"
+    assert label_contract(pack) == label_contract(refreshed)
+    refreshed["cases"][0]["target"]["description"] = "different property"
+    assert label_contract(pack) != label_contract(refreshed)
+    refreshed = deepcopy(pack)
+    refreshed["cases"][0]["validation"]["review_state"] = "human_approved"
+    assert label_contract(pack) != label_contract(refreshed)
+
+
+def test_requested_provider_namespace_is_not_a_model_drift_but_unverified_resolution_is_visible():
+    image = "fixture@sha256:" + "a" * 64
+    system = {"adapter_identity": {"name": "fixture", "version": "1"}, "config": {"model": "provider/model"},
+        "execution": {"backend": "oci", "image": image}, "inference": "remote", "model_id": "friendly-model-label",
+        "model_revision": "exact-served-snapshot"}
+    execution = {"adapter": system["adapter_identity"], "system_config": system["config"], "timeout_seconds": 60,
+        "tool_versions": {"scanner": "1"}, "model_identity": {"requested": "provider/model", "resolved": "exact-served-snapshot", "verification": "verified"},
+        "isolation": {"image": {"reference": image}, "settings": {"user": "65534:65534", "memory_mb": 2048,
+            "memory_swap_mb": 2048, "cpus": 2.0, "pids_limit": 256,
+            "tmpfs": [{"target": "/tmp", "size_mb": 256}], "environment": {"credentials": []}}}}
+    matrix = {"declaration": {"timeout_seconds": 60}}
+    _binding, reasons = _runtime(execution, system, matrix, {"inference": "remote"})
+    assert reasons == []
+    execution["model_identity"]["verification"] = "self_reported"
+    _binding, reasons = _runtime(execution, system, matrix, {"inference": "remote"})
+    assert reasons == ["served_model_revision_unverified"]
