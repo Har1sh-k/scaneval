@@ -185,6 +185,8 @@ def resolve_execution(execution: dict[str, Any] | None, network_policy: str) -> 
             retrieval = validate_settings(retrieval)
         except ValueError as exc:
             raise IsolationError(str(exc)) from exc
+        if any(host.strip("[]") in retrieval["denied_hosts"] for host, _port in egress):
+            raise IsolationError("public_research egress cannot allow denied evaluator infrastructure")
     elif retrieval is not None:
         raise IsolationError("execution.retrieval applies only to public_research")
     return ExecutionSettings("oci", network_policy, image=image,

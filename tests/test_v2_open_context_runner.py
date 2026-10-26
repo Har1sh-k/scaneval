@@ -50,3 +50,11 @@ def test_public_network_config_without_recorded_policy_is_invalid(tmp_path):
     del document["systems"][0]["execution"]["retrieval"]
     with pytest.raises(ContractError, match="stale"):
         validate_document("run-config", document)
+
+
+def test_declared_provider_route_cannot_override_denied_evaluator_infrastructure(tmp_path):
+    config = create_fixture(tmp_path / "fixture")
+    document = json.loads(config.read_text())
+    document["systems"][0]["execution"]["retrieval"]["denied_hosts"] = ["example.com"]
+    with pytest.raises(ContractError, match="denied evaluator infrastructure"):
+        validate_document("run-config", document)

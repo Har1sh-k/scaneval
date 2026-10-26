@@ -201,6 +201,10 @@ class Handler(socketserver.BaseRequestHandler):
             reply(client, 400, "Bad Request")
             return
         host, port = authority
+        if host in server.denied_hosts:
+            server.log.write(event="deny", reason="denied evaluator infrastructure", host=host, port=port)
+            reply(client, 403, "Forbidden")
+            return
         if authority not in server.allow:
             server.log.write(event="deny", reason="not a declared destination", host=host[:TARGET_LIMIT],
                              port=port)
@@ -268,12 +272,14 @@ def main(argv=None):
     log = EgressLog(args.log_dir)
     server = Server((args.bind, args.port), Handler)
     server.public_api = None
+    server.denied_hosts = frozenset()
     if args.public_only:
         if not args.retrieval_module or not args.retrieval_settings:
             parser.error("public-only mode requires the recorded retrieval module and settings")
         server.public_api = runpy.run_path(args.retrieval_module, run_name="scaneval_recorded_retrieval")
         with open(args.retrieval_settings, encoding="utf-8") as stream:
             retrieval_settings = json.load(stream)
+        server.denied_hosts = frozenset(server.public_api["validate_settings"](retrieval_settings)["denied_hosts"])
         server.retrieval = server.public_api["start"](
             args.log_dir, retrieval_settings, args.retrieval_port, args.bind)
     server.allow = frozenset(allow)

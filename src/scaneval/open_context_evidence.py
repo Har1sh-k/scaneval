@@ -15,6 +15,7 @@ import re
 from .contracts import ContractError, canonical_sha256
 from .materialize import MaterializationError
 from .open_context import HISTORY_POLICY, validate_policy
+from .isolation.public_retrieval import validate_settings
 
 
 def _reason(code: str, message: str) -> dict:
@@ -31,6 +32,9 @@ def classify_condition(bundle: Path, execution: dict, policy: dict, evidence: di
     isolation = execution.get("isolation") or {}
     retrieval = isolation.get("retrieval") or {}
     history = evidence.get("history_evidence") or {}
+    if not isinstance(history, dict):
+        history = {}
+        failures.append(_reason("invalid_bounded_history", "The saved bounded-history attestation is malformed."))
     details = {"history": history, "retrieval": retrieval,
                "interpretation": "Assisted investigation; known-vulnerability retrieval can contribute to detection.",
                "model_consumption": {"observed": 0, "unknown": 0},
@@ -48,7 +52,9 @@ def classify_condition(bundle: Path, execution: dict, policy: dict, evidence: di
         failures.append(_reason("ineligible_open_context_input", "Open-context requires the ordinary standard full input."))
     if (history.get("policy") == HISTORY_POLICY and history.get("status") == "available"
             and history.get("source_tree_hash") == (execution.get("provenance") or {}).get("tree_hash")
-            and history.get("reachable_commit_count", 0) > 0
+            and type(history.get("reachable_commit_count")) is int and history["reachable_commit_count"] > 0
+            and isinstance(history.get("head_commit"), str) and re.fullmatch(r"[0-9a-f]{40}", history["head_commit"])
+            and isinstance(history.get("history_digest"), str) and re.fullmatch(r"sha256:[0-9a-f]{64}", history["history_digest"])
             and history.get("refs") == [{"name": "HEAD", "target": history.get("head_commit"), "symbolic": False}]):
         result["history"] = "bounded_ancestor_history"
     else:
@@ -63,6 +69,11 @@ def classify_condition(bundle: Path, execution: dict, policy: dict, evidence: di
         gaps.append(_reason("open_context_boundary_unenforced", "No observed OCI public-research boundary bounded this scanner."))
     actual_policy = retrieval.get("policy")
     if isinstance(actual_policy, dict):
+        try:
+            if validate_settings(actual_policy) != actual_policy:
+                raise ValueError("retrieval settings are not the normalized policy the service used")
+        except ValueError as exc:
+            failures.append(_reason("invalid_retrieval_policy", str(exc)))
         if (actual_policy.get("policy") != policy.get("retrieval") or
                 any(actual_policy.get(key) != policy.get(key) for key in ("capture", "retention")) or
                 retrieval.get("policy_sha256") != canonical_sha256(actual_policy)):
@@ -82,7 +93,7 @@ def classify_condition(bundle: Path, execution: dict, policy: dict, evidence: di
                 raise ContractError("retrieval event bytes contradict their execution-record hash")
             events = [_json(line) for line in raw.splitlines()]
             artifacts.append({"role": "retrieval_events", "path": relative, "sha256": digest})
-            if len(events) != retrieval.get("attempts"):
+            if type(retrieval.get("attempts")) is not int or len(events) != retrieval["attempts"]:
                 raise ContractError("retrieval event count contradicts its execution record")
             seen = set()
             retained = set()
@@ -94,6 +105,13 @@ def classify_condition(bundle: Path, execution: dict, policy: dict, evidence: di
                             "content_sha256", "capture_status", "content_entered_model"}
                 if required - set(event) or event["outcome"] not in ("ok", "http_error", "failed", "denied"):
                     raise ContractError("retrieval event lacks required capture provenance")
+                if event.get("source") not in ("scanner_native", "browser_tool") or event.get("operation") not in ("fetch", "search"):
+                    raise ContractError("retrieval event has an unknown integration boundary")
+                if event["outcome"] in ("ok", "http_error") and (
+                        not isinstance(event["content_sha256"], str) or
+                        not re.fullmatch(r"sha256:[0-9a-f]{64}", event["content_sha256"]) or
+                        type(event.get("byte_count")) is not int or event["byte_count"] < 0):
+                    raise ContractError("fetched content lacks a valid hash or length")
                 if event.get("capture_status") == "preserved":
                     content = event.get("content_path")
                     if not isinstance(content, str) or not re.fullmatch(r"content/[0-9a-f]{64}\.bin", content):
@@ -111,11 +129,19 @@ def classify_condition(bundle: Path, execution: dict, policy: dict, evidence: di
                         gaps.append(_reason("retrieval_content_missing", "A fetched response was hashed but not preserved under content capture."))
                 elif event.get("capture_status") != "unavailable":
                     raise ContractError("retrieval capture status is unknown")
+                elif event["outcome"] in ("ok", "http_error"):
+                    gaps.append(_reason("retrieval_content_missing", "A fetched response has unavailable content capture."))
                 # This transport cannot observe a model request. A scanner acknowledgment is
                 # self-reported and cannot upgrade an unknown model-use field to observed.
                 if event["content_entered_model"] is not None:
                     raise ContractError("the retrieval transport cannot attest model consumption")
                 details["model_consumption"]["unknown"] += int(event.get("content_sha256") is not None)
+            counts = {"denied": sum(event["outcome"] == "denied" for event in events),
+                      "failed": sum(event["outcome"] in ("failed", "http_error") for event in events),
+                      "preserved": sum(event.get("capture_status") == "preserved" for event in events),
+                      "hash_only": sum(event.get("capture_status") == "hash_only" for event in events)}
+            if any(type(retrieval.get(key)) is not int or retrieval[key] != count for key, count in counts.items()):
+                raise ContractError("retrieval coverage counts contradict saved event bytes")
             result["retrieval"] = "recorded"
             result["assurance"]["retrieval"] = "recorded"
             details["attempts"] = len(events)
