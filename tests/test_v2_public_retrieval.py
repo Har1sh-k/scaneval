@@ -4,6 +4,7 @@ import json
 import http.client
 import io
 import socket
+import threading
 
 import pytest
 
@@ -48,6 +49,13 @@ def test_mixed_answers_are_denied_and_validated_ip_is_pinned(monkeypatch):
     connection, checked, chosen = retrieval.connect_public("research.example")
     assert checked == ["8.8.8.8"] and chosen == "8.8.8.8"
     assert connected == [("8.8.8.8", 443)] and len(resolutions) == 1
+
+
+def test_explicit_zero_port_is_denied_and_ipv6_literals_keep_port_443():
+    with pytest.raises(retrieval.RetrievalDenied):
+        retrieval.parse_url("https://research.example:0/")
+    connection = retrieval.PublicHTTPS("2606:4700::1111", port=443)
+    assert connection.host == "2606:4700::1111" and connection.port == 443
 
 
 class Response:
@@ -103,6 +111,7 @@ def test_redirects_revalidate_private_dns_and_keep_denied_attempt(tmp_path, monk
     assert len(result["redirect_chain"]) == 2 and result["redirect_chain"][0]["status"] == 302
     assert len(requests) == 1
     assert json.loads((tmp_path / "retrieval.jsonl").read_text())["outcome"] == "denied"
+    assert result["redirect_chain"][-1]["resolved_addresses"] == ["127.0.0.1"]
 
 
 def test_undeclared_and_credential_redirects_are_denied(tmp_path, monkeypatch):
@@ -183,6 +192,57 @@ def test_existing_corrupt_digest_file_is_replaced_only_by_complete_content(tmp_p
     path.write_bytes(b"old truncated fragment")
     event = recorder.retrieve({"url": "https://research.example/"})
     assert event["capture_status"] == "preserved" and path.read_bytes() == b"public evidence"
+
+
+def test_failed_tls_keeps_checked_and_connected_address_provenance(tmp_path, monkeypatch):
+    transport(monkeypatch, [retrieval.ssl.SSLCertVerificationError("fixture")])
+    recorder = retrieval.Recorder(str(tmp_path), POLICY)
+    event = recorder.retrieve({"url": "https://research.example/"})
+    assert event["outcome"] == "failed"
+    assert event["redirect_chain"][0]["resolved_addresses"] == ["8.8.8.8"]
+    assert event["redirect_chain"][0]["connected_address"] == "8.8.8.8"
+
+
+def test_failed_connect_keeps_checked_addresses_without_claiming_connected_peer(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *_args, **_kwargs: addresses("8.8.8.8"))
+    class Offline:
+        def settimeout(self, _timeout): pass
+        def connect(self, _address): raise TimeoutError("fixture")
+        def close(self): pass
+    monkeypatch.setattr(socket, "socket", lambda *_args: Offline())
+    connection = retrieval.PublicHTTPS("research.example", port=443)
+    with pytest.raises(TimeoutError):
+        connection.connect()
+    assert connection.resolved_addresses == ["8.8.8.8"]
+    assert connection.attempted_addresses == ["8.8.8.8"] and connection.connected_address is None
+
+
+def test_real_https_connect_preserves_peer_when_tls_verification_fails(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *_args, **_kwargs: addresses("8.8.8.8"))
+    class Connected:
+        def settimeout(self, _timeout): pass
+        def connect(self, _address): pass
+        def close(self): pass
+    class RejectCertificate:
+        def wrap_socket(self, *_args, **_kwargs):
+            raise retrieval.ssl.SSLCertVerificationError("fixture")
+    monkeypatch.setattr(socket, "socket", lambda *_args: Connected())
+    connection = retrieval.PublicHTTPS("research.example", port=443)
+    connection._context = RejectCertificate()
+    with pytest.raises(retrieval.ssl.SSLCertVerificationError):
+        connection.connect()
+    assert connection.resolved_addresses == ["8.8.8.8"] and connection.connected_address == "8.8.8.8"
+
+
+def test_incomplete_request_headers_have_a_timeout_before_do_post(monkeypatch):
+    monkeypatch.setattr(retrieval.Handler, "timeout", 0.05)
+    client, server = socket.socketpair()
+    with client, server:
+        client.sendall(b"POST /fetch HTTP/1.1\r\nHost: incomplete")
+        thread = threading.Thread(target=lambda: retrieval.Handler(server, ("127.0.0.1", 0), object()), daemon=True)
+        thread.start()
+        thread.join(1)
+        assert not thread.is_alive(), "incomplete headers held a retrieval thread after its deadline"
 
 
 def test_public_research_configuration_requires_enforcement_and_safe_explicit_policy():

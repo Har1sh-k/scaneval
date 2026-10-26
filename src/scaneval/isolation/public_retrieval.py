@@ -37,7 +37,9 @@ SOURCES = ("scanner_native", "browser_tool")
 
 
 class RetrievalDenied(ValueError):
-    pass
+    def __init__(self, message, *, resolved_addresses=None):
+        super().__init__(message)
+        self.resolved_addresses = resolved_addresses
 
 
 def recorded_url(value):
@@ -56,7 +58,7 @@ def parse_url(value):
         raise RetrievalDenied("URL is missing, too long, or contains whitespace/control characters")
     try:
         parts = urllib.parse.urlsplit(value)
-        port = parts.port or 443
+        port = parts.port if parts.port is not None else 443
         host = (parts.hostname or "").encode("idna").decode("ascii").lower().rstrip(".")
     except (ValueError, UnicodeError) as exc:
         raise RetrievalDenied("URL authority is invalid") from exc
@@ -115,12 +117,14 @@ def public_addresses(host, port=443):
         try:
             ip = ipaddress.ip_address(raw)
         except ValueError as exc:
-            raise RetrievalDenied("destination resolved to an invalid address") from exc
+            raise RetrievalDenied("destination resolved to an invalid address",
+                                  resolved_addresses=[item[4][0] for item in answers]) from exc
         if ("%" in raw or not ip.is_global or ip.is_private or ip.is_loopback or ip.is_link_local
                 or ip.is_multicast or ip.is_reserved or ip.is_unspecified
                 or (isinstance(ip, ipaddress.IPv6Address) and
                     (ip.ipv4_mapped is not None or any(ip in network for network in _TRANSLATORS)))):
-            raise RetrievalDenied("destination has a private, local, reserved, or translated address")
+            raise RetrievalDenied("destination has a private, local, reserved, or translated address",
+                                  resolved_addresses=[item[4][0] for item in answers])
         item = (family, kind, protocol, address)
         if item not in safe:
             safe.append(item)
@@ -130,13 +134,20 @@ def public_addresses(host, port=443):
 def connect_public(host, port=443, timeout=TIMEOUT):
     """Connect without resolving the host a second time, preventing DNS rebinding between checks."""
     addresses = public_addresses(host, port)
+    connection, connected = _connect_validated(addresses, timeout)
+    return connection, [item[3][0] for item in addresses], connected
+
+
+def _connect_validated(addresses, timeout, attempted=None):
     last = None
     for family, kind, protocol, address in addresses:
         connection = socket.socket(family, kind, protocol)
         connection.settimeout(timeout)
         try:
+            if attempted is not None:
+                attempted.append(address[0])
             connection.connect(address)
-            return connection, [item[3][0] for item in addresses], address[0]
+            return connection, address[0]
         except OSError as exc:
             last = exc
             connection.close()
@@ -145,7 +156,17 @@ def connect_public(host, port=443, timeout=TIMEOUT):
 
 class PublicHTTPS(http.client.HTTPSConnection):
     def connect(self):
-        connection, self.validated_addresses, self.connected_address = connect_public(self.host, self.port, self.timeout)
+        self.resolved_addresses = []
+        self.validated_addresses = []
+        self.attempted_addresses = []
+        self.connected_address = None
+        try:
+            addresses = public_addresses(self.host, self.port)
+        except RetrievalDenied as exc:
+            self.resolved_addresses = exc.resolved_addresses
+            raise
+        self.resolved_addresses = self.validated_addresses = [item[3][0] for item in addresses]
+        connection, self.connected_address = _connect_validated(addresses, self.timeout, self.attempted_addresses)
         try:
             self.sock = self._context.wrap_socket(connection, server_hostname=self.host)
         except BaseException:
@@ -221,7 +242,7 @@ class Recorder:
                     raise TimeoutError("retrieval exceeded its total time limit")
                 parts = urllib.parse.urlsplit(url)
                 path = parts.path + (("?" + parts.query) if parts.query else "")
-                connection = PublicHTTPS(host, timeout=min(TIMEOUT, max(1, deadline - time.monotonic())),
+                connection = PublicHTTPS(host, port=443, timeout=min(TIMEOUT, max(1, deadline - time.monotonic())),
                                          context=ssl.create_default_context())
                 hop = {"url": url, "status": None, "location": None}
                 event["redirect_chain"].append(hop)
@@ -230,8 +251,7 @@ class Recorder:
                     connection.request("GET", path, headers={"User-Agent": "ScanEval-recorded-public/1",
                                                                "Accept-Encoding": "identity"})
                     response = connection.getresponse()
-                    hop.update(status=response.status, resolved_addresses=connection.validated_addresses,
-                               connected_address=connection.connected_address)
+                    hop.update(status=response.status)
                     if response.status in (301, 302, 303, 307, 308):
                         location = response.getheader("Location")
                         hop["location"] = recorded_url(location)
@@ -260,8 +280,14 @@ class Recorder:
                         event.update(capture_status="preserved", content_path="content/" + digest + ".bin")
                     break
                 finally:
+                    hop.update(resolved_addresses=getattr(connection, "resolved_addresses",
+                                                         getattr(connection, "validated_addresses", None)),
+                               attempted_addresses=getattr(connection, "attempted_addresses", None),
+                               connected_address=getattr(connection, "connected_address", None))
                     connection.close()
         except RetrievalDenied as exc:
+            if event["redirect_chain"] and exc.resolved_addresses is not None:
+                event["redirect_chain"][-1]["resolved_addresses"] = exc.resolved_addresses
             event.update(outcome="denied", error=str(exc))
         except (OSError, ValueError, http.client.HTTPException) as exc:
             body = None
@@ -274,6 +300,7 @@ class Recorder:
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
+    timeout = TIMEOUT  # Base setup() applies this before the request line and headers are read.
 
     def log_message(self, *_args):
         pass
