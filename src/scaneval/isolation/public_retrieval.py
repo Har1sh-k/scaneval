@@ -227,6 +227,8 @@ class Recorder:
                     if len(body) > MAX_RESPONSE:
                         body = None
                         raise RetrievalDenied("response exceeds the retained-content limit")
+                    if getattr(response, "length", None) not in (None, 0):
+                        raise http.client.IncompleteRead(body, response.length)
                     digest = hashlib.sha256(body).hexdigest()
                     event.update(outcome="ok" if 200 <= response.status < 300 else "http_error",
                                  content_sha256="sha256:" + digest, byte_count=len(body),
@@ -246,6 +248,7 @@ class Recorder:
         except RetrievalDenied as exc:
             event.update(outcome="denied", error=str(exc))
         except (OSError, ValueError, http.client.HTTPException) as exc:
+            body = None
             event.update(outcome="failed", error=type(exc).__name__)
         finally:
             event["finished_at"] = now()

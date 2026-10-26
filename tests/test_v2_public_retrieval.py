@@ -1,6 +1,8 @@
 import base64
 import hashlib
 import json
+import http.client
+import io
 import socket
 
 import pytest
@@ -137,6 +139,20 @@ def test_failures_http_errors_and_hash_only_capture_are_not_empty_success(tmp_pa
     assert error["outcome"] == "http_error" and error["content_sha256"]
     assert hashed["capture_status"] == "hash_only" and hashed["content_path"] is None
     assert not (tmp_path / "content").exists()
+
+
+def test_real_http_response_truncated_content_length_is_not_preserved_as_success(tmp_path, monkeypatch):
+    class Wire:
+        def makefile(self, *_args, **_kwargs):
+            return io.BytesIO(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nfragment")
+    response = http.client.HTTPResponse(Wire())
+    response.begin()
+    transport(monkeypatch, [response])
+    recorder = retrieval.Recorder(str(tmp_path), POLICY)
+    event = recorder.retrieve({"url": "https://research.example/truncated"})
+    assert event["outcome"] == "failed" and event["error"] == "IncompleteRead"
+    assert event["capture_status"] == "unavailable" and event["content_base64"] is None
+    assert event["content_sha256"] is None and not (tmp_path / "content").exists()
 
 
 def test_public_research_configuration_requires_enforcement_and_safe_explicit_policy():
