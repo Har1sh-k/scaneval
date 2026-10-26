@@ -335,7 +335,7 @@ def _instruction_files(paths, listed) -> list[str]:
                    *(path for path in paths if _reads_as_instructions(path))})
 
 
-def _protected_path_gap(path: str) -> str | None:
+def _protected_path_gap(path: str, *, advisory_prose: bool = False) -> str | None:
     """Why *path* is protected from both editing and removal, or ``None`` when it is not."""
     parts = PurePosixPath(path).parts
     folded_parts = tuple(part.casefold() for part in parts)
@@ -352,7 +352,8 @@ def _protected_path_gap(path: str) -> str | None:
             if under(directory):
                 return f"{path} is under {directory}/, {what}"
     name = folded_parts[-1]
-    if name.startswith(FORBIDDEN_NAME_PREFIXES) or any(
+    prefixes = tuple(prefix for prefix in FORBIDDEN_NAME_PREFIXES if not (advisory_prose and prefix == "security"))
+    if name.startswith(prefixes) or any(
             fnmatch.fnmatchcase(name, pattern) for pattern in FORBIDDEN_ATTRIBUTION_NAMES):
         return f"{path} is a license, attribution, or security file"
     for pattern in FORBIDDEN_NAMES:
@@ -399,7 +400,8 @@ def path_class_gap(path: str, role: str, role_check: str | None = None) -> str |
             "file are never edited")
 
 
-def removal_path_gap(path: str, role: str, *, identity_policy: dict | None = None) -> str | None:
+def removal_path_gap(path: str, role: str, *, identity_policy: dict | None = None,
+                     role_check: str | None = None) -> str | None:
     """Why *path* may not be removed under *role*, or ``None`` when it may.
 
     ``identity_document`` is limited to conventional root documents and documentation directories,
@@ -411,7 +413,17 @@ def removal_path_gap(path: str, role: str, *, identity_policy: dict | None = Non
     """
     if role not in REMOVAL_ROLES:
         return f"{role!r} is not a removal role; the roles are {', '.join(REMOVAL_ROLES)}"
-    protected = _protected_path_gap(path)
+    pure = PurePosixPath(path)
+    folded_parts = tuple(part.casefold() for part in pure.parts)
+    stem = pure.stem.casefold()
+    advisory_location = (len(pure.parts) == 1 or folded_parts[0] in REMOVABLE_DOCUMENTATION_ROOTS
+                         or folded_parts[:2] in {("security", "advisories"), (".github", "advisories")})
+    advisory_prose = (role == "identity_document" and identity_policy is not None and is_stated(role_check)
+                      and advisory_location
+                      and pure.suffix.casefold() in DOCUMENTATION_SUFFIXES and stem != "security"
+                      and (stem.startswith(("security-advisory", "security_advisory", "advisory"))
+                           or "advisories" in folded_parts[:-1]))
+    protected = _protected_path_gap(path, advisory_prose=advisory_prose)
     if protected:
         return protected
     instructions = _reads_as_instructions(path)
@@ -422,7 +434,6 @@ def removal_path_gap(path: str, role: str, *, identity_policy: dict | None = Non
                                                        for item in instruction_inventory([path]))
         instructions = known_instructions or any(item["classification"] == "instruction_file"
                                                   for item in instruction_inventory([path], identity_policy))
-    pure = PurePosixPath(path)
     suffix = pure.suffix.casefold()
     if role == "instruction_file":
         if not instructions:
@@ -438,7 +449,6 @@ def removal_path_gap(path: str, role: str, *, identity_policy: dict | None = Non
     if instructions:
         return (f"{path} is a file a scanner reads as instructions; remove it under the "
                 "instruction_file role, not identity_document")
-    folded_parts = tuple(part.casefold() for part in pure.parts)
     if any(part in RUNTIME_REMOVAL_DIRECTORIES for part in folded_parts[:-1]):
         return f"{path} is under a runtime, source, template, prompt, or test directory; it is never removed"
     stem = pure.stem.casefold() if suffix else pure.name.casefold()
@@ -447,7 +457,7 @@ def removal_path_gap(path: str, role: str, *, identity_policy: dict | None = Non
     docs_directory = len(pure.parts) > 1 and folded_parts[0] in REMOVABLE_DOCUMENTATION_ROOTS
     github_prose = len(pure.parts) > 2 and folded_parts[:2] in {
         (".github", "advisories"), (".github", "releases")}
-    if documented and (root_document or docs_directory or github_prose):
+    if documented and (root_document or docs_directory or github_prose or advisory_prose):
         return None
     return (f"{path} is not documentation in a conventional documentation directory or a recognized "
             "root document; source, configuration, scripts, and every other file are never removed")
@@ -1436,6 +1446,61 @@ def _removal_for(removal: dict, snapshot_id: str, source: Path,
     return _Removal(removal["removal_id"], path, removal["role"], True, hashes[path])
 
 
+def _metadata_files(document: dict, snapshot_id: str, source: Path, hashes: dict[str, str],
+                    pack: dict | None) -> tuple[dict[str, bytes], list[dict], list[dict], list[dict]]:
+    from .identity_policy import prepare_metadata_file
+    grouped: dict[str, list[dict]] = {}
+    for edit in document.get("metadata_edits", []):
+        grouped.setdefault(edit["path"], []).append(edit)
+    changes, records, skipped, validation = {}, [], [], []
+    for path, entries in sorted(grouped.items()):
+        resolved = []
+        for entry in entries:
+            expected = next(item for item in entry["expected"] if item["snapshot_id"] == snapshot_id)
+            if expected["state"] == "absent":
+                if path in hashes or (source / path).exists() or (source / path).is_symlink():
+                    raise MaterializationError(f"stale metadata edit: {path} should be absent from {snapshot_id}")
+                validation.append(_passed("metadata_absent", f"{entry['edit_id']}: {path} is absent, as expected"))
+                continue
+            if path not in hashes or hashes[path] != expected["file_sha256"]:
+                raise MaterializationError(f"stale metadata edit: {path} does not have its reviewed hash in {snapshot_id}")
+            resolved.append({key: entry[key] for key in ("edit_id", "path", "field_path", "replacement", "role_check", "rationale")})
+            resolved[-1].update({"expected_sha256": expected["file_sha256"], "original": expected["original"]})
+            if "raw_token" in expected:
+                resolved[-1]["raw_token"] = expected["raw_token"]
+        if not resolved:
+            continue
+        try:
+            batch = prepare_metadata_file((source / path).read_bytes(), resolved)
+            changed_lines = {line for record in batch.records for line in record["changed_lines"]}
+            if pack is not None and _metadata_overlaps_scoring(pack, snapshot_id, path, changed_lines):
+                raise MaterializationError("metadata changes overlap accepted scoring evidence")
+        except MaterializationError as exc:
+            skipped.extend({"path": path, "edit_id": entry["edit_id"], "field_path": entry["field_path"],
+                            "category": "unsafe_or_ambiguous_metadata", "reason": str(exc)} for entry in resolved)
+            continue
+        changes[path] = batch.data
+        records.extend(batch.records)
+        validation.append(_passed("metadata_file_hash", f"{path}: exact original bytes match the reviewed file"))
+        validation.append(_passed("metadata_leaf_structure", f"{path}: only selected metadata leaves changed; lines preserved"))
+    return changes, records, skipped, validation
+
+
+def _metadata_overlaps_scoring(pack: dict, snapshot_id: str, path: str, lines: set[int]) -> bool:
+    from .cases import cases_for_snapshot
+    for case in cases_for_snapshot(pack, snapshot_id):
+        locations = (case["target"]["accepted_locations"] if case["target"]["snapshot_id"] == snapshot_id else [])
+        locations = locations + [location for control in case["controls"] if control["snapshot_id"] == snapshot_id
+                                 for location in control["locations"]]
+        for location in locations:
+            if posixpath.normpath(location["path"]) != path:
+                continue
+            start, end = location.get("start_line"), location.get("end_line")
+            if start is None or end is None or any(start <= line <= end for line in lines):
+                return True
+    return False
+
+
 # --- the blinded export --------------------------------------------------------------------------
 
 
@@ -1515,7 +1580,8 @@ def _preflight(document: dict, snapshot_id: str | None, snapshot: CachedSnapshot
                 raise _refused(f"edit {edit['edit_id']}: configured or nested instructions must be removed, not edited")
         validation.append(_passed("edit_path_class", f"{edit['edit_id']}: {edit['path']} as {edit['role']}"))
     for removal in removals:
-        gap = removal_path_gap(removal["path"], removal["role"], identity_policy=policy)
+        gap = removal_path_gap(removal["path"], removal["role"], identity_policy=policy,
+                               role_check=removal.get("role_check"))
         if gap:
             raise _refused(f"removal {removal['removal_id']}: {gap}")
         validation.append(_passed("removal_path_class",
@@ -1524,7 +1590,7 @@ def _preflight(document: dict, snapshot_id: str | None, snapshot: CachedSnapshot
 
 
 def _write_transformed(original_source: Path, source: Path, original: ExportedTree,
-                       edits: list[_Edit], removals: list[_Removal]) -> ExportedTree:
+                       edits: list[_Edit], removals: list[_Removal], metadata: dict[str, bytes] | None = None) -> ExportedTree:
     """Copy the original export to *source*, write the edits, and verify the result.
 
     Verified, not assumed: the transformed tree holds exactly the original export's paths except
@@ -1535,7 +1601,10 @@ def _write_transformed(original_source: Path, source: Path, original: ExportedTr
     *source* must not exist yet; a directory that already does is refused by ``mkdir`` before
     anything could remove it.
     """
-    changed = {edit.path: edit for edit in edits if edit.present}
+    changed = {edit.path: edit.data for edit in edits if edit.present}
+    changed.update(metadata or {})
+    changed_hashes = {edit.path: edit.transformed_sha256 for edit in edits if edit.present}
+    changed_hashes.update({path: "sha256:" + hashlib.sha256(data).hexdigest() for path, data in (metadata or {}).items()})
     removed = {removal.path for removal in removals if removal.present}
 
     def mode(root: Path, relative: str) -> int:
@@ -1550,8 +1619,8 @@ def _write_transformed(original_source: Path, source: Path, original: ExportedTr
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(original_source / relative, target)
             os.chmod(target, mode(original_source, relative))
-        for path, edit in changed.items():
-            (source / path).write_bytes(edit.data)
+        for path, data in changed.items():
+            (source / path).write_bytes(data)
         hashes: dict[str, str] = {}
         byte_count = 0
         for relative, file in sorted(walk_regular_files(source).items()):
@@ -1559,7 +1628,7 @@ def _write_transformed(original_source: Path, source: Path, original: ExportedTr
             hashes[relative] = digest
             byte_count += size
         expected = {path: digest for path, digest in original.hashes.items() if path not in removed}
-        expected.update({path: edit.transformed_sha256 for path, edit in changed.items()})
+        expected.update(changed_hashes)
         if hashes != expected:
             differing = {path for path in hashes.keys() & expected.keys() if hashes[path] != expected[path]}
             wrong = sorted((hashes.keys() ^ expected.keys()) | differing)
@@ -1638,6 +1707,9 @@ def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapsho
              for edit in document["edits"]]
     removals = [_removal_for(removal, snapshot_id, original_source, original.hashes)
                 for removal in document.get("removals", [])]
+    metadata, metadata_records, metadata_skipped, metadata_validation = _metadata_files(
+        document, snapshot_id, original_source, original.hashes, pack)
+    validation.extend(metadata_validation)
     for edit in edits:
         if not edit.present:
             validation.append(_passed("edit_absent", f"{edit.edit_id}: {edit.path} is absent, as expected"))
@@ -1660,9 +1732,9 @@ def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapsho
         validation.append(_passed("removal_file_hash",
                                   f"{removal.removal_id}: {removal.path} is {removal.original_sha256}, "
                                   "as expected"))
-    transformed = _write_transformed(original_source, source, original, edits, removals)
+    transformed = _write_transformed(original_source, source, original, edits, removals, metadata)
     unedited = (len(original.hashes) - sum(1 for edit in edits if edit.present)
-                - sum(1 for removal in removals if removal.present))
+                - sum(1 for removal in removals if removal.present) - len(metadata))
     validation.append(_passed("unedited_files_unchanged",
                               f"{unedited} file(s) byte-identical to the original export"))
     record = provenance_record(snapshot, profile, transformed, clock=clock)
@@ -1688,15 +1760,21 @@ def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapsho
                                "verified_paths": sorted(edit.path for edit in edits if edit.present)},
     }
     if profile == "identity_reduced":
+        removal_specs = {entry["removal_id"]: entry for entry in document.get("removals", [])}
         applied["removals"] = [
             {"removal_id": removal.removal_id, "path": removal.path, "role": removal.role,
-             "original_sha256": removal.original_sha256}
+             "original_sha256": removal.original_sha256,
+             **({"role_check": removal_specs[removal.removal_id]["role_check"]}
+                if "role_check" in removal_specs[removal.removal_id] else {})}
             for removal in removals if removal.present]
         applied["location_remapping"] = {
             "lines": "identity", "paths": "identity_for_remaining_paths",
-            "verified_paths": sorted(edit.path for edit in edits if edit.present),
+            "verified_paths": sorted({edit.path for edit in edits if edit.present} | set(metadata)),
             "removed_paths": sorted(removal.path for removal in removals if removal.present),
         }
+        if document.get("metadata_edits"):
+            applied["metadata_edits"] = metadata_records
+            applied["skipped_transformations"] = metadata_skipped
     record["blinding"] = applied
     if profile == "identity_reduced":
         from .identity_policy import (IdentityConditionUnavailable, MANIFEST_NAME, build_manifest,
@@ -1710,6 +1788,7 @@ def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapsho
             original_tree_hash=original_hash, transformed_tree_hash=record["trial"]["tree_hash"],
             map_sha256=map_sha256(document), requirements=requirements, inspection=inspection,
             edits=applied["edits"], removals=applied["removals"],
+            metadata_edits=metadata_records, skipped=metadata_skipped,
             tool_versions={**record["tool_versions"], "scaneval": __version__, "python": sys.version.split()[0]},
             original_instruction_files=[item["path"] for item in instruction_inventory(original.hashes, policy)],
             required_source_paths=required_paths)

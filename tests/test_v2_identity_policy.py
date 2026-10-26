@@ -13,7 +13,8 @@ import pytest
 from scaneval.contracts import ContractError, canonical_json, canonical_sha256, validate_document
 from scaneval.identity_policy import (MANIFEST_KIND, POLICY_ID, POLICY_VERSION, build_manifest,
                                      inspect_tree, load_manifest, policy_coverage, prepare_metadata_edit,
-                                     required_answers, scanner_identity_gaps, validate_policy, verify_manifest)
+                                     prepare_metadata_file, required_answers, scanner_identity_gaps,
+                                     validate_policy, verify_manifest)
 from scaneval.materialize import MaterializationError
 
 
@@ -723,3 +724,17 @@ def test_short_repository_names_do_not_match_unrelated_runtime_settings_as_subst
     assert scanner_identity_gaps({"language": "go", "package": "algorithm"}, policy=configured,
                                  repository=repository, commits=[]) == []
     assert scanner_identity_gaps(repository["url"], policy=configured, repository=repository, commits=[])
+
+
+def test_disjoint_metadata_batch_edits_share_one_original_hash_and_preserve_other_fields():
+    tree = {"homepage": ORIGINAL, "repository": "https://example.invalid/original-repository",
+            "dependencies": {"widget-cli": "1"}}
+    data = (json.dumps(tree, indent=2) + "\n").encode()
+    entries = [{"path": "package.json", "field_path": [key], "original": value, "replacement": "",
+                "expected_sha256": "sha256:" + hashlib.sha256(data).hexdigest(), "role_check": ROLE_CHECK}
+               for key, value in tree.items() if key != "dependencies"]
+    batch = prepare_metadata_file(data, entries)
+    assert json.loads(batch.data) == {**tree, "homepage": "", "repository": ""}
+    assert len(batch.records) == 2
+    assert {entry["transformed_sha256"] for entry in batch.records} == {"sha256:" + hashlib.sha256(batch.data).hexdigest()}
+    assert batch.data.count(b"\n") == data.count(b"\n")

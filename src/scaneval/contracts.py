@@ -1841,9 +1841,12 @@ def _validate_blinding_map(document: dict[str, Any]) -> None:
     _unique(variants, "variants.snapshot_id")
     edits = document["edits"]
     removals = document.get("removals", [])
-    if not edits and not removals:
+    metadata = document.get("metadata_edits", [])
+    if metadata and "identity_policy" not in document:
+        raise ContractError("metadata_edits require an explicit strict identity_policy")
+    if not edits and not removals and not metadata:
         raise ContractError("a blinding map must declare at least one edit or removal")
-    _unique([edit["edit_id"] for edit in edits], "edits.edit_id")
+    _unique([edit["edit_id"] for edit in edits + metadata], "edits.edit_id")
     _unique([edit["path"] for edit in edits], "edits.path")
     for edit in edits:
         label = f"edit {edit['edit_id']}"
@@ -1883,11 +1886,48 @@ def _validate_blinding_map(document: dict[str, Any]) -> None:
             raise ContractError(f"{label}.path must be a normalized relative POSIX path, not {path!r}")
         if not is_stated(removal["rationale"]):
             raise ContractError(f"{label} must state its rationale")
+        if "role_check" in removal and not is_stated(removal["role_check"]):
+            raise ContractError(f"{label}.role_check must be stated")
         expected = [entry["snapshot_id"] for entry in removal["expected"]]
         _unique(expected, f"{label} expected.snapshot_id")
         if set(expected) != set(variants):
             raise ContractError(f"{label} must state one expectation for every variant and no other: "
                                 f"it names {sorted(expected)}, the map covers {sorted(variants)}")
+    metadata_selectors = []
+    expectations = {}
+    for edit in metadata:
+        from .identity_policy import validate_metadata_selector
+        from .materialize import MaterializationError
+        label = f"metadata edit {edit['edit_id']}"
+        try:
+            validate_metadata_selector(edit["path"], edit["field_path"])
+        except MaterializationError as exc:
+            raise ContractError(f"{label}: {exc}") from exc
+        metadata_selectors.append((edit["path"], tuple(edit["field_path"])))
+        if edit["path"] in {entry["path"] for entry in edits + removals}:
+            raise ContractError(f"{label}: metadata paths cannot also be token-edited or removed")
+        for key in ("role_check", "rationale"):
+            if not is_stated(edit[key]):
+                raise ContractError(f"{label}.{key} must be stated")
+        expected = [entry["snapshot_id"] for entry in edit["expected"]]
+        _unique(expected, f"{label} expected.snapshot_id")
+        if set(expected) != set(variants):
+            raise ContractError(f"{label} must state one expectation for every variant and no other")
+        single_line = [edit["replacement"], *(entry[key] for entry in edit["expected"] if entry["state"] == "present"
+                                             for key in ("original", "raw_token") if key in entry)]
+        for value in [edit["role_check"], edit["rationale"], *single_line]:
+            try:
+                value.encode("utf-8", errors="strict")
+            except UnicodeEncodeError as exc:
+                raise ContractError(f"{label} text must be strict UTF-8") from exc
+            if value in single_line and any(character in _LINE_BREAKS for character in value):
+                raise ContractError(f"{label} text must preserve line structure")
+        for entry in edit["expected"]:
+            key = edit["path"], entry["snapshot_id"]
+            binding = entry["state"], entry.get("file_sha256")
+            if expectations.setdefault(key, binding) != binding:
+                raise ContractError(f"{label}: all fields of one file must pin the same snapshot state and hash")
+    _unique(metadata_selectors, "metadata_edits path/field_path")
     reviews = document["reviews"]
     for index, review in enumerate(reviews):
         if not is_stated(review["reviewer"]):

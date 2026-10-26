@@ -90,6 +90,7 @@
       "properties": {
         "removal_id": {"type": "string", "minLength": 1}, "path": {"$ref": "#/$defs/path"},
         "role": {"enum": ["identity_document", "instruction_file"]},
+        "role_check": {"type": "string", "minLength": 1},
         "original_sha256": {"$ref": "#/$defs/digest"}
       }
     },

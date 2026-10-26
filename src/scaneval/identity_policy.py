@@ -152,6 +152,14 @@ class MetadataEdit:
     record: dict
 
 
+@dataclass(frozen=True)
+class MetadataFile:
+    """One file with all of its disjoint, independently verified metadata leaf edits applied."""
+
+    data: bytes
+    records: list[dict]
+
+
 def prepare_metadata_edit(data: bytes | bytearray, *, path: str, field_path: list[str] | tuple[str, ...],
                           expected_sha256: str, original: str, replacement: str,
                           role_check: str, raw_token: str | None = None) -> MetadataEdit:
@@ -231,6 +239,74 @@ def prepare_metadata_edit(data: bytes | bytearray, *, path: str, field_path: lis
         "transformed_sha256": _sha256(output), "redactions": 1,
         "changed_lines": [len(_LINE_BREAK.findall(text[:start])) + 1], "role_check": role_check,
     })
+
+
+def validate_metadata_selector(path: str, field_path: list[str]) -> str:
+    """The supported format of a parsed metadata selector, or a controlled policy refusal."""
+    if not isinstance(field_path, list) or not field_path or not all(isinstance(key, str) for key in field_path):
+        raise _refuse("field_path must be a nonempty list of string keys")
+    for key in field_path:
+        _strict_text(key, "field_path")
+    return _metadata_format(path, tuple(field_path))
+
+
+def prepare_metadata_file(data: bytes | bytearray, edits: list[dict]) -> MetadataFile:
+    """Combine distinct leaf changes prepared against the same original bytes, without writing.
+
+    Every individual edit must be safe on the original file. A duplicate raw token still refuses
+    the batch rather than guessing its position. After disjoint byte changes are combined, the
+    complete parsed tree is verified again with exactly the selected leaves changed.
+    """
+    if not isinstance(data, (bytes, bytearray)):
+        raise _refuse("metadata data must be bytes or bytearray")
+    if not isinstance(edits, list) or not edits:
+        raise ContractError("a metadata file needs a nonempty list of edits")
+    allowed = {"path", "field_path", "expected_sha256", "original", "replacement", "role_check", "raw_token",
+               "edit_id", "rationale"}
+    required = {"path", "field_path", "expected_sha256", "original", "replacement", "role_check"}
+    original = bytes(data)
+    prepared, spans, selectors, path = [], [], set(), None
+    for entry in edits:
+        _object(entry, allowed=allowed, required=required, where="metadata edit")
+        change = prepare_metadata_edit(original, **{key: value for key, value in entry.items()
+                                                   if key not in {"edit_id", "rationale"}})
+        selector = tuple(change.record["field_path"])
+        if selector in selectors or path is not None and entry["path"] != path:
+            raise ContractError("a metadata file batch must select distinct leaves in one file")
+        selectors.add(selector)
+        path = entry["path"]
+        prefix, limit = 0, min(len(original), len(change.data))
+        while prefix < limit and original[prefix] == change.data[prefix]:
+            prefix += 1
+        suffix = 0
+        while suffix < limit - prefix and original[-1 - suffix] == change.data[-1 - suffix]:
+            suffix += 1
+        end = len(original) - suffix
+        replacement_end = len(change.data) - suffix
+        spans.append((prefix, end, change.data[prefix:replacement_end]))
+        record = deepcopy(change.record)
+        record.update({key: entry[key] for key in ("edit_id", "rationale") if key in entry})
+        prepared.append((entry, record))
+    parts, cursor = [], 0
+    for start, end, replacement in sorted(spans):
+        if start < cursor:
+            raise _refuse("metadata leaf changes overlap in the original file")
+        parts.extend((original[cursor:start], replacement))
+        cursor = end
+    parts.append(original[cursor:])
+    output = b"".join(parts)
+    format_ = prepared[0][1]["format"]
+    expected = _parse(original.decode("utf-8"), format_)
+    for entry, _ in prepared:
+        parent, key = _leaf(expected, tuple(entry["field_path"]))
+        parent[key] = entry["replacement"]
+    if not _same_tree(expected, _parse(output.decode("utf-8"), format_, label="combined metadata file")):
+        raise _refuse("combined metadata edits change more than their selected leaves")
+    records = []
+    for _, record in prepared:
+        record["transformed_sha256"] = _sha256(output)
+        records.append(record)
+    return MetadataFile(output, sorted(records, key=canonical_json))
 
 
 def _object(value: Any, *, allowed: set[str], required: set[str], where: str) -> None:
