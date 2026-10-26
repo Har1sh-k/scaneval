@@ -43,6 +43,9 @@ MANIFEST_NAME = "identity-transform.json"
 _ALIAS_CATEGORIES = frozenset({"target_alias", "advisory_url", "answer_alias"})
 _ARTIFACT_CATEGORIES = frozenset({"evaluator_evidence", "redaction_dictionary", "transformation_manifest"})
 _TEXT_SUFFIXES = frozenset({".md", ".markdown", ".rst", ".txt", ".adoc", ".asciidoc", ".org", ".mdc"})
+_ARTIFACT_MAX_BYTES = 16 * 1024 * 1024
+_ARTIFACT_MAX_NODES = 1_000_000
+_ARTIFACT_MAX_DEPTH = 128
 
 
 class IdentityConditionUnavailable(MaterializationError):
@@ -78,6 +81,20 @@ def _path(path: str) -> PurePosixPath:
     if pure.is_absolute() or any(part in ("", ".", "..") for part in path.split("/")):
         raise _refuse("a file path must be a normalized relative POSIX path")
     return pure
+
+
+def _required_paths(values: list[str] | None) -> list[str]:
+    if values is None:
+        return []
+    if not isinstance(values, list) or not all(isinstance(path, str) for path in values):
+        raise ContractError("source paths must be a list of normalized relative POSIX strings")
+    result = sorted(set(values))
+    for path in result:
+        try:
+            _path(path)
+        except MaterializationError as exc:
+            raise ContractError(f"source paths: {exc}") from exc
+    return result
 
 
 def _metadata_format(path: str, field_path: tuple[str, ...]) -> str:
@@ -518,8 +535,16 @@ def _instruction_class(path: str, configured: set[str]) -> str | None:
 def instruction_inventory(paths, policy: dict | None = None) -> list[dict]:
     """Classify known, configured, and nested assistant files without granting removal permission."""
     configured = {path.casefold() for path in (policy or {}).get("instruction_paths", [])}
-    return [{"path": path, "classification": classification} for path in sorted(paths)
-            if (classification := _instruction_class(path, configured)) is not None]
+    records = []
+    for path in sorted(paths):
+        try:
+            _path(path)
+        except MaterializationError:
+            continue  # The tree inspector records non-portable names as opaque unsafe entries.
+        classification = _instruction_class(path, configured)
+        if classification is not None:
+            records.append({"path": path, "classification": classification})
+    return records
 
 
 def _tree_entries(root: Path):
@@ -561,6 +586,10 @@ def _tree_entries(root: Path):
                 opaque = _sha256(os.fsencode(name)).split(":", 1)[1]
                 yield prefix + f"[non-utf8-name-{opaque}]", None, "file names must be strict UTF-8"
                 continue
+            if "\\" in name or re.match(r"^[A-Za-z]:", name):
+                opaque = _sha256(os.fsencode(name)).split(":", 1)[1]
+                yield prefix + f"[nonportable-name-{opaque}]", None, "file names must be portable POSIX components"
+                continue
             relative = prefix + name
             if name.casefold() in {".git", ".hg", ".svn", ".bzr", "cvs"}:
                 yield relative, None, "original VCS directories and history are forbidden"
@@ -599,33 +628,122 @@ def _tree_entries(root: Path):
             os.close(descriptor)
 
 
-def _artifact_category(path: str, data: bytes) -> str | None:
-    if PurePosixPath(path).name.casefold() == MANIFEST_NAME:
-        return "transformation_manifest"
-    if PurePosixPath(path).name.casefold() == "provenance.json":
-        return "evaluator_evidence"
-    try:
-        document = json.loads(data)
-    except (UnicodeDecodeError, ValueError, RecursionError):
-        return None
+def _artifact_object_category(document: Any) -> str | None:
     if not isinstance(document, dict):
         return None
-    keys = set(document)
-    if document.get("kind") == MANIFEST_KIND or {"original_tree_hash", "transformed_tree_hash", "policy"} <= keys:
+    digest = lambda value: isinstance(value, str) and bool(_DIGEST.fullmatch(value))
+    if (document.get("kind") == MANIFEST_KIND
+            or digest(document.get("original_tree_hash")) and digest(document.get("transformed_tree_hash"))
+            and isinstance(document.get("policy"), dict)):
         return "transformation_manifest"
-    if {"manifest_sha256", "config_sha256", "validation"} <= keys:
+    if (digest(document.get("manifest_sha256")) and digest(document.get("config_sha256"))
+            and isinstance(document.get("validation"), dict)):
         return "transformation_manifest"
-    if ({"map_id", "pseudonyms", "variants", "edits"} <= keys
-            or document.get("policy_id") == POLICY_ID and "answer_aliases" in keys):
+    if (isinstance(document.get("map_id"), str) and all(isinstance(document.get(key), list)
+                                                     for key in ("pseudonyms", "variants", "edits"))
+            or document.get("policy_id") == POLICY_ID and isinstance(document.get("answer_aliases"), list)):
         return "redaction_dictionary"
-    if any(required <= keys for required in (
-            {"profile", "trial", "source"}, {"blinding", "original", "trial"},
-            {"namespace", "pack_id", "snapshots", "cases"},
-            {"canonical_target", "target", "evidence", "validation"},
-            {"targets", "controls", "review_budgets", "input_hash"},
-            {"claim_matches", "control_assessments", "result_sha256", "input_hash"})):
+    if (isinstance(document.get("map_id"), str) and digest(document.get("map_sha256"))
+            and digest(document.get("original_tree_hash")) and digest(document.get("transformed_tree_hash"))
+            and isinstance(document.get("edits"), list)):
+        return "redaction_dictionary"
+    profile = document.get("profile")
+    trial, source = document.get("trial"), document.get("source")
+    if (isinstance(profile, str) and profile in {"standard", "metadata_blinded", "identity_reduced"}
+            and isinstance(trial, dict) and digest(trial.get("tree_hash"))
+            and isinstance(source, dict) and isinstance(source.get("commit"), str)):
+        return "evaluator_evidence"
+    if (isinstance(document.get("namespace"), str) and isinstance(document.get("pack_id"), str)
+            and isinstance(document.get("snapshots"), list) and isinstance(document.get("cases"), list)):
+        return "evaluator_evidence"
+    if (all(isinstance(document.get(key), dict) for key in ("canonical_target", "target", "validation"))
+            and isinstance(document.get("evidence"), list)):
+        return "evaluator_evidence"
+    if (all(isinstance(document.get(key), list) for key in ("targets", "controls", "review_budgets"))
+            and isinstance(document.get("input_hash"), str)):
+        return "evaluator_evidence"
+    if (all(isinstance(document.get(key), list) for key in ("claim_matches", "control_assessments"))
+            and all(isinstance(document.get(key), str) for key in ("result_sha256", "input_hash"))):
         return "evaluator_evidence"
     return None
+
+
+def _structured_text(data: bytes) -> str:
+    if data.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        encoding = "utf-32"
+    elif data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        encoding = "utf-16"
+    elif len(data) >= 4 and data[0] == 0:
+        encoding = "utf-32-be" if data[1] == 0 else "utf-16-be"
+    elif len(data) >= 4 and data[1] == 0:
+        encoding = "utf-32-le" if data[2] == data[3] == 0 else "utf-16-le"
+    else:
+        encoding = "utf-8-sig"
+    return data.decode(encoding, errors="strict")
+
+
+def _artifact_scan(path: str, data: bytes) -> tuple[set[str], str | None]:
+    categories = {"transformation_manifest"} if PurePosixPath(path).name.casefold() == MANIFEST_NAME else set()
+    try:
+        text = _structured_text(data)
+    except UnicodeDecodeError:
+        return categories, None
+    if not any(line.lstrip().startswith(("{", "[")) for line in text.splitlines()):
+        return categories, None
+    if len(data) > _ARTIFACT_MAX_BYTES:
+        return categories, "structured artifact inspection exceeds the policy byte limit"
+    try:
+        documents = [json.loads(text)]
+    except RecursionError:
+        return categories, "structured artifact inspection exceeds the parser depth limit"
+    except ValueError:
+        documents = []
+        for line in text.splitlines():
+            if not line.lstrip().startswith(("{", "[")):
+                continue
+            try:
+                documents.append(json.loads(line))
+            except RecursionError:
+                return categories, "structured artifact inspection exceeds the parser depth limit"
+            except ValueError:
+                continue
+    stack, nodes = [(document, 0) for document in documents], 0
+    while stack:
+        document, depth = stack.pop()
+        nodes += 1
+        if depth > _ARTIFACT_MAX_DEPTH or nodes > _ARTIFACT_MAX_NODES:
+            return categories, "structured artifact inspection exceeds the policy structure limit"
+        category = _artifact_object_category(document)
+        if category is not None:
+            categories.add(category)
+        children = document.values() if isinstance(document, dict) else document if isinstance(document, list) else ()
+        if len(children) + len(stack) + nodes > _ARTIFACT_MAX_NODES:
+            return categories, "structured artifact inspection exceeds the policy structure limit"
+        stack.extend((child, depth + 1) for child in children)
+    return categories, None
+
+
+def _configuration(policy: dict | None, map_sha256: str, requirements: list[dict], paths_digest: str) -> dict:
+    return {"policy": policy, "map_sha256": map_sha256, "required_answers": requirements,
+            "required_source_paths_sha256": paths_digest,
+            "inspection_limits": _inspection_limits()}
+
+
+def _inspection_limits() -> dict:
+    return {"artifact_bytes": _ARTIFACT_MAX_BYTES, "artifact_nodes": _ARTIFACT_MAX_NODES,
+            "artifact_depth": _ARTIFACT_MAX_DEPTH}
+
+
+def _inspection_policy_digest(policy: dict | None) -> str:
+    return canonical_sha256({"policy": policy, "inspection_limits": _inspection_limits()})
+
+
+def configuration_digest(policy: dict | None, *, map_sha256: str, requirements: list[dict],
+                         required_source_paths: list[str] | None = None) -> str:
+    """Effective deterministic policy configuration, including the bounded inspection limits."""
+    paths = _required_paths(required_source_paths)
+    return canonical_sha256(_configuration(validate_policy(policy) if policy is not None else None, map_sha256,
+                                          _aliases(requirements, "required answers"), canonical_sha256(paths)))
 
 
 def _cue(category: str, value: str, path: str, count: int, surface: str, reason: str) -> dict:
@@ -707,9 +825,7 @@ def inspect_tree(source: Path, policy: dict | None, *, requirements: list[dict],
         else:
             known["forms"] = sorted(set(known["forms"]) | set(entry["forms"]))
     configured = {path.casefold() for path in (normalized or {}).get("instruction_paths", [])}
-    required_paths = sorted(set(required_source_paths or []))
-    for path in required_paths:
-        _path(path)
+    required_paths = _required_paths(required_source_paths)
     hashes, residuals, unsafe, artifacts, instructions, support, reasons = {}, [], [], [], [], [], list(coverage["reasons"])
     byte_count = 0
     for path, data, issue in _tree_entries(Path(source)):
@@ -721,9 +837,11 @@ def inspect_tree(source: Path, policy: dict | None, *, requirements: list[dict],
         hashes[path] = digest
         byte_count += len(data)
         artifact_categories = set()
-        detected = _artifact_category(path, data)
-        if detected:
-            artifact_categories.add(detected)
+        detected, artifact_issue = _artifact_scan(path, data)
+        artifact_categories.update(detected)
+        if artifact_issue is not None:
+            unsafe.append({"path": path, "reason": artifact_issue})
+            reasons.append(f"uninspected structured content at {path}: {artifact_issue}")
         for artifact in (normalized or {}).get("forbidden_artifacts", []):
             if artifact.get("path", "").casefold() == path.casefold() or artifact.get("sha256") == digest:
                 artifact_categories.add(artifact["category"])
@@ -763,7 +881,7 @@ def inspect_tree(source: Path, policy: dict | None, *, requirements: list[dict],
             reasons.append(f"accepted scoring path {path} is absent from the transformed export")
     return {"tree_hash": None if unsafe else tree_hash(hashes), "file_count": len(hashes), "byte_count": byte_count,
             "paths": sorted(hashes),
-            "policy_sha256": canonical_sha256(normalized), "requirements_sha256": canonical_sha256(required),
+            "policy_sha256": _inspection_policy_digest(normalized), "requirements_sha256": canonical_sha256(required),
             "required_source_paths_sha256": canonical_sha256(required_paths),
             "answer_coverage": coverage, "instruction_files": sorted(instructions),
             "assistant_support_files": sorted(support), "residual_cues": sorted(residuals, key=canonical_json),
@@ -839,9 +957,7 @@ def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_
     _validate_components(inspection, edits, fields_input, removals, skipped_input)
     normalized = validate_policy(policy) if policy is not None else None
     required = _aliases(requirements, "required answers")
-    required_paths = sorted(set(required_source_paths or []))
-    for path in required_paths:
-        _path(path)
+    required_paths = _required_paths(required_source_paths)
     required_paths_sha256 = canonical_sha256(required_paths)
     for name, digest in (("original_tree_hash", original_tree_hash), ("transformed_tree_hash", transformed_tree_hash),
                          ("map_sha256", map_sha256)):
@@ -859,7 +975,7 @@ def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_
             validation["reasons"].append(f"accepted scoring path {path} is absent from the transformed export")
     if validation["state"] != "available" and not validation["reasons"]:
         validation["reasons"].append("the export inspection did not establish strict identity availability")
-    if inspection.get("policy_sha256") != canonical_sha256(normalized):
+    if inspection.get("policy_sha256") != _inspection_policy_digest(normalized):
         validation["reasons"].append("the export was inspected under a different identity policy")
     if inspection.get("requirements_sha256") != canonical_sha256(required):
         validation["reasons"].append("the export was inspected against different answer requirements")
@@ -869,15 +985,14 @@ def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_
         validation["reasons"].append("the inspected export does not match the transformed tree hash")
     validation["reasons"] = sorted(set(validation["reasons"]))
     validation["state"] = "unavailable" if validation["reasons"] else "available"
-    configuration = {"policy": normalized, "map_sha256": map_sha256, "required_answers": required,
-                     "required_source_paths_sha256": required_paths_sha256}
+    configuration = _configuration(normalized, map_sha256, required, required_paths_sha256)
     config_sha256 = canonical_sha256(configuration)
     changed = sorted(deepcopy(edits), key=canonical_json)
     fields = sorted(deepcopy(fields_input), key=canonical_json)
     removed = sorted(deepcopy(removals), key=canonical_json)
     remaining = set(inspection["instruction_files"])
     final_paths = set(inspection["paths"])
-    before = set(original_instruction_files or [])
+    before = set(_required_paths(original_instruction_files))
     declared = set((normalized or {}).get("instruction_paths", []))
     configured = {path.casefold() for path in declared}
     inventory = before | remaining
@@ -903,6 +1018,7 @@ def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_
         "policy": {"policy_id": (normalized or {}).get("policy_id"), "version": (normalized or {}).get("version"),
                    "config_sha256": config_sha256},
         "source_snapshot": deepcopy(source_snapshot), "original_tree_hash": original_tree_hash,
+        "inspected_paths": sorted(inspection["paths"]),
         "transformed_tree_hash": transformed_tree_hash, "map_sha256": map_sha256,
         "requirements_sha256": canonical_sha256(required), "inspection_sha256": canonical_sha256(inspection),
         "required_source_paths_sha256": required_paths_sha256,
@@ -927,7 +1043,7 @@ def _portable_summary(manifest: dict) -> dict:
                     for entry in manifest["residual_cues"] if entry["category"] == category)}
                    for category in categories], "validation": {
                        "state": manifest["validation"]["state"],
-                       "reasons": [_portable_reason(reason) for reason in manifest["validation"]["reasons"]]}}
+                       "reasons": sorted({_portable_reason(reason) for reason in manifest["validation"]["reasons"]})}}
 
 
 def _portable_reason(reason: str) -> str:
@@ -944,9 +1060,21 @@ def _portable_reason(reason: str) -> str:
         "repository instruction documents remain in the transformed export",
         "answer-bearing content or unsafe configured instructions remain in the transformed export",
     }
-    if reason in safe or re.fullmatch(r"the policy does not declare (?:required answer |every required normalized form of )sha256:[0-9a-f]{64}", reason):
+    if reason in safe:
         return reason
-    return "strict identity validation diagnostic " + canonical_sha256(reason)
+    if reason.startswith("the policy does not declare required answer "):
+        return "the policy does not declare every required answer alias"
+    if reason.startswith("the policy does not declare every required normalized form of "):
+        return "the policy does not declare every required normalized alias form"
+    if reason.startswith("residual "):
+        return "declared answer aliases remain in scanner-visible content or paths"
+    if reason.startswith("accepted scoring path "):
+        return "accepted scoring paths are absent from the transformed export"
+    if reason.startswith("repository instruction document remains"):
+        return "repository instruction documents remain in the transformed export"
+    if reason.startswith("evaluator-only "):
+        return "evaluator-only artifacts remain in the transformed export"
+    return "strict identity validation failed; detailed diagnostics remain evaluator-side"
 
 
 def _validate_manifest_invariants(document: dict) -> None:
@@ -964,6 +1092,11 @@ def _validate_manifest_invariants(document: dict) -> None:
                 _path(entry["path"])
             except MaterializationError as exc:
                 raise ContractError(f"{key}: {exc}") from exc
+    for path in document["inspected_paths"]:
+        try:
+            _path(path)
+        except MaterializationError as exc:
+            raise ContractError(f"inspected_paths: {exc}") from exc
     instructions = document["instruction_files"]
     if len({entry["path"] for entry in instructions}) != len(instructions):
         raise ContractError("instruction_files paths must be unique")
@@ -1025,12 +1158,9 @@ def verify_manifest(manifest: dict, summary: dict, *, policy: dict | None, map_s
             raise ContractError(f"manifest_path: {exc}") from exc
     normalized = validate_policy(policy) if policy is not None else None
     required = _aliases(requirements, "required answers")
-    paths = sorted(set(required_source_paths or []))
-    for path in paths:
-        _path(path)
+    paths = _required_paths(required_source_paths)
     path_digest = canonical_sha256(paths)
-    config_digest = canonical_sha256({"policy": normalized, "map_sha256": map_sha256,
-                                     "required_answers": required, "required_source_paths_sha256": path_digest})
+    config_digest = canonical_sha256(_configuration(normalized, map_sha256, required, path_digest))
     expected = {"original_tree_hash": original_tree_hash, "transformed_tree_hash": transformed_tree_hash,
                 "map_sha256": map_sha256, "requirements_sha256": canonical_sha256(required),
                 "required_source_paths_sha256": path_digest}
@@ -1046,6 +1176,9 @@ def verify_manifest(manifest: dict, summary: dict, *, policy: dict | None, map_s
     coverage = policy_coverage(normalized, required)
     if coverage["state"] != "available" and manifest["validation"]["state"] == "available":
         raise ContractError("identity manifest cannot claim strict availability without answer coverage")
+    if (manifest["validation"]["state"] == "available"
+            and any(path not in manifest["inspected_paths"] for path in paths)):
+        raise ContractError("identity manifest cannot claim strict availability with missing accepted scoring paths")
     if source is not None:
         inspection = inspect_tree(source, normalized, requirements=required, required_source_paths=paths)
         if canonical_sha256(inspection) != manifest["inspection_sha256"]:

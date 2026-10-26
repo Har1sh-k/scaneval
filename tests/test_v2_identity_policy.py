@@ -10,6 +10,7 @@ import tomllib
 
 import pytest
 
+from scaneval import identity_policy as policy_module
 from scaneval.contracts import ContractError, canonical_json, canonical_sha256, validate_document
 from scaneval.identity_policy import (MANIFEST_KIND, POLICY_ID, POLICY_VERSION, build_manifest,
                                      inspect_tree, load_manifest, policy_coverage, prepare_metadata_edit,
@@ -422,7 +423,7 @@ def test_missing_accepted_paths_are_reported_and_traversal_is_rejected(tmp_path)
     result = inspect_tree(tree, policy(), requirements=[ALIAS], required_source_paths=["src/missing.py"])
     assert result["validation"]["state"] == "unavailable"
     assert "accepted scoring path src/missing.py is absent" in result["validation"]["reasons"][0]
-    with pytest.raises(MaterializationError, match="normalized relative POSIX path"):
+    with pytest.raises(ContractError, match="normalized relative POSIX path"):
         inspect_tree(tree, policy(), requirements=[ALIAS], required_source_paths=["../outside/answer.txt"])
 
 
@@ -590,10 +591,13 @@ def test_saved_manifest_and_summary_tampering_is_detected(tmp_path, bad):
 
 
 @pytest.mark.parametrize("document", [
-    {"profile": "identity_reduced", "trial": {}, "source": {}},
-    {"blinding": {"edits": []}, "original": {}, "trial": {}},
+    {"profile": "identity_reduced", "trial": {"tree_hash": "sha256:" + "1" * 64}, "source": {"commit": "a" * 40}},
+    {"blinding": {"map_id": "map", "map_sha256": "sha256:" + "1" * 64,
+                   "original_tree_hash": "sha256:" + "2" * 64, "transformed_tree_hash": "sha256:" + "3" * 64,
+                   "edits": []}, "original": {}, "trial": {}},
     {"targets": [], "controls": [], "review_budgets": [5], "input_hash": "hash"},
-    {"manifest_sha256": "hash", "config_sha256": "hash", "validation": {"state": "available"}},
+    {"manifest_sha256": "sha256:" + "1" * 64, "config_sha256": "sha256:" + "2" * 64,
+     "validation": {"state": "available"}},
 ])
 def test_export_provenance_plans_and_portable_summaries_are_evaluator_artifacts(tmp_path, document):
     tree = source(tmp_path, {"notes/renamed.json": json.dumps(document)})
@@ -608,8 +612,8 @@ def test_portable_diagnostics_do_not_disclose_aliases_from_paths(tmp_path):
     assert ALIAS["value"] in canonical_json(record)
     assert ALIAS["value"] not in canonical_json(summary)
     assert summary["validation"]["state"] == "unavailable"
-    assert any(reason.startswith("strict identity validation diagnostic sha256:")
-               for reason in summary["validation"]["reasons"])
+    assert all("sha256:" not in reason for reason in summary["validation"]["reasons"])
+    assert "declared answer aliases remain in scanner-visible content or paths" in summary["validation"]["reasons"]
 
 
 def test_forbidden_artifact_paths_match_case_insensitively(tmp_path):
@@ -738,3 +742,91 @@ def test_disjoint_metadata_batch_edits_share_one_original_hash_and_preserve_othe
     assert len(batch.records) == 2
     assert {entry["transformed_sha256"] for entry in batch.records} == {"sha256:" + hashlib.sha256(batch.data).hexdigest()}
     assert batch.data.count(b"\n") == data.count(b"\n")
+
+
+@pytest.mark.parametrize("path", ["a:b.txt", "x\\y.md", ".claude/x\\y.md"])
+def test_nonportable_posix_names_produce_saved_unavailable_evidence(tmp_path, path):
+    tree = source(tmp_path, {path: ALIAS["value"]})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    record, summary = manifest(inspection, transformed_tree_hash="sha256:" + "5" * 64,
+                                original_instruction_files=[entry["path"] for entry in
+                                    policy_module.instruction_inventory([path], policy())])
+    assert record["validation"]["state"] == summary["validation"]["state"] == "unavailable"
+    assert inspection["unsafe_entries"] and "nonportable-name-" in inspection["unsafe_entries"][0]["path"]
+
+
+def test_slsa_provenance_is_ordinary_repository_content_until_explicitly_excluded(tmp_path):
+    provenance = {"_type": "https://in-toto.io/Statement/v1", "predicateType": "https://slsa.dev/provenance/v1",
+                  "subject": [{"name": "artifact", "digest": {"sha256": "a" * 64}}], "predicate": {}}
+    tree = source(tmp_path, {"provenance.json": json.dumps(provenance)})
+    allowed = inspect_tree(tree, policy(), requirements=[ALIAS])
+    assert allowed["validation"]["state"] == "available" and allowed["forbidden_artifacts"] == []
+    forbidden = inspect_tree(tree, policy(forbidden_artifacts=[
+        {"category": "evaluator_evidence", "path": "provenance.json"}]), requirements=[ALIAS])
+    assert forbidden["validation"]["state"] == "unavailable"
+
+
+@pytest.mark.parametrize("wrapper", ["nested", "array", "jsonl", "utf16-jsonl", "utf32-jsonl"])
+def test_wrapped_and_jsonl_evaluator_manifests_are_detected(tmp_path, wrapper):
+    artifact = {"kind": MANIFEST_KIND}
+    if wrapper == "nested":
+        data = json.dumps({"wrapper": {"payload": artifact}}).encode()
+    elif wrapper == "array":
+        data = json.dumps([{"ordinary": 1}, artifact]).encode()
+    else:
+        text = json.dumps({"ordinary": 1}) + "\n" + json.dumps({"payload": [artifact]}) + "\n"
+        data = text.encode("utf-16-be" if wrapper == "utf16-jsonl" else "utf-32-le" if wrapper == "utf32-jsonl" else "utf-8")
+    tree = source(tmp_path, {"renamed.txt": data})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    assert inspection["validation"]["state"] == "unavailable"
+    assert inspection["forbidden_artifacts"][0]["category"] == "transformation_manifest"
+
+
+def test_json_schema_property_definitions_are_not_concrete_evaluator_artifacts(tmp_path):
+    schema = {"type": "object", "properties": {
+        "map_id": {"type": "string"}, "pseudonyms": {"type": "array"}, "variants": {"type": "array"},
+        "edits": {"type": "array"}, "profile": {"type": "string"}, "source": {"type": "object"},
+        "trial": {"type": "object"}, "kind": {"const": MANIFEST_KIND}}}
+    tree = source(tmp_path, {"contract.schema.json": json.dumps(schema)})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    assert inspection["validation"]["state"] == "available" and inspection["forbidden_artifacts"] == []
+
+
+def test_portable_missing_answer_diagnostics_contain_counts_and_codes_without_per_alias_digests(tmp_path):
+    tree = source(tmp_path, {"src/app.py": "safe"})
+    configured = policy(answer_aliases=[])
+    inspection = inspect_tree(tree, configured, requirements=[ALIAS])
+    record, summary = manifest(inspection, selected_policy=configured)
+    assert any("sha256:" in reason for reason in record["validation"]["reasons"])
+    assert all("sha256:" not in reason and ALIAS["value"] not in reason for reason in summary["validation"]["reasons"])
+    assert "the policy does not declare every required answer alias" in summary["validation"]["reasons"]
+
+
+def test_sourceless_reuse_rejects_available_state_with_missing_accepted_paths(tmp_path):
+    tree = source(tmp_path, {"src/app.py": "safe"})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS], required_source_paths=["missing.py"])
+    record, summary = manifest(inspection, required_source_paths=["missing.py"])
+    record["validation"] = summary["validation"] = {"state": "available", "reasons": []}
+    summary["manifest_sha256"] = canonical_sha256(record)
+    with pytest.raises(ContractError, match="missing accepted scoring paths"):
+        verify_manifest(record, summary, **saved_bindings(inspection, required_source_paths=["missing.py"]))
+
+
+def test_structured_inspection_limits_are_explicit_and_invalidate_stale_configuration(tmp_path, monkeypatch):
+    tree = source(tmp_path, {"data.json": json.dumps({"outer": {"inner": {"value": 1}}})})
+    old = inspect_tree(tree, policy(), requirements=[ALIAS])
+    record, summary = manifest(old)
+    monkeypatch.setattr(policy_module, "_ARTIFACT_MAX_DEPTH", 1)
+    limited = inspect_tree(tree, policy(), requirements=[ALIAS])
+    assert limited["validation"]["state"] == "unavailable" and limited["unsafe_entries"]
+    with pytest.raises(ContractError, match="policy configuration is stale"):
+        verify_manifest(record, summary, **saved_bindings(old))
+    _, stale = manifest(old)
+    assert stale["validation"]["state"] == "unavailable"
+
+
+@pytest.mark.parametrize("invalid", ["missing.py", [None], ["../missing.py"]])
+def test_required_source_path_arguments_have_controlled_contract_errors(tmp_path, invalid):
+    tree = source(tmp_path, {"src/app.py": "safe"})
+    with pytest.raises(ContractError):
+        inspect_tree(tree, policy(), requirements=[ALIAS], required_source_paths=invalid)

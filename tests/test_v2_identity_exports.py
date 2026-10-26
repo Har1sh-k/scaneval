@@ -85,7 +85,8 @@ def test_legacy_removal_map_still_runs_but_its_strict_condition_is_unavailable(t
 def test_explicit_policy_failure_persists_refusal_evidence_and_never_calls_scanner(tmp_path, failure):
     extra = {"source-answer": {"src/answer.py": "# cVe_2025_12345\n"},
              "instruction": {"AGENTS.md": "Project instructions\n"},
-             "evaluator-artifact": {"notes/export.json": json.dumps({"profile": "standard", "trial": {}, "source": {}})}}
+             "evaluator-artifact": {"notes/export.json": json.dumps({"profile": "standard",
+                 "trial": {"tree_hash": "sha256:" + "1" * 64}, "source": {"commit": "a" * 40}})}}
     widget = fixture.build_widget(tmp_path, {**fixture.FILES, **extra.get(failure, {})})
     declared = [ALIAS] if failure == "source-answer" else []
     document = strict_map(widget, answer_aliases=declared)

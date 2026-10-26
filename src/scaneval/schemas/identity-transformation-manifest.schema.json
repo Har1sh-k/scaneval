@@ -3,7 +3,7 @@
   "title": "Evaluator-side identity transformation manifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "kind", "policy", "source_snapshot", "original_tree_hash", "transformed_tree_hash", "map_sha256", "requirements_sha256", "inspection_sha256", "required_source_paths_sha256", "tool_versions", "edits", "metadata_edits", "removals", "skipped", "instruction_files", "residual_cues", "forbidden_artifacts", "unsafe_entries", "counts", "validation"],
+  "required": ["schema_version", "kind", "policy", "source_snapshot", "inspected_paths", "original_tree_hash", "transformed_tree_hash", "map_sha256", "requirements_sha256", "inspection_sha256", "required_source_paths_sha256", "tool_versions", "edits", "metadata_edits", "removals", "skipped", "instruction_files", "residual_cues", "forbidden_artifacts", "unsafe_entries", "counts", "validation"],
   "properties": {
     "schema_version": {"const": "2.1"},
     "kind": {"const": "identity-transformation-manifest"},
@@ -27,6 +27,7 @@
       }
     },
     "original_tree_hash": {"$ref": "#/$defs/digest"},
+    "inspected_paths": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/path"}},
     "transformed_tree_hash": {"$ref": "#/$defs/digest"},
     "map_sha256": {"$ref": "#/$defs/digest"},
     "requirements_sha256": {"$ref": "#/$defs/digest"},
