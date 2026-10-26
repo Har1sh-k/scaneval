@@ -45,6 +45,10 @@ Git gets one neutral snapshot commit with fixed identity and date. Before and af
 record every Git path, fingerprint all synthetic repository files and entry types, and reject
 unexpected history, modified metadata, symlinks, and special entries. No upstream commits are
 copied for this condition.
+Git's ordinary v2/v3 index is compared by path, blob, mode, stage, and flags, so a harmless
+stat-cache refresh cannot look like changed history. Its checksum and narrow supported format
+are validated; unknown formats/extensions remain unavailable. Object/ref/config/hook bytes stay
+bound, and bare repositories and Git-bundle headers are reported as retained history artifacts.
 
 Offline scanners declare `network_policy: none`. Remote inference declares
 `network_policy: model_provider_only`; when enforcement is claimed, the recorded OCI proxy
@@ -77,7 +81,11 @@ scaneval validate condition-record bundle-a/condition.json
 The command returns every observation's status and reasons plus separate condition/status
 coverage counts. Aggregation includes condition coverage and refuses a mode/profile view
 containing readable observations from different condition/status strata. Aggregate those
-strata separately; use the condition command to inspect mixed collections. Missing or skipped
+strata in separate homogeneous run collections; use the condition command to inspect mixed
+collections. The current aggregate command accepts whole run directories and has no invocation
+or status filter, so it cannot compute separate metrics inside a mixed-status run. Experiment
+reporting must preserve those assignments and report their separate strata and missingness.
+Missing or skipped
 assignments stay in operational denominators and appear as unavailable condition evidence.
 Existing standard runs remain readable and conservatively classify as unavailable when their
 saved artifacts cannot establish the condition. Detection matching and credit are unchanged.

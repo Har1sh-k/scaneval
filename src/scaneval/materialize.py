@@ -40,6 +40,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from typing import Callable
@@ -611,6 +612,85 @@ def prepare_synthetic_history(source_dir: Path, *, message: str = "snapshot") ->
     return {"commit": commit, "message": message, "identity": "ScanEval <scaneval@localhost>"}
 
 
+def git_index_semantic_sha256(raw: bytes) -> str:
+    """Hash v2/v3 SHA-1 index semantics while ignoring only per-entry stat-cache fields.
+
+    Format: https://git-scm.com/docs/gitformat-index . This intentionally supports only the
+    ordinary index this package creates. Unknown versions/extensions, sparse/split indexes,
+    invalid checksums, paths, flags, modes, padding, and ordering are refused. Cache extensions
+    TREE/EOIE/IEOT stay byte-bound; no parser interprets or follows their object references.
+    """
+    if (len(raw) < 32 or raw[:4] != b"DIRC"
+            or hashlib.sha1(raw[:-20], usedforsecurity=False).digest() != raw[-20:]):
+        raise MaterializationError("Git index has an invalid header or SHA-1 checksum")
+    version, count = int.from_bytes(raw[4:8], "big"), int.from_bytes(raw[8:12], "big")
+    if version not in (2, 3):
+        raise MaterializationError("Git index version is not a supported ordinary v2/v3 index")
+    end, offset = len(raw) - 20, 12
+    if count > (end - offset) // 64:
+        raise MaterializationError("Git index entry count exceeds its saved bytes")
+    entries = []
+    previous = None
+    for _ in range(count):
+        start = offset
+        if offset + 62 > end:
+            raise MaterializationError("Git index entry is truncated")
+        mode = int.from_bytes(raw[offset + 24:offset + 28], "big")
+        oid = raw[offset + 40:offset + 60].hex()
+        flags = int.from_bytes(raw[offset + 60:offset + 62], "big")
+        offset += 62
+        extended = 0
+        if flags & 0x4000:
+            if version == 2 or offset + 2 > end:
+                raise MaterializationError("Git index extended flags are invalid for this version")
+            extended = int.from_bytes(raw[offset:offset + 2], "big")
+            offset += 2
+            if extended & ~0x6000:
+                raise MaterializationError("Git index has unsupported extended flags")
+        nul = raw.find(b"\0", offset, end)
+        if nul < 0:
+            raise MaterializationError("Git index pathname is unterminated")
+        path = raw[offset:nul]
+        if (not path or path.startswith(b"/")
+                or any(part in (b"", b".", b"..", b".git") for part in path.split(b"/"))
+                or flags & 0x0FFF != min(len(path), 0x0FFF)):
+            raise MaterializationError("Git index pathname or encoded name length is invalid")
+        if mode not in (0o100644, 0o100755, 0o120000, 0o160000):
+            raise MaterializationError("Git index has an unsupported entry mode")
+        key = (path, (flags >> 12) & 3)
+        if previous is not None and key <= previous:
+            raise MaterializationError("Git index entries are duplicated or unsorted")
+        previous = key
+        offset = nul + (8 - ((nul - start) % 8))
+        if offset > end or any(raw[nul:offset]):
+            raise MaterializationError("Git index padding is invalid")
+        entries.append({"path_hex": path.hex(), "mode": mode, "oid": oid,
+                        "flags": flags & 0xB000, "extended_flags": extended})
+    extensions = []
+    while offset < end:
+        if offset + 8 > end:
+            raise MaterializationError("Git index extension is truncated")
+        signature = raw[offset:offset + 4]
+        length = int.from_bytes(raw[offset + 4:offset + 8], "big")
+        offset += 8
+        if signature not in (b"TREE", b"EOIE", b"IEOT") or offset + length > end:
+            raise MaterializationError("Git index contains an unknown or truncated extension")
+        extensions.append({"signature": signature.decode("ascii"),
+                           "sha256": "sha256:" + hashlib.sha256(raw[offset:offset + length]).hexdigest()})
+        offset += length
+    return canonical_sha256({"entries": entries, "extensions": extensions})
+
+
+def _history_prefix(path: Path, length: int = 128) -> bytes:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise MaterializationError("a source history candidate is not a regular file")
+        return os.read(descriptor, length)
+    finally:
+        os.close(descriptor)
+
+
 def audit_condition_history(source: Path, *, synthetic: dict | None = None,
                             bounded: dict | None = None,
                             allowed_state_dirs: frozenset[str] = frozenset()) -> dict:
@@ -623,11 +703,17 @@ def audit_condition_history(source: Path, *, synthetic: dict | None = None,
     """
     git_paths: list[str] = []
     controller_paths: list[str] = []
+    history_artifacts: list[dict] = []
     pending = [(source, "")]
     while pending:
         directory, prefix = pending.pop()
         with os.scandir(directory) as entries:
             listed = sorted(entries, key=lambda entry: entry.name)
+        names = {entry.name: entry for entry in listed}
+        if {"HEAD", "objects", "refs"} <= set(names) and names["HEAD"].is_file(follow_symlinks=False):
+            head = _history_prefix(Path(names["HEAD"].path))
+            if head.startswith(b"ref: refs/") or re.fullmatch(rb"[0-9a-f]{40}(?:\n)?|[0-9a-f]{64}(?:\n)?", head):
+                history_artifacts.append({"path": prefix.rstrip("/") or ".", "kind": "bare_repository"})
         for entry in listed:
             relative = f"{prefix}{entry.name}"
             if entry.name == ".git":
@@ -639,8 +725,11 @@ def audit_condition_history(source: Path, *, synthetic: dict | None = None,
                 continue
             if not entry.is_symlink() and entry.is_dir(follow_symlinks=False):
                 pending.append((Path(entry.path), f"{relative}/"))
+            elif not entry.is_symlink() and entry.is_file(follow_symlinks=False):
+                if _history_prefix(Path(entry.path), 16).startswith((b"# v2 git bundle\n", b"# v3 git bundle\n")):
+                    history_artifacts.append({"path": relative, "kind": "git_bundle"})
     expected = synthetic is not None or bounded is not None
-    state = ("unexpected" if controller_paths or git_paths != ([".git"] if expected else [])
+    state = ("unexpected" if controller_paths or history_artifacts or git_paths != ([".git"] if expected else [])
              else "bounded_ancestor_history" if bounded is not None
              else "neutral_synthetic" if synthetic is not None else "original_absent")
     digest = None
@@ -666,12 +755,20 @@ def audit_condition_history(source: Path, *, synthetic: dict | None = None,
                         entries[relative] = {"kind": "directory"}
                         pending_git.append((Path(entry.path), relative + "/"))
                     elif entry.is_file(follow_symlinks=False):
-                        entries[relative] = {"kind": "file", "sha256": sha256_file(Path(entry.path))[0]}
+                        if relative == "index":
+                            descriptor = os.open(entry.path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+                            with os.fdopen(descriptor, "rb") as stream:
+                                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                                    raise MaterializationError("synthetic Git index is not a regular file")
+                                entries[relative] = {"kind": "index", "semantic_sha256": git_index_semantic_sha256(stream.read())}
+                        else:
+                            entries[relative] = {"kind": "file", "sha256": sha256_file(Path(entry.path))[0]}
                     else:
                         entries[relative] = {"kind": "special"}
                         state = "unexpected"
             digest = canonical_sha256(entries)
     return {"state": state, "git_paths": sorted(git_paths), "controller_paths": sorted(controller_paths),
+            "history_artifacts": sorted(history_artifacts, key=lambda item: (item["path"], item["kind"])),
             "git_files_sha256": digest}
 
 

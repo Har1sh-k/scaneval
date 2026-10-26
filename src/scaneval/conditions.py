@@ -428,6 +428,7 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None) -
         failed.append(_reason("condition_policy_mismatch", "The requested condition differs from the saved condition policy."))
     evidence = documents.get("evidence", {})
     controls = evidence.get("controls") or {}
+    record["details"]["history_audit"] = evidence.get("history", {})
     record["history"], history_reasons = _history(evidence, execution)
     (failed if record["history"] == "unexpected" else gaps).extend(history_reasons)
     if execution["provenance"]["source_modified"]:
@@ -462,7 +463,7 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None) -
             gaps.append(_reason("condition_classifier_unavailable", "The open-context classifier is unavailable."))
         else:
             details = classify(root, execution, declaration["policy"], evidence)
-            record["details"] = details.get("details", {})
+            record["details"].update(details.get("details", {}))
             record["assurance"].update(details.get("assurance", {}))
             for reference in details.get("artifacts", []):
                 try:
