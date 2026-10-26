@@ -1139,8 +1139,8 @@ def verify_manifest(manifest: dict, summary: dict, *, policy: dict | None, map_s
 
     A scalar ``validation.state`` is insufficient. The schema and accounting checks run first;
     summary and manifest hashes, policy configuration, aliases, accepted paths, and both tree
-    hashes are recomputed. If the staged tree is available, re-inspection must reproduce the
-    recorded inspection digest as well. No result is upgraded from unavailable on reuse.
+    hashes are recomputed. If the staged tree is available, re-inspection must reproduce both
+    its digest and all derived manifest evidence. No result is upgraded from unavailable on reuse.
     """
     validate_document(MANIFEST_KIND, manifest)
     if not isinstance(summary, dict):
@@ -1183,6 +1183,20 @@ def verify_manifest(manifest: dict, summary: dict, *, policy: dict | None, map_s
         inspection = inspect_tree(source, normalized, requirements=required, required_source_paths=paths)
         if canonical_sha256(inspection) != manifest["inspection_sha256"]:
             raise ContractError("identity manifest inspection is stale for the staged export")
+        # The inspection digest alone does not bind the separately copied residuals, paths,
+        # instruction dispositions, or validation claims. Rebuild those claims from the actual
+        # inspection, retaining the original inventory and reviewed transformation records.
+        # Honest unavailable manifests keep their builder diagnostics, including tree mismatch.
+        rebuilt, _ = build_manifest(
+            normalized, source_snapshot=manifest["source_snapshot"], original_tree_hash=original_tree_hash,
+            transformed_tree_hash=transformed_tree_hash, map_sha256=map_sha256, requirements=required,
+            required_source_paths=paths, inspection=inspection, edits=manifest["edits"],
+            metadata_edits=manifest["metadata_edits"], removals=manifest["removals"],
+            skipped=manifest["skipped"], tool_versions=manifest["tool_versions"],
+            original_instruction_files=[entry["path"] for entry in manifest["instruction_files"]
+                                        if entry["disposition"] != "absent"])
+        if canonical_json(rebuilt) != canonical_json(manifest):
+            raise ContractError("identity manifest claims do not match the re-inspected export evidence")
     return deepcopy(summary)
 
 

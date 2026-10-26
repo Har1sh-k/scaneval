@@ -568,6 +568,47 @@ def test_saved_manifest_reuse_reinspects_available_source_instead_of_trusting_a_
         verify_manifest(record, summary, **saved_bindings(inspection, source=tree))
 
 
+@pytest.mark.parametrize("evidence", ["answer", "repository-identity", "instruction", "paths"])
+def test_fresh_inspection_rejects_rehashed_claims_that_hide_its_evidence(tmp_path, evidence):
+    contents = {"src/app.py": f"# {ALIAS['value']}\n" if evidence == "answer" else "# upstream-project\n"}
+    if evidence == "instruction":
+        contents["AGENTS.md"] = "Review instructions\n"
+    configured = policy(identity_tokens=["upstream-project"])
+    tree = source(tmp_path, contents)
+    inspection = inspect_tree(tree, configured, requirements=[ALIAS])
+    record, summary = manifest(inspection, selected_policy=configured)
+    bindings = saved_bindings(inspection, policy=configured, source=tree)
+    assert verify_manifest(record, summary, **bindings) == summary
+
+    if evidence in {"answer", "repository-identity"}:
+        record["residual_cues"] = []
+        record["counts"]["residual_cues"] = 0
+    elif evidence == "instruction":
+        record["instruction_files"][0]["classification"] = "assistant_support_file"
+    else:
+        record["inspected_paths"] = []
+    record["validation"] = {"state": "available", "reasons": []}
+    summary = policy_module._portable_summary(record)
+
+    with pytest.raises(ContractError, match="claims do not match the re-inspected export evidence"):
+        verify_manifest(record, summary, **bindings)
+
+
+def test_fresh_inspection_preserves_honest_tree_mismatch_refusal_and_rejects_its_upgrade(tmp_path):
+    tree = source(tmp_path, {"src/app.py": "safe"})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    claimed_tree = "sha256:" + "5" * 64
+    record, summary = manifest(inspection, transformed_tree_hash=claimed_tree)
+    bindings = saved_bindings(inspection, source=tree, transformed_tree_hash=claimed_tree)
+    assert summary["validation"]["state"] == "unavailable"
+    assert verify_manifest(record, summary, **bindings) == summary
+
+    record["validation"] = {"state": "available", "reasons": []}
+    summary = policy_module._portable_summary(record)
+    with pytest.raises(ContractError, match="claims do not match the re-inspected export evidence"):
+        verify_manifest(record, summary, **bindings)
+
+
 @pytest.mark.parametrize("bad", ["counts", "summary-hash", "state", "manifest-path", "schema"])
 def test_saved_manifest_and_summary_tampering_is_detected(tmp_path, bad):
     tree = source(tmp_path, {"src/app.py": f"# {ALIAS['value']}\n"})
