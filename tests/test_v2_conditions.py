@@ -151,6 +151,65 @@ def test_inferred_condition_still_fails_genuine_artifact_binding_corruption(tmp_
     assert record["status"] == "failed" and "configuration_mismatch" in codes(record)
 
 
+@pytest.mark.parametrize("changes", [
+    {"profile": "metadata_blinded"},
+    {"profile": "identity_reduced"},
+    {"mode": "pr", "pr": {"base": "a" * 40, "head": "b" * 40}},
+])
+def test_present_request_profile_and_mode_must_match_execution(tmp_path, changes):
+    bundle, _record = invoke(tmp_path)
+    (bundle / conditions.RECORD_FILE).unlink()
+    path = bundle / "request.json"
+    request = json.loads(path.read_text())
+    request["input"].update(changes)
+    validate_document("scan-request", request)
+    path.write_text(canonical_json(request))
+    record = conditions.classify_observation(bundle)
+    assert record["status"] == "failed" and "request_input_mismatch" in codes(record)
+
+
+def test_legacy_execution_without_mode_still_binds_a_full_scan_request(tmp_path):
+    bundle, _record = invoke(tmp_path, enforced=False, declared=False)
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["schema_version"] == "2.0" and "mode" not in execution["provenance"]
+    (bundle / conditions.RECORD_FILE).unlink()
+    path = bundle / "request.json"
+    request = json.loads(path.read_text())
+    request["input"].update({"mode": "pr", "pr": {"base": "a" * 40, "head": "b" * 40}})
+    validate_document("scan-request", request)
+    path.write_text(canonical_json(request))
+    record = conditions.classify_observation(bundle)
+    assert record["mode"] == "full" and record["status"] == "failed"
+    assert "request_input_mismatch" in codes(record)
+
+
+@pytest.mark.parametrize("field", ["profile", "mode"])
+def test_missing_legacy_request_input_fields_are_conservative_gaps(tmp_path, field):
+    bundle, _record = invoke(tmp_path)
+    (bundle / conditions.RECORD_FILE).unlink()
+    path = bundle / "request.json"
+    request = json.loads(path.read_text())
+    request["input"].pop(field)
+    path.write_text(canonical_json(request))
+    record = conditions.classify_observation(bundle)
+    assert record["status"] == "declared_only" and "missing_request" in codes(record)
+
+
+def test_present_preparation_mode_must_match_executed_input(tmp_path):
+    bundle, _record = invoke(tmp_path)
+    (bundle / conditions.RECORD_FILE).unlink()
+    path = bundle / conditions.PROVENANCE_FILE
+    provenance = json.loads(path.read_text())
+    provenance["mode"] = "pr"
+    path.write_text(canonical_json(provenance))
+    execution_path = bundle / "execution.json"
+    execution = json.loads(execution_path.read_text())
+    execution["provenance"]["provenance_sha256"] = canonical_sha256(provenance)
+    execution_path.write_text(canonical_json(execution))
+    record = conditions.classify_observation(bundle)
+    assert record["status"] == "failed" and "input_provenance_mismatch" in codes(record)
+
+
 def test_undeclared_pr_keeps_neutral_history_but_is_outside_closed_book_standard(tmp_path):
     from test_v2_execution import pr_input, run, PrAdapter
     bundle = run(tmp_path, PrAdapter(), pr_input(tmp_path))
@@ -158,6 +217,28 @@ def test_undeclared_pr_keeps_neutral_history_but_is_outside_closed_book_standard
     assert record["history"] == "neutral_synthetic"
     assert record["status"] == "unavailable" and record["declared"] is False
     assert "non_neutral_history" not in codes(record)
+
+
+@pytest.mark.parametrize("change", ["base", "head", "swap", "mode"])
+def test_request_pr_bounds_must_match_executed_change(tmp_path, change):
+    from test_v2_execution import pr_input, run, PrAdapter
+    bundle = run(tmp_path, PrAdapter(), pr_input(tmp_path))
+    (bundle / conditions.RECORD_FILE).unlink()
+    path = bundle / "request.json"
+    request = json.loads(path.read_text())
+    if change == "mode":
+        request["input"]["mode"] = "full"
+        request["input"].pop("pr")
+    elif change == "swap":
+        bounds = request["input"]["pr"]
+        bounds["base"], bounds["head"] = bounds["head"], bounds["base"]
+    else:
+        request["input"]["pr"][change] = "f" * 40
+    validate_document("scan-request", request)
+    path.write_text(canonical_json(request))
+    record = conditions.classify_observation(bundle)
+    assert record["status"] == "failed"
+    assert ("request_input_mismatch" if change == "mode" else "request_pr_mismatch") in codes(record)
 
 
 def test_missing_open_context_extension_refuses_before_creating_output(tmp_path):

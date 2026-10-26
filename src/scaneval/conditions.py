@@ -377,7 +377,10 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None,
                 _reason("invalid_condition_policy" if role == "policy" and (root / relative).exists() else "missing_" + role, str(exc)))
     execution, result, request = (documents.get(name, {}) for name in ("execution", "result", "request"))
     profile = (execution.get("provenance") or {}).get("profile", (request.get("input") or {}).get("profile", identity_profile or "standard"))
-    mode = (execution.get("provenance") or {}).get("mode", (request.get("input") or {}).get("mode", input_mode or "full"))
+    # Execution 2.0 predates PR inputs and therefore denotes a full scan. A contradictory
+    # request must not supply the missing mode and relabel an otherwise valid legacy record.
+    mode = (execution["provenance"].get("mode", "full") if execution
+            else (request.get("input") or {}).get("mode", input_mode or "full"))
     saved_policy = documents.get("policy")
     policy = ({key: value for key, value in saved_policy.items() if key != "declared"}
               if saved_policy is not None else None)
@@ -445,15 +448,27 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None,
                              or request["system"]["id"] != execution["system_id"]
                              or request["input"]["tree_hash"] != execution["provenance"]["tree_hash"]))):
         failed.append(_reason("observation_binding_mismatch", "Saved request, execution, and result do not describe the same observation."))
+    if request:
+        requested = request["input"]
+        executed = execution["provenance"]
+        if requested["profile"] != executed["profile"] or requested["mode"] != executed.get("mode", "full"):
+            failed.append(_reason("request_input_mismatch", "The scanner request's profile or mode contradicts the executed input."))
+        if executed.get("mode") == "pr":
+            pr = executed.get("pr") or {}
+            expected_pr = {"base": pr.get("base_commit"), "head": pr.get("head_commit")}
+            if requested.get("pr") != expected_pr:
+                failed.append(_reason("request_pr_mismatch", "The scanner request's PR bounds differ from the executed synthetic commits."))
     provenance = documents.get("provenance")
     if provenance is not None:
         source_record = provenance.get("head", provenance) if mode == "pr" else provenance
         source_record = source_record if isinstance(source_record, dict) else {}
         recorded_profile = provenance.get("profile", source_record.get("profile"))
+        recorded_mode = provenance.get("mode", source_record.get("mode"))
         trial = source_record.get("trial")
         recorded_tree = trial.get("tree_hash") if isinstance(trial, dict) else None
         if (canonical_sha256(provenance) != execution["provenance"]["provenance_sha256"]
                 or recorded_profile is not None and recorded_profile != profile
+                or recorded_mode is not None and recorded_mode != mode
                 or recorded_tree is not None and recorded_tree != execution["provenance"]["tree_hash"]):
             failed.append(_reason("input_provenance_mismatch", "Saved input provenance contradicts the executed source tree."))
         elif recorded_profile is None or recorded_tree is None:

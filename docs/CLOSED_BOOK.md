@@ -30,6 +30,8 @@ authenticate its author or stop an operator from rewriting every artifact.
 The trace digest and its run identities are captured when the execution record is written;
 matching event counts alone cannot establish trace identity. Adapter identity and the requested
 model/revision must also agree across the saved configuration, request, and execution record.
+The request's source profile, scan mode, and PR commit bounds must agree with the executed
+input; missing legacy evidence cannot stand in for a present contradictory field.
 
 The states are:
 
