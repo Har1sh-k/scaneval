@@ -1,0 +1,439 @@
+"""Deterministic evaluation-condition classification from saved invocation artifacts.
+
+A condition is independent of a source profile. The standard snapshot keeps repository identity;
+closed-book describes the evidence for history and retrieval restrictions, never model memory.
+Records are hashes of saved bytes, not signatures: the evaluator and execution backend remain
+trusted, and an operator able to rewrite every artifact can construct a different evidence set.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+import hashlib
+import json
+from pathlib import Path
+import re
+from typing import Any, Iterable
+
+from .contracts import (ContractError, _reject_json_constant, _strict_object, canonical_sha256,
+                        load_document, reject_nonfinite, validate_document)
+from .trace import parse_trace
+
+
+KIND = "condition-record"
+RECORD_FILE = "condition.json"
+POLICY_FILE = "condition-policy.json"
+CONFIGURATION_FILE = "condition-configuration.json"
+PROVENANCE_FILE = "input-provenance.json"
+EVIDENCE_FILE = "condition-evidence.json"
+STATUSES = ("attested", "declared_only", "failed", "unavailable")
+NAMES = ("closed_book_standard", "open_context", "identity_reduced")
+TOOLS = ("browser", "web_search", "remote_fetch", "package_install", "scanner_update")
+_RETRIEVAL = re.compile(
+    r"(?:web[_. -]?(?:search|fetch)|browser|remote[_. -]?fetch|fetch[_. -]?url|"
+    r"(?:^|[ /_.-])(?:curl|wget)(?:$|[ /_.-])|package[_. -]?install|scanner[_. -]?update)", re.I)
+_LOCAL_TOOLS = frozenset({"read", "write", "edit", "multiedit", "glob", "grep", "ls",
+                          "read_file", "list_directory", "search_files", "apply_patch"})
+_RETRIEVAL_TOOLS = frozenset({"websearch", "web_search", "webfetch", "web_fetch", "browser",
+                              "browse", "remote_fetch", "fetch_url", "package_install", "scanner_update"})
+
+
+def resolve_condition(condition: dict | None = None, *, profile: str = "standard",
+                      mode: str = "full") -> dict:
+    """Complete a condition declaration without equating that declaration with attestation."""
+    name = "identity_reduced" if profile in ("identity_reduced", "metadata_blinded") else "closed_book_standard"
+    if condition is not None and not isinstance(condition, dict):
+        raise ContractError("condition must be an object")
+    value = {"name": name, "policy": {}} if condition is None else dict(condition)
+    if set(value) - {"name", "policy"} or value.get("name") not in NAMES:
+        raise ContractError(f"condition must name one of {', '.join(NAMES)} and an optional policy object")
+    value.setdefault("policy", {})
+    if not isinstance(value["policy"], dict):
+        raise ContractError("condition.policy must be an object")
+    canonical_sha256(value)
+    return value
+
+
+def _bytes(root: Path, relative: str) -> bytes:
+    """Read an ordinary saved file inside the bundle; refuse links and special files."""
+    from .execution import read_regular_file
+    if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
+        raise ContractError(f"condition artifact path escapes its bundle: {relative!r}")
+    path = root / relative
+    if not path.resolve().is_relative_to(root):
+        raise ContractError(f"condition artifact path escapes its bundle: {relative!r}")
+    current = path
+    while current != root:
+        if current.is_symlink():
+            raise ContractError(f"condition artifact is a symbolic link: {relative}")
+        current = current.parent
+    try:
+        return read_regular_file(path)
+    except (OSError, ValueError) as exc:
+        raise ContractError(f"could not read condition artifact {relative}: {exc}") from exc
+
+
+def _json(raw: bytes) -> dict:
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_strict_object,
+                           parse_constant=_reject_json_constant)
+        reject_nonfinite(value)
+        if not isinstance(value, dict):
+            raise ValueError("expected an object")
+        return value
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise ContractError(f"invalid saved condition evidence: {exc}") from exc
+
+
+def _digest(raw: bytes) -> str:
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _reason(code: str, message: str) -> dict:
+    return {"code": code, "message": message}
+
+
+def _check_evidence(value: dict) -> None:
+    for key in ("history", "controls"):
+        if key in value and not isinstance(value[key], dict):
+            raise ContractError(f"condition evidence {key} must be an object")
+    for key in ("before", "after"):
+        if key in value.get("history", {}) and not isinstance(value["history"][key], dict):
+            raise ContractError(f"condition history {key} must be an object")
+    controls = value.get("controls", {})
+    for key in ("tools", "provider"):
+        if key in controls and not isinstance(controls[key], dict):
+            raise ContractError(f"condition controls {key} must be an object")
+    hosts = controls.get("provider", {}).get("inference_hosts")
+    if hosts is not None and (not isinstance(hosts, list) or not all(isinstance(host, str) for host in hosts)):
+        raise ContractError("provider inference_hosts must be a list of host:port strings")
+
+
+def _verify_previous(root: Path, record: dict) -> dict:
+    record["artifacts"].sort(key=lambda item: (item["role"], item["path"]))
+    record["bindings"].update({item["role"] + "_sha256": item["sha256"]
+                                for item in record["artifacts"]})
+    if (root / RECORD_FILE).exists():
+        try:
+            previous = _json(_bytes(root, RECORD_FILE))
+            validate_document(KIND, previous)
+            if previous != record:
+                record["status"] = "failed"
+                record["reasons"].insert(0, _reason("stale_condition_record", "The saved condition record does not match the exact artifacts now present."))
+        except ContractError as exc:
+            record["status"] = "failed"
+            record["reasons"].insert(0, _reason("invalid_condition_record", str(exc)))
+    return validate_document(KIND, record)
+
+
+def _configured_retrieval(config: dict) -> bool:
+    """Recognize explicit enabling flags/tool lists; prose is never interpreted as configuration."""
+    for key, value in config.items():
+        normalized = str(key).lower().replace("-", "_")
+        if normalized in {"tools", "enabled_tools", "allowed_tools"}:
+            if isinstance(value, list) and any(isinstance(item, str) and _RETRIEVAL.search(item) for item in value):
+                return True
+        if normalized in {*TOOLS, "web", "browsing", "web_retrieval", "provider_retrieval",
+                          "enable_browser", "enable_web_search", "enable_retrieval"} and value is True:
+            return True
+        if _RETRIEVAL.search(normalized) and value is True:
+            return True
+        if isinstance(value, dict) and _configured_retrieval(value):
+            return True
+    return False
+
+
+def _history(evidence: dict, execution: dict) -> tuple[str, list[dict]]:
+    observations = evidence.get("history") or {}
+    before, after = observations.get("before") or {}, observations.get("after") or {}
+    states = (before.get("state"), after.get("state"))
+    if "unexpected" in states:
+        return "unexpected", [_reason("unexpected_history", "A saved mechanical audit found unexpected Git history or controller state.")]
+    if (states[0] != states[1] or states[0] not in ("original_absent", "neutral_synthetic", "bounded_ancestor_history")):
+        return "unavailable", [_reason("history_audit_gap", "Before and after history audits are missing or disagree.")]
+    if states[0] in ("neutral_synthetic", "bounded_ancestor_history"):
+        if (not before.get("git_files_sha256")
+                or before["git_files_sha256"] != after.get("git_files_sha256")):
+            return "unexpected", [_reason("history_changed", "The repository metadata changed during execution.")]
+        if states[0] == "neutral_synthetic":
+            neutral = execution["provenance"].get("synthetic_history") or {}
+            if (neutral.get("message") != "snapshot" or neutral.get("identity") != "ScanEval <scaneval@localhost>"
+                    or not re.fullmatch(r"[0-9a-f]{40}", neutral.get("commit", ""))):
+                return "unexpected", [_reason("non_neutral_history", "The saved synthetic history is not the minimal neutral snapshot repository.")]
+    return states[0], []
+
+
+def _network(execution: dict, controls: dict) -> tuple[str, list[dict], list[dict]]:
+    declared = execution["network_policy"]["declared"]
+    failed: list[dict] = []
+    gaps: list[dict] = []
+    inference = controls.get("inference", "unknown")
+    if declared not in ("none", "model_provider_only"):
+        failed.append(_reason("unrestricted_network", "Unrestricted network access is incompatible with closed-book standard."))
+    if inference == "offline" and declared != "none":
+        failed.append(_reason("offline_network_policy", "An offline scanner must declare network_policy none."))
+    if inference == "remote" and declared != "model_provider_only":
+        failed.append(_reason("remote_inference_policy", "Remote inference requires the model_provider_only route."))
+    isolation = execution.get("isolation") or {}
+    actual = isolation.get("network") or {}
+    enforced = (execution["network_policy"]["enforced"] is True
+                and isolation.get("backend") == "oci" and isolation.get("enforced") is True
+                and actual.get("enforced") is True and actual.get("policy") == declared
+                and any(item.get("role") == "worker" and item.get("started") is True
+                        for item in isolation.get("containers", [])))
+    if declared == "model_provider_only":
+        proxy = actual.get("proxy") or {}
+        allowed = proxy.get("allow")
+        hosts = (controls.get("provider") or {}).get("inference_hosts")
+        if not isinstance(allowed, list) or not allowed or not isinstance(hosts, list) or not hosts:
+            enforced = False
+            gaps.append(_reason("provider_route_gap", "Saved evidence does not bind the egress allowlist to remote-inference hosts."))
+        elif set(allowed) - set(hosts):
+            failed.append(_reason("unrelated_egress", "The egress allowlist permits destinations outside the recorded inference route."))
+        elif (actual.get("mode") != "internal network with egress proxy"
+              or not any(item.get("role") == "proxy" and item.get("started") is True
+                         for item in isolation.get("containers", []))):
+            enforced = False
+            gaps.append(_reason("provider_route_unenforced", "The saved backend record does not establish an isolated inference proxy route."))
+    elif declared == "none" and actual.get("mode") != "none":
+        enforced = False
+    if not enforced:
+        gaps.append(_reason("network_unenforced", "A declared local network policy is not evidence of enforced isolation."))
+    return "enforced" if enforced else "unenforced", failed, gaps
+
+
+def _retrieval(execution: dict, evidence: dict, trace: Any) -> tuple[str, str, list[dict], list[dict]]:
+    controls = evidence.get("controls") or {}
+    tools = controls.get("tools") or {}
+    failed, gaps = [], []
+    if _configured_retrieval(execution["system_config"]) or any(tools.get(name) == "enabled" for name in TOOLS):
+        failed.append(_reason("retrieval_enabled", "Configuration or adapter controls enable a prohibited retrieval tool."))
+    unknown_tools = False
+    if trace is not None:
+        for event in trace.events:
+            if event["type"] != "tool.start":
+                continue
+            metadata = event.get("metadata") or {}
+            name = metadata.get("tool_name") or metadata.get("name") or ""
+            # A filename, search pattern, or quoted source mentioning curl/browser is ordinary
+            # input. Only structured tool identity establishes a retrieval operation here.
+            normalized = name.lower() if isinstance(name, str) else ""
+            if (normalized in _RETRIEVAL_TOOLS or normalized.startswith(("mcp__browser__", "mcp__web__"))):
+                failed.append(_reason("retrieval_observed", "A saved tool event records a prohibited retrieval operation."))
+            if not isinstance(name, str) or name.lower() not in _LOCAL_TOOLS:
+                unknown_tools = True
+    if failed:
+        return "enabled", "tool_enabled", failed, gaps
+    complete = (trace is not None and trace.state == "valid" and not unknown_tools
+                and execution["capture"].get("tool_calls") == "complete"
+                and (execution.get("trace") or {}).get("capture_gap") is False
+                and (execution.get("trace") or {}).get("dropped_events") == 0)
+    trace_gap = ((execution.get("trace") or {}).get("capture_gap") is True
+                 or bool((execution.get("trace") or {}).get("dropped_events"))
+                 or (trace is not None and trace.state not in ("valid", "empty")))
+    disabled = (controls.get("basis") == "adapter_controls"
+                and all(tools.get(name) == "disabled" for name in TOOLS))
+    if disabled and not trace_gap:
+        return "disabled", "tool_disabling", failed, gaps
+    if complete:
+        return "observed_none", "complete_observation", failed, gaps
+    gaps.append(_reason("retrieval_capture_gap", "Tool visibility is incomplete; absent events do not establish absence of retrieval."))
+    return "capture_gap", "capture_gap", failed, gaps
+
+
+def _provider(root: Path, execution: dict, configuration: dict, controls: dict,
+              artifacts: list[dict]) -> tuple[str, dict, list[dict], list[dict]]:
+    provider = controls.get("provider") or {}
+    capability = provider.get("capability", "unverifiable")
+    control = provider.get("control", "unverifiable")
+    detail = {"capability": capability, "control": control, "attestation": "missing"}
+    if controls.get("inference") == "offline" and capability == "not_applicable":
+        detail["attestation"] = "not_applicable"
+        return "not_applicable", detail, [], []
+    if control == "enabled":
+        return "enabled", detail, [_reason("provider_retrieval_enabled", "Provider-hosted retrieval is enabled.")], []
+    reference = provider.get("attestation")
+    if isinstance(reference, dict):
+        try:
+            path = reference["path"]
+            registered = {item["path"]: item["sha256"] for item in execution["raw_artifacts"]}
+            raw = _bytes(root, path)
+            digest = _digest(raw)
+            if digest != reference["sha256"] or registered.get(path) != digest:
+                raise ContractError("provider attestation does not bind to a registered artifact")
+            attestation = _json(raw)
+            model = configuration.get("model_id") or (execution.get("model_identity") or {}).get("requested")
+            if (attestation.get("scope") != "invocation"
+                    or attestation.get("invocation_id") != execution["invocation_id"]
+                    or attestation.get("system_id") != execution["system_id"]
+                    or not model or attestation.get("model_id") != model
+                    or not provider.get("name") or attestation.get("provider") != provider["name"]
+                    or attestation.get("retrieval_disabled") is not True
+                    or control != "disabled"):
+                raise ContractError("provider attestation is not applicable to this invocation and requested control")
+            artifacts.append({"role": "provider_attestation", "path": path, "sha256": digest})
+            # Matching hashes and invocation scope bind this assertion to the run; they do
+            # not authenticate a provider. No provider verifier is implemented by this build.
+            detail["attestation"] = "self_reported"
+            return "unverifiable", detail, [], [_reason("provider_attestation_unverified", "The saved assertion is bound to this invocation but has no trusted provider verification.")]
+        except (KeyError, TypeError, ContractError) as exc:
+            detail["attestation"] = "inapplicable"
+            return "unverifiable", detail, [], [_reason("provider_attestation_gap", str(exc))]
+    return "unverifiable", detail, [], [_reason("provider_unverifiable", "No applicable saved provider attestation establishes that provider retrieval was disabled.")]
+
+
+def classify_observation(bundle: str | Path, *, condition: dict | None = None) -> dict:
+    """Classify one saved bundle; never promote legacy declarations to attested evidence.
+
+    Missing execution/input/trace evidence produces an unavailable or declared-only record. An
+    existing ``condition.json`` is verified against recomputed evidence, including exact file
+    hashes, and never trusted as an assertion. No artifact is modified by this function.
+    """
+    root = Path(bundle).expanduser().resolve()
+    artifacts: list[dict] = []
+    documents: dict[str, dict] = {}
+    gaps: list[dict] = []
+    failed: list[dict] = []
+    names = {"request": "request.json", "result": "result.json", "execution": "execution.json",
+             "policy": POLICY_FILE, "configuration": CONFIGURATION_FILE,
+             "provenance": PROVENANCE_FILE, "evidence": EVIDENCE_FILE}
+    kinds = {"request": "scan-request", "result": "scan-result", "execution": "execution-record"}
+    for role, relative in names.items():
+        try:
+            raw = _bytes(root, relative)
+            value = _json(raw)
+            if role in kinds:
+                validate_document(kinds[role], value)
+            if role == "evidence":
+                _check_evidence(value)
+            documents[role] = value
+            artifacts.append({"role": role, "path": relative, "sha256": _digest(raw)})
+        except ContractError as exc:
+            gaps.append(_reason("missing_" + role, str(exc)))
+    execution, result, request = (documents.get(name, {}) for name in ("execution", "result", "request"))
+    profile = (execution.get("provenance") or {}).get("profile", (request.get("input") or {}).get("profile", "standard"))
+    mode = (execution.get("provenance") or {}).get("mode", (request.get("input") or {}).get("mode", "full"))
+    declaration = resolve_condition(condition or documents.get("policy") or execution.get("condition"), profile=profile, mode=mode)
+    record = {"schema_version": "2.1", "condition": declaration["name"], "status": "unavailable",
+              "identity_profile": profile, "history": "unavailable", "retrieval": "capture_gap",
+              "network": "unenforced", "provider_retrieval": "unverifiable",
+              "run_id": execution.get("run_id", result.get("run_id", "unknown")),
+              "invocation_id": execution.get("invocation_id", root.name),
+              "system_id": execution.get("system_id", result.get("system_id", "unknown")),
+              "input_hash": result.get("input_hash", (execution.get("provenance") or {}).get("tree_hash")),
+              "policy_sha256": canonical_sha256(declaration), "artifacts": artifacts,
+              "bindings": {"adapter_sha256": canonical_sha256(execution["adapter"]) if execution else None,
+                           "configuration_sha256": canonical_sha256(documents["configuration"]) if "configuration" in documents else None,
+                           "input_hash": result.get("input_hash"),
+                           "tree_hash": (execution.get("provenance") or {}).get("tree_hash")},
+              "retained_identity_cues": (documents.get("provenance") or {}).get("retained_identity_cues", {
+                  "instruction_files": (documents.get("provenance") or {}).get("instruction_files", []),
+                  "source_identifiers": "retained" if profile == "standard" else "unverified",
+                  "ordinary_paths": "retained" if profile == "standard" else "unverified"}),
+              "assurance": {"network": "declared", "retrieval": "capture_gap", "provider": "unverifiable"},
+              "provider": {}, "details": {}, "reasons": []}
+    trace = None
+    trace_meta = execution.get("trace") or {}
+    if trace_meta.get("path"):
+        try:
+            raw = _bytes(root, trace_meta["path"])
+            trace = parse_trace(raw)
+            artifacts.append({"role": "trace", "path": trace_meta["path"], "sha256": _digest(raw)})
+            if trace_meta.get("events") != len(trace.events):
+                gaps.append(_reason("trace_count_mismatch", "The saved trace count differs from the execution record."))
+                trace = None
+        except ContractError as exc:
+            gaps.append(_reason("trace_unavailable", str(exc)))
+    if not execution or not result:
+        record["reasons"] = gaps
+        return _verify_previous(root, record)
+    expected_input = execution["provenance"].get("input_hash", execution["provenance"]["tree_hash"])
+    if (execution["run_id"] != result["run_id"] or execution["system_id"] != result["system_id"]
+            or result["input_hash"] != expected_input
+            or (request and (request["run_id"] != execution["run_id"]
+                             or request["system"]["id"] != execution["system_id"]
+                             or request["input"]["tree_hash"] != execution["provenance"]["tree_hash"]))):
+        failed.append(_reason("observation_binding_mismatch", "Saved request, execution, and result do not describe the same observation."))
+    provenance = documents.get("provenance")
+    if provenance is not None and (canonical_sha256(provenance) != execution["provenance"]["provenance_sha256"]
+            or provenance.get("profile") != profile
+            or (provenance.get("trial") or {}).get("tree_hash") != execution["provenance"]["tree_hash"]):
+        failed.append(_reason("input_provenance_mismatch", "Saved input provenance does not bind to the executed source tree."))
+    configuration = documents.get("configuration", {})
+    if configuration and (configuration.get("system_id") != execution["system_id"]
+            or configuration.get("config") != execution["system_config"]
+            or configuration.get("network_policy") != execution["network_policy"]["declared"]):
+        failed.append(_reason("configuration_mismatch", "The saved configuration differs from the execution record."))
+    if execution.get("condition") is not None and execution["condition"] != declaration:
+        failed.append(_reason("condition_policy_mismatch", "The saved policy differs from the execution's condition."))
+    if documents.get("policy") is not None and documents["policy"] != declaration:
+        failed.append(_reason("condition_policy_mismatch", "The requested condition differs from the saved condition policy."))
+    evidence = documents.get("evidence", {})
+    controls = evidence.get("controls") or {}
+    record["history"], history_reasons = _history(evidence, execution)
+    (failed if record["history"] == "unexpected" else gaps).extend(history_reasons)
+    if execution["provenance"]["source_modified"]:
+        failed.append(_reason("source_modified", "The executed source changed from the frozen input."))
+    if declaration["name"] == "closed_book_standard":
+        record["network"], network_failures, network_gaps = _network(execution, controls)
+        failed.extend(network_failures)
+        gaps.extend(network_gaps)
+        record["retrieval"], assurance, retrieval_failures, retrieval_gaps = _retrieval(execution, evidence, trace)
+        record["assurance"].update({"network": "external_enforcement" if record["network"] == "enforced" else "declared",
+                                     "retrieval": assurance})
+        failed.extend(retrieval_failures)
+        gaps.extend(retrieval_gaps)
+        record["provider_retrieval"], record["provider"], provider_failures, provider_gaps = _provider(
+            root, execution, configuration, controls, artifacts)
+        record["assurance"]["provider"] = record["provider"].get("attestation", "unverifiable")
+        failed.extend(provider_failures)
+        gaps.extend(provider_gaps)
+        if controls.get("inference") not in ("offline", "remote"):
+            gaps.append(_reason("inference_unverified", "The saved adapter controls do not establish offline or remote inference."))
+        if profile != "standard" or mode != "full":
+            failed.append(_reason("ineligible_input", "closed_book_standard requires the standard full-scan source profile."))
+        if record["history"] == "bounded_ancestor_history":
+            failed.append(_reason("original_history_present", "Original ancestor history is incompatible with closed-book standard."))
+    elif declaration["name"] == "open_context":
+        try:
+            from . import open_context
+        except ImportError:
+            open_context = None
+        classify = getattr(open_context, "classify_condition", None)
+        if classify is None:
+            gaps.append(_reason("condition_classifier_unavailable", "The open-context classifier is unavailable."))
+        else:
+            details = classify(root, execution, declaration["policy"], evidence)
+            record["details"] = details.get("details", {})
+            record["assurance"].update(details.get("assurance", {}))
+            for reference in details.get("artifacts", []):
+                try:
+                    raw = _bytes(root, reference["path"])
+                    if _digest(raw) != reference["sha256"]:
+                        raise ContractError("condition extension artifact hash differs from saved bytes")
+                    artifacts.append(reference)
+                except (KeyError, TypeError, ContractError) as exc:
+                    failed.append(_reason("condition_extension_artifact", str(exc)))
+            for key in ("history", "retrieval", "network", "provider_retrieval"):
+                if key in details:
+                    record[key] = details[key]
+            if details.get("status") == "failed":
+                failed.extend(details.get("reasons", []))
+            elif details.get("status") != "attested":
+                gaps.extend(details.get("reasons", []))
+    else:
+        gaps.append(_reason("identity_condition_unavailable", "An identity transformation is distinct from closed-book attestation."))
+    legacy = not all(key in documents for key in ("evidence", "provenance", "configuration", "policy"))
+    record["status"] = ("failed" if failed else "unavailable" if execution["status"] == "unsupported" or legacy
+                        else "declared_only" if gaps else "attested")
+    record["reasons"] = failed + gaps
+    if not record["reasons"]:
+        record["reasons"] = [_reason("saved_evidence_verified", "Saved input, history, retrieval controls, provider state, and enforced network evidence satisfy the condition.")]
+    return _verify_previous(root, record)
+
+
+def condition_coverage(records: Iterable[dict]) -> list[dict]:
+    """Count each condition/status stratum explicitly without pooling detection metrics."""
+    counts = Counter((row["condition"], row["status"], row["identity_profile"]) for row in records)
+    return [{"condition": name, "status": status, "identity_profile": profile, "observations": count}
+            for (name, status, profile), count in sorted(counts.items())]

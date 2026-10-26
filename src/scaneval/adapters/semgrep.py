@@ -733,6 +733,14 @@ def _pr_review_notes(payload: dict, changes: tuple[Change, ...], scanned: list) 
 
 
 class SemgrepAdapter(Adapter):
+    def condition_controls(self, spec: SystemSpec, preparation: dict) -> dict[str, Any]:
+        """OSS inference is local; pinned local rules and the scan argv disable retrieval."""
+        return {"inference": "offline", "tools": {
+            name: "disabled" for name in ("browser", "web_search", "remote_fetch",
+                                          "package_install", "scanner_update")},
+            "basis": "adapter_controls", "provider": {
+                "capability": "not_applicable", "control": "not_applicable", "attestation": None}}
+
     name = "semgrep"
     adapter_version = "2.1.0"
     requires_git = False

@@ -499,6 +499,8 @@ def _input_row(spec: _InputSpec) -> dict:
     row = {"input_id": spec.input_id, "mode": spec.mode, "profile": spec.profile,
            "snapshot_id": spec.snapshot_id, "tree_hash": None, "input_hash": None,
            "provenance_path": None, "mechanical_checks": [], "preparation_failure": None}
+    if spec.entry.get("condition") is not None:
+        row["condition"] = spec.entry["condition"]
     if spec.change_set is not None:
         row["change_set_id"] = spec.change_set["change_set_id"]
     return row
@@ -557,6 +559,7 @@ def _prepare_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: Path
     prepared = execution.PreparedInput(
         spec.input_id, trial / "source", tree_hash, languages, record, spec.profile, spec.mode,
         input_hash=tree_hash, source_tree_hash=source_tree_hash, blinding=identity, identity_manifest=identity_manifest,
+        condition=spec.entry.get("condition"),
     )
     row.update({"tree_hash": tree_hash, "input_hash": prepared.binding_hash,
                 "mechanical_checks": [{"case_id": outcome["case_id"], "passed": outcome["passed"],
@@ -656,7 +659,8 @@ def _prepare_pr_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: P
     prepared = execution.PreparedInput(
         spec.input_id, trial / "source", diff["head_tree_hash"], tuple(head_snapshot["languages"]), record,
         spec.profile, "pr", input_hash=record["input_hash"], source_tree_hash=head_source_hash, blinding=identity,
-        pr=pr, base_source_dir=trial / materialize.PR_BASE_DIR / "source", identity_manifest=identity_manifest)
+        pr=pr, base_source_dir=trial / materialize.PR_BASE_DIR / "source",
+        identity_manifest=identity_manifest, condition=spec.entry.get("condition"))
     row.update({"tree_hash": prepared.tree_hash, "input_hash": prepared.binding_hash,
                 "mechanical_checks": [{"case_id": outcome["case_id"], "passed": outcome["passed"],
                                        "checks": outcome["checks"]} for outcome in outcomes]})

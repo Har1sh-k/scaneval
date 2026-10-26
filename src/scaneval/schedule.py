@@ -155,6 +155,7 @@ def _input_row(entry: dict, pack: dict, base_dir: Path, maps: dict[str, dict]) -
     plan = (_frozen_pr_plan(pack, change_set, cases.snapshot_by_id(pack, change_set["base_snapshot_id"]), snapshot)
             if change_set is not None else _frozen_plan(pack, snapshot, mode))
     return {"input_id": input_id, "mode": mode, "profile": profile,
+            **({"condition": entry["condition"]} if entry.get("condition") is not None else {}),
             "snapshot_id": snapshot["snapshot_id"],
             "change_set_id": change_set["change_set_id"] if change_set is not None else None,
             "change_set": change_set,
@@ -195,6 +196,8 @@ def _pairs(rows: list[dict], repetitions: int) -> list[dict]:
         for target in vulnerable["plan"]["targets"]:
             for fixed in frozen:
                 if fixed["input_id"] == vulnerable["input_id"] or fixed["profile"] != vulnerable["profile"]:
+                    continue
+                if fixed.get("condition") != vulnerable.get("condition"):
                     continue
                 for control in fixed["plan"]["controls"]:
                     if control["type"] in ("fixed_target", "both") and control["target_id"] == target["target_id"]:

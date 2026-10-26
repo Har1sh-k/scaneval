@@ -54,6 +54,7 @@ SCHEMA_VERSIONS: dict[str, tuple[str, ...]] = {
     # published at 2.1, so plain file names.
     "gate-policy": ("2.1",),
     "gate-decision": ("2.1",),
+    "condition-record": ("2.1",),
 }
 CONTRACT_KINDS = frozenset(SCHEMA_VERSIONS)
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
@@ -1221,6 +1222,25 @@ def _validate_execution_record(document: dict[str, Any]) -> None:
         raise ContractError("a network policy is enforced only inside an enforced isolation backend")
 
 
+def _validate_condition_record(document: dict[str, Any]) -> None:
+    _unique([item["role"] for item in document["artifacts"]], "condition artifacts.role")
+    for item in document["artifacts"]:
+        _require_relative_path(item["path"], "condition artifact.path")
+    if document["status"] == "attested":
+        roles = {item["role"] for item in document["artifacts"]}
+        required = {"request", "result", "execution", "policy", "configuration", "provenance", "evidence"}
+        if not required <= roles:
+            raise ContractError("an attested condition requires exact saved input and invocation artifacts")
+        if document["network"] != "enforced":
+            raise ContractError("an unenforced network declaration cannot be attested")
+        if document["condition"] == "closed_book_standard":
+            if (document["identity_profile"] != "standard"
+                    or document["history"] not in ("original_absent", "neutral_synthetic")
+                    or document["retrieval"] not in ("disabled", "observed_none")
+                    or document["provider_retrieval"] not in ("disabled", "not_applicable")):
+                raise ContractError("closed_book_standard attestation requires standard identity and verified history/retrieval restrictions")
+
+
 def _validate_case_pack(document: dict[str, Any]) -> None:
     """Check what a pack asserts about its own label states; it never re-runs a check.
 
@@ -1618,6 +1638,11 @@ def _validate_run_config(document: dict[str, Any]) -> None:
             raise ContractError(
                 f"{label}: blinding_map is required exactly when profile is metadata_blinded or "
                 "identity_reduced")
+        if item.get("condition") is not None:
+            from .conditions import resolve_condition
+            condition = resolve_condition(item["condition"], profile=item.get("profile", "standard"), mode=mode)
+            if condition["name"] == "closed_book_standard" and (item.get("profile", "standard") != "standard" or mode != "full"):
+                raise ContractError(f"{label}: closed_book_standard requires a standard full-scan input")
     _unique([input_identity(item) for item in document["inputs"]], "input id")
     for index, system in enumerate(document["systems"]):
         execution = system.get("execution") or {"backend": "local"}
@@ -2504,6 +2529,7 @@ _RUNTIME_VALIDATORS = {
     "review-record": _validate_review_record,
     "run-config": _validate_run_config,
     "execution-record": _validate_execution_record,
+    "condition-record": _validate_condition_record,
     "scan-request": _validate_scan_request,
     "scan-result": _validate_scan_result,
     "evaluation-plan": _validate_evaluation_plan,

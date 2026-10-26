@@ -1183,3 +1183,7 @@ def test_semgrep_runs_end_to_end_in_the_pinned_official_image(scratch):
     assert len(runtime) == 1 and runtime[0]["mode"] == "ro" and runtime[0]["target"].startswith("~/")
     assert execution["network_policy"]["enforced"] is True
     assert manifest["status"] == "completed" and leftovers(scratch) == []
+    from scaneval.conditions import classify_observation
+    condition = classify_observation(bundle)
+    assert condition["condition"] == "closed_book_standard" and condition["status"] == "attested"
+    assert condition["history"] == "original_absent" and condition["retrieval"] == "disabled"

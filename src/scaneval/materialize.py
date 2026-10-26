@@ -555,6 +555,15 @@ def provenance_record(snapshot: CachedSnapshot, profile: str, exported: Exported
         "stripped": list(exported.stripped),
         "skipped": list(exported.skipped),
         "instruction_files": list(exported.instruction_files),
+        "retained_identity_cues": {
+            "instruction_files": list(exported.instruction_files),
+            "package_metadata": sorted(path for path in exported.hashes if Path(path).name in {
+                "package.json", "pyproject.toml", "setup.py", "setup.cfg", "Cargo.toml", "go.mod",
+                "composer.json", "pom.xml", "Gemfile", "build.gradle"}),
+            "documentation": sorted(path for path in exported.hashes if Path(path).name.lower().startswith(
+                ("readme", "license", "changelog", "contributing"))),
+            "source_identifiers": "retained", "ordinary_paths": "retained",
+        },
         "synthetic_history": None,
         "exported_at": now.astimezone(timezone.utc).isoformat(timespec="seconds"),
         "tool_versions": {"git": git_version()},
@@ -595,9 +604,75 @@ def prepare_synthetic_history(source_dir: Path, *, message: str = "snapshot") ->
         _git(["config", "--local", key, value], source_dir)
     # Force-add so an upstream .gitignore cannot drop exported files from the synthetic tree.
     _git(["add", "-A", "-f", "."], source_dir)
-    _git(["commit", "-q", "--allow-empty", "--no-verify", "-m", message], source_dir)
+    _git(["commit", "-q", "--allow-empty", "--no-verify", "-m", message], source_dir,
+         extra_env={"GIT_AUTHOR_DATE": "2000-01-01T00:00:00+00:00",
+                    "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00"})
     commit = _git(["rev-parse", "HEAD"], source_dir).strip()
     return {"commit": commit, "message": message, "identity": "ScanEval <scaneval@localhost>"}
+
+
+def audit_condition_history(source: Path, *, synthetic: dict | None = None,
+                            bounded: dict | None = None,
+                            allowed_state_dirs: frozenset[str] = frozenset()) -> dict:
+    """Observe Git paths and controller state without following links or running scanner Git code.
+
+    The runner calls this immediately before and after scanning. A synthetic repository is
+    trusted only because the runner constructed it from a tree with no original history; its
+    entire file digest must remain unchanged. The audit records the actual paths, including
+    empty or symbolic-link ``.git`` entries, which the ordinary source-file hash cannot see.
+    """
+    git_paths: list[str] = []
+    controller_paths: list[str] = []
+    pending = [(source, "")]
+    while pending:
+        directory, prefix = pending.pop()
+        with os.scandir(directory) as entries:
+            listed = sorted(entries, key=lambda entry: entry.name)
+        for entry in listed:
+            relative = f"{prefix}{entry.name}"
+            if entry.name == ".git":
+                git_paths.append(relative)
+                continue
+            if not prefix and entry.name in STRIPPED_TOP_LEVEL:
+                if entry.name not in allowed_state_dirs:
+                    controller_paths.append(relative)
+                continue
+            if not entry.is_symlink() and entry.is_dir(follow_symlinks=False):
+                pending.append((Path(entry.path), f"{relative}/"))
+    expected = synthetic is not None or bounded is not None
+    state = ("unexpected" if controller_paths or git_paths != ([".git"] if expected else [])
+             else "bounded_ancestor_history" if bounded is not None
+             else "neutral_synthetic" if synthetic is not None else "original_absent")
+    digest = None
+    git = source / ".git"
+    if expected and state != "unexpected":
+        if git.is_symlink() or not git.is_dir():
+            state = "unexpected"
+        else:
+            # Git object files, refs, hooks, configuration, and logs are all covered. No Git
+            # command reads the repository after an untrusted scanner has had access to it.
+            entries: dict[str, dict] = {}
+            pending_git = [(git, "")]
+            while pending_git:
+                directory, prefix = pending_git.pop()
+                with os.scandir(directory) as stream:
+                    listed = sorted(stream, key=lambda entry: entry.name)
+                for entry in listed:
+                    relative = prefix + entry.name
+                    if entry.is_symlink():
+                        entries[relative] = {"kind": "symlink", "target": os.readlink(entry.path)}
+                        state = "unexpected"
+                    elif entry.is_dir(follow_symlinks=False):
+                        entries[relative] = {"kind": "directory"}
+                        pending_git.append((Path(entry.path), relative + "/"))
+                    elif entry.is_file(follow_symlinks=False):
+                        entries[relative] = {"kind": "file", "sha256": sha256_file(Path(entry.path))[0]}
+                    else:
+                        entries[relative] = {"kind": "special"}
+                        state = "unexpected"
+            digest = canonical_sha256(entries)
+    return {"state": state, "git_paths": sorted(git_paths), "controller_paths": sorted(controller_paths),
+            "git_files_sha256": digest}
 
 
 # What the synthetic history of a PR input says about itself. Fixed, so the same two trees give the

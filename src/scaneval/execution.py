@@ -118,6 +118,7 @@ from .kinds import mapping_version
 from .materialize import (
     Containment,
     MaterializationError,
+    audit_condition_history,
     prepare_pr_history,
     prepare_synthetic_history,
     sha256_file,
@@ -126,7 +127,7 @@ from .materialize import (
 )
 
 
-NETWORK_POLICIES = ("none", "model_provider_only", "unrestricted")
+NETWORK_POLICIES = ("none", "model_provider_only", "unrestricted", "public_research")
 _USAGE_KEYS = ("wall_seconds", "setup_seconds", "cost_usd", "input_tokens", "output_tokens")
 
 
@@ -174,6 +175,9 @@ class PreparedInput:
     pr: dict | None = None
     base_source_dir: Path | None = None
     identity_manifest: dict | None = None
+    condition: dict | None = None
+    history_dir: Path | None = None
+    history_evidence: dict | None = None
 
     @property
     def binding_hash(self) -> str:
@@ -1183,6 +1187,16 @@ def run_invocation(
     bundle_area = _enclose(bundle)
     request = build_request(run_id, prepared, spec, timeout_seconds=timeout_seconds, trace_mode=trace_mode,
                             pr=request_pr)
+    from . import conditions
+    condition = conditions.resolve_condition(prepared.condition, profile=prepared.profile, mode=prepared.mode)
+    configuration = {"system_id": spec.system_id, "adapter": spec.adapter, "config": dict(spec.config),
+                     "model_id": spec.model_id, "model_revision": spec.model_revision,
+                     "network_policy": network_policy}
+    # Freeze before the scanner can mutate any adapter state; publish with the execution pair,
+    # so a failed final write leaves the historical request/raw-only recovery layout intact.
+    policy_bytes = _canonical_bytes(condition)
+    configuration_bytes = _canonical_bytes(configuration)
+    provenance_bytes = _canonical_bytes(prepared.provenance)
     _write_new(bundle / "request.json", request)
 
     state_dirs = frozenset(getattr(adapter, "state_dirs", ()))
@@ -1213,6 +1227,16 @@ def run_invocation(
     alias_notes: list[str] = []
     capture_notes: list[str] = []
     cleanup_notes: list[str] = []
+    history_before: dict = {"state": "unavailable"}
+    history_after: dict = {"state": "unavailable"}
+    installed_history = None
+    try:
+        controls = adapter.condition_controls(spec, preparation)
+        if not isinstance(controls, dict):
+            raise ValueError("condition_controls must return an object")
+        canonical_sha256(controls)
+    except Exception as exc:
+        controls = {"error": _recordable_text(_failure_message(exc))}
     try:
         staging_raw.mkdir()
         if staging_trace is not None:
@@ -1250,13 +1274,21 @@ def run_invocation(
                            "watched input tree counts and the exported hash does not")
             raise ExecutionError(f"workspace tree hash {actual} does not match prepared input "
                                  f"{prepared.tree_hash}{detail}")
-        if prepared.mode == "pr":
+        if condition["name"] == "open_context":
+            if not mode_unsupported and not unsupported:
+                from . import open_context
+                if prepared.history_dir is None or prepared.history_evidence is None:
+                    raise ExecutionError("open_context requires its saved bounded history and attestation")
+                installed_history = open_context.install_history(
+                    prepared.history_dir, source, expected=prepared.history_evidence)
+        elif prepared.mode == "pr":
             # A PR scanner reads a base and a head whether or not the adapter asked for git, and
             # nothing is built for one that will not scan: the history exists to be reviewed.
             if not mode_unsupported and not unsupported:
                 synthetic = _pr_history(source, prepared)
         elif adapter.requires_git and not (source / ".git").exists():
             synthetic = prepare_synthetic_history(source)
+        history_before = audit_condition_history(source, synthetic=synthetic, bounded=installed_history)
         if mode_unsupported:
             outcome = NativeOutcome(status="unsupported", exit_code=None, command=[],
                                     error={"code": "unsupported_mode",
@@ -1295,6 +1327,12 @@ def run_invocation(
             violation = violation or (
                 "the exported source no longer resolves inside the private workspace, so "
                 "nothing under it was read after the scan")
+        if source_inside:
+            try:
+                history_after = audit_condition_history(source, synthetic=synthetic, bounded=installed_history,
+                                                        allowed_state_dirs=state_dirs)
+            except Exception as exc:
+                history_after = {"state": "unavailable", "error": _failure_message(exc)}
         try:
             for name in sorted(state_dirs) if source_inside else ():
                 state_path = source / name
@@ -1339,7 +1377,7 @@ def run_invocation(
         try:
             # A ``.git`` is the runner's own bookkeeping only when the runner wrote it; when it
             # did not, one the scanner made is watched like everything else it wrote.
-            after = (_input_tree(source, state_dirs, created_git=synthetic is not None)
+            after = (_input_tree(source, state_dirs, created_git=synthetic is not None or installed_history is not None)
                      if source_inside else dict(before))
         except Exception as exc:
             # The comparison never completed, so nothing is claimed about the source: `before`
@@ -1410,7 +1448,7 @@ def run_invocation(
 
     isolation = dict(LOCAL_ISOLATION) if backend is None else backend.isolation_record()
     network_enforced = backend is not None and bool(backend.network_enforced)
-    record_2_1 = prepared.needs_2_1 or isolation.get("backend") != "local"
+    record_2_1 = prepared.needs_2_1 or isolation.get("backend") != "local" or prepared.condition is not None
 
     def build_documents() -> tuple[dict, dict]:
         """The result and execution documents for the outcome as it currently stands.
@@ -1547,6 +1585,7 @@ def run_invocation(
             execution["provenance"].update({"input_hash": prepared.binding_hash, "mode": prepared.mode,
                                             "pr": prepared.pr, "blinding": prepared.blinding})
             execution["isolation"] = isolation
+            execution["condition"] = condition
         execution, rendered_in_execution = _recordable_document(execution)
         if rendered_in_result + rendered_in_execution:
             # Appended after the rendering, so this sentence is itself plain ASCII and needs no
@@ -1647,6 +1686,14 @@ def run_invocation(
             # Nothing the adapter supplied is left in these documents, so the refusal is about
             # the invocation itself; writing half a bundle would be worse than writing none.
             raise ExecutionError(f"the invocation could not be recorded: {again}") from again
+    evidence, _rendered = _recordable_document({
+        "history": {"before": history_before, "after": history_after}, "controls": controls,
+        "history_evidence": installed_history})
     _write_new_documents([(bundle / "result.json", result_bytes),
-                          (bundle / "execution.json", execution_bytes)])
+                          (bundle / "execution.json", execution_bytes),
+                          (bundle / conditions.EVIDENCE_FILE, _canonical_bytes(evidence)),
+                          (bundle / conditions.POLICY_FILE, policy_bytes),
+                          (bundle / conditions.CONFIGURATION_FILE, configuration_bytes),
+                          (bundle / conditions.PROVENANCE_FILE, provenance_bytes)])
+    _write_new(bundle / conditions.RECORD_FILE, conditions.classify_observation(bundle))
     return bundle
