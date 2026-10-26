@@ -933,6 +933,11 @@ class OciBackend:
         retrieval_mounts = []
         retrieval_args = []
         if self.settings.network_policy == "public_research":
+            # Keep directory ownership with the controller. Proxy-owned 0755 directories
+            # prevent a native Linux host from unlinking their files during normal cleanup.
+            content_dir = log_dir / "content"
+            content_dir.mkdir()
+            os.chmod(content_dir, 0o777)  # Writable only through the proxy's private log mount.
             module = directory / "public_retrieval.py"
             shutil.copyfile(Path(__file__).with_name("public_retrieval.py"), module)
             os.chmod(module, 0o644)
