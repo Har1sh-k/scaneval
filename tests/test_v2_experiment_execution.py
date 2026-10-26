@@ -91,7 +91,10 @@ def test_result_binding_rejects_relabeling_and_changed_result_bytes(tmp_path):
     root = tmp_path / "run"
     bundle = root / "invocations" / cell["assignments"][0]["assignment_id"]
     bundle.mkdir(parents=True)
-    (bundle / "result.json").write_text('{"fixture":true}')
+    result = {"schema_version": "2.0", "run_id": cell["config"]["run_id"], "system_id": "scan",
+              "input_hash": "sha256:" + "d" * 64, "status": "success", "ranking": "unranked",
+              "claims": [], "bundles_resolved": True, "usage": {"wall_seconds": 0}}
+    (bundle / "result.json").write_text(json.dumps(result))
     execution._bind_run(matrix, cell, root)
     assignment = cell["assignments"][0]
     assert execution.verify_binding(bundle, matrix, cell, assignment=assignment)["matrix_sha256"] == matrix["matrix_sha256"]
@@ -102,3 +105,23 @@ def test_result_binding_rejects_relabeling_and_changed_result_bytes(tmp_path):
     (bundle / "result.json").write_text('{"fixture":false}')
     with pytest.raises(ContractError, match="artifacts changed"):
         execution.verify_binding(bundle, matrix, cell, assignment=assignment)
+
+
+def test_a_later_staged_cell_changed_between_runs_is_never_invoked(tmp_path, monkeypatch):
+    matrix = frozen_shell()
+    staged_executor(monkeypatch, matrix)
+    output = tmp_path / "out"
+    calls = []
+    def runner(config_path, _out_dir, **_kwargs):
+        calls.append(config_path.parent.name)
+        if len(calls) == 1:
+            later = output / "cells" / matrix["cell_order"][1] / "run-config.json"
+            changed = json.loads(later.read_text())
+            changed["timeout_seconds"] += 1
+            later.write_text(json.dumps(changed))
+        return {"status": "completed"}
+    monkeypatch.setattr(execution.runner, "run_from_config", runner)
+    result = execution.execute(tmp_path / "frozen.json", output)
+    assert calls == [matrix["cell_order"][0], matrix["cell_order"][2]]
+    refused = result["cells"][1]
+    assert refused["status"] == "failed" and "changed before scanner invocation" in refused["error"]["message"]
