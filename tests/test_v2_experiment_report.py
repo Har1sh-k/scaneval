@@ -1,0 +1,100 @@
+from copy import deepcopy
+
+import pytest
+
+from scaneval.contracts import ContractError
+from scaneval.experiment_report import check_adjudication_consistency, paired_effect, weighted_bounds
+
+
+def outcome(target, value, *, snapshot=None, repetition=1, resolved=True, eligible=True, runtime="same"):
+    return {"canonical_id": target, "detected": value, "snapshot_id": snapshot or target,
+            "system_id": "scan", "repetition": repetition, "project": "project-" + target,
+            "resolved": resolved, "eligible": eligible, "runtime_sha256": runtime, "reasons": []}
+
+
+def test_canonical_weighting_does_not_overweight_targets_with_more_inputs_or_repetitions():
+    rows = [{"canonical_id": "A", "lower": value, "upper": value, "resolved": True} for value in (1, 1, 0)]
+    rows.append({"canonical_id": "B", "lower": 0, "upper": 0, "resolved": True})
+    assert weighted_bounds(rows)["value"] == 1 / 3
+
+
+def test_known_contributions_tighten_missing_pair_bounds_without_discarding_it():
+    left = [outcome("A", True), outcome("B", None, resolved=False)]
+    right = [outcome("A", False), outcome("B", False)]
+    result = paired_effect(left, right, uncertainty={"method": "none"}, label="fixture")
+    assert result["planned_pairs"] == 2 and result["resolved_pairs"] == 1
+    assert result["full_population_effect"]["value"] is None
+    assert result["full_population_effect"]["lower_bound"] == 0.5
+    assert result["full_population_effect"]["upper_bound"] == 1.0
+    assert result["resolved_subset_effect"]["value"] == 1.0
+
+
+def test_known_right_hand_hit_keeps_unknown_left_difference_nonpositive():
+    result = paired_effect([outcome("A", None, resolved=False), outcome("B", True)],
+        [outcome("A", True), outcome("B", True)], uncertainty={"method": "none"}, label="fixture")
+    assert result["full_population_effect"]["lower_bound"] == -0.5
+    assert result["full_population_effect"]["upper_bound"] == 0.0
+
+
+def test_actual_runtime_drift_refuses_pair_comparability():
+    result = paired_effect([outcome("A", True, runtime="scanner-1")], [outcome("A", False, runtime="scanner-2")],
+                           uncertainty={"method": "none"}, label="fixture")
+    assert result["comparable_pairs"] == 0 and result["full_population_effect"]["value"] is None
+    assert result["pairs"][0]["reasons"] == ["actual_scanner_model_scope_or_budget_drift"]
+    assert result["full_population_effect"]["lower_bound"] == -1.0
+    assert result["full_population_effect"]["upper_bound"] == 1.0
+
+
+def test_partial_accepted_hit_is_a_known_bound_but_not_complete_work():
+    result = paired_effect([outcome("A", True, resolved=False)], [outcome("A", False)],
+                           uncertainty={"method": "none"}, label="fixture")
+    assert result["full_population_effect"]["value"] is None
+    assert result["full_population_effect"]["lower_bound"] == result["full_population_effect"]["upper_bound"] == 1.0
+    assert result["resolved_pairs"] == 0
+
+
+def test_missing_repetition_or_duplicate_pairs_cannot_be_silently_intersected():
+    left = [outcome("A", True), outcome("A", False, repetition=2)]
+    with pytest.raises(ContractError, match="complete frozen"):
+        paired_effect(left, left[:1], uncertainty={"method": "none"}, label="fixture")
+    with pytest.raises(ContractError, match="duplicate"):
+        paired_effect(left + left[:1], left, uncertainty={"method": "none"}, label="fixture")
+
+
+def test_bootstrap_is_reproducible_only_for_complete_supported_cluster_population():
+    policy = {"method": "paired_cluster_bootstrap", "cluster_by": "canonical_target", "seed": 7,
+              "min_clusters": 2, "replicates": 20, "confidence": 0.9}
+    left, right = [outcome("A", True), outcome("B", True)], [outcome("A", False), outcome("B", False)]
+    result = paired_effect(left, right, uncertainty=policy, label="fixture")
+    interval = result["confidence_interval"]
+    assert interval["status"] == "available" and interval["lower"] == interval["upper"] == 1.0
+    assert paired_effect(left, right, uncertainty=policy, label="fixture") == result
+    left[0]["resolved"] = False
+    assert paired_effect(left, right, uncertainty=policy, label="fixture")["confidence_interval"]["status"] == "unavailable"
+
+
+def test_too_few_clusters_never_get_a_confidence_interval():
+    policy = {"method": "paired_cluster_bootstrap", "seed": 0, "min_clusters": 2, "replicates": 20, "confidence": 0.95}
+    result = paired_effect([outcome("A", True)], [outcome("A", False)], uncertainty=policy, label="fixture")
+    assert result["confidence_interval"]["status"] == "unavailable"
+
+
+def adjudication(decision, *, claim_id="claim"):
+    return {"snapshot_id": "source", "target_canonical": {"target": "root"},
+        "result": {"claims": [{"claim_id": claim_id, "kind": "command_injection", "allegation": "Same allegation",
+                                "primary_location": {"path": "app.py", "start_line": 1, "end_line": 1}}]},
+        "decisions": {"claim_matches": [{"claim_id": claim_id, "target_id": "target", "decision": decision}],
+                      "control_assessments": []}}
+
+
+def test_delivery_ids_do_not_hide_conflicting_cross_condition_review():
+    with pytest.raises(ContractError, match="conflicting cross-condition"):
+        check_adjudication_consistency([adjudication("accepted"), adjudication("rejected", claim_id="different-id")])
+    check_adjudication_consistency([adjudication("accepted"), adjudication("unresolved", claim_id="different-id")])
+
+
+def test_false_allegation_and_accepted_hit_cannot_contradict_between_cells():
+    false = adjudication("unresolved", claim_id="other")
+    false["decisions"]["control_assessments"] = [{"control_id": "control", "decision": "false_allegation", "claim_ids": ["other"]}]
+    with pytest.raises(ContractError, match="both accepted and judged false"):
+        check_adjudication_consistency([adjudication("accepted"), false])

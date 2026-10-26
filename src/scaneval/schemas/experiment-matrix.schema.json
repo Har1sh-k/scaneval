@@ -69,7 +69,7 @@
         "adjudication":{"type":"object","additionalProperties":false,"required":["policy_id","version","matching"],"properties":{"policy_id":{"type":"string","minLength":1},"version":{"type":"string","minLength":1},"matching":{"const":"exact_structured_v2"}}},
         "aggregation_policy":{"type":"object"},
         "uncertainty":{"type":"object","additionalProperties":false,"required":["method"],"properties":{
-          "method":{"enum":["none","paired_cluster_bootstrap"]},"replicates":{"type":"integer","minimum":2},
+          "method":{"enum":["none","paired_cluster_bootstrap"]},"cluster_by":{"enum":["canonical_target","project"]},"replicates":{"type":"integer","minimum":2},
           "confidence":{"type":"number","exclusiveMinimum":0,"exclusiveMaximum":1},"seed":{"type":"integer","minimum":0},"min_clusters":{"type":"integer","minimum":2}
         }},
         "extensions":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["cell_id","history","retrieval","identity","execution"],"properties":{

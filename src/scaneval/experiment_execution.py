@@ -22,6 +22,7 @@ IMMUTABLE_INVOCATION_FILES = (
     "request.json", "result.json", "execution.json", "condition.json", "condition-policy.json",
     "condition-configuration.json", "condition-evidence.json", "input-provenance.json",
     "evaluator/identity-transform.json",
+    "evaluator/identity-context.json",
 )
 
 

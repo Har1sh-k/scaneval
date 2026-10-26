@@ -374,3 +374,8 @@ def execute(*args, **kwargs) -> dict:
 def freeze_file(*args, **kwargs) -> dict:
     from .experiment_execution import freeze_file as freeze_matrix
     return freeze_matrix(*args, **kwargs)
+
+
+def report(*args, **kwargs) -> dict:
+    from .experiment_report import report as report_matrix
+    return report_matrix(*args, **kwargs)
