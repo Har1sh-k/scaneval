@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 import tomllib
 
 import pytest
@@ -585,3 +586,115 @@ def test_saved_manifest_and_summary_tampering_is_detected(tmp_path, bad):
 
     with pytest.raises(ContractError):
         verify_manifest(record, summary, **saved_bindings(inspection))
+
+
+@pytest.mark.parametrize("document", [
+    {"profile": "identity_reduced", "trial": {}, "source": {}},
+    {"blinding": {"edits": []}, "original": {}, "trial": {}},
+    {"targets": [], "controls": [], "review_budgets": [5], "input_hash": "hash"},
+    {"manifest_sha256": "hash", "config_sha256": "hash", "validation": {"state": "available"}},
+])
+def test_export_provenance_plans_and_portable_summaries_are_evaluator_artifacts(tmp_path, document):
+    tree = source(tmp_path, {"notes/renamed.json": json.dumps(document)})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    assert inspection["validation"]["state"] == "unavailable" and inspection["forbidden_artifacts"]
+
+
+def test_portable_diagnostics_do_not_disclose_aliases_from_paths(tmp_path):
+    tree = source(tmp_path, {f'docs/{ALIAS["value"]}.md': "prose"})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    record, summary = manifest(inspection)
+    assert ALIAS["value"] in canonical_json(record)
+    assert ALIAS["value"] not in canonical_json(summary)
+    assert summary["validation"]["state"] == "unavailable"
+    assert any(reason.startswith("strict identity validation diagnostic sha256:")
+               for reason in summary["validation"]["reasons"])
+
+
+def test_forbidden_artifact_paths_match_case_insensitively(tmp_path):
+    tree = source(tmp_path, {"notes.txt": "private evaluator notes"})
+    inspection = inspect_tree(tree, policy(forbidden_artifacts=[
+        {"category": "evaluator_evidence", "path": "Notes.txt"}]), requirements=[ALIAS])
+    assert inspection["validation"]["state"] == "unavailable"
+    assert inspection["forbidden_artifacts"][0]["path"] == "notes.txt"
+
+
+@pytest.mark.parametrize("blocker", ["answer", "instruction", "artifact", "unsafe"])
+def test_manifest_derives_unavailability_from_inspection_fields_when_scalar_is_flipped(tmp_path, blocker):
+    path, content = {"answer": ("src/app.py", ALIAS["value"]), "instruction": ("AGENTS.md", "instructions"),
+                     "artifact": ("identity-transform.json", "{}"), "unsafe": ("src/app.py", "safe")}[blocker]
+    tree = source(tmp_path, {path: content})
+    if blocker == "unsafe":
+        (tree / "link.txt").symlink_to(tree / "src" / "app.py")
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    inspection["validation"] = {"state": "available", "reasons": []}
+    record, summary = manifest(inspection, transformed_tree_hash=inspection["tree_hash"] or "sha256:" + "5" * 64)
+    assert record["validation"]["state"] == summary["validation"]["state"] == "unavailable"
+
+
+@pytest.mark.parametrize("changes", [
+    {"edits": "invalid"}, {"edits": [{}]}, {"removals": [{"path": 5}]},
+    {"metadata_edits": ""}, {"skipped": {}}, {"inspection": None},
+    {"inspection": {"validation": {"state": "available", "reasons": "ok"}}},
+])
+def test_malformed_manifest_components_raise_contract_errors(changes, tmp_path):
+    tree = source(tmp_path, {"src/app.py": "safe"})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    options = {"inspection": inspection, "edits": [], "removals": [], "tool_versions": {}, **changes}
+    with pytest.raises(ContractError, match="component"):
+        build_manifest(policy(), source_snapshot={"snapshot_id": "a", "commit": "a" * 40},
+                       original_tree_hash="sha256:" + "1" * 64, transformed_tree_hash=inspection["tree_hash"],
+                       map_sha256="sha256:" + "2" * 64, requirements=[ALIAS], **options)
+
+
+def test_overlapping_declared_forms_count_once_on_both_content_and_path_surfaces(tmp_path):
+    alias = {"category": "answer_alias", "value": "foo-lib", "forms": ["foo-lib-core"]}
+    tree = source(tmp_path, {"foo-lib-core/x.txt": "foo-lib-core"})
+    inspection = inspect_tree(tree, policy(answer_aliases=[alias]), requirements=[alias])
+    assert {entry["surface"]: entry["occurrences"] for entry in inspection["residual_cues"]} == {
+        "content": 1, "path": 1}
+
+
+def test_case_variant_configured_instruction_disposition_uses_the_real_path(tmp_path):
+    tree = source(tmp_path, {"docs/instructions.md": "project instructions"})
+    configured = policy(instruction_paths=["docs/INSTRUCTIONS.md"])
+    inspection = inspect_tree(tree, configured, requirements=[ALIAS])
+    record, _ = manifest(inspection, selected_policy=configured, original_instruction_files=["docs/instructions.md"])
+    assert record["instruction_files"] == [{"path": "docs/instructions.md", "classification": "instruction_file",
+                                            "disposition": "retained"}]
+
+
+def test_monorepo_nested_assistant_instructions_are_discovered(tmp_path):
+    path = "packages/a/.cursor/rules/project.mdc"
+    tree = source(tmp_path, {path: "project instructions"})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    assert inspection["validation"]["state"] == "unavailable" and inspection["instruction_files"] == [path]
+
+
+def test_non_utf8_names_are_opaque_unsafe_entries_instead_of_serialization_crashes(tmp_path):
+    tree = source(tmp_path, {"src/app.py": "safe"})
+    try:
+        descriptor = os.open(os.fsencode(tree) + b"/bad-\xff", os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError:
+        pytest.skip("this filesystem refuses non-UTF-8 names")
+    os.close(descriptor)
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    assert inspection["validation"]["state"] == "unavailable"
+    assert "non-utf8-name-" in inspection["unsafe_entries"][0]["path"]
+    canonical_json(inspection).encode("utf-8", errors="strict")
+
+
+def test_tree_inspection_does_not_depend_on_python_recursion_depth(tmp_path):
+    tree = source(tmp_path, {})
+    current = tree
+    for _ in range(300):
+        current = current / "d"
+        current.mkdir()
+    (current / "source.txt").write_text("safe")
+    previous = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(200)
+        inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    finally:
+        sys.setrecursionlimit(previous)
+    assert inspection["validation"]["state"] == "available" and inspection["file_count"] == 1

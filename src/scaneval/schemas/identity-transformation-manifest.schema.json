@@ -113,7 +113,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["category", "cue_sha256", "path", "occurrences", "surface", "reason"],
       "properties": {
-        "category": {"type": "string", "minLength": 1}, "cue_sha256": {"$ref": "#/$defs/digest"},
+        "category": {"enum": ["target_alias", "advisory_url", "answer_alias", "repository_identity", "assistant_support_file", "unsafe_configured_instruction"]}, "cue_sha256": {"$ref": "#/$defs/digest"},
         "path": {"$ref": "#/$defs/path"}, "occurrences": {"type": "integer", "minimum": 1},
         "surface": {"enum": ["content", "path"]}, "reason": {"type": "string", "minLength": 1}
       }

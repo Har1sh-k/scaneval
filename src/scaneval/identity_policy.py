@@ -11,7 +11,9 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from decimal import Decimal
+from functools import lru_cache
 import hashlib
+from importlib.resources import files
 import json
 import math
 import os
@@ -21,6 +23,8 @@ import stat
 import tomllib
 from typing import Any
 from urllib.parse import urlsplit
+
+from jsonschema import Draft202012Validator
 
 from .contracts import (ContractError, canonical_json, canonical_sha256, is_stated, load_document,
                          validate_document)
@@ -360,9 +364,14 @@ def _instruction_class(path: str, configured: set[str]) -> str | None:
     folded = path.casefold()
     pure = PurePosixPath(folded)
     named = pure.name in {name.casefold() for name in INSTRUCTION_FILE_NAMES} | {"claude.local.md"}
-    within = (pure.parts[0] in {part.casefold() for part in INSTRUCTION_TOP_LEVEL}
-              or folded in {part.casefold() for part in INSTRUCTION_PATHS}
-              or folded.startswith(tuple(part.casefold() for part in INSTRUCTION_PATH_PREFIXES)))
+    roots = {part.casefold() for part in INSTRUCTION_TOP_LEVEL}
+    within = (any(part in roots for part in pure.parts[:-1])
+              or any(pure.parts[-len(PurePosixPath(part).parts):] == PurePosixPath(part.casefold()).parts
+                     for part in INSTRUCTION_PATHS)
+              or any(tuple(pure.parts[index:index + len(PurePosixPath(prefix).parts)])
+                     == PurePosixPath(prefix.casefold()).parts
+                     for prefix in INSTRUCTION_PATH_PREFIXES
+                     for index in range(len(pure.parts) - len(PurePosixPath(prefix).parts))))
     explicit = folded in configured
     if not (named or within or explicit):
         return None
@@ -377,10 +386,40 @@ def _tree_entries(root: Path):
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
-    def walk(descriptor: int, prefix: str):
+    def names(descriptor):
         with os.scandir(descriptor) as directory:
-            names = sorted(entry.name for entry in directory)
-        for name in names:
+            return sorted(entry.name for entry in directory)
+
+    try:
+        descriptor = os.open(Path(root), directory_flags)
+    except OSError as exc:
+        yield ".", None, f"the export root could not be opened safely: {exc.strerror}"
+        return
+    stack = [[descriptor, "", None, 0]]
+    try:
+        while stack:
+            frame = stack[-1]
+            descriptor, prefix = frame[:2]
+            if frame[2] is None:
+                try:
+                    frame[2] = names(descriptor)
+                except OSError as exc:
+                    yield prefix.rstrip("/") or ".", None, f"directory entries could not be read safely: {exc.strerror}"
+                    stack.pop()
+                    os.close(descriptor)
+                    continue
+            if frame[3] == len(frame[2]):
+                stack.pop()
+                os.close(descriptor)
+                continue
+            name = frame[2][frame[3]]
+            frame[3] += 1
+            try:
+                name.encode("utf-8", errors="strict")
+            except UnicodeEncodeError:
+                opaque = _sha256(os.fsencode(name)).split(":", 1)[1]
+                yield prefix + f"[non-utf8-name-{opaque}]", None, "file names must be strict UTF-8"
+                continue
             relative = prefix + name
             if name.casefold() in {".git", ".hg", ".svn", ".bzr", "cvs"}:
                 yield relative, None, "original VCS directories and history are forbidden"
@@ -391,10 +430,10 @@ def _tree_entries(root: Path):
                     yield relative, None, "symbolic links are forbidden in a validated identity export"
                 elif stat.S_ISDIR(info.st_mode):
                     child = os.open(name, directory_flags, dir_fd=descriptor)
-                    try:
-                        yield from walk(child, relative + "/")
-                    finally:
-                        os.close(child)
+                    if frame[3] == len(frame[2]):
+                        stack.pop()
+                        os.close(descriptor)
+                    stack.append([child, relative + "/", None, 0])
                 elif stat.S_ISREG(info.st_mode):
                     opened = os.open(name, file_flags, dir_fd=descriptor)
                     with os.fdopen(opened, "rb") as handle:
@@ -414,20 +453,16 @@ def _tree_entries(root: Path):
             except OSError as exc:
                 yield relative, None, f"the staged entry could not be read safely: {exc.strerror}"
 
-    try:
-        descriptor = os.open(Path(root), directory_flags)
-    except OSError as exc:
-        yield ".", None, f"the export root could not be opened safely: {exc.strerror}"
-        return
-    try:
-        yield from walk(descriptor, "")
     finally:
-        os.close(descriptor)
+        for descriptor, *_ in stack:
+            os.close(descriptor)
 
 
 def _artifact_category(path: str, data: bytes) -> str | None:
     if PurePosixPath(path).name.casefold() == MANIFEST_NAME:
         return "transformation_manifest"
+    if PurePosixPath(path).name.casefold() == "provenance.json":
+        return "evaluator_evidence"
     try:
         document = json.loads(data)
     except (UnicodeDecodeError, ValueError, RecursionError):
@@ -437,13 +472,16 @@ def _artifact_category(path: str, data: bytes) -> str | None:
     keys = set(document)
     if document.get("kind") == MANIFEST_KIND or {"original_tree_hash", "transformed_tree_hash", "policy"} <= keys:
         return "transformation_manifest"
+    if {"manifest_sha256", "config_sha256", "validation"} <= keys:
+        return "transformation_manifest"
     if ({"map_id", "pseudonyms", "variants", "edits"} <= keys
             or document.get("policy_id") == POLICY_ID and "answer_aliases" in keys):
         return "redaction_dictionary"
     if any(required <= keys for required in (
+            {"profile", "trial", "source"}, {"blinding", "original", "trial"},
             {"namespace", "pack_id", "snapshots", "cases"},
             {"canonical_target", "target", "evidence", "validation"},
-            {"targets", "controls", "provenance", "review_budgets", "input_hash"},
+            {"targets", "controls", "review_budgets", "input_hash"},
             {"claim_matches", "control_assessments", "result_sha256", "input_hash"})):
         return "evaluator_evidence"
     return None
@@ -495,6 +533,10 @@ def _answer_occurrences(data: bytes, forms: set[str]) -> int:
         except UnicodeDecodeError:
             continue
         spans.extend(_decoded_spans(text, encoding, forms))
+    return _merged_count(spans)
+
+
+def _merged_count(spans: list[tuple[int, int]]) -> int:
     count, end = 0, -1
     for start, finish in sorted(spans):
         if start >= end:
@@ -542,7 +584,7 @@ def inspect_tree(source: Path, policy: dict | None, *, requirements: list[dict],
         if detected:
             artifact_categories.add(detected)
         for artifact in (normalized or {}).get("forbidden_artifacts", []):
-            if artifact.get("path") == path or artifact.get("sha256") == digest:
+            if artifact.get("path", "").casefold() == path.casefold() or artifact.get("sha256") == digest:
                 artifact_categories.add(artifact["category"])
         for category in sorted(artifact_categories):
             artifacts.append({"path": path, "category": category, "sha256": digest})
@@ -563,7 +605,7 @@ def inspect_tree(source: Path, policy: dict | None, *, requirements: list[dict],
             forms = {entry["value"].casefold(), *(form.casefold() for form in entry["forms"])}
             for surface, text in (("content", folded_text), ("path", folded_path)):
                 count = (_answer_occurrences(data, forms) if surface == "content"
-                         else sum(text.count(form) for form in forms))
+                         else _merged_count(_decoded_spans(path, "utf-8", forms)))
                 if count:
                     residuals.append(_cue(entry["category"], entry["value"], path, count, surface,
                                           "answer-bearing content remains; unsafe source rewrites are forbidden"))
@@ -588,6 +630,57 @@ def inspect_tree(source: Path, policy: dict | None, *, requirements: list[dict],
             "validation": {"state": "unavailable" if reasons else "available", "reasons": sorted(set(reasons))}}
 
 
+@lru_cache(maxsize=1)
+def _manifest_schema() -> dict:
+    return json.loads(files("scaneval").joinpath("schemas", MANIFEST_KIND + ".schema.json").read_text(encoding="utf-8"))
+
+
+def _validate_components(inspection: dict, edits, fields, removals, skipped) -> None:
+    schema = _manifest_schema()
+    properties = schema["properties"]
+    inspection_properties = {key: properties[key] for key in
+                             ("validation", "residual_cues", "forbidden_artifacts", "unsafe_entries")}
+    inspection_properties.update({
+        "tree_hash": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+        "paths": {"type": "array", "items": {"type": "string"}},
+        "instruction_files": {"type": "array", "items": {"type": "string"}},
+        "assistant_support_files": {"type": "array", "items": {"type": "string"}},
+        "file_count": {"$ref": "#/$defs/count"}, "byte_count": {"$ref": "#/$defs/count"},
+        "policy_sha256": {"$ref": "#/$defs/digest"}, "requirements_sha256": {"$ref": "#/$defs/digest"},
+        "required_source_paths_sha256": {"$ref": "#/$defs/digest"},
+        "answer_coverage": {"type": "object", "additionalProperties": False,
+                            "required": ["state", "reasons", "required_aliases", "declared_aliases"],
+                            "properties": {**properties["validation"]["properties"],
+                                           "required_aliases": {"$ref": "#/$defs/count"},
+                                           "declared_aliases": {"$ref": "#/$defs/count"}}},
+    })
+    checked = {"$defs": schema["$defs"], "type": "object", "properties": {
+        "inspection": {"type": "object", "additionalProperties": False,
+                       "required": sorted(inspection_properties), "properties": inspection_properties},
+        **{key: properties[key] for key in ("edits", "metadata_edits", "removals", "skipped")}}}
+    value = {"inspection": inspection, "edits": edits, "metadata_edits": fields, "removals": removals, "skipped": skipped}
+    errors = sorted(Draft202012Validator(checked).iter_errors(value), key=lambda error: str(list(error.absolute_path)))
+    if errors:
+        location = ".".join(str(part) for part in errors[0].absolute_path)
+        raise ContractError(f"identity manifest component {location}: {errors[0].message}")
+
+
+def _inspection_blockers(inspection: dict) -> list[str]:
+    reasons = []
+    if inspection["tree_hash"] is None:
+        reasons.append("the inspected export has no verified tree hash")
+    if inspection["forbidden_artifacts"]:
+        reasons.append("evaluator-only artifacts remain in the transformed export")
+    if inspection["unsafe_entries"]:
+        reasons.append("the transformed export contains unsafe filesystem entries")
+    if inspection["instruction_files"]:
+        reasons.append("repository instruction documents remain in the transformed export")
+    if any(entry["category"] in _ALIAS_CATEGORIES | {"unsafe_configured_instruction"}
+           for entry in inspection["residual_cues"]):
+        reasons.append("answer-bearing content or unsafe configured instructions remain in the transformed export")
+    return reasons
+
+
 def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_hash: str,
                    transformed_tree_hash: str, map_sha256: str, requirements: list[dict], inspection: dict,
                    edits: list[dict], removals: list[dict], tool_versions: dict[str, str],
@@ -600,6 +693,9 @@ def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_
     can retain its wall-clock preparation timestamp independently. The manifest digest lives in
     the summary rather than inside the object it hashes. Neither object belongs in scanner input.
     """
+    fields_input = [] if metadata_edits is None else metadata_edits
+    skipped_input = [] if skipped is None else skipped
+    _validate_components(inspection, edits, fields_input, removals, skipped_input)
     normalized = validate_policy(policy) if policy is not None else None
     required = _aliases(requirements, "required answers")
     required_paths = sorted(set(required_source_paths or []))
@@ -615,7 +711,8 @@ def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_
         raise ContractError("tool_versions must map tool names to version strings")
     validation = deepcopy(inspection["validation"])
     coverage = policy_coverage(normalized, required)
-    validation["reasons"] = sorted(set(validation["reasons"]) | set(coverage["reasons"]))
+    validation["reasons"] = sorted(set(validation["reasons"]) | set(coverage["reasons"])
+                                    | set(_inspection_blockers(inspection)))
     if validation["state"] != "available" and not validation["reasons"]:
         validation["reasons"].append("the export inspection did not establish strict identity availability")
     if inspection.get("policy_sha256") != canonical_sha256(normalized):
@@ -632,16 +729,20 @@ def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_
                      "required_source_paths_sha256": required_paths_sha256}
     config_sha256 = canonical_sha256(configuration)
     changed = sorted(deepcopy(edits), key=canonical_json)
-    fields = sorted(deepcopy(metadata_edits or []), key=canonical_json)
+    fields = sorted(deepcopy(fields_input), key=canonical_json)
     removed = sorted(deepcopy(removals), key=canonical_json)
     remaining = set(inspection["instruction_files"])
     final_paths = set(inspection["paths"])
     before = set(original_instruction_files or [])
     declared = set((normalized or {}).get("instruction_paths", []))
     configured = {path.casefold() for path in declared}
+    inventory = before | remaining
+    for path in declared:
+        matches = {actual for actual in before | final_paths if actual.casefold() == path.casefold()}
+        inventory.update(matches or {path})
     disposition = [{"path": path, "classification": _instruction_class(path, configured) or "instruction_file",
                     "disposition": "retained" if path in final_paths else
-                    "removed" if path in before else "absent"} for path in sorted(before | remaining | declared)]
+                    "removed" if path in before else "absent"} for path in sorted(inventory)]
     counts = {
         "changed_files": len({entry["path"] for entry in changed + fields}),
         "removed_files": len({entry["path"] for entry in removed}),
@@ -651,7 +752,7 @@ def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_
         "instruction_files_removed": sum(entry["disposition"] == "removed" for entry in disposition),
         "instruction_files_retained": sum(entry["disposition"] == "retained" for entry in disposition),
         "residual_cues": sum(entry["occurrences"] for entry in inspection["residual_cues"]),
-        "skipped_transformations": len(skipped or []),
+        "skipped_transformations": len(skipped_input),
     }
     manifest = {
         "schema_version": "2.1", "kind": MANIFEST_KIND,
@@ -663,7 +764,7 @@ def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_
         "required_source_paths_sha256": required_paths_sha256,
         "tool_versions": dict(sorted(tool_versions.items())),
         "edits": changed, "metadata_edits": fields, "removals": removed,
-        "skipped": sorted(deepcopy(skipped or []), key=canonical_json), "instruction_files": disposition,
+        "skipped": sorted(deepcopy(skipped_input), key=canonical_json), "instruction_files": disposition,
         "residual_cues": deepcopy(inspection["residual_cues"]),
         "forbidden_artifacts": deepcopy(inspection["forbidden_artifacts"]),
         "unsafe_entries": deepcopy(inspection["unsafe_entries"]), "counts": counts, "validation": validation,
@@ -680,7 +781,28 @@ def _portable_summary(manifest: dict) -> dict:
                "counts": deepcopy(manifest["counts"]), "residual_categories": [
                    {"category": category, "occurrences": sum(entry["occurrences"]
                     for entry in manifest["residual_cues"] if entry["category"] == category)}
-                   for category in categories], "validation": deepcopy(manifest["validation"])}
+                   for category in categories], "validation": {
+                       "state": manifest["validation"]["state"],
+                       "reasons": [_portable_reason(reason) for reason in manifest["validation"]["reasons"]]}}
+
+
+def _portable_reason(reason: str) -> str:
+    safe = {
+        "no explicit strict identity policy was supplied",
+        "the export inspection did not establish strict identity availability",
+        "the export was inspected under a different identity policy",
+        "the export was inspected against different answer requirements",
+        "the export was inspected against different accepted scoring paths",
+        "the inspected export does not match the transformed tree hash",
+        "the inspected export has no verified tree hash",
+        "evaluator-only artifacts remain in the transformed export",
+        "the transformed export contains unsafe filesystem entries",
+        "repository instruction documents remain in the transformed export",
+        "answer-bearing content or unsafe configured instructions remain in the transformed export",
+    }
+    if reason in safe or re.fullmatch(r"the policy does not declare (?:required answer |every required normalized form of )sha256:[0-9a-f]{64}", reason):
+        return reason
+    return "strict identity validation diagnostic " + canonical_sha256(reason)
 
 
 def _validate_manifest_invariants(document: dict) -> None:
