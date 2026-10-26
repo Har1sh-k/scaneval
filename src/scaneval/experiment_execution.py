@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Callable
 
@@ -138,6 +139,55 @@ def _verify_run_semantics(matrix: dict, cell: dict, root: Path) -> None:
 def _assignment_states(cell: dict, status: str, reason: str | None = None) -> list[dict]:
     return [{"assignment_id": row["assignment_id"], "status": status, "reason": reason,
              "binding_sha256": None} for row in cell["assignments"]]
+
+
+def load_execution(directory: Path, matrix: dict) -> dict:
+    """Validate execution bookkeeping separately from scanner evidence and scoring outcomes."""
+    digest = artifact_hash(directory, EXECUTION_FILE)
+    if digest is None:
+        return {"state": "unavailable", "reason": "No execution manifest was saved; execution state is unknown.",
+                "sha256": None, "manifest": None}
+    value = read_json(directory / EXECUTION_FILE)
+    if (value.get("schema_version") != "2.1" or any(value.get(key) != matrix[key] for key in
+            ("experiment_id", "experiment_version", "matrix_sha256"))
+            or value.get("assignments") != len(matrix["assignments"])
+            or value.get("status") not in ("completed", "incomplete", "interrupted")
+            or not isinstance(value.get("finished_at"), str)):
+        raise ContractError("execution manifest differs from its frozen matrix identity or assignment count")
+    rows = value.get("cells")
+    if not isinstance(rows, list) or [row.get("condition") for row in rows if isinstance(row, dict)] != matrix["cell_order"]:
+        raise ContractError("execution manifest omits, duplicates, or reorders frozen cells")
+    cells = {cell["name"]: cell for cell in matrix["cells"]}
+    for row in rows:
+        cell = cells[row["condition"]]
+        if (row.get("run_path") != "runs/" + cell["name"] or row.get("assignments") != len(cell["assignments"])
+                or row.get("status") not in ("not_started", "running", "completed", "incomplete", "failed", "interrupted")):
+            raise ContractError("execution cell state differs from the frozen assignment or run path")
+        states = row.get("assignment_states")
+        if (not isinstance(states, list) or len(states) != len(cell["assignments"])
+                or [state.get("assignment_id") for state in states if isinstance(state, dict)] !=
+                   [assignment["assignment_id"] for assignment in cell["assignments"]]):
+            raise ContractError("execution manifest changes scheduled assignment states")
+        for state in states:
+            if (state.get("status") not in ("not_started", "bound", "incomplete", "missing", "skipped", "invalid")
+                    or (state.get("reason") is not None and not isinstance(state["reason"], str))
+                    or (state.get("status") in ("bound", "incomplete") and
+                        (not isinstance(state.get("binding_sha256"), str) or
+                         not re.fullmatch(r"sha256:[0-9a-f]{64}", state["binding_sha256"])) )):
+                raise ContractError("execution assignment state or binding digest is malformed")
+        if row.get("recorded_bindings") != [state for state in states if state["status"] == "bound"]:
+            raise ContractError("execution recorded bindings contradict per-assignment states")
+        if row["status"] == "completed" and any(state["status"] != "bound" for state in states):
+            raise ContractError("execution cell claims completion without all scheduled bindings")
+        for error in (row.get("error"), row.get("binding_error")):
+            if error is not None and (not isinstance(error, dict) or
+                    any(not isinstance(error.get(key), str) for key in ("type", "message"))):
+                raise ContractError("execution failure provenance is malformed")
+    expected = "interrupted" if value.get("interruption") is not None else (
+        "completed" if all(row["status"] == "completed" for row in rows) else "incomplete")
+    if value["status"] != expected:
+        raise ContractError("execution overall status contradicts its saved cell states")
+    return {"state": "recorded", "sha256": digest, "manifest": value}
 
 
 def _bind_run(matrix: dict, cell: dict, root: Path) -> list[dict]:

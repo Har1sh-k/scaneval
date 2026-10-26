@@ -10,7 +10,7 @@ from pathlib import Path
 from . import aggregate, blinding, cases, conditions, experiment, review, scoring
 from .contracts import ContractError, canonical_json, canonical_sha256, load_document, refuse_trial_path
 from .experiment_execution import (artifact_hash, load_matrix, read_json, verify_binding,
-                                   _verify_run_semantics, _write)
+                                   load_execution, _verify_run_semantics, _write)
 from .isolation import resolve_execution
 from .resampling import Stream, resample_with_replacement
 
@@ -272,11 +272,15 @@ def check_adjudication_consistency(rows: list[dict]) -> None:
         raise ContractError("one exact structured allegation was both accepted and judged false across conditions")
 
 
-def _load_rows(matrix: dict, directory: Path) -> list[dict]:
+def _load_rows(matrix: dict, directory: Path, execution_record: dict | None = None) -> list[dict]:
     rows = []
+    execution_record = execution_record or load_execution(directory, matrix)
+    execution_cells = {row["condition"]: row for row in (execution_record.get("manifest") or {}).get("cells", [])}
     sources = {row["snapshot_id"]: row for row in matrix["population"]}
     systems = {row["system_id"]: row for row in matrix["systems"]}
     for cell in matrix["cells"]:
+        execution_cell = execution_cells.get(cell["name"], {})
+        assignment_states = {row["assignment_id"]: row for row in execution_cell.get("assignment_states", [])}
         root = directory / "runs" / cell["name"]
         manifest, run_pack, cell_error = None, None, None
         try:
@@ -291,16 +295,23 @@ def _load_rows(matrix: dict, directory: Path) -> list[dict]:
         by_id = {row["invocation_id"]: row for row in (manifest or {}).get("invocations", [])}
         for assignment in cell["assignments"]:
             source = sources[assignment["snapshot_id"]]
+            assignment_state = assignment_states.get(assignment["assignment_id"], {})
             planned = source["schedule_plan"]
             row = {**assignment, "input_id": assignment["snapshot_id"], "status": "missing", "reason": "missing_row",
                    "review_state": "missing", "observed": None, "planned_targets": planned["targets"],
                    "planned_controls": planned["controls"], "eligible": False, "reasons": [],
                    "condition_status": "unavailable", "condition_policy_sha256": None, "project": source["project"],
                    "source_property": source["source_property"], "runtime_sha256": None,
+                   "execution_state": execution_cell.get("status", "unknown"),
+                   "execution_error": execution_cell.get("error"), "execution_binding_error": execution_cell.get("binding_error"),
+                   "assignment_execution_state": assignment_state.get("status", "unknown"),
+                   "assignment_execution_reason": assignment_state.get("reason"),
                    "corpus_scope": source["plan"]["scope"], "scope": matrix["declaration"].get("evidence_scope", source["plan"]["scope"])}
             rows.append(row)
             observed_row = by_id.get(assignment["assignment_id"])
             if cell_error is not None:
+                if assignment_state.get("status") in ("bound", "incomplete"):
+                    row.update(status="error", reason="missing_bundle")
                 row["reasons"].append("cell_binding_unavailable:" + cell_error)
                 continue
             if observed_row is None:
@@ -358,8 +369,9 @@ def report(directory: Path, *, output: Path | None = None) -> dict:
         refuse_trial_path(output)
     directory = Path(directory).expanduser().resolve()
     matrix = experiment.validate_frozen(load_matrix(directory / "matrix.json"))
+    execution_record = load_execution(directory, matrix)
     corpus_scope = evidence_scope(source["plan"]["scope"] for source in matrix["population"])
-    rows = _load_rows(matrix, directory)
+    rows = _load_rows(matrix, directory, execution_record)
     check_adjudication_consistency(rows)
     metrics_helper = getattr(aggregate, "condition_metrics", None)
     if metrics_helper is None:
@@ -391,6 +403,8 @@ def report(directory: Path, *, output: Path | None = None) -> dict:
             cells.append({"condition": name, "system_id": system["system_id"], "assignments_scheduled": len(selected),
                 "evidence_scope": evidence_scope(row["scope"] for row in selected), "corpus_evidence_scope": corpus_scope,
                 "condition_coverage": dict(Counter(row["condition_status"] for row in selected)),
+                "execution_states": dict(Counter(row["execution_state"] for row in selected)),
+                "assignment_execution_states": dict(Counter(row["assignment_execution_state"] for row in selected)),
                 "eligible_assignments": sum(row["eligible"] for row in selected),
                 "target_detection": weighted_bounds(eligible), "strata": strata,
                 "completion": raw["completion"], "support": raw["support"], "statuses": raw["statuses"],
@@ -412,6 +426,7 @@ def report(directory: Path, *, output: Path | None = None) -> dict:
         "evidence_scope": matrix["declaration"].get("evidence_scope", corpus_scope), "corpus_evidence_scope": corpus_scope,
         "aggregation_policy": experiment.resolve_aggregation_policy(matrix["declaration"]["aggregation_policy"]),
         "assignments_scheduled": len(matrix["assignments"]), "conditions": cells, "contrasts": contrasts,
+        "execution": execution_record,
         "observations": public_rows, "predeclared_exclusions": matrix["declaration"]["exclusions"],
         "interpretation": ["Open-context is assisted investigation; public known-vulnerability information can contribute to detection.",
             "Identity-reduced is neither anonymous nor memory-free. Context sensitivity and its absence cannot establish memorization or its absence.",

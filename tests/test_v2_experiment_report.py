@@ -1,10 +1,62 @@
 from copy import deepcopy
+import json
 
 import pytest
 
 from scaneval.contracts import ContractError
 from scaneval.experiment_report import (check_adjudication_consistency, evidence_scope, label_contract,
-                                       paired_effect, weighted_bounds, _runtime)
+                                       paired_effect, weighted_bounds, _runtime, _load_rows)
+from scaneval.experiment_execution import load_execution, EXECUTION_FILE, _assignment_states
+from test_v2_experiment_execution import frozen_shell
+
+
+def saved_execution(matrix):
+    states = ("failed", "interrupted", "not_started")
+    cells = [{"condition": cell["name"], "run_path": "runs/" + cell["name"],
+              "assignments": len(cell["assignments"]), "status": status,
+              "error": {"type": "FixtureFailure", "message": "preflight refused"} if status == "failed" else None,
+              "recorded_bindings": [], "assignment_states": _assignment_states(cell, "missing" if status != "not_started" else "not_started")}
+             for cell, status in zip(matrix["cells"], states, strict=True)]
+    return {"schema_version": "2.1", "experiment_id": matrix["experiment_id"],
+            "experiment_version": matrix["experiment_version"], "matrix_sha256": matrix["matrix_sha256"],
+            "assignments": len(matrix["assignments"]), "finished_at": "2000-01-01T00:00:00Z",
+            "status": "interrupted", "interruption": {"type": "KeyboardInterrupt", "message": "fixture"}, "cells": cells}
+
+
+def test_report_preserves_failed_interrupted_and_never_attempted_states(tmp_path):
+    matrix = frozen_shell()
+    matrix["declaration"] = {"evidence_scope": "diagnostic"}
+    matrix["population"] = [{"snapshot_id": "source", "project": "fixture", "source_property": "fixture sink",
+                             "plan": {"scope": "draft"}, "schedule_plan": {"targets": [], "controls": []}}]
+    saved = saved_execution(matrix)
+    (tmp_path / EXECUTION_FILE).write_text(json.dumps(saved))
+    rows = _load_rows(matrix, tmp_path)
+    assert len(rows) == 6
+    assert [row["execution_state"] for row in rows[::2]] == ["failed", "interrupted", "not_started"]
+    assert rows[0]["execution_error"]["message"] == "preflight refused"
+    assert rows[-1]["assignment_execution_state"] == "not_started"
+    assert all(row["status"] == "missing" and row["observed"] is None for row in rows)
+    assert all(row["scope"] == "diagnostic" and row["corpus_scope"] == "draft" for row in rows)
+
+
+def test_absent_execution_manifest_explicitly_leaves_state_unknown(tmp_path):
+    value = load_execution(tmp_path, frozen_shell())
+    assert value["state"] == "unavailable" and value["manifest"] is None
+
+
+@pytest.mark.parametrize("mutation", ["matrix", "cell", "assignment", "count", "completion", "bindings"])
+def test_execution_manifest_cannot_change_frozen_states_or_claim_completion(tmp_path, mutation):
+    matrix = frozen_shell()
+    value = saved_execution(matrix)
+    if mutation == "matrix": value["matrix_sha256"] = "sha256:" + "0" * 64
+    elif mutation == "cell": value["cells"].pop()
+    elif mutation == "assignment": value["cells"][0]["assignment_states"][0]["assignment_id"] = "different"
+    elif mutation == "count": value["assignments"] -= 1
+    elif mutation == "completion": value["cells"][0]["status"] = "completed"
+    else: value["cells"][0]["recorded_bindings"] = [{}]
+    (tmp_path / EXECUTION_FILE).write_text(json.dumps(value))
+    with pytest.raises(ContractError, match="execution"):
+        load_execution(tmp_path, matrix)
 
 
 def outcome(target, value, *, snapshot=None, repetition=1, resolved=True, eligible=True, runtime="same"):
