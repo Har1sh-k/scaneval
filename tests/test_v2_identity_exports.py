@@ -278,6 +278,24 @@ def test_reviewed_json_and_toml_metadata_exports_preserve_dependency_source_and_
     record = json.loads((tmp_path / "out" / row["provenance_path"]).read_text())
     assert len(record["blinding"]["metadata_edits"]) == 4
     assert record["identity_reduction"]["counts"]["changed_files"] == 4
+    assert not any(entry["category"] == "unreviewed_identity_metadata"
+                   for entry in record["identity_reduction"]["residual_categories"])
+
+
+def test_omitted_supported_metadata_leaf_is_disclosed_in_saved_export_evidence(tmp_path):
+    text = json.dumps({"homepage": "https://upstream.invalid/project", "dependencies": {"widget-dep": "1"}}) + "\n"
+    widget = fixture.build_widget(tmp_path, {**fixture.FILES, "packages/app/package.json": text})
+    document = strict_map(widget, identity_tokens=[])
+    manifest, adapter, _ = run(tmp_path, widget, document)
+    [row] = manifest["inputs"]
+    assert row["preparation_failure"] is None and adapter.calls == 1
+    trial = tmp_path / "out" / "inputs" / row["input_id"]
+    record = json.loads((tmp_path / "out" / row["provenance_path"]).read_text())
+    summary = record["identity_reduction"]
+    evidence = load_document(trial / summary["manifest_path"], MANIFEST_KIND)
+    assert (trial / "source" / "packages" / "app" / "package.json").read_text() == text
+    assert summary["residual_categories"] == [{"category": "unreviewed_identity_metadata", "occurrences": 1}]
+    assert evidence["residual_cues"][0]["field_path"] == ["homepage"]
 
 
 @pytest.mark.parametrize("reason", ["duplicate-token", "scoring-overlap"])
@@ -302,6 +320,8 @@ def test_unsafe_or_ambiguous_metadata_edits_are_retained_and_reported(tmp_path, 
     assert record["identity_reduction"]["counts"]["skipped_transformations"] == 1
     assert record["blinding"]["metadata_edits"] == []
     assert record["blinding"]["skipped_transformations"][0]["reason"]
+    assert any(entry["category"] == "unreviewed_identity_metadata"
+               for entry in record["identity_reduction"]["residual_categories"])
 
 
 def test_metadata_leaf_can_remove_an_answer_alias_without_rewriting_source(tmp_path):

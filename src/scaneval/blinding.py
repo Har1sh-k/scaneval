@@ -1781,7 +1781,8 @@ def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapsho
                                        inspect_tree, instruction_inventory, snapshot_requirements)
         policy = document.get("identity_policy")
         requirements, required_paths = snapshot_requirements(pack, snapshot_id) if pack is not None else ([], [])
-        inspection = inspect_tree(source, policy, requirements=requirements, required_source_paths=required_paths)
+        inspection = inspect_tree(source, policy, requirements=requirements, required_source_paths=required_paths,
+                                  metadata_edits=metadata_records)
         manifest, summary = build_manifest(
             policy, source_snapshot={"snapshot_id": snapshot_id, "commit": snapshot.commit,
                                      "git_tree": snapshot.git_tree, "url": snapshot.url},

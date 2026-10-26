@@ -115,7 +115,8 @@
       "type": "object", "additionalProperties": false,
       "required": ["category", "cue_sha256", "path", "occurrences", "surface", "reason"],
       "properties": {
-        "category": {"enum": ["target_alias", "advisory_url", "answer_alias", "repository_identity", "assistant_support_file", "unsafe_configured_instruction"]}, "cue_sha256": {"$ref": "#/$defs/digest"},
+        "category": {"enum": ["target_alias", "advisory_url", "answer_alias", "repository_identity", "assistant_support_file", "unsafe_configured_instruction", "unreviewed_identity_metadata", "uninspected_identity_metadata"]}, "cue_sha256": {"$ref": "#/$defs/digest"},
+        "field_path": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
         "path": {"$ref": "#/$defs/path"}, "occurrences": {"type": "integer", "minimum": 1},
         "surface": {"enum": ["content", "path"]}, "reason": {"type": "string", "minLength": 1}
       }

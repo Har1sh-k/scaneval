@@ -785,6 +785,58 @@ def test_disjoint_metadata_batch_edits_share_one_original_hash_and_preserve_othe
     assert batch.data.count(b"\n") == data.count(b"\n")
 
 
+def test_supported_identity_url_leaves_are_disclosed_without_declared_tokens_or_file_changes(tmp_path):
+    package = {"homepage": ORIGINAL, "repository": {"url": ORIGINAL, "type": "git"},
+               "bugs": ORIGINAL, "dependencies": {"upstream-runtime": "https://example.invalid/runtime"}}
+    text = '[project.urls]\n"Issue Tracker" = "https://example.invalid/issues"\nHomepage = ""\n'
+    files = {"packages/app/package.json": json.dumps(package), "pyproject.toml": text}
+    tree = source(tmp_path, files)
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    cues = inspection["residual_cues"]
+    assert inspection["validation"]["state"] == "available"
+    assert {(cue["path"], tuple(cue["field_path"])) for cue in cues} == {
+        ("packages/app/package.json", ("homepage",)), ("packages/app/package.json", ("repository", "url")),
+        ("packages/app/package.json", ("bugs",)), ("pyproject.toml", ("project", "urls", "Issue Tracker"))}
+    assert {cue["category"] for cue in cues} == {"unreviewed_identity_metadata"}
+    assert all((tree / path).read_text() == content for path, content in files.items())
+    record, summary = manifest(inspection)
+    assert summary["residual_categories"] == [{"category": "unreviewed_identity_metadata", "occurrences": 4}]
+    assert "Issue Tracker" not in canonical_json(summary) and ORIGINAL not in canonical_json(record)
+    assert verify_manifest(record, summary, **saved_bindings(inspection, source=tree)) == summary
+
+
+def test_applied_metadata_review_covers_only_its_exact_leaf_and_final_file_digest(tmp_path):
+    original = json.dumps({"homepage": ORIGINAL, "bugs": "https://example.invalid/issues"}).encode()
+    change = edit(original, replacement="https://example.invalid/neutral")
+    tree = source(tmp_path, {"package.json": change.data})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS], metadata_edits=[change.record])
+    assert [cue["field_path"] for cue in inspection["residual_cues"]] == [["bugs"]]
+    record, summary = manifest(inspection, metadata_edits=[change.record])
+    assert verify_manifest(record, summary, **saved_bindings(inspection, source=tree)) == summary
+
+    (tree / "package.json").write_bytes(change.data + b"\n")
+    stale = inspect_tree(tree, policy(), requirements=[ALIAS], metadata_edits=[change.record])
+    assert {tuple(cue["field_path"]) for cue in stale["residual_cues"]} == {("homepage",), ("bugs",)}
+    with pytest.raises(ContractError, match="inspection is stale"):
+        verify_manifest(record, summary, **saved_bindings(inspection, source=tree))
+
+
+@pytest.mark.parametrize("content", [b'{"homepage":', b'{"homepage":"one", "homepage":"two"}', b"\xff\xff"])
+def test_uninspectable_metadata_is_preserved_and_disclosed_as_a_residual(tmp_path, content):
+    tree = source(tmp_path, {"package.json": content})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    assert inspection["validation"]["state"] == "available"
+    assert [cue["category"] for cue in inspection["residual_cues"]] == ["uninspected_identity_metadata"]
+    assert (tree / "package.json").read_bytes() == content
+
+
+def test_metadata_residual_disclosure_does_not_excuse_declared_answer_urls(tmp_path):
+    tree = source(tmp_path, {"package.json": json.dumps({"homepage": ADVISORY["value"]})})
+    inspection = inspect_tree(tree, policy(answer_aliases=[ADVISORY]), requirements=[ADVISORY])
+    assert inspection["validation"]["state"] == "unavailable"
+    assert {cue["category"] for cue in inspection["residual_cues"]} == {"advisory_url", "unreviewed_identity_metadata"}
+
+
 @pytest.mark.parametrize("path", ["a:b.txt", "x\\y.md", ".claude/x\\y.md"])
 def test_nonportable_posix_names_produce_saved_unavailable_evidence(tmp_path, path):
     tree = source(tmp_path, {path: ALIAS["value"]})

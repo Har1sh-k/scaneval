@@ -46,6 +46,7 @@ _TEXT_SUFFIXES = frozenset({".md", ".markdown", ".rst", ".txt", ".adoc", ".ascii
 _ARTIFACT_MAX_BYTES = 16 * 1024 * 1024
 _ARTIFACT_MAX_NODES = 1_000_000
 _ARTIFACT_MAX_DEPTH = 128
+_INSPECTION_METHOD = "declared-cues-and-supported-url-leaves-v1"
 
 
 class IdentityConditionUnavailable(MaterializationError):
@@ -726,7 +727,7 @@ def _artifact_scan(path: str, data: bytes) -> tuple[set[str], str | None]:
 def _configuration(policy: dict | None, map_sha256: str, requirements: list[dict], paths_digest: str) -> dict:
     return {"policy": policy, "map_sha256": map_sha256, "required_answers": requirements,
             "required_source_paths_sha256": paths_digest,
-            "inspection_limits": _inspection_limits()}
+            "inspection_method": _INSPECTION_METHOD, "inspection_limits": _inspection_limits()}
 
 
 def _inspection_limits() -> dict:
@@ -735,7 +736,8 @@ def _inspection_limits() -> dict:
 
 
 def _inspection_policy_digest(policy: dict | None) -> str:
-    return canonical_sha256({"policy": policy, "inspection_limits": _inspection_limits()})
+    return canonical_sha256({"policy": policy, "inspection_method": _INSPECTION_METHOD,
+                             "inspection_limits": _inspection_limits()})
 
 
 def configuration_digest(policy: dict | None, *, map_sha256: str, requirements: list[dict],
@@ -804,17 +806,80 @@ def _merged_count(spans: list[tuple[int, int]]) -> int:
     return count
 
 
+def _reviewed_metadata_fields(edits: list[dict] | None) -> dict[str, dict[tuple[str, ...], str]]:
+    records = [] if edits is None else edits
+    schema = _manifest_schema()
+    checked = {"$defs": schema["$defs"], **schema["properties"]["metadata_edits"]}
+    errors = list(Draft202012Validator(checked).iter_errors(records))
+    if errors:
+        raise ContractError(f"identity inspection metadata_edits: {errors[0].message}")
+    reviewed: dict[str, dict[tuple[str, ...], str]] = {}
+    for record in records:
+        try:
+            validate_metadata_selector(record["path"], record["field_path"])
+        except MaterializationError as exc:
+            raise ContractError(f"identity inspection metadata_edits: {exc}") from exc
+        fields = reviewed.setdefault(record["path"], {})
+        selector = tuple(record["field_path"])
+        if selector in fields:
+            raise ContractError("identity inspection metadata_edits must select distinct leaves")
+        fields[selector] = record["transformed_sha256"]
+    return reviewed
+
+
+def _metadata_residuals(path: str, data: bytes, digest: str,
+                        reviewed: dict[tuple[str, ...], str]) -> list[dict]:
+    name = PurePosixPath(path).name.casefold()
+    if name not in {"package.json", "pyproject.toml"}:
+        return []
+    format_, sample = ("json", ["homepage"]) if name == "package.json" else ("toml", ["project", "urls", "label"])
+    try:
+        validate_metadata_selector(path, sample)
+    except MaterializationError:
+        return []  # Protected material remains outside the supported metadata-edit inventory.
+    try:
+        if len(data) > _ARTIFACT_MAX_BYTES:
+            raise _refuse("metadata inspection exceeds the policy byte limit")
+        parsed = _parse(_structured_text(data), format_)
+        if not isinstance(parsed, dict):
+            raise _refuse("metadata inspection requires a top-level object")
+    except (MaterializationError, UnicodeDecodeError):
+        return [_cue("uninspected_identity_metadata", digest, path, 1, "content",
+                     "supported identity metadata could not be parsed safely; the file is unchanged")]
+    leaves: list[tuple[tuple[str, ...], str]] = []
+    if format_ == "json":
+        for key in ("homepage", "repository", "bugs"):
+            value = parsed.get(key)
+            selector = (key,)
+            if key != "homepage" and isinstance(value, dict):
+                value, selector = value.get("url"), (key, "url")
+            if isinstance(value, str) and is_stated(value):
+                leaves.append((selector, value))
+    else:
+        project = parsed.get("project")
+        urls = project.get("urls") if isinstance(project, dict) else None
+        if isinstance(urls, dict):
+            leaves = [(("project", "urls", label), value) for label, value in urls.items()
+                      if is_stated(label) and isinstance(value, str) and is_stated(value)]
+    return [{**_cue("unreviewed_identity_metadata", canonical_json(selector), path, 1, "content",
+                   "supported identity URL leaf has no applied review bound to this file hash; it is unchanged"),
+             "field_path": list(selector)}
+            for selector, _ in leaves if reviewed.get(selector) != digest]
+
+
 def inspect_tree(source: Path, policy: dict | None, *, requirements: list[dict],
-                 required_source_paths: list[str] | None = None) -> dict:
+                 required_source_paths: list[str] | None = None, metadata_edits: list[dict] | None = None) -> dict:
     """Inspect the final export without executing it, and report strict availability and residuals.
 
     Answer aliases are inspected case-insensitively in file content and paths, including explicitly
-    declared normalized forms. Residual source identities and assistant support files are disclosed;
+    declared normalized forms. Unreviewed supported URL leaves, residual source identities, and
+    assistant support files are disclosed; a reviewed leaf must bind its final file hash.
     residual answers, instructions, evaluator artifacts, unsafe entries, or missing scoring paths
     make the strict experimental condition unavailable. A legacy export with no policy stays usable
     through the basic export API, while its strict condition remains unavailable.
     """
     normalized = validate_policy(policy) if policy is not None else None
+    reviewed_metadata = _reviewed_metadata_fields(metadata_edits)
     required = _aliases(requirements, "required answers")
     coverage = policy_coverage(normalized, required)
     answers = {entry["value"].casefold(): deepcopy(entry) for entry in required}
@@ -836,6 +901,7 @@ def inspect_tree(source: Path, policy: dict | None, *, requirements: list[dict],
         digest = _sha256(data)
         hashes[path] = digest
         byte_count += len(data)
+        residuals.extend(_metadata_residuals(path, data, digest, reviewed_metadata.get(path, {})))
         artifact_categories = set()
         detected, artifact_issue = _artifact_scan(path, data)
         artifact_categories.update(detected)
@@ -1180,7 +1246,8 @@ def verify_manifest(manifest: dict, summary: dict, *, policy: dict | None, map_s
             and any(path not in manifest["inspected_paths"] for path in paths)):
         raise ContractError("identity manifest cannot claim strict availability with missing accepted scoring paths")
     if source is not None:
-        inspection = inspect_tree(source, normalized, requirements=required, required_source_paths=paths)
+        inspection = inspect_tree(source, normalized, requirements=required, required_source_paths=paths,
+                                  metadata_edits=manifest["metadata_edits"])
         if canonical_sha256(inspection) != manifest["inspection_sha256"]:
             raise ContractError("identity manifest inspection is stale for the staged export")
         # The inspection digest alone does not bind the separately copied residuals, paths,
