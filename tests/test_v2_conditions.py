@@ -198,6 +198,45 @@ def test_neutral_single_commit_history_is_recorded_and_unchanged(tmp_path):
     assert record["status"] == "attested" and record["history"] == "neutral_synthetic"
 
 
+@pytest.mark.parametrize("git,inventory", [
+    (False, {"git_paths": ["nested/.git"]}),
+    (False, {"controller_paths": [".codex"]}),
+    (False, {"history_artifacts": [{"path": "upstream.data", "kind": "git_bundle"}]}),
+    (False, {"git_files_sha256": "sha256:" + "a" * 64}),
+    (True, {"git_paths": [".git", "nested/.git"]}),
+    (True, {"git_paths": []}),
+    (True, {"controller_paths": [".codex"]}),
+])
+def test_history_summary_cannot_override_contradictory_saved_inventory(tmp_path, git, inventory):
+    bundle, _record = invoke(tmp_path, Offline(git=git))
+    (bundle / conditions.RECORD_FILE).unlink()
+    evidence_path = bundle / conditions.EVIDENCE_FILE
+    evidence = json.loads(evidence_path.read_text())
+    for audit in evidence["history"].values():
+        audit.update(deepcopy(inventory))
+    evidence_path.write_text(canonical_json(evidence))
+    record = conditions.classify_observation(bundle)
+    assert record["status"] == "failed" and record["history"] == "unexpected"
+    assert "history_inventory_mismatch" in codes(record)
+
+
+@pytest.mark.parametrize("inventory", [None, "not-an-inventory", [None]])
+def test_missing_or_malformed_history_inventory_cannot_attest(tmp_path, inventory):
+    bundle, _record = invoke(tmp_path)
+    (bundle / conditions.RECORD_FILE).unlink()
+    evidence_path = bundle / conditions.EVIDENCE_FILE
+    evidence = json.loads(evidence_path.read_text())
+    for audit in evidence["history"].values():
+        if inventory is None:
+            audit.pop("git_paths")
+        else:
+            audit["git_paths"] = inventory
+    evidence_path.write_text(canonical_json(evidence))
+    record = conditions.classify_observation(bundle)
+    assert record["status"] != "attested"
+    assert codes(record) & {"history_inventory_gap", "invalid_history_inventory"}
+
+
 @pytest.mark.parametrize("mutate", [
     lambda source: (source / ".git").mkdir(),
     lambda source: (source / "nested" / ".git").mkdir(parents=True),

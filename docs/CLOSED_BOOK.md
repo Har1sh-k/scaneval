@@ -44,7 +44,8 @@ The ordinary export removes original `.git` entries and controller state. A scan
 Git gets one neutral snapshot commit with fixed identity and date. Before and after audits
 record every Git path, fingerprint all synthetic repository files and entry types, and reject
 unexpected history, modified metadata, symlinks, and special entries. No upstream commits are
-copied for this condition.
+copied for this condition. Reclassification checks the observed path inventories against the
+saved history state; a summary claiming absence cannot override a listed repository or bundle.
 Git's ordinary v2/v3 index is compared by path, blob, mode, stage, and flags, so a harmless
 stat-cache refresh cannot look like changed history. Its checksum and narrow supported format
 are validated; unknown formats/extensions remain unavailable. Object/ref/config/hook bytes stay

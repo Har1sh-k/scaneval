@@ -182,10 +182,28 @@ def _history(evidence: dict, execution: dict) -> tuple[str, list[dict]]:
     states = (before.get("state"), after.get("state"))
     if "unexpected" in states:
         return "unexpected", [_reason("unexpected_history", "A saved mechanical audit found unexpected Git history or controller state.")]
+    for audit in (before, after):
+        if not {"git_paths", "controller_paths", "history_artifacts"} <= set(audit):
+            return "unavailable", [_reason("history_inventory_gap", "A saved history audit omits its observed path inventory.")]
+        paths = (audit["git_paths"], audit["controller_paths"])
+        artifacts = audit["history_artifacts"]
+        if (any(not isinstance(items, list) or not all(isinstance(path, str) and path for path in items)
+                or len(set(items)) != len(items) for items in paths)
+                or not isinstance(artifacts, list)
+                or not all(isinstance(item, dict) and all(isinstance(item.get(key), str) and item[key]
+                                                         for key in ("path", "kind")) for item in artifacts)):
+            return "unexpected", [_reason("invalid_history_inventory", "A saved history audit has a malformed observed path inventory.")]
+        expected = [".git"] if audit.get("state") in ("neutral_synthetic", "bounded_ancestor_history") else []
+        known = audit.get("state") in ("original_absent", "neutral_synthetic", "bounded_ancestor_history")
+        if (audit["controller_paths"] or artifacts
+                or (known and audit["git_paths"] != expected)
+                or (audit.get("state") == "original_absent" and audit.get("git_files_sha256") is not None)):
+            return "unexpected", [_reason("history_inventory_mismatch", "The saved history summary contradicts observed Git paths, controller state, or retained history artifacts.")]
     if (states[0] != states[1] or states[0] not in ("original_absent", "neutral_synthetic", "bounded_ancestor_history")):
         return "unavailable", [_reason("history_audit_gap", "Before and after history audits are missing or disagree.")]
     if states[0] in ("neutral_synthetic", "bounded_ancestor_history"):
-        if (not before.get("git_files_sha256")
+        if (not isinstance(before.get("git_files_sha256"), str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", before["git_files_sha256"])
                 or before["git_files_sha256"] != after.get("git_files_sha256")):
             return "unexpected", [_reason("history_changed", "The repository metadata changed during execution.")]
         if states[0] == "neutral_synthetic":
