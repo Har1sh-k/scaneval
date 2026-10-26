@@ -110,6 +110,20 @@ def test_unique_token_in_a_comment_is_not_a_selected_toml_field():
         edit(data, path="pyproject.toml", field_path=("project", "urls", "Homepage"))
 
 
+def test_a_reviewed_toml_token_cannot_include_a_trailing_quoted_comment():
+    token = f'"{ORIGINAL}" # "retain this comment"'
+    data = f'[project.urls]\nHomepage = {token}\n'.encode()
+    with pytest.raises(MaterializationError, match="does not encode the selected string value"):
+        edit(data, path="pyproject.toml", field_path=("project", "urls", "Homepage"), raw_token=token)
+
+
+@pytest.mark.parametrize("field", ["original", "replacement"])
+def test_unpaired_unicode_surrogates_cannot_escape_the_strict_utf8_refusal(field):
+    data = json.dumps({"homepage": ORIGINAL}).encode()
+    with pytest.raises(MaterializationError, match="strict UTF-8 strings"):
+        edit(data, **{field: "https://example.invalid/\ud800"})
+
+
 def test_reviewed_json_escaped_token_can_be_selected_without_reserializing_the_file():
     token = json.dumps(ORIGINAL).replace("/", r"\/")
     data = f'{{ "homepage" : {token}, "name" : "upstream-project" }}\n'.encode()

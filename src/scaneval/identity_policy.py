@@ -138,6 +138,11 @@ def prepare_metadata_edit(data: bytes, *, path: str, field_path: list[str] | tup
         raise _refuse("original and replacement must be single-line strings and original must be stated")
     if original == replacement:
         raise _refuse("an identity metadata edit must change its selected value")
+    try:
+        original.encode("utf-8", errors="strict")
+        replacement.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise _refuse("original and replacement must be strict UTF-8 strings") from exc
     if not isinstance(expected_sha256, str) or not _DIGEST.fullmatch(expected_sha256):
         raise _refuse("an identity metadata edit must pin the original file SHA-256")
     digest = _sha256(data)
@@ -158,8 +163,7 @@ def prepare_metadata_edit(data: bytes, *, path: str, field_path: list[str] | tup
         decoded = _parse(token, "json")
         quoted = token.startswith('"') and token.endswith('"')
     else:
-        quoted = (token[0] in ("'", '"') and token[-1] == token[0]
-                  and not token.startswith(("'''", '"""')))
+        quoted = bool(re.fullmatch(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"", token))
         decoded = _parse("value = " + token, "toml")
         if not isinstance(decoded, dict) or list(decoded) != ["value"]:
             raise _refuse("the reviewed raw token is not one TOML string")
