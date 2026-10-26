@@ -26,6 +26,7 @@ import uuid
 
 POLICY = "recorded_public_v1"
 EVENTS = "retrieval.jsonl"
+STARTED = "retrieval-started.jsonl"
 MAX_REQUEST = 16384
 MAX_RESPONSE = 1024 * 1024
 MAX_REDIRECTS = 5
@@ -94,6 +95,13 @@ def validate_settings(settings):
     denied = settings.get("denied_hosts", [])
     if not isinstance(denied, list) or any(not isinstance(host, str) or not host for host in denied):
         raise RetrievalDenied("denied_hosts must list evaluator infrastructure host names")
+    normalized_denied = []
+    for value in denied:
+        url, origin, host = parse_url("https://" + value)
+        if url != origin + "/":
+            raise RetrievalDenied("denied_hosts must contain host names, not URLs or paths")
+        normalized_denied.append(host)
+    denied = sorted(set(normalized_denied))
     search = settings.get("search_endpoint")
     if search:
         url, origin, host = parse_url(search)
@@ -101,7 +109,7 @@ def validate_settings(settings):
             raise RetrievalDenied("search_endpoint must use a declared, allowed retrieval origin")
         search = url
     return {"policy": POLICY, "allowed_origins": sorted(normalized),
-            "denied_hosts": sorted(set(host.lower().rstrip(".") for host in denied)),
+            "denied_hosts": denied,
             "capture": capture, "retention": retention,
             **({"search_endpoint": search} if search else {})}
 
@@ -184,12 +192,32 @@ class Recorder:
         self.settings = validate_settings(settings)
         self.lock = threading.Lock()
         self.stream = open(os.path.join(directory, EVENTS), "a", encoding="utf-8")
+        self.started_stream = open(os.path.join(directory, STARTED), "a", encoding="utf-8")
 
     def write(self, event):
         line = json.dumps(event, sort_keys=True, ensure_ascii=True)
         with self.lock:
             self.stream.write(line + "\n")
             self.stream.flush()
+
+    def begin(self, event, request):
+        request = request if isinstance(request, dict) else {}
+        query = request.get("query")
+        source = request.get("source", "scanner_native")
+        source = source if isinstance(source, str) and source in SOURCES else "unavailable"
+        target = request.get("url")
+        if event["operation"] == "search":
+            endpoint = self.settings.get("search_endpoint")
+            target = (endpoint + ("&" if urllib.parse.urlsplit(endpoint).query else "?") +
+                      urllib.parse.urlencode({"q": query})) if endpoint and isinstance(query, str) and query else None
+        event.update(url=recorded_url(target), query=query if isinstance(query, str) else None, source=source)
+        attempt = {"id": event["id"], "started_at": event["started_at"], "operation": event["operation"],
+                   "url": event["url"], "query": event["query"],
+                   "source": event["source"], "source_assurance": "self_reported"}
+        line = json.dumps(attempt, sort_keys=True, ensure_ascii=True)
+        with self.lock:
+            self.started_stream.write(line + "\n")
+            self.started_stream.flush()
 
     def retain(self, digest, body):
         """Publish only a complete response; a failed write leaves no digest-named fragment."""
@@ -208,12 +236,16 @@ class Recorder:
 
     def retrieve(self, request, operation="fetch"):
         event = {"id": uuid.uuid4().hex, "operation": operation, "source": "scanner_native",
+                 "source_assurance": "self_reported",
                  "query": None, "url": None, "started_at": now(), "finished_at": None,
                  "outcome": "failed", "redirect_chain": [], "content_sha256": None, "byte_count": 0,
                  "capture_status": "unavailable", "content_path": None,
                  "content_entered_model": None, "model_use_assurance": "unverifiable"}
         body = None
         try:
+            # This journal is durable before any network operation. If the proxy is killed, a
+            # start without a terminal event remains a visible capture gap, never zero retrieval.
+            self.begin(event, request)
             if not isinstance(request, dict) or set(request) - {"url", "query", "source"}:
                 raise RetrievalDenied("retrieval request must contain only url, query, and source")
             source = request.get("source", "scanner_native")

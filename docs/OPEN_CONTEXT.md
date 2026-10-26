@@ -96,7 +96,9 @@ the input unavailable. There is no snapshot fallback and no silent commit rewrit
 Preparation and invocation records bind the history policy, head and Git tree, reachable commit
 and object counts, earliest recorded commit, root commits, exact ref inventory, sanitized Git
 configuration, working-tree hash, and deterministic history digest. Installation rechecks the
-artifact in each private workspace. Source and history are mounted read-only. The scanner gets
+artifact in each private workspace. A deterministic index tracks the exact evaluated commit;
+only declared export omissions use `skip-worktree`, so Git-aware scanners see ordinary tracked
+files and a clean status without following omitted links. Source and history are mounted read-only. The scanner gets
 hermetic Git configuration and no host home, source cache, evaluator directory, or sibling trial.
 
 ## Recorded retrieval API
@@ -136,6 +138,14 @@ and model-consumption state. Successful and HTTP-error bodies are preserved by h
 `raw/retrieval-provenance/content/` for `capture: "content", retention: "bundle"`. Choose
 `capture: "hashes", retention: "hashes_only"` when content must not be retained; those responses
 cannot be reconstructed from their hashes. Use retention consistent with the source's permissions.
+
+`attempts.jsonl` is flushed before DNS or transport starts. Each completion binds to its same-id
+start's effective URL, query, operation, caller-declared source, and start time. Search URLs are
+derived from the declared endpoint and query before either record is written; URL userinfo is
+redacted and refused. A start without a completion remains partial capture, including a request
+interrupted when the scanner or proxy stops. Caller-provided source labels carry
+`source_assurance: "self_reported"`. Content is published atomically; retention failures return
+no response bytes and remain explicit capture gaps.
 
 ## Evidence limits and reporting
 

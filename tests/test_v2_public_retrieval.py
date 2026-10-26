@@ -93,6 +93,7 @@ def test_preserved_fetch_and_real_search_url_have_complete_attempt_provenance(tm
     search = recorder.retrieve({"query": "repository vulnerable function"}, "search")
     assert result["outcome"] == "ok" and result["content_entered_model"] is None
     assert result["model_use_assurance"] == "unverifiable" and result["source"] == "browser_tool"
+    assert result["source_assurance"] == "self_reported"
     assert base64.b64decode(result["content_base64"]) == b"public evidence"
     assert (tmp_path / result["content_path"]).read_bytes() == b"public evidence"
     assert result["content_sha256"] == "sha256:" + hashlib.sha256(b"public evidence").hexdigest()
@@ -257,3 +258,28 @@ def test_public_research_configuration_requires_enforcement_and_safe_explicit_po
         resolve_execution({**settings, "egress": [{"host": "api.example", "port": 8080}]}, "public_research")
     with pytest.raises(IsolationError, match="cannot override"):
         resolve_execution({**settings, "credentials": [{"env": "GIT_CONFIG_GLOBAL", "provider": "fixture"}]}, "public_research")
+
+
+def test_idna_evaluator_denials_apply_to_fetch_and_search_configuration(tmp_path):
+    settings = {**POLICY, "allowed_origins": ["https://bücher.example"],
+                "denied_hosts": ["BÜCHER.EXAMPLE."]}
+    normalized = retrieval.validate_settings(settings)
+    assert normalized["denied_hosts"] == ["xn--bcher-kva.example"]
+    recorder = retrieval.Recorder(str(tmp_path), settings)
+    assert recorder.retrieve({"url": "https://xn--bcher-kva.example/"})["outcome"] == "denied"
+    with pytest.raises(retrieval.RetrievalDenied, match="declared, allowed"):
+        retrieval.validate_settings({**settings, "search_endpoint": "https://bücher.example/search"})
+
+
+def test_attempt_journal_is_flushed_before_dns_or_transport(tmp_path, monkeypatch):
+    transport(monkeypatch, [Response()])
+    recorder = retrieval.Recorder(str(tmp_path), POLICY)
+    seen = []
+    def resolve(*_args, **_kwargs):
+        starts = [json.loads(line) for line in (tmp_path / "retrieval-started.jsonl").read_text().splitlines()]
+        assert len(starts) == 1 and starts[0]["url"] == "https://research.example/"
+        seen.append(starts[0]["id"])
+        return addresses("8.8.8.8")
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    event = recorder.retrieve({"url": "https://research.example/"})
+    assert seen == [event["id"]]

@@ -1137,10 +1137,13 @@ class OciBackend:
         """
         summary = {"policy": self.settings.retrieval, "policy_sha256": canonical_sha256(self.settings.retrieval),
                    "capture_status": "unavailable", "events_path": None, "events_sha256": None,
-                   "attempts": 0, "denied": 0, "failed": 0, "preserved": 0, "hash_only": 0,
+                   "attempts_path": None, "attempts_sha256": None,
+                   "attempts": None, "completed_attempts": None, "incomplete_attempts": None,
+                   "denied": 0, "failed": 0, "preserved": 0, "hash_only": 0,
                    "model_consumption": "unverifiable", "provider_retrieval": "unverifiable",
                    "scanner_native_retrieval": "recorded_only_when_using_retrieval_api",
                    "browser_retrieval": "recorded_only_when_using_retrieval_api",
+                   "source_boundary_assurance": "self_reported",
                    "direct_process_egress": "endpoint_only_for_proxy_connect; other_attempts_unobserved",
                    "replayable": False, "gaps": [
                        "Provider-side retrieval is unverifiable without provider attestation.",
@@ -1151,13 +1154,34 @@ class OciBackend:
         try:
             directory = self._proxy["log_dir"]
             data = _read_bounded(directory / "retrieval.jsonl", PROXY_LOG_LIMIT)
-            events = [json.loads(line) for line in data.decode("utf-8").splitlines()]
-            if any(not isinstance(event, dict) or not isinstance(event.get("id"), str)
-                   or event.get("outcome") not in ("ok", "http_error", "denied", "failed") for event in events):
-                raise ValueError("retrieval log contains invalid events")
+            started_data = _read_bounded(directory / "retrieval-started.jsonl", PROXY_LOG_LIMIT)
             destination = self._workspace() / "raw" / "retrieval-provenance"
             destination.mkdir()  # A preexisting file, link, or directory is a capture failure.
             (destination / "events.jsonl").write_bytes(data)
+            (destination / "attempts.jsonl").write_bytes(started_data)
+            summary.update(events_path="raw/retrieval-provenance/events.jsonl",
+                           events_sha256="sha256:" + hashlib.sha256(data).hexdigest(),
+                           attempts_path="raw/retrieval-provenance/attempts.jsonl",
+                           attempts_sha256="sha256:" + hashlib.sha256(started_data).hexdigest())
+            events = [json.loads(line) for line in data.decode("utf-8").splitlines()]
+            started = [json.loads(line) for line in started_data.decode("utf-8").splitlines()]
+            if any(not isinstance(event, dict) or not isinstance(event.get("id"), str)
+                   or event.get("outcome") not in ("ok", "http_error", "denied", "failed") for event in events):
+                raise ValueError("retrieval log contains invalid events")
+            request_fields = {"url", "query", "operation", "source", "source_assurance", "started_at"}
+            if any(not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                   or request_fields - set(item) for item in started):
+                raise ValueError("retrieval attempt journal contains invalid entries")
+            start_ids = {item["id"] for item in started}
+            end_ids = {item["id"] for item in events}
+            summary.update(attempts=len(started), completed_attempts=len(events),
+                           incomplete_attempts=len(start_ids - end_ids))
+            if len(start_ids) != len(started) or len(end_ids) != len(events) or not end_ids <= start_ids:
+                raise ValueError("retrieval attempt and completion journals disagree")
+            by_id = {item["id"]: item for item in started}
+            if any(any(event.get(key) != by_id[event["id"]].get(key) for key in request_fields) for event in events):
+                raise ValueError("retrieval completed request differs from its durable start journal")
+            pending = start_ids - end_ids
             for event in events:
                 rel = event.get("content_path")
                 if rel is None:
@@ -1172,8 +1196,8 @@ class OciBackend:
                 target.parent.mkdir(exist_ok=True)
                 if not target.exists():
                     target.write_bytes(body)
-            summary.update(capture_status="recorded", events_path="raw/retrieval-provenance/events.jsonl",
-                           events_sha256="sha256:" + hashlib.sha256(data).hexdigest(), attempts=len(events),
+            summary.update(capture_status="partial" if pending else "recorded", attempts=len(started),
+                           completed_attempts=len(events), incomplete_attempts=len(pending),
                            denied=sum(event["outcome"] == "denied" for event in events),
                            failed=sum(event["outcome"] in ("failed", "http_error") for event in events),
                            preserved=sum(event.get("capture_status") == "preserved" for event in events),
@@ -1181,6 +1205,9 @@ class OciBackend:
                            # This applies only to recorded retrieval content, never opaque provider activity.
                            replayable=False,
                            replay_note="Recorded content can be inspected offline; the live run itself is not deterministic replay.")
+            if pending:
+                summary["gaps"].append(f"{len(pending)} recorded retrieval attempt(s) have no terminal capture event.")
+                summary["unfinished_attempt_ids"] = sorted(pending)[:DESTINATIONS_RECORDED]
             if self.settings.retrieval["retention"] == "hashes_only":
                 summary["gaps"].append("Downloaded content was not retained; hash-only events cannot reproduce content.")
         except (OSError, ValueError, UnicodeError, IsolationError) as exc:

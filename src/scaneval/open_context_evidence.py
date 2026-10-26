@@ -60,13 +60,32 @@ def classify_condition(bundle: Path, execution: dict, policy: dict, evidence: di
     else:
         gaps.append(_reason("bounded_history_unavailable", "No matching constructed ancestor-history attestation is saved."))
     network = isolation.get("network") or {}
+    containers = isolation.get("containers") or []
+    workers = [item for item in containers if item.get("role") == "worker" and item.get("started") is True]
+    proxies = [item for item in containers if item.get("role") == "proxy" and item.get("started") is True]
+    networks = network.get("networks")
+    internal = ([item for item in networks if isinstance(item, dict) and item.get("role") == "int"]
+                if isinstance(networks, list) else [])
+    proxy = network.get("proxy")
+    allow = proxy.get("allow") if isinstance(proxy, dict) else None
     if (isolation.get("backend") == "oci" and isolation.get("enforced") is True
             and network.get("policy") == "public_research" and network.get("enforced") is True
-            and (execution.get("network_policy") or {}).get("declared") == "public_research"):
+            and (execution.get("network_policy") or {}).get("declared") == "public_research"
+            and (execution.get("network_policy") or {}).get("enforced") is True
+            and network.get("mode") == "internal network with egress proxy"
+            and isinstance(allow, list) and allow and all(isinstance(item, str) and item.endswith(":443") for item in allow)
+            and workers and proxies and all(item.get("removed") is True for item in workers + proxies)
+            and len(internal) == 1 and internal[0].get("internal") is True
+            and internal[0].get("gateway_mode_ipv4") == "isolated"
+            and not internal[0].get("gateways") and internal[0].get("ipv6") is False):
         result["network"] = "enforced"
         result["assurance"]["network"] = "external_enforcement"
     else:
-        gaps.append(_reason("open_context_boundary_unenforced", "No observed OCI public-research boundary bounded this scanner."))
+        if isolation.get("enforced") is True or network.get("enforced") is True or (
+                execution.get("network_policy") or {}).get("enforced") is True:
+            failures.append(_reason("network_evidence_inconsistent", "Public-research enforcement flags contradict recorded workers, proxy, or isolated network settings."))
+        else:
+            gaps.append(_reason("open_context_boundary_unenforced", "No observed OCI public-research boundary bounded this scanner."))
     actual_policy = retrieval.get("policy")
     if isinstance(actual_policy, dict):
         try:
@@ -93,6 +112,24 @@ def classify_condition(bundle: Path, execution: dict, policy: dict, evidence: di
                 raise ContractError("retrieval event bytes contradict their execution-record hash")
             events = [_json(line) for line in raw.splitlines()]
             artifacts.append({"role": "retrieval_events", "path": relative, "sha256": digest})
+            attempts_path = retrieval.get("attempts_path")
+            if attempts_path != "raw/retrieval-provenance/attempts.jsonl":
+                raise ContractError("retrieval attempt journal is unavailable")
+            attempts_raw = _bytes(bundle, attempts_path)
+            attempts_hash = "sha256:" + hashlib.sha256(attempts_raw).hexdigest()
+            if attempts_hash != retrieval.get("attempts_sha256"):
+                raise ContractError("retrieval attempt journal contradicts its execution-record hash")
+            attempts = [_json(line) for line in attempts_raw.splitlines()]
+            if ({item.get("id") for item in attempts} != {item.get("id") for item in events}
+                    or len(attempts) != len(events) or retrieval.get("incomplete_attempts") != 0
+                    or retrieval.get("completed_attempts") != len(events)):
+                raise ContractError("retrieval starts and completions do not establish complete API capture")
+            by_id = {item["id"]: item for item in attempts}
+            request_fields = {"url", "query", "operation", "source", "source_assurance", "started_at"}
+            if any(request_fields - set(item) for item in attempts) or any(
+                    any(event.get(key) != by_id[event["id"]].get(key) for key in request_fields) for event in events):
+                raise ContractError("retrieval completion provenance differs from its started request")
+            artifacts.append({"role": "retrieval_attempts", "path": attempts_path, "sha256": attempts_hash})
             if type(retrieval.get("attempts")) is not int or len(events) != retrieval["attempts"]:
                 raise ContractError("retrieval event count contradicts its execution record")
             seen = set()
@@ -105,7 +142,9 @@ def classify_condition(bundle: Path, execution: dict, policy: dict, evidence: di
                             "content_sha256", "capture_status", "content_entered_model"}
                 if required - set(event) or event["outcome"] not in ("ok", "http_error", "failed", "denied"):
                     raise ContractError("retrieval event lacks required capture provenance")
-                if event.get("source") not in ("scanner_native", "browser_tool") or event.get("operation") not in ("fetch", "search"):
+                source_valid = event.get("source") in ("scanner_native", "browser_tool") or (
+                    event.get("source") == "unavailable" and event["outcome"] == "denied")
+                if not source_valid or event.get("operation") not in ("fetch", "search"):
                     raise ContractError("retrieval event has an unknown integration boundary")
                 if event.get("capture_error"):
                     gaps.append(_reason("retrieval_content_capture_failed", "A fetched response could not be retained as declared."))
