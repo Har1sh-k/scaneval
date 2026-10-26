@@ -80,11 +80,14 @@ scaneval validate condition-record bundle-a/condition.json
 
 The command returns every observation's status and reasons plus separate condition/status
 coverage counts. Aggregation includes condition coverage and refuses a mode/profile view
-containing readable observations from different condition/status strata. Aggregate those
-strata in separate homogeneous run collections; use the condition command to inspect mixed
-collections. The current aggregate command accepts whole run directories and has no invocation
-or status filter, so it cannot compute separate metrics inside a mixed-status run. Experiment
-reporting must preserve those assignments and report their separate strata and missingness.
+containing claim-bearing observations from different condition/status strata within one system.
+Use `scaneval aggregate run-a --by-condition --output strata.json` for separate descriptive
+metrics within a mixed run. Each stratum shows its own denominator beside the full scheduled
+view denominator, with per-target outcomes and null recall plus bounds when work is incomplete,
+unreviewed, or unresolved. This mode reports unweighted target-observation counts and bounds;
+it supplies no pooled weighted headline or confidence interval. Different systems remain
+separate, and an empty unsupported/error/timeout observation occupies the denominator without
+blocking the other observations. Failures that delivered claims remain visible.
 Missing or skipped
 assignments stay in operational denominators and appear as unavailable condition evidence.
 Existing standard runs remain readable and conservatively classify as unavailable when their

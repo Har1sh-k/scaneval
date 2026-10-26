@@ -563,6 +563,126 @@ def _condition_coverage(corpus: _Corpus) -> list[dict]:
             for (system, mode, profile, name, status, policy), rows in sorted(grouped.items())]
 
 
+def _scheduled_condition_rows(corpus: _Corpus) -> list[dict]:
+    """Public-metrics row shape for every scheduled assignment, including unreadable/missing work."""
+    identities = {(row["run_id"], row["assignment_id"]): row for row in _condition_rows(corpus)}
+    rows = []
+    for key, observation in sorted(corpus.observations.items()):
+        scheduled = corpus.inputs[key[:2]]
+        plan = scheduled["plan"]
+        rows.append({**identities[(observation.run_id, observation.assignment_id)],
+                     "input_id": observation.input_id, "repetition": observation.repetition,
+                     "status": observation.status, "condition_status": identities[(observation.run_id, observation.assignment_id)]["status"],
+                     "review_state": observation.review_state, "reason": observation.reason,
+                     "observed": observation.observed, "plan_state": plan["state"],
+                     "planned_targets": plan.get("targets", []), "planned_controls": plan.get("controls", [])})
+    return rows
+
+
+def condition_metrics(rows: Sequence[dict]) -> dict:
+    """Descriptive coverage and target-observation bounds for an explicit scheduled population.
+
+    Each row supplies run_id/input_id/system_id/repetition/assignment_id/status, optional
+    reason/review_state, ``observed`` from :func:`scoring.observe` or None, and planned_targets /
+    planned_controls carrying canonical_id plus target_id / control_id. A missing cell can supply
+    those frozen planned rows with observed=None. This function calls no loader or judge and
+    changes no matching decision. It exposes unweighted per-target outcomes so an experiment can
+    apply its separately frozen weighting, rather than deriving pair effects from a headline rate.
+    """
+    observations = []
+    target_rows, control_rows = [], []
+    missing_plans = 0
+    for row in rows:
+        observation = _Observation(run_id=row["run_id"], input_id=row["input_id"], system_id=row["system_id"],
+                                   repetition=row["repetition"], assignment_id=row["assignment_id"], status=row["status"],
+                                   reason=row.get("reason"), observed=row.get("observed"), review_state=row.get("review_state"))
+        if observation.status not in STATUSES:
+            raise ContractError(f"unknown scheduled condition observation status {observation.status!r}")
+        observations.append(observation)
+        missing_plans += row.get("plan_state", "frozen") != "frozen"
+        reviewed = observation.review_state == "human_approved"
+        identity = {key: row[key] for key in ("run_id", "input_id", "system_id", "repetition", "assignment_id")}
+        targets: dict[str, list[str]] = defaultdict(list)
+        for target in row["planned_targets"]:
+            targets[target["canonical_id"]].append(target["target_id"])
+        for canonical, ids in sorted(targets.items()):
+            outcome = _target_outcome(observation, tuple(sorted(set(ids))), [])
+            observed_targets = {item["target_id"]: item for item in (observation.observed or {}).get("targets", [])}
+            pending = any(target_id not in observed_targets or observed_targets[target_id]["unresolved_match"] for target_id in ids)
+            resolved = reviewed and outcome["assessable"]
+            detected = True if reviewed and outcome["detected"] else False if resolved else None
+            target_rows.append({**identity, "canonical_id": canonical, "detected": detected, "resolved": resolved,
+                                "completed": outcome["completed"], "reviewed": reviewed, "unresolved_match": pending,
+                                "status": observation.status})
+        controls: dict[str, list[str]] = defaultdict(list)
+        for control in row["planned_controls"]:
+            controls[control["canonical_id"]].append(control["control_id"])
+        for canonical, ids in sorted(controls.items()):
+            outcome = _control_outcome(observation, tuple(sorted(set(ids))))
+            control_rows.append({**identity, "canonical_id": canonical,
+                                 "resolved": reviewed and outcome["resolved"], "completed": outcome["completed"],
+                                 "false_allegation": outcome["false_allegation"] if reviewed and outcome["resolved"] else None,
+                                 "observed_false_allegation": reviewed and outcome["observed_false_allegation"]})
+    statuses = Counter(item.status for item in observations)
+    scheduled, targets = len(observations), len(target_rows)
+    detected = sum(row["detected"] is True for row in target_rows)
+    resolved = sum(row["resolved"] for row in target_rows)
+    unknown = sum(row["detected"] is None for row in target_rows)
+    population_complete = missing_plans == 0
+    lower = _float(Fraction(detected, targets)) if targets and population_complete else None
+    upper = _float(Fraction(detected + unknown, targets)) if targets and population_complete else None
+    return {"weighting": "target_observations", "assignments": scheduled,
+            "statuses": {status: statuses[status] for status in STATUSES},
+            "assignments_without_frozen_plan": missing_plans,
+            "completion": {"completed": statuses["success"], "scheduled": scheduled,
+                           "value": _float(Fraction(statuses["success"], scheduled)) if scheduled else None},
+            "support": {"supported": statuses["success"] + statuses["partial"], "unsupported": statuses["unsupported"],
+                        "unknown": scheduled - statuses["success"] - statuses["partial"] - statuses["unsupported"]},
+            "target_observations": {"scheduled": targets, "population_complete": population_complete,
+                                    "detected": detected, "resolved": resolved, "unresolved": targets - resolved,
+                                    "unreviewed": sum(not row["reviewed"] for row in target_rows),
+                                    "unresolved_matches": sum(row["unresolved_match"] for row in target_rows)},
+            "recall": {"value": lower if targets and resolved == targets and population_complete else None,
+                       "lower_bound": lower, "upper_bound": upper, "numerator": detected,
+                       "denominator": targets if population_complete else None},
+            "targets": target_rows, "controls": control_rows, "claims": _claims(observations), "usage": _usage(observations)}
+
+
+def aggregate_by_condition(run_dirs: Iterable[str | PathLike[str]], *, policy: dict | None = None) -> dict:
+    """Report every condition/status stratum from whole runs without pooling their detection metrics.
+
+    The complete scheduled denominator is retained beside each stratum's own denominator. These
+    are descriptive target-observation counts and bounds, with no weighted headline or interval.
+    Raw per-target outcomes are retained for a workflow with separately frozen pairing/weighting.
+    """
+    corpus, resolved_policy = _load_corpus(run_dirs), resolve_policy(policy)
+    rows = _scheduled_condition_rows(corpus)
+    grouped: dict[tuple[str, ...], list[dict]] = defaultdict(list)
+    views: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for row in rows:
+        views[(row["system_id"], row["mode"], row["profile"])].append(row)
+        grouped[(row["system_id"], row["mode"], row["profile"], row["condition"], row["condition_status"], row["policy_sha256"])].append(row)
+    strata = []
+    for (system, mode, profile, name, status, digest), selected in sorted(grouped.items()):
+        all_rows = views[(system, mode, profile)]
+        strata.append({"system_id": system, "mode": mode, "profile": profile, "condition": name, "status": status,
+                       "policy_sha256": digest, "view_scheduled_assignments": len(all_rows),
+                       "view_scheduled_target_observations": sum(len({item["canonical_id"] for item in row["planned_targets"]}) for row in all_rows),
+                       "view_target_population_complete": all(row.get("plan_state") == "frozen" for row in all_rows),
+                       "metrics": condition_metrics(selected)})
+    report = {"schema_version": SCHEMA_VERSION, "evaluator_version": __version__, "report_mode": "condition_strata",
+              "condition_digest_format": conditions.IDENTITY_FORMAT,
+              "policy": resolved_policy, "policy_sha256": canonical_sha256(resolved_policy),
+              "runs": [_run_row(corpus, run) for run in corpus.runs],
+              "systems": [_system_row(system, info) for system, info in corpus.systems.items()],
+              "profile_coverage": _profile_coverage(corpus), "condition_coverage": _condition_coverage(corpus),
+              "condition_strata": strata, "views": [],
+              "notes": ["Separate descriptive condition/status/policy strata; no pooled weighted recall or confidence interval.",
+                        "Full scheduled view denominators are reported beside stratum denominators. Missing, unsupported, incomplete, and unreviewed targets remain unknown, never silent zeros.",
+                        "Metrics use existing scoring.observe target/control decisions. Per-target outcomes are unweighted and do not replace an experiment's frozen weighting or paired analysis."]}
+    return validate_document(REPORT_KIND, report)
+
+
 # --- weights ------------------------------------------------------------------------------------
 
 
@@ -1996,6 +2116,13 @@ def summary(report: dict) -> list[str]:
             lines.append(f"  {system['system_id']} scope={system['evidence_scope']} full_output_recall "
                          f"{' '.join(recalls)} completion={_number(whole['completion']['value'])}")
     lines.extend(_condition_summary(report))
+    for stratum in report.get("condition_strata", []):
+        metrics = stratum["metrics"]
+        lines.append(f"  {stratum['system_id']} {stratum['condition']}/{stratum['status']} "
+                     f"assignments={metrics['assignments']}/{stratum['view_scheduled_assignments']} "
+                     f"targets={metrics['target_observations']['scheduled']} "
+                     f"resolved={metrics['target_observations']['resolved']} recall={_number(metrics['recall']['value'])} "
+                     f"bounds=[{_number(metrics['recall']['lower_bound'])}, {_number(metrics['recall']['upper_bound'])}]")
     return lines
 
 

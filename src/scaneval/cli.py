@@ -946,7 +946,8 @@ def _aggregate(args: argparse.Namespace) -> int:
     """
     _refuse_trial_path(args.output)
     policy = aggregate.load_policy(args.policy) if args.policy else None
-    report = aggregate.aggregate(args.run_dirs, policy=policy)
+    report = (aggregate.aggregate_by_condition(args.run_dirs, policy=policy) if args.by_condition
+              else aggregate.aggregate(args.run_dirs, policy=policy))
     _write_new(args.output, _json(report))
     for line in aggregate.summary(report):
         print(line)
@@ -1425,6 +1426,8 @@ def _add_aggregate_commands(sub: argparse._SubParsersAction) -> None:
                     "denominator.")
     aggregating.add_argument("run_dirs", nargs="+", type=Path, metavar="RUN_DIR", help=run_dirs_help)
     aggregating.add_argument("--policy", type=Path, help=policy_help)
+    aggregating.add_argument("--by-condition", action="store_true",
+                             help="report separate condition/status/policy strata with full scheduled denominators and target outcomes")
     aggregating.add_argument("--output", required=True, type=Path, help=output_help)
 
     comparing = sub.add_parser(

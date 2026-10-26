@@ -193,3 +193,53 @@ def test_malformed_condition_artifact_is_a_failed_record_not_an_anonymous_except
     report = aggregate.aggregate([run], policy=policy(replicates=10))
     assert report["condition_coverage"][0]["status"] == "failed"
     assert "invalid_condition_policy" in {reason["code"] for reason in report["condition_coverage"][0]["assignments"][0]["reasons"]}
+
+
+def test_by_condition_reports_claimful_failures_and_full_denominators(tmp_path, upstream, monkeypatch):
+    from test_v2_aggregate import policy
+    run = condition_run(tmp_path, upstream, monkeypatch, [reporting_system("scanner", behavior="error_claims")], repetitions=2)
+    with pytest.raises(ContractError, match="aggregate --by-condition"):
+        aggregate.aggregate([run], policy=policy(replicates=10))
+    report = aggregate.aggregate_by_condition([run], policy=policy(replicates=10))
+    assert report["report_mode"] == "condition_strata" and report["views"] == []
+    assert {row["status"] for row in report["condition_strata"]} == {"attested", "declared_only"}
+    assert sum(row["metrics"]["assignments"] for row in report["condition_strata"]) == 2
+    assert {row["view_scheduled_assignments"] for row in report["condition_strata"]} == {2}
+    assert sum(row["metrics"]["claims"]["records"] for row in report["condition_strata"]) == 2
+    assert sum(row["metrics"]["usage"]["executed"] for row in report["condition_strata"]) == 2
+    assert sum(row["metrics"]["statuses"]["error"] for row in report["condition_strata"]) == 1
+    output = tmp_path / "strata.json"
+    assert main(["aggregate", str(run), "--by-condition", "--output", str(output)]) == 0
+    assert json.loads(output.read_text())["condition_strata"]
+
+
+def test_by_condition_missing_repetitions_are_unknown_not_zeros(tmp_path):
+    from test_v2_aggregate import write_run, planned, target, scan
+    run = write_run(tmp_path, "missing", [planned("a", targets=[target("T-a")])], repetitions=2,
+                    outcomes={("a", "sys-a", 1): scan(hits={"T-a": 1}), ("a", "sys-a", 2): "missing_row"})
+    report = aggregate.aggregate_by_condition([run])
+    metrics = report["condition_strata"][0]["metrics"]
+    assert metrics["assignments"] == 2 and metrics["statuses"]["missing"] == 1
+    assert metrics["recall"] == {"value": None, "lower_bound": .5, "upper_bound": 1., "numerator": 1, "denominator": 2}
+    assert [row["detected"] for row in metrics["targets"]] == [True, None]
+    assert metrics["target_observations"]["resolved"] == 1
+
+
+def test_public_condition_metrics_can_include_an_entire_missing_cell():
+    rows = [{"run_id": "missing-cell", "input_id": "snapshot", "system_id": "scanner", "repetition": 1,
+             "assignment_id": "snapshot__scanner__r1", "status": "missing", "reason": "missing_row",
+             "observed": None, "planned_targets": [{"canonical_id": "canonical", "target_id": "T"}], "planned_controls": []}]
+    metrics = aggregate.condition_metrics(rows)
+    assert metrics["assignments"] == 1 and metrics["recall"]["value"] is None
+    assert metrics["recall"]["denominator"] == 1 and metrics["targets"][0]["detected"] is None
+    assert metrics["recall"]["lower_bound"] == 0 and metrics["recall"]["upper_bound"] == 1
+
+
+def test_unknown_frozen_population_has_no_invented_recall_denominator():
+    rows = [{"run_id": "old", "input_id": "snapshot", "system_id": "scanner", "repetition": 1,
+             "assignment_id": "snapshot__scanner__r1", "status": "missing", "observed": None,
+             "plan_state": "unavailable", "planned_targets": [], "planned_controls": []}]
+    metrics = aggregate.condition_metrics(rows)
+    assert metrics["assignments_without_frozen_plan"] == 1
+    assert metrics["recall"]["denominator"] is None
+    assert metrics["recall"]["lower_bound"] is None and metrics["recall"]["upper_bound"] is None

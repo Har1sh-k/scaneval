@@ -39,12 +39,26 @@ An input is scored on the targets and controls its schedule froze before the run
 Each (mode, profile) pair is a separate view: `standard`, `metadata_blinded`, and `identity_reduced` are never pooled. `profile_coverage` lists, per mode, the canonical targets each profile carries and those it lacks. Within a view, every system has one block per slice: `all`, each project, and each workload. Weights are renormalized within each slice.
 
 `condition_coverage` records each system's evaluation condition, policy digest, status, assignment
-count, and reasons. Readable observations with different condition names, policies, or statuses
-cannot share a mode/profile metric view: aggregation and comparison refuse that mixture before
-computing metrics. Missing/skipped assignments remain in the operational denominator and are
+count, and reasons. Claim-bearing observations with different condition names, policies, or
+statuses cannot share one system's mode/profile metric view: ordinary weighted aggregation and
+comparison refuse that mixture before computing metrics. Systems are checked separately, and
+comparison checks only its baseline/candidate. Empty unsupported/error/timeout observations
+occupy denominators without blocking other evidence. Missing/skipped assignments remain in the operational denominator and are
 reported as unavailable. Legacy bundles without condition evidence remain readable and classify
 conservatively. Use `scaneval condition bundle-a bundle-b` to inspect mixed collections and their
 separate coverage without pooling results; see [closed-book standard](CLOSED_BOOK.md).
+
+For mixed-status runs, `scaneval aggregate <run> --by-condition --output strata.json` produces
+`report_mode: condition_strata` with separate system/profile/condition/status/policy metrics.
+Every stratum shows its own assignment and target-observation denominator beside the whole
+scheduled view's denominator. Missing repetitions and entire absent bundles remain explicit;
+unknown outcomes are null, rather than silent misses. Recall is null with lower/upper bounds
+when incomplete, unreviewed, or unresolved, and an unavailable frozen population has no invented
+target denominator. Claims and known/unknown usage include failures that delivered claims.
+These are unweighted descriptive target-observation metrics, with no pooled weighted headline
+or confidence interval; the recorded aggregation policy is provenance, not a claim that these
+descriptive counts apply its weightings. `condition_metrics(rows)` also accepts synthetic missing
+assignments from a frozen experiment and exposes per-target outcomes for its declared weighting.
 
 Condition-aware writers include optional-for-compatibility `condition_coverage` and
 `condition_digest_format: condition-structural-v1` fields in 2.1 reports. The structural identity

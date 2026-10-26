@@ -2069,6 +2069,29 @@ def _validate_aggregate_report(document: dict[str, Any]) -> None:
     _unique([run["run_id"] for run in document["runs"]], "runs.run_id")
     _unique([system["system_id"] for system in document["systems"]], "systems.system_id")
     _unique([f"{view['mode']}/{view['profile']}" for view in document["views"]], "views (mode, profile)")
+    if document.get("report_mode") == "condition_strata":
+        if document["views"] or "condition_strata" not in document:
+            raise ContractError("a condition-strata report exposes separate strata and no pooled weighted views")
+        keys = []
+        total_by_view: dict[tuple, int] = {}
+        expected_by_view: dict[tuple, int] = {}
+        for row in document["condition_strata"]:
+            keys.append(canonical_json([row[key] for key in ("system_id", "mode", "profile", "condition", "status", "policy_sha256")]))
+            view = (row["system_id"], row["mode"], row["profile"])
+            metrics = row["metrics"]
+            count = metrics["assignments"]
+            total_by_view[view] = total_by_view.get(view, 0) + count
+            expected_by_view.setdefault(view, row["view_scheduled_assignments"])
+            if expected_by_view[view] != row["view_scheduled_assignments"]:
+                raise ContractError("condition strata disagree on their full scheduled denominator")
+            if sum(metrics["statuses"].values()) != count or metrics["completion"]["scheduled"] != count:
+                raise ContractError("condition-stratum status counts must cover every scheduled assignment")
+            targets = metrics["target_observations"]
+            if len(metrics["targets"]) != targets["scheduled"] or targets["resolved"] + targets["unresolved"] != targets["scheduled"]:
+                raise ContractError("condition-stratum target coverage is inconsistent")
+        _unique(keys, "condition strata")
+        if total_by_view != expected_by_view:
+            raise ContractError("condition strata must preserve the complete scheduled view denominator")
     for view in document["views"]:
         _unique([system["system_id"] for system in view["systems"]], "view systems.system_id")
         for system in view["systems"]:

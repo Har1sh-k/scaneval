@@ -17,6 +17,44 @@
     "notes"
   ],
   "properties": {
+    "report_mode": {"enum":["weighted","condition_strata"]},
+    "condition_strata": {
+      "type":"array","items": {
+        "type":"object","additionalProperties":false,
+        "required":["system_id","mode","profile","condition","status","policy_sha256","view_scheduled_assignments","view_scheduled_target_observations","view_target_population_complete","metrics"],
+        "properties": {
+          "system_id":{"type":"string","minLength":1},"mode":{"enum":["full","pr"]},"profile":{"type":"string","minLength":1},
+          "condition":{"enum":["closed_book_standard","open_context","identity_reduced"]},
+          "status":{"enum":["attested","declared_only","failed","unavailable"]},
+          "policy_sha256":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+          "view_scheduled_assignments":{"type":"integer","minimum":0},"view_scheduled_target_observations":{"type":"integer","minimum":0},
+          "view_target_population_complete":{"type":"boolean"},
+          "metrics": {
+            "type":"object","additionalProperties":false,
+            "required":["weighting","assignments","statuses","assignments_without_frozen_plan","completion","support","target_observations","recall","targets","controls","claims","usage"],
+            "properties": {
+              "weighting":{"const":"target_observations"},"assignments":{"type":"integer","minimum":0},
+              "statuses":{"type":"object","additionalProperties":{"type":"integer","minimum":0}},
+              "assignments_without_frozen_plan":{"type":"integer","minimum":0},
+              "completion":{"type":"object","required":["completed","scheduled","value"],"additionalProperties":false,"properties":{
+                "completed":{"type":"integer","minimum":0},"scheduled":{"type":"integer","minimum":0},"value":{"type":["number","null"],"minimum":0,"maximum":1}}},
+              "support":{"type":"object","required":["supported","unsupported","unknown"],"additionalProperties":false,"properties":{
+                "supported":{"type":"integer","minimum":0},"unsupported":{"type":"integer","minimum":0},"unknown":{"type":"integer","minimum":0}}},
+              "target_observations":{"type":"object","required":["scheduled","population_complete","detected","resolved","unresolved","unreviewed","unresolved_matches"],"additionalProperties":false,"properties":{
+                "scheduled":{"type":"integer","minimum":0},"population_complete":{"type":"boolean"},
+                "detected":{"type":"integer","minimum":0},"resolved":{"type":"integer","minimum":0},"unresolved":{"type":"integer","minimum":0},"unreviewed":{"type":"integer","minimum":0},"unresolved_matches":{"type":"integer","minimum":0}}},
+              "recall":{"type":"object","required":["value","lower_bound","upper_bound","numerator","denominator"],"additionalProperties":false,"properties":{
+                "value":{"type":["number","null"],"minimum":0,"maximum":1},"lower_bound":{"type":["number","null"],"minimum":0,"maximum":1},"upper_bound":{"type":["number","null"],"minimum":0,"maximum":1},
+                "numerator":{"type":"integer","minimum":0},"denominator":{"type":["integer","null"],"minimum":0}}},
+              "targets":{"type":"array","items":{"type":"object","required":["run_id","input_id","system_id","repetition","assignment_id","canonical_id","detected","resolved","completed","reviewed","unresolved_match","status"],"properties":{
+                "detected":{"type":["boolean","null"]},"resolved":{"type":"boolean"},"completed":{"type":"boolean"},"reviewed":{"type":"boolean"},"unresolved_match":{"type":"boolean"}}}},
+              "controls":{"type":"array","items":{"type":"object"}},
+              "claims":{"$ref":"#/$defs/claims"},"usage":{"$ref":"#/$defs/usage"}
+            }
+          }
+        }
+      }
+    },
     "condition_digest_format": {"const": "condition-structural-v1"},
     "condition_coverage": {
       "type": "array", "items": {
