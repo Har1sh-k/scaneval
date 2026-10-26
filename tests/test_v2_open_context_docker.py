@@ -5,6 +5,7 @@ SCANEVAL_REQUIRE_DOCKER=1 to make a missing engine/image fail instead of skip.
 """
 
 import json
+import os
 from pathlib import Path
 import shutil
 
@@ -36,6 +37,7 @@ def test_live_recorded_retrieval_and_private_denial_run_inside_real_boundary(scr
         "retrieval": RETRIEVAL}, "public_research")
     backend = OciBackend(settings, run_id=run_id(scratch), invocation_id="public-fixture",
                          scratch_root=scratch)
+    private = backend.workspace_root.parent
     workspace = backend.workspace_root / "scaneval-trial-public-fixture"
     workspace.mkdir()
     source = workspace / "source"
@@ -101,10 +103,15 @@ print(json.dumps({'live':live['outcome'], 'live_capture':live['capture_status'],
         assert capture["replayable"] is False
         events = [json.loads(line) for line in (raw / "retrieval-provenance/events.jsonl").read_text().splitlines()]
         assert all(event["content_entered_model"] is None for event in events)
+        content = private / "proxy/log/content"
+        assert content.stat().st_uid == os.getuid()  # Native Linux retains container UID ownership for new files.
+        assert content.stat().st_mode & 0o777 == 0o777
+        assert any(path.suffix == ".bin" for path in content.iterdir())
         assert record["network"]["proxy"]["denied"] == 1
         assert all(item["removed"] for item in record["containers"])
     finally:
         assert backend.close() == []
+    assert not private.exists()
 
 
 def test_configured_runner_saves_and_revalidates_open_context_observation(scratch):

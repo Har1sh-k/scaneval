@@ -1187,6 +1187,34 @@ def test_model_provider_only_runs_the_scanner_behind_the_proxy_and_reads_back_it
     assert all(item["removed"] for item in execution["isolation"]["containers"])
 
 
+def test_public_retrieval_content_directory_belongs_to_controller_before_proxy_creation(tmp_path):
+    fake = FakeDocker()
+    configured = resolve_execution({"backend": "oci", "image": IMAGE, "proxy_image": PROXY,
+        "egress": [{"host": "research.example", "port": 443}], "retrieval": {
+            "policy": "recorded_public_v1", "allowed_origins": ["https://research.example"],
+            "capture": "content", "retention": "bundle"}}, "public_research")
+    held = OciBackend(configured, run_id="fixture", invocation_id="retrieval-owner", scratch_root=tmp_path, docker=fake)
+    create = fake.run
+    observed = []
+    def check_before_create(args, **kwargs):
+        if args[0] == "create":
+            content = held.workspace_root.parent / "proxy/log/content"
+            assert content.is_dir() and content.stat().st_uid == os.getuid()
+            assert content.stat().st_mode & 0o777 == 0o777
+            assert held.workspace_root.parent.stat().st_mode & 0o777 == 0o700
+            observed.append(content)
+        return create(args, **kwargs)
+    fake.run = check_before_create
+    private = held.workspace_root.parent
+    try:
+        held._start_proxy("internal", "egress")
+        assert len(observed) == 1
+    finally:
+        assert held.close() == []
+    assert not private.exists()
+    assert fake.networks == {} and fake.containers == {}
+
+
 def test_unrestricted_is_recorded_as_not_enforced_with_the_host_loopback_caveat(tmp_path):
     fake = FakeDocker(behavior=finds_one)
     bundle, _held = invoke(tmp_path, fake, "unrestricted")
