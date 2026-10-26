@@ -22,7 +22,8 @@ import tomllib
 from typing import Any
 from urllib.parse import urlsplit
 
-from .contracts import ContractError, canonical_json, canonical_sha256, is_stated
+from .contracts import (ContractError, canonical_json, canonical_sha256, is_stated, load_document,
+                         validate_document)
 from .materialize import (INSTRUCTION_FILE_NAMES, INSTRUCTION_PATH_PREFIXES, INSTRUCTION_PATHS,
                           INSTRUCTION_TOP_LEVEL, MaterializationError, tree_hash)
 
@@ -637,14 +638,16 @@ def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_
     final_paths = set(inspection["paths"])
     before = set(original_instruction_files or [])
     declared = set((normalized or {}).get("instruction_paths", []))
-    disposition = [{"path": path, "disposition": "retained" if path in final_paths else
+    configured = {path.casefold() for path in declared}
+    disposition = [{"path": path, "classification": _instruction_class(path, configured) or "instruction_file",
+                    "disposition": "retained" if path in final_paths else
                     "removed" if path in before else "absent"} for path in sorted(before | remaining | declared)]
     counts = {
         "changed_files": len({entry["path"] for entry in changed + fields}),
         "removed_files": len({entry["path"] for entry in removed}),
         "redactions": sum(sum(entry.get("occurrences", {}).values()) for entry in changed)
                       + sum(entry.get("redactions", 1) for entry in fields),
-        "instruction_files_discovered": len(before | remaining),
+        "instruction_files_discovered": sum(entry["disposition"] != "absent" for entry in disposition),
         "instruction_files_removed": sum(entry["disposition"] == "removed" for entry in disposition),
         "instruction_files_retained": sum(entry["disposition"] == "retained" for entry in disposition),
         "residual_cues": sum(entry["occurrences"] for entry in inspection["residual_cues"]),
@@ -665,11 +668,123 @@ def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_
         "forbidden_artifacts": deepcopy(inspection["forbidden_artifacts"]),
         "unsafe_entries": deepcopy(inspection["unsafe_entries"]), "counts": counts, "validation": validation,
     }
-    categories = sorted({entry["category"] for entry in inspection["residual_cues"]})
-    summary = {**manifest["policy"], "manifest_sha256": canonical_sha256(manifest),
-               "original_tree_hash": original_tree_hash, "transformed_tree_hash": transformed_tree_hash,
-               "counts": deepcopy(counts), "residual_categories": [
+    validate_document(MANIFEST_KIND, manifest)
+    return manifest, _portable_summary(manifest)
+
+
+def _portable_summary(manifest: dict) -> dict:
+    categories = sorted({entry["category"] for entry in manifest["residual_cues"]})
+    return {**manifest["policy"], "manifest_sha256": canonical_sha256(manifest),
+               "original_tree_hash": manifest["original_tree_hash"],
+               "transformed_tree_hash": manifest["transformed_tree_hash"],
+               "counts": deepcopy(manifest["counts"]), "residual_categories": [
                    {"category": category, "occurrences": sum(entry["occurrences"]
-                    for entry in inspection["residual_cues"] if entry["category"] == category)}
-                   for category in categories], "validation": deepcopy(validation)}
-    return manifest, summary
+                    for entry in manifest["residual_cues"] if entry["category"] == category)}
+                   for category in categories], "validation": deepcopy(manifest["validation"])}
+
+
+def _validate_manifest_invariants(document: dict) -> None:
+    """Cross-field manifest checks, invoked after the registered JSON schema validates its shape."""
+    try:
+        canonical_json(document).encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ContractError("identity manifest text must be strict UTF-8") from exc
+    for key in ("edits", "metadata_edits", "removals", "skipped", "instruction_files", "residual_cues",
+                "forbidden_artifacts", "unsafe_entries"):
+        for entry in document[key]:
+            if key == "unsafe_entries" and entry["path"] == ".":
+                continue
+            try:
+                _path(entry["path"])
+            except MaterializationError as exc:
+                raise ContractError(f"{key}: {exc}") from exc
+    instructions = document["instruction_files"]
+    if len({entry["path"] for entry in instructions}) != len(instructions):
+        raise ContractError("instruction_files paths must be unique")
+    edited = {entry["path"] for entry in document["edits"] + document["metadata_edits"]}
+    removed = {entry["path"] for entry in document["removals"]}
+    if edited & removed:
+        raise ContractError("an identity manifest path cannot be both edited and removed")
+    counts = {
+        "changed_files": len(edited), "removed_files": len(removed),
+        "redactions": sum(sum(entry["occurrences"].values()) for entry in document["edits"])
+                      + sum(entry["redactions"] for entry in document["metadata_edits"]),
+        "instruction_files_discovered": sum(entry["disposition"] != "absent" for entry in instructions),
+        "instruction_files_removed": sum(entry["disposition"] == "removed" for entry in instructions),
+        "instruction_files_retained": sum(entry["disposition"] == "retained" for entry in instructions),
+        "residual_cues": sum(entry["occurrences"] for entry in document["residual_cues"]),
+        "skipped_transformations": len(document["skipped"]),
+    }
+    if counts != document["counts"]:
+        raise ContractError("identity manifest counts do not match its transformations and residuals")
+    validation = document["validation"]
+    if (validation["state"] == "available") != (not validation["reasons"]):
+        raise ContractError("identity manifest availability must agree with its reasons")
+    named = document["policy"]["policy_id"] is not None
+    if named != (document["policy"]["version"] is not None):
+        raise ContractError("identity manifest policy identifier and version must be present together")
+    blockers = (not named or document["forbidden_artifacts"] or document["unsafe_entries"]
+                or any(entry["category"] in _ALIAS_CATEGORIES | {"unsafe_configured_instruction"}
+                       for entry in document["residual_cues"])
+                or any(entry["disposition"] == "retained" and entry["classification"] != "assistant_support_file"
+                       for entry in instructions))
+    if blockers and validation["state"] == "available":
+        raise ContractError("identity manifest cannot claim availability with unresolved strict-policy blockers")
+
+
+def verify_manifest(manifest: dict, summary: dict, *, policy: dict | None, map_sha256: str,
+                    original_tree_hash: str, transformed_tree_hash: str, requirements: list[dict],
+                    required_source_paths: list[str] | None = None, source: Path | None = None,
+                    source_snapshot: dict | None = None) -> dict:
+    """Revalidate saved provenance against the exact expected policy, source, and target bindings.
+
+    A scalar ``validation.state`` is insufficient. The schema and accounting checks run first;
+    summary and manifest hashes, policy configuration, aliases, accepted paths, and both tree
+    hashes are recomputed. If the staged tree is available, re-inspection must reproduce the
+    recorded inspection digest as well. No result is upgraded from unavailable on reuse.
+    """
+    validate_document(MANIFEST_KIND, manifest)
+    if not isinstance(summary, dict):
+        raise ContractError("identity transformation summary must be an object")
+    expected_summary = _portable_summary(manifest)
+    for key, value in expected_summary.items():
+        if canonical_json(summary.get(key)) != canonical_json(value):
+            raise ContractError(f"identity summary {key} does not match its transformation manifest")
+    if "manifest_path" in summary:
+        try:
+            _path(summary["manifest_path"])
+        except MaterializationError as exc:
+            raise ContractError(f"manifest_path: {exc}") from exc
+    normalized = validate_policy(policy) if policy is not None else None
+    required = _aliases(requirements, "required answers")
+    paths = sorted(set(required_source_paths or []))
+    for path in paths:
+        _path(path)
+    path_digest = canonical_sha256(paths)
+    config_digest = canonical_sha256({"policy": normalized, "map_sha256": map_sha256,
+                                     "required_answers": required, "required_source_paths_sha256": path_digest})
+    expected = {"original_tree_hash": original_tree_hash, "transformed_tree_hash": transformed_tree_hash,
+                "map_sha256": map_sha256, "requirements_sha256": canonical_sha256(required),
+                "required_source_paths_sha256": path_digest}
+    for key, value in expected.items():
+        if manifest[key] != value:
+            raise ContractError(f"identity manifest {key} is stale or belongs to another input")
+    policy_identity = {"policy_id": (normalized or {}).get("policy_id"),
+                       "version": (normalized or {}).get("version"), "config_sha256": config_digest}
+    if manifest["policy"] != policy_identity:
+        raise ContractError("identity manifest policy configuration is stale")
+    if source_snapshot is not None and canonical_json(manifest["source_snapshot"]) != canonical_json(source_snapshot):
+        raise ContractError("identity manifest source snapshot is stale")
+    coverage = policy_coverage(normalized, required)
+    if coverage["state"] != "available" and manifest["validation"]["state"] == "available":
+        raise ContractError("identity manifest cannot claim strict availability without answer coverage")
+    if source is not None:
+        inspection = inspect_tree(source, normalized, requirements=required, required_source_paths=paths)
+        if canonical_sha256(inspection) != manifest["inspection_sha256"]:
+            raise ContractError("identity manifest inspection is stale for the staged export")
+    return deepcopy(summary)
+
+
+def load_manifest(path: Path, summary: dict, **expected) -> dict:
+    """Load one registered manifest contract and revalidate its saved bindings."""
+    return verify_manifest(load_document(path, MANIFEST_KIND), summary, **expected)

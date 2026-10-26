@@ -9,10 +9,10 @@ import tomllib
 
 import pytest
 
-from scaneval.contracts import ContractError, canonical_json, canonical_sha256
+from scaneval.contracts import ContractError, canonical_json, canonical_sha256, validate_document
 from scaneval.identity_policy import (MANIFEST_KIND, POLICY_ID, POLICY_VERSION, build_manifest,
-                                     inspect_tree, policy_coverage, prepare_metadata_edit,
-                                     required_answers, validate_policy)
+                                     inspect_tree, load_manifest, policy_coverage, prepare_metadata_edit,
+                                     required_answers, validate_policy, verify_manifest)
 from scaneval.materialize import MaterializationError
 
 
@@ -437,9 +437,9 @@ def test_manifest_and_portable_summary_are_deterministic_and_bind_all_provenance
     assert summary["manifest_sha256"] == canonical_sha256(first)
     assert summary["validation"] == {"state": "available", "reasons": []}
     assert first["instruction_files"] == [
-        {"path": ".assistant/rules.md", "disposition": "absent"},
-        {"path": ".claude/settings.json", "disposition": "retained"},
-        {"path": "AGENTS.md", "disposition": "removed"}]
+        {"path": ".assistant/rules.md", "classification": "instruction_file", "disposition": "absent"},
+        {"path": ".claude/settings.json", "classification": "assistant_support_file", "disposition": "retained"},
+        {"path": "AGENTS.md", "classification": "instruction_file", "disposition": "removed"}]
     assert summary["counts"]["changed_files"] == 1 and summary["counts"]["removed_files"] == 1
     assert summary["counts"]["redactions"] == 2
     assert summary["counts"]["instruction_files_removed"] == summary["counts"]["instruction_files_retained"] == 1
@@ -513,3 +513,75 @@ def test_changed_accepted_source_paths_cannot_reuse_a_stale_tree_inspection(tmp_
     assert changed["validation"]["state"] == "unavailable"
     assert changed["config_sha256"] != expected["config_sha256"]
     assert "the export was inspected against different accepted scoring paths" in changed["validation"]["reasons"]
+
+
+def saved_bindings(inspection, **changes):
+    return {"policy": policy(), "map_sha256": "sha256:" + "2" * 64,
+            "original_tree_hash": "sha256:" + "1" * 64, "transformed_tree_hash": inspection["tree_hash"],
+            "requirements": [ALIAS], "required_source_paths": [], **changes}
+
+
+def test_registered_manifest_schema_and_saved_reuse_recompute_every_binding(tmp_path):
+    tree = source(tmp_path, {"src/app.py": "print('ok')"})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    record, summary = manifest(inspection)
+    path = tmp_path / "identity-transform.json"
+    path.write_text(json.dumps(record, indent=2) + "\n")
+
+    assert validate_document(MANIFEST_KIND, record) is record
+    assert load_manifest(path, summary, **saved_bindings(inspection, source=tree)) == summary
+    assert verify_manifest(record, summary, **saved_bindings(inspection)) == summary
+
+
+@pytest.mark.parametrize("mismatch", ["policy", "map", "original", "transformed", "aliases", "paths", "snapshot"])
+def test_saved_manifest_reuse_refuses_stale_config_or_population(mismatch, tmp_path):
+    tree = source(tmp_path, {"src/app.py": "print('ok')"})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    record, summary = manifest(inspection)
+    changes = {}
+    if mismatch == "policy":
+        changes["policy"] = policy(identity_tokens=["another-project"])
+    elif mismatch == "map":
+        changes["map_sha256"] = "sha256:" + "4" * 64
+    elif mismatch in {"original", "transformed"}:
+        changes[mismatch + "_tree_hash"] = "sha256:" + "4" * 64
+    elif mismatch == "aliases":
+        changes["requirements"] = []
+    elif mismatch == "paths":
+        changes["required_source_paths"] = ["src/app.py"]
+    else:
+        changes["source_snapshot"] = {"snapshot_id": "different", "commit": "b" * 40}
+
+    with pytest.raises(ContractError, match="stale|another input"):
+        verify_manifest(record, summary, **saved_bindings(inspection, **changes))
+
+
+def test_saved_manifest_reuse_reinspects_available_source_instead_of_trusting_a_scalar(tmp_path):
+    tree = source(tmp_path, {"src/app.py": "print('ok')"})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    record, summary = manifest(inspection)
+    (tree / "src" / "app.py").write_text(f"# {ALIAS['value']}\n")
+    with pytest.raises(ContractError, match="inspection is stale"):
+        verify_manifest(record, summary, **saved_bindings(inspection, source=tree))
+
+
+@pytest.mark.parametrize("bad", ["counts", "summary-hash", "state", "manifest-path", "schema"])
+def test_saved_manifest_and_summary_tampering_is_detected(tmp_path, bad):
+    tree = source(tmp_path, {"src/app.py": f"# {ALIAS['value']}\n"})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    record, summary = manifest(inspection)
+    if bad == "counts":
+        record["counts"]["residual_cues"] = 0
+    elif bad == "summary-hash":
+        summary["manifest_sha256"] = "sha256:" + "4" * 64
+    elif bad == "state":
+        record["validation"] = {"state": "available", "reasons": []}
+        summary["validation"] = deepcopy(record["validation"])
+        summary["manifest_sha256"] = canonical_sha256(record)
+    elif bad == "manifest-path":
+        summary["manifest_path"] = "../source/identity-transform.json"
+    else:
+        record["counts"]["redactions"] = "unknown"
+
+    with pytest.raises(ContractError):
+        verify_manifest(record, summary, **saved_bindings(inspection))

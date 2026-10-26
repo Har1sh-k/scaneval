@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Evaluator-side identity transformation manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "policy", "source_snapshot", "original_tree_hash", "transformed_tree_hash", "map_sha256", "requirements_sha256", "inspection_sha256", "required_source_paths_sha256", "tool_versions", "edits", "metadata_edits", "removals", "skipped", "instruction_files", "residual_cues", "forbidden_artifacts", "unsafe_entries", "counts", "validation"],
+  "properties": {
+    "schema_version": {"const": "2.1"},
+    "kind": {"const": "identity-transformation-manifest"},
+    "policy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["policy_id", "version", "config_sha256"],
+      "properties": {
+        "policy_id": {"enum": ["scaneval.identity-reduced", null]},
+        "version": {"enum": ["1", null]},
+        "config_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "source_snapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["snapshot_id", "commit"],
+      "properties": {
+        "snapshot_id": {"type": "string", "minLength": 1},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "git_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "url": {"type": "string", "minLength": 1}
+      }
+    },
+    "original_tree_hash": {"$ref": "#/$defs/digest"},
+    "transformed_tree_hash": {"$ref": "#/$defs/digest"},
+    "map_sha256": {"$ref": "#/$defs/digest"},
+    "requirements_sha256": {"$ref": "#/$defs/digest"},
+    "inspection_sha256": {"$ref": "#/$defs/digest"},
+    "required_source_paths_sha256": {"$ref": "#/$defs/digest"},
+    "tool_versions": {"type": "object", "additionalProperties": {"type": "string"}},
+    "edits": {"type": "array", "items": {"$ref": "#/$defs/edit"}},
+    "metadata_edits": {"type": "array", "items": {"$ref": "#/$defs/metadata_edit"}},
+    "removals": {"type": "array", "items": {"$ref": "#/$defs/removal"}},
+    "skipped": {"type": "array", "items": {"$ref": "#/$defs/skipped"}},
+    "instruction_files": {"type": "array", "items": {"$ref": "#/$defs/instruction"}},
+    "residual_cues": {"type": "array", "items": {"$ref": "#/$defs/residual"}},
+    "forbidden_artifacts": {"type": "array", "items": {"$ref": "#/$defs/artifact"}},
+    "unsafe_entries": {"type": "array", "items": {"$ref": "#/$defs/unsafe"}},
+    "counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["changed_files", "removed_files", "redactions", "instruction_files_discovered", "instruction_files_removed", "instruction_files_retained", "residual_cues", "skipped_transformations"],
+      "properties": {
+        "changed_files": {"$ref": "#/$defs/count"}, "removed_files": {"$ref": "#/$defs/count"},
+        "redactions": {"$ref": "#/$defs/count"}, "instruction_files_discovered": {"$ref": "#/$defs/count"},
+        "instruction_files_removed": {"$ref": "#/$defs/count"}, "instruction_files_retained": {"$ref": "#/$defs/count"},
+        "residual_cues": {"$ref": "#/$defs/count"}, "skipped_transformations": {"$ref": "#/$defs/count"}
+      }
+    },
+    "validation": {
+      "type": "object", "additionalProperties": false, "required": ["state", "reasons"],
+      "properties": {
+        "state": {"enum": ["available", "unavailable"]},
+        "reasons": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "count": {"type": "integer", "minimum": 0},
+    "path": {"type": "string", "minLength": 1},
+    "lines": {"type": "array", "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},
+    "edit": {
+      "type": "object", "additionalProperties": false, "required": ["path", "occurrences"],
+      "properties": {
+        "edit_id": {"type": "string", "minLength": 1}, "path": {"$ref": "#/$defs/path"},
+        "changed_lines": {"$ref": "#/$defs/lines"},
+        "occurrences": {"type": "object", "additionalProperties": {"$ref": "#/$defs/count"}},
+        "original_sha256": {"$ref": "#/$defs/digest"}, "transformed_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "metadata_edit": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "field_path", "format", "original_sha256", "transformed_sha256", "redactions", "changed_lines", "role_check"],
+      "properties": {
+        "edit_id": {"type": "string", "minLength": 1}, "path": {"$ref": "#/$defs/path"},
+        "field_path": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "format": {"enum": ["json", "toml"]}, "role_check": {"type": "string", "minLength": 1},
+        "rationale": {"type": "string", "minLength": 1},
+        "original_sha256": {"$ref": "#/$defs/digest"}, "transformed_sha256": {"$ref": "#/$defs/digest"},
+        "redactions": {"$ref": "#/$defs/count"}, "changed_lines": {"$ref": "#/$defs/lines"}
+      }
+    },
+    "removal": {
+      "type": "object", "additionalProperties": false, "required": ["path", "original_sha256"],
+      "properties": {
+        "removal_id": {"type": "string", "minLength": 1}, "path": {"$ref": "#/$defs/path"},
+        "role": {"enum": ["identity_document", "instruction_file"]},
+        "original_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "skipped": {
+      "type": "object", "additionalProperties": false, "required": ["path", "reason"],
+      "properties": {
+        "path": {"$ref": "#/$defs/path"}, "reason": {"type": "string", "minLength": 1},
+        "edit_id": {"type": "string", "minLength": 1},
+        "field_path": {"type": "array", "items": {"type": "string"}},
+        "category": {"type": "string", "minLength": 1}
+      }
+    },
+    "instruction": {
+      "type": "object", "additionalProperties": false, "required": ["path", "classification", "disposition"],
+      "properties": {
+        "path": {"$ref": "#/$defs/path"}, "disposition": {"enum": ["removed", "retained", "absent"]},
+        "classification": {"enum": ["instruction_file", "assistant_support_file", "unsafe_configured_instruction"]}
+      }
+    },
+    "residual": {
+      "type": "object", "additionalProperties": false,
+      "required": ["category", "cue_sha256", "path", "occurrences", "surface", "reason"],
+      "properties": {
+        "category": {"type": "string", "minLength": 1}, "cue_sha256": {"$ref": "#/$defs/digest"},
+        "path": {"$ref": "#/$defs/path"}, "occurrences": {"type": "integer", "minimum": 1},
+        "surface": {"enum": ["content", "path"]}, "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "artifact": {
+      "type": "object", "additionalProperties": false, "required": ["path", "category", "sha256"],
+      "properties": {
+        "path": {"$ref": "#/$defs/path"}, "category": {"enum": ["evaluator_evidence", "redaction_dictionary", "transformation_manifest"]},
+        "sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "unsafe": {
+      "type": "object", "additionalProperties": false, "required": ["path", "reason"],
+      "properties": {"path": {"$ref": "#/$defs/path"}, "reason": {"type": "string", "minLength": 1}}
+    }
+  }
+}

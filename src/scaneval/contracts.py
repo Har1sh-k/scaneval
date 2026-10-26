@@ -34,6 +34,7 @@ SCHEMA_VERSIONS: dict[str, tuple[str, ...]] = {
     # with. 2.1 is each one's only version, so its schema keeps the plain file name.
     "evaluation-schedule": ("2.1",),
     "blinding-map": ("2.1",),
+    "identity-transformation-manifest": ("2.1",),
     # SARIF import (profile sarif-import-1): the record scaneval.sarif writes beside the scan
     # result it produced from a saved log. A kind first published at 2.1 keeps the plain file name.
     "import-record": ("2.1",),
@@ -1901,6 +1902,12 @@ def _validate_blinding_map(document: dict[str, Any]) -> None:
     if head != recorded:
         raise ContractError(f"reviews_sha256 records {recorded}, but the review history ends at {head}; a "
                             "review was deleted from the end of it")
+# Deterministic identity transformation provenance.
+def _validate_identity_manifest(document: dict[str, Any]) -> None:
+    from .identity_policy import _validate_manifest_invariants
+    _validate_manifest_invariants(document)
+
+
 # SARIF import (profile sarif-import-1).
 def _validate_import_record(document: dict[str, Any]) -> None:
     """Check what an import record asserts about its own accounting; it says nothing about the log.
@@ -2462,6 +2469,7 @@ _RUNTIME_VALIDATORS = {
     # Kinds first published at 2.1, one per feature.
     "evaluation-schedule": _validate_evaluation_schedule,
     "blinding-map": _validate_blinding_map,
+    "identity-transformation-manifest": _validate_identity_manifest,
     # SARIF import (profile sarif-import-1).
     "import-record": _validate_import_record,
     # Corpus aggregation and paired comparison.
