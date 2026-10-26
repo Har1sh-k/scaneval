@@ -1,19 +1,21 @@
-"""Metadata blinding: a reviewed map of identity tokens, applied to documentation and display text.
+"""Reviewed identity transformations for documentation, display text, and identity-only files.
 
 The ``metadata_blinded`` input profile (``docs/DESIGN_DECISIONS.md``, configurable identity
-profiles) reduces selected identity cues in an exported snapshot: branding, documentation
-identifiers, and display metadata. It never renames a package, module, import, source identifier,
-or path, and never changes a dependency, executable logic, or build, CI, or security
-configuration. It is partial blinding: package names and recognizable code may still reveal the
-repository, and every export records which cues remain. It is not anonymization and not a defence
-against memorization.
+profiles) reduces selected identity cues through reviewed token edits in documentation and display
+metadata. ``identity_reduced`` applies those edits and may additionally remove reviewed,
+hash-pinned identity-only documentation and repository instruction files. Neither profile renames
+a package, module, import, source identifier, or path, or changes source, a dependency, license,
+build, CI, or security configuration. Package names and recognizable code may still reveal the
+repository, and every export records which cues remain. These are sensitivity conditions, not
+anonymization or a defence against memorization.
 
 The map. A blinding map (contract kind ``blinding-map``) is evaluator-side data and never enters a
 scanner workspace. It declares pseudonyms (an original token and its replacement), the snapshot
 variants it covers, each pinned by commit and export tree hash, and its edits: one file each, a
 stated role and rationale, the originals replaced there, and for every variant either the exact
-file hash and occurrence count expected or that the file is absent. One map covers every variant
-of one repository, so a vulnerable and a fixed snapshot are blinded with the same pseudonyms.
+file hash and occurrence count expected or that the file is absent. It may also declare removals,
+each with a role, rationale, and exact per-variant hash or absence. One map covers every variant of
+one repository within a profile, so a vulnerable and a fixed snapshot receive one transformation.
 
 Approval. A map is applied only when its latest recorded review approves the map's content as it
 stands now. Reviews are a chain (:func:`scaneval.contracts.chain_digest`, kind
@@ -28,15 +30,16 @@ refusal raises :class:`~scaneval.materialize.MaterializationError` naming the re
 unapproved; it is for another repository; its variant for this snapshot is missing or pinned to
 another commit or export tree (a stale map); an edit names a path outside documentation and
 display configuration, or a forbidden one; an expected file is missing, present when it should be
-absent, or holds other bytes (stale); a file is not strict UTF-8; an original overlaps itself or
+absent, or holds other bytes (stale); an edit is not strict UTF-8; an original overlaps itself or
 another original (ambiguous or overlapping matches); an occurrence count differs from the one
 reviewed; a replacement would form an original again with the text beside it; a line would move;
-or a display file would not keep its structure. Only then is the original export copied and the
-reviewed occurrences replaced, and the result is verified: every file the map does not edit is
-byte-identical to the original export, every file keeps its mode, every edited file keeps its line
-structure, and line ``n`` of an edited file is line ``n`` of the original with the reviewed tokens
-replaced. Claim locations therefore map back to the original export as the identity, which is what
-lets labels written against the original score a blinded run.
+or a display file would not keep its structure. ``metadata_blinded`` refuses removals;
+``identity_reduced`` requires at least one and permits only classified documentation or instruction
+files. Only then is the original export copied, reviewed occurrences replaced, and reviewed files
+omitted. The result is verified: it holds exactly the original paths minus removals; every untouched
+file is byte-identical; every remaining file keeps its mode; and edited lines map one-for-one to the
+original. Labels are checked against the evaluator-side original, and a run separately refuses a
+removal of any labeled scoring path.
 
 Structure. A replacement is written into a file as text, without quoting, so an edit of a JSON,
 TOML, INI, or YAML display file (``.json``, ``.toml``, ``.ini``, ``.cfg``, ``.yml``, ``.yaml``) is
@@ -72,6 +75,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import shutil
 import stat
@@ -80,6 +84,7 @@ from typing import Any, Callable
 
 from .contracts import (
     ContractError,
+    IDENTITY_PROFILES,
     canonical_sha256,
     chain_digest,
     is_stated,
@@ -116,11 +121,24 @@ REVIEW_KIND = "blinding_review"
 ORIGINAL_ROOT = "original/source"
 # These mirror the blinding-map contract enums; the schema stays authoritative.
 EDIT_ROLES = ("documentation_identifier", "non_runtime_branding", "display_metadata")
+REMOVAL_ROLES = ("identity_document", "instruction_file")
 REVIEW_ROLES = ("curator", "independent_reviewer")
 REVIEW_DECISIONS = ("approve", "reject", "unresolved")
 # Files any role may edit, and configuration only a display_metadata edit with a stated role check
 # may edit. Everything else, source and scripts included, is never edited.
 DOCUMENTATION_SUFFIXES = frozenset({".md", ".markdown", ".rst", ".txt", ".adoc", ".asciidoc", ".org"})
+# The one common extensionless identity document the removal profile recognizes explicitly.
+# Editing remains suffix-based for backwards compatibility; removal is separately reviewed and hash-pinned.
+REMOVABLE_DOCUMENTATION_NAMES = frozenset({"readme"})
+REMOVABLE_DOCUMENTATION_ROOTS = frozenset({"doc", "docs", "documentation", "manual", "manuals",
+                                          "advisories", "changelog", "changelogs", "releases",
+                                          "release-notes", "release_notes"})
+REMOVABLE_ROOT_DOCUMENTS = frozenset({"readme", "changelog", "changes", "history", "news",
+                                     "release-notes", "release_notes", "releasenotes", "releases"})
+# A documentation suffix does not turn templates, prompts, or test payloads into identity prose.
+RUNTIME_REMOVAL_DIRECTORIES = frozenset({"src", "lib", "app", "apps", "test", "tests", "fixture", "fixtures",
+                                         "template", "templates", "prompt", "prompts", "static", "_static", "public",
+                                         "assets", "scripts", "bin"})
 DISPLAY_SUFFIXES = frozenset({".yml", ".yaml", ".toml", ".json", ".cfg", ".ini"})
 # Refused whatever the suffix or role. File names compare case-insensitively.
 FORBIDDEN_NAME_PREFIXES = ("license", "licence", "copying", "copyright", "notice", "authors", "contributors",
@@ -310,29 +328,12 @@ def _reads_as_instructions(path: str) -> bool:
 
 def _instruction_files(paths, listed) -> list[str]:
     """The instruction files among *paths* by this module's test, with those the export *listed*."""
-    return sorted({*listed, *(path for path in paths if _reads_as_instructions(path))})
+    return sorted({*(path for path in listed if path in paths),
+                   *(path for path in paths if _reads_as_instructions(path))})
 
 
-def path_class_gap(path: str, role: str, role_check: str | None = None) -> str | None:
-    """Why *path* may not be edited under *role*, or ``None`` when it may.
-
-    Documentation (``.md``, ``.rst``, ``.txt`` and the like) may be edited under any role.
-    Configuration with a display suffix (``.yml``, ``.toml``, ``.json`` and the like) only as
-    ``display_metadata`` with a stated ``role_check``, the reviewer's reason the field is not read
-    at runtime. Refused whatever the suffix and role, with names and directories compared without
-    regard to case: license, attribution, and security files (a name that starts ``license``,
-    ``copyright``, ``notice``, ``authors``, ``security`` and the like, or holds ``third`` then
-    ``party``, and anything under ``licenses/``); dependency manifests and lockfiles (a ``.txt``
-    whose name holds ``requirements`` or ``constraints``, and anything under ``requirements/``);
-    build, CI, and security configuration; anything under ``.github/workflows/``,
-    ``.github/actions/``, ``.github/codeql/``, ``.circleci/``, or ``.git/``; and the files a scanner
-    reads as instructions, ``CLAUDE.local.md`` among them, since changing those changes the
-    execution condition. Every other file, source and scripts included, is never edited. The lists
-    are a guard, not a classifier: they name what is known to matter and cannot name everything.
-    This reads the path only.
-    """
-    if role not in EDIT_ROLES:
-        return f"{role!r} is not an edit role; the roles are {', '.join(EDIT_ROLES)}"
+def _protected_path_gap(path: str) -> str | None:
+    """Why *path* is protected from both editing and removal, or ``None`` when it is not."""
     parts = PurePosixPath(path).parts
     folded_parts = tuple(part.casefold() for part in parts)
 
@@ -355,6 +356,28 @@ def path_class_gap(path: str, role: str, role_check: str | None = None) -> str |
         if fnmatch.fnmatchcase(name, pattern):
             return (f"{path} is a dependency manifest, a lockfile, or build, CI, or security "
                     f"configuration ({pattern})")
+    return None
+
+
+def path_class_gap(path: str, role: str, role_check: str | None = None) -> str | None:
+    """Why *path* may not be edited under *role*, or ``None`` when it may.
+
+    Documentation (``.md``, ``.rst``, ``.txt`` and the like) may be edited under any role.
+    Configuration with a display suffix (``.yml``, ``.toml``, ``.json`` and the like) only as
+    ``display_metadata`` with a stated ``role_check``, the reviewer's reason the field is not read
+    at runtime. Refused whatever the suffix and role, with names and directories compared without
+    regard to case: license, attribution, and security files; dependency manifests and lockfiles;
+    build, CI, and security configuration; and the files a scanner reads as instructions, since
+    changing those changes the execution condition. Every other file, source and scripts included,
+    is never edited. The lists are a guard, not a classifier: they name what is known to matter and
+    cannot name everything. This reads the path only.
+    """
+    if role not in EDIT_ROLES:
+        return f"{role!r} is not an edit role; the roles are {', '.join(EDIT_ROLES)}"
+    protected = _protected_path_gap(path)
+    if protected:
+        return protected
+    name = PurePosixPath(path).name.casefold()
     if _reads_as_instructions(path):
         return (f"{path} is a file a scanner reads as instructions; editing it changes the execution "
                 "condition, not display metadata")
@@ -371,6 +394,77 @@ def path_class_gap(path: str, role: str, role_check: str | None = None) -> str |
     return (f"{path} is neither documentation ({', '.join(sorted(DOCUMENTATION_SUFFIXES))}) nor display "
             f"configuration ({', '.join(sorted(DISPLAY_SUFFIXES))}); source, scripts, and every other "
             "file are never edited")
+
+
+def removal_path_gap(path: str, role: str) -> str | None:
+    """Why *path* may not be removed under *role*, or ``None`` when it may.
+
+    ``identity_document`` is limited to conventional root documents and documentation directories,
+    excluding runtime-like directories. ``instruction_file`` is limited to recognized instruction
+    names and textual instruction documents, not scripts or configuration under assistant roots.
+    Protected license, attribution, dependency, build, CI, and security paths are never removable.
+    Source and every unclassified path are never removable. This reads the path only; exact bytes
+    and variant presence are checked against the original export before a transformed tree exists.
+    """
+    if role not in REMOVAL_ROLES:
+        return f"{role!r} is not a removal role; the roles are {', '.join(REMOVAL_ROLES)}"
+    protected = _protected_path_gap(path)
+    if protected:
+        return protected
+    instructions = _reads_as_instructions(path)
+    pure = PurePosixPath(path)
+    suffix = pure.suffix.casefold()
+    if role == "instruction_file":
+        if not instructions:
+            return f"{path} is not a file a scanner reads as repository instructions"
+        if (pure.name.casefold() in _INSTRUCTION_NAMES
+                or suffix in DOCUMENTATION_SUFFIXES | {".mdc"}
+                or pure.name.casefold() in REMOVABLE_DOCUMENTATION_NAMES):
+            return None
+        return (f"{path} is in an instruction directory but is not a recognized instruction document; "
+                "source, scripts, and configuration are never removed")
+    if instructions:
+        return (f"{path} is a file a scanner reads as instructions; remove it under the "
+                "instruction_file role, not identity_document")
+    folded_parts = tuple(part.casefold() for part in pure.parts)
+    if any(part in RUNTIME_REMOVAL_DIRECTORIES for part in folded_parts[:-1]):
+        return f"{path} is under a runtime, source, template, prompt, or test directory; it is never removed"
+    stem = pure.stem.casefold() if suffix else pure.name.casefold()
+    documented = suffix in DOCUMENTATION_SUFFIXES or pure.name.casefold() in REMOVABLE_ROOT_DOCUMENTS
+    root_document = len(pure.parts) == 1 and stem.split(".", 1)[0] in REMOVABLE_ROOT_DOCUMENTS
+    docs_directory = len(pure.parts) > 1 and folded_parts[0] in REMOVABLE_DOCUMENTATION_ROOTS
+    github_prose = len(pure.parts) > 2 and folded_parts[:2] in {
+        (".github", "advisories"), (".github", "releases")}
+    if documented and (root_document or docs_directory or github_prose):
+        return None
+    return (f"{path} is not documentation in a conventional documentation directory or a recognized "
+            "root document; source, configuration, scripts, and every other file are never removed")
+
+
+def check_scoring_paths(document: dict, pack: dict, snapshot_id: str) -> None:
+    """Refuse a reviewed removal of a target or control location for this snapshot.
+
+    Shared by the runner and CLI dry run. A map that does not cover the snapshot is left to the
+    export preflight, which records the ordinary per-input preparation failure before any tree
+    is written. Its missing expectation must not raise an unchecked ``StopIteration`` here.
+    """
+    from .cases import cases_for_snapshot
+
+    paths: set[str] = set()
+    for case in cases_for_snapshot(pack, snapshot_id):
+        if case["target"]["snapshot_id"] == snapshot_id:
+            paths.update(posixpath.normpath(location["path"])
+                         for location in case["target"]["accepted_locations"])
+        for control in case["controls"]:
+            if control["snapshot_id"] == snapshot_id:
+                paths.update(posixpath.normpath(location["path"]) for location in control["locations"])
+    for removal in document.get("removals", []):
+        expected = next((entry for entry in removal["expected"]
+                         if entry["snapshot_id"] == snapshot_id), None)
+        if expected is not None and expected["state"] == "present" and removal["path"] in paths - {"."}:
+            raise ContractError(
+                f"identity_reduced removal {removal['removal_id']} would remove labelled scoring path "
+                f"{removal['path']} from snapshot {snapshot_id}; scoring evidence must remain in the scanner input")
 
 
 # --- occurrences --------------------------------------------------------------------------------
@@ -447,6 +541,17 @@ class _Edit:
     changed_lines: tuple[int, ...] = ()
     line_count: int = 0
     structure_check: str | None = None
+
+
+@dataclass(frozen=True)
+class _Removal:
+    """One reviewed removal as it applies to one variant, verified before anything is written."""
+
+    removal_id: str
+    path: str
+    role: str
+    present: bool
+    original_sha256: str | None = None
 
 
 def _variant(document: dict, snapshot_id: str, commit: str) -> dict:
@@ -1297,6 +1402,27 @@ def _edit_for(document: dict, edit: dict, snapshot_id: str, source: Path, hashes
                  f"sha256:{hashlib.sha256(data).hexdigest()}", counts, changed, _line_count(text), check)
 
 
+def _removal_for(removal: dict, snapshot_id: str, source: Path,
+                 hashes: dict[str, str]) -> _Removal:
+    """Check one removal against one original export, writing nothing."""
+    where = f"removal {removal['removal_id']}: {removal['path']}"
+    expected = next(entry for entry in removal["expected"] if entry["snapshot_id"] == snapshot_id)
+    path = removal["path"]
+    exported = source / path
+    if expected["state"] == "absent":
+        if path in hashes or exported.exists() or exported.is_symlink():
+            raise MaterializationError(f"stale map: {where} is expected to be absent from snapshot "
+                                       f"{snapshot_id}, but the export holds it")
+        return _Removal(removal["removal_id"], path, removal["role"], False)
+    if path not in hashes or exported.is_symlink() or not exported.is_file():
+        raise MaterializationError(f"stale map: {where} is expected in snapshot {snapshot_id}, but the "
+                                   "export holds no regular file there")
+    if hashes[path] != expected["file_sha256"]:
+        raise MaterializationError(f"stale map: {where} is expected at {expected['file_sha256']} in "
+                                   f"snapshot {snapshot_id}, but the export holds {hashes[path]}")
+    return _Removal(removal["removal_id"], path, removal["role"], True, hashes[path])
+
+
 # --- the blinded export --------------------------------------------------------------------------
 
 
@@ -1313,6 +1439,18 @@ BLINDED_LIMITS = [
     "and after the edit, and a YAML file outside that subset is refused; nothing else a scanner may read is "
     "re-validated.",
 ]
+IDENTITY_REDUCED_LIMITS = [
+    "Export removes original git history and controller state; it is not a sandbox.",
+    "Tracked regular files only: submodules and symbolic links are recorded as skipped.",
+    "Identity reduction applies reviewed metadata edits and removes only reviewed identity-only documentation "
+    "and repository instruction files. Package names, imports, source identifiers, paths, and recognizable code "
+    "are unchanged and may still reveal the repository. It is not anonymization.",
+    "Removed files are hash-pinned per snapshot and retained in the evaluator-side original export.",
+    "The original export under original/source is evaluator-side and is never handed to a scanner.",
+    "JSON, TOML, INI, and YAML display files within the block subset read here are verified by parsing them before "
+    "and after the edit, and a YAML file outside that subset is refused; nothing else a scanner may read is "
+    "re-validated.",
+]
 
 
 def _passed(check: str, detail: str) -> dict:
@@ -1320,15 +1458,22 @@ def _passed(check: str, detail: str) -> dict:
 
 
 def _preflight(document: dict, snapshot_id: str | None, snapshot: CachedSnapshot, *,
-               approval_required: bool) -> tuple[dict, list[dict]]:
+               profile: str, approval_required: bool) -> tuple[dict, list[dict]]:
     """Every check that needs no export: the contract, approval, repository, variant, and paths.
 
     Run before anything is written, so a map refused for any of these leaves no trial behind.
     """
+    if profile not in IDENTITY_PROFILES:
+        raise MaterializationError(f"unknown identity profile {profile!r}; expected one of {IDENTITY_PROFILES}")
     validate_document(MAP_KIND, document)
     if not snapshot_id:
         raise MaterializationError(
-            "a metadata-blinded export needs the pack snapshot id its map's variants are keyed by")
+            f"an {profile} export needs the pack snapshot id its map's variants are keyed by")
+    removals = document.get("removals", [])
+    if profile == "metadata_blinded" and removals:
+        raise _refused("metadata_blinded never removes files; use identity_reduced for a map with removals")
+    if profile == "identity_reduced" and not removals:
+        raise _refused("identity_reduced needs at least one reviewed file removal")
     validation = [_passed("map_contract", f"{MAP_KIND} {_named(document)}, content {content_digest(document)}")]
     gap = approval_gap(document)
     if gap is None:
@@ -1348,21 +1493,29 @@ def _preflight(document: dict, snapshot_id: str | None, snapshot: CachedSnapshot
         if gap:
             raise _refused(f"edit {edit['edit_id']}: {gap}")
         validation.append(_passed("edit_path_class", f"{edit['edit_id']}: {edit['path']} as {edit['role']}"))
+    for removal in removals:
+        gap = removal_path_gap(removal["path"], removal["role"])
+        if gap:
+            raise _refused(f"removal {removal['removal_id']}: {gap}")
+        validation.append(_passed("removal_path_class",
+                                  f"{removal['removal_id']}: {removal['path']} as {removal['role']}"))
     return variant, validation
 
 
 def _write_transformed(original_source: Path, source: Path, original: ExportedTree,
-                       edits: list[_Edit]) -> ExportedTree:
+                       edits: list[_Edit], removals: list[_Removal]) -> ExportedTree:
     """Copy the original export to *source*, write the edits, and verify the result.
 
-    Verified, not assumed: the transformed tree holds exactly the original export's paths, every
-    file no edit names is byte-identical to the original, every edited file holds exactly the
-    bytes computed for it, and every file keeps its mode. Anything that fails, or is interrupted,
-    after *source* is created removes it whole, so a refused transformation never leaves a
-    half-blinded tree where a scanner's input belongs. *source* must not exist yet; a directory
-    that already does is refused by ``mkdir`` before anything could remove it.
+    Verified, not assumed: the transformed tree holds exactly the original export's paths except
+    reviewed removals, every file no edit names is byte-identical to the original, every edited
+    file holds exactly the bytes computed for it, and every remaining file keeps its mode.
+    Anything that fails, or is interrupted, after *source* is created removes it whole, so a
+    refused transformation never leaves a half-transformed tree where a scanner's input belongs.
+    *source* must not exist yet; a directory that already does is refused by ``mkdir`` before
+    anything could remove it.
     """
     changed = {edit.path: edit for edit in edits if edit.present}
+    removed = {removal.path for removal in removals if removal.present}
 
     def mode(root: Path, relative: str) -> int:
         return stat.S_IMODE(os.stat(root / relative).st_mode)
@@ -1370,6 +1523,8 @@ def _write_transformed(original_source: Path, source: Path, original: ExportedTr
     source.mkdir(parents=True)
     try:
         for relative in sorted(original.hashes):
+            if relative in removed:
+                continue
             target = source / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(original_source / relative, target)
@@ -1382,7 +1537,8 @@ def _write_transformed(original_source: Path, source: Path, original: ExportedTr
             digest, size = sha256_file(file)
             hashes[relative] = digest
             byte_count += size
-        expected = {**original.hashes, **{path: edit.transformed_sha256 for path, edit in changed.items()}}
+        expected = {path: digest for path, digest in original.hashes.items() if path not in removed}
+        expected.update({path: edit.transformed_sha256 for path, edit in changed.items()})
         if hashes != expected:
             differing = {path for path in hashes.keys() & expected.keys() if hashes[path] != expected[path]}
             wrong = sorted((hashes.keys() ^ expected.keys()) | differing)
@@ -1428,7 +1584,8 @@ def _retained_cues(document: dict, source: Path, paths: list[str], instruction_f
 
 
 def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapshot_id: str | None,
-           clock: Callable[[], datetime] | None, approval_required: bool, variant_dir: str = "") -> dict:
+           profile: str, clock: Callable[[], datetime] | None, approval_required: bool,
+           variant_dir: str = "") -> dict:
     """Export the original, check the map against it, write the transformed tree, and record it all.
 
     *variant_dir* names where this snapshot's trees sit beneath the trial directory: ``""`` for the
@@ -1437,7 +1594,8 @@ def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapsho
     ``base/source`` and the original at ``original/base/source``. The original stays under
     ``original`` in both, which is the one place nothing is ever handed to a scanner from.
     """
-    variant, validation = _preflight(document, snapshot_id, snapshot, approval_required=approval_required)
+    variant, validation = _preflight(document, snapshot_id, snapshot, profile=profile,
+                                     approval_required=approval_required)
     source = trial_dir / variant_dir / "source"
     original_root = str(PurePosixPath("original") / variant_dir / "source")
     original_source = trial_dir / original_root
@@ -1453,6 +1611,8 @@ def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapsho
     validation.append(_passed("variant_tree", original_hash))
     edits = [_edit_for(document, edit, snapshot_id, original_source, original.hashes)
              for edit in document["edits"]]
+    removals = [_removal_for(removal, snapshot_id, original_source, original.hashes)
+                for removal in document.get("removals", [])]
     for edit in edits:
         if not edit.present:
             validation.append(_passed("edit_absent", f"{edit.edit_id}: {edit.path} is absent, as expected"))
@@ -1467,18 +1627,27 @@ def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapsho
         if edit.structure_check is not None:
             detail = _STRUCTURE_DETAILS[edit.structure_check]
             validation.append(_passed("edit_structure", f"{edit.edit_id}: {detail}"))
-    transformed = _write_transformed(original_source, source, original, edits)
-    unedited = len(original.hashes) - sum(1 for edit in edits if edit.present)
+    for removal in removals:
+        if not removal.present:
+            validation.append(_passed("removal_absent",
+                                      f"{removal.removal_id}: {removal.path} is absent, as expected"))
+            continue
+        validation.append(_passed("removal_file_hash",
+                                  f"{removal.removal_id}: {removal.path} is {removal.original_sha256}, "
+                                  "as expected"))
+    transformed = _write_transformed(original_source, source, original, edits, removals)
+    unedited = (len(original.hashes) - sum(1 for edit in edits if edit.present)
+                - sum(1 for removal in removals if removal.present))
     validation.append(_passed("unedited_files_unchanged",
                               f"{unedited} file(s) byte-identical to the original export"))
-    record = provenance_record(snapshot, "metadata_blinded", transformed, clock=clock)
+    record = provenance_record(snapshot, profile, transformed, clock=clock)
     record["schema_version"] = SCHEMA_VERSION
-    record["limits"] = list(BLINDED_LIMITS)
+    record["limits"] = list(IDENTITY_REDUCED_LIMITS if profile == "identity_reduced" else BLINDED_LIMITS)
     if variant_dir:
         record["trial"]["root"] = str(PurePosixPath(variant_dir) / "source")
     record["original"] = {"root": original_root, "tree_hash": original_hash,
                           "file_count": len(original.hashes), "byte_count": original.byte_count}
-    record["blinding"] = {
+    applied = {
         **map_identity(document),
         "content_sha256": content_digest(document),
         "reviewers": approving_reviews(document),
@@ -1493,10 +1662,22 @@ def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapsho
         "location_remapping": {"lines": "identity", "paths": "identity",
                                "verified_paths": sorted(edit.path for edit in edits if edit.present)},
     }
+    if profile == "identity_reduced":
+        applied["removals"] = [
+            {"removal_id": removal.removal_id, "path": removal.path, "role": removal.role,
+             "original_sha256": removal.original_sha256}
+            for removal in removals if removal.present]
+        applied["location_remapping"] = {
+            "lines": "identity", "paths": "identity_for_remaining_paths",
+            "verified_paths": sorted(edit.path for edit in edits if edit.present),
+            "removed_paths": sorted(removal.path for removal in removals if removal.present),
+        }
+    record["blinding"] = applied
     return record
 
 
-def preflight(document: dict, snapshot_id: str | None, snapshot: CachedSnapshot) -> None:
+def preflight(document: dict, snapshot_id: str | None, snapshot: CachedSnapshot, *,
+              profile: str = "metadata_blinded") -> None:
     """Ask *document* every question about one snapshot that needs no export, refusing as a run would.
 
     The contract, approval, repository, variant commit, and edit path classes: everything
@@ -1506,7 +1687,7 @@ def preflight(document: dict, snapshot_id: str | None, snapshot: CachedSnapshot)
     needs an export, the tree hash and each expected file, is still asked of each variant as it is
     exported. Writes nothing.
     """
-    _preflight(document, snapshot_id, snapshot, approval_required=True)
+    _preflight(document, snapshot_id, snapshot, profile=profile, approval_required=True)
 
 
 def export_blinded(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *,
@@ -1527,11 +1708,28 @@ def export_blinded(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *,
     identity. Every refusal is raised before ``source`` exists; see the module docstring for the
     list. The map must be approved: :func:`dry_run` is the one path that reports approval instead.
     """
-    return _blind(snapshot, Path(trial_dir), document, snapshot_id=snapshot_id, clock=clock,
-                  approval_required=True, variant_dir=variant_dir)
+    return _blind(snapshot, Path(trial_dir), document, snapshot_id=snapshot_id,
+                  profile="metadata_blinded", clock=clock, approval_required=True,
+                  variant_dir=variant_dir)
+
+
+def export_identity_reduced(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *,
+                            snapshot_id: str | None, clock: Callable[[], datetime] | None = None,
+                            variant_dir: str = "") -> dict:
+    """Export an identity-reduced snapshot using reviewed edits and file removals.
+
+    The original export stays evaluator-side under ``original``. Only paths approved as
+    identity-only documentation or repository instructions can be removed; every removal is
+    pinned to the exact original file hash for this variant. Remaining paths and all of their line
+    numbers retain identity with the original export.
+    """
+    return _blind(snapshot, Path(trial_dir), document, snapshot_id=snapshot_id,
+                  profile="identity_reduced", clock=clock, approval_required=True,
+                  variant_dir=variant_dir)
 
 
 def dry_run(document: dict, snapshot: CachedSnapshot, snapshot_id: str, workdir: Path, *,
+            profile: str = "metadata_blinded",
             clock: Callable[[], datetime] | None = None) -> dict:
     """Apply *document* to one variant inside *workdir* exactly as a run would, approval aside.
 
@@ -1540,5 +1738,5 @@ def dry_run(document: dict, snapshot: CachedSnapshot, snapshot_id: str, workdir:
     approved is :func:`approval_gap`. Returns the record a run would write. Writes nothing outside
     *workdir* and never modifies the map. What this returns is never a scan input.
     """
-    return _blind(snapshot, Path(workdir), document, snapshot_id=snapshot_id, clock=clock,
-                  approval_required=False)
+    return _blind(snapshot, Path(workdir), document, snapshot_id=snapshot_id, profile=profile,
+                  clock=clock, approval_required=False)

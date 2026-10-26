@@ -33,7 +33,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import blinding, cases
-from .contracts import ContractError, canonical_sha256, input_identity, validate_document
+from .contracts import IDENTITY_PROFILES, ContractError, canonical_sha256, input_identity, validate_document
 from .execution import invocation_id
 
 
@@ -125,9 +125,9 @@ def _frozen_pr_plan(pack: dict, change_set: dict, base: dict, head: dict) -> dic
 def _input_row(entry: dict, pack: dict, base_dir: Path, maps: dict[str, dict]) -> dict:
     """One configured input as the schedule records it.
 
-    A metadata-blinded input records the identity of its map: the document in *maps* under its
-    input id when the caller loaded it already, which is what makes the schedule name the map the
-    run actually applies, and otherwise the map its entry names under *base_dir*. A native PR input
+    A transformed identity input records its map: the document in *maps* under its input id when
+    the caller loaded it already, which is what makes the schedule name the map the run actually
+    applies, and otherwise the map its entry names under *base_dir*. A native PR input
     is scheduled as the review of a change set the pack declares: its row is about the change set's
     head snapshot, carries the change set as the pack declared it, and freezes the plan the pack's
     eligibility gives it; a change set the pack does not declare is refused, as an undeclared
@@ -145,11 +145,11 @@ def _input_row(entry: dict, pack: dict, base_dir: Path, maps: dict[str, dict]) -
     else:
         snapshot = cases.snapshot_by_id(pack, entry["snapshot_id"])
     identity = None
-    if profile == "metadata_blinded":
+    if profile in IDENTITY_PROFILES:
         document = maps.get(input_id)
         if document is None:
             if "blinding_map" not in entry:
-                raise ContractError(f"input {input_id} is metadata_blinded but names no blinding map")
+                raise ContractError(f"input {input_id} is {profile} but names no blinding map")
             document = blinding.load_map(base_dir / entry["blinding_map"])
         identity = blinding.map_identity(document)
     plan = (_frozen_pr_plan(pack, change_set, cases.snapshot_by_id(pack, change_set["base_snapshot_id"]), snapshot)

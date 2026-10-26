@@ -26,7 +26,8 @@ import pytest
 from scaneval import blinding, cases, materialize
 from scaneval.adapters.base import Adapter, NativeOutcome
 from scaneval.cli import _retained_in, main
-from scaneval.contracts import ContractError, canonical_json, chain_digest, load_document, validate_document
+from scaneval.contracts import (ContractError, canonical_json, chain_digest, load_document,
+                                pack_anchor_digest, validate_document)
 from scaneval.execution import LOCAL_ISOLATION
 from scaneval.materialize import MaterializationError
 from scaneval.runner import run_from_config
@@ -55,6 +56,10 @@ REPRESENTS = ("This case tests caller-controlled shell command construction unde
               "assumption, and adds a single-file Python sink for the blinding tests.")
 BLINDED = {"snapshot_id": "snap-a", "profile": "metadata_blinded", "blinding_map": "widget-map.json"}
 BLINDED_FIXED = {"snapshot_id": "snap-fixed", "profile": "metadata_blinded", "blinding_map": "widget-map.json"}
+IDENTITY_REDUCED = {"snapshot_id": "snap-a", "profile": "identity_reduced",
+                    "blinding_map": "widget-map.json"}
+IDENTITY_REDUCED_FIXED = {"snapshot_id": "snap-fixed", "profile": "identity_reduced",
+                          "blinding_map": "widget-map.json"}
 
 
 def git(*args: str, cwd: Path) -> str:
@@ -126,6 +131,20 @@ def edit_entry(widget: dict, edit_id: str, path: str, role: str, replacements: l
     return entry
 
 
+def removal_entry(widget: dict, removal_id: str, path: str, role: str) -> dict:
+    """One removal pinned to the exact exported bytes of every variant."""
+    expected = []
+    for snapshot_id, exported in widget["exports"].items():
+        if path in exported.hashes:
+            expected.append({"snapshot_id": snapshot_id, "state": "present",
+                             "file_sha256": exported.hashes[path]})
+        else:
+            expected.append({"snapshot_id": snapshot_id, "state": "absent"})
+    return {"removal_id": removal_id, "path": path, "role": role,
+            "rationale": f"{path} supplies repository identity but no runtime or scoring logic.",
+            "expected": expected}
+
+
 def approve(document: dict, decision: str = "approve") -> dict:
     blinding.record_review(document, reviewer=REVIEWER, role="independent_reviewer", decision=decision,
                            note=REVIEW_NOTE, clock=CLOCK)
@@ -158,6 +177,17 @@ def widget_map(widget: dict, *, approved: bool = True) -> dict:
     return approve(document) if approved else document
 
 
+def identity_reduced_map(widget: dict, *, approved: bool = True) -> dict:
+    document = widget_map(widget, approved=False)
+    document["edits"] = [edit for edit in document["edits"] if edit["path"] != "README.md"]
+    document["removals"] = [
+        removal_entry(widget, "readme", "README.md", "identity_document"),
+        removal_entry(widget, "claude-instructions", "CLAUDE.md", "instruction_file"),
+    ]
+    validate_document("blinding-map", document)
+    return approve(document) if approved else document
+
+
 def _variant(document: dict, snapshot_id: str) -> dict:
     return next(variant for variant in document["variants"] if variant["snapshot_id"] == snapshot_id)
 
@@ -166,8 +196,20 @@ def _edit(document: dict, edit_id: str) -> dict:
     return next(edit for edit in document["edits"] if edit["edit_id"] == edit_id)
 
 
+def _removal(document: dict, removal_id: str) -> dict:
+    return next(removal for removal in document.get("removals", [])
+                if removal["removal_id"] == removal_id)
+
+
 def _expected(edit: dict, snapshot_id: str) -> dict:
     return next(entry for entry in edit["expected"] if entry["snapshot_id"] == snapshot_id)
+
+
+def only_variant(document: dict, snapshot_id: str) -> dict:
+    document["variants"] = [_variant(document, snapshot_id)]
+    for operation in document["edits"] + document.get("removals", []):
+        operation["expected"] = [_expected(operation, snapshot_id)]
+    return reapproved(document)
 
 
 # --- the map contract and its reviews ----------------------------------------------------------
@@ -213,6 +255,40 @@ def test_the_map_contract_refuses_malformed_edits(widget, mutate, match):
     document = widget_map(widget, approved=False)
     mutate(document)
     with pytest.raises(ContractError, match=match):
+        validate_document("blinding-map", document)
+
+
+@pytest.mark.parametrize(("mutate", "match"), [
+    (lambda document: _removal(document, "readme").update(path="../README.md"), "relative path"),
+    (lambda document: _removal(document, "readme").update(path="docs//README.md"), "normalized"),
+    (lambda document: _removal(document, "readme").update(rationale="\u200b"), "must state its rationale"),
+    (lambda document: _removal(document, "readme")["expected"].pop(),
+     "one expectation for every variant"),
+    (lambda document: _removal(document, "claude-instructions").update(path="README.md"),
+     "removals.path values must be unique"),
+    (lambda document: _edit(document, "guide-title").update(path="README.md"),
+     "both edited and removed"),
+], ids=["escaping-path", "unnormalized-path", "blank-rationale", "missing-variant",
+        "duplicate-path", "edit-removal-overlap"])
+def test_the_map_contract_refuses_malformed_removals(widget, mutate, match):
+    document = identity_reduced_map(widget, approved=False)
+    mutate(document)
+    with pytest.raises(ContractError, match=match):
+        validate_document("blinding-map", document)
+
+
+def test_the_map_contract_accepts_removal_only_but_not_an_empty_transformation(widget):
+    document = identity_reduced_map(widget, approved=False)
+    document["edits"] = []
+    validate_document("blinding-map", document)
+
+    undeclared = deepcopy(document)
+    undeclared["pseudonyms"] = []
+    with pytest.raises(ContractError, match="pseudonyms"):
+        validate_document("blinding-map", undeclared)
+
+    document["removals"] = []
+    with pytest.raises(ContractError, match="at least one edit or removal"):
         validate_document("blinding-map", document)
 
 
@@ -294,6 +370,12 @@ def export_blinded(widget: dict, document: dict, trial: Path, snapshot_id: str =
                                        blinding_map=document, snapshot_id=snapshot_id, clock=CLOCK)
 
 
+def export_identity_reduced(widget: dict, document: dict, trial: Path,
+                            snapshot_id: str = "snap-a") -> dict:
+    return materialize.export_snapshot(cached(widget, snapshot_id), trial, profile="identity_reduced",
+                                       blinding_map=document, snapshot_id=snapshot_id, clock=CLOCK)
+
+
 def blinded_text(text: str) -> str:
     for original, replacement in PSEUDONYMS.items():
         text = text.replace(original, replacement)
@@ -328,6 +410,118 @@ def test_the_standard_export_record_is_the_record_it_always_was(tmp_path, widget
                    "Instruction files stay in the standard profile and are recorded as identity cues."],
     }
     assert not (tmp_path / "trial" / "original").exists()
+
+
+def test_identity_reduced_removes_only_reviewed_files_and_keeps_the_original(tmp_path, widget):
+    document = identity_reduced_map(widget)
+    trial = tmp_path / "trial"
+
+    record = export_identity_reduced(widget, document, trial)
+
+    source, original = trial / "source", trial / "original" / "source"
+    assert not (source / "README.md").exists()
+    assert not (source / "CLAUDE.md").exists()
+    assert (original / "README.md").read_text(encoding="utf-8") == README_VULNERABLE
+    assert (original / "CLAUDE.md").read_text(encoding="utf-8") == FILES["CLAUDE.md"]
+    for relative in set(FILES) - {"README.md", "CLAUDE.md", "docs/guide.md", "mkdocs.yml"}:
+        assert (source / relative).read_bytes() == (original / relative).read_bytes()
+    assert (source / "docs" / "guide.md").read_text(encoding="utf-8") == \
+        "Sprocket guide\nRating: ***\n"
+    assert (source / "mkdocs.yml").read_text(encoding="utf-8") == "site_name: Sprocket Docs\n"
+
+    applied = record["blinding"]
+    assert record["schema_version"] == "2.1" and record["profile"] == "identity_reduced"
+    assert record["trial"]["file_count"] == len(FILES) - 2
+    assert record["instruction_files"] == []
+    assert [(item["removal_id"], item["path"], item["role"]) for item in applied["removals"]] == [
+        ("readme", "README.md", "identity_document"),
+        ("claude-instructions", "CLAUDE.md", "instruction_file"),
+    ]
+    assert all(item["original_sha256"] == widget["exports"]["snap-a"].hashes[item["path"]]
+               for item in applied["removals"])
+    assert applied["location_remapping"] == {
+        "lines": "identity", "paths": "identity_for_remaining_paths",
+        "verified_paths": ["docs/guide.md", "mkdocs.yml"],
+        "removed_paths": ["CLAUDE.md", "README.md"],
+    }
+    assert applied["retained_identity_cues"]["instruction_files"] == []
+    assert {check["check"] for check in applied["validation"]} >= {
+        "removal_path_class", "removal_file_hash", "unedited_files_unchanged"}
+
+
+def test_metadata_blinded_refuses_a_map_that_removes_files_before_export(tmp_path, widget):
+    document = identity_reduced_map(widget)
+    trial = tmp_path / "trial"
+
+    with pytest.raises(MaterializationError, match="metadata_blinded never removes files"):
+        export_blinded(widget, document, trial)
+    assert not trial.exists()
+
+
+def test_identity_reduced_requires_a_removal_and_exact_original_bytes(tmp_path, widget):
+    no_removal = widget_map(widget)
+    with pytest.raises(MaterializationError, match="needs at least one reviewed file removal"):
+        export_identity_reduced(widget, no_removal, tmp_path / "none")
+    assert not (tmp_path / "none").exists()
+
+    stale = identity_reduced_map(widget, approved=False)
+    _expected(_removal(stale, "readme"), "snap-a")["file_sha256"] = "sha256:" + "0" * 64
+    reapproved(stale)
+    with pytest.raises(MaterializationError, match=r"stale map: removal readme: README.md"):
+        export_identity_reduced(widget, stale, tmp_path / "stale")
+    assert not (tmp_path / "stale" / "source").exists()
+
+
+@pytest.mark.parametrize(("path", "role", "match"), [
+    ("src/app.py", "identity_document", "source, template, prompt, or test directory"),
+    ("LICENSE", "identity_document", "license, attribution, or security"),
+    ("package.json", "identity_document", "dependency manifest"),
+    (".github/workflows/ci.yml", "instruction_file", "build, CI, or repository machinery"),
+    ("README.md", "instruction_file", "is not a file a scanner reads"),
+    ("CLAUDE.md", "identity_document", "remove it under the instruction_file role"),
+])
+def test_identity_reduced_refuses_unsafe_or_misclassified_removals(tmp_path, widget, path, role, match):
+    document = identity_reduced_map(widget, approved=False)
+    document["removals"] = [removal_entry(widget, "unsafe", path, role)]
+    reapproved(document)
+    trial = tmp_path / path.replace("/", "-")
+    with pytest.raises(MaterializationError, match=match):
+        export_identity_reduced(widget, document, trial)
+    assert not trial.exists()
+
+
+def test_identity_reduced_records_a_variant_where_a_reviewed_removal_is_absent(tmp_path, widget):
+    document = identity_reduced_map(widget, approved=False)
+    document["edits"] = [edit for edit in document["edits"] if edit["path"] != "docs/guide.md"]
+    document["removals"] = [removal_entry(widget, "guide", "docs/guide.md", "identity_document")]
+    reapproved(document)
+
+    record = export_identity_reduced(widget, document, tmp_path / "fixed", "snap-fixed")
+
+    assert record["blinding"]["removals"] == []
+    assert record["blinding"]["location_remapping"]["removed_paths"] == []
+    assert any(check["check"] == "removal_absent" for check in record["blinding"]["validation"])
+
+
+@pytest.mark.parametrize("path", ["src/templates/email.txt", "app/prompts/system.md",
+                                  "tests/fixtures/payload.txt", "docs/prompts/system.md", "docs/prompt/system.md",
+                                  "docs/_static/payload.txt",
+                                  "notes/identity.md", "system-prompt.md",
+                                  ".claude/hooks/helper.py", ".claude/settings.json",
+                                  ".codex/settings.toml", ".cursor/mcp.json",
+                                  ".github/instructions/helper.sh"])
+def test_identity_reduced_preserves_runtime_docs_scripts_and_assistant_configuration(tmp_path, path):
+    widget = build_widget(tmp_path, {**FILES, path: "Widget runtime material\n"})
+    document = identity_reduced_map(widget, approved=False)
+    role = "instruction_file" if path.startswith(".") else "identity_document"
+    document["removals"] = [removal_entry(widget, "unsafe", path, role)]
+    reapproved(document)
+
+    with pytest.raises(MaterializationError, match="never removed"):
+        export_identity_reduced(widget, document, tmp_path / "trial")
+
+    assert not (tmp_path / "trial").exists()
+    assert (widget["probes"]["snap-a"] / path).read_text(encoding="utf-8") == "Widget runtime material\n"
 
 
 def test_a_blinded_export_replaces_exactly_the_reviewed_occurrences_and_records_them(tmp_path, widget):
@@ -406,11 +600,13 @@ def test_an_edited_files_lines_map_to_the_original_as_the_identity(tmp_path, wid
                       "site-name: 1 line(s) before and after; each line maps to the same line"]
 
 
-def test_repeating_a_valid_transformation_gives_byte_identical_source_and_provenance(tmp_path, widget):
-    document = widget_map(widget)
+@pytest.mark.parametrize("profile", ["metadata_blinded", "identity_reduced"])
+def test_repeating_a_valid_transformation_gives_byte_identical_source_and_provenance(tmp_path, widget, profile):
+    document = identity_reduced_map(widget) if profile == "identity_reduced" else widget_map(widget)
+    exporter = export_identity_reduced if profile == "identity_reduced" else export_blinded
 
-    first = export_blinded(widget, deepcopy(document), tmp_path / "first")
-    second = export_blinded(widget, deepcopy(document), tmp_path / "second")
+    first = exporter(widget, deepcopy(document), tmp_path / "first")
+    second = exporter(widget, deepcopy(document), tmp_path / "second")
 
     assert canonical_json(first) == canonical_json(second)
     for tree in ("source", "original/source"):
@@ -672,6 +868,20 @@ def test_only_documentation_and_reviewed_display_metadata_may_be_edited(path, ro
 def test_a_document_that_only_resembles_a_forbidden_file_stays_editable(path):
     """The rules match a name's start, a dependency file's kind, or a directory, not any word in a path."""
     assert blinding.path_class_gap(path, "documentation_identifier") is None
+
+
+def test_removal_roles_allow_only_identity_docs_or_actual_instruction_files():
+    assert blinding.removal_path_gap("README", "identity_document") is None
+    assert blinding.removal_path_gap("docs/guide.md", "identity_document") is None
+    assert blinding.removal_path_gap("CLAUDE.md", "instruction_file") is None
+    assert blinding.removal_path_gap(".claude/commands/review.md", "instruction_file") is None
+    assert blinding.removal_path_gap(".cursor/rules/review.mdc", "instruction_file") is None
+    assert blinding.removal_path_gap(".cursorrules", "instruction_file") is None
+    assert blinding.removal_path_gap("CHANGELOG", "identity_document") is None
+    assert blinding.removal_path_gap("releases/2026.md", "identity_document") is None
+    assert "instruction_file role" in blinding.removal_path_gap("CLAUDE.md", "identity_document")
+    assert "is not a file" in blinding.removal_path_gap("README.md", "instruction_file")
+    assert "never removed" in blinding.removal_path_gap("src/app.py", "identity_document")
 
 
 def test_a_scanner_reads_an_instruction_file_by_any_case_and_a_blinded_export_lists_it():
@@ -1823,6 +2033,25 @@ class InspectingAdapter(FakeAdapter):
         return super().scan(request=request, source_dir=source_dir, raw_dir=raw_dir, **kwargs)
 
 
+class IdentityInspectingAdapter(FakeAdapter):
+    """Records the paths and evaluator artifacts visible in an identity-reduced workspace."""
+
+    def __init__(self):
+        super().__init__()
+        self.seen: dict = {}
+
+    def scan(self, *, request, source_dir, raw_dir, **kwargs):
+        workspace = source_dir.parent
+        paths = sorted(path.relative_to(source_dir).as_posix()
+                       for path in source_dir.rglob("*") if path.is_file())
+        every_name = {part for path in workspace.rglob("*")
+                      for part in path.relative_to(workspace).parts}
+        self.seen = {"paths": paths,
+                     "profile": request["input"]["profile"],
+                     "evaluator": sorted(every_name & {"original", "provenance.json", "widget-map.json"})}
+        return super().scan(request=request, source_dir=source_dir, raw_dir=raw_dir, **kwargs)
+
+
 def blinded_run(tmp_path: Path, widget: dict, document: dict, inputs: list[dict], adapter: Adapter, *,
                 checked: bool = False, **config_changes) -> tuple[dict, Path]:
     write_pack(tmp_path / "pack.json", widget, checked=checked)
@@ -1899,6 +2128,86 @@ def test_a_scanner_handed_a_blinded_input_finds_no_map_no_provenance_and_no_orig
                             "tokens_in_request": [], "profile": "metadata_blinded"}
 
 
+def test_a_scanner_handed_identity_reduced_input_cannot_see_removed_files_or_the_original(tmp_path, widget):
+    adapter = IdentityInspectingAdapter()
+
+    manifest, out = blinded_run(tmp_path, widget, identity_reduced_map(widget), [IDENTITY_REDUCED], adapter)
+
+    row = manifest["inputs"][0]
+    assert row["input_id"] == "snap-a.identity-reduced"
+    assert row["preparation_failure"] is None and manifest["invocations"][0]["status"] == "success"
+    assert "README.md" not in adapter.seen["paths"] and "CLAUDE.md" not in adapter.seen["paths"]
+    assert adapter.seen["profile"] == "identity_reduced" and adapter.seen["evaluator"] == []
+    assert (out / "inputs" / row["input_id"] / "original" / "source" / "README.md").is_file()
+    bundle = out / "invocations" / "snap-a.identity-reduced__fake-a__r1"
+    request = load_document(bundle / "request.json", "scan-request")
+    plan = load_document(bundle / "evaluator" / "plan.json", "evaluation-plan")
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert request["input"]["profile"] == plan["provenance"]["profile"] == \
+        execution["provenance"]["profile"] == "identity_reduced"
+    assert plan["provenance"]["blinding"] == blinding.map_identity(identity_reduced_map(widget))
+
+
+@pytest.mark.parametrize("problem", ["missing-variant", "stale-removal-hash", "stale-commit"])
+def test_identity_reduced_map_mismatches_fail_only_the_affected_input(tmp_path, widget, problem):
+    document = identity_reduced_map(widget, approved=False)
+    if problem == "missing-variant":
+        only_variant(document, "snap-fixed")
+        message = "has no variant for snapshot snap-a"
+    elif problem == "stale-removal-hash":
+        _expected(_removal(document, "readme"), "snap-a")["file_sha256"] = "sha256:" + "0" * 64
+        message = "stale map: removal readme"
+    else:
+        _variant(document, "snap-a")["commit"] = "0" * 40
+        message = "stale map: map widget-metadata"
+    reapproved(document)
+    adapter = FakeAdapter()
+
+    manifest, out = blinded_run(tmp_path, widget, document,
+                                [{"snapshot_id": "snap-a"}, IDENTITY_REDUCED], adapter)
+
+    standard, reduced = manifest["inputs"]
+    assert manifest["status"] == "completed" and standard["preparation_failure"] is None
+    assert reduced["preparation_failure"]["type"] == "MaterializationError"
+    assert message in reduced["preparation_failure"]["message"]
+    assert (reduced["tree_hash"], reduced["input_hash"]) == (None, None)
+    assert [row["status"] for row in manifest["invocations"]] == ["success", "skipped"]
+    assert adapter.calls == 1 and adapter.scanned == [standard["tree_hash"]]
+    assert not (out / "inputs" / "snap-a.identity-reduced" / "source").exists()
+
+
+def test_removal_only_maps_still_detect_identity_in_scanner_visible_ids(tmp_path, widget):
+    document = identity_reduced_map(widget, approved=False)
+    document["edits"] = []
+    reapproved(document)
+    adapter = FakeAdapter()
+
+    with pytest.raises(ContractError, match="the run id names 'AcmeCorp'"):
+        blinded_run(tmp_path, widget, document, [IDENTITY_REDUCED], adapter, run_id="AcmeCorp-widget")
+
+    assert adapter.calls == 0 and not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("location_kind", ["target", "control"])
+def test_identity_reduced_refuses_to_remove_a_labelled_scoring_path_before_output(tmp_path, widget, location_kind):
+    pack = write_pack(tmp_path / "pack.json", widget)
+    if location_kind == "target":
+        pack["cases"][0]["target"]["accepted_locations"][0].update(path="README.md", start_line=1, end_line=1)
+        entry = IDENTITY_REDUCED
+    else:
+        pack["cases"][0]["controls"][0]["locations"][0].update(path="README.md", start_line=1, end_line=1)
+        entry = IDENTITY_REDUCED_FIXED
+    pack["anchor_sha256"] = pack_anchor_digest(pack)
+    cases.save_pack(tmp_path / "pack.json", pack)
+    blinding.save_map(tmp_path / "widget-map.json", identity_reduced_map(widget))
+    write_config(tmp_path / "run.json", [entry])
+    out = tmp_path / "out"
+
+    with pytest.raises(ContractError, match="would remove labelled scoring path README.md"):
+        run_from_config(tmp_path / "run.json", out, clock=CLOCK, adapters={"fake": FakeAdapter()})
+    assert not out.exists()
+
+
 def test_a_blinded_run_binds_results_to_the_transformed_tree_and_labels_to_the_original(tmp_path, widget):
     document = widget_map(widget)
     adapter = FakeAdapter()
@@ -1952,6 +2261,36 @@ def test_the_schedule_names_each_blinded_map_and_pairs_only_within_one_profile(t
     assert [(pair["vulnerable_input_id"], pair["fixed_input_id"]) for pair in frozen["pairs"]] == [
         ("snap-a", "snap-fixed"), ("snap-a.blinded", "snap-fixed.blinded")]
     assert all(pair["repetition_pairs"] == [[1, 1]] for pair in frozen["pairs"])
+
+
+def test_three_profiles_share_a_run_but_keep_separate_maps_pairs_and_views(tmp_path, widget):
+    write_pack(tmp_path / "pack.json", widget, checked=True)
+    metadata = widget_map(widget)
+    reduced = identity_reduced_map(widget)
+    blinding.save_map(tmp_path / "metadata-map.json", metadata)
+    blinding.save_map(tmp_path / "reduced-map.json", reduced)
+    metadata_inputs = [{**BLINDED, "blinding_map": "metadata-map.json"},
+                       {**BLINDED_FIXED, "blinding_map": "metadata-map.json"}]
+    reduced_inputs = [{**IDENTITY_REDUCED, "blinding_map": "reduced-map.json"},
+                      {**IDENTITY_REDUCED_FIXED, "blinding_map": "reduced-map.json"}]
+    inputs = [{"snapshot_id": "snap-a"}, {"snapshot_id": "snap-fixed"},
+              *metadata_inputs, *reduced_inputs]
+    write_config(tmp_path / "run.json", inputs)
+
+    manifest = run_from_config(tmp_path / "run.json", tmp_path / "out", clock=CLOCK,
+                               adapters={"fake": FakeAdapter()})
+
+    assert all(row["status"] == "success" for row in manifest["invocations"])
+    frozen = load_document(tmp_path / "out" / manifest["schedule_path"], "evaluation-schedule")
+    assert [(pair["vulnerable_input_id"], pair["fixed_input_id"]) for pair in frozen["pairs"]] == [
+        ("snap-a", "snap-fixed"),
+        ("snap-a.blinded", "snap-fixed.blinded"),
+        ("snap-a.identity-reduced", "snap-fixed.identity-reduced"),
+    ]
+    identities = {row["profile"]: row["blinding"] for row in frozen["inputs"]
+                  if row["snapshot_id"] == "snap-a"}
+    assert identities == {"standard": None, "metadata_blinded": blinding.map_identity(metadata),
+                          "identity_reduced": blinding.map_identity(reduced)}
 
 
 LEAKS = {
@@ -2195,6 +2534,45 @@ def test_blinding_check_exits_one_for_a_refused_or_unapproved_map(tmp_path, widg
     assert "snap-a: pass" in printed and "a run refuses it" in err
 
 
+def test_blinding_check_validates_and_prints_identity_reduced_removals(tmp_path, widget, capsys):
+    write_pack(tmp_path / "pack.json", widget)
+    path = tmp_path / "widget-map.json"
+    blinding.save_map(path, identity_reduced_map(widget))
+
+    code, printed, err = cli(capsys, "blinding", "check", str(path), "--pack",
+                             str(tmp_path / "pack.json"), "--cache-root", str(widget["cache"]),
+                             "--profile", "identity_reduced")
+
+    assert code == 0 and err == ""
+    assert "readme README.md: removed as identity_document" in printed
+    assert "claude-instructions CLAUDE.md: removed as instruction_file" in printed
+
+
+@pytest.mark.parametrize("location_kind", ["target", "control"])
+def test_blinding_check_refuses_removal_of_scoring_evidence(tmp_path, widget, capsys, location_kind):
+    pack = write_pack(tmp_path / "pack.json", widget)
+    if location_kind == "target":
+        pack["cases"][0]["target"]["accepted_locations"][0].update(path="README.md", start_line=1, end_line=1)
+        snapshot_id = "snap-a"
+    else:
+        pack["cases"][0]["controls"][0]["locations"][0].update(path="README.md", start_line=1, end_line=1)
+        snapshot_id = "snap-fixed"
+    pack["anchor_sha256"] = pack_anchor_digest(pack)
+    cases.save_pack(tmp_path / "pack.json", pack)
+    path = tmp_path / "widget-map.json"
+    blinding.save_map(path, identity_reduced_map(widget))
+    before = path.read_bytes()
+
+    code, printed, err = cli(capsys, "blinding", "check", str(path), "--pack", str(tmp_path / "pack.json"),
+                             "--cache-root", str(widget["cache"]), "--profile", "identity_reduced",
+                             "--snapshot-id", snapshot_id)
+
+    assert code == 1 and f"{snapshot_id}: refused:" in printed
+    assert "would remove labelled scoring path README.md" in printed
+    assert f"{snapshot_id}: pass" not in printed and "refused for 1 variant(s)" in err
+    assert path.read_bytes() == before
+
+
 def test_blinding_review_appends_one_chained_review_and_never_names_a_reviewer_itself(tmp_path, widget, capsys):
     path = tmp_path / "widget-map.json"
     blinding.save_map(path, widget_map(widget, approved=False))
@@ -2227,9 +2605,34 @@ def test_blinding_review_appends_one_chained_review_and_never_names_a_reviewer_i
 
 
 def export_blinded_pr(widget: dict, document: dict, trial: Path, *, base: str = "snap-a",
-                      head: str = "snap-fixed") -> dict:
-    return materialize.export_pr(cached(widget, base), cached(widget, head), trial, profile="metadata_blinded",
+                      head: str = "snap-fixed", profile: str = "metadata_blinded") -> dict:
+    return materialize.export_pr(cached(widget, base), cached(widget, head), trial, profile=profile,
                                  blinding_map=document, base_snapshot_id=base, head_snapshot_id=head, clock=CLOCK)
+
+
+def test_identity_reduced_pr_removes_reviewed_files_present_in_head_and_absent_in_base(tmp_path, widget):
+    document = identity_reduced_map(widget, approved=False)
+    document["edits"] = [edit for edit in document["edits"] if edit["path"] != "docs/guide.md"]
+    document["removals"].append(removal_entry(widget, "guide", "docs/guide.md", "identity_document"))
+    reapproved(document)
+    trial = tmp_path / "trial"
+
+    record = export_blinded_pr(widget, document, trial, base="snap-fixed", head="snap-a",
+                               profile="identity_reduced")
+
+    assert (trial / "original" / "source" / "docs" / "guide.md").is_file()
+    assert not (trial / "original" / "base" / "source" / "docs" / "guide.md").exists()
+    for tree in ("source", "base/source"):
+        assert not ((trial / tree) / "README.md").exists()
+        assert not ((trial / tree) / "CLAUDE.md").exists()
+        assert not ((trial / tree) / "docs" / "guide.md").exists()
+    assert [item["removal_id"] for item in record["head"]["blinding"]["removals"]] == [
+        "readme", "claude-instructions", "guide"]
+    assert [item["removal_id"] for item in record["base"]["blinding"]["removals"]] == [
+        "readme", "claude-instructions"]
+    assert any(check["check"] == "removal_absent" for check in record["base"]["blinding"]["validation"])
+    assert record["diff"]["changes"] == {"added": [], "deleted": [], "modified": ["src/app.py"],
+                                          "renamed": [], "mode_changed": []}
 
 
 def test_a_blinded_pr_transforms_the_base_and_the_head_with_one_map(tmp_path, widget):
@@ -2345,14 +2748,18 @@ BLINDED_PR = {"mode": "pr", "change_set_id": "cs-fix", "profile": "metadata_blin
               "blinding_map": "widget-map.json"}
 
 
-def write_pr_pack(path: Path, widget: dict) -> dict:
+def write_pr_pack(path: Path, widget: dict, *, introducing: bool = False) -> dict:
     """The blinding fixture's pack plus the change set from the vulnerable snapshot to the fixed one."""
     pack = write_pack(path, widget)
-    cases.add_change_set(pack, {"change_set_id": "cs-fix", "base_snapshot_id": "snap-a",
-                                "head_snapshot_id": "snap-fixed", "boundary": "repair",
+    base, head = ("snap-fixed", "snap-a") if introducing else ("snap-a", "snap-fixed")
+    cases.add_change_set(pack, {"change_set_id": "cs-fix", "base_snapshot_id": base,
+                                "head_snapshot_id": head, "boundary": "introducing" if introducing else "repair",
                                 "review_scope": "changed_files",
-                                "description": "The pull request that repairs the shell call."})
-    cases.set_pr_eligibility(pack, "case-a", "cs-fix", "repaired", "changed", control_id="C-case-a-fixed")
+                                "description": "The fixture change in shell-call behavior."})
+    if introducing:
+        cases.set_pr_eligibility(pack, "case-a", "cs-fix", "introduced", "changed")
+    else:
+        cases.set_pr_eligibility(pack, "case-a", "cs-fix", "repaired", "changed", control_id="C-case-a-fixed")
     cases.save_pack(path, pack)
     return pack
 
@@ -2396,12 +2803,46 @@ def subprocess_git(workspace: Path, *args: str) -> str:
     return subprocess.run(argv, cwd=str(workspace), env=env, capture_output=True, text=True, check=True).stdout
 
 
-def blinded_pr_run(tmp_path: Path, widget: dict, document: dict, adapter: Adapter) -> tuple[dict, Path]:
-    write_pr_pack(tmp_path / "pack.json", widget)
+def blinded_pr_run(tmp_path: Path, widget: dict, document: dict, adapter: Adapter, *,
+                   profile: str = "metadata_blinded", introducing: bool = False) -> tuple[dict, Path]:
+    write_pr_pack(tmp_path / "pack.json", widget, introducing=introducing)
     blinding.save_map(tmp_path / "widget-map.json", document)
-    write_config(tmp_path / "run.json", [BLINDED_PR])
+    write_config(tmp_path / "run.json", [{**BLINDED_PR, "profile": profile}])
     out = tmp_path / "out"
     return run_from_config(tmp_path / "run.json", out, clock=CLOCK, adapters={"fake": adapter}), out
+
+
+def test_identity_reduced_pr_runner_keeps_removed_material_out_of_both_history_commits(tmp_path, widget):
+    document = identity_reduced_map(widget, approved=False)
+    document["edits"] = [edit for edit in document["edits"] if edit["path"] != "docs/guide.md"]
+    document["removals"].append(removal_entry(widget, "guide", "docs/guide.md", "identity_document"))
+    reapproved(document)
+    adapter = InspectingPrAdapter()
+
+    manifest, out = blinded_pr_run(tmp_path, widget, document, adapter,
+                                   profile="identity_reduced", introducing=True)
+
+    [row] = manifest["inputs"]
+    assert row["input_id"] == "cs-fix.identity-reduced" and row["preparation_failure"] is None
+    assert manifest["invocations"][0]["status"] == "success" and adapter.calls == 1
+    for tree_paths in adapter.seen["paths"].values():
+        assert {"README.md", "CLAUDE.md", "docs/guide.md"}.isdisjoint(tree_paths)
+    assert adapter.seen["leaked_names"] == adapter.seen["tokens_in_request"] == []
+    assert (out / "inputs" / row["input_id"] / "original" / "source" / "docs" / "guide.md").is_file()
+
+
+def test_identity_reduced_pr_with_uncovered_base_records_preparation_failure(tmp_path, widget):
+    document = only_variant(identity_reduced_map(widget, approved=False), "snap-fixed")
+    adapter = InspectingPrAdapter()
+
+    manifest, out = blinded_pr_run(tmp_path, widget, document, adapter, profile="identity_reduced")
+
+    [row] = manifest["inputs"]
+    assert row["preparation_failure"]["type"] == "MaterializationError"
+    assert "has no variant for snapshot snap-a" in row["preparation_failure"]["message"]
+    assert (row["tree_hash"], row["input_hash"]) == (None, None) and adapter.calls == 0
+    assert manifest["invocations"][0]["status"] == "skipped"
+    assert not (out / "inputs" / "cs-fix.identity-reduced").exists()
 
 
 def test_a_blinded_pr_input_is_blinded_with_one_map_for_the_base_and_the_head(tmp_path, widget):

@@ -78,7 +78,8 @@
                 "profile": {
                   "enum": [
                     "standard",
-                    "metadata_blinded"
+                    "metadata_blinded",
+                    "identity_reduced"
                   ]
                 },
                 "inputs": {
@@ -113,7 +114,8 @@
                 "profile": {
                   "enum": [
                     "standard",
-                    "metadata_blinded"
+                    "metadata_blinded",
+                    "identity_reduced"
                   ]
                 },
                 "canonical_target_ids": {
@@ -159,7 +161,8 @@
           "profile": {
             "enum": [
               "standard",
-              "metadata_blinded"
+              "metadata_blinded",
+              "identity_reduced"
             ]
           },
           "evidence_scope": {

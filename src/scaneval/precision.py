@@ -76,7 +76,7 @@ REVIEW_CHAIN_KIND = "precision_review"
 
 POPULATIONS = ("first_b", "full")
 MODES = ("full", "pr")
-PROFILES = ("standard", "metadata_blinded")
+PROFILES = ("standard", "metadata_blinded", "identity_reduced")
 STRATIFICATIONS = ("system", "input", "kind")
 ALLOCATIONS = ("proportional", "equal")
 ROLES = ("independent", "adjudicator")

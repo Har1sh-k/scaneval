@@ -785,7 +785,10 @@ def _blinding_check(args: argparse.Namespace) -> int:
             snapshot = cases.snapshot_by_id(pack, snapshot_id)
             cached = materialize.fetch_snapshot(snapshot["repository"]["url"], snapshot["commit"], cache_root)
             try:
-                record = blinding.dry_run(document, cached, snapshot_id, Path(scratch) / snapshot_id)
+                if args.profile == "identity_reduced":
+                    blinding.check_scoring_paths(document, pack, snapshot_id)
+                record = blinding.dry_run(document, cached, snapshot_id, Path(scratch) / snapshot_id,
+                                          profile=args.profile)
             except (MaterializationError, ContractError) as exc:
                 refused.append(snapshot_id)
                 print(f"{snapshot_id}: refused: {exc}")
@@ -797,6 +800,9 @@ def _blinding_check(args: argparse.Namespace) -> int:
                 lines = ", ".join(str(line) for line in edit["changed_lines"]) or "none"
                 print(f"  {edit['edit_id']} {edit['path']}: {_occurrences(edit['occurrences'])}; "
                       f"changed line(s): {lines}")
+            for removal in applied.get("removals", []):
+                print(f"  {removal['removal_id']} {removal['path']}: removed as {removal['role']}; "
+                      f"original {removal['original_sha256']}")
             cues = applied["retained_identity_cues"]
             print(f"  {len(applied['validation'])} check(s) passed; retained identity cues: "
                   f"{cues['token_count']} token(s), {cues['total_occurrences']} occurrence(s) in "
@@ -1296,7 +1302,7 @@ def _add_diagnose_commands(sub: argparse._SubParsersAction) -> None:
 
 
 def _add_blinding_commands(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("blinding", help="dry-run and review a metadata blinding map")
+    parser = sub.add_parser("blinding", help="dry-run and review an identity transformation map")
     commands = parser.add_subparsers(dest="blinding_command", required=True)
 
     checked = commands.add_parser(
@@ -1305,6 +1311,8 @@ def _add_blinding_commands(sub: argparse._SubParsersAction) -> None:
     checked.add_argument("map", type=Path, help="the blinding map to apply; never written")
     checked.add_argument("--pack", required=True, type=Path, help="the pack declaring the variants' snapshots")
     checked.add_argument("--snapshot-id", help="check this variant only")
+    checked.add_argument("--profile", choices=sorted(blinding.IDENTITY_PROFILES), default="metadata_blinded",
+                         help="profile to validate the map for (default metadata_blinded)")
     checked.add_argument("--cache-root", type=Path, help="source cache; default .repos beside the pack")
 
     reviewed = commands.add_parser("review", help="record one review of the map as it stands")

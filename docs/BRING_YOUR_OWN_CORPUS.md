@@ -434,11 +434,11 @@ admission before evaluation, enforce it by checking the pack, not by relying on 
 | `pack` | yes | Path to the case pack, relative to the configuration file. |
 | `cache_root` | no | Immutable source cache, relative to the configuration file. Default `.repos`. |
 | `inputs[].snapshot_id` | yes for a full input | A snapshot the pack declares. Refused before anything is written otherwise. A PR input names no snapshot; see [a native PR input](#a-native-pr-input). |
-| `inputs[].input_id` | no, 2.1 | Names the input's directory and invocations; never shown to a scanner. Defaults to the snapshot id, with `.blinded` appended for a blinded input. |
+| `inputs[].input_id` | no, 2.1 | Names the input's directory and invocations; never shown to a scanner. Defaults to the snapshot/change-set id, with `.blinded` for `metadata_blinded` or `.identity-reduced` for `identity_reduced`. |
 | `inputs[].mode` | no, 2.1 | `full` (default) or `pr`. A `pr` input reviews a change and names its `change_set_id`; a full scan of the head never stands in for one. |
 | `inputs[].change_set_id` | 2.1, PR input | A change set the pack declares. Required when `mode` is `pr`, and refused for a full input. Refused before anything is written when the pack does not declare it. The input's default `input_id` is this id. |
-| `inputs[].profile` | no | `standard` (default) or `metadata_blinded`, which needs a 2.1 configuration; see [a metadata-blinded input](#a-metadata-blinded-input). |
-| `inputs[].blinding_map` | 2.1 | Path to the reviewed blinding map, relative to the configuration file. Required exactly when `profile` is `metadata_blinded`. |
+| `inputs[].profile` | no | `standard` (default), `metadata_blinded`, or `identity_reduced`. Transformed profiles need a 2.1 configuration; see [a metadata-blinded input](#a-metadata-blinded-input). |
+| `inputs[].blinding_map` | 2.1 | Path to the reviewed transformation map, relative to the configuration file. Required exactly for `metadata_blinded` and `identity_reduced`. |
 | `systems[].system_id` | yes | Matches `^[A-Za-z0-9][A-Za-z0-9._-]*$`. |
 | `systems[].adapter` | yes | `semgrep`, `llm-harness`, or `deepsec` in this build. |
 | `systems[].config` | yes | Adapter configuration. For `semgrep` this pins a rules repository by url, commit, and paths; for `deepsec` it names the installed workspace and the model. See the [example configuration](../corpus/pilot/run-deepsec.json). |
@@ -681,7 +681,7 @@ with the same map. Documentation files may be edited under any role. `.yml`, `.y
 `.json`, `.cfg`, and `.ini` files may be edited only as `display_metadata` with a `role_check`.
 License, attribution, and security files, dependency manifests, build, CI, and security
 configuration, files a scanner reads as instructions (in any case), and every other file, source
-included, are refused. [Current capabilities](INITIAL_BUILD.md#metadata-blinding) lists every rule,
+included, are refused. [Current capabilities](INITIAL_BUILD.md#identity-transformation-profiles) lists every rule,
 and says what the lists do not cover.
 
 **A replacement cannot break the file it is written into.** A replacement goes into a file as plain
@@ -755,8 +755,60 @@ The review covers `content_sha256`, the map without its reviews. Any later edit 
 unapproved until someone reviews it again, and `--decision reject` or `unresolved` withdraws an
 approval explicitly. As with `corpus approve`, the name is recorded, not verified.
 
-**Run it.** A blinded input needs a 2.1 configuration that names its map, relative to the
-configuration file. It can sit beside the standard input of the same snapshot:
+**Reduce whole-file identity cues.** Create a separate map for the `identity_reduced` profile:
+
+```sh
+cp "$BYOC/reporting-map.json" "$BYOC/reporting-identity-reduced-map.json"
+```
+
+In the copy, set `map_id` to `acme-reporting-service-identity-reduced`, remove the `readme-title`
+edit, and add the `removals` array below. The original metadata map keeps its README edit and has
+no removals. The copy needs its own review after these changes. A removal names one normalized path,
+why that file is identity-only, and the exact bytes expected in every variant. Use
+`identity_document` for documentation and `instruction_file` for files such as `AGENTS.md` or
+`CLAUDE.md` that a scanner may load as project instructions:
+
+```json
+"removals": [
+  {"removal_id": "readme", "path": "README.md", "role": "identity_document",
+   "rationale": "The README is product-facing identity material; labels and runtime logic do not use it.",
+   "expected": [{"snapshot_id": "reporting-main", "state": "present",
+                 "file_sha256": "sha256:f9a6a048580372be907b00e460f13b8ee08cd76129a5a3486732c3e08af81bf1"}]},
+  {"removal_id": "agent-instructions", "path": "AGENTS.md", "role": "instruction_file",
+   "rationale": "Repository-specific agent instructions identify the project and define a different condition.",
+   "expected": [{"snapshot_id": "reporting-main", "state": "absent"}]}
+]
+```
+
+An edited path cannot also be removed. Identity documents must be recognized root documents or
+lie under conventional documentation directories such as `docs/`, `doc/`, or `releases/`.
+Runtime templates, prompts, and test fixtures are refused even when their suffix is `.md` or
+`.txt`. Instruction removals accept recognized instruction names and textual instruction
+documents; scripts and configuration under `.claude/`, `.codex/`, or `.cursor/` stay protected.
+Source, dependency, license/attribution, build, CI, and security paths are refused. Both the dry
+run and a real run refuse removal of an accepted target or control location. The original export remains under
+evaluator control, while the scanner receives a tree with the reviewed files absent. Check this
+condition explicitly before review:
+
+```sh
+$SB blinding check "$BYOC/reporting-identity-reduced-map.json" --pack "$BYOC/pack.json" \
+  --profile identity_reduced --cache-root "$BYOC/.repos"
+```
+
+Until the copy is reviewed, the check reports its transformations and exits one because its old
+approval no longer covers the changed content. After inspecting the removals, record a new review:
+
+```sh
+$SB blinding review "$BYOC/reporting-identity-reduced-map.json" --reviewer "Example Reviewer (fictional)" \
+  --role independent_reviewer --decision approve \
+  --note "Checked each removal against original bytes; no runtime or scoring file is removed."
+```
+
+Do not call the result anonymous. Paths, package/import names, source identifiers, and recognizable
+code remain. The profile measures sensitivity to a larger, recorded set of identity cues.
+
+**Run it.** A transformed input needs a 2.1 configuration that names its map, relative to the
+configuration file. The three profiles can sit beside one another for the same snapshot:
 
 ```json
 {
@@ -766,7 +818,9 @@ configuration file. It can sit beside the standard input of the same snapshot:
   "cache_root": ".repos",
   "inputs": [{"snapshot_id": "reporting-main"},
              {"snapshot_id": "reporting-main", "profile": "metadata_blinded",
-              "blinding_map": "reporting-map.json"}],
+              "blinding_map": "reporting-map.json"},
+             {"snapshot_id": "reporting-main", "profile": "identity_reduced",
+              "blinding_map": "reporting-identity-reduced-map.json"}],
   "systems": [
     {"system_id": "semgrep-local-rules", "adapter": "semgrep",
      "config": {"ruleset": {"url": "/private/tmp/byoc/rules",
@@ -797,12 +851,13 @@ scaneval: the run id names 'Acme', an original identity token of blinding map ac
 exit=2
 ```
 
-With a neutral run id both inputs run:
+With a neutral run id all three inputs run:
 
 ```
 $ $SB run "$BYOC/run-blinded.json" --output "$BYOC/runs/blinded" --workspace-root "$BYOC/workspaces"
 reporting-main__semgrep-local-rules__r1 status=success claims=1 plan=draft review=draft
 reporting-main.blinded__semgrep-local-rules__r1 status=success claims=1 plan=draft review=draft
+reporting-main.identity-reduced__semgrep-local-rules__r1 status=success claims=1 plan=draft review=draft
 Manifest: /private/tmp/byoc/runs/blinded/run-manifest.json
 Schedule: /private/tmp/byoc/runs/blinded/evaluator/schedule.json
 ```
@@ -834,6 +889,7 @@ sees it. After the README edit's rationale is reworded without a new review, the
 ```
 reporting-main__semgrep-local-rules__r1 status=success claims=1 plan=draft review=draft
 reporting-main.blinded__semgrep-local-rules__r1 status=skipped claims=None plan=None review=None
+reporting-main.identity-reduced__semgrep-local-rules__r1 status=success claims=1 plan=draft review=draft
 Manifest: /private/tmp/byoc/runs/edited/run-manifest.json
 Schedule: /private/tmp/byoc/runs/edited/evaluator/schedule.json
 scaneval: input reporting-main.blinded could not be prepared: MaterializationError: blinding map refused: map acme-reporting-service 1: the latest approval, by Example Reviewer (fictional) (independent_reviewer) at 2026-09-30T01:19:25+00:00, covers content sha256:fc626885d14212555e2cb4873e53b0d04605c8340dd2b8618a15c1af273f3121, but the map now hashes to sha256:87ca782566c26b6dba8d889e80f6c93040d242867b4fd5370d75e5ce1b0d4488; it was edited after it was approved
@@ -844,6 +900,10 @@ exit=1
 Report standard and blinded results separately: the schedule pairs vulnerable and fixed inputs only
 within one profile. A blinded result says the listed cues were absent from the scanned text, not
 that the scanner could not recognize the repository.
+
+This is the reviewed-export foundation for identity sensitivity analysis. Automatic alias and safe
+metadata policies, validation of a complete identity-reduced experimental condition, and a paired
+condition report remain follow-up work. A profile name alone does not establish that condition.
 
 ### A native PR input
 
@@ -1162,7 +1222,7 @@ These are limits of the current implementation, not guarantees about your enviro
 | Credentials | `--url`, `--historical-url`, and `--repo` refuse a URL whose authority carries userinfo, except the bare `git` user of an ssh clone URL. The run configuration has no credential field. Scanner subprocesses receive only `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR`, `TERM`, `USER`, `SHELL` unless the adapter adds more. | The check reads the URL authority only: a token in a path, a query, or an scp-style `git@host:path` address is not detected. The `llm-harness` adapter adds `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, and `XDG_CONFIG_HOME` to that passthrough, and `deepsec` adds `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, so provider keys in your environment do reach those scanner processes; neither is recorded. `NODE_OPTIONS` is deliberately passed by neither, because node executes what it names and a `--require` in your environment would run code inside the scanner while the record showed only a variable name. |
 | Traces | `trace_mode` is `off`, `metadata`, or `content`. Metadata mode omits content. Content mode stores a cloned, redacted copy of metadata and content, including the outgoing model request, in the bundle's `trace/` directory. | Content-mode traces therefore contain the source that was sent to the model. Treat a content-mode bundle as source material, with the same handling rules. The default redactor replaces common credential-looking keys; it is not a secret scanner. |
 | Directory separation | Evaluator files live in `evaluator/` and in the pack; the scanner receives a private workspace copy of one export. The trial-path check refuses writing evaluator material inside an exported tree, and the runner refuses a workspace inside evaluator storage. | These compare resolved paths. They follow no bind mount or hard link, and they are not a sandbox. Directory separation documents the evaluator boundary; it does not enforce it. |
-| Exported trees | The export carries tracked regular files only, strips `.git`, `.securevibes`, `.scaneval`, and `.repos`, records skipped submodules and symlinks, and records retained instruction files such as `CLAUDE.md` or `AGENTS.md` as identity cues. A blinded export also keeps the original export evaluator-side and records every edit and every remaining cue. | It is not a sandbox, and instruction files stay in the tree under both profiles. Blinding never renames a package, import, identifier, or path, so a blinded tree is not anonymous. |
+| Exported trees | The export carries tracked regular files only, strips `.git`, `.securevibes`, `.scaneval`, and `.repos`, records skipped submodules and symlinks, and records retained instruction files such as `CLAUDE.md` or `AGENTS.md` as identity cues. A transformed export also keeps the original export evaluator-side and records every edit, removal, and declared cue that remains. | It is not a sandbox. Instruction files stay under `standard` and `metadata_blinded`; `identity_reduced` can remove reviewed instruction documents. Transformation never renames a package, import, identifier, or path, so the tree is not anonymous. |
 | Pack edits | A pack is replaced atomically through a temporary file and a rename, keeping the previous permission bits. | No previous version is kept on disk. Keep the pack under version control if you need history or a correction trail. |
 
 ## 9. What is not implemented yet
@@ -1187,11 +1247,12 @@ These are limits of the current implementation, not guarantees about your enviro
   Freezing membership and promoting a version are hand edits to the pack file, reviewed in your own
   repository. `scaneval gate` judges a saved comparison against a policy and promotes nothing, a
   pack version included ([gate](GATE.md)).
-- **Metadata blinding is partial, and nothing finds cues for you.** A map edits the documentation
-  and display metadata a reviewer listed and nothing else. Nothing discovers identity cues, reads
-  source, or decides whether a field is read at runtime, and the run's leak check matches only the
-  spellings the map declares. A blinded input is never replaced by a `standard` export: a map that
-  is not approved or does not fit fails that input instead.
+- **Identity reduction is partial, and nothing finds cues for you.** A map edits the documentation
+  and display metadata a reviewer listed; `identity_reduced` can additionally remove only reviewed
+  documentation and instruction paths. Nothing discovers identity cues, reads source, or decides
+  whether content is safe to edit/remove, and the run's leak check matches only spellings the map
+  declares. A transformed input is never replaced by `standard`: a map that is not approved or
+  does not fit fails that input instead.
 - **No case-authoring skill yet.** The design pairs this guide with a case-authoring `SKILL.md`.
   The CLI operations it would drive are the ones documented here.
 - **Admission is a record, not a gate,** and `extended_regression` is planned like any other

@@ -79,7 +79,8 @@
         "profile": {
           "enum": [
             "standard",
-            "metadata_blinded"
+            "metadata_blinded",
+            "identity_reduced"
           ]
         },
         "source_tree_hash": {

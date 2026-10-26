@@ -45,12 +45,14 @@ def run_config(**changes) -> dict:
     return document
 
 
-def test_a_standard_and_a_blinded_input_of_one_snapshot_have_distinct_default_ids():
+def test_all_identity_profiles_of_one_snapshot_have_distinct_default_ids():
     inputs = [{"snapshot_id": "snap-a"},
               {"snapshot_id": "snap-a", "profile": "metadata_blinded", "blinding_map": "map.json"},
+              {"snapshot_id": "snap-a", "profile": "identity_reduced", "blinding_map": "map.json"},
               {"mode": "pr", "change_set_id": "cs-1"}]
     validate_document("run-config", run_config(inputs=inputs))
-    assert [input_identity(item) for item in inputs] == ["snap-a", "snap-a.blinded", "cs-1"]
+    assert [input_identity(item) for item in inputs] == [
+        "snap-a", "snap-a.blinded", "snap-a.identity-reduced", "cs-1"]
     with pytest.raises(ContractError, match="input id values must be unique"):
         validate_document("run-config", run_config(inputs=[{"snapshot_id": "snap-a"},
                                                            {"snapshot_id": "snap-b", "input_id": "snap-a"}]))
@@ -60,6 +62,7 @@ def test_a_standard_and_a_blinded_input_of_one_snapshot_have_distinct_default_id
     ({"mode": "pr", "snapshot_id": "snap-a"}, "a pr input names a change_set_id"),
     ({"snapshot_id": "snap-a", "change_set_id": "cs-1"}, "a full input names a snapshot_id and no change_set_id"),
     ({"snapshot_id": "snap-a", "profile": "metadata_blinded"}, "blinding_map is required"),
+    ({"snapshot_id": "snap-a", "profile": "identity_reduced"}, "blinding_map is required"),
     ({"snapshot_id": "snap-a", "blinding_map": "map.json"}, "blinding_map is required"),
 ])
 def test_an_input_says_exactly_one_thing(entry, message):

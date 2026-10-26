@@ -58,7 +58,7 @@
       "properties": {
         "tree_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
         "provenance_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-        "profile": {"enum": ["standard", "metadata_blinded"]},
+        "profile": {"enum": ["standard", "metadata_blinded", "identity_reduced"]},
         "synthetic_history": {"type": ["object", "null"]},
         "source_modified": {"type": "boolean"},
         "modified_paths": {"type": "array", "items": {"type": "string"}},
