@@ -18,7 +18,7 @@ from jsonschema import Draft202012Validator
 from . import blinding, cases, conditions, schedule
 from .adapters import get_adapter
 from .contracts import (ContractError, canonical_sha256, load_document, reject_nonfinite,
-                        validate_document)
+                        validate_document, _require_relative_path)
 from .execution import invocation_id
 from .isolation import PINNED_IMAGE, IsolationError, resolve_execution
 from .resampling import ALGORITHM, Stream, sample_without_replacement
@@ -75,6 +75,7 @@ def validate_matrix(document: dict) -> dict:
     _schema_validate(document)
     if document["stage"] == "frozen":
         return validate_frozen(document)
+    _require_relative_path(document["pack"], "matrix pack")
     _unique(document["systems"], "system_id", "experiment system_id")
     _unique(document["conditions"], "name", "condition name")
     if {row["name"] for row in document["conditions"]} != set(NAMES):
@@ -93,6 +94,8 @@ def validate_matrix(document: dict) -> dict:
             raise ContractError(f"invalid common execution settings: {exc}") from exc
         if row["execution"].get("backend") != "oci":
             raise ContractError("a three-condition experiment requires external OCI isolation for every cell")
+        if conditions._configured_retrieval(row["config"]):
+            raise ContractError("common scanner settings enable retrieval in the closed conditions")
     for row in document["conditions"]:
         name = row["name"]
         expected = (("standard", "bounded_ancestor", "recorded_public", "preserved") if name == "open_context"
@@ -112,6 +115,8 @@ def validate_matrix(document: dict) -> dict:
         if set(row["system_context"]) != set(systems):
             raise ContractError(f"{name} must declare context controls for exactly the common systems")
         maps = row.get("transformation_maps", {})
+        for path in maps.values():
+            _require_relative_path(path, "matrix transformation map")
         if name == "identity_reduced":
             if set(maps) != set(document["population"]["snapshot_ids"]):
                 raise ContractError("identity_reduced must pin a reviewed transformation map for every snapshot")
@@ -139,6 +144,9 @@ def validate_matrix(document: dict) -> dict:
                     raise ContractError(f"{name} must disable retrieval and use the inference-appropriate network route")
     if set(document["required_capture"]) != set(NAMES):
         raise ContractError("required_capture must state capabilities separately for all three conditions")
+    by_name = {row["name"]: row for row in document["conditions"]}
+    if by_name["closed_book_standard"]["system_context"] != by_name["identity_reduced"]["system_context"]:
+        raise ContractError("closed-book and identity-reduced cells must have identical inference/network/proxy controls")
     for name, capabilities in document["required_capture"].items():
         minimum = {"external_isolation", "history"}
         minimum |= {"retrieval_events"} if name == "open_context" else {"tool_controls"}
@@ -154,6 +162,8 @@ def validate_matrix(document: dict) -> dict:
     if order["method"] == "fixed" and "seed" in order:
         raise ContractError("fixed cell order does not use a random seed")
     excluded = {row["snapshot_id"] for row in document["exclusions"]}
+    if len(excluded) != len(document["exclusions"]):
+        raise ContractError("duplicate predeclared snapshot exclusion")
     if excluded & set(document["population"]["snapshot_ids"]):
         raise ContractError("an excluded snapshot cannot also enter the experiment population")
     if document["uncertainty"]["method"] == "paired_cluster_bootstrap":
@@ -191,7 +201,33 @@ def _population(pack: dict, document: dict) -> list[dict]:
                            "plan": plan, "schedule_plan": planned})
     if target_ids != set(document["population"]["canonical_target_ids"]) or control_ids != set(document["population"]["canonical_control_ids"]):
         raise ContractError("declared canonical target/control populations differ from the schedule planner's exact eligibility")
+    scopes = {row["plan"]["scope"] for row in population}
+    if "diagnostic" in scopes and len(scopes) > 1:
+        raise ContractError("diagnostic fixtures cannot be pooled with real draft or reviewed label populations")
     return population
+
+
+def _validate_cell_config(config: dict) -> None:
+    validate_document("run-config", config)
+    for system in config["systems"]:
+        try:
+            resolve_execution(system["execution"], system.get("network_policy", config["network_policy"]))
+        except IsolationError as exc:
+            raise ContractError(f"invalid merged condition execution settings: {exc}") from exc
+
+
+def check_identity_cues(matrix: dict, *, output_dir: Path | None = None,
+                        workspace_root: Path | None = None) -> None:
+    declaration = matrix.get("declaration", matrix)
+    candidate = {"run_id": declaration["experiment_id"] + ".identity_reduced", "systems": [
+        {key: system.get(key) for key in ("system_id", "adapter", "config", "model_id", "model_revision")}
+        for system in declaration["systems"]],
+        "output_dir": str(output_dir) if output_dir else None,
+        "workspace_root": str(workspace_root) if workspace_root else None}
+    for mapping in matrix.get("maps", {}).values():
+        leaked = blinding.leaked_originals(mapping, candidate)
+        if leaked:
+            raise ContractError("identity-reduced experiment identifiers/configuration/paths retain reviewed original cues: " + ", ".join(leaked))
 
 
 def _assignments(document: dict, name: str, population: list[dict]) -> list[dict]:
@@ -267,7 +303,7 @@ def freeze(document: dict, *, base_dir: Path, created_at: str, adapters: dict | 
                 maps[digest] = mapping
                 map_bindings[map_path] = digest
         config = _config(document, cell, population, map_bindings)
-        validate_document("run-config", config)
+        _validate_cell_config(config)
         cell_assignments = _assignments(document, name, population)
         assignments.extend(cell_assignments)
         cells.append({"name": name, "config": config, "config_sha256": canonical_sha256(config),
@@ -283,6 +319,7 @@ def freeze(document: dict, *, base_dir: Path, created_at: str, adapters: dict | 
                            "run_order_algorithm_sha256": canonical_sha256(ALGORITHM),
                            **{"map." + path: digest for path, digest in map_bindings.items()}}}
     frozen["matrix_sha256"] = matrix_digest(frozen)
+    check_identity_cues(frozen)
     return validate_frozen(frozen)
 
 
@@ -299,6 +336,8 @@ def validate_frozen(document: dict) -> dict:
     if document["bindings"]["pack_sha256"] != canonical_sha256(document["pack"]):
         raise ContractError("frozen case pack binding differs")
     validate_document("case-pack", document["pack"])
+    for exclusion in document["declaration"]["exclusions"]:
+        cases.snapshot_by_id(document["pack"], exclusion["snapshot_id"])
     if document["bindings"]["population_sha256"] != canonical_sha256(document["population"]):
         raise ContractError("frozen target population binding differs")
     if document["population"] != _population(document["pack"], document["declaration"]):
@@ -341,7 +380,7 @@ def validate_frozen(document: dict) -> dict:
             raise ContractError("frozen transformation map binding is missing") from exc
         if cell["config"] != expected_config:
             raise ContractError("frozen cell changes scanner/model/scope/budget outside the allowed context differences")
-        validate_document("run-config", cell["config"])
+        _validate_cell_config(cell["config"])
         if cell["name"] == "identity_reduced":
             for source in document["population"]:
                 path = declared_cell["transformation_maps"][source["snapshot_id"]]
@@ -363,6 +402,7 @@ def validate_frozen(document: dict) -> dict:
     keys = [(row["condition"], row["assignment_id"]) for row in document["assignments"]]
     if len(keys) != len(set(keys)):
         raise ContractError("duplicate experiment condition assignment")
+    check_identity_cues(document)
     return document
 
 

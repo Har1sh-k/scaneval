@@ -85,6 +85,43 @@ def test_seeded_run_order_rejects_unfrozen_seed_and_fixed_order_rejects_unused_s
     del matrix["run_order"]["seed"]
     with pytest.raises(ContractError, match="requires a frozen seed"):
         experiment.validate_matrix(matrix)
+
+
+def test_identity_contrast_cannot_change_inference_endpoints_or_proxy_image():
+    matrix = declaration()
+    matrix["systems"][0].update(inference="remote", model_id="model", model_revision="model-revision")
+    controls = {"scan": {"network_policy": "model_provider_only", "execution": {
+        "proxy_image": IMAGE, "egress": [{"host": "api-a.example", "port": 443}]}}}
+    matrix["conditions"][1]["system_context"] = deepcopy(controls)
+    matrix["conditions"][2]["system_context"] = deepcopy(controls)
+    experiment.validate_matrix(matrix)
+    matrix["conditions"][2]["system_context"]["scan"]["execution"]["egress"][0]["host"] = "api-b.example"
+    with pytest.raises(ContractError, match="identical inference/network/proxy"):
+        experiment.validate_matrix(matrix)
+
+
+@pytest.mark.parametrize("path", ["/absolute/map.json", "../outside.json", "C:\\outside.json"])
+def test_unportable_pack_and_map_paths_are_refused(path):
+    matrix = declaration()
+    matrix["pack"] = path
+    with pytest.raises(ContractError, match="relative path"):
+        experiment.validate_matrix(matrix)
+    matrix = declaration()
+    matrix["conditions"][2]["transformation_maps"]["source"] = path
+    with pytest.raises(ContractError, match="relative path"):
+        experiment.validate_matrix(matrix)
+
+
+def test_duplicate_exclusions_and_identity_cues_fail_before_scanning():
+    matrix = declaration()
+    matrix["exclusions"] = [{"snapshot_id": "excluded", "reason": "predeclared"}] * 2
+    with pytest.raises(ContractError, match="duplicate predeclared"):
+        experiment.validate_matrix(matrix)
+    matrix = declaration()
+    matrix["experiment_id"] = "AcmeCorp-study"
+    frozen = {"declaration": matrix, "maps": {"map": {"pseudonyms": [{"original": "AcmeCorp", "replacement": "Neutral"}]}}}
+    with pytest.raises(ContractError, match="retain reviewed original cues"):
+        experiment.check_identity_cues(frozen)
     matrix["run_order"] = {"method": "fixed", "seed": 1}
     with pytest.raises(ContractError, match="does not use a random seed"):
         experiment.validate_matrix(matrix)
