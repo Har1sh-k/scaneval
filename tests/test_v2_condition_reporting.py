@@ -243,3 +243,35 @@ def test_unknown_frozen_population_has_no_invented_recall_denominator():
     assert metrics["assignments_without_frozen_plan"] == 1
     assert metrics["recall"]["denominator"] is None
     assert metrics["recall"]["lower_bound"] is None and metrics["recall"]["upper_bound"] is None
+
+
+@pytest.mark.parametrize("scope", ["diagnostic", "draft"])
+def test_finding_review_cannot_upgrade_corpus_evidence_scope(tmp_path, scope):
+    from test_v2_aggregate import write_run, planned, target, scan
+    run = write_run(tmp_path, "scope", [planned("a", targets=[target("T-a", level="fixture" if scope == "diagnostic" else "L3")], scope=scope)],
+                    outcomes={("a", "sys-a", 1): scan(hits={"T-a": 1}, scope=scope)})
+    report = aggregate.aggregate_by_condition([run])
+    [stratum] = report["condition_strata"]
+    assert stratum["evidence_scope"] == stratum["metrics"]["evidence_scope"] == scope
+    assert stratum["metrics"]["targets"][0]["evidence_scope"] == scope
+    assert stratum["metrics"]["targets"][0]["reviewed"] is True
+
+
+def test_by_condition_splits_diagnostic_from_real_evidence_with_full_denominators(tmp_path):
+    from test_v2_aggregate import write_run, planned, target, scan
+    diagnostic = write_run(tmp_path / "a", "diagnostic", [planned("a", targets=[target("T-a", level="fixture")], scope="diagnostic")],
+                           outcomes={("a", "sys-a", 1): scan(hits={"T-a": 1}, scope="diagnostic")})
+    reviewed = write_run(tmp_path / "b", "reviewed", [planned("b", targets=[target("T-b")], scope="reviewed")],
+                         outcomes={("b", "sys-a", 1): scan(hits={"T-b": 1}, scope="reviewed")})
+    report = aggregate.aggregate_by_condition([diagnostic, reviewed])
+    assert {row["evidence_scope"] for row in report["condition_strata"]} == {"diagnostic", "reviewed"}
+    assert {row["view_scheduled_assignments"] for row in report["condition_strata"]} == {2}
+    assert sum(row["metrics"]["assignments"] for row in report["condition_strata"]) == 2
+
+
+def test_flat_condition_metrics_refuse_mixed_diagnostic_and_real_labels():
+    row = {"run_id": "r", "input_id": "s", "system_id": "system", "repetition": 1,
+           "assignment_id": "assignment", "status": "missing", "observed": None,
+           "planned_targets": [], "planned_controls": []}
+    with pytest.raises(ContractError, match="diagnostic fixture"):
+        aggregate.condition_metrics([{**row, "scope": "diagnostic"}, {**row, "scope": "reviewed"}])

@@ -59,6 +59,10 @@ These are unweighted descriptive target-observation metrics, with no pooled weig
 or confidence interval; the recorded aggregation policy is provenance, not a claim that these
 descriptive counts apply its weightings. `condition_metrics(rows)` also accepts synthetic missing
 assignments from a frozen experiment and exposes per-target outcomes for its declared weighting.
+Strata also separate the original evidence scope. Diagnostic fixtures are never pooled with
+draft or reviewed corpus evidence, and a human-approved finding review never upgrades the
+corpus labels. The shared metrics API takes each row's original `scope`, preserves it on target
+outcomes, and refuses a flat diagnostic/non-diagnostic mixture. Missing scope stays unavailable.
 
 Condition-aware writers include optional-for-compatibility `condition_coverage` and
 `condition_digest_format: condition-structural-v1` fields in 2.1 reports. The structural identity

@@ -21,19 +21,22 @@
     "condition_strata": {
       "type":"array","items": {
         "type":"object","additionalProperties":false,
-        "required":["system_id","mode","profile","condition","status","policy_sha256","view_scheduled_assignments","view_scheduled_target_observations","view_target_population_complete","metrics"],
+        "required":["system_id","mode","profile","condition","status","evidence_scope","policy_sha256","view_scheduled_assignments","view_scheduled_target_observations","view_target_population_complete","metrics"],
         "properties": {
           "system_id":{"type":"string","minLength":1},"mode":{"enum":["full","pr"]},"profile":{"type":"string","minLength":1},
           "condition":{"enum":["closed_book_standard","open_context","identity_reduced"]},
           "status":{"enum":["attested","declared_only","failed","unavailable"]},
+          "evidence_scope":{"enum":["diagnostic","draft","reviewed","unavailable"]},
           "policy_sha256":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
           "view_scheduled_assignments":{"type":"integer","minimum":0},"view_scheduled_target_observations":{"type":"integer","minimum":0},
           "view_target_population_complete":{"type":"boolean"},
           "metrics": {
             "type":"object","additionalProperties":false,
-            "required":["weighting","assignments","statuses","assignments_without_frozen_plan","completion","support","target_observations","recall","targets","controls","claims","usage"],
+            "required":["weighting","assignments","evidence_scope","evidence_scope_counts","statuses","assignments_without_frozen_plan","completion","support","target_observations","recall","targets","controls","claims","usage"],
             "properties": {
               "weighting":{"const":"target_observations"},"assignments":{"type":"integer","minimum":0},
+              "evidence_scope":{"enum":["diagnostic","draft","reviewed","unavailable"]},
+              "evidence_scope_counts":{"type":"object","additionalProperties":{"type":"integer","minimum":0}},
               "statuses":{"type":"object","additionalProperties":{"type":"integer","minimum":0}},
               "assignments_without_frozen_plan":{"type":"integer","minimum":0},
               "completion":{"type":"object","required":["completed","scheduled","value"],"additionalProperties":false,"properties":{

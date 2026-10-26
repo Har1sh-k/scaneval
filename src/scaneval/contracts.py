@@ -2076,7 +2076,7 @@ def _validate_aggregate_report(document: dict[str, Any]) -> None:
         total_by_view: dict[tuple, int] = {}
         expected_by_view: dict[tuple, int] = {}
         for row in document["condition_strata"]:
-            keys.append(canonical_json([row[key] for key in ("system_id", "mode", "profile", "condition", "status", "policy_sha256")]))
+            keys.append(canonical_json([row[key] for key in ("system_id", "mode", "profile", "condition", "status", "policy_sha256", "evidence_scope")]))
             view = (row["system_id"], row["mode"], row["profile"])
             metrics = row["metrics"]
             count = metrics["assignments"]
@@ -2086,6 +2086,8 @@ def _validate_aggregate_report(document: dict[str, Any]) -> None:
                 raise ContractError("condition strata disagree on their full scheduled denominator")
             if sum(metrics["statuses"].values()) != count or metrics["completion"]["scheduled"] != count:
                 raise ContractError("condition-stratum status counts must cover every scheduled assignment")
+            if sum(metrics["evidence_scope_counts"].values()) != count or metrics["evidence_scope"] != row["evidence_scope"]:
+                raise ContractError("condition-stratum evidence scope must cover every assignment without upgrading labels")
             targets = metrics["target_observations"]
             if len(metrics["targets"]) != targets["scheduled"] or targets["resolved"] + targets["unresolved"] != targets["scheduled"]:
                 raise ContractError("condition-stratum target coverage is inconsistent")

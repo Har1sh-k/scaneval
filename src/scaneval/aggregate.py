@@ -574,6 +574,7 @@ def _scheduled_condition_rows(corpus: _Corpus) -> list[dict]:
                      "input_id": observation.input_id, "repetition": observation.repetition,
                      "status": observation.status, "condition_status": identities[(observation.run_id, observation.assignment_id)]["status"],
                      "review_state": observation.review_state, "reason": observation.reason,
+                     "scope": observation.scope,
                      "observed": observation.observed, "plan_state": plan["state"],
                      "planned_targets": plan.get("targets", []), "planned_controls": plan.get("controls", [])})
     return rows
@@ -592,16 +593,23 @@ def condition_metrics(rows: Sequence[dict]) -> dict:
     observations = []
     target_rows, control_rows = [], []
     missing_plans = 0
+    scopes = {row.get("scope") or "unavailable" for row in rows}
+    if not scopes <= {"diagnostic", "draft", "reviewed", "unavailable"}:
+        raise ContractError("unknown evidence scope in condition metrics")
+    if "diagnostic" in scopes and scopes != {"diagnostic"}:
+        raise ContractError("condition metrics mix diagnostic fixture evidence with other evidence scopes; report them separately")
     for row in rows:
         observation = _Observation(run_id=row["run_id"], input_id=row["input_id"], system_id=row["system_id"],
                                    repetition=row["repetition"], assignment_id=row["assignment_id"], status=row["status"],
-                                   reason=row.get("reason"), observed=row.get("observed"), review_state=row.get("review_state"))
+                                   reason=row.get("reason"), observed=row.get("observed"), review_state=row.get("review_state"),
+                                   scope=row.get("scope"))
         if observation.status not in STATUSES:
             raise ContractError(f"unknown scheduled condition observation status {observation.status!r}")
         observations.append(observation)
         missing_plans += row.get("plan_state", "frozen") != "frozen"
         reviewed = observation.review_state == "human_approved"
         identity = {key: row[key] for key in ("run_id", "input_id", "system_id", "repetition", "assignment_id")}
+        identity["evidence_scope"] = observation.scope or "unavailable"
         targets: dict[str, list[str]] = defaultdict(list)
         for target in row["planned_targets"]:
             targets[target["canonical_id"]].append(target["target_id"])
@@ -629,9 +637,12 @@ def condition_metrics(rows: Sequence[dict]) -> dict:
     resolved = sum(row["resolved"] for row in target_rows)
     unknown = sum(row["detected"] is None for row in target_rows)
     population_complete = missing_plans == 0
+    scope_counts = Counter(row.get("scope") or "unavailable" for row in rows)
     lower = _float(Fraction(detected, targets)) if targets and population_complete else None
     upper = _float(Fraction(detected + unknown, targets)) if targets and population_complete else None
     return {"weighting": "target_observations", "assignments": scheduled,
+            "evidence_scope": "unavailable" if not scopes or "unavailable" in scopes else _scope(scopes),
+            "evidence_scope_counts": {scope: scope_counts[scope] for scope in ("diagnostic", "draft", "reviewed", "unavailable")},
             "statuses": {status: statuses[status] for status in STATUSES},
             "assignments_without_frozen_plan": missing_plans,
             "completion": {"completed": statuses["success"], "scheduled": scheduled,
@@ -661,11 +672,13 @@ def aggregate_by_condition(run_dirs: Iterable[str | PathLike[str]], *, policy: d
     views: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
     for row in rows:
         views[(row["system_id"], row["mode"], row["profile"])].append(row)
-        grouped[(row["system_id"], row["mode"], row["profile"], row["condition"], row["condition_status"], row["policy_sha256"])].append(row)
+        grouped[(row["system_id"], row["mode"], row["profile"], row["condition"], row["condition_status"], row["policy_sha256"],
+                 row.get("scope") or "unavailable")].append(row)
     strata = []
-    for (system, mode, profile, name, status, digest), selected in sorted(grouped.items()):
+    for (system, mode, profile, name, status, digest, scope), selected in sorted(grouped.items()):
         all_rows = views[(system, mode, profile)]
         strata.append({"system_id": system, "mode": mode, "profile": profile, "condition": name, "status": status,
+                       "evidence_scope": scope,
                        "policy_sha256": digest, "view_scheduled_assignments": len(all_rows),
                        "view_scheduled_target_observations": sum(len({item["canonical_id"] for item in row["planned_targets"]}) for row in all_rows),
                        "view_target_population_complete": all(row.get("plan_state") == "frozen" for row in all_rows),
@@ -2119,6 +2132,7 @@ def summary(report: dict) -> list[str]:
     for stratum in report.get("condition_strata", []):
         metrics = stratum["metrics"]
         lines.append(f"  {stratum['system_id']} {stratum['condition']}/{stratum['status']} "
+                     f"scope={stratum['evidence_scope']} "
                      f"assignments={metrics['assignments']}/{stratum['view_scheduled_assignments']} "
                      f"targets={metrics['target_observations']['scheduled']} "
                      f"resolved={metrics['target_observations']['resolved']} recall={_number(metrics['recall']['value'])} "
