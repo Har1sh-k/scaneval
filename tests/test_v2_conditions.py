@@ -241,7 +241,9 @@ def test_request_pr_bounds_must_match_executed_change(tmp_path, change):
     assert ("request_input_mismatch" if change == "mode" else "request_pr_mismatch") in codes(record)
 
 
-def test_missing_open_context_extension_refuses_before_creating_output(tmp_path):
+def test_missing_open_context_extension_refuses_before_creating_output(tmp_path, monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "scaneval.open_context", None)
     source = tmp_path / "source"
     source.mkdir()
     tree = hash_exported_tree(source)["tree_hash"]
