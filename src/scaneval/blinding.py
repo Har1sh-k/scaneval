@@ -79,8 +79,11 @@ import posixpath
 import re
 import shutil
 import stat
+import sys
 import tomllib
 from typing import Any, Callable
+
+from . import __version__
 
 from .contracts import (
     ContractError,
@@ -396,7 +399,7 @@ def path_class_gap(path: str, role: str, role_check: str | None = None) -> str |
             "file are never edited")
 
 
-def removal_path_gap(path: str, role: str) -> str | None:
+def removal_path_gap(path: str, role: str, *, identity_policy: dict | None = None) -> str | None:
     """Why *path* may not be removed under *role*, or ``None`` when it may.
 
     ``identity_document`` is limited to conventional root documents and documentation directories,
@@ -412,11 +415,20 @@ def removal_path_gap(path: str, role: str) -> str | None:
     if protected:
         return protected
     instructions = _reads_as_instructions(path)
+    known_instructions = instructions
+    if identity_policy is not None:
+        from .identity_policy import instruction_inventory
+        known_instructions = known_instructions or any(item["classification"] == "instruction_file"
+                                                       for item in instruction_inventory([path]))
+        instructions = known_instructions or any(item["classification"] == "instruction_file"
+                                                  for item in instruction_inventory([path], identity_policy))
     pure = PurePosixPath(path)
     suffix = pure.suffix.casefold()
     if role == "instruction_file":
         if not instructions:
             return f"{path} is not a file a scanner reads as repository instructions"
+        if not known_instructions and any(part.casefold() in RUNTIME_REMOVAL_DIRECTORIES for part in pure.parts[:-1]):
+            return f"{path} is a configured instruction alias inside a runtime directory; it is never removed"
         if (pure.name.casefold() in _INSTRUCTION_NAMES
                 or suffix in DOCUMENTATION_SUFFIXES | {".mdc"}
                 or pure.name.casefold() in REMOVABLE_DOCUMENTATION_NAMES):
@@ -441,13 +453,8 @@ def removal_path_gap(path: str, role: str) -> str | None:
             "root document; source, configuration, scripts, and every other file are never removed")
 
 
-def check_scoring_paths(document: dict, pack: dict, snapshot_id: str) -> None:
-    """Refuse a reviewed removal of a target or control location for this snapshot.
-
-    Shared by the runner and CLI dry run. A map that does not cover the snapshot is left to the
-    export preflight, which records the ordinary per-input preparation failure before any tree
-    is written. Its missing expectation must not raise an unchecked ``StopIteration`` here.
-    """
+def scoring_paths(pack: dict, snapshot_id: str) -> list[str]:
+    """Normalized accepted target and control paths for one evaluator-side snapshot."""
     from .cases import cases_for_snapshot
 
     paths: set[str] = set()
@@ -458,10 +465,16 @@ def check_scoring_paths(document: dict, pack: dict, snapshot_id: str) -> None:
         for control in case["controls"]:
             if control["snapshot_id"] == snapshot_id:
                 paths.update(posixpath.normpath(location["path"]) for location in control["locations"])
+    return sorted(paths - {"."})
+
+
+def check_scoring_paths(document: dict, pack: dict, snapshot_id: str) -> None:
+    """Refuse scoring-path removal; uncovered snapshots remain ordinary preflight failures."""
+    paths = set(scoring_paths(pack, snapshot_id))
     for removal in document.get("removals", []):
         expected = next((entry for entry in removal["expected"]
                          if entry["snapshot_id"] == snapshot_id), None)
-        if expected is not None and expected["state"] == "present" and removal["path"] in paths - {"."}:
+        if expected is not None and expected["state"] == "present" and removal["path"] in paths:
             raise ContractError(
                 f"identity_reduced removal {removal['removal_id']} would remove labelled scoring path "
                 f"{removal['path']} from snapshot {snapshot_id}; scoring evidence must remain in the scanner input")
@@ -1470,9 +1483,12 @@ def _preflight(document: dict, snapshot_id: str | None, snapshot: CachedSnapshot
         raise MaterializationError(
             f"an {profile} export needs the pack snapshot id its map's variants are keyed by")
     removals = document.get("removals", [])
+    policy = document.get("identity_policy")
+    if profile == "metadata_blinded" and policy is not None:
+        raise _refused("metadata_blinded never applies a strict identity policy; use identity_reduced")
     if profile == "metadata_blinded" and removals:
         raise _refused("metadata_blinded never removes files; use identity_reduced for a map with removals")
-    if profile == "identity_reduced" and not removals:
+    if profile == "identity_reduced" and not removals and policy is None:
         raise _refused("identity_reduced needs at least one reviewed file removal")
     validation = [_passed("map_contract", f"{MAP_KIND} {_named(document)}, content {content_digest(document)}")]
     gap = approval_gap(document)
@@ -1492,9 +1508,14 @@ def _preflight(document: dict, snapshot_id: str | None, snapshot: CachedSnapshot
         gap = path_class_gap(edit["path"], edit["role"], edit.get("role_check"))
         if gap:
             raise _refused(f"edit {edit['edit_id']}: {gap}")
+        if policy is not None:
+            from .identity_policy import instruction_inventory
+            if any(item["classification"] == "instruction_file"
+                   for item in instruction_inventory([edit["path"]], policy)):
+                raise _refused(f"edit {edit['edit_id']}: configured or nested instructions must be removed, not edited")
         validation.append(_passed("edit_path_class", f"{edit['edit_id']}: {edit['path']} as {edit['role']}"))
     for removal in removals:
-        gap = removal_path_gap(removal["path"], removal["role"])
+        gap = removal_path_gap(removal["path"], removal["role"], identity_policy=policy)
         if gap:
             raise _refused(f"removal {removal['removal_id']}: {gap}")
         validation.append(_passed("removal_path_class",
@@ -1585,7 +1606,7 @@ def _retained_cues(document: dict, source: Path, paths: list[str], instruction_f
 
 def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapshot_id: str | None,
            profile: str, clock: Callable[[], datetime] | None, approval_required: bool,
-           variant_dir: str = "") -> dict:
+           variant_dir: str = "", pack: dict | None = None) -> dict:
     """Export the original, check the map against it, write the transformed tree, and record it all.
 
     *variant_dir* names where this snapshot's trees sit beneath the trial directory: ``""`` for the
@@ -1594,6 +1615,10 @@ def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapsho
     ``base/source`` and the original at ``original/base/source``. The original stays under
     ``original`` in both, which is the one place nothing is ever handed to a scanner from.
     """
+    if variant_dir not in ("", "base"):
+        raise MaterializationError("a transformed export variant directory must be empty or base")
+    if profile == "identity_reduced" and document.get("identity_policy") is not None and pack is None:
+        raise MaterializationError("a strict identity policy needs the evaluator-side pack to verify answer coverage")
     variant, validation = _preflight(document, snapshot_id, snapshot, profile=profile,
                                      approval_required=approval_required)
     source = trial_dir / variant_dir / "source"
@@ -1673,6 +1698,32 @@ def _blind(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *, snapsho
             "removed_paths": sorted(removal.path for removal in removals if removal.present),
         }
     record["blinding"] = applied
+    if profile == "identity_reduced":
+        from .identity_policy import (IdentityConditionUnavailable, MANIFEST_NAME, build_manifest,
+                                       inspect_tree, instruction_inventory, snapshot_requirements)
+        policy = document.get("identity_policy")
+        requirements, required_paths = snapshot_requirements(pack, snapshot_id) if pack is not None else ([], [])
+        inspection = inspect_tree(source, policy, requirements=requirements, required_source_paths=required_paths)
+        manifest, summary = build_manifest(
+            policy, source_snapshot={"snapshot_id": snapshot_id, "commit": snapshot.commit,
+                                     "git_tree": snapshot.git_tree, "url": snapshot.url},
+            original_tree_hash=original_hash, transformed_tree_hash=record["trial"]["tree_hash"],
+            map_sha256=map_sha256(document), requirements=requirements, inspection=inspection,
+            edits=applied["edits"], removals=applied["removals"],
+            tool_versions={**record["tool_versions"], "scaneval": __version__, "python": sys.version.split()[0]},
+            original_instruction_files=[item["path"] for item in instruction_inventory(original.hashes, policy)],
+            required_source_paths=required_paths)
+        manifest_path = trial_dir / variant_dir / MANIFEST_NAME
+        with manifest_path.open("x", encoding="utf-8") as handle:
+            handle.write(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
+        summary["manifest_path"] = str(PurePosixPath(variant_dir) / MANIFEST_NAME)
+        record["identity_reduction"] = summary
+        if policy is not None and summary["validation"]["state"] != "available":
+            shutil.rmtree(source)
+            failure_path = trial_dir / "provenance.json"
+            with failure_path.open("x", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, indent=2, ensure_ascii=False) + "\n")
+            raise IdentityConditionUnavailable(summary, failure_path)
     return record
 
 
@@ -1692,7 +1743,7 @@ def preflight(document: dict, snapshot_id: str | None, snapshot: CachedSnapshot,
 
 def export_blinded(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *,
                    snapshot_id: str | None, clock: Callable[[], datetime] | None = None,
-                   variant_dir: str = "") -> dict:
+                   variant_dir: str = "", pack: dict | None = None) -> dict:
     """Export *snapshot* blinded by *document*: the original to ``original/source``, the result to ``source``.
 
     A PR input blinds its base with the map that blinded its head, so the same function writes the
@@ -1710,12 +1761,12 @@ def export_blinded(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *,
     """
     return _blind(snapshot, Path(trial_dir), document, snapshot_id=snapshot_id,
                   profile="metadata_blinded", clock=clock, approval_required=True,
-                  variant_dir=variant_dir)
+                  variant_dir=variant_dir, pack=pack)
 
 
 def export_identity_reduced(snapshot: CachedSnapshot, trial_dir: Path, document: dict, *,
                             snapshot_id: str | None, clock: Callable[[], datetime] | None = None,
-                            variant_dir: str = "") -> dict:
+                            variant_dir: str = "", pack: dict | None = None) -> dict:
     """Export an identity-reduced snapshot using reviewed edits and file removals.
 
     The original export stays evaluator-side under ``original``. Only paths approved as
@@ -1725,12 +1776,12 @@ def export_identity_reduced(snapshot: CachedSnapshot, trial_dir: Path, document:
     """
     return _blind(snapshot, Path(trial_dir), document, snapshot_id=snapshot_id,
                   profile="identity_reduced", clock=clock, approval_required=True,
-                  variant_dir=variant_dir)
+                  variant_dir=variant_dir, pack=pack)
 
 
 def dry_run(document: dict, snapshot: CachedSnapshot, snapshot_id: str, workdir: Path, *,
             profile: str = "metadata_blinded",
-            clock: Callable[[], datetime] | None = None) -> dict:
+            clock: Callable[[], datetime] | None = None, pack: dict | None = None) -> dict:
     """Apply *document* to one variant inside *workdir* exactly as a run would, approval aside.
 
     Everything :func:`export_blinded` checks is checked, except that an unapproved map is reported
@@ -1739,4 +1790,4 @@ def dry_run(document: dict, snapshot: CachedSnapshot, snapshot_id: str, workdir:
     *workdir* and never modifies the map. What this returns is never a scan input.
     """
     return _blind(snapshot, Path(workdir), document, snapshot_id=snapshot_id, profile=profile,
-                  clock=clock, approval_required=False)
+                  clock=clock, approval_required=False, pack=pack)

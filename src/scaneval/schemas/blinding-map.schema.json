@@ -22,7 +22,7 @@
     "map_id": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
-      "description": "Stable id of this map. Every blinded input of one repository in one run uses one map id and one content digest."
+      "description": "Stable id of this map. Related transformed inputs of one repository use one map id and content digest within each profile; different profiles can name different maps."
     },
     "map_version": {
       "type": "string",
@@ -109,6 +109,35 @@
       "description": "Files identity_reduced removes after review. metadata_blinded refuses any map with removals. Only identity-only documentation and scanner instruction files are eligible; source, dependencies, licenses, build, CI, and security material are never eligible.",
       "items": {
         "$ref": "#/$defs/removal"
+      }
+    },
+    "identity_policy": {
+      "type": "object",
+      "description": "Explicit strict identity-reduced condition policy. Its declarations are part of the reviewed map digest; legacy maps without it remain basic exports only.",
+      "additionalProperties": false,
+      "required": ["policy_id", "version", "answer_aliases"],
+      "properties": {
+        "policy_id": {"const": "scaneval.identity-reduced"},
+        "version": {"const": "1"},
+        "answer_aliases": {"type": "array", "items": {
+          "type": "object", "additionalProperties": false, "required": ["category", "value"],
+          "properties": {
+            "category": {"enum": ["target_alias", "advisory_url", "answer_alias"]},
+            "value": {"type": "string", "minLength": 1},
+            "forms": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+          }
+        }},
+        "instruction_paths": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "identity_tokens": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "forbidden_artifacts": {"type": "array", "items": {
+          "type": "object", "additionalProperties": false, "required": ["category"],
+          "anyOf": [{"required": ["path"]}, {"required": ["sha256"]}],
+          "properties": {
+            "category": {"enum": ["evaluator_evidence", "redaction_dictionary", "transformation_manifest"]},
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          }
+        }}
       }
     },
     "reviews": {

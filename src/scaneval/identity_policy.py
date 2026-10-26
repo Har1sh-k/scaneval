@@ -45,6 +45,15 @@ _ARTIFACT_CATEGORIES = frozenset({"evaluator_evidence", "redaction_dictionary", 
 _TEXT_SUFFIXES = frozenset({".md", ".markdown", ".rst", ".txt", ".adoc", ".asciidoc", ".org", ".mdc"})
 
 
+class IdentityConditionUnavailable(MaterializationError):
+    """An explicit strict policy failed; evaluator-side refusal evidence has been saved."""
+
+    def __init__(self, summary: dict, provenance_path: Path | None = None):
+        self.summary = deepcopy(summary)
+        self.provenance_path = provenance_path
+        super().__init__("strict identity-reduced condition unavailable: " + "; ".join(summary["validation"]["reasons"]))
+
+
 def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
@@ -339,6 +348,55 @@ def required_answers(pack: dict, snapshot_ids: list[str]) -> list[dict]:
     return _aliases(list(found.values()), "required answers")
 
 
+def snapshot_requirements(pack: dict, snapshot_id: str) -> tuple[list[dict], list[str]]:
+    """Shared export/report requirements: answer aliases and accepted scoring paths for a snapshot."""
+    from .blinding import scoring_paths
+    return required_answers(pack, [snapshot_id]), scoring_paths(pack, snapshot_id)
+
+
+def scanner_identity_gaps(value: Any, *, policy: dict, repository: dict, commits: list[str]) -> list[dict]:
+    """Declared answers and upstream identity cues in scanner-visible identifiers/configuration.
+
+    Qualified repository names, URLs, and revision tokens are checked independently of the
+    reviewed pseudonyms. Short unqualified names are ambiguous with language/runtime settings;
+    qualified names and declared identity tokens can still cover them explicitly.
+    """
+    normalized = validate_policy(policy)
+    pending, strings, visited = [value], [], set()
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            strings.append(item.casefold())
+        elif isinstance(item, (dict, list, tuple)) and id(item) not in visited:
+            visited.add(id(item))
+            if isinstance(item, dict):
+                pending.extend(item.keys())
+                pending.extend(item.values())
+            else:
+                pending.extend(item)
+    needles = []
+    for entry in normalized["answer_aliases"]:
+        needles.extend((entry["category"], form, False) for form in [entry["value"], *entry["forms"]])
+    names = {repository["url"]}
+    name = repository["name"]
+    if "/" in name or len(name) >= 4:
+        names.add(name)
+    if len(name.rsplit("/", 1)[-1]) >= 4:
+        names.add(name.rsplit("/", 1)[-1])
+    needles.extend(("repository_identity", name, True) for name in names)
+    needles.extend(("repository_identity", token, True) for token in normalized["identity_tokens"])
+    needles.extend(("upstream_revision", revision, True) for commit in commits
+                   for revision in {commit, commit[:12], commit[:7]})
+    found = {}
+    for category, needle, bounded in needles:
+        folded = needle.casefold()
+        pattern = re.compile(r"(?<![^\W_])" + re.escape(folded) + r"(?![^\W_])") if bounded else None
+        if any(pattern.search(text) if pattern else folded in text for text in strings):
+            digest = canonical_sha256({"category": category, "value": needle})
+            found[category, digest] = {"category": category, "cue_sha256": digest}
+    return [found[key] for key in sorted(found)]
+
+
 def policy_coverage(policy: dict | None, requirements: list[dict]) -> dict:
     """Whether an explicit reviewed policy declares every evaluator-side answer requirement."""
     required = _aliases(requirements, "required answers")
@@ -379,6 +437,13 @@ def _instruction_class(path: str, configured: set[str]) -> str | None:
     if named or textual:
         return "instruction_file"
     return "unsafe_configured_instruction" if explicit else "assistant_support_file"
+
+
+def instruction_inventory(paths, policy: dict | None = None) -> list[dict]:
+    """Classify known, configured, and nested assistant files without granting removal permission."""
+    configured = {path.casefold() for path in (policy or {}).get("instruction_paths", [])}
+    return [{"path": path, "classification": classification} for path in sorted(paths)
+            if (classification := _instruction_class(path, configured)) is not None]
 
 
 def _tree_entries(root: Path):
@@ -713,6 +778,9 @@ def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_
     coverage = policy_coverage(normalized, required)
     validation["reasons"] = sorted(set(validation["reasons"]) | set(coverage["reasons"])
                                     | set(_inspection_blockers(inspection)))
+    for path in required_paths:
+        if path not in inspection["paths"]:
+            validation["reasons"].append(f"accepted scoring path {path} is absent from the transformed export")
     if validation["state"] != "available" and not validation["reasons"]:
         validation["reasons"].append("the export inspection did not establish strict identity availability")
     if inspection.get("policy_sha256") != canonical_sha256(normalized):
@@ -869,6 +937,8 @@ def verify_manifest(manifest: dict, summary: dict, *, policy: dict | None, map_s
     if not isinstance(summary, dict):
         raise ContractError("identity transformation summary must be an object")
     expected_summary = _portable_summary(manifest)
+    if set(summary) - set(expected_summary) - {"manifest_path"}:
+        raise ContractError("identity transformation summary contains unbound extension fields")
     for key, value in expected_summary.items():
         if canonical_json(summary.get(key)) != canonical_json(value):
             raise ContractError(f"identity summary {key} does not match its transformation manifest")

@@ -13,7 +13,7 @@ import pytest
 from scaneval.contracts import ContractError, canonical_json, canonical_sha256, validate_document
 from scaneval.identity_policy import (MANIFEST_KIND, POLICY_ID, POLICY_VERSION, build_manifest,
                                      inspect_tree, load_manifest, policy_coverage, prepare_metadata_edit,
-                                     required_answers, validate_policy, verify_manifest)
+                                     required_answers, scanner_identity_gaps, validate_policy, verify_manifest)
 from scaneval.materialize import MaterializationError
 
 
@@ -698,3 +698,28 @@ def test_tree_inspection_does_not_depend_on_python_recursion_depth(tmp_path):
     finally:
         sys.setrecursionlimit(previous)
     assert inspection["validation"]["state"] == "available" and inspection["file_count"] == 1
+
+
+def test_manifest_rederives_missing_accepted_paths_even_when_availability_scalar_is_flipped(tmp_path):
+    tree = source(tmp_path, {"src/app.py": "safe"})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS], required_source_paths=["missing.py"])
+    inspection["validation"] = {"state": "available", "reasons": []}
+    record, summary = manifest(inspection, required_source_paths=["missing.py"])
+    assert record["validation"]["state"] == summary["validation"]["state"] == "unavailable"
+
+
+def test_manifest_reuse_refuses_unbound_summary_extensions(tmp_path):
+    tree = source(tmp_path, {"src/app.py": "safe"})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS])
+    record, summary = manifest(inspection)
+    summary["unexpected_field"] = "unbound content"
+    with pytest.raises(ContractError, match="unbound extension fields"):
+        verify_manifest(record, summary, **saved_bindings(inspection))
+
+
+def test_short_repository_names_do_not_match_unrelated_runtime_settings_as_substrings():
+    configured = policy(answer_aliases=[])
+    repository = {"name": "go", "url": "https://example.invalid/org/go.git"}
+    assert scanner_identity_gaps({"language": "go", "package": "algorithm"}, policy=configured,
+                                 repository=repository, commits=[]) == []
+    assert scanner_identity_gaps(repository["url"], policy=configured, repository=repository, commits=[])

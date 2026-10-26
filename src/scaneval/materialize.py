@@ -451,6 +451,7 @@ def export_snapshot(
     blinding_map: dict | None = None,
     snapshot_id: str | None = None,
     clock: Callable[[], datetime] | None = None,
+    pack: dict | None = None,
 ) -> dict:
     """Copy the tracked regular files of *snapshot* into ``trial_dir/source`` and record provenance.
 
@@ -472,7 +473,7 @@ def export_snapshot(
         # Imported here because the blinding module builds on this one.
         from .blinding import export_blinded, export_identity_reduced
         exporter = export_identity_reduced if profile == "identity_reduced" else export_blinded
-        return exporter(snapshot, trial_dir, blinding_map, snapshot_id=snapshot_id, clock=clock)
+        return exporter(snapshot, trial_dir, blinding_map, snapshot_id=snapshot_id, clock=clock, pack=pack)
     source = trial_dir / "source"
     if source.exists():
         raise MaterializationError(f"trial source directory already exists: {source}")
@@ -903,7 +904,8 @@ def changed_paths(changes: dict) -> list[str]:
 
 def export_pr(base: CachedSnapshot, head: CachedSnapshot, trial_dir: Path, *, profile: str = "standard",
               blinding_map: dict | None = None, base_snapshot_id: str | None = None,
-              head_snapshot_id: str | None = None, clock: Callable[[], datetime] | None = None) -> dict:
+              head_snapshot_id: str | None = None, clock: Callable[[], datetime] | None = None,
+              pack: dict | None = None) -> dict:
     """Export the two snapshots of a change set into one trial and record the change between them.
 
     The head goes to ``trial_dir/source``, exactly where a full input's export goes, and the base
@@ -939,16 +941,23 @@ def export_pr(base: CachedSnapshot, head: CachedSnapshot, trial_dir: Path, *, pr
         from .blinding import preflight
         for snapshot, snapshot_id in ((head, head_snapshot_id), (base, base_snapshot_id)):
             preflight(blinding_map, snapshot_id, snapshot, profile=profile)
-    head_record = export_snapshot(head, trial_dir, profile=profile, blinding_map=blinding_map,
-                                  snapshot_id=head_snapshot_id, clock=clock)
-    if profile in ("metadata_blinded", "identity_reduced"):
-        from .blinding import export_blinded, export_identity_reduced
-        exporter = export_identity_reduced if profile == "identity_reduced" else export_blinded
-        base_record = exporter(base, trial_dir, blinding_map, snapshot_id=base_snapshot_id,
-                               clock=clock, variant_dir=PR_BASE_DIR)
-    else:
-        base_record = provenance_record(base, profile, export_tree(base, base_source), clock=clock)
-        base_record["trial"]["root"] = f"{PR_BASE_DIR}/source"
+    from .identity_policy import IdentityConditionUnavailable
+    try:
+        head_record = export_snapshot(head, trial_dir, profile=profile, blinding_map=blinding_map,
+                                      snapshot_id=head_snapshot_id, clock=clock, pack=pack)
+        if profile in ("metadata_blinded", "identity_reduced"):
+            from .blinding import export_blinded, export_identity_reduced
+            exporter = export_identity_reduced if profile == "identity_reduced" else export_blinded
+            base_record = exporter(base, trial_dir, blinding_map, snapshot_id=base_snapshot_id,
+                                   clock=clock, variant_dir=PR_BASE_DIR, pack=pack)
+        else:
+            base_record = provenance_record(base, profile, export_tree(base, base_source), clock=clock)
+            base_record["trial"]["root"] = f"{PR_BASE_DIR}/source"
+    except IdentityConditionUnavailable:
+        for directory in (trial_dir / "source", base_source):
+            if directory.exists():
+                shutil.rmtree(directory)
+        raise
     changes = diff_trees(base_source, trial_dir / "source")
     if not any(changes.values()):
         raise MaterializationError(

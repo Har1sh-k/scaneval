@@ -173,6 +173,7 @@ class PreparedInput:
     blinding: dict | None = None
     pr: dict | None = None
     base_source_dir: Path | None = None
+    identity_manifest: dict | None = None
 
     @property
     def binding_hash(self) -> str:

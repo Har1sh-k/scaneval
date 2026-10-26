@@ -1808,6 +1808,9 @@ def _validate_blinding_map(document: dict[str, Any]) -> None:
     :mod:`scaneval.blinding` asks them against the export, where a refusal is that input's own
     preparation failure.
     """
+    if "identity_policy" in document:
+        from .identity_policy import validate_policy
+        validate_policy(document["identity_policy"])
     pseudonyms = document["pseudonyms"]
     for index, pseudonym in enumerate(pseudonyms):
         for side in ("original", "replacement"):
