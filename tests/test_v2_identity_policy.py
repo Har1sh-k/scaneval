@@ -129,6 +129,46 @@ def test_unpaired_unicode_surrogates_cannot_escape_the_strict_utf8_refusal(field
         edit(data, **{field: "https://example.invalid/\ud800"})
 
 
+@pytest.mark.parametrize("data", [None, "text", memoryview(b"text"), 42])
+def test_metadata_data_types_have_a_controlled_materialization_refusal(data):
+    with pytest.raises(MaterializationError, match="metadata data must be bytes or bytearray"):
+        prepare_metadata_edit(data, path="package.json", field_path=["homepage"],
+                              expected_sha256="sha256:" + "0" * 64, original=ORIGINAL,
+                              replacement=REPLACEMENT, role_check=ROLE_CHECK)
+
+
+def test_bytearray_metadata_input_is_normalized_without_mutating_it():
+    data = bytearray(json.dumps({"homepage": ORIGINAL}).encode())
+    before = bytes(data)
+    changed = edit(data)
+    assert type(changed.data) is bytes and bytes(data) == before
+
+
+@pytest.mark.parametrize("changes", [
+    {"path": "docs/\ud800/package.json"}, {"role_check": "reviewed \ud800"},
+    {"path": "pyproject.toml", "field_path": ["project", "urls", "\ud800"]},
+    {"raw_token": '"\ud800"'},
+])
+def test_all_metadata_record_text_has_a_controlled_strict_utf8_refusal(changes):
+    data = json.dumps({"homepage": ORIGINAL}).encode()
+    with pytest.raises(MaterializationError, match="strict UTF-8 strings"):
+        edit(data, **changes)
+
+
+def test_unrelated_toml_nan_is_preserved_without_falsely_blaming_the_leaf_edit():
+    data = f'[project.urls]\nHomepage = "{ORIGINAL}"\n[tool.runtime]\nvalue = nan\n'.encode()
+    changed = edit(data, path="pyproject.toml", field_path=["project", "urls", "Homepage"])
+    assert changed.data == data.replace(ORIGINAL.encode(), REPLACEMENT.encode())
+    assert b"value = nan" in changed.data
+
+
+def test_a_json_key_token_cannot_be_mistaken_for_the_selected_leaf_value():
+    escaped = json.dumps(ORIGINAL).replace("/", r"\/")
+    data = f'{{"homepage": {escaped}, "{ORIGINAL}": 42}}'.encode()
+    with pytest.raises(MaterializationError, match="other than the selected metadata leaf"):
+        edit(data)
+
+
 def test_reviewed_json_escaped_token_can_be_selected_without_reserializing_the_file():
     token = json.dumps(ORIGINAL).replace("/", r"\/")
     data = f'{{ "homepage" : {token}, "name" : "upstream-project" }}\n'.encode()
@@ -260,6 +300,19 @@ def test_answer_aliases_in_source_are_residual_and_never_rewritten(tmp_path, tex
 def test_ascii_answer_aliases_are_detected_in_common_unicode_text_encodings(tmp_path, encoding):
     tree = source(tmp_path, {"src/script.ps1": "prefix cVe-2025-12345 suffix".encode(encoding)})
     result = inspect_tree(tree, policy(), requirements=[ALIAS])
+    assert result["validation"]["state"] == "unavailable"
+    assert result["residual_cues"][0]["occurrences"] == 1
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"])
+@pytest.mark.parametrize("value, rendered", [("München-advisory", "MÜNCHEN-ADVISORY"),
+                                            ("Straße-code", "STRASSE-CODE"),
+                                            ("STRASSE-code", "Straße-code")])
+def test_unicode_answer_aliases_and_case_expansions_are_detected_in_each_supported_encoding(
+        tmp_path, encoding, value, rendered):
+    alias = {"category": "answer_alias", "value": value, "forms": []}
+    tree = source(tmp_path, {"src/app.py": f"prefix {rendered} suffix".encode(encoding)})
+    result = inspect_tree(tree, policy(answer_aliases=[alias]), requirements=[alias])
     assert result["validation"]["state"] == "unavailable"
     assert result["residual_cues"][0]["occurrences"] == 1
 
@@ -449,3 +502,14 @@ def test_an_unavailable_inspection_is_never_silently_upgraded_from_an_empty_reas
     _, summary = manifest(inspection)
     assert summary["validation"]["state"] == "unavailable"
     assert "did not establish strict identity availability" in summary["validation"]["reasons"][0]
+
+
+def test_changed_accepted_source_paths_cannot_reuse_a_stale_tree_inspection(tmp_path):
+    tree = source(tmp_path, {"src/app.py": "print('ok')"})
+    old = inspect_tree(tree, policy(), requirements=[ALIAS], required_source_paths=["src/app.py"])
+    _, expected = manifest(old, required_source_paths=["src/app.py"])
+    _, changed = manifest(old, required_source_paths=["src/missing.py"])
+    assert expected["validation"]["state"] == "available"
+    assert changed["validation"]["state"] == "unavailable"
+    assert changed["config_sha256"] != expected["config_sha256"]
+    assert "the export was inspected against different accepted scoring paths" in changed["validation"]["reasons"]

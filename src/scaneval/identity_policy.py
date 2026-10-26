@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -47,10 +48,18 @@ def _refuse(message: str) -> MaterializationError:
     return MaterializationError("identity policy refused: " + message)
 
 
+def _strict_text(value: str, where: str) -> None:
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise _refuse(f"metadata values must be strict UTF-8 strings ({where})") from exc
+
+
 def _path(path: str) -> PurePosixPath:
     if (not isinstance(path, str) or not path or "\\" in path or "\x00" in path
             or re.match(r"^[A-Za-z]:", path)):
         raise _refuse("a file path must be a normalized relative POSIX path")
+    _strict_text(path, "path")
     pure = PurePosixPath(path)
     if pure.is_absolute() or any(part in ("", ".", "..") for part in path.split("/")):
         raise _refuse("a file path must be a normalized relative POSIX path")
@@ -88,14 +97,14 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-JSON constant {value}")
 
 
-def _parse(text: str, format_: str) -> Any:
+def _parse(text: str, format_: str, *, label: str = "metadata file") -> Any:
     try:
         if format_ == "json":
             return json.loads(text, object_pairs_hook=_json_object, parse_float=Decimal,
                               parse_constant=_reject_json_constant)
         return tomllib.loads(text)
     except (ValueError, RecursionError) as exc:
-        raise _refuse(f"the metadata file is not valid strict {format_.upper()}: {exc}") from exc
+        raise _refuse(f"the {label} is not valid strict {format_.upper()}: {exc}") from exc
 
 
 def _leaf(tree: Any, field_path: tuple[str, ...]) -> tuple[dict, str]:
@@ -116,6 +125,8 @@ def _same_tree(one: Any, two: Any) -> bool:
         return list(one) == list(two) and all(_same_tree(one[key], two[key]) for key in one)
     if isinstance(one, list):
         return len(one) == len(two) and all(_same_tree(a, b) for a, b in zip(one, two))
+    if isinstance(one, float) and math.isnan(one) and math.isnan(two):
+        return True
     return one == two
 
 
@@ -127,7 +138,7 @@ class MetadataEdit:
     record: dict
 
 
-def prepare_metadata_edit(data: bytes, *, path: str, field_path: list[str] | tuple[str, ...],
+def prepare_metadata_edit(data: bytes | bytearray, *, path: str, field_path: list[str] | tuple[str, ...],
                           expected_sha256: str, original: str, replacement: str,
                           role_check: str, raw_token: str | None = None) -> MetadataEdit:
     """Prepare a hash-pinned identity metadata edit, without writing any file.
@@ -137,23 +148,26 @@ def prepare_metadata_edit(data: bytes, *, path: str, field_path: list[str] | tup
     string or a JSON string with escapes. Its decoded value must be ``original``. Ambiguous
     tokens, missing fields, non-string leaves, and any broader parsed change are refused.
     """
+    if not isinstance(data, (bytes, bytearray)):
+        raise _refuse("metadata data must be bytes or bytearray")
+    data = bytes(data)
     if (not isinstance(field_path, (list, tuple)) or not field_path
             or not all(isinstance(part, str) for part in field_path)):
         raise _refuse("field_path must be a nonempty list of string keys")
     keys = tuple(field_path)
+    for key in keys:
+        _strict_text(key, "field_path")
     format_ = _metadata_format(path, keys)
     if not isinstance(role_check, str) or not is_stated(role_check):
         raise _refuse("an identity metadata edit must state why the field has no runtime role")
+    _strict_text(role_check, "role_check")
     if (not isinstance(original, str) or not is_stated(original) or not isinstance(replacement, str)
             or _LINE_BREAK.search(original) or _LINE_BREAK.search(replacement)):
         raise _refuse("original and replacement must be single-line strings and original must be stated")
     if original == replacement:
         raise _refuse("an identity metadata edit must change its selected value")
-    try:
-        original.encode("utf-8", errors="strict")
-        replacement.encode("utf-8", errors="strict")
-    except UnicodeEncodeError as exc:
-        raise _refuse("original and replacement must be strict UTF-8 strings") from exc
+    _strict_text(original, "original")
+    _strict_text(replacement, "replacement")
     if not isinstance(expected_sha256, str) or not _DIGEST.fullmatch(expected_sha256):
         raise _refuse("an identity metadata edit must pin the original file SHA-256")
     digest = _sha256(data)
@@ -170,12 +184,13 @@ def prepare_metadata_edit(data: bytes, *, path: str, field_path: list[str] | tup
     token = json.dumps(original, ensure_ascii=False) if raw_token is None else raw_token
     if not isinstance(token, str) or not token or _LINE_BREAK.search(token):
         raise _refuse("the reviewed raw token must be a single-line quoted string")
+    _strict_text(token, "raw_token")
     if format_ == "json":
-        decoded = _parse(token, "json")
+        decoded = _parse(token, "json", label="reviewed raw token")
         quoted = token.startswith('"') and token.endswith('"')
     else:
         quoted = bool(re.fullmatch(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"", token))
-        decoded = _parse("value = " + token, "toml")
+        decoded = _parse("value = " + token, "toml", label="reviewed raw token")
         if not isinstance(decoded, dict) or list(decoded) != ["value"]:
             raise _refuse("the reviewed raw token is not one TOML string")
         decoded = decoded["value"]
@@ -191,7 +206,7 @@ def prepare_metadata_edit(data: bytes, *, path: str, field_path: list[str] | tup
     expected = deepcopy(before)
     selected, selected_key = _leaf(expected, keys)
     selected[selected_key] = replacement
-    after = _parse(changed, format_)
+    after = _parse(changed, format_, label="transformed metadata file")
     if not _same_tree(expected, after):
         raise _refuse("the token replacement changes something other than the selected metadata leaf")
     if _LINE_BREAK.findall(text) != _LINE_BREAK.findall(changed):
@@ -438,24 +453,48 @@ def _cue(category: str, value: str, path: str, count: int, surface: str, reason:
             "path": path, "occurrences": count, "surface": surface, "reason": reason}
 
 
-def _answer_occurrences(data: bytes, folded_text: str, forms: set[str]) -> int:
-    """Count ASCII aliases in common text encodings, merging overlapping encoded matches."""
-    folded_bytes = data.lower()
+def _decoded_spans(text: str, encoding: str, forms: set[str]) -> list[tuple[int, int]]:
+    """Map case-folded matches back to byte spans, including Unicode case expansions."""
+    folded = text.casefold()
+    matches = []
+    for form in forms:
+        start = folded.find(form)
+        while start >= 0:
+            matches.append((start, start + len(form)))
+            start = folded.find(form, start + len(form))
+    if not matches:
+        return []
+    starts, ends = sorted({start for start, _ in matches}), sorted({end for _, end in matches})
+    start_bytes, end_bytes = {}, {}
+    start_index = end_index = folded_offset = byte_offset = 0
+    for character in text:
+        folded_end = folded_offset + len(character.casefold())
+        byte_end = byte_offset + len(character.encode(encoding, errors="surrogateescape"))
+        while start_index < len(starts) and starts[start_index] < folded_end:
+            start_bytes[starts[start_index]] = byte_offset
+            start_index += 1
+        while end_index < len(ends) and ends[end_index] <= folded_end:
+            end_bytes[ends[end_index]] = byte_end
+            end_index += 1
+        folded_offset, byte_offset = folded_end, byte_end
+        if start_index == len(starts) and end_index == len(ends):
+            break
+    return [(start_bytes[start], end_bytes[end]) for start, end in matches]
+
+
+def _answer_occurrences(data: bytes, forms: set[str]) -> int:
+    """Count Unicode aliases across common text encodings without duplicate overlap credit."""
     encodings = ["utf-8"]
     if b"\x00" in data:
         encodings += ["utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"]
     spans = []
-    count = sum(folded_text.count(form) for form in forms if not form.isascii())
-    for form in forms:
-        if not form.isascii():
+    for encoding in encodings:
+        try:
+            text = data.decode(encoding, errors="surrogateescape" if encoding == "utf-8" else "strict")
+        except UnicodeDecodeError:
             continue
-        for encoding in encodings:
-            needle = form.encode(encoding)
-            start = folded_bytes.find(needle)
-            while start >= 0:
-                spans.append((start, start + len(needle)))
-                start = folded_bytes.find(needle, start + len(needle))
-    end = -1
+        spans.extend(_decoded_spans(text, encoding, forms))
+    count, end = 0, -1
     for start, finish in sorted(spans):
         if start >= end:
             count += 1
@@ -522,7 +561,7 @@ def inspect_tree(source: Path, policy: dict | None, *, requirements: list[dict],
         for entry in answers.values():
             forms = {entry["value"].casefold(), *(form.casefold() for form in entry["forms"])}
             for surface, text in (("content", folded_text), ("path", folded_path)):
-                count = (_answer_occurrences(data, folded_text, forms) if surface == "content"
+                count = (_answer_occurrences(data, forms) if surface == "content"
                          else sum(text.count(form) for form in forms))
                 if count:
                     residuals.append(_cue(entry["category"], entry["value"], path, count, surface,
@@ -552,7 +591,8 @@ def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_
                    transformed_tree_hash: str, map_sha256: str, requirements: list[dict], inspection: dict,
                    edits: list[dict], removals: list[dict], tool_versions: dict[str, str],
                    metadata_edits: list[dict] | None = None, skipped: list[dict] | None = None,
-                   original_instruction_files: list[str] | None = None) -> tuple[dict, dict]:
+                   original_instruction_files: list[str] | None = None,
+                   required_source_paths: list[str] | None = None) -> tuple[dict, dict]:
     """Build deterministic evaluator-side provenance and its portable condition summary.
 
     No timestamp, temporary path, or random value is introduced. The surrounding export record
@@ -561,6 +601,10 @@ def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_
     """
     normalized = validate_policy(policy) if policy is not None else None
     required = _aliases(requirements, "required answers")
+    required_paths = sorted(set(required_source_paths or []))
+    for path in required_paths:
+        _path(path)
+    required_paths_sha256 = canonical_sha256(required_paths)
     for name, digest in (("original_tree_hash", original_tree_hash), ("transformed_tree_hash", transformed_tree_hash),
                          ("map_sha256", map_sha256)):
         if not isinstance(digest, str) or not _DIGEST.fullmatch(digest):
@@ -577,11 +621,14 @@ def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_
         validation["reasons"].append("the export was inspected under a different identity policy")
     if inspection.get("requirements_sha256") != canonical_sha256(required):
         validation["reasons"].append("the export was inspected against different answer requirements")
+    if inspection.get("required_source_paths_sha256") != required_paths_sha256:
+        validation["reasons"].append("the export was inspected against different accepted scoring paths")
     if inspection["tree_hash"] != transformed_tree_hash:
         validation["reasons"].append("the inspected export does not match the transformed tree hash")
     validation["reasons"] = sorted(set(validation["reasons"]))
     validation["state"] = "unavailable" if validation["reasons"] else "available"
-    configuration = {"policy": normalized, "map_sha256": map_sha256, "required_answers": required}
+    configuration = {"policy": normalized, "map_sha256": map_sha256, "required_answers": required,
+                     "required_source_paths_sha256": required_paths_sha256}
     config_sha256 = canonical_sha256(configuration)
     changed = sorted(deepcopy(edits), key=canonical_json)
     fields = sorted(deepcopy(metadata_edits or []), key=canonical_json)
@@ -610,6 +657,7 @@ def build_manifest(policy: dict | None, *, source_snapshot: dict, original_tree_
         "source_snapshot": deepcopy(source_snapshot), "original_tree_hash": original_tree_hash,
         "transformed_tree_hash": transformed_tree_hash, "map_sha256": map_sha256,
         "requirements_sha256": canonical_sha256(required), "inspection_sha256": canonical_sha256(inspection),
+        "required_source_paths_sha256": required_paths_sha256,
         "tool_versions": dict(sorted(tool_versions.items())),
         "edits": changed, "metadata_edits": fields, "removals": removed,
         "skipped": sorted(deepcopy(skipped or []), key=canonical_json), "instruction_files": disposition,
