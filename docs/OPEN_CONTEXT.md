@@ -114,14 +114,18 @@ are forwarded. The response includes provenance plus `content_base64`.
 For example, inside a scanner process:
 
 ```python
-import json, os, urllib.request
+import json, os, urllib.error, urllib.request
 
 request = urllib.request.Request(
     os.environ["SCANEVAL_RETRIEVAL_URL"] + "/fetch",
     data=json.dumps({"url": "https://example.com/"}).encode(),
     headers={"Content-Type": "application/json"},
 )
-with urllib.request.urlopen(request, timeout=60) as response:
+try:
+    response = urllib.request.urlopen(request, timeout=60)
+except urllib.error.HTTPError as error:
+    response = error  # Denied/failed attempts still return their structured provenance.
+with response:
     evidence = json.load(response)
 ```
 
