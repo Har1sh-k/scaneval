@@ -102,6 +102,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import errno
+import hashlib
 import os
 from pathlib import Path, PurePath
 import shutil
@@ -867,7 +868,7 @@ def _capture_record(capture: dict, capture_state: dict | None, trace_record: dic
 
 
 def _read_trace(outcome: NativeOutcome, staged_areas: list[tuple[Path, Path, Path]], trace_dir: Path,
-                trace_mode: str, bundle: Containment) -> dict:
+                trace_mode: str, bundle: Containment, evidence: dict | None = None) -> dict:
     """Count the events in the staged trace file and record where it landed.
 
     Only a regular file this bundle actually holds is read: a trace path that is a symbolic link,
@@ -900,7 +901,11 @@ def _read_trace(outcome: NativeOutcome, staged_areas: list[tuple[Path, Path, Pat
             outcome.notes.append("trace file left outside the bundle; its path is not recorded")
         else:
             from .trace import parse_trace
-            parsed = parse_trace(read_regular_file(events_path))
+            raw = read_regular_file(events_path)
+            parsed = parse_trace(raw)
+            if evidence is not None:
+                evidence.update({"path": recorded_trace_path, "sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+                                 "run_ids": sorted({event["run_id"] for event in parsed.events})})
             count = len(parsed.events)
             invalid = parsed.rejected_records > 0
             if invalid:
@@ -1190,6 +1195,7 @@ def run_invocation(
         except ImportError as exc:
             raise ExecutionError("open_context is unavailable: its bounded-history extension is not installed") from exc
     configuration = {"system_id": spec.system_id, "adapter": spec.adapter, "config": dict(spec.config),
+                     "adapter_identity": {"name": adapter.name, "version": adapter.adapter_version},
                      "model_id": spec.model_id, "model_revision": spec.model_revision,
                      "network_policy": network_policy}
     # Freeze before the scanner can mutate any adapter state; publish with the execution pair,
@@ -1453,6 +1459,7 @@ def run_invocation(
     finished_at = _now(clock)
     modified = sorted(set(before) ^ set(after) | {p for p in before if p in after and before[p] != after[p]})
     trace_record: dict | None = None
+    trace_evidence: dict = {}
 
     isolation = dict(LOCAL_ISOLATION) if backend is None else backend.isolation_record()
     network_enforced = backend is not None and bool(backend.network_enforced)
@@ -1637,7 +1644,7 @@ def run_invocation(
 
     if violation is None and trace_dir is not None:
         try:
-            trace_record = _read_trace(outcome, staged_areas, trace_dir, trace_mode, bundle_area)
+            trace_record = _read_trace(outcome, staged_areas, trace_dir, trace_mode, bundle_area, trace_evidence)
         except (UnicodeDecodeError, OSError) as exc:
             # A trace this module cannot read as UTF-8 text is a recorded failure, not a
             # silently missing count beside an otherwise successful result.
@@ -1696,7 +1703,7 @@ def run_invocation(
             raise ExecutionError(f"the invocation could not be recorded: {again}") from again
     evidence, _rendered = _recordable_document({
         "history": {"before": history_before, "after": history_after}, "controls": controls,
-        "history_evidence": installed_history})
+        "history_evidence": installed_history, "trace": trace_evidence or None})
     _write_new_documents([(bundle / "result.json", result_bytes),
                           (bundle / "execution.json", execution_bytes),
                           (bundle / conditions.EVIDENCE_FILE, _canonical_bytes(evidence)),

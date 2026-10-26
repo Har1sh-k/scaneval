@@ -16,7 +16,7 @@ import re
 from typing import Any, Iterable
 
 from .contracts import (ContractError, _reject_json_constant, _strict_object, canonical_sha256,
-                        load_document, reject_nonfinite, validate_document)
+                        reject_nonfinite, validate_document)
 from .trace import parse_trace
 
 
@@ -29,13 +29,10 @@ EVIDENCE_FILE = "condition-evidence.json"
 STATUSES = ("attested", "declared_only", "failed", "unavailable")
 NAMES = ("closed_book_standard", "open_context", "identity_reduced")
 TOOLS = ("browser", "web_search", "remote_fetch", "package_install", "scanner_update")
-_RETRIEVAL = re.compile(
-    r"(?:web[_. -]?(?:search|fetch)|browser|remote[_. -]?fetch|fetch[_. -]?url|"
-    r"(?:^|[ /_.-])(?:curl|wget)(?:$|[ /_.-])|package[_. -]?install|scanner[_. -]?update)", re.I)
 _LOCAL_TOOLS = frozenset({"read", "write", "edit", "multiedit", "glob", "grep", "ls",
                           "read_file", "list_directory", "search_files", "apply_patch"})
 _RETRIEVAL_TOOLS = frozenset({"websearch", "web_search", "webfetch", "web_fetch", "browser",
-                              "browse", "remote_fetch", "fetch_url", "package_install", "scanner_update"})
+                              "browse", "remote_fetch", "fetch_url", "package_install", "scanner_update", "curl", "wget"})
 
 
 def resolve_condition(condition: dict | None = None, *, profile: str = "standard",
@@ -58,10 +55,14 @@ def _bytes(root: Path, relative: str) -> bytes:
     """Read an ordinary saved file inside the bundle; refuse links and special files."""
     from .execution import read_regular_file
     if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
-        raise ContractError(f"condition artifact path escapes its bundle: {relative!r}")
+        raise ContractError("condition artifact path must be bundle-relative without parent components")
     path = root / relative
-    if not path.resolve().is_relative_to(root):
-        raise ContractError(f"condition artifact path escapes its bundle: {relative!r}")
+    try:
+        inside = path.resolve().is_relative_to(root)
+    except (OSError, RuntimeError) as exc:
+        raise ContractError(f"condition artifact path cannot be resolved: {relative}") from exc
+    if not inside:
+        raise ContractError(f"condition artifact resolves outside its bundle: {relative}")
     current = path
     while current != root:
         if current.is_symlink():
@@ -69,8 +70,10 @@ def _bytes(root: Path, relative: str) -> bytes:
         current = current.parent
     try:
         return read_regular_file(path)
-    except (OSError, ValueError) as exc:
-        raise ContractError(f"could not read condition artifact {relative}: {exc}") from exc
+    except OSError as exc:
+        raise ContractError(f"could not read condition artifact {relative}: {type(exc).__name__}: {exc.strerror or 'read failed'}") from exc
+    except ValueError as exc:
+        raise ContractError(f"could not read condition artifact {relative}: {str(exc).replace(str(root), '<bundle>')}") from exc
 
 
 def _json(raw: bytes) -> dict:
@@ -101,6 +104,8 @@ def _check_evidence(value: dict) -> None:
         if key in value.get("history", {}) and not isinstance(value["history"][key], dict):
             raise ContractError(f"condition history {key} must be an object")
     controls = value.get("controls", {})
+    if value.get("trace") is not None and not isinstance(value["trace"], dict):
+        raise ContractError("condition evidence trace must be an object or null")
     for key in ("tools", "provider"):
         if key in controls and not isinstance(controls[key], dict):
             raise ContractError(f"condition controls {key} must be an object")
@@ -131,15 +136,29 @@ def _configured_retrieval(config: dict) -> bool:
     for key, value in config.items():
         normalized = str(key).lower().replace("-", "_")
         if normalized in {"tools", "enabled_tools", "allowed_tools"}:
-            if isinstance(value, list) and any(isinstance(item, str) and _RETRIEVAL.search(item) for item in value):
+            listed = value if isinstance(value, list) else re.split(r"[,;\s]+", value) if isinstance(value, str) else []
+            if any(isinstance(item, str) and _is_retrieval_tool(item) for item in listed):
                 return True
         if normalized in {*TOOLS, "web", "browsing", "web_retrieval", "provider_retrieval",
-                          "enable_browser", "enable_web_search", "enable_retrieval"} and value is True:
-            return True
-        if _RETRIEVAL.search(normalized) and value is True:
-            return True
+                          "enable_browser", "enable_web_search", "enable_retrieval"} or _is_retrieval_tool(normalized):
+            if value is True or isinstance(value, str) and value.casefold() in {"on", "true", "yes", "enabled", "allowed"}:
+                return True
+            if isinstance(value, dict) and any(value.get(key) is True or isinstance(value.get(key), str)
+                                               and value[key].casefold() in {"on", "true", "yes", "enabled", "allowed"}
+                                               for key in ("enabled", "allow", "allowed")):
+                return True
         if isinstance(value, dict) and _configured_retrieval(value):
             return True
+    return False
+
+
+def _is_retrieval_tool(name: str) -> bool:
+    normalized = name.casefold()
+    if normalized in _RETRIEVAL_TOOLS or normalized.startswith(("mcp__browser__", "mcp__web__", "browser.", "web.")):
+        return True
+    if normalized.startswith("mcp:") and "/" in normalized:
+        server, tool = normalized[4:].split("/", 1)
+        return server in {"web", "browser", "playwright"} or tool in _RETRIEVAL_TOOLS
     return False
 
 
@@ -227,7 +246,7 @@ def _retrieval(execution: dict, evidence: dict, trace: Any) -> tuple[str, str, l
             # A filename, search pattern, or quoted source mentioning curl/browser is ordinary
             # input. Only structured tool identity establishes a retrieval operation here.
             normalized = name.lower() if isinstance(name, str) else ""
-            if (normalized in _RETRIEVAL_TOOLS or normalized.startswith(("mcp__browser__", "mcp__web__"))):
+            if _is_retrieval_tool(normalized):
                 failed.append(_reason("retrieval_observed", "A saved tool event records a prohibited retrieval operation."))
             if not isinstance(name, str) or name.lower() not in _LOCAL_TOOLS:
                 unknown_tools = True
@@ -349,12 +368,25 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None) -
               "provider": {}, "details": {}, "reasons": []}
     trace = None
     trace_meta = execution.get("trace") or {}
+    trace_binding = (documents.get("evidence") or {}).get("trace") or {}
     if trace_meta.get("path"):
         try:
             raw = _bytes(root, trace_meta["path"])
             trace = parse_trace(raw)
             artifacts.append({"role": "trace", "path": trace_meta["path"], "sha256": _digest(raw)})
-            if trace_meta.get("events") != len(trace.events):
+            if not trace_binding:
+                gaps.append(_reason("trace_binding_unavailable", "No saved execution-time digest binds the trace bytes."))
+                trace = None
+            elif trace_binding.get("path") != trace_meta["path"] or trace_binding.get("sha256") != _digest(raw):
+                failed.append(_reason("trace_binding_mismatch", "The saved trace differs from its execution-time digest."))
+                trace = None
+            if trace is not None and any(event["run_id"] != execution.get("run_id") for event in trace.events):
+                failed.append(_reason("trace_run_mismatch", "A trace event belongs to a different run."))
+                trace = None
+            if trace is not None and trace_binding.get("run_ids") != sorted({event["run_id"] for event in trace.events}):
+                failed.append(_reason("trace_run_binding_mismatch", "The saved trace run identities differ from their execution-time binding."))
+                trace = None
+            if trace is not None and trace_meta.get("events") != len(trace.events):
                 gaps.append(_reason("trace_count_mismatch", "The saved trace count differs from the execution record."))
                 trace = None
         except ContractError as exc:
@@ -379,6 +411,17 @@ def classify_observation(bundle: str | Path, *, condition: dict | None = None) -
             or configuration.get("config") != execution["system_config"]
             or configuration.get("network_policy") != execution["network_policy"]["declared"]):
         failed.append(_reason("configuration_mismatch", "The saved configuration differs from the execution record."))
+    if configuration:
+        actual_adapter = configuration.get("adapter_identity") or {"name": configuration.get("adapter"),
+                                                                   "version": execution["adapter"]["version"]}
+        if actual_adapter != execution["adapter"]:
+            failed.append(_reason("adapter_identity_mismatch", "The saved adapter identity differs from the execution record."))
+        if request and any(configuration.get(key) != request["system"].get(key)
+                           for key in ("model_id", "model_revision")):
+            failed.append(_reason("model_configuration_mismatch", "The saved model identity/revision differs from the invocation request."))
+        requested_model = (execution.get("model_identity") or {}).get("requested")
+        if configuration.get("model_id") and requested_model is not None and configuration["model_id"] != requested_model:
+            failed.append(_reason("model_identity_mismatch", "The executed model identity differs from the saved requested model."))
     if execution.get("condition") is not None and execution["condition"] != declaration:
         failed.append(_reason("condition_policy_mismatch", "The saved policy differs from the execution's condition."))
     if policy is not None and policy != declaration:

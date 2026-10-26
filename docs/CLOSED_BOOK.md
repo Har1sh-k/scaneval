@@ -27,6 +27,9 @@ mechanical history audits, and any observed trace or referenced provider asserti
 shows retained instruction, metadata, and documentation paths. Reclassification checks those
 files and refuses a stale record. Hashes detect changes to saved evidence; they do not
 authenticate its author or stop an operator from rewriting every artifact.
+The trace digest and its run identities are captured when the execution record is written;
+matching event counts alone cannot establish trace identity. Adapter identity and the requested
+model/revision must also agree across the saved configuration, request, and execution record.
 
 The states are:
 

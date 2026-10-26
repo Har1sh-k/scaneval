@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -194,6 +195,9 @@ def test_synthetic_metadata_symlink_is_not_an_unchanged_hash(tmp_path):
     ("unrestricted", {}, "unrestricted_network"),
     ("none", {"tools": ["WebSearch"]}, "retrieval_enabled"),
     ("none", {"tools": {"browser": True}}, "retrieval_enabled"),
+    ("none", {"tools": {"web_search": {"enabled": True}}}, "retrieval_enabled"),
+    ("none", {"web_search": "on"}, "retrieval_enabled"),
+    ("none", {"tools": "Read,WebSearch"}, "retrieval_enabled"),
 ])
 def test_enabled_network_or_retrieval_cannot_validate(tmp_path, policy, config, expected):
     _bundle, record = invoke(tmp_path, policy=policy, config=config)
@@ -218,11 +222,55 @@ def test_complete_local_tool_observation_ignores_benign_retrieval_mentions(tmp_p
     assert record["status"] == "attested" and record["retrieval"] == "observed_none"
 
 
-@pytest.mark.parametrize("name,state", [("WebSearch", "enabled"), ("Bash", "capture_gap")])
+@pytest.mark.parametrize("name,state", [("WebSearch", "enabled"), ("Bash", "capture_gap"),
+                                         ("mcp:browser/navigate", "enabled"), ("mcp:api/web_search", "enabled")])
 def test_structured_retrieval_is_distinct_from_opaque_shell_observation(tmp_path, name, state):
     _bundle, record = invoke(tmp_path, Offline(tools=False, events=[{"metadata": {"tool_name": name, "input_summary": "curl https://example.com"}}]))
     assert record["retrieval"] == state
     assert record["status"] == ("failed" if state == "enabled" else "declared_only")
+
+
+def test_same_count_trace_substitution_fails_without_a_previous_condition_record(tmp_path):
+    bundle, _record = invoke(tmp_path, Offline(tools=False, events=[{"metadata": {"tool_name": "Read"}}]))
+    (bundle / conditions.RECORD_FILE).unlink()
+    trace = bundle / "trace" / "events.jsonl"
+    event = json.loads(trace.read_text())
+    event["metadata"]["tool_name"] = "Grep"
+    trace.write_text(canonical_json(event) + "\n")
+    record = conditions.classify_observation(bundle)
+    assert record["status"] == "failed" and "trace_binding_mismatch" in codes(record)
+
+
+def test_foreign_run_trace_cannot_attest_even_when_hash_matches(tmp_path):
+    _bundle, record = invoke(tmp_path, Offline(tools=False, events=[{"run_id": "another-run", "metadata": {"tool_name": "Read"}}]))
+    assert record["status"] == "failed" and "trace_run_mismatch" in codes(record)
+
+
+def test_legacy_trace_without_execution_time_digest_does_not_attest(tmp_path):
+    bundle, _record = invoke(tmp_path, Offline(tools=False, events=[{"metadata": {"tool_name": "Read"}}]))
+    (bundle / conditions.RECORD_FILE).unlink()
+    evidence_path = bundle / conditions.EVIDENCE_FILE
+    evidence = json.loads(evidence_path.read_text())
+    evidence.pop("trace")
+    evidence_path.write_text(canonical_json(evidence))
+    record = conditions.classify_observation(bundle)
+    assert record["status"] == "declared_only" and "trace_binding_unavailable" in codes(record)
+
+
+@pytest.mark.parametrize("key,value,code", [
+    ("adapter_identity", {"name": "wrong", "version": "1"}, "adapter_identity_mismatch"),
+    ("model_id", "other-model", "model_configuration_mismatch"),
+    ("model_revision", "other-revision", "model_configuration_mismatch"),
+])
+def test_adapter_and_model_configuration_are_independently_bound(tmp_path, key, value, code):
+    bundle, _record = invoke(tmp_path, model_id="model-a")
+    (bundle / conditions.RECORD_FILE).unlink()
+    path = bundle / conditions.CONFIGURATION_FILE
+    configuration = json.loads(path.read_text())
+    configuration[key] = value
+    path.write_text(canonical_json(configuration))
+    record = conditions.classify_observation(bundle)
+    assert record["status"] == "failed" and code in codes(record)
 
 
 class Remote(Offline):
@@ -288,6 +336,18 @@ def test_legacy_runs_remain_readable_without_retroactive_attestation(tmp_path):
     record = conditions.classify_observation(bundle)
     assert record["condition"] == "closed_book_standard" and record["status"] == "unavailable"
     assert record["history"] == "unavailable" and record["retrieval"] == "capture_gap"
+
+
+def test_legacy_classification_is_independent_of_bundle_location(tmp_path):
+    bundle, _record = invoke(tmp_path)
+    for name in (conditions.RECORD_FILE, conditions.POLICY_FILE, conditions.CONFIGURATION_FILE,
+                 conditions.PROVENANCE_FILE, conditions.EVIDENCE_FILE):
+        (bundle / name).unlink()
+    first = conditions.classify_observation(bundle)
+    moved = tmp_path / "relocated" / bundle.name
+    shutil.copytree(bundle, moved)
+    assert conditions.classify_observation(moved) == first
+    assert str(tmp_path) not in canonical_json(first)
 
 
 def test_condition_schema_refuses_attestation_of_an_unenforced_declaration(tmp_path):
