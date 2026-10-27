@@ -972,6 +972,7 @@ def run_from_config(
     only_inputs: set[str] | None = None,
     progress: ProgressReporter | None = None,
     progress_interval_seconds: float = DEFAULT_PROGRESS_INTERVAL_SECONDS,
+    prepared_guard: Callable[[dict, dict], None] | None = None,
 ) -> dict:
     """Run every configured (input, system, repetition) and return the run manifest.
 
@@ -994,6 +995,12 @@ def run_from_config(
     output paths. Long invocations receive a heartbeat every ``progress_interval_seconds``.
     These messages are best-effort, carry no scanner content, are not saved as evidence, and a
     reporter failure cannot change the run.
+
+    ``prepared_guard``, when given, is called once every input has been prepared and the runtime
+    pack saved, before any system is prepared or adapter invoked. It receives that checked pack and
+    a schedule rebuilt from it with the same configuration, selection, maps, and ``created_at`` as
+    the frozen schedule. An exception it raises fails the run like any other failure after the
+    output directory exists. Without a guard nothing is rebuilt and the run is unchanged.
 
     Refused before the output directory is created, so a refused run writes nothing at all: an
     input the pack does not declare, a native PR input whose change set the pack does not declare,
@@ -1064,9 +1071,12 @@ def run_from_config(
     }
     # Built from the pack as it was supplied, before any check has run against an export, and
     # before anything is written: a schedule that cannot be built refuses the run here.
-    frozen_schedule = schedule.build_schedule(
-        config, pack, base_dir=base, created_at=_now(clock), inputs=[spec.entry for spec in inputs],
-        systems=systems, maps={spec.input_id: spec.blinding_map for spec in inputs if spec.blinding_map})
+    def build_schedule(current: dict, created_at: str) -> dict:
+        return schedule.build_schedule(
+            config, current, base_dir=base, created_at=created_at, inputs=[spec.entry for spec in inputs],
+            systems=systems, maps={spec.input_id: spec.blinding_map for spec in inputs if spec.blinding_map})
+
+    frozen_schedule = build_schedule(pack, _now(clock))
 
     out_dir.mkdir(parents=True, exist_ok=False)
     _emit_progress(progress, f"run {config['run_id']}: output {out_dir}")
@@ -1114,6 +1124,9 @@ def run_from_config(
 
         # The pack is frozen once, here: every input has been checked and nothing is invoked yet.
         _write_new(evaluator_dir / "pack.json", pack)
+        # Outside the per-input handler: a refusal fails the whole run before any system or adapter.
+        if prepared_guard is not None:
+            prepared_guard(pack, build_schedule(pack, frozen_schedule["created_at"]))
         # Only now does the pack say what each case's check set amounts to, so the manifest's
         # planning notes and per-input label states are derived from the frozen copy.
         warnings.extend(_planning_records(pack, prepared_inputs, manifest_inputs))

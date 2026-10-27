@@ -99,6 +99,48 @@ def _verify_staged(matrix: dict, cell: dict, out: Path) -> None:
             raise ContractError(f"staged matrix artifact changed before scanner invocation: {relative}")
 
 
+def _check_schedule(matrix: dict, cell: dict, scheduled: dict) -> None:
+    """Require one cell schedule's inputs, assignments, and frozen plans to equal the frozen cell.
+
+    Pure: shared by the prepared-cell guard and post-run verification. ``created_at`` and the
+    pack digest are not compared, so independently refreshed check timestamps are not drift.
+    """
+    expected = {row["assignment_id"]: row for row in cell["assignments"]}
+    ids = [row["assignment_id"] for row in scheduled["assignments"]]
+    if scheduled["config_sha256"] != cell["config_sha256"] or set(ids) != set(expected):
+        raise ContractError("executed schedule differs from the complete frozen matrix population")
+    for row in scheduled["assignments"]:
+        assignment = expected[row["assignment_id"]]
+        if any(row[key] != assignment[expected_key] for key, expected_key in
+               (("input_id", "snapshot_id"), ("system_id", "system_id"), ("repetition", "repetition"))):
+            raise ContractError("scheduled assignment identity differs from the frozen matrix")
+    snapshots = {source["snapshot_id"]: source for source in matrix["population"]}
+    if {row["input_id"] for row in scheduled["inputs"]} != set(snapshots):
+        raise ContractError("executed schedule changes the frozen source population")
+    for source in scheduled["inputs"]:
+        if source["plan"] != snapshots[source["snapshot_id"]]["schedule_plan"]:
+            raise ContractError("executed target/control eligibility differs from its frozen matrix population")
+
+
+def _prepared_guard(matrix: dict, cell: dict) -> Callable[[dict, dict], None]:
+    """Refuse a cell whose input preparation changed frozen labels or eligibility.
+
+    The runner calls this after every input of the cell is prepared and its runtime pack is saved,
+    before any system is prepared or adapter invoked, with that pack and a schedule rebuilt from it.
+    """
+    def guard(pack: dict, rebuilt: dict) -> None:
+        try:
+            if experiment.label_contract(pack) != experiment.label_contract(matrix["pack"]):
+                raise ContractError("runtime corpus labels, source bindings, review state, or eligibility differ from the frozen pack")
+            _check_schedule(matrix, cell, rebuilt)
+        except ContractError as exc:
+            raise ContractError(
+                f"input preparation changed frozen labels or eligibility for matrix cell {cell['name']} "
+                f"({exc}); no scanner was prepared or invoked. Run case checks, review the resulting pack, "
+                "and freeze a new matrix") from exc
+    return guard
+
+
 def _verify_run_semantics(matrix: dict, cell: dict, root: Path) -> None:
     if (root / "run-config.json").exists() and read_json(root / "run-config.json") != cell["config"]:
         raise ContractError("executed run configuration differs from its frozen matrix cell")
@@ -116,21 +158,7 @@ def _verify_run_semantics(matrix: dict, cell: dict, root: Path) -> None:
                    (("input_id", "snapshot_id"), ("system_id", "system_id"), ("repetition", "repetition"))):
                 raise ContractError("manifest assignment identity differs from the frozen matrix")
     if (root / "evaluator/schedule.json").exists():
-        scheduled = load_document(root / "evaluator/schedule.json", "evaluation-schedule")
-        ids = [row["assignment_id"] for row in scheduled["assignments"]]
-        if scheduled["config_sha256"] != cell["config_sha256"] or set(ids) != set(expected):
-            raise ContractError("executed schedule differs from the complete frozen matrix population")
-        for row in scheduled["assignments"]:
-            assignment = expected[row["assignment_id"]]
-            if any(row[key] != assignment[expected_key] for key, expected_key in
-                   (("input_id", "snapshot_id"), ("system_id", "system_id"), ("repetition", "repetition"))):
-                raise ContractError("scheduled assignment identity differs from the frozen matrix")
-        snapshots = {source["snapshot_id"]: source for source in matrix["population"]}
-        if {row["input_id"] for row in scheduled["inputs"]} != set(snapshots):
-            raise ContractError("executed schedule changes the frozen source population")
-        for source in scheduled["inputs"]:
-            if source["plan"] != snapshots[source["snapshot_id"]]["schedule_plan"]:
-                raise ContractError("executed target/control eligibility differs from its frozen matrix population")
+        _check_schedule(matrix, cell, load_document(root / "evaluator/schedule.json", "evaluation-schedule"))
     invocations = root / "invocations"
     if invocations.is_dir() and any(path.name not in expected for path in invocations.iterdir()):
         raise ContractError("run contains unexpected invocation output outside the frozen schedule")
@@ -269,7 +297,9 @@ def execute(frozen_path: Path, out_dir: Path, *, workspace_root: Path | None = N
             progress=None) -> dict:
     """Stage all cells before the first scanner, then execute each under its frozen run config.
 
-    A cell failure does not remove any assignment or prevent other cells from running. Every
+    Each cell's runner refuses the cell after preparing all its inputs, before any system is
+    prepared, when the runtime pack's label contract or rebuilt schedule differs from the frozen
+    matrix. A cell failure does not remove any assignment or prevent other cells from running. Every
     immutable scanner artifact receives a matrix/assignment binding; later human review remains
     separate and is checked for cross-condition consistency by the matrix reporter.
     """
@@ -323,7 +353,8 @@ def execute(frozen_path: Path, out_dir: Path, *, workspace_root: Path | None = N
             try:
                 _verify_staged(matrix, cell, out)
                 manifest = runner.run_from_config(out / "cells" / name / "run-config.json", out / row["run_path"],
-                    workspace_root=workspace_root, adapters=adapters, clock=clock, progress=progress)
+                    workspace_root=workspace_root, adapters=adapters, clock=clock, progress=progress,
+                    prepared_guard=_prepared_guard(matrix, cell))
                 row["status"] = manifest["status"]
             except Exception as exc:
                 row["status"] = "failed"
