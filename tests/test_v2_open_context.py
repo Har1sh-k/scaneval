@@ -1,10 +1,13 @@
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
-from scaneval.materialize import CachedSnapshot, MaterializationError, export_snapshot
+from scaneval import open_context
+from scaneval.materialize import (CachedSnapshot, MaterializationError, export_snapshot, fetch_snapshot,
+                                  git_command, hash_exported_tree)
 from scaneval.open_context import export_history, install_history, validate_policy
 
 
@@ -167,3 +170,181 @@ def test_out_of_range_original_commit_time_is_a_structured_refusal(tmp_path):
     unusual = CachedSnapshot(snapshot.path, snapshot.url, head, snapshot.git_tree, "fixture")
     with pytest.raises(MaterializationError, match="out-of-range committer timestamp"):
         export_history(unusual, tmp_path / "unusual.git", source_dir=source, expected_tree_hash=digest)
+
+
+def hermetic(root: Path, *args: str) -> bytes:
+    argv, env = git_command(["-c", "user.name=Fixture", "-c", "user.email=f@example.test",
+                             "-c", "core.autocrlf=false", *args])
+    return subprocess.run(argv, cwd=root, env=env, capture_output=True, check=True).stdout
+
+
+def converted_snapshot(tmp_path, *commits):
+    """Commit each file map in turn to a local upstream, then use the real cache and export path."""
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    hermetic(upstream, "init", "-q")
+    for files in commits:
+        for rel, data in files.items():
+            (upstream / rel).parent.mkdir(parents=True, exist_ok=True)
+            (upstream / rel).write_bytes(data)
+        hermetic(upstream, "add", "--", *files)
+        hermetic(upstream, "commit", "-qm", "fixture commit")
+    head = hermetic(upstream, "rev-parse", "HEAD").decode().strip()
+    snapshot = fetch_snapshot(str(upstream), head, tmp_path / "cache")
+    record = export_snapshot(snapshot, tmp_path / "input")
+    return snapshot, tmp_path / "input" / "source", record["trial"]["tree_hash"]
+
+
+# Each fixture: first commit, evaluated second commit, and a path whose checkout bytes differ
+# from its stored blob because of a committed built-in conversion.
+CONVERSIONS = {
+    "crlf": ({".gitattributes": b"*.bat text eol=crlf\n", "run.bat": b"@echo off\n"},
+             {"run.bat": b"@echo off\nexit /b 1\n"}, "run.bat"),
+    "ident": ({".gitattributes": b"*.c ident\n", "version.c": b"/* $Id$ */\n"},
+              {"version.c": b"/* $Id$ */\nint vulnerable;\n"}, "version.c"),
+    "utf16": ({".gitattributes": b"*.txt working-tree-encoding=UTF-16\n", "notes.txt": "first\n".encode("utf-16")},
+              {"notes.txt": "evaluated\n".encode("utf-16")}, "notes.txt"),
+    "nested": ({".gitattributes": b"*.txt text eol=lf\n", "docs/.gitattributes": b"*.txt text eol=crlf\n",
+                "docs/guide.txt": b"first\n", "top.txt": b"top\n"},
+               {"docs/guide.txt": b"first\nevaluated\n"}, "docs/guide.txt"),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(CONVERSIONS))
+def test_committed_checkout_conversions_bind_export_and_install_exactly(tmp_path, monkeypatch, kind):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    first, second, converted = CONVERSIONS[kind]
+    snapshot, source, digest = converted_snapshot(tmp_path, first, second)
+    blob = hermetic(snapshot.path, "cat-file", "blob", f"{snapshot.commit}:{converted}")
+    assert (source / converted).read_bytes() != blob, "fixture must export a converted representation"
+    if kind == "nested":
+        assert (source / converted).read_bytes() == b"first\r\nevaluated\r\n"
+        assert (source / "top.txt").read_bytes() == b"top\n"
+    evidence = export_history(snapshot, tmp_path / "bounded.git", source_dir=source, expected_tree_hash=digest)
+    assert evidence["source_tree_hash"] == digest
+    workspace = tmp_path / "workspace"
+    shutil.copytree(source, workspace)
+    assert install_history(tmp_path / "bounded.git", workspace, expected=evidence) == evidence
+    assert (workspace / converted).read_bytes() == (source / converted).read_bytes()
+    assert hermetic(workspace, "status", "--porcelain") == b""
+    assert list(scratch.iterdir()) == [], "private verification checkouts must be removed"
+
+
+def mixed_conversion_snapshot(tmp_path):
+    return converted_snapshot(
+        tmp_path, {".gitattributes": b"*.bat text eol=crlf\n*.c ident\n", "run.bat": b"@echo off\n",
+                   "version.c": b"/* $Id$ */\n"},
+        {"run.bat": b"@echo off\nexit /b 1\n", "version.c": b"/* $Id$ */\nint vulnerable;\n"})
+
+
+@pytest.mark.parametrize("mutation", ["eol", "ident", "mode", "attributes", "bytes"])
+def test_blob_equivalent_mode_and_attribute_rewrites_of_the_export_are_refused(tmp_path, monkeypatch, mutation):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    snapshot, source, digest = mixed_conversion_snapshot(tmp_path)
+    bat, version = source / "run.bat", source / "version.c"
+    assert bat.read_bytes() == b"@echo off\r\nexit /b 1\r\n"
+    assert version.read_bytes().startswith(b"/* $Id: ") and b"$Id$" not in version.read_bytes()
+    if mutation == "eol":
+        bat.write_bytes(bat.read_bytes().replace(b"\r\n", b"\n"))
+    elif mutation == "ident":
+        version.write_bytes(b"/* $Id$ */\nint vulnerable;\n")
+    elif mutation == "mode":
+        bat.chmod(0o755)
+    elif mutation == "attributes":
+        # A scanner-visible attribute file cannot redefine the expected checkout representation.
+        (source / ".gitattributes").write_bytes(b"*.c ident\n")
+        bat.write_bytes(b"@echo off\nexit /b 1\n")
+    else:
+        bat.write_bytes(bat.read_bytes() + b"rem altered\r\n")
+    if mutation in ("eol", "ident"):
+        # Git's clean conversion maps these altered bytes to the same stored blob.
+        rel = "run.bat" if mutation == "eol" else "version.c"
+        cleaned = hermetic(snapshot.path, "hash-object", f"--path={rel}", str(source / rel)).strip()
+        assert cleaned == hermetic(snapshot.path, "rev-parse", f"{snapshot.commit}:{rel}").strip()
+    changed = hash_exported_tree(source)["tree_hash"]
+    assert (changed == digest) == (mutation == "mode")
+    with pytest.raises(MaterializationError, match="bytes or executable mode differ"):
+        export_history(snapshot, tmp_path / "bounded.git", source_dir=source, expected_tree_hash=changed)
+    assert list(scratch.iterdir()) == [], "a refused verification still removes its checkout"
+    assert not (tmp_path / "bounded.git").exists()
+
+
+def test_blob_invalid_in_its_declared_working_tree_encoding_is_refused(tmp_path):
+    snapshot, source, digest = converted_snapshot(
+        tmp_path, {"legacy.txt": b"\xff\xfe\xfa legacy\n"},
+        {".gitattributes": b"*.txt working-tree-encoding=UTF-16\n"})
+    # The cache checkout silently kept unconverted bytes; exact verification does not accept that.
+    assert (source / "legacy.txt").read_bytes() == b"\xff\xfe\xfa legacy\n"
+    with pytest.raises(MaterializationError, match="conversion failed or is unsupported"):
+        export_history(snapshot, tmp_path / "bounded.git", source_dir=source, expected_tree_hash=digest)
+
+
+def test_configured_filters_hooks_and_operator_attributes_are_never_executed(tmp_path, monkeypatch):
+    sentinel = tmp_path / "FILTER_OR_HOOK_RAN"
+    command = f"touch {sentinel}; cat"
+    snapshot, source, digest = converted_snapshot(
+        tmp_path, {".gitattributes": b"*.py filter=evil\n*.bat text eol=crlf\n", "app.py": b"first = 1\n",
+                   "run.bat": b"@echo off\n"},
+        {"app.py": b"evaluated = 1\n"})
+    hook = f"#!/bin/sh\ntouch {sentinel}\n"
+    for repository in (snapshot.path, tmp_path / "upstream"):
+        for key in ("smudge", "clean"):
+            hermetic(repository, "config", f"filter.evil.{key}", command)
+        hermetic(repository, "config", "filter.evil.required", "true")
+        for name in ("post-checkout", "post-index-change", "reference-transaction"):
+            (repository / ".git" / "hooks").mkdir(exist_ok=True)
+            (repository / ".git" / "hooks" / name).write_text(hook)
+            (repository / ".git" / "hooks" / name).chmod(0o755)
+        (repository / ".git" / "info").mkdir(exist_ok=True)
+        (repository / ".git" / "info" / "attributes").write_text("* filter=evil ident eol=lf\n")
+    home = tmp_path / "home"
+    (home / ".config" / "git").mkdir(parents=True)
+    operator = f'[filter "evil"]\n\tsmudge = {command}\n\tclean = {command}\n\trequired = true\n'
+    (home / ".gitconfig").write_text(operator)
+    (home / ".config" / "git" / "config").write_text(operator)
+    (home / ".config" / "git" / "attributes").write_text("* filter=evil\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "filter.evil.smudge")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", command)
+    monkeypatch.setenv("GIT_ATTR_SOURCE", snapshot.commit)
+    evidence = export_history(snapshot, tmp_path / "bounded.git", source_dir=source, expected_tree_hash=digest)
+    workspace = tmp_path / "workspace"
+    shutil.copytree(source, workspace)
+    assert install_history(tmp_path / "bounded.git", workspace, expected=evidence) == evidence
+    # Even a repository argument carrying the hostile configuration contributes only its objects.
+    assert open_context._source_binding(snapshot.path, source, snapshot.commit, digest)[0] == digest
+    assert not sentinel.exists()
+    assert (source / "run.bat").read_bytes() == b"@echo off\r\n"
+
+
+def test_link_and_gitlink_omissions_stay_explicit_beside_converted_files(tmp_path):
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    hermetic(upstream, "init", "-q")
+    (upstream / ".gitattributes").write_bytes(b"*.bat text eol=crlf\n")
+    (upstream / "run.bat").write_bytes(b"@echo off\n")
+    (upstream / "run-link").symlink_to("run.bat")
+    hermetic(upstream, "add", "--", ".gitattributes", "run.bat", "run-link")
+    hermetic(upstream, "commit", "-qm", "first")
+    first = hermetic(upstream, "rev-parse", "HEAD").decode().strip()
+    hermetic(upstream, "update-index", "--add", "--cacheinfo", f"160000,{first},vendor/lib")
+    hermetic(upstream, "commit", "-qm", "evaluated with gitlink")
+    head = hermetic(upstream, "rev-parse", "HEAD").decode().strip()
+    snapshot = fetch_snapshot(str(upstream), head, tmp_path / "cache")
+    record = export_snapshot(snapshot, tmp_path / "input")
+    source = tmp_path / "input" / "source"
+    evidence = export_history(snapshot, tmp_path / "bounded.git", source_dir=source,
+                              expected_tree_hash=record["trial"]["tree_hash"])
+    assert {(item["path"], item["reason"]) for item in evidence["source_export_omissions"]} == {
+        ("run-link", "symbolic link"), ("vendor/lib", "submodule gitlink")}
+    assert not (source / "run-link").exists() and not (source / "vendor").exists()
+    workspace = tmp_path / "workspace"
+    shutil.copytree(source, workspace)
+    assert install_history(tmp_path / "bounded.git", workspace, expected=evidence) == evidence
+    assert not (workspace / "run-link").is_symlink()

@@ -86,7 +86,16 @@ commit ids preserve author/committer identity, timestamps, messages, trees, and 
 exposed head is the detached evaluated commit; refs, tags, remotes, reflogs, notes, stashes,
 hooks, alternates, and fetched configuration do not cross the boundary.
 
-The working tree uses the normal export's regular files and executable modes. Symlinks and
+The working tree uses the normal export's regular files and executable modes. Each exported
+file must equal, byte for byte, what a fresh checkout of the evaluated commit writes. That
+private checkout borrows the verified objects through a temporary alternate, uses a generated
+configuration and a HEAD-only index, and reads every attribute, including nested
+`.gitattributes`, from that index rather than from scanner-visible files. Committed built-in
+`eol`, `text`, `ident`, and `working-tree-encoding` conversions therefore apply exactly as in the
+normal export. No repository or operator filter command, hook, or attribute file is used; unknown
+filters stay inert and Git LFS pointers stay pointers. Bytes that would only clean to the same
+blob, a changed executable mode, or a blob that cannot be converted as its attributes declare all
+make the input unavailable. The temporary checkout is removed on every exit. Symlinks and
 gitlinks stay omitted and unfollowed; their original objects remain visible in history and are
 named in `source_export_omissions`. An ancestor containing excluded `.scaneval`, `.repos`, or
 harness-state paths is refused because preserving its exact objects would expose those bytes.
