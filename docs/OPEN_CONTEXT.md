@@ -143,7 +143,14 @@ which allows CONNECT to declared provider endpoints and provides this retrieval 
 reject private, loopback, link-local, metadata, reserved, and translation addresses. Mixed
 public/private DNS answers are denied. Connections use a validated address directly; every
 redirect is independently checked, with no credentials carried across hops. Fetches are bounded
-to five redirects, one MiB of response bytes, and finite connection/request timeouts.
+to five redirects and one MiB of response bytes. One 60-second monotonic deadline spans every
+hop's connection, TLS handshake, status line and headers, interim `100 Continue` responses, and
+body. The standard HTTP parser reads through a file that checks this deadline before and after
+each buffered read, and each socket read waits at most 20 seconds or the remaining budget,
+whichever is less. A server that trickles bytes cannot extend the attempt; a timeout is recorded
+as a failed completion. DNS resolution remains a synchronous system call that cannot be
+cancelled: a blocked resolver can exceed the budget, and an attempt interrupted then remains a
+visible start without a completion.
 
 `raw/retrieval-provenance/events.jsonl` records query, URL, source boundary, start/finish times,
 outcome, redirect chain, resolved and connected addresses, content hash/length, retention status,

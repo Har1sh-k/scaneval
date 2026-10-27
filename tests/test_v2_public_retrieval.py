@@ -5,6 +5,7 @@ import http.client
 import io
 import socket
 import threading
+import types
 
 import pytest
 
@@ -63,11 +64,13 @@ def test_explicit_zero_port_is_denied_and_ipv6_literals_keep_port_443():
 class Response:
     def __init__(self, status=200, body=b"public evidence", location=None):
         self.status, self.body, self.location = status, body, location
+        self.closes = 0
     def getheader(self, _key): return self.location
     def read(self, limit): return self.body[:limit]
+    def close(self): self.closes += 1
 
 
-def transport(monkeypatch, responses):
+def transport(monkeypatch, responses, closed=None):
     requests = []
     class HTTPS:
         def __init__(self, host, **_kwargs):
@@ -81,7 +84,9 @@ def transport(monkeypatch, responses):
             result = responses.pop(0)
             if isinstance(result, BaseException): raise result
             return result
-        def close(self): pass
+        def close(self):
+            if closed is not None:
+                closed.append(self.host)
     monkeypatch.setattr(retrieval, "PublicHTTPS", HTTPS)
     monkeypatch.setattr(socket, "getaddrinfo", lambda host, *_args, **_kwargs:
                         addresses("127.0.0.1" if host == "private.example" else "8.8.8.8"))
@@ -318,25 +323,35 @@ class WireFile(io.RawIOBase):
         wire.io_refs += 1
     def readable(self): return True
     def readinto(self, buffer):
+        """Deliver the next scripted (delay, bytes) item, honoring the socket timeout in force."""
+        self.wire.reads += 1
         if not self.wire.script:
             return 0
-        data = self.wire.script.pop(0)
+        delay, data = self.wire.script.pop(0)
+        timeout = self.wire.timeouts[-1] if self.wire.timeouts else retrieval.TIMEOUT
+        if delay > timeout:
+            self.wire.clock[0] += timeout
+            self.wire.script.insert(0, (delay - timeout, data))
+            raise TimeoutError("timed out")
+        self.wire.clock[0] += delay
         size = min(len(buffer), len(data))
         buffer[:size] = data[:size]
         if data[size:]:
-            self.wire.script.insert(0, data[size:])
+            self.wire.script.insert(0, (0, data[size:]))
         return size
     def close(self):
         if not self.closed:
             self.wire.io_refs -= 1
+            self.wire.file_closes += 1
         super().close()
 
 
 class Wire:
     """The connected TLS socket double: scripted response bytes behind the real HTTP parser."""
-    def __init__(self, script):
-        self.script, self.sent, self.timeouts = list(script), b"", []
-        self.io_refs = self.closed = 0
+    def __init__(self, script, clock=None):
+        self.script = [item if isinstance(item, tuple) else (0, item) for item in script]
+        self.sent, self.timeouts, self.clock = b"", [], clock if clock is not None else [0.0]
+        self.io_refs = self.closed = self.file_closes = self.reads = 0
     def settimeout(self, value): self.timeouts.append(value)
     def sendall(self, data): self.sent += data
     def makefile(self, mode, buffering=None):
@@ -346,23 +361,46 @@ class Wire:
     def close(self): self.closed += 1
 
 
-def real_transport(monkeypatch, *scripts):
-    """Run the actual PublicHTTPS, address validation, and HTTPResponse over scripted TLS sockets."""
-    wires = []
-    pending = [Wire(script if isinstance(script, list) else [script]) for script in scripts]
+def open_files(wire):
+    return wire.io_refs if isinstance(wire, Wire) else wire._io_refs
+
+
+def real_transport(monkeypatch, *scripts, clock=None, connect_delay=0):
+    """Run the actual PublicHTTPS, address validation, and HTTPResponse over scripted TLS sockets.
+
+    A script is response bytes, a list of bytes or (virtual delay, bytes) reads, or an already
+    connected real socket. With *clock*, monotonic time is virtual and advances only by delays.
+    """
+    class Transported(list):
+        """Connected sockets in order, plus the socket timeout each TLS handshake started with."""
+    wires = Transported()
+    wires.handshakes = handshakes = []
+    wires.prior_open_files = []
+    pending = [script if isinstance(script, socket.socket) else
+               Wire(script if isinstance(script, list) else [script], clock) for script in scripts]
     class TCP:
-        def settimeout(self, _value): pass
-        def connect(self, _address): pass
+        def __init__(self):
+            self.timeouts = []
+        def settimeout(self, value): self.timeouts.append(value)
+        def connect(self, _address):
+            if clock is not None:
+                clock[0] += connect_delay
         def close(self): pass
     original = retrieval.ssl.create_default_context
     def context():
         verified = original()
-        def wrap_socket(_sock, server_hostname):
+        def wrap_socket(sock, server_hostname):
             assert server_hostname and verified.verify_mode == retrieval.ssl.CERT_REQUIRED
+            handshakes.append(sock.timeouts[-1])
+            # Earlier hops must already have released their socket files before the next starts.
+            wires.prior_open_files.append(sum(open_files(wire) for wire in wires))
             wires.append(pending.pop(0))
             return wires[-1]
         verified.wrap_socket = wrap_socket
         return verified
+    if clock is not None:
+        # Only the retrieval module's clock is virtual; other code keeps real monotonic time.
+        monkeypatch.setattr(retrieval, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
     monkeypatch.setattr(retrieval.ssl, "create_default_context", context)
     monkeypatch.setattr(socket, "socket", lambda *_args: TCP())
     monkeypatch.setattr(socket, "getaddrinfo", lambda host, *_args, **_kwargs:
@@ -463,3 +501,192 @@ def test_trickling_body_cannot_reset_the_retrieval_budget(tmp_path, monkeypatch)
     event = retrieval.Recorder(str(tmp_path), POLICY).retrieve({"url": "https://research.example/"})
     assert event["outcome"] == "failed" and event["error"] == "TimeoutError"
     assert event["content_base64"] is None and event["capture_status"] == "unavailable"
+
+
+def recording(monkeypatch, recorder):
+    """Observe how many socket files remain open at the moment the terminal event is journaled."""
+    observed = []
+    original = recorder.write
+    def write(event):
+        observed.append(event)
+        original(event)
+    monkeypatch.setattr(recorder, "write", write)
+    return observed
+
+
+@pytest.mark.parametrize("phase", ["status_and_headers", "interim_continue"])
+def test_slow_response_head_cannot_outlast_the_total_deadline(tmp_path, monkeypatch, phase):
+    clock = [0.0]
+    if phase == "status_and_headers":
+        script = [(19, b"HTTP/1.1 200 OK\r\n"), (19, b"X-One: 1\r\n"), (19, b"X-Two: 2\r\n"),
+                  (19, b"X-Three: 3\r\n"), (0, b"Content-Length: 2\r\n\r\nok")]
+    else:
+        script = [(19, b"HTTP/1.1 100 Continue\r\n\r\n")] * 4 + [(0, http_bytes(200, b"ok"))]
+    # Every read is inside the 20-second per-read timeout; only the total budget can stop this.
+    wires = real_transport(monkeypatch, script, clock=clock)
+    logs = tmp_path / "proxy-log"
+    logs.mkdir()
+    recorder = retrieval.Recorder(str(logs), POLICY)
+    journaled = recording(monkeypatch, recorder)
+    event = recorder.retrieve({"url": "https://research.example/slow"})
+    assert event["outcome"] == "failed" and event["error"] == "TimeoutError"
+    assert clock[0] == 60.0 and wires[0].timeouts[-1] == pytest.approx(3.0)
+    assert wires[0].script, "bytes after the deadline must never reach the parser"
+    assert event["redirect_chain"][0]["status"] is None
+    assert event["redirect_chain"][0]["connected_address"] == "8.8.8.8"
+    assert wires[0].io_refs == 0 and wires[0].file_closes == 1 and wires[0].closed
+    assert [item["id"] for item in journaled] == [event["id"]]
+    summary, condition, _saved = capture_and_classify(tmp_path, logs)
+    assert summary["capture_status"] == "recorded" and summary["incomplete_attempts"] == 0
+    assert summary["failed"] == 1 and condition["retrieval"] == "recorded", condition["reasons"]
+    assert not any(reason["code"] == "retrieval_artifact_mismatch" for reason in condition["reasons"])
+
+
+def test_already_buffered_interim_responses_observe_the_same_deadline(monkeypatch):
+    queued = b"HTTP/1.1 100 Continue\r\n\r\n" * 20 + http_bytes(200, b"ok")
+    clock = [0.0]
+    monkeypatch.setattr(retrieval, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
+    connection = retrieval.PublicHTTPS("research.example", port=443)
+    connection.deadline = 60.0
+    control = Wire([queued])
+    response = connection.response_class(control, method="GET")
+    response.begin()
+    assert response.status == 200 and response.read() == b"ok"
+    response.close()
+    assert control.io_refs == 0 and control.file_closes == 1
+    def ticking():
+        clock[0] += 4.0  # Parsing queued bytes takes time but performs no further socket read.
+        return clock[0]
+    monkeypatch.setattr(retrieval, "time", types.SimpleNamespace(monotonic=ticking))
+    clock[0] = 0.0
+    wire = Wire([queued])
+    response = connection.response_class(wire, method="GET")
+    with pytest.raises(TimeoutError):
+        response.begin()
+    assert wire.reads == 1, "the deadline must stop parsing of already buffered responses"
+    response.close()
+    assert wire.io_refs == 0 and wire.file_closes == 1
+
+
+@pytest.mark.parametrize("operation,args", [("read", (2,)), ("read1", (2,)), ("readinto", (bytearray(2),)),
+                                            ("readinto1", (bytearray(2),)), ("readline", ()), ("peek", (1,))])
+def test_every_buffered_read_operation_checks_the_deadline(monkeypatch, operation, args):
+    clock = [0.0]
+    monkeypatch.setattr(retrieval, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
+    connection = retrieval.PublicHTTPS("research.example", port=443)
+    connection.deadline = 60.0
+    wire = Wire([b"ab\ncd\nef\n"])
+    response = connection.response_class(wire, method="GET")
+    stream = response.fp
+    assert getattr(stream, operation)(*args)
+    clock[0] = 60.0
+    with pytest.raises(TimeoutError):
+        getattr(stream, operation)(*args)
+    assert wire.reads == 1
+    response.close()
+    response.close()
+    assert stream.closed and wire.io_refs == 0 and wire.file_closes == 1
+
+
+def test_fast_real_responses_keep_framing_size_limits_and_read_timeouts(tmp_path, monkeypatch):
+    clock = [0.0]
+    chunked = [b"HTTP/1.1 100 Continue\r\n\r\n", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel",
+               b"lo\r\n6\r\n world\r\n0\r\n\r\n"]
+    wires = real_transport(monkeypatch, chunked, http_bytes(200, b"x" * (retrieval.MAX_RESPONSE + 1)),
+                           b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nfragment", clock=clock)
+    recorder = retrieval.Recorder(str(tmp_path), POLICY)
+    ok, large, truncated = (recorder.retrieve({"url": "https://research.example/" + name})
+                            for name in ("chunked", "large", "truncated"))
+    assert ok["outcome"] == "ok" and base64.b64decode(ok["content_base64"]) == b"hello world"
+    assert ok["capture_status"] == "preserved"
+    assert large["outcome"] == "denied" and "retained-content limit" in large["error"]
+    assert truncated["outcome"] == "failed" and truncated["error"] == "IncompleteRead"
+    assert wires.handshakes == [20, 20, 20]
+    for wire in wires:
+        assert wire.timeouts and set(wire.timeouts) == {20}
+        assert wire.io_refs == 0 and wire.file_closes == 1 and wire.closed
+
+
+@pytest.mark.parametrize("connect_delay", [50, 60])
+def test_tls_handshake_gets_only_the_remaining_budget(tmp_path, monkeypatch, connect_delay):
+    clock = [0.0]
+    wires = real_transport(monkeypatch, http_bytes(200, b"ok"), clock=clock, connect_delay=connect_delay)
+    event = retrieval.Recorder(str(tmp_path), POLICY).retrieve({"url": "https://research.example/"})
+    hop = event["redirect_chain"][0]
+    assert hop["connected_address"] == "8.8.8.8" and hop["attempted_addresses"] == ["8.8.8.8"]
+    if connect_delay == 50:
+        assert event["outcome"] == "ok" and wires.handshakes == [10]
+        assert set(wires[0].timeouts) == {10}
+    else:
+        assert event["outcome"] == "failed" and event["error"] == "TimeoutError"
+        assert len(wires) == 0, "an exhausted budget must refuse before the TLS handshake"
+        assert json.loads((tmp_path / retrieval.EVENTS).read_text())["outcome"] == "failed"
+
+
+def test_detached_and_persistent_responses_release_socket_files_every_hop(tmp_path, monkeypatch):
+    detached = b"HTTP/1.1 302 Found\r\nLocation: /next\r\nConnection: close\r\nContent-Length: 20\r\n\r\nunread"
+    persistent = b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 20\r\n\r\nunread"
+    wires = real_transport(monkeypatch, detached, persistent, http_bytes(200, b"done"))
+    recorder = retrieval.Recorder(str(tmp_path), POLICY)
+    journaled = recording(monkeypatch, recorder)
+    event = recorder.retrieve({"url": "https://research.example/start"})
+    assert event["outcome"] == "ok" and [hop["status"] for hop in event["redirect_chain"]] == [302, 302, 200]
+    assert wires.prior_open_files == [0, 0, 0]
+    assert len(journaled) == 1
+    for wire in wires:
+        assert wire.io_refs == 0 and wire.file_closes == 1 and wire.closed
+
+
+def test_detached_body_timeout_releases_its_file_before_the_failure_is_journaled(tmp_path, monkeypatch):
+    clock = [0.0]
+    head = b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 10\r\n\r\n"
+    wires = real_transport(monkeypatch, [head, (70, b"0123456789")], clock=clock)
+    recorder = retrieval.Recorder(str(tmp_path), POLICY)
+    open_at_completion = []
+    original = recorder.write
+    def write(event):
+        open_at_completion.append(open_files(wires[0]))
+        original(event)
+    monkeypatch.setattr(recorder, "write", write)
+    event = recorder.retrieve({"url": "https://research.example/"})
+    assert event["outcome"] == "failed" and event["error"] == "TimeoutError"
+    assert event["content_base64"] is None and event["capture_status"] == "unavailable"
+    assert open_at_completion == [0] and wires[0].file_closes == 1 and wires[0].closed
+
+
+def test_real_socket_file_of_a_detached_unread_redirect_is_really_closed(tmp_path, monkeypatch):
+    first, first_peer = socket.socketpair()
+    second, second_peer = socket.socketpair()
+    with first_peer, second_peer:
+        first_peer.sendall(b"HTTP/1.1 302 Found\r\nLocation: /next\r\nConnection: close\r\n"
+                           b"Content-Length: 64\r\n\r\npartial")
+        second_peer.sendall(http_bytes(200, b"done"))
+        wires = real_transport(monkeypatch, first, second)
+        recorder = retrieval.Recorder(str(tmp_path), POLICY)
+        released = []
+        original = recorder.write
+        def write(event):
+            released.append([(sock._io_refs, sock.fileno()) for sock in (first, second)])
+            original(event)
+        monkeypatch.setattr(recorder, "write", write)
+        event = recorder.retrieve({"url": "https://research.example/start"})
+    assert event["outcome"] == "ok" and base64.b64decode(event["content_base64"]) == b"done"
+    assert wires.prior_open_files == [0, 0]
+    assert released == [[(0, -1), (0, -1)]], "socket files must be closed, not left to garbage collection"
+
+
+def test_response_close_failure_still_closes_the_connection_and_records_failure(tmp_path, monkeypatch):
+    class Unclosable(Response):
+        def close(self):
+            super().close()
+            raise OSError("fixture close failure")
+    closed = []
+    normal, failing = Response(), Unclosable(302, location="/next")
+    transport(monkeypatch, [normal, failing], closed)
+    recorder = retrieval.Recorder(str(tmp_path), POLICY)
+    assert recorder.retrieve({"url": "https://research.example/"})["outcome"] == "ok"
+    assert normal.closes == 1 and closed == ["research.example"]
+    event = recorder.retrieve({"url": "https://research.example/redirect"})
+    assert failing.closes == 1 and closed == ["research.example"] * 2
+    assert event["outcome"] == "failed" and event["error"] == "OSError"
+    assert json.loads((tmp_path / retrieval.EVENTS).read_text().splitlines()[-1])["id"] == event["id"]

@@ -11,6 +11,7 @@ import datetime
 import hashlib
 import http.client
 import http.server
+import io
 import ipaddress
 import json
 import os
@@ -192,7 +193,101 @@ def _connect_validated(addresses, timeout, attempted=None, deadline=None):
     raise last or OSError("no validated public address could be connected")
 
 
+def _remaining(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("retrieval exceeded its total time limit")
+    return remaining
+
+
+class _DeadlineRaw(io.RawIOBase):
+    """Unbuffered reads from the actual socket, each bounded by the remaining total budget.
+
+    This owns one ``makefile`` reference, never the connection socket itself, so closing it
+    releases that reference while the connection still closes the socket.
+    """
+
+    def __init__(self, sock, deadline):
+        super().__init__()
+        self._sock = sock
+        self._deadline = deadline
+        self._file = sock.makefile("rb", buffering=0)
+
+    def readable(self):
+        return True
+
+    def fileno(self):
+        return self._file.fileno()
+
+    def readinto(self, buffer):
+        self._sock.settimeout(min(TIMEOUT, _remaining(self._deadline)))
+        count = self._file.readinto(buffer)
+        _remaining(self._deadline)
+        return count
+
+    def close(self):
+        if not self.closed:
+            try:
+                if getattr(self, "_file", None) is not None:
+                    self._file.close()
+            finally:
+                super().close()
+
+
+class _DeadlineReader(io.BufferedReader):
+    """Already buffered bytes, such as queued interim responses, observe the same deadline."""
+
+    def __init__(self, raw, deadline):
+        super().__init__(raw)
+        self._deadline = deadline
+
+    def _checked(self, operation, *args):
+        _remaining(self._deadline)
+        result = operation(*args)
+        _remaining(self._deadline)
+        return result
+
+    def read(self, size=-1):
+        return self._checked(super().read, size)
+
+    def read1(self, size=-1):
+        return self._checked(super().read1, size)
+
+    def readinto(self, buffer):
+        return self._checked(super().readinto, buffer)
+
+    def readinto1(self, buffer):
+        return self._checked(super().readinto1, buffer)
+
+    def readline(self, size=-1):
+        return self._checked(super().readline, size)
+
+    def peek(self, size=0):
+        return self._checked(super().peek, size)
+
+
+class _DeadlineFileSource:
+    """What the standard HTTPResponse makes its file from in place of the socket's own makefile."""
+
+    def __init__(self, sock, deadline):
+        self._sock = sock
+        self._deadline = deadline
+
+    def makefile(self, mode):
+        if mode != "rb":
+            raise ValueError("retrieval responses are read-only binary streams")
+        return _DeadlineReader(_DeadlineRaw(self._sock, self._deadline), self._deadline)
+
+
 class PublicHTTPS(http.client.HTTPSConnection):
+    deadline = None  # Recorder.retrieve sets one monotonic deadline for all hops and reads.
+
+    def response_class(self, sock, *args, **kwargs):
+        """Parse with the standard HTTPResponse over a deadline-checked file of the actual socket."""
+        if self.deadline is not None:
+            sock = _DeadlineFileSource(sock, self.deadline)
+        return http.client.HTTPResponse(sock, *args, **kwargs)
+
     def connect(self):
         self.resolved_addresses = []
         self.validated_addresses = []
@@ -205,8 +300,11 @@ class PublicHTTPS(http.client.HTTPSConnection):
             raise
         self.resolved_addresses = self.validated_addresses = [item[3][0] for item in addresses]
         connection, self.connected_address = _connect_validated(
-            addresses, self.timeout, self.attempted_addresses, getattr(self, "deadline", None))
+            addresses, self.timeout, self.attempted_addresses, self.deadline)
         try:
+            if self.deadline is not None:
+                # Connection setup consumed part of the budget; the handshake gets only the rest.
+                connection.settimeout(min(TIMEOUT, _remaining(self.deadline)))
             self.sock = self._context.wrap_socket(connection, server_hostname=self.host)
             self.active_socket = self.sock
         except BaseException:
@@ -339,6 +437,9 @@ class Recorder:
                 connection.deadline = deadline
                 hop = {"url": url, "status": None, "location": None}
                 event["redirect_chain"].append(hop)
+                # This hop owns any returned response. A Connection: close response is detached
+                # from its connection, so connection.close() alone cannot release its socket file.
+                response = None
                 try:
                     # No caller headers, cookies, authorization, or proxy environment can reach this request.
                     connection.request("GET", path, headers={"User-Agent": "ScanEval-recorded-public/1",
@@ -377,7 +478,11 @@ class Recorder:
                                                          getattr(connection, "validated_addresses", None)),
                                attempted_addresses=getattr(connection, "attempted_addresses", None),
                                connected_address=getattr(connection, "connected_address", None))
-                    connection.close()
+                    try:
+                        if response is not None:
+                            response.close()
+                    finally:
+                        connection.close()
         except RetrievalDenied as exc:
             if event["redirect_chain"] and exc.resolved_addresses is not None:
                 event["redirect_chain"][-1]["resolved_addresses"] = exc.resolved_addresses
