@@ -86,7 +86,16 @@ commit ids preserve author/committer identity, timestamps, messages, trees, and 
 exposed head is the detached evaluated commit; refs, tags, remotes, reflogs, notes, stashes,
 hooks, alternates, and fetched configuration do not cross the boundary.
 
-The working tree uses the normal export's regular files and executable modes. Symlinks and
+The working tree uses the normal export's regular files and executable modes. Each exported
+file must equal, byte for byte, what a fresh checkout of the evaluated commit writes. That
+private checkout borrows the verified objects through a temporary alternate, uses a generated
+configuration and a HEAD-only index, and reads every attribute, including nested
+`.gitattributes`, from that index rather than from scanner-visible files. Committed built-in
+`eol`, `text`, `ident`, and `working-tree-encoding` conversions therefore apply exactly as in the
+normal export. No repository or operator filter command, hook, or attribute file is used; unknown
+filters stay inert and Git LFS pointers stay pointers. Bytes that would only clean to the same
+blob, a changed executable mode, or a blob that cannot be converted as its attributes declare all
+make the input unavailable. The temporary checkout is removed on every exit. Symlinks and
 gitlinks stay omitted and unfollowed; their original objects remain visible in history and are
 named in `source_export_omissions`. An ancestor containing excluded `.scaneval`, `.repos`, or
 harness-state paths is refused because preserving its exact objects would expose those bytes.
@@ -134,7 +143,14 @@ which allows CONNECT to declared provider endpoints and provides this retrieval 
 reject private, loopback, link-local, metadata, reserved, and translation addresses. Mixed
 public/private DNS answers are denied. Connections use a validated address directly; every
 redirect is independently checked, with no credentials carried across hops. Fetches are bounded
-to five redirects, one MiB of response bytes, and finite connection/request timeouts.
+to five redirects and one MiB of response bytes. One 60-second monotonic deadline spans every
+hop's connection, TLS handshake, status line and headers, interim `100 Continue` responses, and
+body. The standard HTTP parser reads through a file that checks this deadline before and after
+each buffered read, and each socket read waits at most 20 seconds or the remaining budget,
+whichever is less. A server that trickles bytes cannot extend the attempt; a timeout is recorded
+as a failed completion. DNS resolution remains a synchronous system call that cannot be
+cancelled: a blocked resolver can exceed the budget, and an attempt interrupted then remains a
+visible start without a completion.
 
 `raw/retrieval-provenance/events.jsonl` records query, URL, source boundary, start/finish times,
 outcome, redirect chain, resolved and connected addresses, content hash/length, retention status,
@@ -145,9 +161,14 @@ cannot be reconstructed from their hashes. Use retention consistent with the sou
 
 `attempts.jsonl` is flushed before DNS or transport starts. Each completion binds to its same-id
 start's effective URL, query, operation, caller-declared source, and start time. Search URLs are
-derived from the declared endpoint and query before either record is written; URL userinfo is
-redacted and refused. A start without a completion remains partial capture, including a request
-interrupted when the scanner or proxy stops. Caller-provided source labels carry
+derived from the declared endpoint and query before either record is written. Userinfo in the
+outer URL authority, including malformed and scheme-relative forms and redirect locations, is
+redacted in both journals and in the response, and the request is refused. A redirect `Location`
+containing ASCII whitespace/control characters or outer userinfo, including empty or literal
+`[redacted]` userinfo, is refused before it is resolved against the current URL, so an invalid
+scheme such as `1https://user:secret@host/` cannot become a path request to the allowed origin.
+Path and query text, including nested URLs, is recorded unchanged. A start without a completion remains partial
+capture, including a request interrupted when the scanner or proxy stops. Caller-provided source labels carry
 `source_assurance: "self_reported"`. Content is published atomically; retention failures return
 no response bytes and remain explicit capture gaps.
 

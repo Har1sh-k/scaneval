@@ -180,6 +180,11 @@ def test_refreshed_mechanical_timestamps_do_not_allow_label_or_review_drift():
     assert label_contract(pack) != label_contract(refreshed)
 
 
+def test_reporting_and_execution_share_one_label_contract():
+    from scaneval import experiment
+    assert label_contract is experiment.label_contract
+
+
 def test_requested_provider_namespace_is_not_a_model_drift_but_unverified_resolution_is_visible():
     image = "fixture@sha256:" + "a" * 64
     system = {"adapter_identity": {"name": "fixture", "version": "1"}, "config": {"model": "provider/model"},

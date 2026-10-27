@@ -114,6 +114,16 @@ records every cell and assignment as bound, skipped, missing, invalid, interrupt
 with the available failure reasons; the report validates and preserves these states independently
 of scoring missingness. A missing execution manifest leaves execution state explicitly unknown.
 
+Within each cell, every input is prepared and mechanically checked, and the runtime pack saved,
+before any system is prepared. The cell then fails, with no adapter work, unless the runtime pack's
+label contract equals the frozen pack and a schedule rebuilt from it has the frozen inputs,
+assignments, and target/control eligibility. The label contract is the whole pack with only check
+timestamps and their derived digests normalized, so it covers excluded and currently unplanned
+cases, newly eligible drafts, and stale check sets. A refusal leaves the runtime pack, frozen
+schedule, and failed run manifest for diagnosis; run the case checks, review the resulting pack,
+and freeze a new matrix. An input whose preparation fails without changing the pack is still a
+skipped input. The report repeats the label-contract check after execution.
+
 Each cell has an independent source/rules cache. This can clone the same pinned repository three
 times and costs setup time/storage, but avoids cross-cell writable cache state. It is not a model
 cache or assurance that remote providers share no hidden state. Source, labels, maps, transformation

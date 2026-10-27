@@ -943,3 +943,52 @@ def test_a_second_input_that_fails_to_export_still_leaves_the_first_one_recorded
     assert adapter.prepared == 1 and adapter.calls == 1
     assert any(warning.startswith("snap-fixed: not prepared (MaterializationError: ")
                for warning in manifest["warnings"])
+
+
+def test_a_prepared_guard_runs_after_every_input_and_its_refusal_precedes_any_system(tmp_path, upstream):
+    repo, commit = upstream
+    write_two_snapshot_pack(tmp_path / "pack.json", repo, commit, repaired_commit(repo))
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake")],
+                 inputs=[{"snapshot_id": "snap-a"}, {"snapshot_id": "snap-fixed"}])
+    adapter = FakeAdapter()
+    out = tmp_path / "out"
+    seen = []
+
+    def guard(pack, rebuilt):
+        seen.append(rebuilt)
+        assert cases.load_pack(out / "evaluator" / "pack.json") == pack
+        assert set(cases.case_by_id(pack, "case-a")["validation"]["check_sets"]) == {"snap-a", "snap-fixed"}
+        assert adapter.prepared == 0
+        raise ContractError("fixture guard refusal")
+
+    with pytest.raises(ContractError, match="fixture guard refusal"):
+        run_from_config(config_path, out, clock=CLOCK, adapters={"fake": adapter}, prepared_guard=guard)
+    assert adapter.prepared == 0 and adapter.calls == 0
+    manifest = load_document(out / MANIFEST_NAME, "run-manifest")
+    assert manifest["status"] == "failed" and manifest["failure"]["type"] == "ContractError"
+    assert manifest["invocations"] == [] and not (out / "invocations").exists()
+    frozen = load_document(out / "evaluator" / "schedule.json", "evaluation-schedule")
+    [rebuilt] = seen
+    # Rebuilt from the checked pack with the frozen schedule's own creation time and selection.
+    assert rebuilt["created_at"] == frozen["created_at"]
+    assert [row["input_id"] for row in rebuilt["inputs"]] == [row["input_id"] for row in frozen["inputs"]]
+    assert {row["plan"]["state"] for row in frozen["inputs"]} == {"unavailable"}
+    assert {row["plan"]["state"] for row in rebuilt["inputs"]} == {"frozen"}
+
+
+def test_a_passing_guard_leaves_an_ordinary_run_and_its_skipped_input_unchanged(tmp_path, upstream):
+    repo, commit = upstream
+    repaired_commit(repo)
+    write_two_snapshot_pack(tmp_path / "pack.json", repo, commit, "f" * 40)
+    config_path = tmp_path / "run-config.json"
+    write_config(config_path, systems=[system_entry("fake-a", "fake")],
+                 inputs=[{"snapshot_id": "snap-a"}, {"snapshot_id": "snap-fixed"}])
+    guarded, plain = FakeAdapter(), FakeAdapter()
+    calls = []
+    manifest = run_from_config(config_path, tmp_path / "guarded", clock=CLOCK, adapters={"fake": guarded},
+                               prepared_guard=lambda pack, rebuilt: calls.append(guarded.prepared))
+    assert manifest == run_from_config(config_path, tmp_path / "plain", clock=CLOCK, adapters={"fake": plain})
+    assert calls == [0] and (guarded.prepared, guarded.calls) == (plain.prepared, plain.calls) == (1, 1)
+    assert [(row["invocation_id"], row["status"]) for row in manifest["invocations"]] == [
+        ("snap-a__fake-a__r1", "success"), ("snap-fixed__fake-a__r1", "skipped")]

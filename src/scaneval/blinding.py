@@ -137,6 +137,9 @@ DOCUMENTATION_SUFFIXES = frozenset({".md", ".markdown", ".rst", ".txt", ".adoc",
 # The one common extensionless identity document the removal profile recognizes explicitly.
 # Editing remains suffix-based for backwards compatibility; removal is separately reviewed and hash-pinned.
 REMOVABLE_DOCUMENTATION_NAMES = frozenset({"readme"})
+# Extensionless instruction text the inventory classifies as an instruction file. Removable only under
+# instruction_file, never as a generic identity document.
+REMOVABLE_INSTRUCTION_NAMES = frozenset({"instructions"})
 REMOVABLE_DOCUMENTATION_ROOTS = frozenset({"doc", "docs", "documentation", "manual", "manuals",
                                           "advisories", "changelog", "changelogs", "releases",
                                           "release-notes", "release_notes"})
@@ -447,7 +450,7 @@ def removal_path_gap(path: str, role: str, *, identity_policy: dict | None = Non
             return f"{path} is a configured instruction alias inside a runtime directory; it is never removed"
         if (pure.name.casefold() in _INSTRUCTION_NAMES
                 or suffix in DOCUMENTATION_SUFFIXES | {".mdc"}
-                or pure.name.casefold() in REMOVABLE_DOCUMENTATION_NAMES):
+                or pure.name.casefold() in REMOVABLE_DOCUMENTATION_NAMES | REMOVABLE_INSTRUCTION_NAMES):
             return None
         return (f"{path} is in an instruction directory but is not a recognized instruction document; "
                 "source, scripts, and configuration are never removed")

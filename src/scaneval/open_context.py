@@ -19,7 +19,7 @@ import tempfile
 
 from .contracts import canonical_sha256
 from .materialize import (
-    CachedSnapshot, MaterializationError, _git, _require_commit, git_command,
+    CachedSnapshot, MaterializationError, _LFS_CONFIG, _git, _require_commit, git_command,
     sha256_file, tree_hash, walk_regular_files, STRIPPED_TOP_LEVEL,
 )
 
@@ -33,6 +33,10 @@ _CONFIG = (
     "\tattributesFile = /dev/null\n\texcludesFile = /dev/null\n"
     "[credential]\n\thelper =\n[commit]\n\tgpgsign = false\n"
 )
+# Private source-binding checkout only: the same inert Git LFS driver as the source cache, so LFS
+# pointers stay pointers on both sides. No other filter driver is ever configured.
+_VERIFY_CONFIG = _CONFIG + '[filter "lfs"]\n' + "".join(
+    f"\t{key.rsplit('.', 1)[1]} = {value}\n" for key, value in _LFS_CONFIG)
 
 
 def validate_policy(policy: dict) -> dict:
@@ -92,9 +96,60 @@ def _metadata_files(directory: Path) -> list[str]:
     return sorted(allowed)
 
 
+def _checkout_representation(repository: Path, head: str, paths: list[str]) -> dict[str, str]:
+    """Hash the exact bytes a hardened checkout of *head* writes for each ordinary blob path.
+
+    Built-in eol, ident, and working-tree-encoding conversions can write different bytes for one
+    stored blob, so cleaning exported bytes back into a blob would accept altered sources. The
+    expected representation is checked out afresh instead. A private repository borrows the
+    verified objects through a temporary alternate and receives a generated configuration and a
+    HEAD-only index. Nothing is copied from *repository*: no configuration, filter, hook, or live
+    index. Files are written below a separate prefix, so the verification work tree stays empty and
+    every attribute, including nested ``.gitattributes``, is read from that index, never from
+    scanner-visible files. Only ordinary blobs are named; no link is created or followed.
+    """
+    objects = (repository / ".git" / "objects").resolve(strict=True)
+    if any(character in str(objects) for character in "\n\r\""):
+        raise MaterializationError("bounded history object directory cannot be named in an alternate")
+    with tempfile.TemporaryDirectory(prefix="scaneval-history-checkout-") as scratch:
+        work, output = Path(scratch) / "repository", Path(scratch) / "checkout"
+        work.mkdir()
+        output.mkdir()
+        _git(["init", "-q"], work)
+        git_dir = work / ".git"
+        for entry in list(git_dir.iterdir()):
+            if entry.name != "objects":
+                shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+        (git_dir / "HEAD").write_text(head + "\n")
+        (git_dir / "config").write_text(_VERIFY_CONFIG)
+        (git_dir / "refs").mkdir()
+        (git_dir / "objects" / "info").mkdir(exist_ok=True)
+        (git_dir / "objects" / "info" / "alternates").write_text(str(objects) + "\n")
+        _git(["read-tree", head], work)
+        argv, env = git_command(["checkout-index", "-z", "--stdin", f"--prefix={output}/"])
+        try:
+            result = subprocess.run(argv, cwd=work, env=env, capture_output=True, timeout=900,
+                                    input=b"".join(rel.encode("utf-8") + b"\0" for rel in paths))
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise MaterializationError(f"bounded history checkout could not run: {exc}") from exc
+        # Git reports a failed conversion, such as a blob invalid in its declared encoding, but may
+        # still write unconverted bytes. Any diagnostic is an unsupported representation.
+        if result.returncode or result.stderr.strip():
+            raise MaterializationError("bounded history checkout conversion failed or is unsupported: "
+                                       + result.stderr.decode("utf-8", "replace")[:1000])
+        expected = {}
+        for rel in paths:
+            path = output / rel
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise MaterializationError(f"bounded history checkout did not write a regular file at {rel}")
+            expected[rel] = sha256_file(path)[0]
+        return expected
+
+
 def _source_binding(repository: Path, source_dir: Path, head: str, expected_tree_hash: str) -> tuple[str, list]:
     files = walk_regular_files(source_dir, skip_top_level=frozenset({".git"}))
-    actual = tree_hash({rel: sha256_file(path)[0] for rel, path in files.items()})
+    hashes = {rel: sha256_file(path)[0] for rel, path in files.items()}
+    actual = tree_hash(hashes)
     if actual != expected_tree_hash:
         raise MaterializationError("bounded history source tree does not match the evaluated tree hash")
     raw = _binary_git(["ls-tree", "-r", "-z", head], repository)
@@ -120,15 +175,11 @@ def _source_binding(repository: Path, source_dir: Path, head: str, expected_tree
         entries[rel] = (mode, oid)
     if set(entries) != set(files):
         raise MaterializationError("bounded history head and evaluated export contain different paths")
-    paths = sorted(files)
-    for offset in range(0, len(paths), 200):
-        group = paths[offset:offset + 200]
-        # --no-filters prevents repository attributes from rewriting the bytes being compared.
-        ids = _git(["hash-object", "--no-filters", "--", *[str(files[rel]) for rel in group]], repository).splitlines()
-        for rel, oid in zip(group, ids, strict=True):
-            executable = bool(files[rel].stat().st_mode & 0o111)
-            if oid != entries[rel][1] or executable != (entries[rel][0] == "100755"):
-                raise MaterializationError(f"bounded history head bytes or executable mode differ at {rel}")
+    expected = _checkout_representation(repository, head, sorted(files))
+    for rel in sorted(files):
+        executable = bool(files[rel].stat().st_mode & 0o111)
+        if hashes[rel] != expected[rel] or executable != (entries[rel][0] == "100755"):
+            raise MaterializationError(f"bounded history head bytes or executable mode differ at {rel}")
     return actual, sorted(omitted, key=lambda item: item["path"])
 
 

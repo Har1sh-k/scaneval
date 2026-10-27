@@ -565,3 +565,42 @@ def test_condition_schema_refuses_attestation_of_an_unenforced_declaration(tmp_p
     with pytest.raises(ContractError, match="unenforced"):
         validate_document(conditions.KIND, record)
     assert record["status"] == "attested"
+
+
+def test_condition_schema_refuses_attested_closed_book_pr_but_keeps_compatible_records(tmp_path, capsys):
+    from scaneval.cli import main
+    from test_v2_execution import pr_input, run, PrAdapter
+
+    (tmp_path / "full").mkdir()
+    bundle, record = invoke(tmp_path / "full")
+    assert record["mode"] == "full" and record["status"] == "attested"
+    validate_document(conditions.KIND, record)
+    omitted = deepcopy(record)
+    omitted.pop("mode")
+    validate_document(conditions.KIND, omitted)
+    explicit_pr = {**deepcopy(record), "mode": "pr"}
+    with pytest.raises(ContractError, match="full-scan-eligible"):
+        validate_document(conditions.KIND, explicit_pr)
+
+    (tmp_path / "pr").mkdir()
+    pr_bundle = run(tmp_path / "pr", PrAdapter(), pr_input(tmp_path / "pr"))
+    unattested_pr = load_document(pr_bundle / conditions.RECORD_FILE, conditions.KIND)
+    assert (unattested_pr["mode"], unattested_pr["status"]) == ("pr", "unavailable")
+
+    saved = {}
+    for name, document in {"full": record, "omitted": omitted, "pr": unattested_pr, "attested-pr": explicit_pr}.items():
+        saved[name] = tmp_path / f"{name}.json"
+        saved[name].write_text(canonical_json(document))
+    capsys.readouterr()
+    for name in ("full", "omitted", "pr"):
+        assert main(["validate", conditions.KIND, str(saved[name])]) == 0
+        assert f"Valid {conditions.KIND}" in capsys.readouterr().out
+    assert main(["validate", conditions.KIND, str(saved["attested-pr"])]) != 0
+    captured = capsys.readouterr()
+    assert "Valid" not in captured.out and "full-scan-eligible" in captured.err
+
+    (bundle / conditions.RECORD_FILE).write_text(canonical_json(explicit_pr))
+    reclassified = conditions.classify_observation(bundle)
+    assert reclassified["status"] == "failed" and reclassified["mode"] == "full"
+    [refusal] = [reason for reason in reclassified["reasons"] if reason["code"] == "invalid_condition_record"]
+    assert "full-scan-eligible" in refusal["message"]

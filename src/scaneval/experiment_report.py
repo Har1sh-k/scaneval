@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from copy import deepcopy
 from fractions import Fraction
 from pathlib import Path
 
 from . import aggregate, blinding, cases, conditions, experiment, review, scoring
-from .contracts import ContractError, canonical_json, canonical_sha256, load_document, refuse_trial_path
+from .contracts import ContractError, canonical_sha256, load_document, refuse_trial_path
 from .experiment_execution import (artifact_hash, load_matrix, read_json, verify_binding,
                                    load_execution, _verify_run_semantics, _write)
 from .isolation import resolve_execution
@@ -34,18 +33,8 @@ def evidence_scope(scopes) -> str:
     return "diagnostic" if values == {"diagnostic"} else "draft" if "draft" in values else "reviewed"
 
 
-def label_contract(pack: dict) -> dict:
-    """Permit refreshed mechanical-check timestamps, retaining labels/reviews/eligibility intact."""
-    value = deepcopy(pack)
-    value.pop("anchor_sha256", None)
-    for case in value["cases"]:
-        validation = case["validation"]
-        validation["checks"] = sorted(
-            [{key: item for key, item in check.items() if key != "at"} for check in validation["checks"]],
-            key=canonical_json)
-        for check_set in validation.get("check_sets", {}).values():
-            check_set.pop("checks_sha256", None)  # Recomputed by the case contract from the refreshed checks.
-    return value
+# Compatibility alias: execution's prepared-cell guard and this reporter share one definition.
+label_contract = experiment.label_contract
 
 
 def weighted_bounds(rows: list[dict]) -> dict:

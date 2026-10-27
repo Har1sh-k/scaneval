@@ -18,7 +18,7 @@ from jsonschema import Draft202012Validator
 
 from . import blinding, cases, conditions, schedule
 from .adapters import get_adapter
-from .contracts import (ContractError, canonical_sha256, load_document, reject_nonfinite,
+from .contracts import (ContractError, canonical_json, canonical_sha256, load_document, reject_nonfinite,
                         validate_document, _require_relative_path)
 from .execution import invocation_id
 from .isolation import PINNED_IMAGE, IsolationError, resolve_execution
@@ -63,6 +63,24 @@ def _schema_validate(document: dict) -> None:
 
 def matrix_digest(document: dict) -> str:
     return canonical_sha256({key: value for key, value in document.items() if key != "matrix_sha256"})
+
+
+def label_contract(pack: dict) -> dict:
+    """Permit refreshed mechanical-check timestamps, retaining labels/reviews/eligibility intact.
+
+    Every case is retained, including excluded and currently unplanned cases, because a runtime
+    check can change their eligibility. Execution and reporting share this one definition.
+    """
+    value = deepcopy(pack)
+    value.pop("anchor_sha256", None)
+    for case in value["cases"]:
+        validation = case["validation"]
+        validation["checks"] = sorted(
+            [{key: item for key, item in check.items() if key != "at"} for check in validation["checks"]],
+            key=canonical_json)
+        for check_set in validation.get("check_sets", {}).values():
+            check_set.pop("checks_sha256", None)  # Recomputed by the case contract from the refreshed checks.
+    return value
 
 
 def _unique(rows: list[dict], field: str, label: str) -> None:

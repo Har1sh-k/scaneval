@@ -11,10 +11,10 @@ import datetime
 import hashlib
 import http.client
 import http.server
+import io
 import ipaddress
 import json
 import os
-import re
 import socket
 import ssl
 import threading
@@ -43,15 +43,50 @@ class RetrievalDenied(ValueError):
         self.resolved_addresses = resolved_addresses
 
 
-def recorded_url(value):
-    """Keep the attempted destination while excluding explicit URL userinfo from evidence.
+def _outer_userinfo(value):
+    """Return the original (start, end) span of outer authority userinfo and its ``@``, or None.
 
-    This also handles malformed credentialed URLs before parse_url rejects them. A query is
-    untrusted research data, not a secret-injection channel; callers must not put secrets in it.
+    The authority is located in a view without ASCII whitespace/control characters (code points
+    0-32 and 127) that keeps each character's original offset; the view is never a URL. It follows
+    an initial ``//`` or the first ``://`` whose preceding text has no ``/``, ``?``, or ``#``, and
+    ends at the next of those characters. The scheme need not be valid, so malformed prefixes and
+    controls inside or after a scheme still locate credentials that parse_url would reject.
     """
     if not isinstance(value, str):
         return None
-    return re.sub(r"(//)[^/?#]*@", r"\1[redacted]@", value, count=1)
+    offsets = [index for index, character in enumerate(value) if ord(character) > 32 and ord(character) != 127]
+    locator = "".join(value[index] for index in offsets)
+    if locator.startswith("//"):
+        authority = 2
+    else:
+        marker = locator.find("://")
+        if marker < 0 or any(character in locator[:marker] for character in "/?#"):
+            return None
+        authority = marker + 3
+    end = authority
+    while end < len(locator) and locator[end] not in "/?#":
+        end += 1
+    userinfo = locator.rfind("@", authority, end)
+    if userinfo < 0:
+        return None
+    return offsets[authority - 1] + 1, offsets[userinfo] + 1
+
+
+def recorded_url(value):
+    """Keep the attempted destination while excluding outer URL userinfo from evidence.
+
+    Only the span located by _outer_userinfo is replaced; every other original character,
+    including a malformed prefix and its controls, is kept, so malformed credentialed URLs stay
+    hidden before parse_url rejects them. Path and query text, including nested URLs, is preserved
+    exactly. A query is untrusted research data, not a secret-injection channel; callers must not
+    put secrets in it.
+    """
+    if not isinstance(value, str):
+        return None
+    span = _outer_userinfo(value)
+    if span is None:
+        return value
+    return value[:span[0]] + "[redacted]@" + value[span[1]:]
 
 
 def parse_url(value):
@@ -172,7 +207,101 @@ def _connect_validated(addresses, timeout, attempted=None, deadline=None):
     raise last or OSError("no validated public address could be connected")
 
 
+def _remaining(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("retrieval exceeded its total time limit")
+    return remaining
+
+
+class _DeadlineRaw(io.RawIOBase):
+    """Unbuffered reads from the actual socket, each bounded by the remaining total budget.
+
+    This owns one ``makefile`` reference, never the connection socket itself, so closing it
+    releases that reference while the connection still closes the socket.
+    """
+
+    def __init__(self, sock, deadline):
+        super().__init__()
+        self._sock = sock
+        self._deadline = deadline
+        self._file = sock.makefile("rb", buffering=0)
+
+    def readable(self):
+        return True
+
+    def fileno(self):
+        return self._file.fileno()
+
+    def readinto(self, buffer):
+        self._sock.settimeout(min(TIMEOUT, _remaining(self._deadline)))
+        count = self._file.readinto(buffer)
+        _remaining(self._deadline)
+        return count
+
+    def close(self):
+        if not self.closed:
+            try:
+                if getattr(self, "_file", None) is not None:
+                    self._file.close()
+            finally:
+                super().close()
+
+
+class _DeadlineReader(io.BufferedReader):
+    """Already buffered bytes, such as queued interim responses, observe the same deadline."""
+
+    def __init__(self, raw, deadline):
+        super().__init__(raw)
+        self._deadline = deadline
+
+    def _checked(self, operation, *args):
+        _remaining(self._deadline)
+        result = operation(*args)
+        _remaining(self._deadline)
+        return result
+
+    def read(self, size=-1):
+        return self._checked(super().read, size)
+
+    def read1(self, size=-1):
+        return self._checked(super().read1, size)
+
+    def readinto(self, buffer):
+        return self._checked(super().readinto, buffer)
+
+    def readinto1(self, buffer):
+        return self._checked(super().readinto1, buffer)
+
+    def readline(self, size=-1):
+        return self._checked(super().readline, size)
+
+    def peek(self, size=0):
+        return self._checked(super().peek, size)
+
+
+class _DeadlineFileSource:
+    """What the standard HTTPResponse makes its file from in place of the socket's own makefile."""
+
+    def __init__(self, sock, deadline):
+        self._sock = sock
+        self._deadline = deadline
+
+    def makefile(self, mode):
+        if mode != "rb":
+            raise ValueError("retrieval responses are read-only binary streams")
+        return _DeadlineReader(_DeadlineRaw(self._sock, self._deadline), self._deadline)
+
+
 class PublicHTTPS(http.client.HTTPSConnection):
+    deadline = None  # Recorder.retrieve sets one monotonic deadline for all hops and reads.
+
+    def response_class(self, sock, *args, **kwargs):
+        """Parse with the standard HTTPResponse over a deadline-checked file of the actual socket."""
+        if self.deadline is not None:
+            sock = _DeadlineFileSource(sock, self.deadline)
+        return http.client.HTTPResponse(sock, *args, **kwargs)
+
     def connect(self):
         self.resolved_addresses = []
         self.validated_addresses = []
@@ -185,8 +314,11 @@ class PublicHTTPS(http.client.HTTPSConnection):
             raise
         self.resolved_addresses = self.validated_addresses = [item[3][0] for item in addresses]
         connection, self.connected_address = _connect_validated(
-            addresses, self.timeout, self.attempted_addresses, getattr(self, "deadline", None))
+            addresses, self.timeout, self.attempted_addresses, self.deadline)
         try:
+            if self.deadline is not None:
+                # Connection setup consumed part of the budget; the handshake gets only the rest.
+                connection.settimeout(min(TIMEOUT, _remaining(self.deadline)))
             self.sock = self._context.wrap_socket(connection, server_hostname=self.host)
             self.active_socket = self.sock
         except BaseException:
@@ -319,6 +451,9 @@ class Recorder:
                 connection.deadline = deadline
                 hop = {"url": url, "status": None, "location": None}
                 event["redirect_chain"].append(hop)
+                # This hop owns any returned response. A Connection: close response is detached
+                # from its connection, so connection.close() alone cannot release its socket file.
+                response = None
                 try:
                     # No caller headers, cookies, authorization, or proxy environment can reach this request.
                     connection.request("GET", path, headers={"User-Agent": "ScanEval-recorded-public/1",
@@ -330,6 +465,12 @@ class Recorder:
                         hop["location"] = recorded_url(location)
                         if not location or redirect == MAX_REDIRECTS:
                             raise RetrievalDenied("redirect is missing a target or exceeds the redirect limit")
+                        # Check the raw value: urljoin would drop controls and resolve an invalid
+                        # scheme such as 1https://user:secret@host/ as a path under this origin.
+                        if (any(ord(ch) < 33 or ord(ch) == 127 for ch in location) or
+                                _outer_userinfo(location) is not None):
+                            raise RetrievalDenied("redirect location contains whitespace, control "
+                                                  "characters, or URL credentials")
                         target = urllib.parse.urljoin(url, location)
                         continue
                     body = read_body(response, connection, deadline)
@@ -357,7 +498,11 @@ class Recorder:
                                                          getattr(connection, "validated_addresses", None)),
                                attempted_addresses=getattr(connection, "attempted_addresses", None),
                                connected_address=getattr(connection, "connected_address", None))
-                    connection.close()
+                    try:
+                        if response is not None:
+                            response.close()
+                    finally:
+                        connection.close()
         except RetrievalDenied as exc:
             if event["redirect_chain"] and exc.resolved_addresses is not None:
                 event["redirect_chain"][-1]["resolved_addresses"] = exc.resolved_addresses
