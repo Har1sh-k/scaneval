@@ -42,6 +42,10 @@
     "schema_version": {
       "const": "2.1"
     },
+    "condition": {
+      "type": "object", "additionalProperties": false, "required": ["name", "policy"],
+      "properties": {"name": {"enum": ["closed_book_standard", "open_context", "identity_reduced"]}, "policy": {"type": "object"}}
+    },
     "run_id": {
       "type": "string",
       "minLength": 1
@@ -479,6 +483,9 @@
           }
         },
         "network": {
+          "type": "object"
+        },
+        "retrieval": {
           "type": "object"
         },
         "containers": {

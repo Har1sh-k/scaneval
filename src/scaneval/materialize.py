@@ -40,6 +40,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from typing import Callable
@@ -555,6 +556,15 @@ def provenance_record(snapshot: CachedSnapshot, profile: str, exported: Exported
         "stripped": list(exported.stripped),
         "skipped": list(exported.skipped),
         "instruction_files": list(exported.instruction_files),
+        "retained_identity_cues": {
+            "instruction_files": list(exported.instruction_files),
+            "package_metadata": sorted(path for path in exported.hashes if Path(path).name in {
+                "package.json", "pyproject.toml", "setup.py", "setup.cfg", "Cargo.toml", "go.mod",
+                "composer.json", "pom.xml", "Gemfile", "build.gradle"}),
+            "documentation": sorted(path for path in exported.hashes if Path(path).name.lower().startswith(
+                ("readme", "license", "changelog", "contributing"))),
+            "source_identifiers": "retained", "ordinary_paths": "retained",
+        },
         "synthetic_history": None,
         "exported_at": now.astimezone(timezone.utc).isoformat(timespec="seconds"),
         "tool_versions": {"git": git_version()},
@@ -595,9 +605,186 @@ def prepare_synthetic_history(source_dir: Path, *, message: str = "snapshot") ->
         _git(["config", "--local", key, value], source_dir)
     # Force-add so an upstream .gitignore cannot drop exported files from the synthetic tree.
     _git(["add", "-A", "-f", "."], source_dir)
-    _git(["commit", "-q", "--allow-empty", "--no-verify", "-m", message], source_dir)
+    _git(["commit", "-q", "--allow-empty", "--no-verify", "-m", message], source_dir,
+         extra_env={"GIT_AUTHOR_DATE": "2000-01-01T00:00:00+00:00",
+                    "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00"})
     commit = _git(["rev-parse", "HEAD"], source_dir).strip()
     return {"commit": commit, "message": message, "identity": "ScanEval <scaneval@localhost>"}
+
+
+def git_index_semantic_sha256(raw: bytes) -> str:
+    """Hash v2/v3 SHA-1 index semantics while ignoring only per-entry stat-cache fields.
+
+    Format: https://git-scm.com/docs/gitformat-index . This intentionally supports only the
+    ordinary index this package creates. Unknown versions/extensions, sparse/split indexes,
+    invalid checksums, paths, flags, modes, padding, and ordering are refused. Cache extensions
+    TREE stays byte-bound; derived EOIE/IEOT offsets are validated and omitted from identity.
+    """
+    if (len(raw) < 32 or raw[:4] != b"DIRC"
+            or hashlib.sha1(raw[:-20], usedforsecurity=False).digest() != raw[-20:]):
+        raise MaterializationError("Git index has an invalid header or SHA-1 checksum")
+    version, count = int.from_bytes(raw[4:8], "big"), int.from_bytes(raw[8:12], "big")
+    if version not in (2, 3):
+        raise MaterializationError("Git index version is not a supported ordinary v2/v3 index")
+    end, offset = len(raw) - 20, 12
+    if count > (end - offset) // 64:
+        raise MaterializationError("Git index entry count exceeds its saved bytes")
+    entries = []
+    previous = None
+    for _ in range(count):
+        start = offset
+        if offset + 62 > end:
+            raise MaterializationError("Git index entry is truncated")
+        mode = int.from_bytes(raw[offset + 24:offset + 28], "big")
+        oid = raw[offset + 40:offset + 60].hex()
+        flags = int.from_bytes(raw[offset + 60:offset + 62], "big")
+        offset += 62
+        extended = 0
+        if flags & 0x4000:
+            if version == 2 or offset + 2 > end:
+                raise MaterializationError("Git index extended flags are invalid for this version")
+            extended = int.from_bytes(raw[offset:offset + 2], "big")
+            offset += 2
+            if extended & ~0x6000:
+                raise MaterializationError("Git index has unsupported extended flags")
+        nul = raw.find(b"\0", offset, end)
+        if nul < 0:
+            raise MaterializationError("Git index pathname is unterminated")
+        path = raw[offset:nul]
+        if (not path or path.startswith(b"/")
+                or any(part in (b"", b".", b"..", b".git") for part in path.split(b"/"))
+                or flags & 0x0FFF != min(len(path), 0x0FFF)):
+            raise MaterializationError("Git index pathname or encoded name length is invalid")
+        if mode not in (0o100644, 0o100755, 0o120000, 0o160000):
+            raise MaterializationError("Git index has an unsupported entry mode")
+        key = (path, (flags >> 12) & 3)
+        if previous is not None and key <= previous:
+            raise MaterializationError("Git index entries are duplicated or unsorted")
+        previous = key
+        offset = nul + (8 - ((nul - start) % 8))
+        if offset > end or any(raw[nul:offset]):
+            raise MaterializationError("Git index padding is invalid")
+        entries.append({"path_hex": path.hex(), "mode": mode, "oid": oid,
+                        "flags": flags & 0xB000, "extended_flags": extended})
+    extensions = []
+    entries_end = offset
+    extension_headers = bytearray()
+    while offset < end:
+        if offset + 8 > end:
+            raise MaterializationError("Git index extension is truncated")
+        signature = raw[offset:offset + 4]
+        length = int.from_bytes(raw[offset + 4:offset + 8], "big")
+        offset += 8
+        if signature not in (b"TREE", b"EOIE", b"IEOT") or offset + length > end:
+            raise MaterializationError("Git index contains an unknown or truncated extension")
+        payload = raw[offset:offset + length]
+        if signature == b"EOIE":
+            if (length != 24 or int.from_bytes(payload[:4], "big") != entries_end or offset + length != end
+                    or payload[4:] != hashlib.sha1(extension_headers, usedforsecurity=False).digest()):
+                raise MaterializationError("Git index end-of-entries cache is invalid")
+        elif signature == b"IEOT":
+            if length < 4 or (length - 4) % 8 or int.from_bytes(payload[:4], "big") != 1:
+                raise MaterializationError("Git index entry-offset cache is invalid")
+            for position in range(4, length, 8):
+                if not 12 <= int.from_bytes(payload[position:position + 4], "big") < entries_end:
+                    raise MaterializationError("Git index entry-offset cache points outside its entries")
+        else:
+            extensions.append({"signature": signature.decode("ascii"),
+                               "sha256": "sha256:" + hashlib.sha256(payload).hexdigest()})
+        extension_headers.extend(signature + length.to_bytes(4, "big"))
+        offset += length
+    return canonical_sha256({"entries": entries, "extensions": extensions})
+
+
+def _history_prefix(path: Path, length: int = 128) -> bytes:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise MaterializationError("a source history candidate is not a regular file")
+        return os.read(descriptor, length)
+    finally:
+        os.close(descriptor)
+
+
+def audit_condition_history(source: Path, *, synthetic: dict | None = None,
+                            bounded: dict | None = None,
+                            allowed_state_dirs: frozenset[str] = frozenset()) -> dict:
+    """Observe Git paths and controller state without following links or running scanner Git code.
+
+    The runner calls this immediately before and after scanning. A synthetic repository is
+    trusted only because the runner constructed it from a tree with no original history; its
+    entire file digest must remain unchanged. The audit records the actual paths, including
+    empty or symbolic-link ``.git`` entries, which the ordinary source-file hash cannot see.
+    """
+    git_paths: list[str] = []
+    controller_paths: list[str] = []
+    history_artifacts: list[dict] = []
+    pending = [(source, "")]
+    while pending:
+        directory, prefix = pending.pop()
+        with os.scandir(directory) as entries:
+            listed = sorted(entries, key=lambda entry: entry.name)
+        names = {entry.name: entry for entry in listed}
+        if {"HEAD", "objects", "refs"} <= set(names) and names["HEAD"].is_file(follow_symlinks=False):
+            head = _history_prefix(Path(names["HEAD"].path))
+            if head.startswith(b"ref: refs/") or re.fullmatch(rb"[0-9a-f]{40}(?:\n)?|[0-9a-f]{64}(?:\n)?", head):
+                history_artifacts.append({"path": prefix.rstrip("/") or ".", "kind": "bare_repository"})
+        for entry in listed:
+            relative = f"{prefix}{entry.name}"
+            if entry.name == ".git":
+                git_paths.append(relative)
+                continue
+            if not prefix and entry.name in STRIPPED_TOP_LEVEL:
+                if entry.name not in allowed_state_dirs:
+                    controller_paths.append(relative)
+                continue
+            if not entry.is_symlink() and entry.is_dir(follow_symlinks=False):
+                pending.append((Path(entry.path), f"{relative}/"))
+            elif not entry.is_symlink() and entry.is_file(follow_symlinks=False):
+                if _history_prefix(Path(entry.path), 16).startswith((b"# v2 git bundle\n", b"# v3 git bundle\n")):
+                    history_artifacts.append({"path": relative, "kind": "git_bundle"})
+    expected = synthetic is not None or bounded is not None
+    state = ("unexpected" if controller_paths or history_artifacts or git_paths != ([".git"] if expected else [])
+             else "bounded_ancestor_history" if bounded is not None
+             else "neutral_synthetic" if synthetic is not None else "original_absent")
+    digest = None
+    git = source / ".git"
+    if expected and state != "unexpected":
+        if git.is_symlink() or not git.is_dir():
+            state = "unexpected"
+        else:
+            # Git object files, refs, hooks, configuration, and logs are all covered. No Git
+            # command reads the repository after an untrusted scanner has had access to it.
+            entries: dict[str, dict] = {}
+            pending_git = [(git, "")]
+            while pending_git:
+                directory, prefix = pending_git.pop()
+                with os.scandir(directory) as stream:
+                    listed = sorted(stream, key=lambda entry: entry.name)
+                for entry in listed:
+                    relative = prefix + entry.name
+                    if entry.is_symlink():
+                        entries[relative] = {"kind": "symlink", "target": os.readlink(entry.path)}
+                        state = "unexpected"
+                    elif entry.is_dir(follow_symlinks=False):
+                        entries[relative] = {"kind": "directory"}
+                        pending_git.append((Path(entry.path), relative + "/"))
+                    elif entry.is_file(follow_symlinks=False):
+                        if relative == "index":
+                            descriptor = os.open(entry.path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+                            with os.fdopen(descriptor, "rb") as stream:
+                                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                                    raise MaterializationError("synthetic Git index is not a regular file")
+                                entries[relative] = {"kind": "index", "semantic_sha256": git_index_semantic_sha256(stream.read())}
+                        else:
+                            entries[relative] = {"kind": "file", "sha256": sha256_file(Path(entry.path))[0]}
+                    else:
+                        entries[relative] = {"kind": "special"}
+                        state = "unexpected"
+            digest = canonical_sha256(entries)
+    return {"state": state, "git_paths": sorted(git_paths), "controller_paths": sorted(controller_paths),
+            "history_artifacts": sorted(history_artifacts, key=lambda item: (item["path"], item["kind"])),
+            "git_files_sha256": digest}
 
 
 # What the synthetic history of a PR input says about itself. Fixed, so the same two trees give the

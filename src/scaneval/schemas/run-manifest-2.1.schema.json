@@ -349,6 +349,10 @@
             "identity_reduced"
           ]
         },
+        "condition": {
+          "type": "object", "additionalProperties": false, "required": ["name", "policy"],
+          "properties": {"name": {"enum": ["closed_book_standard", "open_context", "identity_reduced"]}, "policy": {"type": "object"}}
+        },
         "snapshot_id": {
           "type": [
             "string",

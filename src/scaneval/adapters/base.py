@@ -305,6 +305,18 @@ class Adapter(ABC):
     # ``oci`` with a recorded reason instead of running it.
     oci_compatible: bool = False
 
+    def condition_controls(self, spec: SystemSpec, preparation: dict) -> dict[str, Any]:
+        """Machine-readable retrieval controls applied by this adapter, recorded beside the run.
+
+        The default supplies no evidence. An implementation describes actual adapter controls,
+        not the operator's policy or a scanner's self-report. ``inference`` is ``offline`` or
+        ``remote``; ``tools`` maps browser, web_search, remote_fetch, package_install, and
+        scanner_update to disabled/enabled/unknown. Provider capability, the requested control,
+        and an applicable provider attestation remain separate in ``provider``. Artifact paths
+        in an attestation are bundle-relative and must name saved bytes.
+        """
+        return {}
+
     def prepare(self, spec: SystemSpec, cache_root: Path) -> dict[str, Any]:
         """Separately recorded preparation phase (rulesets, dependencies). Default: nothing."""
         return {}

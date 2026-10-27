@@ -54,6 +54,7 @@ SCHEMA_VERSIONS: dict[str, tuple[str, ...]] = {
     # published at 2.1, so plain file names.
     "gate-policy": ("2.1",),
     "gate-decision": ("2.1",),
+    "condition-record": ("2.1",),
 }
 CONTRACT_KINDS = frozenset(SCHEMA_VERSIONS)
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
@@ -1221,6 +1222,35 @@ def _validate_execution_record(document: dict[str, Any]) -> None:
         raise ContractError("a network policy is enforced only inside an enforced isolation backend")
 
 
+def _validate_condition_record(document: dict[str, Any]) -> None:
+    _unique([item["role"] for item in document["artifacts"]], "condition artifacts.role")
+    for item in document["artifacts"]:
+        _require_relative_path(item["path"], "condition artifact.path")
+    if document["status"] == "attested":
+        roles = {item["role"] for item in document["artifacts"]}
+        required = {"request", "result", "execution", "policy", "configuration", "provenance", "evidence"}
+        if not required <= roles:
+            raise ContractError("an attested condition requires exact saved input and invocation artifacts")
+        if document["network"] != "enforced":
+            raise ContractError("an unenforced network declaration cannot be attested")
+        if document["condition"] == "closed_book_standard":
+            if (document["identity_profile"] != "standard"
+                    or document["history"] not in ("original_absent", "neutral_synthetic")
+                    or document["retrieval"] not in ("disabled", "observed_none")
+                    or document["provider_retrieval"] not in ("disabled", "not_applicable")):
+                raise ContractError("closed_book_standard attestation requires standard identity and verified history/retrieval restrictions")
+        if document["condition"] == "identity_reduced":
+            identity = document["details"].get("identity_reduction") or {}
+            if (document["identity_profile"] != "identity_reduced" or document.get("mode") != "full"
+                    or document["history"] not in ("original_absent", "neutral_synthetic")
+                    or document["retrieval"] not in ("disabled", "observed_none")
+                    or document["provider_retrieval"] not in ("disabled", "not_applicable")
+                    or not {"identity_manifest", "identity_context"} <= roles
+                    or identity.get("transformation_verified") is not True
+                    or ((identity.get("summary") or {}).get("validation") or {}).get("state") != "available"):
+                raise ContractError("identity_reduced attestation requires full-scan strict manifest/context verification and closed retrieval controls")
+
+
 def _validate_case_pack(document: dict[str, Any]) -> None:
     """Check what a pack asserts about its own label states; it never re-runs a check.
 
@@ -1618,6 +1648,18 @@ def _validate_run_config(document: dict[str, Any]) -> None:
             raise ContractError(
                 f"{label}: blinding_map is required exactly when profile is metadata_blinded or "
                 "identity_reduced")
+        if item.get("condition") is not None:
+            from .conditions import resolve_condition
+            condition = resolve_condition(item["condition"], profile=item.get("profile", "standard"), mode=mode)
+            if condition["name"] == "closed_book_standard" and (item.get("profile", "standard") != "standard" or mode != "full"):
+                raise ContractError(f"{label}: closed_book_standard requires a standard full-scan input")
+            if condition["name"] == "identity_reduced" and (item.get("profile", "standard") != "identity_reduced" or mode != "full"):
+                raise ContractError(f"{label}: the named identity_reduced condition requires an identity_reduced full-scan input")
+            if condition["name"] == "open_context":
+                try:
+                    from . import open_context  # noqa: F401
+                except ImportError as exc:
+                    raise ContractError(f"{label}: open_context is unavailable: its bounded-history extension is not installed") from exc
     _unique([input_identity(item) for item in document["inputs"]], "input id")
     for index, system in enumerate(document["systems"]):
         execution = system.get("execution") or {"backend": "local"}
@@ -2039,6 +2081,31 @@ def _validate_aggregate_report(document: dict[str, Any]) -> None:
     _unique([run["run_id"] for run in document["runs"]], "runs.run_id")
     _unique([system["system_id"] for system in document["systems"]], "systems.system_id")
     _unique([f"{view['mode']}/{view['profile']}" for view in document["views"]], "views (mode, profile)")
+    if document.get("report_mode") == "condition_strata":
+        if document["views"] or "condition_strata" not in document:
+            raise ContractError("a condition-strata report exposes separate strata and no pooled weighted views")
+        keys = []
+        total_by_view: dict[tuple, int] = {}
+        expected_by_view: dict[tuple, int] = {}
+        for row in document["condition_strata"]:
+            keys.append(canonical_json([row[key] for key in ("system_id", "mode", "profile", "condition", "status", "policy_sha256", "evidence_scope")]))
+            view = (row["system_id"], row["mode"], row["profile"])
+            metrics = row["metrics"]
+            count = metrics["assignments"]
+            total_by_view[view] = total_by_view.get(view, 0) + count
+            expected_by_view.setdefault(view, row["view_scheduled_assignments"])
+            if expected_by_view[view] != row["view_scheduled_assignments"]:
+                raise ContractError("condition strata disagree on their full scheduled denominator")
+            if sum(metrics["statuses"].values()) != count or metrics["completion"]["scheduled"] != count:
+                raise ContractError("condition-stratum status counts must cover every scheduled assignment")
+            if sum(metrics["evidence_scope_counts"].values()) != count or metrics["evidence_scope"] != row["evidence_scope"]:
+                raise ContractError("condition-stratum evidence scope must cover every assignment without upgrading labels")
+            targets = metrics["target_observations"]
+            if len(metrics["targets"]) != targets["scheduled"] or targets["resolved"] + targets["unresolved"] != targets["scheduled"]:
+                raise ContractError("condition-stratum target coverage is inconsistent")
+        _unique(keys, "condition strata")
+        if total_by_view != expected_by_view:
+            raise ContractError("condition strata must preserve the complete scheduled view denominator")
     for view in document["views"]:
         _unique([system["system_id"] for system in view["systems"]], "view systems.system_id")
         for system in view["systems"]:
@@ -2504,6 +2571,7 @@ _RUNTIME_VALIDATORS = {
     "review-record": _validate_review_record,
     "run-config": _validate_run_config,
     "execution-record": _validate_execution_record,
+    "condition-record": _validate_condition_record,
     "scan-request": _validate_scan_request,
     "scan-result": _validate_scan_result,
     "evaluation-plan": _validate_evaluation_plan,

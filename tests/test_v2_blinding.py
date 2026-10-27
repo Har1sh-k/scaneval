@@ -387,8 +387,8 @@ def file_map(root: Path) -> dict[str, str]:
             for relative, path in materialize.walk_regular_files(root).items()}
 
 
-def test_the_standard_export_record_is_the_record_it_always_was(tmp_path, widget):
-    """No new key, no changed value: blinding arguments play no part in a standard export."""
+def test_standard_export_keeps_source_identity_and_ignores_blinding_arguments(tmp_path, widget):
+    """Cue inventory is additive evaluator metadata; blinding arguments change no standard byte."""
     snapshot = cached(widget, "snap-a")
     record = materialize.export_snapshot(snapshot, tmp_path / "trial", clock=CLOCK)
     named = materialize.export_snapshot(snapshot, tmp_path / "named", clock=CLOCK, snapshot_id="snap-a",
@@ -404,12 +404,17 @@ def test_the_standard_export_record_is_the_record_it_always_was(tmp_path, widget
         "trial": {"root": "source", "tree_hash": materialize.tree_hash(exported.hashes), "file_count": 8,
                   "byte_count": sum(len(text.encode("utf-8")) for text in FILES.values())},
         "stripped": [], "skipped": [], "instruction_files": ["CLAUDE.md"], "synthetic_history": None,
+        "retained_identity_cues": {"instruction_files": ["CLAUDE.md"], "package_metadata": ["package.json"],
+                                   "documentation": ["LICENSE", "README.md"], "source_identifiers": "retained",
+                                   "ordinary_paths": "retained"},
         "exported_at": AT, "tool_versions": {"git": materialize.git_version()},
         "limits": ["Export removes original git history and controller state; it is not a sandbox.",
                    "Tracked regular files only: submodules and symbolic links are recorded as skipped.",
                    "Instruction files stay in the standard profile and are recorded as identity cues."],
     }
     assert not (tmp_path / "trial" / "original").exists()
+    assert {path: (tmp_path / "trial" / "source" / path).read_text(encoding="utf-8") for path in FILES} == FILES
+    assert materialize.hash_exported_tree(tmp_path / "trial" / "source")["tree_hash"] == record["trial"]["tree_hash"]
 
 
 def test_identity_reduced_removes_only_reviewed_files_and_keeps_the_original(tmp_path, widget):

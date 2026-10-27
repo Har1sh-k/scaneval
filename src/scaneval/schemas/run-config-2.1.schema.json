@@ -71,6 +71,10 @@
             ],
             "default": "standard"
           },
+          "condition": {
+            "type": "object", "additionalProperties": false, "required": ["name", "policy"],
+            "properties": {"name": {"enum": ["closed_book_standard", "open_context", "identity_reduced"]}, "policy": {"type": "object"}}
+          },
           "blinding_map": {
             "type": "string",
             "minLength": 1,

@@ -60,6 +60,7 @@ and an input that was never prepared is never rewritten as one that had nothing 
 from __future__ import annotations
 
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -161,6 +162,7 @@ class _InputSpec:
     blinding_map: dict | None = field(default=None, compare=False, repr=False)
     # The change set a native PR input reviews, as the pack declares it.
     change_set: dict | None = field(default=None, compare=False, repr=False)
+    identity_context: dict | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -321,7 +323,9 @@ def _input_specs(config: dict, only: set[str] | None, base: Path,
                 document = blinding.load_map(path)
             except ContractError as exc:
                 raise ContractError(f"{label}: the blinding map {path} cannot be used: {exc}") from exc
-        specs.append(_InputSpec(input_id, snapshot_id, mode, profile, entry, document, change_set))
+        context = ({"schema_version": "2.1", "pack": deepcopy(pack), "map": deepcopy(document), "snapshot_id": snapshot_id}
+                   if profile == "identity_reduced" and pack is not None else None)
+        specs.append(_InputSpec(input_id, snapshot_id, mode, profile, entry, document, change_set, context))
     return specs, excluded
 
 
@@ -499,6 +503,8 @@ def _input_row(spec: _InputSpec) -> dict:
     row = {"input_id": spec.input_id, "mode": spec.mode, "profile": spec.profile,
            "snapshot_id": spec.snapshot_id, "tree_hash": None, "input_hash": None,
            "provenance_path": None, "mechanical_checks": [], "preparation_failure": None}
+    if spec.entry.get("condition") is not None:
+        row["condition"] = spec.entry["condition"]
     if spec.change_set is not None:
         row["change_set_id"] = spec.change_set["change_set_id"]
     return row
@@ -552,11 +558,14 @@ def _prepare_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: Path
     if blinded:
         identity = {**blinding.map_identity(spec.blinding_map), "original_tree_hash": source_tree_hash,
                     "transformed_tree_hash": tree_hash}
-    identity_manifest = (_verified_identity_manifest(trial, record, spec.blinding_map, pack, spec.snapshot_id)
+    identity_manifest = (_verified_identity_manifest(trial, record, spec.blinding_map,
+                                                    spec.identity_context["pack"] if spec.identity_context else pack, spec.snapshot_id)
                          if spec.profile == "identity_reduced" else None)
     prepared = execution.PreparedInput(
         spec.input_id, trial / "source", tree_hash, languages, record, spec.profile, spec.mode,
         input_hash=tree_hash, source_tree_hash=source_tree_hash, blinding=identity, identity_manifest=identity_manifest,
+        condition=spec.entry.get("condition"),
+        identity_context=spec.identity_context,
     )
     row.update({"tree_hash": tree_hash, "input_hash": prepared.binding_hash,
                 "mechanical_checks": [{"case_id": outcome["case_id"], "passed": outcome["passed"],
@@ -650,13 +659,15 @@ def _prepare_pr_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: P
                     "base_transformed_tree_hash": diff["base_tree_hash"]}
     identity_manifest = None
     if spec.profile == "identity_reduced":
-        identity_manifest = _verified_identity_manifest(trial, record["head"], spec.blinding_map, pack,
+        expected_pack = spec.identity_context["pack"] if spec.identity_context else pack
+        identity_manifest = _verified_identity_manifest(trial, record["head"], spec.blinding_map, expected_pack,
                                                         head_snapshot["snapshot_id"])
-        _verified_identity_manifest(trial, record["base"], spec.blinding_map, pack, base_snapshot["snapshot_id"])
+        _verified_identity_manifest(trial, record["base"], spec.blinding_map, expected_pack, base_snapshot["snapshot_id"])
     prepared = execution.PreparedInput(
         spec.input_id, trial / "source", diff["head_tree_hash"], tuple(head_snapshot["languages"]), record,
         spec.profile, "pr", input_hash=record["input_hash"], source_tree_hash=head_source_hash, blinding=identity,
-        pr=pr, base_source_dir=trial / materialize.PR_BASE_DIR / "source", identity_manifest=identity_manifest)
+        pr=pr, base_source_dir=trial / materialize.PR_BASE_DIR / "source",
+        identity_manifest=identity_manifest, identity_context=spec.identity_context, condition=spec.entry.get("condition"))
     row.update({"tree_hash": prepared.tree_hash, "input_hash": prepared.binding_hash,
                 "mechanical_checks": [{"case_id": outcome["case_id"], "passed": outcome["passed"],
                                        "checks": outcome["checks"]} for outcome in outcomes]})
@@ -990,8 +1001,11 @@ def run_from_config(
     pack_path = base / config["pack"]
     cache_root = base / config.get("cache_root", DEFAULT_CACHE_ROOT)
     pack = cases.load_pack(pack_path)
+    # Matrix/source expectations bind the configured document, before mechanical checks add
+    # timestamps or validation levels. The runtime evaluator pack may record those fresh checks.
+    configured_pack = deepcopy(pack)
 
-    inputs, excluded_inputs = _input_specs(config, only_inputs, base, pack)
+    inputs, excluded_inputs = _input_specs(config, only_inputs, base, configured_pack)
     systems = _selected(config["systems"], "system_id", only_systems, "systems")
     _check_invocation_ids(inputs, systems, repetitions)
     _check_input_snapshots(pack, inputs)

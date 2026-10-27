@@ -83,7 +83,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
-from . import __version__, review, scoring
+from . import __version__, conditions, review, scoring
 from .contracts import (
     WEIGHT_TOLERANCE,
     ContractError,
@@ -205,6 +205,7 @@ class _Observation:
     unscored: int = 0
     unregistered: int = 0
     timing: tuple[datetime | None, datetime | None, float] | None = None
+    condition: dict | None = field(default=None, repr=False)
 
     @property
     def executed(self) -> bool:
@@ -306,7 +307,7 @@ def _timing(bundle: Path, run: _Run, assignment: dict, result: dict) -> tuple | 
 
 
 def _observe(run: _Run, assignment: dict, row: dict | None, prepared: dict | None, system: dict | None,
-             frozen: dict) -> _Observation:
+             scheduled_input: dict) -> _Observation:
     """What *run* says about one *assignment*: a read bundle, or a failure and why.
 
     The reason of a failure is the first that applies: ``missing_row`` (the manifest has no row, as in
@@ -318,6 +319,7 @@ def _observe(run: _Run, assignment: dict, row: dict | None, prepared: dict | Non
     identity = {"run_id": run.run_id, "input_id": assignment["input_id"],
                 "system_id": assignment["system_id"], "repetition": assignment["repetition"],
                 "assignment_id": assignment["assignment_id"]}
+    frozen = scheduled_input["plan"]
     planned = frozen["state"] == "frozen"
 
     def failure(status: str, reason: str) -> _Observation:
@@ -363,8 +365,18 @@ def _observe(run: _Run, assignment: dict, row: dict | None, prepared: dict | Non
             planned_ids = {item[key] for item in plan[kind]}
             unscored += len(frozen_ids - planned_ids)
             unregistered += len(planned_ids - frozen_ids)
+    try:
+        condition = conditions.classify_observation(bundle, condition=scheduled_input.get("condition"),
+                                                    identity_profile=scheduled_input["profile"], input_mode=scheduled_input["mode"])
+    except ContractError as exc:
+        declaration = conditions.resolve_condition(scheduled_input.get("condition"), profile=scheduled_input["profile"], mode=scheduled_input["mode"])
+        condition = {"condition": declaration["name"], "status": "failed", "identity_profile": scheduled_input["profile"],
+                     "mode": scheduled_input["mode"], "system_id": assignment["system_id"],
+                     "policy_sha256": canonical_sha256(declaration),
+                     "reasons": [{"code": "unusable_condition_evidence", "message": f"Condition evidence for {assignment['assignment_id']} is unusable: {str(exc).replace(str(run.directory), '<run>')}"}]}
     return _Observation(**identity, status=result["status"], scope=scope, observed=observed,
-                        review_state=state, unscored=unscored, unregistered=unregistered, timing=timing)
+                        review_state=state, unscored=unscored, unregistered=unregistered, timing=timing,
+                        condition=condition)
 
 
 @dataclass
@@ -492,8 +504,196 @@ def _load_corpus(run_dirs: Iterable[str | PathLike[str]]) -> _Corpus:
             key = (run.run_id, assignment["input_id"], assignment["system_id"], assignment["repetition"])
             observations[key] = _observe(
                 run, assignment, rows.get(assignment["assignment_id"]), prepared.get(assignment["input_id"]),
-                manifest_systems.get(assignment["system_id"]), inputs[key[:2]]["plan"])
+                manifest_systems.get(assignment["system_id"]), inputs[key[:2]])
     return _Corpus(runs, observations, targets, controls, inputs, systems)
+
+
+def _condition_rows(corpus: _Corpus) -> list[dict]:
+    rows = []
+    roots = {run.run_id: str(run.directory) for run in corpus.runs}
+    for key, observation in sorted(corpus.observations.items()):
+        planned = corpus.inputs[key[:2]]
+        declaration = conditions.resolve_condition(planned.get("condition"), profile=planned["profile"], mode=planned["mode"])
+        record = observation.condition
+        rows.append({"run_id": observation.run_id, "assignment_id": observation.assignment_id,
+                     "system_id": observation.system_id, "mode": planned["mode"], "profile": planned["profile"],
+                     "condition": record["condition"] if record else declaration["name"],
+                     "status": record["status"] if record else "unavailable",
+                     "policy_sha256": record["policy_sha256"] if record else canonical_sha256(declaration),
+                     "reasons": [{"code": item["code"], "message": item["message"].replace(roots[observation.run_id], "<run>")}
+                                 for item in record["reasons"]] if record else [{"code": observation.reason or "unavailable",
+                                                                    "message": "No readable invocation evidence is available."}],
+                     "record_identity_sha256": conditions.record_identity(record) if record else None})
+    return rows
+
+
+def _refuse_condition_mixing(corpus: _Corpus, system_ids: Iterable[str] | None = None) -> None:
+    """A mode/profile metric view may not pool observations from different condition strata.
+
+    Assignments that never produced a readable result stay in the operational denominator; they
+    contain no measured observation to pool. Their missing condition evidence is still reported.
+    """
+    selected = set(corpus.systems) if system_ids is None else set(system_ids)
+    strata: dict[tuple[str, str, str], set[tuple[str, str, str]]] = defaultdict(set)
+    for key, observation in corpus.observations.items():
+        denominator_only = (observation.status in ("partial", "unsupported", "error", "timeout")
+                            and observation.observed is not None
+                            and observation.observed["claims"]["records"] == 0)
+        if observation.system_id in selected and observation.condition is not None and not denominator_only:
+            planned = corpus.inputs[key[:2]]
+            strata[(observation.system_id, planned["mode"], planned["profile"])].add(
+                (observation.condition["condition"], observation.condition["status"], observation.condition["policy_sha256"]))
+    for (system_id, mode, profile), found in sorted(strata.items()):
+        if len(found) > 1:
+            names = ", ".join(f"{name}/{status} ({policy})" for name, status, policy in sorted(found))
+            raise ContractError(f"{system_id} {mode}/{profile} mixes evaluation condition strata ({names}); "
+                                "use scaneval aggregate --by-condition for separate metrics and full missingness, "
+                                "or scaneval condition to inspect invocation evidence.")
+
+
+def _condition_coverage(corpus: _Corpus) -> list[dict]:
+    grouped: dict[tuple[str, ...], list[dict]] = defaultdict(list)
+    for row in _condition_rows(corpus):
+        grouped[(row["system_id"], row["mode"], row["profile"], row["condition"], row["status"], row["policy_sha256"])].append(row)
+    return [{"system_id": system, "mode": mode, "profile": profile, "condition": name,
+             "status": status, "observations": len(rows),
+             "policy_sha256": policy,
+             "assignments": [{key: row[key] for key in ("run_id", "assignment_id", "reasons", "record_identity_sha256")}
+                             for row in rows]}
+            for (system, mode, profile, name, status, policy), rows in sorted(grouped.items())]
+
+
+def _scheduled_condition_rows(corpus: _Corpus) -> list[dict]:
+    """Public-metrics row shape for every scheduled assignment, including unreadable/missing work."""
+    identities = {(row["run_id"], row["assignment_id"]): row for row in _condition_rows(corpus)}
+    rows = []
+    for key, observation in sorted(corpus.observations.items()):
+        scheduled = corpus.inputs[key[:2]]
+        plan = scheduled["plan"]
+        rows.append({**identities[(observation.run_id, observation.assignment_id)],
+                     "input_id": observation.input_id, "repetition": observation.repetition,
+                     "status": observation.status, "condition_status": identities[(observation.run_id, observation.assignment_id)]["status"],
+                     "review_state": observation.review_state, "reason": observation.reason,
+                     "scope": observation.scope,
+                     "observed": observation.observed, "plan_state": plan["state"],
+                     "planned_targets": plan.get("targets", []), "planned_controls": plan.get("controls", [])})
+    return rows
+
+
+def condition_metrics(rows: Sequence[dict]) -> dict:
+    """Descriptive coverage and target-observation bounds for an explicit scheduled population.
+
+    Each row supplies run_id/input_id/system_id/repetition/assignment_id/status, optional
+    reason/review_state, ``observed`` from :func:`scoring.observe` or None, and planned_targets /
+    planned_controls carrying canonical_id plus target_id / control_id. A missing cell can supply
+    those frozen planned rows with observed=None. This function calls no loader or judge and
+    changes no matching decision. It exposes unweighted per-target outcomes so an experiment can
+    apply its separately frozen weighting, rather than deriving pair effects from a headline rate.
+    """
+    observations = []
+    target_rows, control_rows = [], []
+    missing_plans = 0
+    scopes = {row.get("scope") or "unavailable" for row in rows}
+    if not scopes <= {"diagnostic", "draft", "reviewed", "unavailable"}:
+        raise ContractError("unknown evidence scope in condition metrics")
+    if "diagnostic" in scopes and scopes != {"diagnostic"}:
+        raise ContractError("condition metrics mix diagnostic fixture evidence with other evidence scopes; report them separately")
+    for row in rows:
+        observation = _Observation(run_id=row["run_id"], input_id=row["input_id"], system_id=row["system_id"],
+                                   repetition=row["repetition"], assignment_id=row["assignment_id"], status=row["status"],
+                                   reason=row.get("reason"), observed=row.get("observed"), review_state=row.get("review_state"),
+                                   scope=row.get("scope"))
+        if observation.status not in STATUSES:
+            raise ContractError(f"unknown scheduled condition observation status {observation.status!r}")
+        observations.append(observation)
+        missing_plans += row.get("plan_state", "frozen") != "frozen"
+        reviewed = observation.review_state == "human_approved"
+        identity = {key: row[key] for key in ("run_id", "input_id", "system_id", "repetition", "assignment_id")}
+        identity["evidence_scope"] = observation.scope or "unavailable"
+        targets: dict[str, list[str]] = defaultdict(list)
+        for target in row["planned_targets"]:
+            targets[target["canonical_id"]].append(target["target_id"])
+        for canonical, ids in sorted(targets.items()):
+            outcome = _target_outcome(observation, tuple(sorted(set(ids))), [])
+            observed_targets = {item["target_id"]: item for item in (observation.observed or {}).get("targets", [])}
+            pending = any(target_id not in observed_targets or observed_targets[target_id]["unresolved_match"] for target_id in ids)
+            resolved = reviewed and outcome["assessable"]
+            detected = True if reviewed and outcome["detected"] else False if resolved else None
+            target_rows.append({**identity, "canonical_id": canonical, "detected": detected, "resolved": resolved,
+                                "completed": outcome["completed"], "reviewed": reviewed, "unresolved_match": pending,
+                                "status": observation.status})
+        controls: dict[str, list[str]] = defaultdict(list)
+        for control in row["planned_controls"]:
+            controls[control["canonical_id"]].append(control["control_id"])
+        for canonical, ids in sorted(controls.items()):
+            outcome = _control_outcome(observation, tuple(sorted(set(ids))))
+            control_rows.append({**identity, "canonical_id": canonical,
+                                 "resolved": reviewed and outcome["resolved"], "completed": outcome["completed"],
+                                 "false_allegation": outcome["false_allegation"] if reviewed and outcome["resolved"] else None,
+                                 "observed_false_allegation": reviewed and outcome["observed_false_allegation"]})
+    statuses = Counter(item.status for item in observations)
+    scheduled, targets = len(observations), len(target_rows)
+    detected = sum(row["detected"] is True for row in target_rows)
+    resolved = sum(row["resolved"] for row in target_rows)
+    unknown = sum(row["detected"] is None for row in target_rows)
+    population_complete = missing_plans == 0
+    scope_counts = Counter(row.get("scope") or "unavailable" for row in rows)
+    lower = _float(Fraction(detected, targets)) if targets and population_complete else None
+    upper = _float(Fraction(detected + unknown, targets)) if targets and population_complete else None
+    return {"weighting": "target_observations", "assignments": scheduled,
+            "evidence_scope": "unavailable" if not scopes or "unavailable" in scopes else _scope(scopes),
+            "evidence_scope_counts": {scope: scope_counts[scope] for scope in ("diagnostic", "draft", "reviewed", "unavailable")},
+            "statuses": {status: statuses[status] for status in STATUSES},
+            "assignments_without_frozen_plan": missing_plans,
+            "completion": {"completed": statuses["success"], "scheduled": scheduled,
+                           "value": _float(Fraction(statuses["success"], scheduled)) if scheduled else None},
+            "support": {"supported": statuses["success"] + statuses["partial"], "unsupported": statuses["unsupported"],
+                        "unknown": scheduled - statuses["success"] - statuses["partial"] - statuses["unsupported"]},
+            "target_observations": {"scheduled": targets, "population_complete": population_complete,
+                                    "detected": detected, "resolved": resolved, "unresolved": targets - resolved,
+                                    "unreviewed": sum(not row["reviewed"] for row in target_rows),
+                                    "unresolved_matches": sum(row["unresolved_match"] for row in target_rows)},
+            "recall": {"value": lower if targets and resolved == targets and population_complete else None,
+                       "lower_bound": lower, "upper_bound": upper, "numerator": detected,
+                       "denominator": targets if population_complete else None},
+            "targets": target_rows, "controls": control_rows, "claims": _claims(observations), "usage": _usage(observations)}
+
+
+def aggregate_by_condition(run_dirs: Iterable[str | PathLike[str]], *, policy: dict | None = None) -> dict:
+    """Report every condition/status stratum from whole runs without pooling their detection metrics.
+
+    The complete scheduled denominator is retained beside each stratum's own denominator. These
+    are descriptive target-observation counts and bounds, with no weighted headline or interval.
+    Raw per-target outcomes are retained for a workflow with separately frozen pairing/weighting.
+    """
+    corpus, resolved_policy = _load_corpus(run_dirs), resolve_policy(policy)
+    rows = _scheduled_condition_rows(corpus)
+    grouped: dict[tuple[str, ...], list[dict]] = defaultdict(list)
+    views: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for row in rows:
+        views[(row["system_id"], row["mode"], row["profile"])].append(row)
+        grouped[(row["system_id"], row["mode"], row["profile"], row["condition"], row["condition_status"], row["policy_sha256"],
+                 row.get("scope") or "unavailable")].append(row)
+    strata = []
+    for (system, mode, profile, name, status, digest, scope), selected in sorted(grouped.items()):
+        all_rows = views[(system, mode, profile)]
+        strata.append({"system_id": system, "mode": mode, "profile": profile, "condition": name, "status": status,
+                       "evidence_scope": scope,
+                       "policy_sha256": digest, "view_scheduled_assignments": len(all_rows),
+                       "view_scheduled_target_observations": sum(len({item["canonical_id"] for item in row["planned_targets"]}) for row in all_rows),
+                       "view_target_population_complete": all(row.get("plan_state") == "frozen" for row in all_rows),
+                       "metrics": condition_metrics(selected)})
+    report = {"schema_version": SCHEMA_VERSION, "evaluator_version": __version__, "report_mode": "condition_strata",
+              "condition_digest_format": conditions.IDENTITY_FORMAT,
+              "policy": resolved_policy, "policy_sha256": canonical_sha256(resolved_policy),
+              "runs": [_run_row(corpus, run) for run in corpus.runs],
+              "systems": [_system_row(system, info) for system, info in corpus.systems.items()],
+              "profile_coverage": _profile_coverage(corpus), "condition_coverage": _condition_coverage(corpus),
+              "condition_strata": strata, "views": [],
+              "notes": ["Separate descriptive condition/status/policy strata; no pooled weighted recall or confidence interval.",
+                        "Full scheduled view denominators are reported beside stratum denominators. Missing, unsupported, incomplete, and unreviewed targets remain unknown, never silent zeros.",
+                        "Metrics use existing scoring.observe target/control decisions. Per-target outcomes are unweighted and do not replace an experiment's frozen weighting or paired analysis."]}
+    return validate_document(REPORT_KIND, report)
 
 
 # --- weights ------------------------------------------------------------------------------------
@@ -1546,6 +1746,7 @@ def _run_row(corpus: _Corpus, run: _Run) -> dict:
     """One run as read: its hashes, its evidence digest, its failures, its execution timing, and what it covers.
 
     The evidence digest hashes, per assignment in id order, its status, failure reason, review state,
+    the versioned structural condition identity (artifact hashes and reason codes, excluding prose),
     and the result, plan, and decisions digests of its bundle, so a report binds to exact evidence.
     ``selection`` is the manifest's record of what the run was narrowed to, and ``configured_inputs``
     counts the inputs its configuration names beside ``inputs``, those its schedule covers: a run
@@ -1563,6 +1764,7 @@ def _run_row(corpus: _Corpus, run: _Run) -> dict:
         elapsed = span if span >= 0 else None
     evidence = [{"assignment_id": item.assignment_id, "status": item.status, "reason": item.reason,
                  "review_state": item.review_state,
+                 "condition_identity_sha256": conditions.record_identity(item.condition) if item.condition is not None else None,
                  **({key: item.observed[key] for key in ("result_sha256", "plan_sha256", "decisions_sha256")}
                     if item.observed is not None else {})}
                 for item in observations]
@@ -1650,6 +1852,7 @@ def aggregate(run_dirs: Iterable[str | PathLike[str]], *, policy: dict | None = 
     """
     context = _Context(_load_corpus(run_dirs), resolve_policy(policy))
     corpus = context.corpus
+    _refuse_condition_mixing(corpus)
     views = []
     for mode, profile in _view_keys(corpus, corpus.systems):
         system_ids = _systems_in_view(corpus, mode, profile)
@@ -1663,10 +1866,12 @@ def aggregate(run_dirs: Iterable[str | PathLike[str]], *, policy: dict | None = 
                       "warnings": _view_warnings(facts, results)})
     report = {
         "schema_version": SCHEMA_VERSION, "evaluator_version": __version__,
+        "condition_digest_format": conditions.IDENTITY_FORMAT,
         "policy": context.policy, "policy_sha256": canonical_sha256(context.policy),
         "runs": [_run_row(corpus, run) for run in corpus.runs],
         "systems": [_system_row(system_id, info) for system_id, info in corpus.systems.items()],
         "profile_coverage": _profile_coverage(corpus),
+        "condition_coverage": _condition_coverage(corpus),
         "views": views,
         "notes": _notes(context.policy),
     }
@@ -1692,6 +1897,7 @@ def _contract(corpus: _Corpus, system_id: str) -> dict:
             continue
         for row in run.schedule["inputs"]:
             inputs.append({**{name: row[name] for name in _CONTRACT_FIELDS},
+                           "condition": conditions.resolve_condition(row.get("condition"), profile=row["profile"], mode=row["mode"]),
                            "plan": {key: value for key, value in row["plan"].items() if key != "notes"},
                            "repetitions": run.repetitions})
         pairs.extend(run.schedule["pairs"])
@@ -1849,6 +2055,7 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
     for system_id in (baseline, candidate):
         if system_id not in corpus.systems:
             raise ContractError(f"system {system_id} is not scheduled in any of the given runs")
+    _refuse_condition_mixing(corpus, (baseline, candidate))
     contracts = {system_id: _contract(corpus, system_id) for system_id in (baseline, candidate)}
     gap = _contract_gap(contracts[baseline], contracts[candidate], (baseline, candidate))
     if gap is not None:
@@ -1872,6 +2079,7 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
     structure = contracts[baseline]
     report = {
         "schema_version": SCHEMA_VERSION, "evaluator_version": __version__,
+        "condition_digest_format": conditions.IDENTITY_FORMAT,
         "policy": context.policy, "policy_sha256": canonical_sha256(context.policy),
         "runs": [_run_row(corpus, run) for run in corpus.runs
                  if baseline in run.system_ids or candidate in run.system_ids],
@@ -1881,6 +2089,7 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
                      "pairs": len(structure["pairs"])},
         "configuration_differences": configuration_differences(corpus.systems[baseline]["configuration"],
                                                                corpus.systems[candidate]["configuration"]),
+        "condition_coverage": [row for row in _condition_coverage(corpus) if row["system_id"] in (baseline, candidate)],
         "views": views,
         "notes": _notes(context.policy),
     }
@@ -1919,13 +2128,29 @@ def summary(report: dict) -> list[str]:
                                f"{_interval_text(metric['interval'])}")
             lines.append(f"  {system['system_id']} scope={system['evidence_scope']} full_output_recall "
                          f"{' '.join(recalls)} completion={_number(whole['completion']['value'])}")
+    lines.extend(_condition_summary(report))
+    for stratum in report.get("condition_strata", []):
+        metrics = stratum["metrics"]
+        lines.append(f"  {stratum['system_id']} {stratum['condition']}/{stratum['status']} "
+                     f"scope={stratum['evidence_scope']} "
+                     f"assignments={metrics['assignments']}/{stratum['view_scheduled_assignments']} "
+                     f"targets={metrics['target_observations']['scheduled']} "
+                     f"resolved={metrics['target_observations']['resolved']} recall={_number(metrics['recall']['value'])} "
+                     f"bounds=[{_number(metrics['recall']['lower_bound'])}, {_number(metrics['recall']['upper_bound'])}]")
     return lines
+
+
+def _condition_summary(report: dict) -> list[str]:
+    return [f"condition {row['condition']} status={row['status']} system={row['system_id']} "
+            f"profile={row['profile']} observations={row['observations']}"
+            for row in report.get("condition_coverage", [])]
 
 
 def comparison_summary(report: dict) -> list[str]:
     """One line per view and weighting of a comparison: the full-output recall difference."""
     lines = [f"baseline={report['baseline']['system_id']} candidate={report['candidate']['system_id']} "
              f"configuration_differences={len(report['configuration_differences'])}"]
+    lines.extend(_condition_summary(report))
     for view in report["views"]:
         scope = view["evidence_scope"]
         lines.append(f"view {view['mode']}/{view['profile']} scope baseline={scope['baseline']} "

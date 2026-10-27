@@ -946,11 +946,28 @@ def _aggregate(args: argparse.Namespace) -> int:
     """
     _refuse_trial_path(args.output)
     policy = aggregate.load_policy(args.policy) if args.policy else None
-    report = aggregate.aggregate(args.run_dirs, policy=policy)
+    report = (aggregate.aggregate_by_condition(args.run_dirs, policy=policy) if args.by_condition
+              else aggregate.aggregate(args.run_dirs, policy=policy))
     _write_new(args.output, _json(report))
     for line in aggregate.summary(report):
         print(line)
     print(f"Report: {args.output}")
+    return 0
+
+
+def _condition(args: argparse.Namespace) -> int:
+    """Reclassify saved artifacts and report every condition stratum without scoring claims."""
+    from . import conditions
+    for bundle in args.bundles:
+        if not bundle.expanduser().resolve().is_dir():
+            raise ContractError(f"condition bundle is not a directory: {bundle}")
+    records = [conditions.classify_observation(bundle) for bundle in args.bundles]
+    report = {"observations": records, "coverage": conditions.condition_coverage(records)}
+    if args.output:
+        _refuse_trial_path(args.output)
+        _write_new(args.output, _json(report))
+    else:
+        sys.stdout.write(_json(report))
     return 0
 
 
@@ -1409,6 +1426,8 @@ def _add_aggregate_commands(sub: argparse._SubParsersAction) -> None:
                     "denominator.")
     aggregating.add_argument("run_dirs", nargs="+", type=Path, metavar="RUN_DIR", help=run_dirs_help)
     aggregating.add_argument("--policy", type=Path, help=policy_help)
+    aggregating.add_argument("--by-condition", action="store_true",
+                             help="report separate condition/status/policy strata with full scheduled denominators and target outcomes")
     aggregating.add_argument("--output", required=True, type=Path, help=output_help)
 
     comparing = sub.add_parser(
@@ -1509,6 +1528,9 @@ def build_parser() -> argparse.ArgumentParser:
     validate = sub.add_parser("validate", help="validate a versioned JSON contract")
     validate.add_argument("kind", choices=sorted(CONTRACT_KINDS))
     validate.add_argument("path", type=Path)
+    condition = sub.add_parser("condition", help="classify saved evaluation conditions without pooling their results")
+    condition.add_argument("bundles", type=Path, nargs="+")
+    condition.add_argument("--output", type=Path, help="new JSON file; default stdout")
     scoring = sub.add_parser("score", help="score saved output with frozen evaluator decisions")
     for name in ("plan", "result", "decisions"):
         scoring.add_argument(f"--{name}", required=True, type=Path)
@@ -1580,6 +1602,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "validate":
             load_document(args.path, args.kind)
             print(f"Valid {args.kind}: {args.path}")
+        elif args.command == "condition":
+            return _condition(args)
         elif args.command == "investigate":
             return _investigate(args)
         elif args.command == "precision":

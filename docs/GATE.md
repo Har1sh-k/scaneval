@@ -1,5 +1,11 @@
 # Promotion gate decisions
 
+Condition-aware comparison reports use `condition_digest_format: condition-structural-v1`:
+run evidence digests include structural condition identities and frozen contract digests include
+the resolved condition declaration. An older gate decision remains bound to its original saved
+comparison. Regenerating a comparison under the new composition requires a new gate evaluation;
+the old decision cannot be transferred by matching scanner results alone.
+
 `scaneval gate` holds one saved comparison of a candidate against a baseline to a gate policy and writes a decision. It follows [design section 8](DESIGN_DECISIONS.md#8-repetitions-uncertainty-and-feedback-for-harness-improvement): ScanEval returns a decision and its evidence, and the workflow that owns the harness owns any promotion. The requirements are the constraints of [evaluation math](EVALUATION_MATH.md) sections 1 to 4, kept separate: detection, precision, control false alarms, completion, review burden, and cost. There is no composite score, so recall cannot compensate for noise. The command reads three kinds of document, runs no scan, and calls no model or judge.
 
 ```sh
