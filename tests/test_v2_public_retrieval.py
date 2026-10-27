@@ -514,6 +514,59 @@ def test_outer_credentials_stay_redacted_and_denied_through_capture_and_classifi
     assert not any(reason["code"] == "retrieval_artifact_mismatch" for reason in condition["reasons"])
 
 
+UNSAFE_LOCATION = "redirect location contains whitespace, control characters, or URL credentials"
+
+
+def test_unsafe_raw_redirect_locations_are_denied_before_resolution_or_a_second_request(tmp_path, monkeypatch):
+    secret = "redirect-secret"
+    denied = {
+        "1https://user:" + secret + "@research.example/": "1https://[redacted]@research.example/",
+        "9://user:" + secret + "@research.example/next": "9://[redacted]@research.example/next",
+        "https:\t//user:" + secret + "@research.example/": "https:\t//[redacted]@research.example/",
+        "ht\x01tps://user:" + secret + "@research.example/": "ht\x01tps://[redacted]@research.example/",
+        "ht tps://user:" + secret + "@research.example/": "ht tps://[redacted]@research.example/",
+        "https://user:" + secret + "\x7f@research.example/": "https://[redacted]@research.example/",
+        "https://@research.example/": "https://[redacted]@research.example/",
+        "https://[redacted]@research.example/": "https://[redacted]@research.example/",
+        "//[redacted]@research.example/": "//[redacted]@research.example/",
+        "/ne\x0bxt?q=research": "/ne\x0bxt?q=research",
+        "/next page": "/next page",
+    }
+    valid = ["/login?next=//a@b", "//research.example/final?u=https://c@d",
+             "https://research.example/p/https://u@host/x"]
+    scripts = [http_bytes(302, Location=location) for location in denied]
+    for location in valid:
+        scripts += [http_bytes(302, Location=location), http_bytes(200, b"followed")]
+    wires = real_transport(monkeypatch, *scripts)
+    logs = tmp_path / "proxy-log"
+    logs.mkdir()
+    recorder = retrieval.Recorder(str(logs), POLICY)
+    results = [recorder.retrieve({"url": f"https://research.example/start-{index}"})
+               for index in range(len(denied) + len(valid))]
+    refused, followed = results[:len(denied)], results[len(denied):]
+    assert all(result["outcome"] == "denied" and result["error"] == UNSAFE_LOCATION for result in refused)
+    assert all(len(result["redirect_chain"]) == 1 and result["redirect_chain"][0]["status"] == 302
+               for result in refused)
+    assert [result["redirect_chain"][0]["location"] for result in refused] == list(denied.values())
+    # One connection and one request per refused attempt: nothing was resolved and fetched.
+    assert len(wires) == len(scripts) and all(wire.sent.count(b"GET ") == 1 for wire in wires)
+    assert all(b"GET /start-" in wire.sent for wire in wires[:len(denied)])
+    assert [result["outcome"] for result in followed] == ["ok"] * len(valid)
+    assert [result["redirect_chain"][1]["url"] for result in followed] == [
+        "https://research.example/login?next=//a@b", "https://research.example/final?u=https://c@d",
+        "https://research.example/p/https://u@host/x"]
+    events = [json.loads(line) for line in (logs / retrieval.EVENTS).read_text().splitlines()]
+    assert [event["outcome"] for event in events] == ["denied"] * len(denied) + ["ok"] * len(valid)
+    summary, condition, saved = capture_and_classify(tmp_path, logs)
+    for evidence in (json.dumps(results), (logs / retrieval.EVENTS).read_text(),
+                     (logs / retrieval.STARTED).read_text(), saved.decode()):
+        assert secret not in evidence
+    assert summary["capture_status"] == "recorded" and summary["denied"] == len(denied)
+    assert summary["preserved"] == len(valid)
+    assert condition["retrieval"] == "recorded", condition["reasons"]
+    assert not any(reason["code"] == "retrieval_artifact_mismatch" for reason in condition["reasons"])
+
+
 @pytest.mark.parametrize("control", ["\t", " ", "\x00", "\x01", "\x0b", "\x1f", "\x7f"])
 def test_controls_anywhere_in_the_outer_prefix_cannot_expose_credentials(tmp_path, monkeypatch, control):
     secret = "synthetic-secret"

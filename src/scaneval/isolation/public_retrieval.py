@@ -465,6 +465,12 @@ class Recorder:
                         hop["location"] = recorded_url(location)
                         if not location or redirect == MAX_REDIRECTS:
                             raise RetrievalDenied("redirect is missing a target or exceeds the redirect limit")
+                        # Check the raw value: urljoin would drop controls and resolve an invalid
+                        # scheme such as 1https://user:secret@host/ as a path under this origin.
+                        if (any(ord(ch) < 33 or ord(ch) == 127 for ch in location) or
+                                _outer_userinfo(location) is not None):
+                            raise RetrievalDenied("redirect location contains whitespace, control "
+                                                  "characters, or URL credentials")
                         target = urllib.parse.urljoin(url, location)
                         continue
                     body = read_body(response, connection, deadline)
