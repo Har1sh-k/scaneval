@@ -55,6 +55,7 @@ SCHEMA_VERSIONS: dict[str, tuple[str, ...]] = {
     "gate-policy": ("2.1",),
     "gate-decision": ("2.1",),
     "condition-record": ("2.1",),
+    "experiment-matrix": ("2.1",),
 }
 CONTRACT_KINDS = frozenset(SCHEMA_VERSIONS)
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
@@ -1665,6 +1666,12 @@ def _validate_run_config(document: dict[str, Any]) -> None:
         execution = system.get("execution") or {"backend": "local"}
         label = f"systems[{index}].execution"
         policy = system.get("network_policy", document["network_policy"])
+        if policy == "public_research":
+            from .isolation import IsolationError, resolve_execution
+            try:
+                resolve_execution(execution, policy)
+            except IsolationError as exc:
+                raise ContractError(f"{label}: {exc}") from exc
         if execution["backend"] == "local":
             extra = sorted(set(execution) - {"backend"})
             if extra:
@@ -1674,7 +1681,7 @@ def _validate_run_config(document: dict[str, Any]) -> None:
         image = execution.get("image")
         if not isinstance(image, str) or not _PINNED_IMAGE.match(image):
             raise ContractError(f"{label}: an oci backend needs an image pinned by digest, not {image!r}")
-        if policy == "model_provider_only":
+        if policy in ("model_provider_only", "public_research"):
             if not execution.get("egress"):
                 raise ContractError(f"{label}: model_provider_only needs the egress it allows declared")
             proxy = execution.get("proxy_image")
@@ -2566,12 +2573,18 @@ def _validate_gate_decision(document: dict[str, Any]) -> None:
                             f"requirement and the policy's required scope give {expected}")
 
 
+def _validate_experiment_matrix(document: dict) -> None:
+    from .experiment import validate_matrix
+    validate_matrix(document)
+
+
 _RUNTIME_VALIDATORS = {
     "case-pack": _validate_case_pack,
     "review-record": _validate_review_record,
     "run-config": _validate_run_config,
     "execution-record": _validate_execution_record,
     "condition-record": _validate_condition_record,
+    "experiment-matrix": _validate_experiment_matrix,
     "scan-request": _validate_scan_request,
     "scan-result": _validate_scan_result,
     "evaluation-plan": _validate_evaluation_plan,

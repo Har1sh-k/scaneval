@@ -128,7 +128,7 @@ from .materialize import (
 )
 
 
-NETWORK_POLICIES = ("none", "model_provider_only", "unrestricted")
+NETWORK_POLICIES = ("none", "model_provider_only", "public_research", "unrestricted")
 _USAGE_KEYS = ("wall_seconds", "setup_seconds", "cost_usd", "input_tokens", "output_tokens")
 
 
@@ -1160,6 +1160,27 @@ def run_invocation(
         raise ExecutionError(f"unknown network policy {network_policy!r}")
     if trace_mode not in ("off", "metadata", "content"):
         raise ExecutionError(f"unknown trace mode {trace_mode!r}")
+    from . import conditions
+    condition = conditions.resolve_condition(prepared.condition, profile=prepared.profile, mode=prepared.mode)
+    if condition["name"] == "open_context":
+        from .isolation.oci import OciBackend
+        try:
+            from .open_context import validate_policy
+        except ImportError as exc:
+            raise ExecutionError("open_context is unavailable: its bounded-history extension is not installed") from exc
+        try:
+            validate_policy(condition["policy"])
+        except MaterializationError as exc:
+            raise ExecutionError(str(exc)) from exc
+        if (not isinstance(backend, OciBackend) or backend.settings.network_policy != "public_research"
+                or network_policy != "public_research" or getattr(adapter, "oci_compatible", False) is not True):
+            raise ExecutionError("open_context requires an OCI public_research backend and an OCI-compatible adapter")
+        if prepared.profile != "standard" or prepared.mode != "full":
+            raise ExecutionError("open_context requires a standard full input")
+        actual = backend.settings.retrieval or {}
+        if actual.get("policy") != condition["policy"]["retrieval"] or any(
+                actual.get(key) != condition["policy"][key] for key in ("capture", "retention")):
+            raise ExecutionError("open_context backend retrieval policy differs from the declared condition")
     unsupported = [lang for lang in prepared.languages if lang not in adapter.supported_languages]
     # Hashed before anything is created: the provenance is the caller's, it is fixed before the
     # scan, and a value it cannot be hashed from would otherwise surface while the execution
@@ -1188,13 +1209,6 @@ def run_invocation(
     mode_unsupported = prepared.mode not in adapter.scan_modes
     request = build_request(run_id, prepared, spec, timeout_seconds=timeout_seconds, trace_mode=trace_mode,
                             pr=request_pr)
-    from . import conditions
-    condition = conditions.resolve_condition(prepared.condition, profile=prepared.profile, mode=prepared.mode)
-    if condition["name"] == "open_context":
-        try:
-            from . import open_context
-        except ImportError as exc:
-            raise ExecutionError("open_context is unavailable: its bounded-history extension is not installed") from exc
     configuration = {"system_id": spec.system_id, "adapter": spec.adapter, "config": dict(spec.config),
                      "adapter_identity": {"name": adapter.name, "version": adapter.adapter_version},
                      "model_id": spec.model_id, "model_revision": spec.model_revision,

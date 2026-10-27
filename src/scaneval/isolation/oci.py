@@ -49,6 +49,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -63,6 +64,7 @@ from typing import Any, Callable, Iterator
 import uuid
 
 from ..adapters.base import CommandResult, routed_through
+from ..contracts import canonical_sha256
 from . import PINNED_IMAGE, ExecutionSettings, IsolationError, Limits
 
 
@@ -77,6 +79,7 @@ KILL_GRACE = 10.0
 ATTACHED_STATE_GRACE = 1.0
 ATTACHED_STATE_POLL = 0.05
 PROXY_PORT = 3128
+RETRIEVAL_PORT = 3129
 PROXY_READY_SECONDS = 30.0
 # The egress log is written by this package's own proxy, but its lines name destinations the
 # scanner chose, so it is read with a ceiling.
@@ -360,7 +363,7 @@ class OciBackend:
         self._runtime: dict = {}
         self._image: dict = {"reference": settings.image}
         self._proxy_image: dict | None = ({"reference": settings.proxy_image}
-                                          if settings.network_policy == "model_provider_only" else None)
+                                          if settings.network_policy in ("model_provider_only", "public_research") else None)
         self._mounts: list[_Mount] = []
         self._network_args = ["--network", "none"]
         self._network: dict = {"policy": settings.network_policy, "enforced": False, "mode": "not set up"}
@@ -371,13 +374,14 @@ class OciBackend:
         self._environment = {"set": [], "credentials": [], "dropped": set()}
         self._touched = False
         self._counter = 0
+        self._retrieval: dict | None = None
 
     # --- the interface run_invocation relies on --------------------------------------------
 
     @property
     def network_enforced(self) -> bool:
         """True only when a container ran and the policy was one this backend enforces."""
-        return self._ran() and self.settings.network_policy in ("none", "model_provider_only")
+        return self._ran() and self.settings.network_policy in ("none", "model_provider_only", "public_research")
 
     @contextmanager
     def activate(self) -> Iterator["OciBackend"]:
@@ -581,7 +585,7 @@ class OciBackend:
             if stranded:
                 note += f" {len(stranded)} container(s) could not be removed afterwards: {', '.join(stranded)}."
         network = dict(self._network)
-        network["enforced"] = ran and self.settings.network_policy in ("none", "model_provider_only")
+        network["enforced"] = ran and self.settings.network_policy in ("none", "model_provider_only", "public_research")
         if self._networks:
             network["networks"] = [dict(item) for item in self._networks]
         if self._proxy is not None:
@@ -594,7 +598,10 @@ class OciBackend:
             mounts.append({"target": "/tmp", "mode": "tmpfs", "role": "scratch"})
         return {"backend": "oci", "enforced": ran, "note": note, "runtime": dict(self._runtime),
                 "image": image, "settings": self._settings_record(), "mounts": mounts,
-                "network": network, "containers": [dict(item) for item in self._containers]}
+                "network": network, "containers": [dict(item) for item in self._containers],
+                **({"retrieval": self._retrieval or {"capture_status": "unavailable", "policy": self.settings.retrieval,
+                                                     "policy_sha256": canonical_sha256(self.settings.retrieval)}}
+                   if self.settings.network_policy == "public_research" else {})}
 
     def close(self) -> list[str]:
         """Remove everything this backend created; return what could not be removed. Never raises.
@@ -636,7 +643,7 @@ class OciBackend:
     def _preflight(self) -> None:
         self._runtime = self._engine()
         self._image = self._image_identity(self.settings.image, "image")
-        if self.settings.network_policy == "model_provider_only":
+        if self.settings.network_policy in ("model_provider_only", "public_research"):
             self._proxy_image = self._image_identity(self.settings.proxy_image, "proxy image")
         self._mounts = self._plan_mounts()
         self._check_mounts_visible()
@@ -868,10 +875,13 @@ class OciBackend:
         self._start_proxy(internal, egress)
         self._network_args = ["--network", internal]
         self._network = {
-            "policy": "model_provider_only", "mode": "internal network with egress proxy",
+            "policy": policy, "mode": "internal network with egress proxy",
             "note": ("The scanner's only network is an internal one with no gateway; the one reachable "
                      "address on it is the egress proxy, which forwards CONNECT only to the declared "
                      "destinations. DNS for the scanner resolves nothing outside that network.")}
+        if policy == "public_research":
+            self._network["note"] += (" Provider CONNECT and recorded retrieval reject every non-public DNS "
+                                      "answer and pin a validated address; HTTP retrieval revalidates redirects.")
 
     def _create_network(self, suffix: str, *, internal: bool) -> str:
         """Create one labelled network for this invocation and verify what the engine made."""
@@ -920,6 +930,24 @@ class OciBackend:
         log_dir = directory / "log"
         log_dir.mkdir()
         os.chmod(log_dir, 0o777)
+        retrieval_mounts = []
+        retrieval_args = []
+        if self.settings.network_policy == "public_research":
+            # Keep directory ownership with the controller. Proxy-owned 0755 directories
+            # prevent a native Linux host from unlinking their files during normal cleanup.
+            content_dir = log_dir / "content"
+            content_dir.mkdir()
+            os.chmod(content_dir, 0o777)  # Writable only through the proxy's private log mount.
+            module = directory / "public_retrieval.py"
+            shutil.copyfile(Path(__file__).with_name("public_retrieval.py"), module)
+            os.chmod(module, 0o644)
+            policy_file = directory / "retrieval-settings.json"
+            policy_file.write_text(json.dumps(self.settings.retrieval, sort_keys=True), encoding="utf-8")
+            os.chmod(policy_file, 0o644)
+            retrieval_mounts = ["--mount", _Mount(str(module), "ro", "retrieval implementation").argument(),
+                                "--mount", _Mount(str(policy_file), "ro", "retrieval policy").argument()]
+            retrieval_args = ["--public-only", "--retrieval-module", str(module),
+                              "--retrieval-settings", str(policy_file), "--retrieval-port", str(RETRIEVAL_PORT)]
         allow = [f"{host}:{port}" for host, port in self.settings.egress]
         name = f"scaneval-{self._session}-proxy"
         args = ["create", "--name", name, *self._label_args("proxy"), "--pull", "never",
@@ -927,9 +955,10 @@ class OciBackend:
                 "--sysctl", "net.ipv4.ip_forward=0", "--workdir", "/tmp", "--env", "HOME=/tmp",
                 "--mount", _Mount(str(script), "ro", "proxy").argument(),
                 "--mount", _Mount(str(log_dir), "rw", "proxy log").argument(),
+                *retrieval_mounts,
                 "--entrypoint", "python3", str(self.settings.proxy_image), "-I", str(script),
                 "--port", str(PROXY_PORT), "--log-dir", str(log_dir),
-                *[word for pair in allow for word in ("--allow", pair)]]
+                *[word for pair in allow for word in ("--allow", pair)], *retrieval_args]
         record = {"name": name, "role": "proxy", "command": "python3 egress_proxy.py", "created": False,
                   "started": False, "exit_code": None, "oom_killed": None, "timed_out": False,
                   "removed": False, "status": None, "error": None, "wall_seconds": None}
@@ -970,6 +999,9 @@ class OciBackend:
         url = f"http://{address}:{PROXY_PORT}"
         self._proxy_env = {"HTTPS_PROXY": url, "https_proxy": url, "HTTP_PROXY": url, "http_proxy": url,
                            "ALL_PROXY": url, "all_proxy": url, "NO_PROXY": "", "no_proxy": ""}
+        if self.settings.network_policy == "public_research":
+            self._proxy_env["SCANEVAL_RETRIEVAL_URL"] = f"http://{address}:{RETRIEVAL_PORT}"
+            self._proxy_env.update(NO_PROXY=address, no_proxy=address)
 
     # --- per command ----------------------------------------------------------------------
 
@@ -1019,6 +1051,15 @@ class OciBackend:
             if isinstance(value, str) and "\x00" not in value:
                 values[key] = value
         values.update(self._proxy_env)
+        if self.settings.network_policy == "public_research":
+            values.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_SYSTEM": "/dev/null",
+                           "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ATTR_NOSYSTEM": "1",
+                           "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "GIT_OPTIONAL_LOCKS": "0",
+                           "GIT_CONFIG_COUNT": "4", "GIT_CONFIG_KEY_0": "core.hooksPath",
+                           "GIT_CONFIG_VALUE_0": "/dev/null", "GIT_CONFIG_KEY_1": "core.attributesFile",
+                           "GIT_CONFIG_VALUE_1": "/dev/null", "GIT_CONFIG_KEY_2": "core.excludesFile",
+                           "GIT_CONFIG_VALUE_2": "/dev/null", "GIT_CONFIG_KEY_3": "safe.directory",
+                           "GIT_CONFIG_VALUE_3": str(self._workspace() / "source")})
         names: list[str] = []
         secret: dict[str, str] = {}
         recorded = []
@@ -1084,6 +1125,8 @@ class OciBackend:
                 record["error"] = _scrub_home(str(exc))
             record["removed"] = self._remove_container(name)
             self._proxy.update(self._proxy_log())
+            if self.settings.network_policy == "public_research" and self._retrieval is None:
+                self._retrieval = self._capture_retrieval()
         for network in reversed(self._networks):
             try:
                 self._docker.run(["network", "rm", network["name"]], timeout=CONTROL_TIMEOUT)
@@ -1091,6 +1134,91 @@ class OciBackend:
                 network["removed"] = check.returncode != 0
             except Exception:
                 network["removed"] = False
+
+    def _capture_retrieval(self) -> dict:
+        """Retain the proxy's independently written audit after all scanner containers stop.
+
+        The scanner never mounts this log directory. A scanner-created destination in raw output
+        is refused rather than followed or overwritten. Missing/truncated capture remains a gap.
+        """
+        summary = {"policy": self.settings.retrieval, "policy_sha256": canonical_sha256(self.settings.retrieval),
+                   "capture_status": "unavailable", "events_path": None, "events_sha256": None,
+                   "attempts_path": None, "attempts_sha256": None,
+                   "attempts": None, "completed_attempts": None, "incomplete_attempts": None,
+                   "denied": 0, "failed": 0, "preserved": 0, "hash_only": 0,
+                   "model_consumption": "unverifiable", "provider_retrieval": "unverifiable",
+                   "scanner_native_retrieval": "recorded_only_when_using_retrieval_api",
+                   "browser_retrieval": "recorded_only_when_using_retrieval_api",
+                   "source_boundary_assurance": "self_reported",
+                   "direct_process_egress": "endpoint_only_for_proxy_connect; other_attempts_unobserved",
+                   "replayable": False, "gaps": [
+                       "Provider-side retrieval is unverifiable without provider attestation.",
+                       "Opaque CONNECT records endpoints and byte counts, not queries, URLs, redirects, or model use.",
+                       "Blocked direct socket attempts are unobserved; no events does not establish no retrieval.",
+                       "Fetched content entering a model request is unknown without an independently observed binding.",
+                   ]}
+        try:
+            directory = self._proxy["log_dir"]
+            data = _read_bounded(directory / "retrieval.jsonl", PROXY_LOG_LIMIT)
+            started_data = _read_bounded(directory / "retrieval-started.jsonl", PROXY_LOG_LIMIT)
+            destination = self._workspace() / "raw" / "retrieval-provenance"
+            destination.mkdir()  # A preexisting file, link, or directory is a capture failure.
+            (destination / "events.jsonl").write_bytes(data)
+            (destination / "attempts.jsonl").write_bytes(started_data)
+            summary.update(events_path="raw/retrieval-provenance/events.jsonl",
+                           events_sha256="sha256:" + hashlib.sha256(data).hexdigest(),
+                           attempts_path="raw/retrieval-provenance/attempts.jsonl",
+                           attempts_sha256="sha256:" + hashlib.sha256(started_data).hexdigest())
+            events = [json.loads(line) for line in data.decode("utf-8").splitlines()]
+            started = [json.loads(line) for line in started_data.decode("utf-8").splitlines()]
+            if any(not isinstance(event, dict) or not isinstance(event.get("id"), str)
+                   or event.get("outcome") not in ("ok", "http_error", "denied", "failed") for event in events):
+                raise ValueError("retrieval log contains invalid events")
+            request_fields = {"url", "query", "operation", "source", "source_assurance", "started_at"}
+            if any(not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                   or request_fields - set(item) for item in started):
+                raise ValueError("retrieval attempt journal contains invalid entries")
+            start_ids = {item["id"] for item in started}
+            end_ids = {item["id"] for item in events}
+            summary.update(attempts=len(started), completed_attempts=len(events),
+                           incomplete_attempts=len(start_ids - end_ids))
+            if len(start_ids) != len(started) or len(end_ids) != len(events) or not end_ids <= start_ids:
+                raise ValueError("retrieval attempt and completion journals disagree")
+            by_id = {item["id"]: item for item in started}
+            if any(any(event.get(key) != by_id[event["id"]].get(key) for key in request_fields) for event in events):
+                raise ValueError("retrieval completed request differs from its durable start journal")
+            pending = start_ids - end_ids
+            for event in events:
+                rel = event.get("content_path")
+                if rel is None:
+                    continue
+                if not isinstance(rel, str) or not re.fullmatch(r"content/[0-9a-f]{64}\.bin", rel):
+                    raise ValueError("retrieval log names an invalid evidence path")
+                body = _read_bounded(directory / rel, 1024 * 1024)
+                digest = "sha256:" + hashlib.sha256(body).hexdigest()
+                if digest != event.get("content_sha256"):
+                    raise ValueError("retrieval evidence contradicts its content hash")
+                target = destination / rel
+                target.parent.mkdir(exist_ok=True)
+                if not target.exists():
+                    target.write_bytes(body)
+            summary.update(capture_status="partial" if pending else "recorded", attempts=len(started),
+                           completed_attempts=len(events), incomplete_attempts=len(pending),
+                           denied=sum(event["outcome"] == "denied" for event in events),
+                           failed=sum(event["outcome"] in ("failed", "http_error") for event in events),
+                           preserved=sum(event.get("capture_status") == "preserved" for event in events),
+                           hash_only=sum(event.get("capture_status") == "hash_only" for event in events),
+                           # This applies only to recorded retrieval content, never opaque provider activity.
+                           replayable=False,
+                           replay_note="Recorded content can be inspected offline; the live run itself is not deterministic replay.")
+            if pending:
+                summary["gaps"].append(f"{len(pending)} recorded retrieval attempt(s) have no terminal capture event.")
+                summary["unfinished_attempt_ids"] = sorted(pending)[:DESTINATIONS_RECORDED]
+            if self.settings.retrieval["retention"] == "hashes_only":
+                summary["gaps"].append("Downloaded content was not retained; hash-only events cannot reproduce content.")
+        except (OSError, ValueError, UnicodeError, IsolationError) as exc:
+            summary["gaps"].append(f"Retrieval capture failed: {type(exc).__name__}: {str(exc)[:300]}")
+        return summary
 
     def _proxy_log(self) -> dict:
         """Allow and deny counts from the proxy's own log, read with a ceiling."""

@@ -43,7 +43,7 @@ from ..adapters.base import AdapterError
 
 
 BACKENDS = ("local", "oci")
-NETWORK_POLICIES = ("none", "model_provider_only", "unrestricted")
+NETWORK_POLICIES = ("none", "model_provider_only", "public_research", "unrestricted")
 # The unprivileged user a scanner runs as unless the configuration names another: nobody:nogroup
 # on Debian and Alpine alike, owning nothing on the host or in the image.
 DEFAULT_USER = "65534:65534"
@@ -93,6 +93,7 @@ class ExecutionSettings:
     credentials: tuple[tuple[str, str], ...] = ()
     limits: Limits = field(default_factory=Limits)
     user: str = DEFAULT_USER
+    retrieval: dict | None = None
 
     @property
     def enforcing(self) -> bool:
@@ -115,11 +116,15 @@ def resolve_execution(execution: dict[str, Any] | None, network_policy: str) -> 
     if network_policy not in NETWORK_POLICIES:
         raise IsolationError(f"unknown network policy {network_policy!r}")
     if not execution:
+        if network_policy == "public_research":
+            raise IsolationError("public_research requires the oci execution backend and recorded retrieval")
         return ExecutionSettings("local", network_policy)
     backend = execution.get("backend")
     if backend not in BACKENDS:
         raise IsolationError(f"execution.backend must be one of {', '.join(BACKENDS)}, not {backend!r}")
     if backend == "local":
+        if network_policy == "public_research":
+            raise IsolationError("public_research requires the oci execution backend")
         extra = sorted(set(execution) - {"backend"})
         if extra:
             raise IsolationError(f"the local backend enforces nothing, so it takes no {', '.join(extra)}")
@@ -129,12 +134,12 @@ def resolve_execution(execution: dict[str, Any] | None, network_policy: str) -> 
         raise IsolationError(f"execution.image must be an image pinned by digest, not {image!r}")
     proxy_image = execution.get("proxy_image")
     raw_egress = execution.get("egress") or []
-    if network_policy == "model_provider_only":
+    if network_policy in ("model_provider_only", "public_research"):
         if not raw_egress:
-            raise IsolationError("model_provider_only needs the egress it allows declared in execution.egress")
+            raise IsolationError(f"{network_policy} needs the egress it allows declared in execution.egress")
         if not isinstance(proxy_image, str) or not PINNED_IMAGE.match(proxy_image):
             raise IsolationError(
-                f"model_provider_only needs execution.proxy_image pinned by digest, not {proxy_image!r}")
+                f"{network_policy} needs execution.proxy_image pinned by digest, not {proxy_image!r}")
     elif raw_egress or proxy_image:
         raise IsolationError("execution.egress and execution.proxy_image apply only to model_provider_only")
     egress: list[tuple[str, int]] = []
@@ -146,6 +151,8 @@ def resolve_execution(execution: dict[str, Any] | None, network_policy: str) -> 
         if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
             raise IsolationError(f"execution.egress[{index}].port must be an integer from 1 to 65535, "
                                  f"not {port!r}")
+        if network_policy == "public_research" and port != 443:
+            raise IsolationError("public_research provider endpoints permit HTTPS port 443 only")
         pair = (host.lower(), port)
         if pair not in egress:
             egress.append(pair)
@@ -155,6 +162,9 @@ def resolve_execution(execution: dict[str, Any] | None, network_policy: str) -> 
         if not isinstance(name, str) or not _ENV_NAME.match(name):
             raise IsolationError(f"execution.credentials[{index}].env must name an environment "
                                  f"variable, not {name!r}")
+        if network_policy == "public_research" and (name.startswith(("GIT_", "SCANEVAL_")) or name in
+                {"HOME", "PATH", "TMPDIR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}):
+            raise IsolationError("public_research credentials cannot override Git, retrieval, or network controls")
         if not isinstance(provider, str) or not provider.strip():
             raise IsolationError(f"execution.credentials[{index}].provider must be stated")
         if any(name == seen for seen, _ in credentials):
@@ -168,9 +178,21 @@ def resolve_execution(execution: dict[str, Any] | None, network_policy: str) -> 
     if int(match.group(1)) == 0:
         raise IsolationError("execution.user names uid 0; the oci backend runs a scanner as a "
                              "non-root user only")
+    retrieval = execution.get("retrieval")
+    if network_policy == "public_research":
+        from .public_retrieval import validate_settings
+        try:
+            retrieval = validate_settings(retrieval)
+        except ValueError as exc:
+            raise IsolationError(str(exc)) from exc
+        if any(host.strip("[]") in retrieval["denied_hosts"] for host, _port in egress):
+            raise IsolationError("public_research egress cannot allow denied evaluator infrastructure")
+    elif retrieval is not None:
+        raise IsolationError("execution.retrieval applies only to public_research")
     return ExecutionSettings("oci", network_policy, image=image,
-                             proxy_image=proxy_image if network_policy == "model_provider_only" else None,
-                             egress=tuple(egress), credentials=tuple(credentials), limits=limits, user=user)
+                             proxy_image=proxy_image if network_policy in ("model_provider_only", "public_research") else None,
+                             egress=tuple(egress), credentials=tuple(credentials), limits=limits, user=user,
+                             retrieval=retrieval)
 
 
 def _limits(values: dict[str, Any]) -> Limits:

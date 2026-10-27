@@ -361,6 +361,38 @@ defence in depth.
 
 ## How to read a bundle
 
+### Open-context public research
+
+The explicit `open_context` condition requires OCI with `public_research`; it cannot fall back
+to an unenforced local run. Its source mount includes only constructed ancestor Git history,
+with an all-object inventory excluding descendant and unreachable objects. The source and Git
+metadata are read-only, host/system Git configuration is disabled, and no remote, hook, or
+alternate object store is inherited. The source still uses the normal regular-file export;
+unfollowed symlink/gitlink omissions and the original objects visible through history are stated
+in its attestation. Ancestry exposing excluded evaluator/harness state is refused.
+
+The scanner has an isolated network without a gateway and reaches only its own proxy. Provider
+CONNECT traffic is limited to declared port-443 endpoint pairs. The separate recorded retrieval
+API fetches only declared HTTPS origins, checks every redirect, and sends no caller headers,
+cookies, or authorization. Both paths reject any private/local/reserved DNS answer, including a
+mixed public/private answer, and connect directly to a checked address. Operator-declared public
+evaluator infrastructure must also be listed in the retrieval policy's `denied_hosts`.
+
+The proxy's retrieval events and retained response bodies are written outside scanner mounts
+and copied into the invocation only after scanner containers stop. Missing/truncated capture is
+a visible gap. Provider/native/browser activity inside encrypted tunnels remains unverifiable;
+CONNECT logs contain endpoints and byte counts, while direct socket attempts blocked by the
+network remain unobserved. Fetching bytes does not establish that they entered a model request.
+Hash-only retention cannot reconstruct content, and live retrieval does not promise deterministic
+replay. See [the open-context guide](OPEN_CONTEXT.md) for the policy and artifact fields.
+
+Repository instructions and retrieved content are untrusted data. Enabling research starts no
+target application and grants no evaluator tool, destination, label, or scoring authority. The
+declared provider/retrieval services, engine, and digest-pinned images remain trusted; an allowed
+provider endpoint can receive anything the scanner can read. Secrets use named injection only.
+
+### Saved invocation evidence
+
 - Check that both `result.json` and `execution.json` are there before reading either. A bundle
   holding one without the other is a killed or failed write, not a result: the exception named at
   the top of this document. A bundle `scaneval import sarif` wrote is not a run: nothing executed,

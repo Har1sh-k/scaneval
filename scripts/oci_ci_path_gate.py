@@ -29,6 +29,10 @@ RELEVANT_PREFIXES = (
     "src/scaneval/schemas/",
     "tests/fixtures/",
     "tests/test_v2_isolation",
+    "tests/test_v2_open_context",
+    "tests/test_v2_public_retrieval",
+    "tests/test_v2_experiment",
+    "tests/test_v2_identity",
 )
 
 RELEVANT_FILES = frozenset({
@@ -47,6 +51,16 @@ RELEVANT_FILES = frozenset({
     "src/scaneval/execution.py",
     "src/scaneval/kinds.py",
     "src/scaneval/materialize.py",
+    "src/scaneval/open_context.py",
+    "src/scaneval/open_context_evidence.py",
+    "src/scaneval/identity_policy.py",
+    "src/scaneval/blinding.py",
+    "src/scaneval/conditions.py",
+    "src/scaneval/experiment.py",
+    "src/scaneval/experiment_execution.py",
+    "src/scaneval/experiment_report.py",
+    "examples/experiment_matrix_fixture.py",
+    "examples/open_context_fixture.py",
     "src/scaneval/runner.py",
     "src/scaneval/schedule.py",
     "src/scaneval/adapters/__init__.py",

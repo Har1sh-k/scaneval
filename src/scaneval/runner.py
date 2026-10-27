@@ -69,7 +69,7 @@ import tempfile
 import time
 from typing import Any, Callable
 
-from . import blinding, cases, execution, isolation, materialize, report, review, schedule, scoring
+from . import blinding, cases, execution, isolation, materialize, open_context, report, review, schedule, scoring
 from .adapters import get_adapter
 from .adapters.base import Adapter, AdapterError, SystemSpec
 from .contracts import (
@@ -302,6 +302,14 @@ def _input_specs(config: dict, only: set[str] | None, base: Path,
         mode = entry.get("mode", "full")
         profile = entry.get("profile", "standard")
         label = f"inputs[{index}] ({input_id})"
+        condition = entry.get("condition")
+        if condition is not None and condition["name"] == "open_context":
+            if mode != "full" or profile != "standard":
+                raise ContractError(f"{label}: open_context requires a standard full input")
+            try:
+                open_context.validate_policy(condition["policy"])
+            except materialize.MaterializationError as exc:
+                raise ContractError(f"{label}: {exc}") from exc
         change_set = None
         snapshot_id = entry.get("snapshot_id")
         if mode == "pr":
@@ -542,6 +550,17 @@ def _prepare_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: Path
     trial = out_dir / "inputs" / spec.input_id
     record = materialize.export_snapshot(cached, trial, profile=spec.profile, blinding_map=spec.blinding_map,
                                          snapshot_id=spec.snapshot_id, clock=clock, pack=pack)
+    condition = spec.entry.get("condition")
+    history_dir = None
+    history_evidence = None
+    if condition is not None and condition["name"] == "open_context":
+        history_dir = trial / "history.git"
+        history_evidence = open_context.export_history(
+            cached, history_dir, source_dir=trial / "source", expected_tree_hash=record["trial"]["tree_hash"])
+        record["history"] = history_evidence
+        record["limits"][0] = (
+            "Original ancestor history is intentionally exposed under ancestor_history_v1; "
+            "known-vulnerability retrieval can contribute to detection.")
     provenance_path = materialize.write_provenance(trial, record)
     row["provenance_path"] = _relative(provenance_path, out_dir)
     tree_hash = record["trial"]["tree_hash"]
@@ -564,7 +583,7 @@ def _prepare_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: Path
     prepared = execution.PreparedInput(
         spec.input_id, trial / "source", tree_hash, languages, record, spec.profile, spec.mode,
         input_hash=tree_hash, source_tree_hash=source_tree_hash, blinding=identity, identity_manifest=identity_manifest,
-        condition=spec.entry.get("condition"),
+        condition=condition, history_dir=history_dir, history_evidence=history_evidence,
         identity_context=spec.identity_context,
     )
     row.update({"tree_hash": tree_hash, "input_hash": prepared.binding_hash,
@@ -585,6 +604,25 @@ def _verified_identity_manifest(trial: Path, record: dict, document: dict, pack:
         source=trial / record["trial"]["root"],
         source_snapshot={"snapshot_id": snapshot_id, **{key: record["source"][key] for key in ("url", "commit", "git_tree")}})
     return manifest
+
+
+def _check_open_context(inputs: list[_InputSpec], systems: list[dict], default_policy: str) -> None:
+    """A declared open condition is runnable only under the controlled, external backend."""
+    chosen = [spec for spec in inputs if (spec.entry.get("condition") or {}).get("name") == "open_context"]
+    if not chosen:
+        return
+    for entry in systems:
+        policy = entry.get("network_policy", default_policy)
+        try:
+            settings = isolation.resolve_execution(entry.get("execution"), policy)
+        except isolation.IsolationError as exc:
+            raise ContractError(f"open_context system {entry['system_id']}: {exc}") from exc
+        if settings.backend != "oci" or policy != "public_research":
+            raise ContractError(f"open_context system {entry['system_id']} requires oci with public_research")
+        for spec in chosen:
+            condition = spec.entry["condition"]["policy"]
+            if any(settings.retrieval[name] != condition[name] for name in ("capture", "retention")):
+                raise ContractError("open_context condition capture/retention differs from execution.retrieval")
 
 
 def _prepare_pr_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: Path,
@@ -1009,6 +1047,7 @@ def run_from_config(
     systems = _selected(config["systems"], "system_id", only_systems, "systems")
     _check_invocation_ids(inputs, systems, repetitions)
     _check_input_snapshots(pack, inputs)
+    _check_open_context(inputs, systems, config["network_policy"])
     _check_blinding(config, pack, inputs, systems, workspace_root=workspace_root, cache_root=cache_root,
                     config_dir=base)
     _check_cache_root(cache_root, out_dir)

@@ -89,6 +89,7 @@ refused, or an output that cannot be written.
 """
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -971,6 +972,47 @@ def _condition(args: argparse.Namespace) -> int:
     return 0
 
 
+def _matrix(args: argparse.Namespace) -> int:
+    from . import experiment
+    if args.matrix_command == "freeze":
+        created_at = args.created_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+        frozen = experiment.freeze_file(args.declaration, args.output, created_at=created_at)
+        print(f"Frozen matrix: {args.output} ({len(frozen['assignments'])} assignments)")
+        return 0
+    if args.matrix_command == "run":
+        def progress(message: str) -> None:
+            print(f"scaneval: {message}", file=sys.stderr, flush=True)
+        result = experiment.execute(args.matrix, args.output, workspace_root=args.workspace_root,
+                                    progress=None if args.quiet else progress)
+        for cell in result["cells"]:
+            print(f"{cell['condition']}: {cell['status']} ({len(cell['recorded_bindings'])}/{cell['assignments']} bound)")
+        print(f"Matrix execution: {args.output / 'matrix-execution.json'}")
+        return 0 if result["status"] == "completed" else 1
+    report = experiment.report(args.directory, output=args.output)
+    if args.output is None:
+        sys.stdout.write(_json(report))
+    else:
+        print(f"Matrix report: {args.output} (evidence scope: {report['evidence_scope']})")
+    return 0
+
+
+def _add_matrix_commands(sub) -> None:
+    matrix = sub.add_parser("matrix", help="freeze, execute, and report a paired three-condition experiment")
+    commands = matrix.add_subparsers(dest="matrix_command", required=True)
+    freezing = commands.add_parser("freeze", help="freeze the exact population, systems, maps, policies, and assignments")
+    freezing.add_argument("declaration", type=Path)
+    freezing.add_argument("--output", required=True, type=Path, help="new frozen experiment-matrix JSON")
+    freezing.add_argument("--created-at", help="ISO timestamp; default current UTC time")
+    running = commands.add_parser("run", help="execute every assignment of a frozen matrix under external isolation")
+    running.add_argument("matrix", type=Path)
+    running.add_argument("--output", required=True, type=Path, help="new evaluator directory")
+    running.add_argument("--workspace-root", type=Path, help="existing scanner workspace visible to the OCI daemon")
+    running.add_argument("--quiet", action="store_true")
+    reporting = commands.add_parser("report", help="report saved cells and paired effects without running scanners")
+    reporting.add_argument("directory", type=Path, help="saved matrix execution directory")
+    reporting.add_argument("--output", type=Path, help="new JSON report; default stdout")
+
+
 def _compare(args: argparse.Namespace) -> int:
     """Compare two systems over run directories into one new report; refused unless their work matches.
 
@@ -1583,6 +1625,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_import_commands(sub)
     _add_aggregate_commands(sub)
     _add_gate_commands(sub)
+    _add_matrix_commands(sub)
     return parser
 
 
@@ -1604,6 +1647,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Valid {args.kind}: {args.path}")
         elif args.command == "condition":
             return _condition(args)
+        elif args.command == "matrix":
+            return _matrix(args)
         elif args.command == "investigate":
             return _investigate(args)
         elif args.command == "precision":
