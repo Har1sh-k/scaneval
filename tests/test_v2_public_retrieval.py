@@ -10,6 +10,8 @@ import pytest
 
 from scaneval.isolation import IsolationError, resolve_execution
 from scaneval.isolation import public_retrieval as retrieval
+from scaneval.isolation.oci import OciBackend
+from scaneval.open_context_evidence import classify_condition
 
 
 POLICY = {"policy": "recorded_public_v1", "allowed_origins": ["https://research.example"],
@@ -284,6 +286,169 @@ def test_attempt_journal_is_flushed_before_dns_or_transport(tmp_path, monkeypatc
     monkeypatch.setattr(socket, "getaddrinfo", resolve)
     event = recorder.retrieve({"url": "https://research.example/"})
     assert seen == [event["id"]]
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("https://research.example/a?next=//x@y", None),
+    ("https://research.example/p/https://u@host/x", None),
+    ("https://research.example/a#//x@y", None),
+    ("/login?next=//a@b", None),
+    ("login?next=https://a@b", None),
+    ("https://research.example", None),
+    ("https://user:pw@research.example/x?next=//a@b", "https://[redacted]@research.example/x?next=//a@b"),
+    ("https://user:a@b@research.example/", "https://[redacted]@research.example/"),
+    ("https://user:pw@research.example#f@x", "https://[redacted]@research.example#f@x"),
+    ("https://user:pw@research.example", "https://[redacted]@research.example"),
+    ("https://user\\pw@research.example/", "https://[redacted]@research.example/"),
+    ("//user:pw@research.example/next?u=//a@b", "//[redacted]@research.example/next?u=//a@b"),
+    (" https://user:pw@research.example/", " https://[redacted]@research.example/"),
+    ("\x01\t//user:pw@research.example/", "\x01\t//[redacted]@research.example/"),
+    ("ht tps://user:pw@research.example/", "ht tps://[redacted]@research.example/"),
+    ("https://user:p\nw@research.example/", "https://[redacted]@research.example/"),
+])
+def test_only_outer_authority_userinfo_is_redacted(value, expected):
+    assert retrieval.recorded_url(value) == (value if expected is None else expected)
+    assert retrieval.recorded_url(None) is None
+
+
+class WireFile(io.RawIOBase):
+    """Unbuffered socket-file double that releases its socket reference exactly once."""
+    def __init__(self, wire):
+        self.wire = wire
+        wire.io_refs += 1
+    def readable(self): return True
+    def readinto(self, buffer):
+        if not self.wire.script:
+            return 0
+        data = self.wire.script.pop(0)
+        size = min(len(buffer), len(data))
+        buffer[:size] = data[:size]
+        if data[size:]:
+            self.wire.script.insert(0, data[size:])
+        return size
+    def close(self):
+        if not self.closed:
+            self.wire.io_refs -= 1
+        super().close()
+
+
+class Wire:
+    """The connected TLS socket double: scripted response bytes behind the real HTTP parser."""
+    def __init__(self, script):
+        self.script, self.sent, self.timeouts = list(script), b"", []
+        self.io_refs = self.closed = 0
+    def settimeout(self, value): self.timeouts.append(value)
+    def sendall(self, data): self.sent += data
+    def makefile(self, mode, buffering=None):
+        assert mode == "rb"
+        raw = WireFile(self)
+        return raw if buffering == 0 else io.BufferedReader(raw)
+    def close(self): self.closed += 1
+
+
+def real_transport(monkeypatch, *scripts):
+    """Run the actual PublicHTTPS, address validation, and HTTPResponse over scripted TLS sockets."""
+    wires = []
+    pending = [Wire(script if isinstance(script, list) else [script]) for script in scripts]
+    class TCP:
+        def settimeout(self, _value): pass
+        def connect(self, _address): pass
+        def close(self): pass
+    original = retrieval.ssl.create_default_context
+    def context():
+        verified = original()
+        def wrap_socket(_sock, server_hostname):
+            assert server_hostname and verified.verify_mode == retrieval.ssl.CERT_REQUIRED
+            wires.append(pending.pop(0))
+            return wires[-1]
+        verified.wrap_socket = wrap_socket
+        return verified
+    monkeypatch.setattr(retrieval.ssl, "create_default_context", context)
+    monkeypatch.setattr(socket, "socket", lambda *_args: TCP())
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, *_args, **_kwargs:
+                        addresses("127.0.0.1" if host == "private.example" else "8.8.8.8"))
+    return wires
+
+
+def http_bytes(status, body=b"", **headers):
+    lines = [f"HTTP/1.1 {status} Fixture"] + [f"{key.replace('_', '-')}: {value}" for key, value in headers.items()]
+    return ("\r\n".join(lines + [f"Content-Length: {len(body)}", "", ""])).encode() + body
+
+
+OPEN_POLICY = {"history": "ancestor_history_v1", "retrieval": "recorded_public_v1", "web_mode": "live",
+               "capture": "content", "retention": "bundle"}
+
+
+def capture_and_classify(tmp_path, logs):
+    """Collect the proxy journals with the real OCI capture and recompute the condition from them."""
+    settings = resolve_execution({"backend": "oci", "image": IMAGE, "proxy_image": IMAGE,
+                                  "egress": [{"host": "api.example", "port": 443}], "retrieval": POLICY},
+                                 "public_research")
+    backend = OciBackend(settings, run_id="fixture", invocation_id="retrieval", scratch_root=tmp_path)
+    workspace = backend.workspace_root / "scaneval-trial-retrieval"
+    (workspace / "source").mkdir(parents=True)
+    (workspace / "raw").mkdir()
+    backend._proxy = {"log_dir": logs}
+    try:
+        summary = backend._capture_retrieval()
+        assert summary["events_path"] and summary["attempts_path"], summary["gaps"]
+        execution = {"provenance": {"mode": "full", "profile": "standard", "tree_hash": "sha256:" + "a" * 64},
+                     "network_policy": {"declared": "public_research", "enforced": False},
+                     "isolation": {"backend": "oci", "enforced": False, "containers": [], "retrieval": summary}}
+        condition = classify_condition(workspace, execution, OPEN_POLICY, {})
+        saved = b"".join((workspace / summary[key]).read_bytes() for key in ("events_path", "attempts_path"))
+    finally:
+        backend._proxy = None
+        assert backend.close() == []
+    return summary, condition, saved
+
+
+def test_nested_urls_and_relative_redirects_keep_recorded_hops_classifiable(tmp_path, monkeypatch):
+    wires = real_transport(monkeypatch, http_bytes(200, b"query"), http_bytes(200, b"path"),
+                           http_bytes(302, Location="/login?next=//a@b"), http_bytes(200, b"login"),
+                           http_bytes(301, Location="//research.example/final?u=https://c@d"),
+                           http_bytes(200, b"final"))
+    logs = tmp_path / "proxy-log"
+    logs.mkdir()
+    recorder = retrieval.Recorder(str(logs), POLICY)
+    urls = ["https://research.example/a?next=//x@y", "https://research.example/p/https://u@host/x",
+            "https://research.example/start", "https://research.example/hop"]
+    results = [recorder.retrieve({"url": url}) for url in urls]
+    assert [result["outcome"] for result in results] == ["ok"] * 4
+    assert [result["url"] for result in results] == urls
+    assert results[2]["redirect_chain"][0]["location"] == "/login?next=//a@b"
+    assert results[2]["redirect_chain"][1]["url"] == "https://research.example/login?next=//a@b"
+    assert results[3]["redirect_chain"][1]["url"] == "https://research.example/final?u=https://c@d"
+    assert b"GET /p/https://u@host/x HTTP/1.1" in wires[1].sent
+    summary, condition, _saved = capture_and_classify(tmp_path, logs)
+    assert summary["capture_status"] == "recorded" and summary["preserved"] == 4
+    assert condition["retrieval"] == "recorded", condition["reasons"]
+    assert not any(reason["code"] == "retrieval_artifact_mismatch" for reason in condition["reasons"])
+
+
+def test_outer_credentials_stay_redacted_and_denied_through_capture_and_classification(tmp_path, monkeypatch):
+    real_transport(monkeypatch, http_bytes(302, Location="//user:outer-secret@research.example/next"),
+                   http_bytes(302, Location="https://user:outer-secret@research.example/next?u=//a@b"))
+    logs = tmp_path / "proxy-log"
+    logs.mkdir()
+    recorder = retrieval.Recorder(str(logs), POLICY)
+    attempts = ["https://user:outer-secret@research.example/", " https://user:outer-secret@research.example/",
+                "\x01https://user:outer-secret@research.example/", "ht tps://user:outer-secret@research.example/",
+                "//user:outer-secret@research.example/", "https://user:outer\nsecret@research.example/"]
+    results = [recorder.retrieve({"url": url}) for url in attempts]
+    redirects = [recorder.retrieve({"url": "https://research.example/" + name}) for name in ("relative", "absolute")]
+    assert all(result["outcome"] == "denied" for result in results + redirects)
+    assert all("[redacted]@research.example/" in result["url"] for result in results)
+    assert redirects[0]["redirect_chain"][0]["location"] == "//[redacted]@research.example/next"
+    assert redirects[1]["redirect_chain"][0]["location"] == "https://[redacted]@research.example/next?u=//a@b"
+    returned = json.dumps(results + redirects)
+    summary, condition, saved = capture_and_classify(tmp_path, logs)
+    for evidence in (returned, (logs / retrieval.EVENTS).read_text(), (logs / retrieval.STARTED).read_text(),
+                     saved.decode()):
+        assert "outer-secret" not in evidence and "outer\\nsecret" not in evidence
+    assert summary["capture_status"] == "recorded" and summary["denied"] == len(attempts) + 2
+    assert condition["retrieval"] == "recorded", condition["reasons"]
+    assert not any(reason["code"] == "retrieval_artifact_mismatch" for reason in condition["reasons"])
 
 
 def test_trickling_body_cannot_reset_the_retrieval_budget(tmp_path, monkeypatch):

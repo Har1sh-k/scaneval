@@ -14,7 +14,6 @@ import http.server
 import ipaddress
 import json
 import os
-import re
 import socket
 import ssl
 import threading
@@ -44,14 +43,35 @@ class RetrievalDenied(ValueError):
 
 
 def recorded_url(value):
-    """Keep the attempted destination while excluding explicit URL userinfo from evidence.
+    """Keep the attempted destination while excluding outer URL userinfo from evidence.
 
-    This also handles malformed credentialed URLs before parse_url rejects them. A query is
-    untrusted research data, not a secret-injection channel; callers must not put secrets in it.
+    Only the outer authority is redacted: it follows an initial ``//`` or the first ``://``
+    whose preceding text has no ``/``, ``?``, or ``#``, and ends at the next of those characters.
+    Leading whitespace/control characters are skipped while locating it but kept in the result,
+    and the scheme need not be valid, so malformed credentialed URLs stay hidden before
+    parse_url rejects them. Path and query text, including nested URLs, is preserved exactly. A
+    query is untrusted research data, not a secret-injection channel; callers must not put
+    secrets in it.
     """
     if not isinstance(value, str):
         return None
-    return re.sub(r"(//)[^/?#]*@", r"\1[redacted]@", value, count=1)
+    start = 0
+    while start < len(value) and (ord(value[start]) < 33 or ord(value[start]) == 127):
+        start += 1
+    if value.startswith("//", start):
+        authority = start + 2
+    else:
+        marker = value.find("://", start)
+        if marker < 0 or any(character in value[start:marker] for character in "/?#"):
+            return value
+        authority = marker + 3
+    end = authority
+    while end < len(value) and value[end] not in "/?#":
+        end += 1
+    userinfo = value.rfind("@", authority, end)
+    if userinfo < 0:
+        return value
+    return value[:authority] + "[redacted]@" + value[userinfo + 1:]
 
 
 def parse_url(value):

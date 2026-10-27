@@ -154,9 +154,11 @@ cannot be reconstructed from their hashes. Use retention consistent with the sou
 
 `attempts.jsonl` is flushed before DNS or transport starts. Each completion binds to its same-id
 start's effective URL, query, operation, caller-declared source, and start time. Search URLs are
-derived from the declared endpoint and query before either record is written; URL userinfo is
-redacted and refused. A start without a completion remains partial capture, including a request
-interrupted when the scanner or proxy stops. Caller-provided source labels carry
+derived from the declared endpoint and query before either record is written. Userinfo in the
+outer URL authority, including malformed and scheme-relative forms and redirect locations, is
+redacted in both journals and in the response, and the request is refused. Path and query text,
+including nested URLs, is recorded unchanged. A start without a completion remains partial
+capture, including a request interrupted when the scanner or proxy stops. Caller-provided source labels carry
 `source_assurance: "self_reported"`. Content is published atomically; retention failures return
 no response bytes and remain explicit capture gaps.
 
