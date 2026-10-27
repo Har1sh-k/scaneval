@@ -42,6 +42,7 @@ The scorer reports known-target detection, recall within review budgets, and fal
 | `scaneval corpus add-change-set\|pr-scope\|canonical` | Declare a base/head change set, state which targets and controls are scored in its PR review, and group records by canonical root cause. |
 | `scaneval plan --pack --snapshot-id --tree-hash --output` | Build an evaluation plan for one materialized input, or with `--mode pr --change-set-id` and the hashes that identify it, the PR plan of a change set. |
 | `scaneval run <config> --output <new dir>` | Run a frozen configuration and save its artifacts. |
+| `scaneval matrix freeze\|run\|report` | Freeze and execute the three evaluation conditions, retaining missingness and paired effects ([guide and diagnostic fixture](docs/EXPERIMENT_MATRIX.md)). |
 | `scaneval blinding check\|review` | Dry-run a metadata blinding map against its snapshots, and record a named review of it. |
 | `scaneval import sarif <log> --pack --snapshot-id --tree-hash --system-id --output` | Import one run of a saved SARIF 2.1.0 log into a new bundle for review, offline. |
 | `scaneval review init\|record\|approve\|status` | Prepare and record the review of an invocation bundle. |
