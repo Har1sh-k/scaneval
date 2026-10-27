@@ -310,10 +310,35 @@ def test_attempt_journal_is_flushed_before_dns_or_transport(tmp_path, monkeypatc
     ("\x01\t//user:pw@research.example/", "\x01\t//[redacted]@research.example/"),
     ("ht tps://user:pw@research.example/", "ht tps://[redacted]@research.example/"),
     ("https://user:p\nw@research.example/", "https://[redacted]@research.example/"),
+    ("https:\t//user:pw@research.example/", "https:\t//[redacted]@research.example/"),
+    ("https:/\x7f/user:pw@research.example/", "https:/\x7f/[redacted]@research.example/"),
+    ("ht\x01tps://user:pw@research.example/", "ht\x01tps://[redacted]@research.example/"),
+    ("https\x0b://user:pw@research.example/", "https\x0b://[redacted]@research.example/"),
+    ("https:// user:pw@research.example/", "https://[redacted]@research.example/"),
+    ("https://user:pw@\x00research.example/", "https://[redacted]@\x00research.example/"),
+    ("/\t/user:pw@research.example/", "/\t/[redacted]@research.example/"),
+    ("1https:\t//user:pw@research.example/", "1https:\t//[redacted]@research.example/"),
+    ("https://@research.example/", "https://[redacted]@research.example/"),
+    ("https://[redacted]@research.example/", "https://[redacted]@research.example/"),
+    ("https:\t/\t/research.example/a?next=https://x@y", None),
+    ("/a\t/b?next=//x@y", None),
 ])
 def test_only_outer_authority_userinfo_is_redacted(value, expected):
     assert retrieval.recorded_url(value) == (value if expected is None else expected)
     assert retrieval.recorded_url(None) is None
+
+
+@pytest.mark.parametrize("value,span", [
+    ("https://@research.example/", (8, 9)),
+    ("https://[redacted]@research.example/", (8, 19)),
+    ("https:\t//user:pw@research.example/", (9, 17)),
+    ("\x01//u@research.example/", (3, 5)),
+    ("https://research.example/a?next=//x@y", None),
+    ("/login?next=//a@b", None),
+    (None, None),
+])
+def test_outer_userinfo_presence_is_an_original_span_even_when_empty_or_placeholder(value, span):
+    assert retrieval._outer_userinfo(value) == span
 
 
 class WireFile(io.RawIOBase):
@@ -487,6 +512,34 @@ def test_outer_credentials_stay_redacted_and_denied_through_capture_and_classifi
     assert summary["capture_status"] == "recorded" and summary["denied"] == len(attempts) + 2
     assert condition["retrieval"] == "recorded", condition["reasons"]
     assert not any(reason["code"] == "retrieval_artifact_mismatch" for reason in condition["reasons"])
+
+
+@pytest.mark.parametrize("control", ["\t", " ", "\x00", "\x01", "\x0b", "\x1f", "\x7f"])
+def test_controls_anywhere_in_the_outer_prefix_cannot_expose_credentials(tmp_path, monkeypatch, control):
+    secret = "synthetic-secret"
+    prefixes = [control + "https://", "ht" + control + "tps://", "https" + control + "://",
+                "https:" + control + "//", "https:/" + control + "/", "https://" + control,
+                "1https:" + control + "//", control + "//", "/" + control + "/"]
+    attempts = [prefix + "user:" + secret + "@research.example/" for prefix in prefixes]
+    logs = tmp_path / "proxy-log"
+    logs.mkdir()
+    recorder = retrieval.Recorder(str(logs), POLICY)
+    observed = recording(monkeypatch, recorder)
+    results = [recorder.retrieve({"url": url}) for url in attempts]
+    assert [result["outcome"] for result in results] == ["denied"] * len(attempts)
+    assert all(result["redirect_chain"] == [] for result in results)
+    for prefix, result in zip(prefixes, results):
+        # Only the userinfo is replaced: the malformed prefix and the rest stay as attempted.
+        assert result["url"] == prefix[:prefix.rindex("/") + 1] + "[redacted]@research.example/"
+    starts = [json.loads(line) for line in (logs / retrieval.STARTED).read_text().splitlines()]
+    assert [start["url"] for start in starts] == [result["url"] for result in results]
+    assert [event["url"] for event in observed] == [result["url"] for result in results]
+    summary, condition, saved = capture_and_classify(tmp_path, logs)
+    for evidence in (json.dumps(results), (logs / retrieval.EVENTS).read_text(),
+                     (logs / retrieval.STARTED).read_text(), saved.decode()):
+        assert secret not in evidence
+    assert summary["capture_status"] == "recorded" and summary["denied"] == len(attempts)
+    assert condition["retrieval"] == "recorded", condition["reasons"]
 
 
 def test_trickling_body_cannot_reset_the_retrieval_budget(tmp_path, monkeypatch):

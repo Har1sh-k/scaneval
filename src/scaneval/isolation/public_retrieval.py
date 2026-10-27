@@ -43,36 +43,50 @@ class RetrievalDenied(ValueError):
         self.resolved_addresses = resolved_addresses
 
 
-def recorded_url(value):
-    """Keep the attempted destination while excluding outer URL userinfo from evidence.
+def _outer_userinfo(value):
+    """Return the original (start, end) span of outer authority userinfo and its ``@``, or None.
 
-    Only the outer authority is redacted: it follows an initial ``//`` or the first ``://``
-    whose preceding text has no ``/``, ``?``, or ``#``, and ends at the next of those characters.
-    Leading whitespace/control characters are skipped while locating it but kept in the result,
-    and the scheme need not be valid, so malformed credentialed URLs stay hidden before
-    parse_url rejects them. Path and query text, including nested URLs, is preserved exactly. A
-    query is untrusted research data, not a secret-injection channel; callers must not put
-    secrets in it.
+    The authority is located in a view without ASCII whitespace/control characters (code points
+    0-32 and 127) that keeps each character's original offset; the view is never a URL. It follows
+    an initial ``//`` or the first ``://`` whose preceding text has no ``/``, ``?``, or ``#``, and
+    ends at the next of those characters. The scheme need not be valid, so malformed prefixes and
+    controls inside or after a scheme still locate credentials that parse_url would reject.
     """
     if not isinstance(value, str):
         return None
-    start = 0
-    while start < len(value) and (ord(value[start]) < 33 or ord(value[start]) == 127):
-        start += 1
-    if value.startswith("//", start):
-        authority = start + 2
+    offsets = [index for index, character in enumerate(value) if ord(character) > 32 and ord(character) != 127]
+    locator = "".join(value[index] for index in offsets)
+    if locator.startswith("//"):
+        authority = 2
     else:
-        marker = value.find("://", start)
-        if marker < 0 or any(character in value[start:marker] for character in "/?#"):
-            return value
+        marker = locator.find("://")
+        if marker < 0 or any(character in locator[:marker] for character in "/?#"):
+            return None
         authority = marker + 3
     end = authority
-    while end < len(value) and value[end] not in "/?#":
+    while end < len(locator) and locator[end] not in "/?#":
         end += 1
-    userinfo = value.rfind("@", authority, end)
+    userinfo = locator.rfind("@", authority, end)
     if userinfo < 0:
+        return None
+    return offsets[authority - 1] + 1, offsets[userinfo] + 1
+
+
+def recorded_url(value):
+    """Keep the attempted destination while excluding outer URL userinfo from evidence.
+
+    Only the span located by _outer_userinfo is replaced; every other original character,
+    including a malformed prefix and its controls, is kept, so malformed credentialed URLs stay
+    hidden before parse_url rejects them. Path and query text, including nested URLs, is preserved
+    exactly. A query is untrusted research data, not a secret-injection channel; callers must not
+    put secrets in it.
+    """
+    if not isinstance(value, str):
+        return None
+    span = _outer_userinfo(value)
+    if span is None:
         return value
-    return value[:authority] + "[redacted]@" + value[userinfo + 1:]
+    return value[:span[0]] + "[redacted]@" + value[span[1]:]
 
 
 def parse_url(value):
