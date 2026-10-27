@@ -1235,11 +1235,13 @@ def _validate_condition_record(document: dict[str, Any]) -> None:
         if document["network"] != "enforced":
             raise ContractError("an unenforced network declaration cannot be attested")
         if document["condition"] == "closed_book_standard":
-            if (document["identity_profile"] != "standard"
+            # An omitted mode stays compatible with older records; an explicit pr scan is never eligible.
+            if (document["identity_profile"] != "standard" or document.get("mode") == "pr"
                     or document["history"] not in ("original_absent", "neutral_synthetic")
                     or document["retrieval"] not in ("disabled", "observed_none")
                     or document["provider_retrieval"] not in ("disabled", "not_applicable")):
-                raise ContractError("closed_book_standard attestation requires standard identity and verified history/retrieval restrictions")
+                raise ContractError("closed_book_standard attestation requires a full-scan-eligible input, standard "
+                                    "identity and verified history/retrieval restrictions")
         if document["condition"] == "identity_reduced":
             identity = document["details"].get("identity_reduction") or {}
             if (document["identity_profile"] != "identity_reduced" or document.get("mode") != "full"

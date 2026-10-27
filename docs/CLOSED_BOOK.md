@@ -100,7 +100,9 @@ scaneval validate condition-record bundle-a/condition.json
 ```
 
 The command returns every observation's status and reasons plus separate condition/status
-coverage counts. Aggregation includes condition coverage and refuses a mode/profile view
+coverage counts. `validate condition-record` refuses an attested `closed_book_standard` record
+whose `mode` is `pr`; a record that omits `mode` remains valid, and a PR record that is not
+attested remains representable. Aggregation includes condition coverage and refuses a mode/profile view
 containing claim-bearing observations from different condition/status strata within one system.
 Use `scaneval aggregate run-a --by-condition --output strata.json` for separate descriptive
 metrics within a mixed run. Each stratum shows its own denominator beside the full scheduled
