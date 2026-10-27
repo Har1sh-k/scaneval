@@ -18,7 +18,9 @@ This design resolves issues [80](https://github.com/Har1sh-k/scaneval/issues/80)
 [82](https://github.com/Har1sh-k/scaneval/issues/82),
 [83](https://github.com/Har1sh-k/scaneval/issues/83),
 [84](https://github.com/Har1sh-k/scaneval/issues/84), and
-[85](https://github.com/Har1sh-k/scaneval/issues/85). Their reproductions use
+[85](https://github.com/Har1sh-k/scaneval/issues/85), plus the related redirect
+validation defect [86](https://github.com/Har1sh-k/scaneval/issues/86) reproduced
+during implementation review. Their reproductions use
 fabricated fixtures; none requires a real vulnerability scan or a model call.
 
 An attested condition has the required verified evidence. Unavailable or failed
@@ -114,16 +116,20 @@ there is no switch of ordinary exports to raw Git blobs.
 
 ### 82: redact the outer URL authority only
 
-In `public_retrieval.recorded_url`, identify only the outer authority. For this
-redaction step, skip leading ASCII whitespace/control characters when locating
-the prefix, without deleting or normalizing them in the returned string. Accept
-either initial `//` or a prefix ending in `://` whose preceding text contains
-none of `/`, `?`, or `#`. Deliberately do not require a syntactically valid scheme:
-malformed forms such as ` https://user:secret@host/` and
-`ht tps://user:secret@host/` must still hide credentials before rejection.
-The authority ends at the first `/`, `?`, or `#` after that prefix. Within it,
-replace everything through the last `@` with `[redacted]@`. Preserve the rest
-of the original string exactly, including nested URLs in path/query values.
+In `public_retrieval.recorded_url`, identify only the outer authority. Build a
+redaction-only locator with ASCII whitespace/control characters (code points
+0–32 and 127) removed, retaining each locator character's original offset.
+Never pass this locator to transport/validation or return it as the recorded URL.
+Accept either initial `//` or a prefix ending in `://` whose preceding locator
+text contains none of `/`, `?`, or `#`. Deliberately do not require a syntactically
+valid scheme. This recognizes malformed leading prefixes, controls inside a
+scheme, and controls between the colon/slashes, such as a tab between `https:`
+and `//user:secret@host/`, before the original input is rejected.
+The locator authority ends at the first `/`, `?`, or `#` after that prefix.
+Map the last prefix slash and last authority `@` back to original offsets, then
+replace that original userinfo span with `[redacted]@`. Preserve every other
+original byte/character, including the malformed prefix and nested URLs in
+path/query values. If no outer userinfo is located, return the original string.
 Scheme-relative redirect authorities are supported; relative paths without an
 authority are unchanged. Do not rely on `urlsplit` succeeding on malformed
 credentialed input. Existing credential/control-character rejection remains in
@@ -132,6 +138,24 @@ in both journals and returned diagnostics, including malformed userinfo.
 
 No origin-policy or evidence-validator relaxation is permitted. Valid path/query
 content must reach the existing hop comparison unchanged.
+
+### 86: reject unsafe raw redirect locations before resolution
+
+Share the locator's original userinfo-span helper between `recorded_url` and
+redirect validation. After recording the redacted Location, but before calling
+`urljoin`, reject the raw Location if it contains any ASCII whitespace/control
+character (0–32 or 127) or the helper identifies outer userinfo. Use the helper's
+presence result, not inequality between original and redacted strings: literal
+`[redacted]` userinfo is still userinfo. Raise a static `RetrievalDenied` message
+without echoing the location or credentials. Keep the current redirect-limit and
+missing-location checks. Every denial must finish the attempt journal normally.
+
+This ordering prevents invalid schemes such as `1https://user:secret@host/`
+from becoming relative paths under the allowed origin, and prevents `urljoin`
+from removing controls before validation. Direct fetch still validates the
+original input. Valid relative paths, scheme-relative redirects, and query/path
+research text with nested URLs remain unchanged. Existing destination, address,
+TLS and hop-evidence checks stay in force.
 
 ### 83: enforce the deadline below and above HTTP buffering
 
@@ -224,10 +248,11 @@ trailers.
 | --- | --- | --- |
 | 80 | experiment.py, experiment_execution.py, experiment_report.py, runner.py | Valid baseline and timestamp refresh run; unchecked excluded case, failing draft, newly eligible draft and stale checks refuse before any adapter preparation/invocation; later-input drift also has zero calls; ordinary runner and unchanged skipped inputs retain behavior. |
 | 81 | open_context.py | Real local two-commit CRLF/ident/UTF-16 and nested-attribute fixtures pass export, attestation and installation; changed bytes including normalized-away ident/EOL changes, changed mode, altered attributes, and malformed encoding refuse; malicious configured filter/hook is not executed; symlink/gitlink omissions remain explicit. |
-| 82 | isolation/public_retrieval.py | Real recorder/capture/classifier fixtures accept query/path nested URLs and relative redirects; actual outer credentials remain absent from both journals and returned diagnostics; leading-space/control prefixes, malformed schemes and scheme-relative userinfo stay redacted and denied. |
+| 82 | isolation/public_retrieval.py | Real recorder/capture/classifier fixtures accept query/path nested URLs and relative redirects; actual outer credentials remain absent from both journals and returned diagnostics; whitespace/C0/DEL at every outer prefix position (including between colon/slashes), malformed schemes and scheme-relative userinfo stay redacted and denied. |
 | 83 | isolation/public_retrieval.py | Real HTTPResponse parser on bounded deterministic transport times out during slow status/header bytes and repeated 100 Continue; buffered input checks use the same deadline; fast control succeeds; failure completion is journaled; body/chunk framing, TLS timeout and close/refcount behavior remain correct. |
 | 84 | blinding.py | Reviewed strict maps remove extensionless known/nested/configured instruction text and record removal; .md control succeeds; runtime source aliases, wrong role, stale hash, missing review and unsafe paths still refuse. |
 | 85 | contracts.py | Direct validator and CLI reject attested closed-book explicit PR; full, omitted-mode and non-attested PR controls remain accepted; runtime reclassification still refuses inconsistent records. |
+| 86 | isolation/public_retrieval.py | Numeric/invalid-scheme credential redirects, controls throughout the prefix and literal placeholder userinfo deny before a second transport request; both journals/returned/captured evidence contain no secret; valid relative, scheme-relative and nested-URL research controls continue to work. |
 
 Matrix guard regressions must use a complete fabricated pack and the actual
 runner, with counting adapters. Existing incomplete frozen-shell or mocked-runner
