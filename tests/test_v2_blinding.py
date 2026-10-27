@@ -882,6 +882,13 @@ def test_removal_roles_allow_only_identity_docs_or_actual_instruction_files():
     assert blinding.removal_path_gap(".claude/commands/review.md", "instruction_file") is None
     assert blinding.removal_path_gap(".cursor/rules/review.mdc", "instruction_file") is None
     assert blinding.removal_path_gap(".cursorrules", "instruction_file") is None
+    assert blinding.removal_path_gap(".claude/instructions", "instruction_file") is None
+    assert blinding.removal_path_gap(".claude/INSTRUCTIONS", "instruction_file") is None
+    assert blinding.removal_path_gap("packages/a/.cursor/instructions", "instruction_file", identity_policy={}) is None
+    assert "is not a file" in blinding.removal_path_gap("instructions", "instruction_file")
+    assert "never removed" in blinding.removal_path_gap(".claude/instructions.py", "instruction_file")
+    assert "never removed" in blinding.removal_path_gap("instructions", "identity_document")
+    assert "never removed" in blinding.removal_path_gap("docs/instructions", "identity_document")
     assert blinding.removal_path_gap("CHANGELOG", "identity_document") is None
     assert blinding.removal_path_gap("releases/2026.md", "identity_document") is None
     assert "instruction_file role" in blinding.removal_path_gap("CLAUDE.md", "identity_document")

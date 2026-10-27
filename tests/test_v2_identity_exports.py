@@ -106,10 +106,15 @@ def test_explicit_policy_failure_persists_refusal_evidence_and_never_calls_scann
     assert ALIAS["value"] not in canonical_json(summary)
 
 
-@pytest.mark.parametrize("path", [".assistant/project-rules.md", "packages/a/.cursor/rules/project.mdc"])
-def test_strict_policy_removes_reviewed_configured_and_nested_instruction_documents(tmp_path, path):
+@pytest.mark.parametrize(("path", "configured"), [
+    (".assistant/project-rules.md", True), ("packages/a/.cursor/rules/project.mdc", True),
+    (".claude/instructions.md", False), (".claude/instructions", False), (".Claude/INSTRUCTIONS", False),
+    ("packages/a/.cursor/instructions", False), (".github/instructions/instructions", False),
+    (".assistant/instructions", True),
+])
+def test_strict_policy_removes_reviewed_configured_and_nested_instruction_documents(tmp_path, path, configured):
     widget = fixture.build_widget(tmp_path, {**fixture.FILES, path: "Project instructions\n"})
-    document = strict_map(widget, instruction_paths=[path])
+    document = strict_map(widget, **({"instruction_paths": [path]} if configured else {}))
     document["removals"].append(fixture.removal_entry(widget, "extra-instructions", path, "instruction_file"))
     fixture.reapproved(document)
 
@@ -118,7 +123,45 @@ def test_strict_policy_removes_reviewed_configured_and_nested_instruction_docume
     [row] = manifest["inputs"]
     assert row["preparation_failure"] is None and adapter.calls == 1 and path not in adapter.seen["paths"]
     record = json.loads((tmp_path / "out" / row["provenance_path"]).read_text())
-    assert record["identity_reduction"]["validation"]["state"] == "available"
+    summary = record["identity_reduction"]
+    assert summary["validation"]["state"] == "available"
+    saved = load_document(tmp_path / "out" / "inputs" / row["input_id"] / summary["manifest_path"], MANIFEST_KIND)
+    assert {"path": path, "classification": "instruction_file", "disposition": "removed"} in saved["instruction_files"]
+
+
+def _refused_instruction_removal(tmp_path, path, role, problem):
+    widget = fixture.build_widget(tmp_path, {**fixture.FILES, path: "Project instructions\n"})
+    document = strict_map(widget, **({"instruction_paths": [path]} if problem == "configured" else {}))
+    removal = fixture.removal_entry(widget, "extra-instructions", path, role)
+    if problem == "stale":
+        removal["expected"][0]["file_sha256"] = "sha256:" + "0" * 64
+    document["removals"].append(removal)
+    if problem == "unreviewed":
+        document["reviews"] = []
+        document.pop("reviews_sha256", None)
+    else:
+        fixture.reapproved(document)
+    manifest, adapter, _ = run(tmp_path, widget, document)
+    [row] = manifest["inputs"]
+    assert adapter.calls == 0 and row["preparation_failure"]["type"] == "MaterializationError"
+    assert not (tmp_path / "out" / "inputs" / row["input_id"] / "source").exists()
+    return row["preparation_failure"]["message"]
+
+
+@pytest.mark.parametrize(("path", "role", "problem", "reason"), [
+    ("src/instructions", "instruction_file", "configured", "inside a runtime directory"),
+    (".claude/instructions.py", "instruction_file", None, "not a recognized instruction document"),
+    (".claude/hooks/instructions.sh", "instruction_file", None, "not a recognized instruction document"),
+    ("instructions", "instruction_file", None, "not a file a scanner reads as repository instructions"),
+    (".claude/instructions", "identity_document", None, "instruction_file role"),
+    ("instructions", "identity_document", None, "not documentation"),
+    ("docs/instructions", "identity_document", None, "not documentation"),
+    (".claude/instructions", "instruction_file", "stale", "stale map: removal extra-instructions"),
+    (".claude/instructions", "instruction_file", "unreviewed", "unreviewed"),
+])
+def test_extensionless_instruction_removal_keeps_location_role_hash_and_review_refusals(
+        tmp_path, path, role, problem, reason):
+    assert reason in _refused_instruction_removal(tmp_path, path, role, problem)
 
 
 def test_strict_export_is_deterministic_and_needs_pack_answer_coverage(tmp_path, widget):
