@@ -901,9 +901,16 @@ Report standard and blinded results separately: the schedule pairs vulnerable an
 within one profile. A blinded result says the listed cues were absent from the scanned text, not
 that the scanner could not recognize the repository.
 
-This is the reviewed-export foundation for identity sensitivity analysis. Automatic alias and safe
-metadata policies, validation of a complete identity-reduced experimental condition, and a paired
-condition report remain follow-up work. A profile name alone does not establish that condition.
+The map above demonstrates the basic reviewed-export API. Its strict identity summary is
+unavailable because it declares no `identity_policy`. To validate answer coverage, safely edit
+supported package URL leaves, and inspect instruction/metadata residuals, follow the
+[strict identity guide](IDENTITY_REDUCTION.md). It shows the policy, per-leaf expectations,
+dry-run/review/run workflow, and saved-manifest verification. A supplied strict policy that fails
+validation stops that input before a scanner starts and preserves evaluator-side refusal evidence.
+A profile name or available export alone does not establish execution isolation or a paired
+condition contrast; that reporting workflow is tracked in
+[issue #64](https://github.com/Har1sh-k/scaneval/issues/64). Standard and transformed results remain
+separate profile views in ordinary aggregation.
 
 ### A native PR input
 
@@ -1247,12 +1254,13 @@ These are limits of the current implementation, not guarantees about your enviro
   Freezing membership and promoting a version are hand edits to the pack file, reviewed in your own
   repository. `scaneval gate` judges a saved comparison against a policy and promotes nothing, a
   pack version included ([gate](GATE.md)).
-- **Identity reduction is partial, and nothing finds cues for you.** A map edits the documentation
-  and display metadata a reviewer listed; `identity_reduced` can additionally remove only reviewed
-  documentation and instruction paths. Nothing discovers identity cues, reads source, or decides
-  whether content is safe to edit/remove, and the run's leak check matches only spellings the map
-  declares. A transformed input is never replaced by `standard`: a map that is not approved or
-  does not fit fails that input instead.
+- **Identity reduction is partial.** A map edits reviewed documentation/display metadata;
+  `identity_reduced` adds reviewed document/instruction removals and narrow package URL leaf edits.
+  Strict inspection inventories supported instruction/URL leaves and declared answers/forms,
+  preserving skipped edits and remaining cues. It cannot discover every identity or establish that
+  content has no runtime role. Code, package names, paths, and other recognizable context remain.
+  An unapproved/stale map or failed explicit strict policy fails that input; it never silently
+  substitutes `standard`. See the [strict identity guide](IDENTITY_REDUCTION.md).
 - **No case-authoring skill yet.** The design pairs this guide with a case-authoring `SKILL.md`.
   The CLI operations it would drive are the ones documented here.
 - **Admission is a record, not a gate,** and `extended_regression` is planned like any other
@@ -1269,4 +1277,5 @@ the same way, against a pack of the same shape in another temporary directory, w
 repository of one pull request, with the own harness's mock runner (no model call) and a local Semgrep
 ruleset, and the hand-added controls it describes; the `Schedule:` line in the first run transcript is the line `run` has printed
 since then. Re-check these behaviors against the current checkout rather than treating this guide
-as a guarantee.
+as a guarantee. The linked strict identity policy/metadata guide describes the current API using
+illustrative fragments; it does not add fabricated output to these historical transcripts.

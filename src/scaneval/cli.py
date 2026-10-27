@@ -788,7 +788,7 @@ def _blinding_check(args: argparse.Namespace) -> int:
                 if args.profile == "identity_reduced":
                     blinding.check_scoring_paths(document, pack, snapshot_id)
                 record = blinding.dry_run(document, cached, snapshot_id, Path(scratch) / snapshot_id,
-                                          profile=args.profile)
+                                          profile=args.profile, pack=pack)
             except (MaterializationError, ContractError) as exc:
                 refused.append(snapshot_id)
                 print(f"{snapshot_id}: refused: {exc}")
@@ -810,6 +810,12 @@ def _blinding_check(args: argparse.Namespace) -> int:
                   f"{', '.join(cues['instruction_files']) or 'none'}")
             if cues["paths"]:
                 print(f"  {_retained_in(cues)}")
+            if "identity_reduction" in record:
+                summary = record["identity_reduction"]
+                counts = summary["counts"]
+                print(f"  strict identity condition: {summary['validation']['state']}; "
+                      f"changed files={counts['changed_files']}, removed files={counts['removed_files']}, "
+                      f"redactions={counts['redactions']}, residual cues={counts['residual_cues']}")
     if refused:
         print(f"scaneval: blinding map refused for {len(refused)} variant(s): {', '.join(refused)}",
               file=sys.stderr)

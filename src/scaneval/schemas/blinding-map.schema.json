@@ -22,7 +22,7 @@
     "map_id": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
-      "description": "Stable id of this map. Every blinded input of one repository in one run uses one map id and one content digest."
+      "description": "Stable id of this map. Related transformed inputs of one repository use one map id and content digest within each profile; different profiles can name different maps."
     },
     "map_version": {
       "type": "string",
@@ -111,6 +111,39 @@
         "$ref": "#/$defs/removal"
       }
     },
+    "identity_policy": {
+      "type": "object",
+      "description": "Explicit strict identity-reduced condition policy. Its declarations are part of the reviewed map digest; legacy maps without it remain basic exports only.",
+      "additionalProperties": false,
+      "required": ["policy_id", "version", "answer_aliases"],
+      "properties": {
+        "policy_id": {"const": "scaneval.identity-reduced"},
+        "version": {"const": "1"},
+        "answer_aliases": {"type": "array", "items": {
+          "type": "object", "additionalProperties": false, "required": ["category", "value"],
+          "properties": {
+            "category": {"enum": ["target_alias", "advisory_url", "answer_alias"]},
+            "value": {"type": "string", "minLength": 1},
+            "forms": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+          }
+        }},
+        "instruction_paths": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "identity_tokens": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "forbidden_artifacts": {"type": "array", "items": {
+          "type": "object", "additionalProperties": false, "required": ["category"],
+          "anyOf": [{"required": ["path"]}, {"required": ["sha256"]}],
+          "properties": {
+            "category": {"enum": ["evaluator_evidence", "redaction_dictionary", "transformation_manifest"]},
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          }
+        }}
+      }
+    },
+    "metadata_edits": {
+      "type": "array", "items": {"$ref": "#/$defs/metadata_edit"},
+      "description": "Strict identity policy only: reviewed hash-pinned edits to supported identity-only package URL leaves. Dependency/runtime fields and arbitrary selectors are refused."
+    },
     "reviews": {
       "type": "array",
       "items": {
@@ -130,6 +163,30 @@
     }
   },
   "$defs": {
+    "metadata_edit": {
+      "type": "object", "additionalProperties": false,
+      "required": ["edit_id", "path", "field_path", "replacement", "role_check", "rationale", "expected"],
+      "properties": {
+        "edit_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "path": {"type": "string", "minLength": 1},
+        "field_path": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "replacement": {"type": "string"},
+        "role_check": {"type": "string", "minLength": 1},
+        "rationale": {"type": "string", "minLength": 1},
+        "expected": {"type": "array", "minItems": 1, "items": {"oneOf": [
+          {"$ref": "#/$defs/metadata_present"}, {"$ref": "#/$defs/absent"}
+        ]}}
+      }
+    },
+    "metadata_present": {
+      "type": "object", "additionalProperties": false,
+      "required": ["snapshot_id", "state", "file_sha256", "original"],
+      "properties": {
+        "snapshot_id": {"type": "string", "minLength": 1}, "state": {"const": "present"},
+        "file_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "original": {"type": "string", "minLength": 1}, "raw_token": {"type": "string", "minLength": 1}
+      }
+    },
     "edit": {
       "type": "object",
       "additionalProperties": false,
@@ -224,6 +281,10 @@
           "type": "string",
           "minLength": 1,
           "description": "Why removing this file reduces repository identity without removing code or scoring evidence."
+        },
+        "role_check": {
+          "type": "string", "minLength": 1,
+          "description": "Explicit strict-policy review that advisory prose has no runtime, security-configuration, or scoring role; required for the narrow security-advisory prose exception."
         },
         "expected": {
           "type": "array",

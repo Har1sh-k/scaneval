@@ -37,7 +37,7 @@ yields a draft plan.
 What fails where. A configuration this run cannot honour (an input the pack does not declare,
 a PR input naming a change set the pack does not declare, colliding invocation ids, a cache or
 workspace inside evaluator storage, a blinding map that cannot be loaded, blinded inputs of one
-repository naming different maps, a run, system, or path that names an original token of a
+repository and profile naming different maps, a run, system, or path that names an original token of a
 blinded input's map) is refused before the output directory exists, so nothing is written. An input that
 cannot be prepared (a failed fetch or export, a declared tree hash the export contradicts, a
 change with nothing in it, a history git reads differently from the export, a blinding map that is
@@ -64,6 +64,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import threading
+import tempfile
 import time
 from typing import Any, Callable
 
@@ -389,6 +390,20 @@ def _check_blinding(config: dict, pack: dict, inputs: list[_InputSpec], systems:
                     f"{where} names {leaked[0]!r}, an original identity token of blinding map "
                     f"{spec.blinding_map['map_id']}, which would reach the scan of blinded input "
                     f"{spec.input_id}; rename it, or leave that input standard")
+        if spec.profile == "identity_reduced" and "identity_policy" in spec.blinding_map:
+            from .identity_policy import scanner_identity_gaps
+            snapshot = cases.snapshot_by_id(pack, spec.snapshot_id)
+            commits = [snapshot["commit"]]
+            if spec.change_set is not None:
+                commits.append(cases.snapshot_by_id(pack, spec.change_set["base_snapshot_id"])["commit"])
+            strict_fields = fields + ([] if workspace_root is not None else
+                                     [("the default workspace temporary directory", tempfile.gettempdir())])
+            for where, value in strict_fields:
+                gaps = scanner_identity_gaps(value, policy=spec.blinding_map["identity_policy"],
+                                              repository=snapshot["repository"], commits=commits)
+                if gaps:
+                    raise ContractError(f"{where} exposes a strict identity cue ({gaps[0]['category']}, "
+                                        f"{gaps[0]['cue_sha256']}) to input {spec.input_id}")
 
 
 def _check_invocation_ids(inputs: list[_InputSpec], systems: list[dict], repetitions: int) -> None:
@@ -520,7 +535,7 @@ def _prepare_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: Path
     cached = materialize.fetch_snapshot(snapshot["repository"]["url"], snapshot["commit"], cache_root)
     trial = out_dir / "inputs" / spec.input_id
     record = materialize.export_snapshot(cached, trial, profile=spec.profile, blinding_map=spec.blinding_map,
-                                         snapshot_id=spec.snapshot_id, clock=clock)
+                                         snapshot_id=spec.snapshot_id, clock=clock, pack=pack)
     provenance_path = materialize.write_provenance(trial, record)
     row["provenance_path"] = _relative(provenance_path, out_dir)
     tree_hash = record["trial"]["tree_hash"]
@@ -537,14 +552,30 @@ def _prepare_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: Path
     if blinded:
         identity = {**blinding.map_identity(spec.blinding_map), "original_tree_hash": source_tree_hash,
                     "transformed_tree_hash": tree_hash}
+    identity_manifest = (_verified_identity_manifest(trial, record, spec.blinding_map, pack, spec.snapshot_id)
+                         if spec.profile == "identity_reduced" else None)
     prepared = execution.PreparedInput(
         spec.input_id, trial / "source", tree_hash, languages, record, spec.profile, spec.mode,
-        input_hash=tree_hash, source_tree_hash=source_tree_hash, blinding=identity,
+        input_hash=tree_hash, source_tree_hash=source_tree_hash, blinding=identity, identity_manifest=identity_manifest,
     )
     row.update({"tree_hash": tree_hash, "input_hash": prepared.binding_hash,
                 "mechanical_checks": [{"case_id": outcome["case_id"], "passed": outcome["passed"],
                                        "checks": outcome["checks"]} for outcome in outcomes]})
     return prepared
+
+
+def _verified_identity_manifest(trial: Path, record: dict, document: dict, pack: dict, snapshot_id: str) -> dict:
+    from .identity_policy import MANIFEST_KIND, snapshot_requirements, verify_manifest
+    summary = record["identity_reduction"]
+    manifest = load_document(trial / summary["manifest_path"], MANIFEST_KIND)
+    requirements, paths = snapshot_requirements(pack, snapshot_id)
+    verify_manifest(
+        manifest, summary, policy=document.get("identity_policy"), map_sha256=blinding.map_sha256(document),
+        original_tree_hash=record["original"]["tree_hash"], transformed_tree_hash=record["trial"]["tree_hash"],
+        requirements=requirements, required_source_paths=paths,
+        source=trial / record["trial"]["root"],
+        source_snapshot={"snapshot_id": snapshot_id, **{key: record["source"][key] for key in ("url", "commit", "git_tree")}})
+    return manifest
 
 
 def _prepare_pr_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: Path,
@@ -579,7 +610,8 @@ def _prepare_pr_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: P
     trial = out_dir / "inputs" / spec.input_id
     record = materialize.export_pr(
         base_cached, head_cached, trial, profile=spec.profile, blinding_map=spec.blinding_map,
-        base_snapshot_id=base_snapshot["snapshot_id"], head_snapshot_id=head_snapshot["snapshot_id"], clock=clock)
+        base_snapshot_id=base_snapshot["snapshot_id"], head_snapshot_id=head_snapshot["snapshot_id"], clock=clock,
+        pack=pack)
     provenance_path = materialize.write_provenance(trial, record)
     row["provenance_path"] = _relative(provenance_path, out_dir)
     blinded = spec.blinding_map is not None
@@ -616,10 +648,15 @@ def _prepare_pr_input(spec: _InputSpec, pack: dict, out_dir: Path, cache_root: P
         identity = {**blinding.map_identity(spec.blinding_map), "original_tree_hash": head_source_hash,
                     "transformed_tree_hash": diff["head_tree_hash"], "base_original_tree_hash": sides[0][2],
                     "base_transformed_tree_hash": diff["base_tree_hash"]}
+    identity_manifest = None
+    if spec.profile == "identity_reduced":
+        identity_manifest = _verified_identity_manifest(trial, record["head"], spec.blinding_map, pack,
+                                                        head_snapshot["snapshot_id"])
+        _verified_identity_manifest(trial, record["base"], spec.blinding_map, pack, base_snapshot["snapshot_id"])
     prepared = execution.PreparedInput(
         spec.input_id, trial / "source", diff["head_tree_hash"], tuple(head_snapshot["languages"]), record,
         spec.profile, "pr", input_hash=record["input_hash"], source_tree_hash=head_source_hash, blinding=identity,
-        pr=pr, base_source_dir=trial / materialize.PR_BASE_DIR / "source")
+        pr=pr, base_source_dir=trial / materialize.PR_BASE_DIR / "source", identity_manifest=identity_manifest)
     row.update({"tree_hash": prepared.tree_hash, "input_hash": prepared.binding_hash,
                 "mechanical_checks": [{"case_id": outcome["case_id"], "passed": outcome["passed"],
                                        "checks": outcome["checks"]} for outcome in outcomes]})
@@ -913,7 +950,7 @@ def run_from_config(
     input the pack does not declare, a native PR input whose change set the pack does not declare,
     a metadata-blinded input of a 2.0 configuration (which cannot name a map) or one whose map
     cannot be loaded, blinded inputs of
-    one repository naming different maps, a run id or a system id, model, revision, or
+    one repository and profile naming different maps, a run id or a system id, model, revision, or
     configuration, or a workspace root, cache root, or configuration directory, naming an original
     token of a blinded input's map, colliding invocation ids, a cache root that overlaps the
     output directory, and a workspace inside evaluator storage.
@@ -1007,6 +1044,9 @@ def run_from_config(
                 # This input is recorded as unprepared and its assignments as skipped below; an
                 # interrupt is not an Exception and still stops the whole run.
                 row["preparation_failure"] = {"type": type(exc).__name__, "message": _message(exc)}
+                refusal_path = getattr(exc, "provenance_path", None)
+                if refusal_path is not None:
+                    row["provenance_path"] = _relative(refusal_path, out_dir)
                 warnings.append(f"{spec.input_id}: not prepared ({type(exc).__name__}: {_message(exc)})")
                 manifest_inputs.append(row)
                 _emit_progress(
