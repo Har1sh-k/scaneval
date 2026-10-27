@@ -1,7 +1,8 @@
 # Condition preparation and evidence correctness
 
-Status: reviewed for implementation; independent comprehension, design, and
-readiness review completed before coding. Implementation verification is pending.
+Status: implemented and independently reviewed. Comprehension, design, and
+readiness review preceded coding; implementation review used fresh reviewers.
+Required regression and merge checks are listed below.
 
 ## Context and scope
 
