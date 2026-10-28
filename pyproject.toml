@@ -21,7 +21,7 @@ scaneval = "scaneval.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-scaneval = ["schemas/*.json", "mappings/*.json", "adapters/*.mts", "adapters/*.mjs", "datasets/locks/*.json"]
+scaneval = ["schemas/*.json", "mappings/*.json", "adapters/*.mts", "adapters/*.mjs", "datasets/locks/*.json", "data/*.json"]
 
 [project.optional-dependencies]
 dev = [
