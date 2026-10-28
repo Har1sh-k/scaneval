@@ -1,8 +1,10 @@
 # Codex quota guard for operator experiments
 
-Status: specification committed before implementation. Implementation and test
-evidence follow in separate commits. Code review is reserved for a fresh Opus
-5.5 reviewer before any PR; this document does not claim review approval.
+Status: specification committed before implementation; implementation and
+synthetic test evidence follow in separate commits. Public feature request:
+[#91](https://github.com/Har1sh-k/scaneval/issues/91). Code review is reserved for
+a fresh Opus 5.5 reviewer before any PR; this document does not claim review
+approval. See [operator usage and limitations](../CODEX_QUOTA_GUARD.md).
 
 ## Scope and invariant
 
@@ -58,17 +60,51 @@ Claude work. Clean up descendants even when the direct command exits. Detached
 processes that leave the owned group are outside this utility's containment
 contract and must not be used by the wrapped job.
 
+Keep owned leaders unreaped until group cleanup using POSIX `waitid(WNOWAIT)`.
+Darwin may report EPERM when a group contains only its dead leader; accept that
+case only after a bounded `PROC_PGRP_ONLY` query positively identifies that exact
+group as containing just the unreaped leader. A live group, failed query or
+possibly truncated query remains a cleanup failure.
+
 Docker work must register exact full container IDs or explicitly supplied
 Docker `--cidfile` paths. Read those paths during monitoring and immediately
 before cleanup; freeze each observed ID, reject changes/malformed files, and
 stop only the registered IDs with bounded Docker calls. No container discovery,
-prefix matches, label sweeps, pruning, deletion, or arbitrary PID attachment.
+prefix matches, label sweeps, pruning, default deletion, or arbitrary PID attachment.
 An unregistered detached container is outside the contract. The operator must
 ensure every experiment container is registered before it consumes quota.
 
+A controller may instead atomically maintain a bounded append-only registry:
+`{"schema":1,"container_ids":["<full ID>"]}`. Accept initially absent files,
+then require monotonically growing ID membership; reject invalid/deleted or
+symlinked files. Maximum 256 entries / 64 KiB. This provides dynamic explicit
+registration without Docker discovery.
+
+For ephemeral workloads using detached Docker clients, provide explicit
+`--stop-file` and `--remove-containers` options. Create the private, initially
+absent stop marker before child/container cleanup. The scoped Docker wrapper
+must reject create/start after that marker, register each full ID before start,
+and start by inspected immutable ID. The opt-in removal action forcibly removes
+only the registered IDs, closing the race where a detached start could restart
+a merely stopped container after guard exit. A pending start therefore either
+runs before removal and is killed, or fails after removal. Marker failure is
+visible, never skips remaining cleanup, and prevents cleanup-success reporting.
+No unregistered container may be removed. The root coordinator explicitly
+authorized this option for owned ephemeral experiment containers.
+
+Batch-stop registered IDs, then on a failed stop inspect only exact registered
+IDs with a format exposing ID and running status. Accept already-removed IDs
+only after an exact missing-container diagnostic and a successful daemon
+version query; connection failure or unverified state remains cleanup failure.
+Use five-second per-call deadlines and a ten-second aggregate Docker cleanup
+budget, plus bounded client-process cleanup. Preserve full IDs and each
+stopped/removed/not-found/still-running/not-removed/unverified state in the final
+audit receipt; an existing stopped container fails a requested removal.
+
 Write an exclusive new mode-0600 JSONL receipt file. Receipts contain an
 allowlisted schema of timestamps, window percentages/durations/reset times,
-terminal reason codes, process-group IDs, exit status, and cleanup counts.
+terminal reason codes, process-group IDs, exit status, full explicitly
+registered container IDs, per-container cleanup states, and cleanup counts.
 Never persist raw protocol payloads, errors, prompts, command arguments,
 environment, tokens, auth state, account identity, or child output in receipts.
 Keep experiment output on its own normal streams. Any receipt failure stops
@@ -101,3 +137,10 @@ Follow Elephant/Goldfish artifact separation: commit this specification first,
 then logical implementation/test/documentation commits. Use the configured Git
 author without AI co-author trailers. Preserve the existing dirty checkout.
 Do not run scans, push, open a PR, or perform code review in this work stream.
+
+Implementation validation: `tests/test_codex_quota_guard.py` passes 108
+synthetic tests, covering the policies, bounded transports, ownership,
+registry evolution, Docker cleanup proofs, stop-marker ordering, and opt-in
+exact-ID removal. Repository hygiene checks pass two tests with one existing
+skip. No real model calls or scans were used for this evidence. Fresh Opus 5.5
+implementation review and wrapper integration validation remain the next gate.
