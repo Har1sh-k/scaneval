@@ -83,6 +83,14 @@ from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, active_backe
 
 
 DRIVER = Path(__file__).with_name("llm_harness_driver.mts")
+DEFAULT_IMAGE_HARNESS_COMMIT = "f959cbcf010c7e41f780c718b65b1724d3aecb43"
+DEFAULT_IMAGE_PI_VERSION = "1.4.0"
+IMAGE_ADAPTER_FILES = {
+    "driver": "llm_harness_driver.mts",
+    "runner": "pi_oci_runner.mts",
+    "extension": "pi_open_context.mts",
+    "extension_tools": "pi_open_context_tools.mjs",
+}
 HARNESS_PRESETS: dict[str, dict[str, Any]] = {
     "securevibes-agent": {
         "state_dir": ".securevibes",
@@ -281,10 +289,14 @@ def image_settings(config: dict) -> dict[str, Any]:
         paths[key] = value
     if "root" in overrides and "tsx" not in overrides:
         paths["tsx"] = paths["root"].rstrip("/") + "/node_modules/.bin/tsx"
-    expected_commit = config.get("expected_harness_commit")
+    expected_commit = config.get("expected_harness_commit", None if synthetic else DEFAULT_IMAGE_HARNESS_COMMIT)
+    if not synthetic and expected_commit is None:
+        raise AdapterError("config.expected_harness_commit cannot be null on the real model route")
     if expected_commit is not None and (not isinstance(expected_commit, str) or not _COMMIT.match(expected_commit)):
         raise AdapterError("config.expected_harness_commit must be a full 40-character commit id")
-    expected_pi = config.get("expected_pi_version")
+    expected_pi = config.get("expected_pi_version", None if synthetic else DEFAULT_IMAGE_PI_VERSION)
+    if not synthetic and expected_pi is None:
+        raise AdapterError("config.expected_pi_version cannot be null on the real model route")
     if expected_pi is not None and (not isinstance(expected_pi, str) or not expected_pi.strip()):
         raise AdapterError("config.expected_pi_version must be a version string")
     calls = config.get("synthetic_tool_calls")
@@ -413,13 +425,37 @@ def image_run_account(image: dict[str, Any], output: Any,
     versions = {"runtime": "oci_image", "harness": f"securevibes-agent@{commit or 'unknown'}",
                 "harness_package": str(package), "pi": pi_observed or pi_receipt or "unknown",
                 "node": node_observed or node_receipt or "unknown"}
-    for role in ("runner", "extension", "extension_tools", "synthetic_provider"):
+    for role in (*IMAGE_ADAPTER_FILES, "synthetic_provider"):
         entry = files.get(role)
         if isinstance(entry, dict) and isinstance(entry.get("sha256"), str):
-            versions[f"pi_{role}"] = entry["sha256"]
+            versions["driver_sha256" if role == "driver" else f"pi_{role}"] = entry["sha256"]
     notes: list[str] = []
     errors: list[str] = []
     partial: list[str] = []
+    if not image["synthetic"]:
+        if not runtime:
+            errors.append("the driver reported no image runtime identity")
+        if not isinstance(receipt, dict) or not receipt or runtime.get("receipt_error"):
+            errors.append("the image runtime receipt is missing or unreadable")
+        if not route:
+            errors.append("the driver reported no Pi route")
+        adapters = receipt.get("adapters") if isinstance(receipt, dict) else None
+        adapters = adapters if isinstance(adapters, dict) else {}
+        for role, name in IMAGE_ADAPTER_FILES.items():
+            try:
+                expected_digest = "sha256:" + hashlib.sha256(DRIVER.with_name(name).read_bytes()).hexdigest()
+            except OSError:
+                errors.append(f"the host adapter file {name} could not be read for identity verification")
+                continue
+            versions[f"host_{role}_sha256"] = expected_digest
+            entry = files.get(role)
+            reported_digest = entry.get("sha256") if isinstance(entry, dict) else None
+            if reported_digest != expected_digest:
+                errors.append(f"runtime.files.{role} digest is missing or differs from the host's {name}")
+            if adapters.get(name) != expected_digest:
+                errors.append(f"runtime receipt adapters.{name} digest is missing or differs from the host")
+    else:
+        notes.append("DIAGNOSTIC: synthetic runs do not attest host/image adapter code identity.")
     if not runtime:
         notes.append("The driver reported no image runtime identity, so which harness, Pi and Node ran is unknown.")
     else:
@@ -431,15 +467,15 @@ def image_run_account(image: dict[str, Any], output: Any,
                      f"{pi_receipt or 'none'}); Node {node_observed or 'unknown'} as the driver process reported it "
                      f"(receipt: {node_receipt or 'none'}). Digests of the driver, runner and extension files the "
                      "driver loaded are recorded with the tool versions.")
-    # Compared only when the driver got far enough to report a runtime: a driver that failed before
-    # that has its own error, which an unknown identity must not replace.
-    if runtime and image["expected_commit"] and commit != image["expected_commit"]:
+    if image["expected_commit"] and commit != image["expected_commit"]:
         errors.append(f"the image's harness commit is {commit or 'unknown'}, not the configured "
                       f"{image['expected_commit']}")
-    if pi_observed and pi_receipt and pi_receipt not in pi_observed:
+    if pi_observed and pi_receipt and pi_receipt != pi_observed.strip():
         errors.append(f"the Pi binary reports {pi_observed!r}, which contradicts the image receipt's {pi_receipt!r}")
-    if runtime and image["expected_pi"] and image["expected_pi"] not in (pi_observed or pi_receipt or ""):
-        errors.append(f"Pi {pi_observed or pi_receipt or 'unknown'} ran, not the configured {image['expected_pi']}")
+    if image["expected_pi"] and (pi_receipt != image["expected_pi"]
+                                  or (pi_observed or "").strip() != image["expected_pi"]):
+        errors.append(f"Pi binary {pi_observed or 'unknown'} and receipt {pi_receipt or 'unknown'} do not both "
+                      f"match the configured {image['expected_pi']}")
     declared = route.get("tools")
     expected_tools = image_tools(image)
     if route and declared != expected_tools:
@@ -496,8 +532,10 @@ def image_run_account(image: dict[str, Any], output: Any,
     credential = route.get("credential") if isinstance(route.get("credential"), dict) else {}
     if not image["synthetic"]:
         if credential.get("removed") is True:
-            notes.append(f"The {image['provider']} OAuth credential was materialized only in the container's private "
-                         "agent directory and was removed when the scan ended; no value is recorded.")
+            notes.append(f"The {image['provider']} OAuth credential arrived through the container environment and "
+                         "was copied into its private Pi agent directory, which was removed when the scan ended. "
+                         "The driver removed the variable before starting child processes; this does not erase "
+                         "its initial process environment from OS inspection. No value is recorded.")
         else:
             notes.append(f"The private Pi agent directory holding the {image['provider']} credential was not shown "
                          "removed; it lived on the container's private /tmp, which ends with the container.")
@@ -2062,14 +2100,25 @@ class LlmHarnessAdapter(Adapter):
             """
             return f"{message}; {loss_message}"[:2000] if loss_message else message
 
+        completion_notes, completion_code, completion_message = read_completion(
+            usable_summary, required=image is not None)
+        notes.extend(completion_notes)
+        if completion_code and completion_message and not completion_notes:
+            notes.append(f"Harness completion report: {completion_message}.")
         if result.timed_out:
             return NativeOutcome(status="timeout", exit_code=None, timed_out=True,
                                  error={"code": "timeout",
                                         "message": with_loss(f"harness exceeded {timeout_seconds}s")}, **base)
         if image_failure is not None and image_failure["status"] == "error":
             # What ran is not what the system pins: nothing it produced is this system's observation.
+            message = image_failure["message"]
+            if not usable_summary:
+                failure = output.get("error") if isinstance(output, dict) else None
+                native_message = failure.get("message") if isinstance(failure, dict) else None
+                if native_message:
+                    message = f"{str(native_message)[:1000]}; {message}"[:2000]
             return NativeOutcome(status="error", exit_code=result.exit_code,
-                                 error={"code": image_failure["code"], "message": with_loss(image_failure["message"])},
+                                 error={"code": image_failure["code"], "message": with_loss(message)},
                                  **base)
         if not usable_summary:
             failure = (output.get("error") or {}) if isinstance(output, dict) else {}
@@ -2163,9 +2212,6 @@ class LlmHarnessAdapter(Adapter):
             return NativeOutcome(status="partial", exit_code=result.exit_code,
                                  error={"code": "harness_inconclusive",
                                         "message": with_loss(f"degradation={usable_summary.get('degradation')} scan_status={scan_status} reasons={scan_stats.get('reasons')}")}, **base)
-        completion_notes, completion_code, completion_message = read_completion(
-            usable_summary, required=image is not None)
-        notes.extend(completion_notes)
         if completion_code:
             # The engine's own statement that this scan is not shown complete: never success, so
             # never quiet credit, and its reasons are the error's.

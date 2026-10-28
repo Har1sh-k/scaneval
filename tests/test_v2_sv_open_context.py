@@ -11,6 +11,7 @@ a model or starts a container; ``test_v2_sv_open_context_docker.py`` does the re
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,9 +24,11 @@ import time
 import pytest
 
 from scaneval.adapters import get_adapter
+from scaneval.adapters import llm_harness
 from scaneval.adapters.base import AdapterError, CommandResult, SystemSpec, routed_through
 from scaneval.adapters.llm_harness import (
-    DEFAULT_PI_AUTH_ENV, SYNTHETIC_MODEL, check_pi_credential, credential_validity, image_settings, read_completion,
+    DEFAULT_IMAGE_HARNESS_COMMIT, DEFAULT_IMAGE_PI_VERSION, DEFAULT_PI_AUTH_ENV, IMAGE_ADAPTER_FILES,
+    SYNTHETIC_MODEL, check_pi_credential, credential_validity, image_run_account, image_settings, read_completion,
 )
 from scaneval.isolation import resolve_execution
 from scaneval.isolation.oci import OciBackend
@@ -122,6 +125,8 @@ class HostOciBackend(OciBackend):
     ({"image_paths": {"elsewhere": "/x"}}, "may name only"),
     ({"image_paths": {"driver": "relative.mts"}}, "absolute path inside the image"),
     ({"expected_harness_commit": "abc"}, "40-character"),
+    ({"expected_harness_commit": None}, "cannot be null"),
+    ({"expected_pi_version": None}, "cannot be null"),
     ({"synthetic_tool_calls": []}, "synthetic diagnostic model route"),
     ({"mode": "pr"}, "bootstrap"),
 ])
@@ -136,10 +141,96 @@ def test_image_defaults_pin_high_reasoning_and_the_image_paths():
     assert settings["auth_env"] == DEFAULT_PI_AUTH_ENV and not settings["synthetic"]
     assert settings["paths"]["driver"] == "/opt/scaneval/llm_harness_driver.mts"
     assert settings["paths"]["tsx"] == "/opt/scaneval/harness/node_modules/.bin/tsx"
+    assert settings["expected_commit"] == DEFAULT_IMAGE_HARNESS_COMMIT == COMMIT
+    assert settings["expected_pi"] == DEFAULT_IMAGE_PI_VERSION == "1.4.0"
+    dockerfile = (ROOT / "containers/sv-agent/Dockerfile").read_text()
+    assert f"ARG HARNESS_COMMIT={settings['expected_commit']}\n" in dockerfile
+    assert f"ARG EXPECT_PI_VERSION={settings['expected_pi']}\n" in dockerfile
     synthetic = image_settings({"harness": "securevibes-agent", "model": SYNTHETIC_MODEL})
     assert synthetic["synthetic"] and synthetic["auth_env"] is None
     with pytest.raises(AdapterError, match="takes no credential"):
         image_settings({"harness": "securevibes-agent", "model": SYNTHETIC_MODEL, "pi_auth_env": "X_AUTH"})
+
+
+def _adapter_digests():
+    return {name: "sha256:" + hashlib.sha256((ADAPTERS / name).read_bytes()).hexdigest()
+            for name in IMAGE_ADAPTER_FILES.values()}
+
+
+def _identity_output():
+    digests = _adapter_digests()
+    return {"runtime": {"receipt": {"harness": {"commit": COMMIT}, "pi": {"version": "1.4.0"},
+                                     "adapters": digests}, "pi_version": "1.4.0",
+                        "files": {role: {"sha256": digests[name]} for role, name in IMAGE_ADAPTER_FILES.items()}},
+            "pi_route": {"tools": ["scaneval_fetch", "scaneval_git", "scaneval_read"]}}
+
+
+def test_real_image_identity_matches_both_receipt_and_runtime_to_host():
+    notes, failure, versions = image_run_account(image_settings(IMAGE), _identity_output(), {})
+    assert failure is None
+    assert versions["driver_sha256"] == versions["host_driver_sha256"] == _adapter_digests()["llm_harness_driver.mts"]
+
+
+@pytest.mark.parametrize("part", ["runtime", "receipt", "receipt_error", "pi_route", "files", "adapters"])
+def test_real_image_identity_requires_complete_readable_evidence(part):
+    output = _identity_output()
+    if part in {"runtime", "pi_route"}:
+        output.pop(part)
+    elif part == "adapters":
+        output["runtime"]["receipt"].pop("adapters")
+    elif part == "receipt_error":
+        output["runtime"]["receipt_error"] = "unreadable receipt"
+    else:
+        output["runtime"].pop(part)
+    _notes, failure, _versions = image_run_account(image_settings(IMAGE), output, {})
+    assert failure["status"] == "error" and failure["code"] == "runtime_mismatch"
+
+
+@pytest.mark.parametrize("role", ["driver", "runner", "extension", "extension_tools"])
+@pytest.mark.parametrize("drift", ["reported", "receipt", "both", "missing_reported", "missing_receipt"])
+def test_real_image_identity_rejects_adapter_drift_and_missing_digests(role, drift):
+    output = _identity_output()
+    name = IMAGE_ADAPTER_FILES[role]
+    if drift in {"reported", "both"}:
+        output["runtime"]["files"][role]["sha256"] = "sha256:" + "0" * 64
+    if drift in {"receipt", "both"}:
+        output["runtime"]["receipt"]["adapters"][name] = "sha256:" + "0" * 64
+    if drift == "missing_reported":
+        output["runtime"]["files"].pop(role)
+    if drift == "missing_receipt":
+        output["runtime"]["receipt"]["adapters"].pop(name)
+    _notes, failure, _versions = image_run_account(image_settings(IMAGE), output, {})
+    assert failure["status"] == "error" and failure["code"] == "runtime_mismatch"
+    assert name in failure["message"]
+
+
+@pytest.mark.parametrize("pin", ["commit", "pi_binary", "pi_receipt", "pi_missing", "pi_suffix"])
+def test_real_image_default_pins_cannot_be_bypassed(pin):
+    output = _identity_output()
+    if pin == "commit":
+        output["runtime"]["receipt"]["harness"]["commit"] = "0" * 40
+    elif pin == "pi_receipt":
+        output["runtime"]["receipt"]["pi"]["version"] = "1.3.0"
+    elif pin == "pi_missing":
+        output["runtime"].pop("pi_version")
+    else:
+        output["runtime"]["pi_version"] = "1.4.0-modified" if pin == "pi_suffix" else "1.3.0"
+    _notes, failure, _versions = image_run_account(image_settings(IMAGE), output, {})
+    assert failure["code"] == "runtime_mismatch"
+
+
+def test_missing_host_adapter_files_fail_closed(tmp_path, monkeypatch):
+    output = _identity_output()
+    monkeypatch.setattr(llm_harness, "DRIVER", tmp_path / "llm_harness_driver.mts")
+    _notes, failure, _versions = image_run_account(image_settings(IMAGE), output, {})
+    assert failure["code"] == "runtime_mismatch"
+    assert "host adapter file" in failure["message"]
+
+
+def test_synthetic_diagnostic_explicitly_does_not_attest_code_identity():
+    notes, failure, _versions = image_run_account(image_settings({**IMAGE, "model": SYNTHETIC_MODEL}), {}, {})
+    assert failure is None
+    assert any("do not attest host/image adapter code identity" in note for note in notes)
 
 
 def test_prepare_on_the_image_runtime_inspects_nothing_on_the_host(tmp_path):
@@ -453,7 +544,8 @@ def _fixture(tmp_path: Path, *, receipt_commit: str = COMMIT) -> dict:
     fake_pi.chmod(0o755)
     receipt = tmp_path / "runtime.json"
     receipt.write_text(json.dumps({"harness": {"commit": receipt_commit, "package_version": "0.1.0"},
-                                   "pi": {"version": "1.4.0"}, "node": {"version": "v26.7.0"}}))
+                                   "pi": {"version": "1.4.0"}, "node": {"version": "v26.7.0"},
+                                   "adapters": _adapter_digests()}))
     source = tmp_path / "source"
     source.mkdir()
     (source / "app.py").write_text("def handler(q):\n    return eval(q)\n")
@@ -563,10 +655,13 @@ def test_fixture_run_exercises_research_history_and_tool_policy_without_leaking_
     assert outcome.tool_versions["runtime"] == "oci_image"
     assert outcome.tool_versions["harness"] == f"securevibes-agent@{COMMIT}"
     assert outcome.tool_versions["pi"] == "1.4.0"
+    assert outcome.tool_versions["driver_sha256"] == _adapter_digests()["llm_harness_driver.mts"]
     assert any(artifact["id"].startswith("open-context-tools/") for artifact in outcome.artifacts)
     text = "\n".join(outcome.notes)
     assert "Tool availability" in text and "Tool execution" in text and "model consumption stays unverifiable" in text
     assert "Declared tool policy on the pi-oci route" in text
+    assert "arrived through the container environment" in text
+    assert "initial process environment from OS inspection" in text
     assert outcome.usage["input_tokens"] == 7
     # The private agent directory, and the credential in it, did not outlive the run.
     assert not [name for name in fixture["leftovers"] if name.startswith("scaneval-pi-agent-")]
@@ -584,6 +679,8 @@ def test_research_tools_that_were_not_shown_available_make_the_run_partial(tmp_p
     outcome, *_ = _fixture_run(tmp_path, monkeypatch, retrieval, control={"skipExtension": True})
     assert outcome.status == "partial"
     assert outcome.error["code"] == "research_tools_unavailable"
+    assert any("Harness completion report:" in note and "source_analysis_completion_not_established" in note
+               for note in outcome.notes)
 
 
 def test_a_credential_that_never_reached_the_container_fails_actionably(tmp_path, monkeypatch, retrieval):

@@ -2382,6 +2382,22 @@ DRIVER_OUTPUT = {
 }
 
 
+@pytest.mark.parametrize("scan_stats,expected", [
+    ({"llmCalls": 2, "failedCalls": 1, "status": "complete"}, "llm_calls_failed"),
+    ({"llmCalls": 2, "failedCalls": 2, "status": "complete"}, "llm_path_failed"),
+    ({"llmCalls": 2, "failedCalls": 0, "status": "inconclusive"}, "harness_inconclusive"),
+])
+def test_native_completion_notes_survive_other_partial_outcomes(tmp_path, monkeypatch, scan_stats, expected):
+    completion = json.loads((ROOT / "tests/fixtures/sv-completion.json").read_text())
+    output = {**DRIVER_OUTPUT, "summary": {**DRIVER_OUTPUT["summary"],
+                                          "bootstrapScan": scan_stats, "completion": completion}}
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {"a.md": FINDING}, output=output)
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["status"] == "partial" and execution["error"]["code"] == expected
+    assert any("Harness completion report:" in note and "source_analysis_completion_not_established" in note
+               for note in execution["notes"])
+
+
 @pytest.mark.parametrize("failed,driver_failed", [(1, 1), (0, 1), (1, None)])
 def test_unrecovered_model_call_makes_completed_scan_partial(tmp_path, monkeypatch, failed, driver_failed):
     output = {**DRIVER_OUTPUT, "summary": {

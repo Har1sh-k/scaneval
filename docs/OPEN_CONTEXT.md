@@ -215,13 +215,19 @@ The image holds Node, the pinned upstream harness under `/opt/scaneval/harness` 
 `/opt/scaneval/runtime.json` (`harness.commit`, `harness.package_version`, `pi.version`,
 `node.version`, or the same names flattened with underscores). The driver runs with the image's
 `tsx` from the mounted workspace and reports the receipt, the Pi and Node versions the processes
-themselves report, and digests of the driver, runner and extension files it loaded. Set
-`expected_harness_commit` and `expected_pi_version` to make any disagreement an error.
+themselves report, and digests of the driver, runner and extension files it loaded. Real model
+runs require runtime identity, a readable receipt and Pi route metadata. The host compares its
+driver, OCI runner, extension and tools-helper hashes with both `runtime.files` and
+`receipt.adapters`; absent or different hashes produce `runtime_mismatch`. The driver hash is
+recorded in tool versions. Required `expected_harness_commit` and `expected_pi_version` default
+to the Dockerfile pins `f959cbcf010c7e41f780c718b65b1724d3aecb43` and `1.4.0`; explicit overrides
+must also match. Synthetic diagnostics do not attest host/image adapter identity.
 
 ```json
 {"system_id": "sv-agent-open-context", "adapter": "llm-harness",
  "config": {"harness": "securevibes-agent", "runtime": "oci_image", "model": "openai-codex/gpt-5.6-sol",
-            "thinking_level": "high", "expected_harness_commit": "f959cbcf010c7e41f780c718b65b1724d3aecb43"},
+            "thinking_level": "high", "expected_harness_commit": "f959cbcf010c7e41f780c718b65b1724d3aecb43",
+            "expected_pi_version": "1.4.0"},
  "execution": {"backend": "oci", "image": "<sv-agent image>@sha256:<digest>",
                "proxy_image": "<proxy image>@sha256:<digest>",
                "egress": [{"host": "chatgpt.com", "port": 443}],
@@ -257,8 +263,10 @@ model call, labelled `scanner_native` and reported as transport evidence, not re
 Three separate statements. The extension journals, per Pi process, which tools it registered
 (availability) and the metadata of each call it served; Pi's JSON stream reports each tool
 execution (execution); and nothing establishes that a result entered a model request or shaped a
-finding (consumption), which stays unverifiable. A run whose Pi processes did not all register the
-research tools is `partial` (`research_tools_unavailable`). Pi's message metadata names the
+finding (consumption), which stays unverifiable. If Pi ran without any journaled registration,
+or a recorded registration lacks required tools, the run is `partial`
+(`research_tools_unavailable`). Registration counts are reported alongside Pi call counts;
+the adapter does not establish a one-to-one correspondence. Pi's message metadata names the
 provider and model Pi addressed; that is the client's routing record, so no resolved model is
 recorded, and a route other than the pinned one is an error.
 

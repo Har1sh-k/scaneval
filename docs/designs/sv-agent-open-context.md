@@ -26,6 +26,12 @@ reason; no implicit provider, model, scanner, or condition fallback is allowed.
 - The container image pins the clean upstream harness commit and Pi version; scans pin the
   built image by digest or local immutable image id. Never auto-update inside a scan. Record
   Node/Pi/harness/driver identities and the requested model/reasoning settings.
+  Real model runs require runtime identity, a readable receipt, and Pi route metadata. Compare
+  the host driver, OCI runner, research extension and tools helper SHA-256 digests with both the
+  reported runtime files and receipt adapters; missing evidence or drift is `runtime_mismatch`.
+  Default the required harness/Pi pins to the Dockerfile's f959cbcf010c7e41f780c718b65b1724d3aecb43
+  and 1.4.0; explicit overrides remain required identities, never optional checks.
+  Synthetic diagnostics remain explicitly nonattesting for host/image adapter identity.
 - An explicit OCI runner must not pass through an older patched default wrapper that re-adds
   --no-tools or instructions forbidding all external lookup. The newly pinned clean upstream
   revision does not have that old wrapper behavior. Use the harness's retry/isolation seams when
@@ -66,6 +72,7 @@ reason; no implicit provider, model, scanner, or condition fallback is allowed.
   or silence credit; retain the native reasons. This is independent of condition attestation.
   Validate native enum values, execution evidence, count conservation and failure samples; require
   the report for the image runtime, while absence remains compatible with older local harnesses.
+  Preserve its native notes even when another failure or partial outcome takes precedence.
 
 ## Verification
 
