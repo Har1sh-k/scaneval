@@ -1,9 +1,0 @@
-[package]
-name = "file-organizer-agent"
-version = "0.1.0"
-edition = "2021"
-description = "An LLM-driven file organizer agent that moves and renames files within a workspace."
-
-[[bin]]
-name = "file-organizer"
-path = "src/main.rs"

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scaneval-example-dataset"
+version = "0.1.0"
+description = "Example external JSONL dataset adapter for ScanEval"
+requires-python = ">=3.11"
+dependencies = ["scaneval>=2.0.0a1"]
+
+[project.entry-points."scaneval.datasets"]
+example-jsonl = "scaneval_example_dataset:JsonlDataset"
+
+[tool.setuptools]
+py-modules = ["scaneval_example_dataset"]

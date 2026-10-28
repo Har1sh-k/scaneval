@@ -220,7 +220,7 @@ $$
 
 Here $d_i=\widehat p_{Ai}-\widehat p_{Bi}$ at the planned repetition count, $\sigma_d^2=\operatorname{Var}(d_i)$, $\delta$ is the minimum worthwhile difference, $\alpha$ the Type I error rate, $1-\beta$ power, and $z_q$ a standard-normal quantile. [Miller](https://arxiv.org/abs/2411.00640) discusses variance, paired comparisons, clustering, and power for model evaluations. This does not yield a universal repetition count.
 
-Actual planning: pilot diverse inputs, then simulate candidate budgets using their paired, clustered outcomes. Preserve systems, shared scans, related targets, and repetitions when resampling dependency groups. With few repositories, show project results and leave-one-project-out sensitivity; neither a bootstrap nor many repeats makes the corpus representative of all software. Predeclare interval-width/effect goals and stopping rules. Five cases per class is a configurable workload size, not evidence of adequate power.
+Actual planning: start with diverse inputs, then simulate candidate budgets using their paired, clustered outcomes. Preserve systems, shared scans, related targets, and repetitions when resampling dependency groups. With few repositories, show project results and leave-one-project-out sensitivity; neither a bootstrap nor many repeats makes the corpus representative of all software. Predeclare interval-width/effect goals and stopping rules. Five cases per class is a configurable workload size, not evidence of adequate power.
 
 ## 6. Freshness and knowledge probes
 

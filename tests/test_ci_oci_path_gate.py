@@ -159,15 +159,15 @@ def test_renames_report_both_ends_and_preserve_spaces(tmp_path):
 
 
 def test_docs_only_pull_request_skips_docker(tmp_path):
-    repo = repository(tmp_path, {"docs/PILOT.md": "base\n"})
+    repo = repository(tmp_path, {"docs/GUIDE.md": "base\n"})
     git(repo, "checkout", "-q", "-b", "topic")
-    (repo / "docs/PILOT.md").write_text("docs only\n", encoding="utf-8")
+    (repo / "docs/GUIDE.md").write_text("docs only\n", encoding="utf-8")
     commit(repo, "docs only")
     git(repo, "checkout", "-q", "main")
     git(repo, "merge", "-q", "--no-ff", "topic", "-m", "merge")
     shallow = depth_two_clone(repo, tmp_path / "docs-depth-two")
 
-    assert gate.pull_request_changed_paths(shallow) == ("docs/PILOT.md",)
+    assert gate.pull_request_changed_paths(shallow) == ("docs/GUIDE.md",)
     assert gate.should_run_oci("pull_request", shallow) is False
 
 

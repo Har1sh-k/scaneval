@@ -19,7 +19,7 @@ import pytest
 
 from scaneval.adapters.base import Adapter, AdapterError, NativeOutcome
 from scaneval.cli import main
-from scaneval.contracts import canonical_json, canonical_sha256, load_document
+from scaneval.contracts import canonical_json, canonical_sha256, load_document, pack_anchor_digest, validate_document
 
 
 VULNERABLE = "import subprocess\n\n\ndef run(cmd):\n    return subprocess.run(cmd, shell=True)\n"
@@ -155,6 +155,22 @@ def test_add_snapshot_never_records_a_verified_license_and_refuses_a_duplicate(t
     code, _, err = cli(capsys, *snapshot_argv(pack, repo, commit))
     assert code == 2 and "already exists" in err
     assert len(read_pack(pack)["snapshots"]) == 1
+
+
+@pytest.mark.parametrize("language", ["java", "ruby"])
+def test_additional_corpus_languages_round_trip_through_cli_and_pack_versions(tmp_path, capsys, upstream, language):
+    repo, commit = upstream
+    pack = tmp_path / "pack.json"
+    assert main(init_argv(pack)) == 0
+    args = snapshot_argv(pack, repo, commit)
+    args[args.index("--language") + 1] = language
+    code, _, err = cli(capsys, *args)
+    assert code == 0, err
+    document = load_document(pack, "case-pack")
+    assert document["snapshots"][0]["languages"] == [language]
+    document["schema_version"] = "2.1"
+    document["anchor_sha256"] = pack_anchor_digest(document)
+    validate_document("case-pack", document)
 
 
 def test_every_import_produces_an_unapproved_draft_with_recorded_provenance(tmp_path, capsys, upstream):

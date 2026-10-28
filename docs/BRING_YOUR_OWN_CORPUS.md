@@ -4,6 +4,11 @@ This guide documents the organization-owned case pack path as the code implement
 package version `2.0.0a1`. It is the documentation deliverable named in
 [design decisions section 9](DESIGN_DECISIONS.md#9-bring-your-own-test-cases).
 
+For static CVE labels without HITL, use the [machine-review commands](../corpus/diverse/README.md#machine-review-without-hitl)
+and [CVE review skill](../skills/cve-corpus-review/SKILL.md). They create a separate evidence-bound
+machine assessment. The human approval and admission commands documented here remain available
+for that reporting track; they are not prerequisites for machine label review or draft scan execution.
+
 Examples use a throwaway pack under `/private/tmp/byoc` with a local Git repository as its
 snapshot source. Substitute your own paths and commit IDs. Where the design asks for something
 the code does not do yet, the gap is stated in the section it belongs to. Section 9 collects
@@ -123,7 +128,14 @@ $SB corpus add-snapshot "$BYOC/pack.json" \
 Added vulnerable snapshot reporting-main at 8cfdba14ed72; license verified: false
 ```
 
-`--language` is repeatable and accepts `python`, `typescript`, `javascript`, `go`, `rust`.
+`--language` is repeatable and accepts `python`, `typescript`, `javascript`, `go`, `rust`, `java`, `ruby`.
+These are corpus metadata values; each adapter separately declares the languages it can run.
+Case records may also carry optional `severity` metadata: a published CVSS base `level`, `score`,
+`cvss_version`, `vector`, `source` URL, `source_kind`, `retrieved` date and explanatory `note`.
+This metadata is bound by the pack anchor and summarized by `corpus validate`; missing ratings
+are counted as unrated. The contract checks the score band and vector-version agreement, not the
+full CVSS calculation. Preserve source disagreements and state a consistent source-selection
+policy, as the [current corpus does](../corpus/diverse/README.md#severity-distribution).
 `--workload` accepts `conventional_application`, `conventional_automation`,
 `ai_assisted_application`, `agentic_application`. `--component-role` accepts `application`,
 `library_sdk`, `infrastructure`. `--role` accepts `vulnerable` (the default), `fixed`, `ordinary`.
@@ -441,7 +453,7 @@ admission before evaluation, enforce it by checking the pack, not by relying on 
 | `inputs[].blinding_map` | 2.1 | Path to the reviewed transformation map, relative to the configuration file. Required exactly for `metadata_blinded` and `identity_reduced`. |
 | `systems[].system_id` | yes | Matches `^[A-Za-z0-9][A-Za-z0-9._-]*$`. |
 | `systems[].adapter` | yes | `semgrep`, `llm-harness`, or `deepsec` in this build. |
-| `systems[].config` | yes | Adapter configuration. For `semgrep` this pins a rules repository by url, commit, and paths; for `deepsec` it names the installed workspace and the model. See the [example configuration](../corpus/pilot/run-deepsec.json). |
+| `systems[].config` | yes | Adapter configuration. For `semgrep` this pins a rules repository by url, commit, and paths; for `deepsec` it names the installed workspace and the model. See the [adapter descriptions](INITIAL_BUILD.md#adapters). |
 | `systems[].model_id`, `model_revision` | no | Recorded in the scan request and the execution record. |
 | `systems[].network_policy` | no | Overrides the run-level policy for this system. |
 | `systems[].execution` | no, 2.1 | `{"backend": "local"}` by default. A system configured for another backend is recorded as skipped, with the reason, rather than run without it. |

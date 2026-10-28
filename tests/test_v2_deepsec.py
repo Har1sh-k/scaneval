@@ -63,7 +63,6 @@ from scaneval.scoring import observe, score
 
 ROOT = Path(__file__).resolve().parents[1]
 CAPTURE_MATRIX = ROOT / "tests" / "fixtures" / "deepsec-capture-matrix.json"
-RUN_CONFIG = ROOT / "corpus" / "pilot" / "run-deepsec.json"
 CLOCK = lambda: datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)  # noqa: E731
 
 # A fake ``deepsec`` executable. It writes the records the real one writes and reads a control
@@ -1296,40 +1295,6 @@ def test_capture_status_refuses_a_trace_mode_no_run_can_have():
         capture_status("verbose", transcripts_found=0, sessions=0, batches_failed=0)
 
 
-# --- the frozen pilot run ----------------------------------------------------------------
-
-
-def test_the_frozen_pilot_run_configuration_validates_and_names_this_adapter():
-    config = load_document(RUN_CONFIG, "run-config")
-    system = config["systems"][0]
-    assert system["adapter"] == "deepsec"
-    assert system["config"]["deepsec_root"].startswith("~/")
-    assert system["config"]["model"] == "claude-haiku-4-5"
-    assert system["config"]["limit"] == 6 and system["config"]["batch_size"] == 3
-    assert system["config"]["concurrency"] == 1 and system["config"]["max_turns"] == 60
-    assert system["config"]["thinking_level"] == "low"
-    assert config["trace_mode"] == "content"
-    assert [entry["snapshot_id"] for entry in config["inputs"]] == [
-        entry["snapshot_id"] for entry in
-        load_document(RUN_CONFIG.with_name("run-harness.json"), "run-config")["inputs"]]
-    assert config["pack"] == "pack.json"
-    joined = " ".join(config["notes"]).lower()
-    assert "cost" in joined and "estimate" in joined
-    assert "pipeline exercise" in joined
-
-
-def test_the_frozen_run_configuration_is_one_this_adapter_accepts(tmp_path):
-    """The recorded configuration must survive the adapter's own validation, not just a schema."""
-    config = load_document(RUN_CONFIG, "run-config")
-    root = fake_deepsec_root(tmp_path)
-    system = dict(config["systems"][0]["config"])
-    system["deepsec_root"] = str(root)
-    resolved = settings(SystemSpec("pilot", "deepsec", system))
-    assert resolved.model == "claude-haiku-4-5" and resolved.thinking_level == "low"
-    assert resolved.limit == 6 and resolved.batch_size == 3 and resolved.max_turns == 60
-    assert resolved.projects_dir == Path("~/.claude/projects").expanduser()
-
-
 # --- reads of the record tree -------------------------------------------------------------
 
 
@@ -1970,13 +1935,6 @@ def test_an_export_finding_that_was_lost_makes_finding_submitted_partial(tmp_pat
     assert result["status"] == "partial" and result["error"]["code"] == "import_loss"
     assert execution["capture"]["finding_submitted"] == "partial"
     assert execution["capture"]["finding_candidate"] == "complete", "the records were all read"
-
-
-def test_the_pilot_notes_say_the_limited_run_is_recorded_as_partial():
-    """The frozen run is deliberately limited, so its own notes must not surprise a reader."""
-    config = load_document(RUN_CONFIG, "run-config")
-    joined = " ".join(config["notes"])
-    assert "scope_incomplete" in joined and "bundles_resolved false" in joined
 
 
 # --- a transcript that exists is not a transcript that was read --------------------------

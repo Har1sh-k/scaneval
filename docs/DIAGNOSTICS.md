@@ -245,7 +245,7 @@ locations, which the evaluator already holds.
 
 ```bash
 scaneval diagnose context-coverage <run>/invocations/<name>/
-scaneval diagnose context-coverage <run>/invocations/<name>/ --pack ~/corpus/pilot/pack.json
+scaneval diagnose context-coverage <run>/invocations/<name>/ --pack corpus/diverse/pack.json
 scaneval diagnose context-coverage <run>/invocations/<name>/ --out coverage.json
 ```
 
