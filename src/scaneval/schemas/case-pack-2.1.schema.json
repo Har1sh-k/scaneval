@@ -246,7 +246,9 @@
               "typescript",
               "javascript",
               "go",
-              "rust"
+              "rust",
+              "java",
+              "ruby"
             ]
           }
         },
@@ -922,6 +924,9 @@
           "items": {
             "type": "string"
           }
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
         }
       }
     },
@@ -1014,6 +1019,154 @@
           "type": "string"
         }
       }
+    },
+    "severity": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Published CVSS base severity, with its source and version. This is corpus stratification metadata, not a scanner score, exploitability proof, or admission decision. Preserve source disagreements in note; never infer severity from the vulnerability kind.",
+      "required": [
+        "level",
+        "score",
+        "cvss_version",
+        "vector",
+        "source",
+        "source_kind",
+        "retrieved",
+        "note"
+      ],
+      "properties": {
+        "level": {
+          "enum": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "cvss_version": {
+          "enum": [
+            "3.0",
+            "3.1",
+            "4.0"
+          ]
+        },
+        "vector": {
+          "type": "string",
+          "pattern": "^CVSS:(3\\.[01]|4\\.0)/"
+        },
+        "source": {
+          "type": "string",
+          "pattern": "^https?://"
+        },
+        "source_kind": {
+          "enum": [
+            "cna_cvss",
+            "vendor_cvss",
+            "github_reviewed_cvss"
+          ]
+        },
+        "retrieved": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "level": {
+              "const": "none"
+            },
+            "score": {
+              "const": 0
+            }
+          }
+        },
+        {
+          "properties": {
+            "level": {
+              "const": "low"
+            },
+            "score": {
+              "minimum": 0.1,
+              "maximum": 3.9
+            }
+          }
+        },
+        {
+          "properties": {
+            "level": {
+              "const": "medium"
+            },
+            "score": {
+              "minimum": 4,
+              "maximum": 6.9
+            }
+          }
+        },
+        {
+          "properties": {
+            "level": {
+              "const": "high"
+            },
+            "score": {
+              "minimum": 7,
+              "maximum": 8.9
+            }
+          }
+        },
+        {
+          "properties": {
+            "level": {
+              "const": "critical"
+            },
+            "score": {
+              "minimum": 9,
+              "maximum": 10
+            }
+          }
+        }
+      ],
+      "anyOf": [
+        {
+          "properties": {
+            "cvss_version": {
+              "const": "3.0"
+            },
+            "vector": {
+              "pattern": "^CVSS:3\\.0/"
+            }
+          }
+        },
+        {
+          "properties": {
+            "cvss_version": {
+              "const": "3.1"
+            },
+            "vector": {
+              "pattern": "^CVSS:3\\.1/"
+            }
+          }
+        },
+        {
+          "properties": {
+            "cvss_version": {
+              "const": "4.0"
+            },
+            "vector": {
+              "pattern": "^CVSS:4\\.0/"
+            }
+          }
+        }
+      ]
     }
   }
 }

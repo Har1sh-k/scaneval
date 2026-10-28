@@ -1519,6 +1519,11 @@ def pack_summary(pack: dict) -> dict:
     return {
         "namespace": pack["namespace"], "pack_id": pack["pack_id"], "version": pack["version"], "status": pack["status"],
         "snapshots": len(pack["snapshots"]), "cases": len(pack["cases"]),
+        "severity_counts": {
+            level: sum(1 for case in pack["cases"] if case.get("severity", {}).get("level") == level)
+            for level in ("critical", "high", "medium", "low", "none")
+        },
+        "severity_unrated": sum(1 for case in pack["cases"] if "severity" not in case),
         "review_states": {state: sum(1 for c in pack["cases"] if c["validation"]["review_state"] == state)
                           for state in ("draft", "mechanically_checked", "human_approved")},
         "dispositions": {value: sum(1 for c in pack["cases"] if c["disposition"]["value"] == value)

@@ -1,0 +1,199 @@
+{
+  "imported_datasets": [
+    {
+      "annotation_warnings": 1,
+      "annotations": {
+        "negative": 639,
+        "positive": 1506
+      },
+      "cases": 200,
+      "cves": 0,
+      "dataset_id": "aacr-bench",
+      "dataset_sha256": "sha256:ef72f3b730077a5cd465d8761e7a56fb802153d0d4c94fe7d376fd293873faff",
+      "label_authority": "publisher-supplied; importing does not independently validate labels",
+      "languages": [
+        "c",
+        "cpp",
+        "csharp",
+        "go",
+        "java",
+        "javascript",
+        "php",
+        "python",
+        "rust",
+        "typescript"
+      ],
+      "mode": "pr-review",
+      "positive_categories": {
+        "Code Defect": 710,
+        "Maintainability and Readability": 626,
+        "Performance": 117,
+        "Security Vulnerability": 53
+      },
+      "positive_severity": {
+        "unspecified": 1506
+      },
+      "repositories": 50,
+      "source": {
+        "adapter_version": "1.0",
+        "label_authority": "upstream publisher",
+        "license": "Apache-2.0",
+        "name": "alibaba/aacr-bench",
+        "repository_url": "https://github.com/alibaba/aacr-bench",
+        "revision": "ee9d7fef70ef31acea2ff7ae316ce0a9575fe4df",
+        "source_lock_sha256": "sha256:a5d330caa125163374b2b23ba615bd6b681a4ab11a213e8f42efa0855a6aef6f"
+      },
+      "source_code_materialized": false,
+      "tasks": 200
+    },
+    {
+      "annotation_warnings": 0,
+      "annotations": {
+        "negative": 2009,
+        "positive": 2623
+      },
+      "cases": 219,
+      "cves": 0,
+      "dataset_id": "reviewbench",
+      "dataset_sha256": "sha256:5dd77a9a68fa3ba96aae649c8c5465b3613096db916cc675671c61b2b082d6b6",
+      "label_authority": "publisher-supplied; importing does not independently validate labels",
+      "languages": [
+        "c",
+        "cpp",
+        "csharp",
+        "dart",
+        "go",
+        "go template",
+        "hcl",
+        "java",
+        "javascript",
+        "jupyter notebook",
+        "kotlin",
+        "php",
+        "powershell",
+        "python",
+        "ruby",
+        "rust",
+        "shell",
+        "swift",
+        "typescript",
+        "unknown"
+      ],
+      "mode": "pr-review",
+      "positive_categories": {
+        "accessibility": 57,
+        "api-architecture": 81,
+        "correctness": 1068,
+        "documentation": 306,
+        "maintainability": 365,
+        "performance": 63,
+        "reliability": 362,
+        "security": 98,
+        "testing": 223
+      },
+      "positive_severity": {
+        "high": 181,
+        "low": 1551,
+        "medium": 891
+      },
+      "repositories": 187,
+      "source": {
+        "adapter_version": "1.0",
+        "label_authority": "upstream publisher",
+        "license": "MIT",
+        "name": "review-bench/ReviewBench",
+        "repository_url": "https://github.com/review-bench/ReviewBench",
+        "revision": "9fd1c9bb1f3a2e1e6dbbd2a226a47c82b6c90e87",
+        "source_lock_sha256": "sha256:906c2b2139c84c6970aafea7e6e14086224415e2a06c23f5d6cc8a08b2c44968"
+      },
+      "source_code_materialized": false,
+      "tasks": 219
+    },
+    {
+      "annotation_warnings": 0,
+      "annotations": {
+        "positive": 173
+      },
+      "cases": 50,
+      "cves": 0,
+      "dataset_id": "martian",
+      "dataset_sha256": "sha256:08d06f34d3a26d7168cd29a555ff3701db21c185c2e22a644ef35567cc657654",
+      "label_authority": "publisher-supplied; importing does not independently validate labels",
+      "languages": [
+        "go",
+        "java",
+        "python",
+        "ruby",
+        "typescript"
+      ],
+      "mode": "pr-review",
+      "positive_categories": {
+        "api": 13,
+        "bug": 94,
+        "concurrency": 14,
+        "data": 7,
+        "doc_defect": 9,
+        "perf": 6,
+        "security": 11,
+        "speculative": 5,
+        "style": 10,
+        "test_gap": 4
+      },
+      "positive_severity": {
+        "critical": 12,
+        "high": 54,
+        "low": 46,
+        "medium": 61
+      },
+      "repositories": 7,
+      "source": {
+        "adapter_version": "1.0",
+        "label_authority": "upstream publisher",
+        "license": "MIT",
+        "name": "withmartian/code-review-benchmark",
+        "repository_url": "https://github.com/withmartian/code-review-benchmark",
+        "revision": "e616e849755441da38f18bf3adba2c9583b03803",
+        "source_lock_sha256": "sha256:d9da6400cd3b59d3fc3e714fb42e196c701aa73ff43efd3b8c578f8f77c01364"
+      },
+      "source_code_materialized": false,
+      "tasks": 50
+    },
+    {
+      "annotation_warnings": 2,
+      "annotations": {
+        "fixed-control": 223,
+        "positive": 223
+      },
+      "cases": 223,
+      "cves": 223,
+      "dataset_id": "openssf",
+      "dataset_sha256": "sha256:b5866e3b3cf13d8342c84531910067da89d610e92085bdd59d8df599911319ab",
+      "label_authority": "publisher-supplied; importing does not independently validate labels",
+      "languages": [
+        "javascript",
+        "typescript"
+      ],
+      "mode": "cve-detection",
+      "positive_categories": {
+        "security": 223
+      },
+      "positive_severity": {
+        "unspecified": 223
+      },
+      "repositories": 186,
+      "source": {
+        "adapter_version": "1.0",
+        "label_authority": "upstream publisher",
+        "license": "MIT",
+        "name": "ossf-cve-benchmark/ossf-cve-benchmark",
+        "repository_url": "https://github.com/ossf-cve-benchmark/ossf-cve-benchmark",
+        "revision": "91c59fd54b2b768c0f310bb0027d2ac59cdf74d4",
+        "source_lock_sha256": "sha256:b3aa88282b83b93573a83b68de6348bf68cf8ea885722a74bc9940a032486740"
+      },
+      "source_code_materialized": false,
+      "tasks": 446
+    }
+  ],
+  "scanner_runs": 0,
+  "source_code_materialized": false
+}

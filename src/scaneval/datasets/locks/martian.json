@@ -1,0 +1,522 @@
+{
+  "repository": "withmartian/code-review-benchmark",
+  "revision": "e616e849755441da38f18bf3adba2c9583b03803",
+  "retrieved_at": "2026-10-22T20:07:13.364367+00:00",
+  "files": [
+    {
+      "path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/withmartian/code-review-benchmark/e616e849755441da38f18bf3adba2c9583b03803/LICENSE",
+      "bytes": 1082,
+      "sha256": "sha256:3d0f7aacf358c3578c1e541bdd297b675d76805e6bf3dddaf89b6d2b45e3afad",
+      "git_blob": "d7da7e66f99f7c7c6c92346a4e13bd41f2ae4cc0"
+    },
+    {
+      "path": "README.md",
+      "url": "https://raw.githubusercontent.com/withmartian/code-review-benchmark/e616e849755441da38f18bf3adba2c9583b03803/README.md",
+      "bytes": 11549,
+      "sha256": "sha256:4eca16de461cf4dad0cf09f51595b19c48ad81be60bb63b9d4874b8bc5e99bf9",
+      "git_blob": "333ab571e122da0c431519db220efff2901db47f"
+    },
+    {
+      "path": "offline/README.md",
+      "url": "https://raw.githubusercontent.com/withmartian/code-review-benchmark/e616e849755441da38f18bf3adba2c9583b03803/offline/README.md",
+      "bytes": 12025,
+      "sha256": "sha256:53ec48dc3b4751455491d80ab9f2247a2afb8bbfeb52512cd92a3cfb47ac6a32",
+      "git_blob": "bf0efd3ec4677ecad8e4e7cdc988d81e146ac873"
+    },
+    {
+      "path": "offline/golden_comments/cal_dot_com.json",
+      "url": "https://raw.githubusercontent.com/withmartian/code-review-benchmark/e616e849755441da38f18bf3adba2c9583b03803/offline/golden_comments/cal_dot_com.json",
+      "bytes": 15809,
+      "sha256": "sha256:f8d88e88392b4349c418ea844fce5d19b29b48c5ebc34a1501d849f126478750",
+      "git_blob": "1db1048b48f66b8a3d6b7e1e76a4a1f1fc38d9f0"
+    },
+    {
+      "path": "offline/golden_comments/discourse.json",
+      "url": "https://raw.githubusercontent.com/withmartian/code-review-benchmark/e616e849755441da38f18bf3adba2c9583b03803/offline/golden_comments/discourse.json",
+      "bytes": 16236,
+      "sha256": "sha256:d5d8d02f32823d7196333f463d6a154b3ac55da93ef3bb067464dff88918c854",
+      "git_blob": "2bf9f03dd324ccdb1e49865ce83589e2a5fdb15f"
+    },
+    {
+      "path": "offline/golden_comments/grafana.json",
+      "url": "https://raw.githubusercontent.com/withmartian/code-review-benchmark/e616e849755441da38f18bf3adba2c9583b03803/offline/golden_comments/grafana.json",
+      "bytes": 10131,
+      "sha256": "sha256:beeb065e0127232b663a68d174be5223ef0cf6068541306cd30e4bac72bab04b",
+      "git_blob": "c3140d341933f0631f675a49e6eeb863c599b3e5"
+    },
+    {
+      "path": "offline/golden_comments/keycloak.json",
+      "url": "https://raw.githubusercontent.com/withmartian/code-review-benchmark/e616e849755441da38f18bf3adba2c9583b03803/offline/golden_comments/keycloak.json",
+      "bytes": 11894,
+      "sha256": "sha256:aa89db36f36fe61bf86d367e8b07dfc9aec291a08cdbf3ef4c4d5bf5305b413d",
+      "git_blob": "1a826cbb43e7888b4d42ca2a312fc0b88e72f446"
+    },
+    {
+      "path": "offline/golden_comments/sentry.json",
+      "url": "https://raw.githubusercontent.com/withmartian/code-review-benchmark/e616e849755441da38f18bf3adba2c9583b03803/offline/golden_comments/sentry.json",
+      "bytes": 12607,
+      "sha256": "sha256:02342962b0d11a9ba190401e066a2c4e5d58c5ca561ca10d812194069b4a7d01",
+      "git_blob": "397d1321550ce26ac1b133d5b9b48ca561e25cd9"
+    }
+  ],
+  "license": "MIT",
+  "dataset_id": "martian",
+  "mode": "pr-review",
+  "supplemental_pins": {
+    "origin": "GitHub pull request API, frozen by ScanEval; not supplied in Martian golden comments",
+    "retrieved_at": "2026-10-22T20:09:43.739463+00:00",
+    "pull_requests": [
+      {
+        "pr_url": "https://github.com/calcom/cal.com/pull/8087",
+        "resolved_pr_url": "https://github.com/calcom/cal.diy/pull/8087",
+        "base_commit": "ba9688a04a8398c9a8332ee7061bfae2f2efd524",
+        "head_commit": "820d7fa87e0c824c5dee8082a33efadb1a2566f7",
+        "api_url": "https://api.github.com/repos/calcom/cal.diy/pulls/8087",
+        "response_sha256": "sha256:5605913c8ee713e4c5fdacbcedab838e3e423d88531c2417d0964b6e46d8e4f6",
+        "base_repository_url": "https://github.com/calcom/cal.diy.git"
+      },
+      {
+        "pr_url": "https://github.com/calcom/cal.com/pull/10600",
+        "resolved_pr_url": "https://github.com/calcom/cal.diy/pull/10600",
+        "base_commit": "efa6d464a38e60ceeeb88f40668c1c4ac4bfaf54",
+        "head_commit": "54486a059cd2032042189bb565646ba4e0f6bd61",
+        "api_url": "https://api.github.com/repos/calcom/cal.diy/pulls/10600",
+        "response_sha256": "sha256:1290fb0aa6e2799bb105c36d6f98969dcc36ae1e62e37e0fba80d3395e56e89b",
+        "base_repository_url": "https://github.com/calcom/cal.diy.git"
+      },
+      {
+        "pr_url": "https://github.com/calcom/cal.com/pull/10967",
+        "resolved_pr_url": "https://github.com/calcom/cal.diy/pull/10967",
+        "base_commit": "a308075bc39b77ed7059b0cae9d443d669a7bf98",
+        "head_commit": "de628295646d0848226618108a52f2f1e5d04ac0",
+        "api_url": "https://api.github.com/repos/calcom/cal.diy/pulls/10967",
+        "response_sha256": "sha256:95b3eceb6f5e5a66eed91f1e90509927e27dcf3d897d307ec12897c38a4ee54c",
+        "base_repository_url": "https://github.com/calcom/cal.diy.git"
+      },
+      {
+        "pr_url": "https://github.com/calcom/cal.com/pull/22345",
+        "resolved_pr_url": "https://github.com/calcom/cal.diy/pull/22345",
+        "base_commit": "c9a47dd0cebd121ff73f24e1f8c1829579daf8e3",
+        "head_commit": "da09bc0808e7c6df1bc10e00d5acf764d94c7cc7",
+        "api_url": "https://api.github.com/repos/calcom/cal.diy/pulls/22345",
+        "response_sha256": "sha256:525ba0c8f1d9b79ae9d98d46fba0fec4dfc80250198ce39cfea1424c24f10b9c",
+        "base_repository_url": "https://github.com/calcom/cal.diy.git"
+      },
+      {
+        "pr_url": "https://github.com/calcom/cal.com/pull/7232",
+        "resolved_pr_url": "https://github.com/calcom/cal.diy/pull/7232",
+        "base_commit": "d1440bb5d2f2190ad7ae1d26c165f970055b5370",
+        "head_commit": "6048e2a86b50e81e1e3b1b467dfea5a895add3dc",
+        "api_url": "https://api.github.com/repos/calcom/cal.diy/pulls/7232",
+        "response_sha256": "sha256:05cf032dc79155a35739882ee58907c9af3e651e7c20d8726f5eb26391acb732",
+        "base_repository_url": "https://github.com/calcom/cal.diy.git"
+      },
+      {
+        "pr_url": "https://github.com/calcom/cal.com/pull/8330",
+        "resolved_pr_url": "https://github.com/calcom/cal.diy/pull/8330",
+        "base_commit": "93cb21f55a2a40d9116c014741f5679fbeff5fd9",
+        "head_commit": "ee38fd295fd294b9fc787eba482bde24bbfea69b",
+        "api_url": "https://api.github.com/repos/calcom/cal.diy/pulls/8330",
+        "response_sha256": "sha256:4c8fa496a8c77914ba3ff83899e7e593c919322054628ee058427fd67a6e7c3b",
+        "base_repository_url": "https://github.com/calcom/cal.diy.git"
+      },
+      {
+        "pr_url": "https://github.com/calcom/cal.com/pull/11059",
+        "resolved_pr_url": "https://github.com/calcom/cal.diy/pull/11059",
+        "base_commit": "bc89fe00ea84d20bedcec782f0701b9711dc8201",
+        "head_commit": "9fde0e906897cc0f4f71793f647dd629faba3317",
+        "api_url": "https://api.github.com/repos/calcom/cal.diy/pulls/11059",
+        "response_sha256": "sha256:2ef2297064ac041ae2dd7f457348f567abd6cd6d190444cbddc3f6fc2f735586",
+        "base_repository_url": "https://github.com/calcom/cal.diy.git"
+      },
+      {
+        "pr_url": "https://github.com/calcom/cal.com/pull/14943",
+        "resolved_pr_url": "https://github.com/calcom/cal.diy/pull/14943",
+        "base_commit": "917c7b0764f4c6bfdca95db2c5f73dbfdbe11757",
+        "head_commit": "c790227e0cda780e6fea9bb03af27948d9e286b9",
+        "api_url": "https://api.github.com/repos/calcom/cal.diy/pulls/14943",
+        "response_sha256": "sha256:0c3d3bcf36a68427bb9bf681e1764d4605590260c2effd8489151b78428aea2d",
+        "base_repository_url": "https://github.com/calcom/cal.diy.git"
+      },
+      {
+        "pr_url": "https://github.com/calcom/cal.com/pull/14740",
+        "resolved_pr_url": "https://github.com/calcom/cal.diy/pull/14740",
+        "base_commit": "b004587262e8221083bafbe9a0c515e7becaa7b3",
+        "head_commit": "92f44dcea7ff19e9123a30c63c167a2938df5a55",
+        "api_url": "https://api.github.com/repos/calcom/cal.diy/pulls/14740",
+        "response_sha256": "sha256:8661d3d96b501694c9454b85d025a8b05e65b403b099615f590e22c550c71aad",
+        "base_repository_url": "https://github.com/calcom/cal.diy.git"
+      },
+      {
+        "pr_url": "https://github.com/calcom/cal.com/pull/22532",
+        "resolved_pr_url": "https://github.com/calcom/cal.diy/pull/22532",
+        "base_commit": "30a92a4d66b417f7c19dee2b343099adc6e88aa6",
+        "head_commit": "5fd11f9faa79c4aefd39975d1b0e963e5034f793",
+        "api_url": "https://api.github.com/repos/calcom/cal.diy/pulls/22532",
+        "response_sha256": "sha256:ab1ad2009d6407cd4df6508a28e70884d5a1c8f43575bbd838f2009923203441",
+        "base_repository_url": "https://github.com/calcom/cal.diy.git"
+      },
+      {
+        "pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/1",
+        "resolved_pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/1",
+        "base_commit": "3f71fa15c93bb0b751bb92abae1b5dc9a21bd4ca",
+        "head_commit": "ffbaf8c54269df2ce510de91245760fddce09896",
+        "api_url": "https://api.github.com/repos/ai-code-review-evaluation/discourse-graphite/pulls/1",
+        "response_sha256": "sha256:0ab1270e3aaf398ae8c1a4531fe8b3946550a6eb0cbfa7bc14f4d81f3151dfec",
+        "base_repository_url": "https://github.com/ai-code-review-evaluation/discourse-graphite.git"
+      },
+      {
+        "pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/2",
+        "resolved_pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/2",
+        "base_commit": "56abd247e1829cb6de82dfcc8ce04deb5f0d1e91",
+        "head_commit": "6669a2d94d76eea3b99b8c476d12b1eb66726b07",
+        "api_url": "https://api.github.com/repos/ai-code-review-evaluation/discourse-graphite/pulls/2",
+        "response_sha256": "sha256:a3d325e01dfae8641c6beb004f0cdd8aaa40575475f080a508c035fbb115048a",
+        "base_repository_url": "https://github.com/ai-code-review-evaluation/discourse-graphite.git"
+      },
+      {
+        "pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/3",
+        "resolved_pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/3",
+        "base_commit": "e25638dab0d4b98f99c8fe8976ccaae8f4fb9db3",
+        "head_commit": "5f8a130277dbddc95d133cd2832be639baf89213",
+        "api_url": "https://api.github.com/repos/ai-code-review-evaluation/discourse-graphite/pulls/3",
+        "response_sha256": "sha256:4bc44a2962e497b174f772d573fbcc0030be1a98ab43ea33e4a5d56ed0f97cbf",
+        "base_repository_url": "https://github.com/ai-code-review-evaluation/discourse-graphite.git"
+      },
+      {
+        "pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/4",
+        "resolved_pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/4",
+        "base_commit": "62db063e1e1abe691313ab42682a68f796d63769",
+        "head_commit": "4f8aed295a29954023b2849c060ef4fb299d1b5d",
+        "api_url": "https://api.github.com/repos/ai-code-review-evaluation/discourse-graphite/pulls/4",
+        "response_sha256": "sha256:85d2c36e9d3356b124aa27232c1d83601a5a12cea9f8387cd0b518be7c8b39ba",
+        "base_repository_url": "https://github.com/ai-code-review-evaluation/discourse-graphite.git"
+      },
+      {
+        "pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/5",
+        "resolved_pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/5",
+        "base_commit": "98fa098e6fade3097a11fe7f99a98a4e6ffb4728",
+        "head_commit": "5b229316ee4c661836ed1161139692a3e8527444",
+        "api_url": "https://api.github.com/repos/ai-code-review-evaluation/discourse-graphite/pulls/5",
+        "response_sha256": "sha256:b5674ca12d42705930425d1d68982626249e511afdff05fdcb5dfdf5c1647cef",
+        "base_repository_url": "https://github.com/ai-code-review-evaluation/discourse-graphite.git"
+      },
+      {
+        "pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/6",
+        "resolved_pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/6",
+        "base_commit": "7a5fbae060bd0d3e29f3a4b5c6f2bfd8b2914dc7",
+        "head_commit": "267d8be1f556ed59639ced396c885bb44586da19",
+        "api_url": "https://api.github.com/repos/ai-code-review-evaluation/discourse-graphite/pulls/6",
+        "response_sha256": "sha256:c9f224fc60a67043b9094778eba7ff3881020894c671a7ef2814286b3bb11ea5",
+        "base_repository_url": "https://github.com/ai-code-review-evaluation/discourse-graphite.git"
+      },
+      {
+        "pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/7",
+        "resolved_pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/7",
+        "base_commit": "7554b5e3c458dc79b591d5e874e79ab10cf30c2f",
+        "head_commit": "d38c4d5f7443223c81529c22470293771baf9f38",
+        "api_url": "https://api.github.com/repos/ai-code-review-evaluation/discourse-graphite/pulls/7",
+        "response_sha256": "sha256:e6261dbe20cc9f498af5b8003dfd14ac434b3110d0e90fbcb3bf9dcecbe1e7cf",
+        "base_repository_url": "https://github.com/ai-code-review-evaluation/discourse-graphite.git"
+      },
+      {
+        "pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/8",
+        "resolved_pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/8",
+        "base_commit": "4975fc28903a84418f546b2809370f19abf10e08",
+        "head_commit": "060cda77729cb1c4a827560e09e89a7b22078ba9",
+        "api_url": "https://api.github.com/repos/ai-code-review-evaluation/discourse-graphite/pulls/8",
+        "response_sha256": "sha256:5f08dcd51fd01deca4a5b932c2c3461998c6886139805cf4154a0b245aaeb274",
+        "base_repository_url": "https://github.com/ai-code-review-evaluation/discourse-graphite.git"
+      },
+      {
+        "pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/9",
+        "resolved_pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/9",
+        "base_commit": "728845d008f06828630a632e5c7d67e11bf15deb",
+        "head_commit": "ecfa17b5a79dfdc91e7a4d50b42ae78a35d0a293",
+        "api_url": "https://api.github.com/repos/ai-code-review-evaluation/discourse-graphite/pulls/9",
+        "response_sha256": "sha256:a4367b85f2fb20ad835bff457d280c273a4b5cafc3ccecf102f86db97b2ca8df",
+        "base_repository_url": "https://github.com/ai-code-review-evaluation/discourse-graphite.git"
+      },
+      {
+        "pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/10",
+        "resolved_pr_url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/10",
+        "base_commit": "913c3d6f636d02b3dd6c2c022ca1af2bec95d752",
+        "head_commit": "d1c69189f3c90ecf56013a8da904da9bff9a8e19",
+        "api_url": "https://api.github.com/repos/ai-code-review-evaluation/discourse-graphite/pulls/10",
+        "response_sha256": "sha256:a5182d5be5bab983dbc36c0dcdae3f9934f297694fec94ee7f408e1bf03b4f7b",
+        "base_repository_url": "https://github.com/ai-code-review-evaluation/discourse-graphite.git"
+      },
+      {
+        "pr_url": "https://github.com/grafana/grafana/pull/79265",
+        "resolved_pr_url": "https://github.com/grafana/grafana/pull/79265",
+        "base_commit": "50f4e78a39914711d0d231a501ba215becf17ebc",
+        "head_commit": "bbd8c507cdf56f6b884373809e0b24abd4a2353d",
+        "api_url": "https://api.github.com/repos/grafana/grafana/pulls/79265",
+        "response_sha256": "sha256:bec5fab510091848362556711a85ae3bbb76e17b7eea76e26bbf3e0fc0334852",
+        "base_repository_url": "https://github.com/grafana/grafana.git"
+      },
+      {
+        "pr_url": "https://github.com/grafana/grafana/pull/103633",
+        "resolved_pr_url": "https://github.com/grafana/grafana/pull/103633",
+        "base_commit": "5634ca44f799a82161f0401dadc286452f3bdbf8",
+        "head_commit": "7562f37880367411a62304bcdcdc178bced23906",
+        "api_url": "https://api.github.com/repos/grafana/grafana/pulls/103633",
+        "response_sha256": "sha256:72e9a8c80934130068befd873b587c0747d9173c45fbebfc082398841513de9c",
+        "base_repository_url": "https://github.com/grafana/grafana.git"
+      },
+      {
+        "pr_url": "https://github.com/grafana/grafana/pull/76186",
+        "resolved_pr_url": "https://github.com/grafana/grafana/pull/76186",
+        "base_commit": "58ba11ecbd60863e2bfc6e32f0399ed4feb3927a",
+        "head_commit": "303cdc2caf256aa5df660611120c2e3f7392365d",
+        "api_url": "https://api.github.com/repos/grafana/grafana/pulls/76186",
+        "response_sha256": "sha256:0818426af1e865c8e4629457ccc59a1da3d12f9c10d205a39784ac916c95f299",
+        "base_repository_url": "https://github.com/grafana/grafana.git"
+      },
+      {
+        "pr_url": "https://github.com/grafana/grafana/pull/107534",
+        "resolved_pr_url": "https://github.com/grafana/grafana/pull/107534",
+        "base_commit": "d9a8253640464014aa3662c91131278990cfb828",
+        "head_commit": "1cab4143d443c33079566f6ca36931eb8468159f",
+        "api_url": "https://api.github.com/repos/grafana/grafana/pulls/107534",
+        "response_sha256": "sha256:f7fbf3cca78a02c9ce0d5d7b4950a2de5245f6b8ef5b5b2e13331d83b8d1cf7b",
+        "base_repository_url": "https://github.com/grafana/grafana.git"
+      },
+      {
+        "pr_url": "https://github.com/grafana/grafana/pull/106778",
+        "resolved_pr_url": "https://github.com/grafana/grafana/pull/106778",
+        "base_commit": "47e5bd23163e6037fc0741068ac78930bba2769f",
+        "head_commit": "8df850371034b73dc4dd9908cc30fa09f12a1f97",
+        "api_url": "https://api.github.com/repos/grafana/grafana/pulls/106778",
+        "response_sha256": "sha256:4f2448cf9a5644bace70edeecd24e564562e4333fdd1c2204ac35b63e77e177c",
+        "base_repository_url": "https://github.com/grafana/grafana.git"
+      },
+      {
+        "pr_url": "https://github.com/grafana/grafana/pull/90045",
+        "resolved_pr_url": "https://github.com/grafana/grafana/pull/90045",
+        "base_commit": "66c4dff17e9147b11fb9b14c6ed63089a599da65",
+        "head_commit": "e369f24665ec70e1e3700f457d25ef83301d931a",
+        "api_url": "https://api.github.com/repos/grafana/grafana/pulls/90045",
+        "response_sha256": "sha256:8382b8ec48abf625854a95b86caa7a41498052a2f2d196ef33ebf4f73e5136bc",
+        "base_repository_url": "https://github.com/grafana/grafana.git"
+      },
+      {
+        "pr_url": "https://github.com/grafana/grafana/pull/80329",
+        "resolved_pr_url": "https://github.com/grafana/grafana/pull/80329",
+        "base_commit": "a886bd3c79a417a70b51509384d1f1ec3e87e96b",
+        "head_commit": "04cfa3bfd469c035ff8b35f9a66867c4e8d5dcf4",
+        "api_url": "https://api.github.com/repos/grafana/grafana/pulls/80329",
+        "response_sha256": "sha256:5334a3cc1d9aed1cc807db88d9ddeb46343cf4215a259579fd94acaffa183e0d",
+        "base_repository_url": "https://github.com/grafana/grafana.git"
+      },
+      {
+        "pr_url": "https://github.com/grafana/grafana/pull/90939",
+        "resolved_pr_url": "https://github.com/grafana/grafana/pull/90939",
+        "base_commit": "3ce1a5b0caab215346a51629b0344b90d67e9478",
+        "head_commit": "b1613e320acff00623e6efc59f00ee68c7684a97",
+        "api_url": "https://api.github.com/repos/grafana/grafana/pulls/90939",
+        "response_sha256": "sha256:3c82f4cbfaf7b76b300558e92ff5808ada2ef934e0f109ea8331a06da253a541",
+        "base_repository_url": "https://github.com/grafana/grafana.git"
+      },
+      {
+        "pr_url": "https://github.com/grafana/grafana/pull/94942",
+        "resolved_pr_url": "https://github.com/grafana/grafana/pull/94942",
+        "base_commit": "cbe1e7d63f098e306058c0fbcab2f5c30602fa7d",
+        "head_commit": "f3317b329b4eb8fd96f99dd86525bc4a22d20248",
+        "api_url": "https://api.github.com/repos/grafana/grafana/pulls/94942",
+        "response_sha256": "sha256:cf6a4057efbb67860d439b0cb5e98adb6956b9b022b04014ff48eff6970bb5d6",
+        "base_repository_url": "https://github.com/grafana/grafana.git"
+      },
+      {
+        "pr_url": "https://github.com/grafana/grafana/pull/97529",
+        "resolved_pr_url": "https://github.com/grafana/grafana/pull/97529",
+        "base_commit": "871af07203177ce59a24e742107119409274f48a",
+        "head_commit": "26fed312840cd76b766cbd2158e17a7e6c0ec548",
+        "api_url": "https://api.github.com/repos/grafana/grafana/pulls/97529",
+        "response_sha256": "sha256:c0a10e0494313144de8a50fbaa2d10d0d129ec12e6d3a454be4b25ec72683d57",
+        "base_repository_url": "https://github.com/grafana/grafana.git"
+      },
+      {
+        "pr_url": "https://github.com/ai-code-review-evaluation/keycloak-greptile/pull/1",
+        "resolved_pr_url": "https://github.com/ai-code-review-evaluation/keycloak-greptile/pull/1",
+        "base_commit": "30f804af450dec523909a52f2a4b97302d27f5cc",
+        "head_commit": "3214b188de808fdb0fff335556b686f1b0a63218",
+        "api_url": "https://api.github.com/repos/ai-code-review-evaluation/keycloak-greptile/pulls/1",
+        "response_sha256": "sha256:0250fdddff600cc9092aab3a3c81e918ed77b95baef342215cb9ce7f6ba443ec",
+        "base_repository_url": "https://github.com/ai-code-review-evaluation/keycloak-greptile.git"
+      },
+      {
+        "pr_url": "https://github.com/keycloak/keycloak/pull/32918",
+        "resolved_pr_url": "https://github.com/keycloak/keycloak/pull/32918",
+        "base_commit": "272cfc68dcc88615396ae62ed1571918e9c58ad3",
+        "head_commit": "e944e2acf1e64421860a8e827f93ad06c169621b",
+        "api_url": "https://api.github.com/repos/keycloak/keycloak/pulls/32918",
+        "response_sha256": "sha256:895644a170ae798bc3956dfbe38bf9e271ce793dd9411fc595c447c7e5d4d715",
+        "base_repository_url": "https://github.com/keycloak/keycloak.git"
+      },
+      {
+        "pr_url": "https://github.com/keycloak/keycloak/pull/33832",
+        "resolved_pr_url": "https://github.com/keycloak/keycloak/pull/33832",
+        "base_commit": "10aca5552314d6e5c9226f3c6d0107861c38c693",
+        "head_commit": "79d11c4890cc4792e3dc3535af59e4e5f7a2739d",
+        "api_url": "https://api.github.com/repos/keycloak/keycloak/pulls/33832",
+        "response_sha256": "sha256:c7421b2d1c86a4fda6a46cfe23152d5facc589160d743b00662ece4f2ef48dc3",
+        "base_repository_url": "https://github.com/keycloak/keycloak.git"
+      },
+      {
+        "pr_url": "https://github.com/keycloak/keycloak/pull/36882",
+        "resolved_pr_url": "https://github.com/keycloak/keycloak/pull/36882",
+        "base_commit": "8671f860469d6d95e54df3e13f77ebc401249489",
+        "head_commit": "62bf98939eda58f0d0a1a41a58aa6d4ecdc24dba",
+        "api_url": "https://api.github.com/repos/keycloak/keycloak/pulls/36882",
+        "response_sha256": "sha256:dc8ee00c017864e2eb9e4e3a411248f52c6a907626518e869b263eb8657860c3",
+        "base_repository_url": "https://github.com/keycloak/keycloak.git"
+      },
+      {
+        "pr_url": "https://github.com/keycloak/keycloak/pull/36880",
+        "resolved_pr_url": "https://github.com/keycloak/keycloak/pull/36880",
+        "base_commit": "b8c1cd410f4499c77a8b372decfe1718b80ccfd2",
+        "head_commit": "1950a511026d520a7329c7b6b9ee60a4af8f8b55",
+        "api_url": "https://api.github.com/repos/keycloak/keycloak/pulls/36880",
+        "response_sha256": "sha256:e64d87df5d20d37c7ed39b2afa267442a561734a7131f9dae2e3cff0ad6928ee",
+        "base_repository_url": "https://github.com/keycloak/keycloak.git"
+      },
+      {
+        "pr_url": "https://github.com/keycloak/keycloak/pull/37038",
+        "resolved_pr_url": "https://github.com/keycloak/keycloak/pull/37038",
+        "base_commit": "7ea067aae9be56cb2622bce6563864817c3dfeaf",
+        "head_commit": "7355f05e6aafe2a7acc6434fb40c686665416606",
+        "api_url": "https://api.github.com/repos/keycloak/keycloak/pulls/37038",
+        "response_sha256": "sha256:cea6a74ef75a5b7f19cce9ff63860e850dfb50aa7eb8f8747008abfa94ef4e56",
+        "base_repository_url": "https://github.com/keycloak/keycloak.git"
+      },
+      {
+        "pr_url": "https://github.com/keycloak/keycloak/pull/37429",
+        "resolved_pr_url": "https://github.com/keycloak/keycloak/pull/37429",
+        "base_commit": "f3c8e8f3487112f2c99aa78400430cce2d30be39",
+        "head_commit": "02f48f776f43734d1ac8914d3ad6a7115acdcb33",
+        "api_url": "https://api.github.com/repos/keycloak/keycloak/pulls/37429",
+        "response_sha256": "sha256:8ac172608da2e519ab321645ce796d75aed79dd586b75d4f55c78e39fc410704",
+        "base_repository_url": "https://github.com/keycloak/keycloak.git"
+      },
+      {
+        "pr_url": "https://github.com/keycloak/keycloak/pull/37634",
+        "resolved_pr_url": "https://github.com/keycloak/keycloak/pull/37634",
+        "base_commit": "c22f76867f595f0f7c327376a66a08dca01949e8",
+        "head_commit": "daffb05b5ad091d3ec09933c3c99c2b54f448696",
+        "api_url": "https://api.github.com/repos/keycloak/keycloak/pulls/37634",
+        "response_sha256": "sha256:046fa43e394eeec042ffdfd7613d9ba111251d9c27e685acd56119c27132b10a",
+        "base_repository_url": "https://github.com/keycloak/keycloak.git"
+      },
+      {
+        "pr_url": "https://github.com/keycloak/keycloak/pull/38446",
+        "resolved_pr_url": "https://github.com/keycloak/keycloak/pull/38446",
+        "base_commit": "85737f52b59aa2e3403c9b8e48acf71ccc5bfae3",
+        "head_commit": "ce2dcc537b4b1f98a335e88cfe8e0b804483252a",
+        "api_url": "https://api.github.com/repos/keycloak/keycloak/pulls/38446",
+        "response_sha256": "sha256:f0b933077d8428ea4822244270f501ed252203d36953cb0ca75fd48383382c28",
+        "base_repository_url": "https://github.com/keycloak/keycloak.git"
+      },
+      {
+        "pr_url": "https://github.com/keycloak/keycloak/pull/40940",
+        "resolved_pr_url": "https://github.com/keycloak/keycloak/pull/40940",
+        "base_commit": "c834e7473c02f11451216b3fbf355f953cfd95e9",
+        "head_commit": "4def149a50c4b9b2c24fbb753ac60fe4f4df0cac",
+        "api_url": "https://api.github.com/repos/keycloak/keycloak/pulls/40940",
+        "response_sha256": "sha256:a69e20b99a681663d5cee7f52817859907c4acb94e7801f8977c646d7097244e",
+        "base_repository_url": "https://github.com/keycloak/keycloak.git"
+      },
+      {
+        "pr_url": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/1",
+        "resolved_pr_url": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/1",
+        "base_commit": "a5d290951def84afdcc4c88d2f1f20023fc36e2a",
+        "head_commit": "8ab88145113dd23a930e23b9cbbcf8b30e4c0b17",
+        "api_url": "https://api.github.com/repos/ai-code-review-evaluation/sentry-greptile/pulls/1",
+        "response_sha256": "sha256:a902157222bb3fe62a9d11d4a3686ec65a7b397c25ab3c64338a17563a1f3da3",
+        "base_repository_url": "https://github.com/ai-code-review-evaluation/sentry-greptile.git"
+      },
+      {
+        "pr_url": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/2",
+        "resolved_pr_url": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/2",
+        "base_commit": "28e3db2520d4ea28c57b08da57b83917ba7b2e15",
+        "head_commit": "8ab88145113dd23a930e23b9cbbcf8b30e4c0b17",
+        "api_url": "https://api.github.com/repos/ai-code-review-evaluation/sentry-greptile/pulls/2",
+        "response_sha256": "sha256:1da98efb3df3957571cafe417462e29ea82895b319d8849d3da1680e518a2a71",
+        "base_repository_url": "https://github.com/ai-code-review-evaluation/sentry-greptile.git"
+      },
+      {
+        "pr_url": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/3",
+        "resolved_pr_url": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/3",
+        "base_commit": "a5d290951def84afdcc4c88d2f1f20023fc36e2a",
+        "head_commit": "6ad6fe3899f630ccf922ce7ac681147dc7987435",
+        "api_url": "https://api.github.com/repos/ai-code-review-evaluation/sentry-greptile/pulls/3",
+        "response_sha256": "sha256:351faddf1f2b7357eddf1a32f8f698287273376c6c3e862877eea09a28b239c8",
+        "base_repository_url": "https://github.com/ai-code-review-evaluation/sentry-greptile.git"
+      },
+      {
+        "pr_url": "https://github.com/getsentry/sentry/pull/67876",
+        "resolved_pr_url": "https://github.com/getsentry/sentry/pull/67876",
+        "base_commit": "344aa102e7818606e29426ebe69d5a680d8727c6",
+        "head_commit": "bb75657fc8f13923c1d7983f422290908a1e7310",
+        "api_url": "https://api.github.com/repos/getsentry/sentry/pulls/67876",
+        "response_sha256": "sha256:32ae1c13e8b653b34508c880cce9f18e0d2647280223fcd3cde3239949044591",
+        "base_repository_url": "https://github.com/getsentry/sentry.git"
+      },
+      {
+        "pr_url": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/5",
+        "resolved_pr_url": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/5",
+        "base_commit": "49a275847631e231672d01b5dcd66558c069d25b",
+        "head_commit": "ea188e2d736fd6ed27c1dba8aae63b7268e2a7a9",
+        "api_url": "https://api.github.com/repos/ai-code-review-evaluation/sentry-greptile/pulls/5",
+        "response_sha256": "sha256:cd8e982ebfd2953bb40a4c309a81c64e36883ced1f8a25bcd1bb244625a82104",
+        "base_repository_url": "https://github.com/ai-code-review-evaluation/sentry-greptile.git"
+      },
+      {
+        "pr_url": "https://github.com/getsentry/sentry/pull/93824",
+        "resolved_pr_url": "https://github.com/getsentry/sentry/pull/93824",
+        "base_commit": "de11fb0166a7244115bb066edd65ec0d6b7e365c",
+        "head_commit": "3162ad68a5c87666788b27a44eb31235025091a9",
+        "api_url": "https://api.github.com/repos/getsentry/sentry/pulls/93824",
+        "response_sha256": "sha256:f2eab706a8c8d717c568449c44fdf0202b22cad9f7be7379a0366f8291d8e371",
+        "base_repository_url": "https://github.com/getsentry/sentry.git"
+      },
+      {
+        "pr_url": "https://github.com/getsentry/sentry/pull/77754",
+        "resolved_pr_url": "https://github.com/getsentry/sentry/pull/77754",
+        "base_commit": "bb5a6837cb5b3d8d3b174e17d42ec14486ef8738",
+        "head_commit": "9501091c52ae94e8d916f79b35d21975b3f9cadb",
+        "api_url": "https://api.github.com/repos/getsentry/sentry/pulls/77754",
+        "response_sha256": "sha256:c8384fa41432444975de0a715527d155ae7d72c2f1d79bc2f97683a51ef48a4a",
+        "base_repository_url": "https://github.com/getsentry/sentry.git"
+      },
+      {
+        "pr_url": "https://github.com/getsentry/sentry/pull/80528",
+        "resolved_pr_url": "https://github.com/getsentry/sentry/pull/80528",
+        "base_commit": "0cfc28e76ddc986d2d89dd9b9f63ee916a18a5f9",
+        "head_commit": "dcdcadb771128e79259cc9eff9c70c38fc597976",
+        "api_url": "https://api.github.com/repos/getsentry/sentry/pulls/80528",
+        "response_sha256": "sha256:db766009ca4d7cb8e1c4dc14ddcd0865234b9dd6345ab427b572c80fad0a6c64",
+        "base_repository_url": "https://github.com/getsentry/sentry.git"
+      },
+      {
+        "pr_url": "https://github.com/getsentry/sentry/pull/95633",
+        "resolved_pr_url": "https://github.com/getsentry/sentry/pull/95633",
+        "base_commit": "fd358e8a388939959369f08f616e29552cdaf96e",
+        "head_commit": "9966ec5a13e331659c3ea00981f9b11b0faf821f",
+        "api_url": "https://api.github.com/repos/getsentry/sentry/pulls/95633",
+        "response_sha256": "sha256:ecd39e8b41d47fe15805519e27a54046a916b716e29159871a4290dfd84f13e4",
+        "base_repository_url": "https://github.com/getsentry/sentry.git"
+      },
+      {
+        "pr_url": "https://github.com/getsentry/sentry/pull/80168",
+        "resolved_pr_url": "https://github.com/getsentry/sentry/pull/80168",
+        "base_commit": "bdd229e3f22e307fe40b30ef99e92ff3f6723da4",
+        "head_commit": "8422030ef456e3a898415e96475b4d8ddfc7640f",
+        "api_url": "https://api.github.com/repos/getsentry/sentry/pulls/80168",
+        "response_sha256": "sha256:26c56e6b2db86c685388fadaa42998b01072fb6923eb2b5330da23c733ebd526",
+        "base_repository_url": "https://github.com/getsentry/sentry.git"
+      }
+    ]
+  }
+}
