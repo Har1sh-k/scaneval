@@ -102,8 +102,16 @@ Steps 1-3 are implemented: `config.runtime: "oci_image"` in `llm-harness`, the i
 `pi_oci_runner.mts`, `pi_open_context.mts` with `pi_open_context_tools.mjs`, and the diagnostic
 `pi_synthetic_provider.mts` (see [open context](../OPEN_CONTEXT.md#sv-agent-image-runtime)).
 Focused tests run locally without Docker or a model; the real-boundary fixture
-(`tests/test_v2_sv_open_context_docker.py`) needs the built image and has not been run yet. Steps 4
-and 5 are not done: live support is unverified until the bounded smoke succeeds.
+(`tests/test_v2_sv_open_context_docker.py`) passed against the built pinned image using its
+synthetic provider. This verifies the boundary and tool plumbing, not live model behavior.
+Steps 4 and 5 are not done: live support is unverified until the bounded smoke succeeds.
+
+The pinned upstream completion contract makes completed bootstrap assessment unreachable:
+source assessment is always `unassessed` or `not-recorded`, each of which adds an unknown
+coverage reason. A live smoke may independently verify transport, history and research;
+that cannot satisfy the complete-scan gate for step 5. Keep the full-corpus run stopped until
+an upstream evidence-backed completion contract is available. Preserve partial findings and
+native reasons, and do not infer assessment from delivery, process exit or an empty response.
 
 Use logical commits without AI coauthor trailers. Fresh independent reviewers read the design
 and final implementation; fix substantiated findings and rerun the affected checks. Do not

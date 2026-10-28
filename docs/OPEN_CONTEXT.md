@@ -297,6 +297,15 @@ not treated as legacy absence. Research/history attestation and scan assessment 
 remain separate: the synthetic image fixture can attest `open_context` while its native source
 assessment is `unknown`, so its outcome is `partial`.
 
+This is also a limitation of real bootstrap scans at the pinned upstream revision
+`f959cbcf010c7e41f780c718b65b1724d3aecb43`. Its source-assessment contract has no
+completed state: delivered source remains `unassessed`, and missing source evidence remains
+`not-recorded`. Both add an unknown-coverage reason. A successful model response therefore
+cannot produce a completed source-scan score through this route. Findings and diagnostic
+evidence remain available, but full-corpus scoring must wait for an upstream completion
+contract backed by assessment evidence. Changing the adapter to treat delivery or an empty
+findings array as completed assessment would not resolve this limitation.
+
 `model: "scaneval-synthetic/deterministic-open-context"` selects a DIAGNOSTIC in-process provider
 that calls no model: it issues `synthetic_tool_calls` and then answers with the harness's own
 deterministic mock response. It exists to exercise the route inside the real boundary
