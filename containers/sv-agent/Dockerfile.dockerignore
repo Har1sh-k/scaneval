@@ -1,0 +1,16 @@
+# BuildKit reads this file for containers/sv-agent/Dockerfile instead of a root .dockerignore.
+# The context is the repository root, so admit only what the image needs: no evaluator code,
+# corpus, cases, results, .git, host node_modules or credentials can reach the daemon.
+*
+!containers/sv-agent/package.json
+!containers/sv-agent/package-lock.json
+!containers/sv-agent/write-runtime-receipt.mjs
+!sdk/typescript/package.json
+!sdk/typescript/package-lock.json
+!sdk/typescript/tsconfig.json
+!sdk/typescript/src/
+!src/scaneval/adapters/
+**/node_modules
+**/dist
+**/__pycache__
+src/scaneval/adapters/*.py
