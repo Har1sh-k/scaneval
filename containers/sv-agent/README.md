@@ -35,7 +35,9 @@ timestamps; identical inputs produce identical bytes.
                "lockfile_sha256": "sha256:…", "tsx_version": "4.21.0" },
   "pi": { "package": "@earendil-works/pi-coding-agent", "version": "1.4.0",
           "integrity": "sha512-…", "lockfile_sha256": "sha256:…" },
-  "node": { "version": "v26.7.0", "base_image": "node:26.7.0-trixie-slim@sha256:…" },
+  "node": { "version": "v26.7.0", "platform": "linux", "arch": "arm64",
+            "base_image": "node:26.7.0-trixie-slim@sha256:…",
+            "base_os": { "id": "debian", "version_id": "13", "codename": "trixie" } },
   "observer": { "package_version": "0.1.0-experimental", "files": { "index.js": "sha256:…" } },
   "adapters": { "llm_harness_driver.mts": "sha256:…", "pi_oci_runner.mts": "sha256:…",
                 "pi_open_context.mts": "sha256:…" },
@@ -65,6 +67,10 @@ Prerequisites:
 
    This gives the multi-platform index digest. The build selects the platform from it, so pass
    `--platform` (or `PLATFORM=` to `build.sh`) when the build host differs from the scan host.
+   If the digest belongs to another Debian-based `node:26.7.0-*` tag, for example
+   `bookworm-slim`, also pass `--build-arg NODE_IMAGE=<that tag>` (or `NODE_IMAGE=` to
+   `build.sh`). Otherwise the receipt names the wrong tag. `base_os` in the receipt is read from
+   the image itself either way.
 3. Network access during the build to the Debian archive, registry.npmjs.org and github.com
    (the harness commit is fetched with `git fetch --depth 1 origin <sha>`). Scans themselves
    install nothing.
@@ -114,11 +120,15 @@ The image's defaults match what `scaneval.isolation.oci` imposes on every worker
 - `/tmp` is `noexec`. Nothing may need to execute from it. Pi's `grep`/`find` tools find the
   system `rg` and `fdfind`, so they never try to download binaries. tsx only writes its
   compile cache there, which is fine.
-- `PI_SKIP_VERSION_CHECK=1` and `PI_TELEMETRY=0`. Pi makes no version or install-telemetry
-  request during a scan. The image does not set `PI_OFFLINE`. Setting it (or passing
-  `--offline`) also stops the remote model-catalog refresh, so the route resolves from Pi
-  1.4.0's built-in catalog. That fits "never auto-update inside a scan", provided the
-  requested model is in that catalog. The runner decides.
+- `PI_SKIP_VERSION_CHECK=1`, so Pi makes no latest-version request during a scan. Two other
+  settings are deliberately left to the runner because they change what Pi sends:
+  - `PI_TELEMETRY`: in Pi 1.4.0 it decides whether provider requests carry Pi's attribution
+    headers (`core/client-identity.js`), as well as interactive install telemetry. Leaving it
+    unset keeps upstream's default request shape. If the runner sets it, record it as a
+    transport difference.
+  - `PI_OFFLINE` / `--offline`: this also stops the remote model-catalog refresh, so the route
+    resolves from Pi 1.4.0's built-in catalog. That fits "never auto-update inside a scan",
+    provided the requested model is in that catalog.
 - Git has `safe.directory = *` in `/etc/gitconfig`. Bind-mounted sources are owned by a host
   uid, and git under uid 65534 would otherwise refuse to read their history.
 - The upstream harness checkout contains `.pi/extensions/securevibes/`. Pi must not run with

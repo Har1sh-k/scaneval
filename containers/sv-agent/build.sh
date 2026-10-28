@@ -5,7 +5,9 @@
 #   NODE_DIGEST=sha256:<64 hex> containers/sv-agent/build.sh [tag]
 #
 # Optional: PLATFORM=linux/arm64 (or linux/amd64) to build for a specific platform; the image
-# id it prints is specific to that platform.
+# id it prints is specific to that platform. NODE_IMAGE=node:26.7.0-bookworm-slim (or another
+# Debian-based node:26.7.0 tag) when the digest belongs to a tag other than the default
+# node:26.7.0-trixie-slim, so the receipt names the tag the digest was resolved from.
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -33,6 +35,7 @@ trap 'rm -f "$iidfile"' EXIT
 docker build \
   ${PLATFORM:+--platform "$PLATFORM"} \
   -f "$here/Dockerfile" \
+  ${NODE_IMAGE:+--build-arg "NODE_IMAGE=$NODE_IMAGE"} \
   --build-arg "NODE_DIGEST=$NODE_DIGEST" \
   --iidfile "$iidfile" \
   -t "$tag" \

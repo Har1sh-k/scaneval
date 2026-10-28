@@ -44,6 +44,17 @@ function tree(dir) {
   return out;
 }
 
+function osRelease() {
+  // The base's own identity, so the receipt does not rely on the NODE_IMAGE tag string alone.
+  const fields = Object.fromEntries(
+    readFileSync("/etc/os-release", "utf8").split("\n")
+      .map((line) => line.match(/^([A-Z_]+)=(.*)$/))
+      .filter(Boolean)
+      .map(([, key, value]) => [key, value.replace(/^"(.*)"$/, "$1")]),
+  );
+  return { id: fields.ID ?? null, version_id: fields.VERSION_ID ?? null, codename: fields.VERSION_CODENAME ?? null };
+}
+
 function dpkgVersion(name) {
   return execFileSync("dpkg-query", ["-W", "-f=${Version}", name], { encoding: "utf8" }).trim();
 }
@@ -87,7 +98,10 @@ const receipt = {
   },
   node: {
     version: process.version,
+    platform: process.platform,
+    arch: process.arch,
     base_image: `${expected("NODE_IMAGE")}@${expected("NODE_DIGEST")}`,
+    base_os: osRelease(),
   },
   observer: {
     package_version: readJson(join(ROOT, "observer", "package.json")).version,

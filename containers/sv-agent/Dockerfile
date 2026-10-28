@@ -87,8 +87,10 @@ COPY --from=adapters /build/out/ /opt/scaneval/
 # user unless it is listed here. Only system/global/command-line config can set this.
 RUN git config --system --add safe.directory '*'
 
-# Verifies every pinned identity against what was installed, then writes runtime.json. Pi and
-# tsx are executed once with a throwaway HOME so no config or cache lands in the layer.
+# Verifies every pinned identity against what was installed, then writes runtime.json. Pi runs
+# once, and tsx transforms one TypeScript file so the esbuild binary is actually loaded, both
+# with a throwaway HOME so no config or cache lands in the layer. Ownership and modes are fixed
+# only where they deviate, so the subtree is not rewritten into a second layer.
 RUN --mount=type=bind,source=containers/sv-agent/write-runtime-receipt.mjs,target=/run/scaneval/write-runtime-receipt.mjs \
     NODE_IMAGE="$NODE_IMAGE" NODE_DIGEST="$NODE_DIGEST" \
     HARNESS_REPOSITORY="$HARNESS_REPOSITORY" HARNESS_COMMIT="$HARNESS_COMMIT" \
@@ -96,10 +98,13 @@ RUN --mount=type=bind,source=containers/sv-agent/write-runtime-receipt.mjs,targe
     node /run/scaneval/write-runtime-receipt.mjs \
  && scratch="$(mktemp -d)" \
  && test "$(HOME="$scratch" PI_CODING_AGENT_DIR="$scratch/pi" PI_OFFLINE=1 /opt/scaneval/node_modules/.bin/pi --version)" = "$EXPECT_PI_VERSION" \
- && HOME="$scratch" TMPDIR="$scratch" /opt/scaneval/harness/node_modules/.bin/tsx --version >/dev/null \
+ && printf 'const n: number = 1;\nconsole.log(n);\n' > "$scratch/check.ts" \
+ && test "$(HOME="$scratch" TMPDIR="$scratch" /opt/scaneval/harness/node_modules/.bin/tsx "$scratch/check.ts")" = 1 \
  && rm -rf "$scratch" \
- && chown -R root:root /opt/scaneval \
- && chmod -R a+rX,go-w /opt/scaneval
+ && find /opt/scaneval ! -user root -exec chown -h root:root {} + \
+ && find /opt/scaneval ! -type l -perm /022 -exec chmod go-w {} + \
+ && find /opt/scaneval -type f ! -perm -444 -exec chmod a+r {} + \
+ && find /opt/scaneval -type d ! -perm -555 -exec chmod a+rx {} +
 
 LABEL org.opencontainers.image.title="scaneval-sv-agent" \
       org.opencontainers.image.description="SV-Agent harness with Pi for ScanEval open-context scans" \
@@ -110,13 +115,13 @@ LABEL org.opencontainers.image.title="scaneval-sv-agent" \
 # The OCI backend runs with --read-only, a noexec /tmp tmpfs and --user 65534:65534; the defaults
 # below match that. Pi's provider traffic goes through undici's EnvHttpProxyAgent, which already
 # honors HTTP(S)_PROXY/NO_PROXY; NODE_USE_ENV_PROXY makes Node's own fetch/http do the same for
-# the driver and extension. Pi auth is never set here: it arrives per run as a declared
-# credential environment variable.
+# the driver and extension. PI_TELEMETRY is deliberately not set: in Pi 1.4.0 it also decides
+# whether provider requests carry attribution headers, which is the runner's transport choice.
+# Pi auth is never set here: it arrives per run as a declared credential environment variable.
 ENV PATH=/opt/scaneval/node_modules/.bin:$PATH \
     HOME=/tmp \
     PI_CODING_AGENT_DIR=/tmp/pi-agent \
     PI_SKIP_VERSION_CHECK=1 \
-    PI_TELEMETRY=0 \
     NODE_USE_ENV_PROXY=1 \
     NPM_CONFIG_UPDATE_NOTIFIER=false
 
