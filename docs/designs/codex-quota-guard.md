@@ -1,8 +1,8 @@
 # Codex quota guard for operator experiments
 
-Status: implementation and first-review corrections are committed. The second
-review's bucket-map visibility correction is specified below for implementation
-and a fresh independent review. Public feature request:
+Status: implementation and both reviews' required corrections are implemented
+and tested; the second review's correction awaits a fresh independent review.
+Public feature request:
 [#91](https://github.com/Har1sh-k/scaneval/issues/91). Code review is reserved for
 a fresh Opus 5.5 reviewer before any PR; this document does not claim review
 approval. See [operator usage and limitations](../CODEX_QUOTA_GUARD.md).
@@ -147,8 +147,8 @@ then logical implementation/test/documentation commits. Use the configured Git
 author without AI co-author trailers. Preserve the existing dirty checkout.
 Do not run scans, push, open a PR, or perform code review in this work stream.
 
-Implementation validation before the second-review correction: the three quota
-guard/wrapper test files pass 189 synthetic tests, covering policies, transports, ownership,
+Implementation validation after the second-review correction: the three quota
+guard/wrapper test files pass 202 synthetic tests, covering policies, transports, ownership,
 registry evolution, Docker cleanup proofs, stop-marker ordering, and opt-in
 exact-ID removal. Repository hygiene checks pass two tests with one existing
 skip. A harmless real Docker integration also verified the permanent stop marker,

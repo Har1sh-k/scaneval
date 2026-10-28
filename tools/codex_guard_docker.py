@@ -239,7 +239,8 @@ def _create_labels(config: Config, args: list[str]) -> dict[str, str]:
                 raise Refused("invalid_create_labels")
             labels[key] = label
         elif option == "--name":
-            if name is not None or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value):
+            if (name is not None or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value)
+                    or ID.fullmatch(value)):
                 raise Refused("invalid_container_name")
             name = value
         index += 1

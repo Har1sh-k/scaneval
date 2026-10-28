@@ -162,6 +162,17 @@ def test_unrelated_and_alternative_launches_are_refused_without_docker_calls(set
     assert SECRET not in result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("inline", [False, True])
+def test_full_id_container_names_are_refused_before_create(setup, inline):
+    args = create_args(name="a" * 64)
+    if inline:
+        args[1:3] = ["--name=" + "a" * 64]
+    result = invoke(setup, *args)
+    assert result.returncode == 2 and "invalid_container_name" in result.stderr
+    assert events(setup[0]) == []
+    assert SECRET not in result.stdout + result.stderr
+
+
 def test_alias_start_requires_registration_and_owned_labels(setup):
     root, _, _ = setup
     ident = invoke(setup, *create_args()).stdout.strip()

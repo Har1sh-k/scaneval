@@ -98,6 +98,8 @@ def parse_windows(result: object, *, limit_id: str = "codex",
         raise Stop("invalid_limit_selection")
     visible_bucket_keys(result)
     buckets = result.get("rateLimitsByLimitId")
+    if buckets is None and not allow_other_limit_windows:
+        raise Stop("bucket_map_unavailable")
     if buckets is not None:
         if limit_id not in buckets:
             raise Stop("missing_codex_bucket" if limit_id == "codex" else "missing_selected_bucket")
@@ -626,15 +628,19 @@ class Controller:
     def observe(self) -> None:
         keys: tuple[str, ...] = ()
         windows: tuple[Window, ...] = ()
+        bucket_map_present = False
         visibility_available = False
         request_started = time.monotonic()
         try:
             result = self.source.read(self.options.read_timeout, self.check)
+            bucket_map_present = isinstance(result, dict) and isinstance(result.get("rateLimitsByLimitId"), dict)
             keys = visible_bucket_keys(result)
-            visibility_available = True
+            visibility_available = bucket_map_present
             if not self.reported_start:
                 # Actual visible keys are available only after the first response.
-                self.receipts.emit("guard_started", **self.start_fields(), visible_bucket_keys=list(keys))
+                self.receipts.emit("guard_started", **self.start_fields(), visible_bucket_keys=list(keys),
+                                   bucket_map_present=bucket_map_present,
+                                   bucket_visibility_available=visibility_available)
                 self.reported_start = True
             windows = parse_windows(result, limit_id=self.limit_id,
                                     allow_other_limit_windows=self.allow_other_limit_windows)
@@ -643,11 +649,13 @@ class Controller:
         except Stop as error:
             self.receipts.emit("usage_rejected", reason=str(error), windows=[w.receipt() for w in windows],
                                selected_limit_id=self.limit_id, visible_bucket_keys=list(keys),
+                               bucket_map_present=bucket_map_present,
                                bucket_visibility_available=visibility_available)
             raise
         self.receipts.emit("usage_accepted", windows=[w.receipt() for w in windows],
                            selected_limit_id=self.limit_id, visible_bucket_keys=list(keys),
-                           bucket_visibility_available=True)
+                           bucket_map_present=bucket_map_present,
+                           bucket_visibility_available=visibility_available)
 
     def start_fields(self) -> dict:
         return {"poll_seconds": self.options.poll,
@@ -740,7 +748,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--docker", default="docker", help="Docker executable for registered containers")
     parser.add_argument("--limit-id", default="codex", help="Exact quota bucket ID to supervise")
     parser.add_argument("--allow-other-limit-windows", action="store_true",
-                        help="Explicitly allow reported quota windows outside the selected bucket")
+                        help="Allow other reported quota windows or unavailable bucket-map visibility")
     parser.add_argument("--poll-seconds", type=float, default=30)
     parser.add_argument("--read-timeout-seconds", type=float, default=10)
     parser.add_argument("--stale-after-seconds", type=float, default=45)

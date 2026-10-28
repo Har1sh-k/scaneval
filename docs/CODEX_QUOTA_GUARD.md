@@ -28,6 +28,10 @@ refused. Replace the command after `--` with the authorized workload. The
 command inherits its normal environment, working directory and output streams.
 The guard never writes command arguments, output or environment into receipts.
 
+For a long-running interactive job, use a `tmux` session and detach from it while
+the guard runs. `nohup` does not make the guard immune to SIGHUP: the guard
+installs its own SIGHUP handler, so a received hangup still requests cleanup.
+
 Select the exact quota bucket with `--limit-id` (default `codex`). The selected
 bucket must report the same `limitId`, including legacy responses; a map missing
 the requested bucket cannot fall back to another entry. The first valid read
@@ -39,12 +43,17 @@ missing/malformed response, or read failure stops the command. There are no
 automatic retries or restarts after a terminal refusal.
 
 Sorted visible bucket keys and the selected bucket ID appear in startup and usage
-receipts. Other buckets reporting primary/secondary windows refuse launch by
+receipts, together with `bucket_map_present` and `bucket_visibility_available`.
+An absent or null bucket map refuses launch with `bucket_map_unavailable`: a
+legacy response's single bucket does not show whether other windows exist.
+Other buckets reporting primary/secondary windows refuse launch by
 default: the guard cannot establish which bucket a particular model request will
 spend. An informed operator may explicitly set `--allow-other-limit-windows`;
-this exception is recorded, and malformed other windows still fail closed.
-An account response showing only `codex` makes the observed selection unambiguous
-but does not prove that GPT-5.6 Sol or any other model charges that bucket. Model
+this exception permits a legacy response and is recorded. Legacy receipts keep
+both map-presence and visibility fields false; malformed maps and windows still
+fail closed. A full bucket map containing only `codex` establishes the visible
+account selection but does not prove that GPT-5.6 Sol or any other model charges
+that bucket. Model
 billing/quota identity remains unverified without independent provider evidence.
 
 The default timers are:
@@ -63,6 +72,11 @@ stale age must be greater than poll interval plus read timeout. Known reset,
 staleness, runtime and interruption deadlines are checked at most every 0.1
 seconds while waiting for the next poll or a usage response, subject to OS
 scheduling. A blocked read therefore cannot postpone a known reset deadline.
+Local freshness starts when a usage request starts, so its age includes the
+time spent waiting for that response. Consecutive slow reads can reach the
+staleness deadline during a later read even when each request stays within its
+individual timeout. That cutoff fails closed; a response does not restart the
+age of the data from zero.
 
 ## Process and container ownership
 
@@ -85,6 +99,10 @@ experiment container explicitly. Use repeated `--container-id` arguments with
 complete 64-character lowercase hexadecimal IDs, or reserve initially absent
 files using repeated `--container-cidfile` arguments and pass the same paths to
 the workload's Docker `--cidfile` options. Each cidfile must contain one full ID.
+Place cidfiles in a current-user-owned private mode-0700 directory, and set
+`umask 077` before launching Docker so newly created cidfiles are private too.
+Do not reserve them directly in shared `/tmp`, or pre-create the files that
+Docker must create itself.
 The guard freezes an ID once observed and refuses a changed or malformed file.
 It refreshes cidfiles at polls and after stopping the owned command group.
 
@@ -111,7 +129,7 @@ Registry and stop-marker parent directories must exist before launch, belong to 
 current user, and prohibit group/other writes. Existing registry files must have one
 link, the current owner, and no group/other writes. Use a new private mode-0700
 operator directory instead of placing these control files directly in shared `/tmp`. The guard
-creates it with mode 0600 before terminating any owned process or cleaning up
+creates the stop marker with mode 0600 before terminating any owned process or cleaning up
 containers. A scoped wrapper must reject new create/start calls once the marker
 exists, register create IDs before permitting start, and forward start using
 the inspected full ID. The explicit removal option then runs
@@ -178,7 +196,11 @@ succeeds. Connection errors, mismatched inspection IDs, and still-running
 containers remain failures. Each control call has a five-second deadline,
 with a shared ten-second cleanup budget plus bounded client-process cleanup.
 The final receipt preserves every ID and its `stopped`, `removed`, `not_found`,
-`still_running`, `not_removed`, or `unverified` state. An existing stopped
+`still_running`, `not_removed`, or `unverified` state. `removed` means Docker
+acknowledged forced removal, including an ID that was already absent; it does
+not establish that every ID still existed when cleanup began. `not_found`
+records the separate inspect-and-daemon proof after a cleanup-command failure.
+An existing stopped
 container is a cleanup failure when removal was requested. Keep cidfiles and
 the append-only registry until the guard finishes. Stop-marker creation
 failure is reported and cleanup is still attempted, but the wrapper's start
@@ -211,8 +233,8 @@ cannot retract a request already accepted upstream.
 
 The usage response has no source observation timestamp. The guard enforces
 fresh successful request/response cycles and local age measured from the request
-start, but cannot prove the
-upstream data is uncached. Equal consecutive percentages are allowed. The
+start, but cannot prove the upstream data is uncached. Equal consecutive
+percentages are allowed. The
 receipt explicitly reports `upstream_observation_time_available: false`.
 
 A userspace monitor cannot enforce deadlines while suspended or after its own

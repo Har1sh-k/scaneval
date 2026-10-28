@@ -21,9 +21,10 @@ TEST_RESET = int(time.time()) + 3600
 
 
 def usage(used=62, reset=None, secondary=None):
-    return {"rateLimits": {"limitId": "codex", "primary": {
+    bucket = {"limitId": "codex", "primary": {
         "usedPercent": used, "resetsAt": reset or TEST_RESET,
-        "windowDurationMins": 10080}, "secondary": secondary}}
+        "windowDurationMins": 10080}, "secondary": secondary}
+    return {"rateLimits": bucket, "rateLimitsByLimitId": {"codex": bucket}}
 
 
 def windows(used=62, reset=5000, secondary=None):
@@ -116,10 +117,10 @@ def test_malformed_readings_fail_closed(field, value):
     None, [], {}, {"rateLimits": {}},
     {"rateLimits": {"primary": None, "secondary": None}},
     {"rateLimits": {"primary": False, "secondary": None}},
-    {"rateLimitsByLimitId": {"other": {}}, **usage()},
-    {"rateLimitsByLimitId": {}, **usage()},
-    {"rateLimitsByLimitId": {"codex": None}, **usage()},
-    {"rateLimitsByLimitId": [], **usage()},
+    {**usage(), "rateLimitsByLimitId": {"other": {}}},
+    {**usage(), "rateLimitsByLimitId": {}},
+    {**usage(), "rateLimitsByLimitId": {"codex": None}},
+    {**usage(), "rateLimitsByLimitId": []},
 ])
 def test_missing_and_ambiguous_data_cannot_use_legacy_fallback(result):
     with pytest.raises(guard.Stop):
