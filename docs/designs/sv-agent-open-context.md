@@ -62,10 +62,16 @@ reason; no implicit provider, model, scanner, or condition fallback is allowed.
    demonstrates original ancestor visibility and excludes later commits, exercises research
    through the proxy, writes/imports findings and trace evidence, and attests open_context.
    Include denied private retrieval, read-only source, absent host/evaluator paths and cleanup.
-3. Existing Semgrep three-condition Docker gate and affected isolation/condition regressions.
+3. Affected isolation/condition regressions. Do not launch further Semgrep scans for this work.
 4. Build the real pinned runtime and run a bounded live-model smoke test. Start with a fabricated
    tiny source fixture to verify transport/research before any paid real-CVE benchmark. Do not
    represent diagnostic labels as real CVE detection performance. Preserve results locally.
+5. After the live smoke succeeds and any corrections pass review, run the existing 50-CVE
+   population with SV-Agent in open_context, one repetition, Pi GPT-5.6 Sol high. Keep every
+   planned input in the denominator, including unsupported, unavailable and partial outcomes.
+   Run independent processes for disjoint input shards where useful, with bounded concurrency.
+   Preserve run/config/image/model/research evidence locally and summarize completion and
+   provisional detection honestly; unresolved claims must not become confirmed detections.
 
 Use logical commits without AI coauthor trailers. Fresh independent reviewers read the design
 and final implementation; fix substantiated findings and rerun the affected checks. Do not
