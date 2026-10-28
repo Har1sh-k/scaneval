@@ -62,7 +62,8 @@ RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund --engine-strict \
  && rm -rf /root/.npm
 
 FROM base AS adapters
-# Only the Node sources leave this stage; the Python adapters never reach the runtime image.
+# Dockerfile.dockerignore admits only the top-level *.mts/*.mjs adapter sources; the find
+# below keeps the runtime image to exactly those even if the ignore file drifts.
 COPY src/scaneval/adapters/ /build/adapters/
 RUN mkdir /build/out \
  && find /build/adapters -maxdepth 1 -type f \( -name '*.mts' -o -name '*.mjs' \) -exec cp {} /build/out/ \; \
