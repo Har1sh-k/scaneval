@@ -1,7 +1,8 @@
 # Codex quota guard for operator experiments
 
-Status: specification and implementation are committed; the first independent
-review corrections below are in progress. Public feature request:
+Status: implementation and first-review corrections are committed. The second
+review's bucket-map visibility correction is specified below for implementation
+and a fresh independent review. Public feature request:
 [#91](https://github.com/Har1sh-k/scaneval/issues/91). Code review is reserved for
 a fresh Opus 5.5 reviewer before any PR; this document does not claim review
 approval. See [operator usage and limitations](../CODEX_QUOTA_GUARD.md).
@@ -40,7 +41,13 @@ generated JSON schema. `usedPercent` is an integer, `resetsAt` is Unix seconds,
 and `windowDurationMins` identifies the window. Select the explicitly configured `--limit-id` bucket (default `codex`) from
 `rateLimitsByLimitId`; require an exact `limitId` match in both mapped and legacy
 responses. Missing/malformed selected data never falls back. Record sorted visible
-bucket keys. Other reported quota windows require an explicit
+bucket keys and whether a bucket map was present. An absent or null map leaves
+other quota windows unknown: refuse with `bucket_map_unavailable` unless the
+operator explicitly supplies `--allow-other-limit-windows`. A permitted legacy
+response still records `bucket_map_present: false` and
+`bucket_visibility_available: false`; its one identifier does not establish
+complete bucket visibility. Malformed maps remain invalid even with the exception.
+Other reported quota windows require an explicit
 `--allow-other-limit-windows` exception; the workload model's charged bucket is not
 proven merely by an account catalog. Credits and other model quotas do not
 override the selected window checks. Official protocol reference:
@@ -140,12 +147,14 @@ then logical implementation/test/documentation commits. Use the configured Git
 author without AI co-author trailers. Preserve the existing dirty checkout.
 Do not run scans, push, open a PR, or perform code review in this work stream.
 
-Implementation validation: `tests/test_codex_quota_guard.py` passes 108
-synthetic tests, covering the policies, bounded transports, ownership,
+Implementation validation before the second-review correction: the three quota
+guard/wrapper test files pass 189 synthetic tests, covering policies, transports, ownership,
 registry evolution, Docker cleanup proofs, stop-marker ordering, and opt-in
 exact-ID removal. Repository hygiene checks pass two tests with one existing
-skip. No real model calls or scans were used for this evidence. Fresh Opus 5.5
-implementation review and wrapper integration validation remain the next gate.
+skip. A harmless real Docker integration also verified the permanent stop marker,
+exact registered-container removal (including a previously removed ID), and
+owned-process cleanup. No model calls or scans were used for this evidence.
+Fresh Opus 5.5 review of the second-review correction remains the next gate.
 
 ## Review corrections before live use
 
@@ -184,3 +193,10 @@ Then run a harmless real Docker workload on the dedicated test engine, including
 one already-removed registered ID and one sleeping container. Require a permanent
 stop marker, exact owned-ID removal, no surviving owned group, and retained
 sanitized receipts. This integration calls no model; quota reads are read-only.
+
+The second review requires missing/null bucket-map refusal, an explicit legacy
+exception, and truthful map-presence/visibility fields on accepted and rejected
+readings. Regression tests must prove a legacy response cannot launch work by
+default, that the exception remains audited, and that full-map receipts differ
+from legacy receipts. Refuse Docker create names consisting of 64 lowercase hex
+characters, so a wrapper-created name cannot be mistaken for a full container ID.
