@@ -25,7 +25,7 @@ RELATED_SCOPE = (
 )
 TIMESTAMP_PATTERN = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
-    r"(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})"
+    r"(?:\.(?P<fraction>[0-9]+))?(?:Z|[+-][0-9]{2}:[0-9]{2})"
 )
 
 
@@ -47,8 +47,12 @@ def _source_url(value: object, label: str) -> str:
 
 
 def _utc_day(value: object) -> str:
-    _require(isinstance(value, str) and TIMESTAMP_PATTERN.fullmatch(value) is not None,
+    match = TIMESTAMP_PATTERN.fullmatch(value) if isinstance(value, str) else None
+    _require(match is not None,
              f"public timestamp must include seconds and an explicit time zone: {value!r}")
+    fraction = match.group("fraction")
+    _require(fraction is None or len(fraction) <= 6,
+             f"public timestamp fractional seconds must contain at most six digits: {value!r}")
     _require(not value.endswith("-00:00"), "public timestamp has an unknown -00:00 offset")
     if not value.endswith("Z"):
         _require(int(value[-5:-3]) <= 23 and int(value[-2:]) <= 59,

@@ -148,6 +148,7 @@ def test_explicit_native_evidence_kinds(dossier, native, kind):
     ("2026-07-02T00:30:00+02:00", "2026-07-01"),
     ("2026-07-01T23:30:00-02:00", "2026-07-02"),
     ("2024-03-01T00:30:00+01:00", "2024-02-29"),
+    ("2026-08-27T11:41:22.1Z", "2026-08-27"),
     ("2026-08-27T11:41:22.123456Z", "2026-08-27"),
 ])
 def test_timestamp_precision_is_retained_while_utc_day_is_projected(dossier, timestamp, utc_date):
@@ -168,6 +169,12 @@ def test_timestamp_precision_is_retained_while_utc_day_is_projected(dossier, tim
 def test_ambiguous_invalid_or_unrepresentable_timestamp_is_input_error(dossier, timestamp):
     dossier["candidates"][0]["dates"]["earliest_observed_public_evidence_at"] = timestamp
     with pytest.raises(CutoffError):
+        prepare_chronology(dossier, AUTHORITY)
+
+
+def test_timestamp_fraction_longer_than_six_digits_is_rejected_without_rounding(dossier):
+    dossier["candidates"][0]["dates"]["earliest_observed_public_evidence_at"] = "2026-08-27T23:59:59.9999999Z"
+    with pytest.raises(CutoffError, match="at most six digits"):
         prepare_chronology(dossier, AUTHORITY)
 
 
