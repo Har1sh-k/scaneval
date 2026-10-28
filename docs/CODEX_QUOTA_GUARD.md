@@ -28,13 +28,24 @@ refused. Replace the command after `--` with the authorized workload. The
 command inherits its normal environment, working directory and output streams.
 The guard never writes command arguments, output or environment into receipts.
 
-The first valid read must include a weekly window (10080 minutes), and every
-present Codex window must satisfy **`1 < remaining_percent < 90`**. A null
+Select the exact quota bucket with `--limit-id` (default `codex`). The selected
+bucket must report the same `limitId`, including legacy responses; a map missing
+the requested bucket cannot fall back to another entry. The first valid read
+must include a weekly window (10080 minutes), and every present selected window must satisfy **`1 < remaining_percent < 90`**. A null
 secondary window is accepted. Subsequent readings must preserve the set of
 windows, their durations and reset timestamps; remaining quota may stay equal
 or decline. Any increase, reset change, elapsed reset, boundary crossing,
 missing/malformed response, or read failure stops the command. There are no
 automatic retries or restarts after a terminal refusal.
+
+Sorted visible bucket keys and the selected bucket ID appear in startup and usage
+receipts. Other buckets reporting primary/secondary windows refuse launch by
+default: the guard cannot establish which bucket a particular model request will
+spend. An informed operator may explicitly set `--allow-other-limit-windows`;
+this exception is recorded, and malformed other windows still fail closed.
+An account response showing only `codex` makes the observed selection unambiguous
+but does not prove that GPT-5.6 Sol or any other model charges that bucket. Model
+billing/quota identity remains unverified without independent provider evidence.
 
 The default timers are:
 
@@ -90,12 +101,16 @@ register each full ID before forwarding the corresponding container start,
 using a writer lock and atomic replacement to append IDs. Once observed, IDs
 must never disappear from the list; they remain in the audit even after Docker
 removes the container. Malformed files, deletion after observation, symlinks,
-more than 256 entries, or files larger than 64 KiB fail closed. This is an
+more than 2,048 entries, or files larger than 256 KiB fail closed. This is an
 explicit registration channel; the guard does not search labels or enumerate
 containers.
 
-For workloads with detached Docker clients, configure both `--stop-file PATH`
-and `--remove-containers`. The marker must initially be absent. The guard
+Dynamic registry mode requires `--stop-file PATH` and `--remove-containers`
+together, plus an absolute real Docker executable. The marker must initially be absent.
+Registry and stop-marker parent directories must exist before launch, belong to the
+current user, and prohibit group/other writes. Existing registry files must have one
+link, the current owner, and no group/other writes. Use a new private mode-0700
+operator directory instead of placing these control files directly in shared `/tmp`. The guard
 creates it with mode 0600 before terminating any owned process or cleaning up
 containers. A scoped wrapper must reject new create/start calls once the marker
 exists, register create IDs before permitting start, and forward start using
@@ -108,12 +123,56 @@ their writable container layers are deleted. Unregistered containers are
 never targeted. The operator chooses the real Docker executable with
 `--docker`, while the workload can use its scoped wrapper on PATH.
 
+
+### ScanEval OCI launch wrapper
+
+`tools/codex_guard_docker.py` gates Docker create/start calls for the OCI backend.
+Prepare a private mode-0600 configuration file in the operator directory:
+
+```json
+{
+  "schema": 1,
+  "real_docker": "/absolute/path/to/docker",
+  "allowed_run_ids": ["run-explicitly-owned"],
+  "registry_file": "/private/operator/run/containers.json",
+  "stop_file": "/private/operator/run/guard.stop"
+}
+```
+
+Put a task-local executable named `docker` first on the workload's PATH. Its
+launcher sets `SCANEVAL_GUARD_DOCKER_CONFIG` to that absolute configuration path,
+then execs an absolute Python 3.11+ interpreter with the absolute wrapper path and
+its original arguments. Use proper shell quoting when constructing the launcher.
+This assignment must happen in the launcher: ScanEval filters arbitrary variables
+out of the Docker client's environment. Named model credentials still pass through
+as required by the existing OCI backend; the wrapper does not print them.
+
+The guard's `--docker` must name the real executable from the configuration,
+**never the wrapper**. Pass the same registry and marker to the guard and enable
+`--remove-containers`. The wrapper verifies `scaneval.backend=oci`, an exact
+allowlisted `scaneval.run`, and role `worker`, `proxy`, or `probe`. It atomically
+registers a newly created full container ID under a writer lock before returning
+it. Starts require a registered ID and inspected ownership, recheck the stop
+marker, then execute against the full ID to prevent name reuse from redirecting
+work. If stop arrives during create, only that positively identified new container
+is removed. Read, network and cleanup commands needed by the OCI backend remain
+available; alternative launch commands such as `run` and `restart` are refused.
+
+The append-only capacity is a budget of 2,048 containers **per guard invocation**,
+including already-removed workers, proxies and probes. Plan invocations within that
+budget; reaching it refuses the next creation without starting it. The registry
+is not compacted during a run. A wrapper killed between creation and registration
+can leave a stopped, unregistered container: it cannot be started through the gate
+or spend quota, but cleanup of that artifact is not certified by the guard.
+
 On exit it runs one bounded `docker container stop --time 0 -- <exact IDs>`
 command for the registrations, including when the experiment command exits
 normally, unless explicit removal was selected. It never discovers or prunes
 containers. If the selected cleanup command fails, it inspects only the exact
-registered IDs and only their ID/running
-fields. Already removed containers count as `not_found` only when Docker
+registered IDs in one batched inspect and only their ID/running
+fields. Every stdout JSON line and stderr missing-container diagnostic must map
+to a registered ID exactly once; duplicate, foreign or unaccounted output fails
+closed. Already removed containers count as `not_found` only when Docker
 returns an exact missing-container error and a separate daemon-version read
 succeeds. Connection errors, mismatched inspection IDs, and still-running
 containers remain failures. Each control call has a five-second deadline,
@@ -136,7 +195,7 @@ credentials, command arguments and child output are excluded.
 Full explicitly registered container IDs are included for cleanup auditing.
 
 Successful completion preserves the command's exit code. A guard refusal or
-cleanup failure exits 125; SIGINT/SIGTERM requests a controlled stop with exit
+cleanup failure exits 125; SIGINT, SIGTERM, SIGHUP, and SIGQUIT request a controlled stop with exit
 130, unless cleanup fails. A command killed by a signal maps to `128 + signal`.
 Inspect `guard_stopped.reason` and `cleanup_okay`, since a wrapped command may
 itself return 125 or 130. A receipt write failure still stops owned work, but
@@ -151,7 +210,8 @@ reserve or prevent overshoot between readings. Stopping local processes also
 cannot retract a request already accepted upstream.
 
 The usage response has no source observation timestamp. The guard enforces
-fresh successful request/response cycles and local age, but cannot prove the
+fresh successful request/response cycles and local age measured from the request
+start, but cannot prove the
 upstream data is uncached. Equal consecutive percentages are allowed. The
 receipt explicitly reports `upstream_observation_time_available: false`.
 
@@ -160,10 +220,12 @@ SIGKILL, a host failure, or a blocked filesystem operation. Keep receipts and
 cidfiles on responsive local storage. Resume detects elapsed reset/freshness
 deadlines, but cannot undo work completed while the guard was unscheduled.
 
-Validation uses fabricated endpoints and local synthetic child processes only:
+The automated regression suite uses fabricated endpoints and local synthetic
+child processes. A separate harmless dedicated-engine Docker integration checks
+actual missing-container diagnostics and shutdown; it calls no model:
 
 ```sh
-python3 -m pytest tests/test_codex_quota_guard.py -q
+python3 -m pytest tests/test_codex_quota_guard.py tests/test_codex_guard_docker.py tests/test_codex_quota_buckets.py -q
 ```
 
 The [committed specification](designs/codex-quota-guard.md) records the scope

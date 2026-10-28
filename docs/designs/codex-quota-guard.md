@@ -1,7 +1,7 @@
 # Codex quota guard for operator experiments
 
-Status: specification committed before implementation; implementation and
-synthetic test evidence follow in separate commits. Public feature request:
+Status: specification and implementation are committed; the first independent
+review corrections below are in progress. Public feature request:
 [#91](https://github.com/Har1sh-k/scaneval/issues/91). Code review is reserved for
 a fresh Opus 5.5 reviewer before any PR; this document does not claim review
 approval. See [operator usage and limitations](../CODEX_QUOTA_GUARD.md).
@@ -37,11 +37,13 @@ retry or an alternative model call.
 
 This contract was checked against the locally installed Codex CLI 0.165.0
 generated JSON schema. `usedPercent` is an integer, `resetsAt` is Unix seconds,
-and `windowDurationMins` identifies the window. Prefer the explicitly keyed
-`rateLimitsByLimitId.codex` bucket; accept the legacy `rateLimits` view only when
-its bucket is unambiguous. Explicitly absent/malformed Codex data must not fall
-back to another bucket. Credits and unrelated model quotas do not override the
-strict Codex window checks. Official protocol reference:
+and `windowDurationMins` identifies the window. Select the explicitly configured `--limit-id` bucket (default `codex`) from
+`rateLimitsByLimitId`; require an exact `limitId` match in both mapped and legacy
+responses. Missing/malformed selected data never falls back. Record sorted visible
+bucket keys. Other reported quota windows require an explicit
+`--allow-other-limit-windows` exception; the workload model's charged bucket is not
+proven merely by an account catalog. Credits and other model quotas do not
+override the selected window checks. Official protocol reference:
 <https://learn.chatgpt.com/docs/app-server>.
 
 ## Timers, containment, and audit
@@ -77,7 +79,7 @@ ensure every experiment container is registered before it consumes quota.
 A controller may instead atomically maintain a bounded append-only registry:
 `{"schema":1,"container_ids":["<full ID>"]}`. Accept initially absent files,
 then require monotonically growing ID membership; reject invalid/deleted or
-symlinked files. Maximum 256 entries / 64 KiB. This provides dynamic explicit
+symlinked files. Maximum 2,048 entries / 256 KiB. This provides dynamic explicit
 registration without Docker discovery.
 
 For ephemeral workloads using detached Docker clients, provide explicit
