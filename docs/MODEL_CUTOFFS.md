@@ -65,26 +65,35 @@ None of these commands executes a model/scanner or changes corpus admission.
 
 `prepare-chronology` accepts the versioned research dossier and an explicit pack
 severity authority. It checks the selected CVSS 3.0/3.1/4.0 rating's numeric score,
-severity band, proposed stratum, authority and source URL. It preserves that
-selected rating without recalculating its vector or resolving other authorities'
-disagreements. Every projected case is **pending**, even if input text claims
-review, approval or eligibility.
+severity band, proposed stratum, authority and structurally valid HTTP(S) source
+URL. URL validation does not prove public reachability and performs no DNS,
+network or private-address checks. It preserves the selected rating without
+recalculating its vector or resolving other authorities' disagreements. Every
+projected case is **pending**, even if input text claims review, approval or
+eligibility.
 
 The projection consumes the dossier's explicitly observed public timestamp, URL,
 native evidence kind, date note and optional scope note. Its supported native
 kinds are `maintainer_advisory_publication`, `public_release_publication`, and
 `public_pull_request_creation`. It requires timestamps with seconds and an
-explicit `Z` or numeric offset, converts them to UTC days, and retains the original
-timestamps. Missing/unknown timezones (including `-00:00`), date-only or month-only
-values, unsupported kinds and invalid URLs return exit 2. CVE publication and
-commit author/committer dates are never substitutes for missing observations.
+explicit `Z` or numeric offset, accepts fractional seconds of one through six
+digits, converts timestamps to UTC days, and retains the originals. Fractions
+longer than six digits are rejected without rounding. Missing/unknown timezones
+(including `-00:00`), date-only or month-only values, unsupported kinds and
+invalid URLs return exit 2. CVE publication and commit author/committer dates are
+never substitutes for missing observations.
 
 The v1 dossier's `dates.related_predecessor` explicitly denotes a related advisory.
 Its publication is included with a `related_predecessor` relationship, original
-timestamp, source, current-body update day, wording flag and scope caveat. This
-preserves Composer's July 1 observation without declaring it the first disclosure
-of the exact August bypass. A successful round trip exposes observed dates but
-still reports zero eligible cases and no established earliest-public lower bounds.
+timestamp, source, current-body update day, wording flag, shared date note and
+relationship caveat. Candidate-only evidence scope remains on the candidate
+artifact. The recorded update day must be on or after the publication timestamp's
+UTC day. A predecessor advisory may nevertheless be published after the candidate
+observation because an older weakness can receive a later advisory publication.
+This preserves Composer's July 1 observation without declaring it the first
+disclosure of the exact August bypass. A successful round trip exposes observed
+dates but still reports zero eligible cases and no established earliest-public
+lower bounds.
 
 Output includes `projection_provenance` with policy version
 `scaneval.dossier-chronology.v1`, source dossier schema version

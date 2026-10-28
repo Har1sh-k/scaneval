@@ -298,10 +298,23 @@ def test_missing_observation_never_falls_back_to_cve_or_commit_date(dossier, fie
     ("candidates", 0, "dates", "earliest_observed_public_evidence_url"),
 ])
 @pytest.mark.parametrize("source", [None, [], "file:///tmp/advisory", "https://", "https://user:password@example.com/advisory"])
-def test_selected_and_observed_sources_must_be_public_urls(dossier, path, source):
+def test_selected_and_observed_sources_must_be_structural_http_urls(dossier, path, source):
     set_path(dossier, path, source)
     with pytest.raises(CutoffError):
         prepare_chronology(dossier, AUTHORITY)
+
+
+def test_source_url_validation_does_not_imply_reachability_or_reject_private_hosts(dossier):
+    candidate = dossier["candidates"][0]
+    candidate["severity"]["selected"]["source"] = "http://127.0.0.1/severity"
+    candidate["dates"]["earliest_observed_public_evidence_url"] = "https://localhost/advisory"
+    add_related_predecessor(dossier)
+    candidate["dates"]["related_predecessor"]["url"] = "http://[::1]/predecessor"
+    projected = prepare_chronology(dossier, AUTHORITY)["candidates"][0]
+    assert projected["severity_source_url"] == "http://127.0.0.1/severity"
+    assert [artifact["source_url"] for artifact in projected["chronology"]["public_artifacts"]] == [
+        "https://localhost/advisory", "http://[::1]/predecessor",
+    ]
 
 
 @pytest.mark.parametrize("field,value", [
