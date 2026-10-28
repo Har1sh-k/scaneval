@@ -185,9 +185,9 @@ class OwnedProcess:
             size = library.proc_listpids(2, self.pgid, members, ctypes.sizeof(members))
             # PROC_PGRP_ONLY=2 in Darwin's sys/proc_info.h. Refuse a possibly
             # truncated list rather than assume unseen members are absent.
-            if size < 0 or size >= ctypes.sizeof(members) or size % ctypes.sizeof(ctypes.c_int):
+            if size <= 0 or size >= ctypes.sizeof(members) or size % ctypes.sizeof(ctypes.c_int):
                 return False
-            return set(members[:size // ctypes.sizeof(ctypes.c_int)]) <= {0, self.pgid}
+            return set(members[:size // ctypes.sizeof(ctypes.c_int)]) - {0} == {self.pgid}
         except (OSError, AttributeError):
             return False
 
@@ -344,7 +344,8 @@ CONTAINER_ID = re.compile(r"[0-9a-f]{64}\Z")
 class Containers:
     """Operator registrations only; never enumerate containers or attach by name."""
 
-    def __init__(self, ids: list[str], cidfiles: list[Path], docker: str, grace: float):
+    def __init__(self, ids: list[str], cidfiles: list[Path], docker: str, grace: float,
+                 registry: Path | None = None, remove: bool = False):
         if any(not CONTAINER_ID.fullmatch(value) for value in ids):
             raise Stop("invalid_container_id")
         if len(set(cidfiles)) != len(cidfiles):
@@ -353,6 +354,10 @@ class Containers:
         self.cidfiles = {path: None for path in cidfiles}
         self.docker = docker
         self.grace = grace
+        self.registry = registry
+        self.remove = remove
+        self.registry_ids: set[str] | None = None
+        self.cleanup: list[dict] = []
         # cidfiles are reserved for containers the wrapped job will create.
         if any(path.exists() or path.is_symlink() for path in cidfiles):
             raise Stop("cidfile_already_exists")
@@ -386,6 +391,88 @@ class Containers:
             self.ids.add(value)
         if failed:
             raise Stop("invalid_container_registration")
+        if self.registry is not None:
+            try:
+                descriptor = os.open(self.registry, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            except FileNotFoundError:
+                if self.registry_ids is None:
+                    return
+                raise Stop("invalid_container_registration") from None
+            except OSError:
+                raise Stop("invalid_container_registration") from None
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    raise Stop("invalid_container_registration")
+                raw = os.read(descriptor, 65537)
+                if len(raw) > 65536:
+                    raise Stop("invalid_container_registration")
+                value = json.loads(raw)
+                if (not isinstance(value, dict) or type(value.get("schema")) is not int
+                        or value["schema"] != 1 or not isinstance(value.get("container_ids"), list)):
+                    raise Stop("invalid_container_registration")
+                ids = value["container_ids"]
+                if len(ids) > 256 or any(not isinstance(item, str) or not CONTAINER_ID.fullmatch(item)
+                                         for item in ids):
+                    raise Stop("invalid_container_registration")
+                ids = set(ids)
+                if self.registry_ids is not None and not self.registry_ids <= ids:
+                    raise Stop("invalid_container_registration")
+                self.registry_ids = ids
+                self.ids.update(ids)
+            except (OSError, ValueError, UnicodeError):
+                raise Stop("invalid_container_registration") from None
+            finally:
+                os.close(descriptor)
+
+    def control(self, args: list[str], deadline: float) -> tuple[int | None, bytes, bytes]:
+        """Bound Docker control output/time; never persist raw diagnostic text."""
+        owned = None
+        output = [bytearray(), bytearray()]
+        deadline = min(deadline, time.monotonic() + 5)
+        try:
+            if time.monotonic() >= deadline:
+                return None, b"", b""
+            owned = OwnedProcess([self.docker, *args], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+            with selectors.DefaultSelector() as selector:
+                for index, stream in enumerate((owned.process.stdout, owned.process.stderr)):
+                    os.set_blocking(stream.fileno(), False)
+                    selector.register(stream, selectors.EVENT_READ, index)
+                while selector.get_map() or owned.exit_code() is None:
+                    if time.monotonic() >= deadline:
+                        return None, b"", b""
+                    for key, _ in selector.select(min(.05, max(0, deadline - time.monotonic()))):
+                        try:
+                            chunk = os.read(key.fd, 8192)
+                        except BlockingIOError:
+                            continue
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        output[key.data].extend(chunk)
+                        if sum(map(len, output)) > 65536:
+                            return None, b"", b""
+            return owned.exit_code(), bytes(output[0]), bytes(output[1])
+        except OSError:
+            return None, b"", b""
+        finally:
+            if owned is not None:
+                if not owned.stop(min(self.grace, .2)):
+                    return None, b"", b""
+
+    @staticmethod
+    def proves_missing(container_id: str, code: int | None, out: bytes, err: bytes) -> bool:
+        # Refuse ambiguous or connection failures. These exact Docker errors
+        # are accepted only alongside a successful daemon version read.
+        expected = {
+            f"Error: No such object: {container_id}",
+            f"Error: No such container: {container_id}",
+            f"Error response from daemon: No such container: {container_id}",
+        }
+        try:
+            return code == 1 and not out.strip() and err.decode("utf-8").strip() in expected
+        except UnicodeError:
+            return False
 
     def stop(self) -> tuple[int, int]:
         failures = 0
@@ -394,27 +481,43 @@ class Containers:
         except Stop:
             failures += 1
         if self.ids:
-            owned = None
-            try:
-                owned = OwnedProcess([self.docker, "container", "stop", "--time", "0", "--", *sorted(self.ids)],
-                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL)
-                deadline = time.monotonic() + 5
-                while owned.exit_code() is None and time.monotonic() < deadline:
-                    time.sleep(.05)
-                if owned.exit_code() != 0:
-                    failures += 1
-            except OSError:
-                failures += 1
-            finally:
-                if owned is not None and not owned.stop(self.grace):
-                    failures += 1
+            deadline = time.monotonic() + 10
+            action = ["container", "rm", "--force"] if self.remove else ["container", "stop", "--time", "0"]
+            code, _, _ = self.control([*action, "--", *sorted(self.ids)], deadline)
+            pending_missing = []
+            for container_id in sorted(self.ids):
+                state = ("removed" if self.remove else "stopped") if code == 0 else "unverified"
+                if code != 0:
+                    status, out, err = self.control(["container", "inspect", "--format",
+                        '{"id":{{json .Id}},"running":{{json .State.Running}}}', "--", container_id], deadline)
+                    if status == 0:
+                        try:
+                            observed = json.loads(out)
+                            if observed.get("id") == container_id and type(observed.get("running")) is bool:
+                                state = "still_running" if observed["running"] else ("not_removed" if self.remove else "stopped")
+                        except (ValueError, AttributeError, UnicodeError):
+                            pass
+                    elif self.proves_missing(container_id, status, out, err):
+                        state = "pending_missing"
+                record = {"container_id": container_id, "state": state}
+                self.cleanup.append(record)
+                if state == "pending_missing":
+                    pending_missing.append(record)
+            if pending_missing:
+                status, out, _ = self.control(["version", "--format", "{{json .Server.Version}}"], deadline)
+                try:
+                    server_version = json.loads(out) if status == 0 else None
+                except (ValueError, UnicodeError):
+                    server_version = None
+                for record in pending_missing:
+                    record["state"] = "not_found" if isinstance(server_version, str) and server_version else "unverified"
+            failures += sum(record["state"] not in ("stopped", "removed", "not_found") for record in self.cleanup)
         return len(self.ids), failures
 
 
 class Controller:
     def __init__(self, options: Options, source: AppServer, receipts: Receipts,
-                 containers: Containers):
+                 containers: Containers, stop_file: Path | None = None):
         self.options = options
         self.source = source
         self.receipts = receipts
@@ -422,10 +525,13 @@ class Controller:
         self.policy = Policy(options.stale_after)
         self.interrupted = False
         self.deadline = math.inf
+        self.stop_file = stop_file
 
     def check(self) -> None:
         if self.interrupted:
             raise Stop("interrupted")
+        if self.stop_file is not None and (self.stop_file.exists() or self.stop_file.is_symlink()):
+            raise Stop("stop_file_present")
         now = time.monotonic()
         if now >= self.deadline:
             raise Stop("runtime_elapsed")
@@ -452,6 +558,7 @@ class Controller:
                                read_timeout_seconds=self.options.read_timeout,
                                stale_after_seconds=self.options.stale_after,
                                max_runtime_seconds=self.options.max_runtime,
+                               container_action="remove" if self.containers.remove else "stop",
                                upstream_observation_time_available=False)
             self.source.start(self.options.read_timeout, self.check)
             self.observe()
@@ -479,9 +586,22 @@ class Controller:
             # No exception text: OS and upstream failures may contain secrets.
             reason = "internal_error"
         finally:
+            stop_gate_closed = None
+            if self.stop_file is not None:
+                try:
+                    descriptor = os.open(self.stop_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    os.close(descriptor)  # Existence alone closes the wrapper's start gate.
+                    stop_gate_closed = True
+                except OSError:
+                    stop_gate_closed = False
+                    cleanup_okay = False
+            try:
+                self.receipts.emit("guard_stopping", reason=reason, stop_gate_closed=stop_gate_closed)
+            except (Stop, OSError):
+                cleanup_okay = False
             if child is not None:
                 try:
-                    cleanup_okay = child.stop(self.options.grace)
+                    cleanup_okay = child.stop(self.options.grace) and cleanup_okay
                 except Exception:
                     cleanup_okay = False
             count, failures = len(self.containers.ids), 1
@@ -499,7 +619,8 @@ class Controller:
             try:
                 self.receipts.emit("guard_stopped", reason=reason, exit_code=code,
                                    command_exit_code=child_exit, cleanup_okay=cleanup_okay,
-                                   registered_containers=count, container_cleanup_failures=failures)
+                                   registered_containers=count, container_cleanup_failures=failures,
+                                   containers=self.containers.cleanup, stop_gate_closed=stop_gate_closed)
             except (Stop, OSError):
                 code = 125
         return code
@@ -518,6 +639,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--container-id", action="append", default=[], help="Exact 64-character experiment container ID")
     parser.add_argument("--container-cidfile", type=Path, action="append", default=[],
                         help="Initially absent cidfile that the wrapped experiment will write")
+    parser.add_argument("--container-registry", type=Path,
+                        help="Operator-maintained atomic JSON registry of append-only full container IDs")
+    parser.add_argument("--remove-containers", action="store_true",
+                        help="Opt in to removing exact registered ephemeral containers, preventing delayed restarts")
+    parser.add_argument("--stop-file", type=Path,
+                        help="Create this initially absent private marker before cleanup to close a wrapper's start gate")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -531,10 +658,13 @@ def main(argv: list[str] | None = None) -> int:
         options = Options(args.poll_seconds, args.read_timeout_seconds,
                           args.stale_after_seconds, args.max_runtime_seconds, args.grace_seconds)
         options.validate()
-        containers = Containers(args.container_id, args.container_cidfile, args.docker, options.grace)
+        if args.stop_file is not None and (args.stop_file.exists() or args.stop_file.is_symlink()):
+            raise Stop("stop_file_already_exists")
+        containers = Containers(args.container_id, args.container_cidfile, args.docker, options.grace,
+                                args.container_registry, args.remove_containers)
         receipts = Receipts(args.receipts)
         source = AppServer([args.codex, "app-server", "--listen", "stdio://"], options.grace)
-        controller = Controller(options, source, receipts, containers)
+        controller = Controller(options, source, receipts, containers, args.stop_file)
 
         def interrupted(signum, frame):
             # Record only. Never interrupt Popen before its owned PID is stored,

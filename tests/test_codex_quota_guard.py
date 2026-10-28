@@ -422,7 +422,7 @@ def test_docker_cleanup_timeout_is_bounded(tmp_path):
     containers = guard.Containers(["a" * 64], [], str(docker), .1)
     start = time.monotonic()
     assert containers.stop() == (1, 1)
-    assert time.monotonic() - start < 7
+    assert time.monotonic() - start < 12
     with pytest.raises(ProcessLookupError):
         os.kill(int(marker.read_text()), 0)
 
@@ -443,6 +443,24 @@ def test_real_permission_failure_cannot_claim_cleanup_success(monkeypatch):
         owned.process.wait(timeout=5)
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin zombie-group proof")
+def test_failed_darwin_group_query_cannot_claim_cleanup_success(monkeypatch):
+    import ctypes
+    import types
+
+    owned = guard.OwnedProcess([sys.executable, "-c", "pass"])
+    try:
+        deadline = time.monotonic() + 5
+        while owned.exit_code() is None:
+            assert time.monotonic() < deadline
+            time.sleep(.01)
+        with monkeypatch.context() as patch:
+            patch.setattr(ctypes, "CDLL", lambda path: types.SimpleNamespace(proc_listpids=lambda *args: 0))
+            assert owned.dead_darwin_group() is False
+    finally:
+        assert owned.stop(.1)
+
+
 def test_app_server_initialization_timeout_is_bounded():
     source = guard.AppServer([sys.executable, "-c", "import time; time.sleep(30)"], .1)
     start = time.monotonic()
@@ -460,6 +478,171 @@ def test_runtime_expires_before_next_scheduled_poll(tmp_path):
     assert run_controller(controller, [sys.executable, "-c", "import time; time.sleep(30)"]) == 125
     assert events(tmp_path)[-1]["reason"] == "runtime_elapsed"
     assert len([event for event in events(tmp_path) if event["event"] == "usage_accepted"]) == 1
+
+
+def test_dynamic_registry_is_append_only_and_refreshes_at_cleanup(tmp_path):
+    registry = tmp_path / "registry.json"
+    containers = guard.Containers([], [], "/usr/bin/true", .1, registry)
+    containers.refresh()  # A controller may not have created the file yet.
+    registry.write_text(json.dumps({"schema": 1, "container_ids": ["a" * 64]}))
+    containers.refresh()
+    registry.write_text(json.dumps({"schema": 1, "container_ids": ["b" * 64]}))
+    with pytest.raises(guard.Stop, match="invalid_container_registration"):
+        containers.refresh()
+    assert containers.ids == {"a" * 64}
+    registry.write_text(json.dumps({"schema": 1, "container_ids": ["a" * 64, "b" * 64]}))
+    assert containers.stop() == (2, 0)
+    assert containers.cleanup == [
+        {"container_id": "a" * 64, "state": "stopped"},
+        {"container_id": "b" * 64, "state": "stopped"},
+    ]
+
+
+@pytest.mark.parametrize("value", [
+    [], {}, {"schema": True, "container_ids": []}, {"schema": 2, "container_ids": []},
+    {"schema": 1, "container_ids": "a" * 64}, {"schema": 1, "container_ids": ["short"]},
+    {"schema": 1, "container_ids": [12]}, {"schema": 1, "container_ids": ["a" * 64] * 257},
+])
+def test_dynamic_registry_malformed_data_fails_closed(tmp_path, value):
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps(value))
+    containers = guard.Containers([], [], "/usr/bin/true", .1, registry)
+    with pytest.raises(guard.Stop, match="invalid_container_registration"):
+        containers.refresh()
+    assert containers.ids == set()
+
+
+def test_dynamic_registry_cannot_disappear_or_be_symlink_or_oversized(tmp_path):
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps({"schema": 1, "container_ids": ["a" * 64]}))
+    containers = guard.Containers([], [], "/usr/bin/true", .1, registry)
+    containers.refresh()
+    registry.unlink()
+    with pytest.raises(guard.Stop, match="invalid_container_registration"):
+        containers.refresh()
+    target = tmp_path / "target.json"
+    target.write_text(json.dumps({"schema": 1, "container_ids": ["a" * 64]}))
+    registry.symlink_to(target)
+    with pytest.raises(guard.Stop, match="invalid_container_registration"):
+        containers.refresh()
+    registry.unlink()
+    registry.write_text(" " * 65537)
+    with pytest.raises(guard.Stop, match="invalid_container_registration"):
+        containers.refresh()
+    assert containers.ids == {"a" * 64}
+
+
+def docker_state_fixture(tmp_path, mode):
+    executable = tmp_path / "docker-state"
+    script = r'''
+import json, sys
+mode = MODE
+args = sys.argv[1:]
+if args[:2] in (['container', 'stop'], ['container', 'rm']):
+    print('SENSITIVE generic stop diagnostic', file=sys.stderr)
+    sys.exit(1)
+if args[:2] == ['container', 'inspect']:
+    ident = args[-1]
+    if mode in ('stopped', 'running', 'bad_id'):
+        print(json.dumps({'id': ident if mode != 'bad_id' else 'z'*64,
+                          'running': mode == 'running'}))
+        sys.exit(0)
+    if mode == 'connection_failure':
+        print('SENSITIVE cannot connect to daemon', file=sys.stderr)
+    else:
+        print('Error: No such object: '+ident, file=sys.stderr)
+    sys.exit(1)
+if args[0] == 'version':
+    if mode == 'daemon_down':
+        print('SENSITIVE cannot connect to daemon', file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps('synthetic-server-version'))
+    sys.exit(0)
+sys.exit(2)
+'''
+    executable.write_text(f"#!{sys.executable}\nMODE={mode!r}\n" + script)
+    executable.chmod(0o700)
+    return str(executable)
+
+
+@pytest.mark.parametrize("mode,state,failures", [
+    ("missing", "not_found", 0), ("stopped", "stopped", 0),
+    ("running", "still_running", 1), ("bad_id", "unverified", 1),
+    ("connection_failure", "unverified", 1), ("daemon_down", "unverified", 1),
+])
+def test_cleanup_requires_exact_inspection_and_reachable_daemon_for_missing(tmp_path, mode, state, failures):
+    containers = guard.Containers(["a" * 64], [], docker_state_fixture(tmp_path, mode), .1)
+    assert containers.stop() == (1, failures)
+    assert containers.cleanup == [{"container_id": "a" * 64, "state": state}]
+
+
+def test_container_audit_records_exact_ids_and_state_without_raw_errors(tmp_path):
+    controller = controller_fixture(tmp_path, [usage()])
+    controller.containers = guard.Containers(["a" * 64], [], docker_state_fixture(tmp_path, "missing"), .1)
+    assert run_controller(controller, [sys.executable, "-c", "pass"]) == 0
+    assert events(tmp_path)[-1]["containers"] == [{"container_id": "a" * 64, "state": "not_found"}]
+    assert "SENSITIVE" not in (tmp_path / "receipts.jsonl").read_text()
+
+
+def test_opt_in_removal_targets_only_registered_full_ids(tmp_path):
+    executable = tmp_path / "docker-remove"
+    log = tmp_path / "remove-args.json"
+    executable.write_text(f"#!{sys.executable}\nimport json,pathlib,sys\npathlib.Path({str(log)!r}).write_text(json.dumps(sys.argv[1:]))\n")
+    executable.chmod(0o700)
+    containers = guard.Containers(["a" * 64, "b" * 64], [], str(executable), .1, remove=True)
+    assert containers.stop() == (2, 0)
+    assert json.loads(log.read_text()) == ["container", "rm", "--force", "--", "a" * 64, "b" * 64]
+    assert all(record["state"] == "removed" for record in containers.cleanup)
+
+
+@pytest.mark.parametrize("mode,state,failures", [
+    ("missing", "not_found", 0), ("stopped", "not_removed", 1),
+    ("running", "still_running", 1), ("daemon_down", "unverified", 1),
+])
+def test_opt_in_removal_requires_absence_or_success(tmp_path, mode, state, failures):
+    containers = guard.Containers(["a" * 64], [], docker_state_fixture(tmp_path, mode), .1, remove=True)
+    assert containers.stop() == (1, failures)
+    assert containers.cleanup == [{"container_id": "a" * 64, "state": state}]
+
+
+def test_stop_marker_precedes_all_process_and_container_cleanup(tmp_path, monkeypatch):
+    controller = controller_fixture(tmp_path, [usage()])
+    marker = tmp_path / "stopped"
+    controller.stop_file = marker
+    real_stop = guard.OwnedProcess.stop
+    real_containers_stop = controller.containers.stop
+
+    def stop_owned(owned, grace):
+        assert marker.is_file()
+        return real_stop(owned, grace)
+
+    def stop_containers():
+        assert marker.is_file()
+        return real_containers_stop()
+
+    monkeypatch.setattr(guard.OwnedProcess, "stop", stop_owned)
+    controller.containers.stop = stop_containers
+    assert run_controller(controller, [sys.executable, "-c", "pass"]) == 0
+    assert marker.stat().st_mode & 0o777 == 0o600
+    assert events(tmp_path)[-1]["stop_gate_closed"] is True
+
+
+def test_failed_stop_marker_still_cleans_up_and_reports_failure(tmp_path):
+    controller = controller_fixture(tmp_path, [usage()])
+    controller.stop_file = tmp_path / "missing-directory" / "stopped"
+    assert run_controller(controller, [sys.executable, "-c", "pass"]) == 125
+    assert events(tmp_path)[-1]["stop_gate_closed"] is False
+    assert events(tmp_path)[-1]["cleanup_okay"] is False
+    assert controller.source.owned.process.returncode is not None
+
+
+def test_cli_refuses_existing_stop_marker_before_usage_or_launch(tmp_path):
+    marker = tmp_path / "stopped"
+    marker.write_text("keep")
+    assert guard.main(["--receipts", str(tmp_path / "receipt"), "--stop-file", str(marker),
+                       "--codex", "never-launch", "--", "never-launch"]) == 125
+    assert marker.read_text() == "keep"
+    assert not (tmp_path / "receipt").exists()
 
 
 @pytest.mark.parametrize("value", ["short", "-option", "a" * 63, "g" * 64])
