@@ -26,10 +26,15 @@ reason; no implicit provider, model, scanner, or condition fallback is allowed.
 - The container image pins the clean upstream harness commit and Pi version; scans pin the
   built image by digest or local immutable image id. Never auto-update inside a scan. Record
   Node/Pi/harness/driver identities and the requested model/reasoning settings.
-- An explicit OCI runner must not pass through the old default wrapper that re-adds --no-tools
-  or instructions forbidding all external lookup. Use the harness's retry/isolation seams when
+- An explicit OCI runner must not pass through an older patched default wrapper that re-adds
+  --no-tools or instructions forbidding all external lookup. The newly pinned clean upstream
+  revision does not have that old wrapper behavior. Use the harness's retry/isolation seams when
   compatible, and document any transport-only difference. Do not alter its scan stages or
-  silently truncate the source population. Preserve prompts passed on stdin and native sessions.
+  silently truncate the source population. Preserve prompts passed on stdin and native sessions. Forward abortSignal and maxOutputBytes.
+  The pinned upstream exposes neither observer hooks nor resolveRunnerBinary: explicitly resolve
+  the image route as Pi for session capture and preserve unavailable inner-event evidence.
+  Enforce configured high reasoning on every evaluated call, including specialist retries,
+  and record this override rather than silently retaining upstream minimal-effort retries.
 - Pi 1.4.0 --no-tools disables extension tools as well. Configure an explicit tool selection
   including the research extension. Disable ambient extension/MCP discovery and operator
   settings; supply only image-owned code and per-call state. Give research tools an explicit
@@ -44,7 +49,8 @@ reason; no implicit provider, model, scanner, or condition fallback is allowed.
 - Use existing named credential injection. Never place secrets in argv, configs, raw output,
   image layers or tracked files. Any temporary Pi auth file lives on the container's private
   tmpfs and is removed. For OAuth, accept a deliberately provided credential via a documented
-  environment name, not a mount of the operator's entire Pi directory. Authentication refresh
+  environment name, not a mount of the operator's entire Pi directory. One operator-owned refresh supplies unexpired access credentials to the shards; do not
+  concurrently rotate copied refresh credentials inside independent calls. Authentication refresh
   stays explicit; no silent fallback to a paid API provider. Host auth checks never print keys.
 - All untrusted output reads must retain the existing containment/regular-file protections.
   Review direct read_text/stat/followed-link paths before declaring OCI support. Invalid model
@@ -52,6 +58,9 @@ reason; no implicit provider, model, scanner, or condition fallback is allowed.
 - Open-context attestation continues to be computed by the existing classifier from actual
   backend/history/retrieval evidence. Do not weaken classifiers to make the integration pass.
   Provider retrieval and served model revision remain unverifiable unless actually observed.
+- Consume the pinned harness native summary.completion model-health/coverage report. Its
+  incomplete or unknown coverage and malformed completion evidence must never become success
+  or silence credit; retain the native reasons. This is independent of condition attestation.
 
 ## Verification
 
@@ -64,7 +73,9 @@ reason; no implicit provider, model, scanner, or condition fallback is allowed.
    Include denied private retrieval, read-only source, absent host/evaluator paths and cleanup.
 3. Affected isolation/condition regressions. Do not launch further Semgrep scans for this work.
 4. Build the real pinned runtime and run a bounded live-model smoke test. Start with a fabricated
-   tiny source fixture to verify transport/research before any paid real-CVE benchmark. Do not
+   tiny source fixture to verify transport/research before any paid real-CVE benchmark. Require an actual model-issued
+   successful research tool call and history-tool result showing the ancestor and excluding
+   the later commit; an operator-only fetch probe is insufficient. Do not
    represent diagnostic labels as real CVE detection performance. Preserve results locally.
 5. After the live smoke succeeds and any corrections pass review, run the existing 50-CVE
    population with SV-Agent in open_context, one repetition, Pi GPT-5.6 Sol high. Keep every
