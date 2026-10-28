@@ -25,6 +25,8 @@ CUTOFF_FIELDS = ("training_data_cutoff", "knowledge_cutoff", "reliable_knowledge
 IDENTITY_STATUSES = {"pinned_snapshot", "documented_api_id", "documented_alias"}
 TARGET = {"Low": 2, "Medium": 3, "High": 3, "Critical": 2}
 ARTIFACT_KINDS = {"advisory", "issue", "pull_request", "release", "public_commit", "proof_of_concept"}
+DOSSIER_SCHEMA_VERSION = "scaneval.research-candidate-dossier.v1"
+PROJECTION_POLICY_VERSION = "scaneval.dossier-chronology.v1"
 
 
 def _require(condition: bool, message: str) -> None:
@@ -34,6 +36,10 @@ def _require(condition: bool, message: str) -> None:
 
 def _text(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _canonical_cve_id(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"CVE-[0-9]{4}-(?:[0-9]{4}|[1-9][0-9]{4,})", value) is not None
 
 
 def _url(value: object) -> bool:
@@ -138,16 +144,25 @@ def validate_candidates(document: dict) -> None:
     _require(isinstance(document, dict) and type(document.get("schema_version")) is int and document["schema_version"] == 1, "unsupported candidate document version")
     _require(_text(document.get("severity_authority")), "declare one severity_authority for the pack")
     _require(isinstance(document.get("candidates"), list), "candidates must be a list")
+    if "projection_provenance" in document:
+        provenance = document["projection_provenance"]
+        _require(isinstance(provenance, dict), "projection_provenance must be an object")
+        _require(set(provenance) == {"policy_version", "dossier_schema_version", "dossier_sha256"}, "invalid projection_provenance fields")
+        _require(provenance["policy_version"] == PROJECTION_POLICY_VERSION, "unsupported projection policy version")
+        _require(provenance["dossier_schema_version"] == DOSSIER_SCHEMA_VERSION, "unsupported projection dossier version")
+        digest = provenance["dossier_sha256"]
+        _require(isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None, "invalid projection dossier SHA-256")
     ids = set()
     for candidate in document["candidates"]:
         _require(isinstance(candidate, dict), "candidate must be an object")
         cid = candidate.get("cve_id")
-        _require(isinstance(cid, str) and re.fullmatch(r"CVE-[0-9]{4}-(?:[0-9]{4}|[1-9][0-9]{4,})", cid) is not None and cid not in ids, f"invalid or duplicate CVE: {cid!r}")
+        _require(_canonical_cve_id(cid) and cid not in ids, f"invalid or duplicate CVE: {cid!r}")
         ids.add(cid)
         _require(_text(candidate.get("severity")) and candidate["severity"] in TARGET, f"{cid}: invalid severity")
         _require(_url(candidate.get("severity_source_url")), f"{cid}: severity_source_url is required")
         chronology = candidate.get("chronology")
         _require(isinstance(chronology, dict) and _text(chronology.get("status")) and chronology["status"] in {"pending", "reviewed"}, f"{cid}: chronology must be pending or reviewed")
+        _require("projection_provenance" not in document or chronology["status"] == "pending", f"{cid}: projected chronology must remain pending")
         _require(_text(chronology.get("review_note")), f"{cid}: chronology review_note is required")
         artifacts = chronology.get("public_artifacts")
         _require(isinstance(artifacts, list), f"{cid}: public_artifacts must be a list")
@@ -232,10 +247,13 @@ def assess_candidates(registry: dict, document: dict, model_ids: list[str], *, b
                         "earliest_observed_artifact_date_lower_bound": lower.isoformat() if lower else None,
                         "chronology_status": chronology["status"], "models": decisions})
     shortages = {key: max(0, target - counts[key]) for key, target in TARGET.items()}
-    return {"schema_version": 1, "registry_id": registry["registry_id"], "basis": basis,
+    report = {"schema_version": 1, "registry_id": registry["registry_id"], "basis": basis,
             "registry_sha256": _digest(registry), "candidate_document_sha256": _digest(document),
             "claim_scope": "Chronology relative to documented cutoffs and caller-reviewed evidence; not proof of training exclusion, uncontaminated evaluation, or corpus admission.",
             "severity_authority": document["severity_authority"], "models": boundaries, "candidates": results,
             "eligible_counts": counts, "required_counts": dict(TARGET), "shortages": shortages,
             "minimum_total": 10, "eligible_total": sum(counts.values()),
             "pack_target_met": sum(counts.values()) >= 10 and not any(shortages.values())}
+    if "projection_provenance" in document:
+        report["projection_provenance"] = dict(document["projection_provenance"])
+    return report
