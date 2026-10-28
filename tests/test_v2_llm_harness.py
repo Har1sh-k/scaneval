@@ -407,8 +407,9 @@ def test_finding_submitted_follows_the_capture_state_the_same_record_carries(sta
 
 
 def test_every_declared_tool_policy_says_who_declared_it():
-    assert set(TOOL_POLICY) == {"pi", "claude", "mock"}
+    assert set(TOOL_POLICY) == {"pi", "claude", "mock", "pi-oci"}
     assert "--no-tools" in TOOL_POLICY["pi"]
+    assert "explicit allowlist" in TOOL_POLICY["pi-oci"] and "no built-in file, shell" in TOOL_POLICY["pi-oci"]
     assert "file tools" in TOOL_POLICY["claude"] and "remain permitted" in TOOL_POLICY["claude"]
 
 
@@ -435,7 +436,7 @@ def test_mock_run_records_the_mock_route_and_its_policy_note(tmp_path):
     # adapter now reports different categories against different harnesses, which is a change a
     # reader of an old execution record must be able to date. 2.3.0 added the harness's pr mode;
     # 2.4.0 distinguishes a declared recovered planner timeout from an unresolved runner failure.
-    assert execution["adapter"]["version"] == "2.4.0"
+    assert execution["adapter"]["version"] == "2.5.0"
 
 
 # Where an observation came from, as the trace event contract spells it. Two of these are this
@@ -510,7 +511,7 @@ def test_the_runner_hooks_make_every_cli_attempt_a_paired_request_and_response(t
     requests = [event for event in events if event["type"] == "model.request"]
     responses = [event for event in events if event["type"] == "model.response"]
 
-    assert output["driver_version"] == "2.5.0"
+    assert output["driver_version"] == "2.6.0"
     assert output["hooks"] == {"runner": 1, "engine": 1}
     assert len(requests) == output["model_attempts"] >= output["model_calls"] >= 1
     for event in requests + responses:
@@ -2381,6 +2382,22 @@ DRIVER_OUTPUT = {
 }
 
 
+@pytest.mark.parametrize("scan_stats,expected", [
+    ({"llmCalls": 2, "failedCalls": 1, "status": "complete"}, "llm_calls_failed"),
+    ({"llmCalls": 2, "failedCalls": 2, "status": "complete"}, "llm_path_failed"),
+    ({"llmCalls": 2, "failedCalls": 0, "status": "inconclusive"}, "harness_inconclusive"),
+])
+def test_native_completion_notes_survive_other_partial_outcomes(tmp_path, monkeypatch, scan_stats, expected):
+    completion = json.loads((ROOT / "tests/fixtures/sv-completion.json").read_text())
+    output = {**DRIVER_OUTPUT, "summary": {**DRIVER_OUTPUT["summary"],
+                                          "bootstrapScan": scan_stats, "completion": completion}}
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {"a.md": FINDING}, output=output)
+    execution = load_document(bundle / "execution.json", "execution-record")
+    assert execution["status"] == "partial" and execution["error"]["code"] == expected
+    assert any("Harness completion report:" in note and "source_analysis_completion_not_established" in note
+               for note in execution["notes"])
+
+
 @pytest.mark.parametrize("failed,driver_failed", [(1, 1), (0, 1), (1, None)])
 def test_unrecovered_model_call_makes_completed_scan_partial(tmp_path, monkeypatch, failed, driver_failed):
     output = {**DRIVER_OUTPUT, "summary": {
@@ -3490,7 +3507,7 @@ def test_the_adapter_declares_full_and_pr_scans():
     adapter = get_adapter("llm-harness")
 
     assert adapter.scan_modes == frozenset({"full", "pr"})
-    assert adapter.adapter_version == "2.4.0"
+    assert adapter.adapter_version == "2.5.0"
 
 
 def test_a_pr_request_runs_the_harness_in_pr_mode_between_the_commits_the_request_names(tmp_path, monkeypatch):
@@ -3515,7 +3532,7 @@ def test_a_pr_request_runs_the_harness_in_pr_mode_between_the_commits_the_reques
     execution = load_document(bundle / "execution.json", "execution-record")
     assert result["status"] == "success" and result["location_basis"] == "pr_head"
     assert [claim["claim_id"] for claim in result["claims"]] == ["SV-AUTH-AUTHBYPASS-001"]
-    assert execution["provenance"]["mode"] == "pr" and execution["adapter"]["version"] == "2.4.0"
+    assert execution["provenance"]["mode"] == "pr" and execution["adapter"]["version"] == "2.5.0"
     assert execution["provenance"]["pr"]["prepared_state"] == "fresh"
     assert any(note.startswith("Prepared state: fresh.") for note in execution["notes"])
     assert all(not note.startswith("Prepared state") for note in

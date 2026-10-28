@@ -1,0 +1,22 @@
+# BuildKit reads this file for containers/sv-agent/Dockerfile instead of a root .dockerignore.
+# The context is the repository root, so admit only what the image needs: no evaluator code,
+# corpus, cases, results, .git, host node_modules or credentials can reach the daemon.
+# Source directories are admitted by file type, never whole, so a stray .env or auth JSON
+# next to the sources stays out.
+*
+!containers/sv-agent/package.json
+!containers/sv-agent/package-lock.json
+!containers/sv-agent/write-runtime-receipt.mjs
+!sdk/typescript/package.json
+!sdk/typescript/package-lock.json
+!sdk/typescript/tsconfig.json
+!sdk/typescript/src/**/*.ts
+!src/scaneval/adapters/*.mts
+!src/scaneval/adapters/*.mjs
+# An exception also admits everything under a directory it matches (e.g. a directory named
+# x.ts), so nothing below a matched name is admitted.
+sdk/typescript/src/**/*.ts/**
+src/scaneval/adapters/*/**
+**/node_modules
+**/dist
+**/__pycache__

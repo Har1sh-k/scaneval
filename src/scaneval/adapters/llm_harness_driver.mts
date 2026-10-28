@@ -19,16 +19,37 @@
 //   <harness>/node_modules/.bin/tsx llm_harness_driver.mts --config <driver-config.json>
 
 import {
-  appendFileSync, closeSync, constants, copyFileSync, existsSync, fstatSync, lstatSync,
-  mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync,
+  appendFileSync, chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, lstatSync,
+  mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync,
+  writeSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { homedir } from "node:os";
-import { isAbsolute, join, relative, sep } from "node:path";
-import { pathToFileURL } from "node:url";
+import { homedir, tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const DRIVER_VERSION = "2.5.0";
+const DRIVER_VERSION = "2.6.0";
+// The route label of the image runtime's dedicated Pi runner. Deliberately not "pi": the old
+// local route's declared tool policy is --no-tools, and this one is an explicit allowlist.
+const PI_OCI_ROUTE = "pi-oci";
+
+/** The image runtime's settings, written by the adapter; absent on the local runtime. */
+interface ImageRuntimeConfig {
+  pi_runner_entry: string;
+  pi_extension: string;
+  pi_synthetic_extension: string | null;
+  exec_entry: string;
+  pi_binary: string;
+  pi_provider: string;
+  pi_model_id: string;
+  thinking_level: string;
+  pi_auth_env: string | null;
+  credential_valid_for_ms: number;
+  runtime_receipt: string;
+  research: { search: boolean; journal_dir: string; preflight_url: string | null };
+  synthetic: { tool_calls: unknown[]; harness_mock: string } | null;
+}
 
 interface DriverConfig {
   harness_root: string;
@@ -54,6 +75,8 @@ interface DriverConfig {
   output_path: string;
   progress_path: string;
   flush_timeout_ms: number;
+  runtime?: "local" | "oci_image";
+  image?: ImageRuntimeConfig;
 }
 
 interface PiMeta { invocationId?: string; stage?: string }
@@ -645,12 +668,224 @@ function snapshotContextRecord(record: Record<string, unknown>): {
   }
 }
 
+// ---- image runtime (config.runtime = "oci_image") ----------------------------------------------
+
+const MAX_CREDENTIAL_CHARS = 64 * 1024;
+const REFRESH_DISABLED = "scaneval-refresh-disabled";
+const MAX_RECEIPT_BYTES = 64 * 1024;
+// What a Pi process of the image route inherits from this driver's environment, by name. Nothing
+// else is passed: no provider API key, no credential variable, no operator setting.
+const PI_ENV_PASSTHROUGH = ["PATH", "LANG", "LC_ALL", "TERM", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY",
+  "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy", "SCANEVAL_RETRIEVAL_URL"];
+
+interface ImageRuntimeState {
+  image: ImageRuntimeConfig;
+  agentDir: string;
+  environment: Record<string, string>;
+  credential: { env: string | null; provider: string; materialized: boolean; removed: boolean | null };
+  receipt: Record<string, unknown> | null;
+  receiptError: string | null;
+  piVersion: string | null;
+  piVersionError: string | null;
+  files: Record<string, { path: string; sha256: string | null }>;
+}
+
+/**
+ * Check the single-provider OAuth credential and return the auth.json text Pi will read.
+ *
+ * Every message names the variable and what was wrong with its shape, never a value: an error
+ * here travels into the driver output and the adapter's record.
+ */
+function piAuthDocument(raw: string | undefined, provider: string, name: string, validForMs: number,
+                        now = Date.now()): string {
+  if (raw === undefined || raw === "") {
+    throw new Error(`the Pi credential variable ${name} is not set in the scanner container: declare it under `
+      + `execution.credentials with provider ${provider}, and export in it a JSON object holding exactly one `
+      + `"${provider}" OAuth entry`);
+  }
+  if (raw.length > MAX_CREDENTIAL_CHARS) throw new Error(`the Pi credential variable ${name} is larger than ${MAX_CREDENTIAL_CHARS} characters`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`the Pi credential variable ${name} is not JSON; it must hold {"${provider}": {"type": "oauth", ...}}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`the Pi credential variable ${name} is not a JSON object`);
+  }
+  const keys = Object.keys(parsed);
+  if (keys.length !== 1 || keys[0] !== provider) {
+    throw new Error(`the Pi credential variable ${name} must hold exactly one entry, for provider ${provider}; `
+      + `it holds ${keys.length} entr${keys.length === 1 ? "y" : "ies"}${keys.length === 1 ? " for another provider" : ""}`);
+  }
+  const entry = (parsed as Record<string, unknown>)[provider] as Record<string, unknown> | null;
+  if (!entry || typeof entry !== "object" || Array.isArray(entry) || entry.type !== "oauth") {
+    throw new Error(`the ${provider} entry in ${name} must be an OAuth credential (type "oauth"); this route accepts `
+      + "no API key and falls back to no paid provider");
+  }
+  if (Object.hasOwn(entry, "refresh")) {
+    throw new Error(`the ${provider} OAuth entry in ${name} must be access-only: omit the refresh field; `
+      + "a refresh token must never enter a scanner container");
+  }
+  if (Object.keys(entry).some((key) => !["type", "access", "expires", "accountId"].includes(key))) {
+    throw new Error(`the ${provider} OAuth entry in ${name} contains unsupported fields; `
+      + "export only type, access, expires, and optional accountId");
+  }
+  if (Object.hasOwn(entry, "accountId") && (typeof entry.accountId !== "string" || !entry.accountId)) {
+    throw new Error(`the ${provider} OAuth entry in ${name} has an invalid accountId`);
+  }
+  if (typeof entry.access !== "string" || !entry.access) {
+    throw new Error(`the ${provider} OAuth entry in ${name} has no access token`);
+  }
+  if (typeof entry.expires !== "number" || !Number.isFinite(entry.expires) || Math.abs(entry.expires) >= 2 ** 53) {
+    throw new Error(`the ${provider} OAuth entry in ${name} has no numeric expiry`);
+  }
+  if (!Number.isFinite(validForMs) || validForMs < 360_000 || validForMs >= 2 ** 53) {
+    throw new Error("the Pi access-token validity window must be finite and include its refresh margin");
+  }
+  if (entry.expires <= now + validForMs) {
+    throw new Error(`the ${provider} access token in ${name} has expired or expires within ${Math.round(validForMs / 1000)} seconds, `
+      + "before this scan's limit and Pi's refresh window; refresh it explicitly once (pi auth check) before the run, "
+      + "nothing inside the scan refreshes it");
+  }
+  // Only the fields Pi needs to use the access token. The refresh token is never written: Pi
+  // cannot refresh inside the scan, so no copy of the operator's credential is ever rotated by
+  // one shard underneath another. A refresh Pi attempts anyway fails, visibly, with this value.
+  return JSON.stringify({ [provider]: {
+    type: "oauth", access: entry.access, refresh: REFRESH_DISABLED, expires: entry.expires,
+    ...(typeof entry.accountId === "string" ? { accountId: entry.accountId } : {}),
+  } });
+}
+
+function fileDigest(path: string): string | null {
+  try {
+    return `sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
+  } catch {
+    return null;
+  }
+}
+
+function readReceipt(path: string): { receipt: Record<string, unknown> | null; error: string | null } {
+  try {
+    const descriptor = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      const status = fstatSync(descriptor);
+      if (!status.isFile() || status.size > MAX_RECEIPT_BYTES) return { receipt: null, error: "the runtime receipt is not a bounded regular file" };
+      const parsed = JSON.parse(readFileSync(descriptor, "utf8"));
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? { receipt: parsed as Record<string, unknown>, error: null }
+        : { receipt: null, error: "the runtime receipt is not a JSON object" };
+    } finally {
+      closeSync(descriptor);
+    }
+  } catch (error) {
+    return { receipt: null, error: `the runtime receipt could not be read (${error instanceof Error ? error.name : "error"})` };
+  }
+}
+
+/**
+ * Everything the image route needs before the engine starts: the credential in a private agent
+ * directory, the Pi environment, and the identities of what is about to run.
+ *
+ * The credential variable is removed from this process's environment first, whatever happens
+ * next, so no child this driver or the harness starts (git, pi, anything) can inherit it.
+ */
+function prepareImageRuntime(config: DriverConfig): ImageRuntimeState {
+  const image = config.image;
+  if (!image || typeof image !== "object") throw new Error("the image runtime was selected without its settings");
+  const rawCredential = image.pi_auth_env ? process.env[image.pi_auth_env] : undefined;
+  if (image.pi_auth_env) delete process.env[image.pi_auth_env];
+  if (image.synthetic && rawCredential !== undefined) {
+    throw new Error("the synthetic diagnostic route takes no credential, and one was passed");
+  }
+  const authText = image.synthetic ? null : piAuthDocument(rawCredential, image.pi_provider, image.pi_auth_env ?? "(none)",
+    image.credential_valid_for_ms);
+  if (!process.env.SCANEVAL_RETRIEVAL_URL) {
+    throw new Error("the open-context research route needs SCANEVAL_RETRIEVAL_URL, which the oci backend sets "
+      + "only under the public_research network policy; it was not set, so nothing was run");
+  }
+  const agentDir = mkdtempSync(join(tmpdir(), "scaneval-pi-agent-"));
+  chmodSync(agentDir, 0o700);
+  process.on("exit", () => {
+    try { rmSync(agentDir, { recursive: true, force: true }); } catch { /* recorded as not removed */ }
+  });
+  if (authText !== null) {
+    const descriptor = openSync(join(agentDir, "auth.json"), "wx", 0o600);
+    try {
+      writeSync(descriptor, authText);
+    } finally {
+      closeSync(descriptor);
+    }
+    chmodSync(join(agentDir, "auth.json"), 0o600);
+  }
+  mkdirSync(image.research.journal_dir, { recursive: true, mode: 0o755 });
+  const environment: Record<string, string> = {};
+  for (const name of PI_ENV_PASSTHROUGH) {
+    const value = process.env[name];
+    if (typeof value === "string" && !value.includes("\0")) environment[name] = value;
+  }
+  Object.assign(environment, {
+    HOME: tmpdir(), TMPDIR: tmpdir(), PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", PI_TELEMETRY: "0",
+    SCANEVAL_OPEN_CONTEXT_REPO: config.repo_path,
+    SCANEVAL_OPEN_CONTEXT_SEARCH: image.research.search ? "1" : "0",
+    SCANEVAL_OPEN_CONTEXT_JOURNAL: image.research.journal_dir,
+    ...(image.synthetic ? {
+      SCANEVAL_SYNTHETIC_TOOL_CALLS: JSON.stringify(image.synthetic.tool_calls),
+      SCANEVAL_SYNTHETIC_HARNESS_MOCK: image.synthetic.harness_mock,
+    } : {}),
+  });
+  const { receipt, error: receiptError } = readReceipt(image.runtime_receipt);
+  let piVersion: string | null = null;
+  let piVersionError: string | null = null;
+  try {
+    piVersion = execFileSync(image.pi_binary, ["--version"], { env: { ...environment, PI_CODING_AGENT_DIR: agentDir },
+      encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] }).trim().slice(0, 200) || null;
+  } catch (error) {
+    piVersionError = `pi --version failed (${error instanceof Error ? error.name : "error"})`;
+  }
+  const toolsHelper = join(dirname(image.pi_extension), "pi_open_context_tools.mjs");
+  const files: ImageRuntimeState["files"] = {};
+  for (const [role, path] of [["driver", fileURLToPath(import.meta.url)], ["runner", image.pi_runner_entry],
+    ["extension", image.pi_extension], ["extension_tools", toolsHelper],
+    ...(image.pi_synthetic_extension ? [["synthetic_provider", image.pi_synthetic_extension]] : [])] as Array<[string, string]>) {
+    files[role] = { path, sha256: fileDigest(path) };
+  }
+  return { image, agentDir, environment,
+    credential: { env: image.pi_auth_env, provider: image.pi_provider, materialized: authText !== null, removed: null },
+    receipt, receiptError, piVersion, piVersionError, files };
+}
+
+/** The exact tool allowlist the image route declares to the model; nothing built in. */
+function imageTools(image: ImageRuntimeConfig): string[] {
+  return ["scaneval_fetch", ...(image.research.search ? ["scaneval_search"] : []), "scaneval_git", "scaneval_read"];
+}
+
+/** One bounded public fetch through the recorded API, identified as a preflight, never as research. */
+async function researchPreflight(state: ImageRuntimeState): Promise<Record<string, unknown> | null> {
+  const url = state.image.research.preflight_url;
+  if (!url) return null;
+  try {
+    const tools = await import(pathToFileURL(join(dirname(state.image.pi_extension), "pi_open_context_tools.mjs")).href);
+    const { reply } = await tools.postRetrieval(new URL(String(process.env.SCANEVAL_RETRIEVAL_URL)), "/fetch",
+      { url, source: "scanner_native" });
+    const chain = Array.isArray(reply?.redirect_chain) ? reply.redirect_chain : [];
+    return { purpose: "transport preflight by the driver, before any model call; not model research", url,
+      outcome: reply?.outcome ?? null, http_status: chain.length ? chain[chain.length - 1]?.status ?? null : null,
+      content_sha256: reply?.content_sha256 ?? null, retrieval_event_id: reply?.id ?? null };
+  } catch (error) {
+    return { purpose: "transport preflight by the driver, before any model call; not model research", url,
+      outcome: "client_error", error: error instanceof Error ? error.message.slice(0, 200) : "error" };
+  }
+}
+
 async function main(): Promise<void> {
   const configPath = argValue("config");
   if (!configPath) throw new Error("--config <path> is required");
   const config = JSON.parse(readFileSync(configPath, "utf8")) as DriverConfig;
   const startedAt = nowIso();
   const started = Date.now();
+  // First, before any module of the harness is loaded: the credential leaves the environment.
+  const imageState = config.runtime === "oci_image" ? prepareImageRuntime(config) : null;
 
   const engineModule = await import(pathToFileURL(join(config.harness_root, config.engine_entry)).href);
   const runnerModule = await import(pathToFileURL(join(config.harness_root, config.runner_entry)).href);
@@ -658,10 +893,14 @@ async function main(): Promise<void> {
 
   // Capability detection, once, by what the harness build actually exports. Every branch below
   // reads these two and nothing else, so an older harness takes the pre-hooks path in all of
-  // them rather than in the ones somebody remembered.
-  const runnerHooks: number | null = runnerModule.PI_RUNNER_HOOKS_VERSION ?? null;
+  // them rather than in the ones somebody remembered. The image route composes its own raw
+  // runner under the harness's retry and isolation wrappers and passes them no hooks, so it is
+  // observed per logical call whatever the build exports, and its route is named explicitly
+  // rather than resolved off argv by a helper the pinned build does not export.
+  const runnerHooks: number | null = imageState ? null : runnerModule.PI_RUNNER_HOOKS_VERSION ?? null;
   const engineHooks: number | null = engineModule.HARNESS_OBSERVER_VERSION ?? null;
-  const resolveBinary: ((args: string[]) => string) | undefined = runnerModule.resolveRunnerBinary;
+  const resolveBinary: ((args: string[]) => string) | undefined = imageState
+    ? () => PI_OCI_ROUTE : runnerModule.resolveRunnerBinary;
 
   let eventsWritten = 0;
   const observer = new observerModule.Observer({
@@ -955,7 +1194,75 @@ async function main(): Promise<void> {
     import(pathToFileURL(join(config.harness_root, config.mock_entry)).href)
       .then((module) => module.createDeterministicTestLlmRunner() as PiRunner);
 
-  const baseRunner: PiRunner = config.runner === "mock"
+  // What the image route's Pi processes reported about themselves, aggregated over every call.
+  // Pi's message metadata names the provider and model Pi addressed; that is the client's own
+  // routing record, never a provider's statement of the model it served.
+  const piCallSummary = {
+    calls: 0, nonzero_exits: 0, unparsed_stream_records: 0, thinking_overridden: 0, session_dirs_used: 0,
+    stop_reasons: {} as Record<string, number>, providers_addressed: {} as Record<string, number>,
+    models_addressed: {} as Record<string, number>, replaced_stage_flags: {} as Record<string, number>,
+    tool_executions: {} as Record<string, { ok: number; error: number }>,
+  };
+  const bump = (table: Record<string, number>, key: string | null) => {
+    const name = key ?? "unknown";
+    table[name] = (table[name] ?? 0) + 1;
+  };
+  function observePiCall(observation: Record<string, unknown>): void {
+    piCallSummary.calls += 1;
+    if (observation.exit_code !== 0) piCallSummary.nonzero_exits += 1;
+    piCallSummary.unparsed_stream_records += Number(observation.stream_unparsed_records) || 0;
+    if (observation.thinking_requested_by_stage !== null
+        && observation.thinking_requested_by_stage !== observation.thinking_applied) piCallSummary.thinking_overridden += 1;
+    if (observation.session_dir_used === true) piCallSummary.session_dirs_used += 1;
+    bump(piCallSummary.stop_reasons, typeof observation.stop_reason === "string" ? observation.stop_reason : null);
+    bump(piCallSummary.providers_addressed, typeof observation.provider_addressed === "string" ? observation.provider_addressed : null);
+    bump(piCallSummary.models_addressed, typeof observation.model_addressed === "string" ? observation.model_addressed : null);
+    for (const flag of Array.isArray(observation.replaced_stage_flags) ? observation.replaced_stage_flags : []) {
+      bump(piCallSummary.replaced_stage_flags, String(flag));
+    }
+    for (const execution of Array.isArray(observation.tool_executions) ? observation.tool_executions : []) {
+      const name = typeof execution?.name === "string" ? execution.name : "unknown";
+      const entry = piCallSummary.tool_executions[name] ?? { ok: 0, error: 0 };
+      if (execution?.is_error === true) entry.error += 1;
+      else entry.ok += 1;
+      piCallSummary.tool_executions[name] = entry;
+    }
+    const usage = observation.usage as Record<string, number> | null;
+    if (usage && typeof usage === "object") {
+      for (const [from, to] of [["input", "input_tokens"], ["output", "output_tokens"], ["cacheRead", "cache_read_input_tokens"],
+        ["cacheWrite", "cache_creation_input_tokens"]] as const) {
+        const value = wireNumber(usage[from]);
+        if (value === null) continue;
+        usageTotals[to] = (usageTotals[to] ?? 0) + value;
+        usageObserved = true;
+      }
+      const cost = usage.cost;
+      if (typeof cost === "number" && Number.isFinite(cost) && cost > 0) costTotal = (costTotal ?? 0) + cost;
+    }
+  }
+
+  async function imageRunner(state: ImageRuntimeState): Promise<PiRunner> {
+    const ociModule = await import(pathToFileURL(state.image.pi_runner_entry).href);
+    const execModule = await import(pathToFileURL(join(config.harness_root, state.image.exec_entry)).href);
+    const raw = ociModule.createPiOciRawRunner({
+      exec: execModule.execCommand,
+      piBinary: state.image.pi_binary,
+      provider: state.image.pi_provider,
+      modelId: state.image.pi_model_id,
+      requestedModel: config.model,
+      thinkingLevel: state.image.thinking_level,
+      agentDir: state.agentDir,
+      extensions: [state.image.pi_extension, ...(state.image.pi_synthetic_extension ? [state.image.pi_synthetic_extension] : [])],
+      tools: imageTools(state.image),
+      environment: state.environment,
+      sessionRoot: config.pi_session_root ?? null,
+      onCall: observePiCall,
+    });
+    // Composed exactly as upstream's createDefaultPiRunner composes its own exec.
+    return runnerModule.createRetryingPiRunner(runnerModule.createIsolatedPiRunner(raw)) as PiRunner;
+  }
+
+  const baseRunner: PiRunner = imageState ? await imageRunner(imageState) : config.runner === "mock"
     // The mock route goes through the same retry wrapper so it exercises the same attempt
     // events; one attempt, because a deterministic runner has nothing to retry.
     ? (runnerHooks === null
@@ -1054,7 +1361,7 @@ async function main(): Promise<void> {
       const binary = config.runner === "mock" ? "mock"
         : options.args && resolveBinary ? resolveBinary(options.args) : "unknown";
       let observedOptions = options;
-      if (binary === "pi" && config.pi_session_root && options.args) {
+      if ((binary === "pi" || binary === PI_OCI_ROUTE) && config.pi_session_root && options.args) {
         const sessionDir = join(config.pi_session_root, minted);
         mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
         observedOptions = {
@@ -1392,6 +1699,8 @@ async function main(): Promise<void> {
     }
   };
 
+  const researchPreflightResult = imageState ? await researchPreflight(imageState) : null;
+
   let summary: unknown = null;
   let failure: { name: string; message: string } | null = null;
   try {
@@ -1412,6 +1721,16 @@ async function main(): Promise<void> {
     });
   } catch (error) {
     failure = { name: error instanceof Error ? error.name : "Error", message: error instanceof Error ? error.message : String(error) };
+  }
+  if (imageState) {
+    // The private agent directory holds the credential and whatever Pi wrote beside it. It goes
+    // as soon as no model call can need it, and whether it really went is recorded.
+    try {
+      rmSync(imageState.agentDir, { recursive: true, force: true });
+    } catch {
+      // Recorded below as not removed.
+    }
+    imageState.credential.removed = !existsSync(imageState.agentDir);
   }
 
   // A v1 call ID is only a logical correlation key and can be reused by outer retries or even
@@ -1560,9 +1879,11 @@ async function main(): Promise<void> {
         : ["finding.validation (not applicable: the consensus judge is the only validation stage, and this "
           + "driver never configures consensus)"]),
     ...(engineHooks === null ? ["finding.filtered"] : []),
-    ...(runnerHooks === null
-      ? ["model retries inside the harness runner", "token usage"]
-      : ["token usage on the pi route"]),
+    ...(imageState
+      ? ["model retries inside the harness runner"]
+      : runnerHooks === null
+        ? ["model retries inside the harness runner", "token usage"]
+        : ["token usage on the pi route"]),
     ...(engineHooks === null || untaggedCalls === 0
       ? []
       : [`context.selection for ${untaggedCalls} of ${modelCallIds.size} model invocations `
@@ -1641,6 +1962,35 @@ async function main(): Promise<void> {
       ? null
       : (typeof record.observer?.hookFailures === "number" ? record.observer.hookFailures : null),
     progress_notes: progressNotes,
+    // The image runtime's identities and route, absent on the local runtime. Versions are what
+    // the image's own receipt and the processes themselves report; file digests are of the
+    // files this process actually loaded.
+    ...(imageState ? {
+      runtime: {
+        kind: "oci_image",
+        receipt: imageState.receipt,
+        receipt_error: imageState.receiptError,
+        node_version: process.version,
+        pi_version: imageState.piVersion,
+        pi_version_error: imageState.piVersionError,
+        files: imageState.files,
+      },
+      pi_route: {
+        route: PI_OCI_ROUTE,
+        provider: imageState.image.pi_provider,
+        model_id: imageState.image.pi_model_id,
+        requested: config.model,
+        thinking_level: imageState.image.thinking_level,
+        tools: imageTools(imageState.image),
+        extensions: [imageState.image.pi_extension,
+          ...(imageState.image.pi_synthetic_extension ? [imageState.image.pi_synthetic_extension] : [])],
+        synthetic: imageState.image.synthetic !== null,
+        credential: imageState.credential,
+        research: { search: imageState.image.research.search, journal_dir: imageState.image.research.journal_dir,
+          preflight: researchPreflightResult },
+      },
+      pi_calls: piCallSummary,
+    } : {}),
     summary,
     error: failure,
     trace: {
@@ -1650,9 +2000,16 @@ async function main(): Promise<void> {
       state: observer.getState(),
       flush_timed_out: flushTimedOut,
       unavailable,
-      tool_dispatch_note: "Tool dispatch happens inside the model CLI subprocess, which this driver spawns but "
-        + "cannot see into. No tool event is emitted, and no absence of tool use is established.",
-      usage_note: runnerHooks === null
+      tool_dispatch_note: imageState
+        ? "Tool dispatch happens inside the Pi subprocess. Pi's own JSON stream reports each tool execution, "
+          + "counted under pi_calls.tool_executions; no tool event is emitted into this trace, and neither count "
+          + "shows that a tool's result entered or shaped a model response."
+        : "Tool dispatch happens inside the model CLI subprocess, which this driver spawns but "
+          + "cannot see into. No tool event is emitted, and no absence of tool use is established.",
+      usage_note: imageState
+        ? "Token usage and the cost estimate are summed from the usage Pi attached to each assistant message in its "
+          + "JSON stream: Pi's own accounting, with a cost Pi computes from its catalog prices, never a bill."
+        : runnerHooks === null
         ? "This harness build exports no runner hooks, so no attempt, no token count and no cost estimate was observed."
         : "Token usage and the cost estimate are read from the claude CLI's own json result object. The pi route "
           + "prints no usage and the mock runner calls no model, so a run on either reports none; an absent count "
