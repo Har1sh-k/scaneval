@@ -79,8 +79,10 @@ license and environment evidence, and the declared scope of a prior-public-histo
 search. Raw responses, source files, receipts, and mechanical check reports remain
 outside Git under `/tmp`; committed references retain their URLs and digests.
 
-Composer remains on hold: the July predecessor already disclosed the broader
-binary-path escape and permission change. A proposed clean-bin symlink-bypass
+Composer remains on hold: a predecessor advisory and release were public in July;
+the currently retained advisory describes the broader binary-path escape and
+permission change. Its July 7 update means publication time alone does not establish
+which wording was present July 1. A proposed clean-bin symlink-bypass
 label needs an explicit distinctness decision and stronger earliest-public
 chronology before temporal admission. A newer CVE publication cannot reset that
 history. Preserve all ten candidates' pending status, unknown model cutoffs, and
