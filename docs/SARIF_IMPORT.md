@@ -16,7 +16,7 @@ OSS 1.177 and CodeQL 2.26 write.
 
 ```sh
 scaneval import sarif results/codeql.sarif \
-  --pack corpus/pilot/pack.json --snapshot-id <snapshot> --tree-hash sha256:<64 hex> \
+  --pack corpus/diverse/pack.json --snapshot-id <snapshot> --tree-hash sha256:<64 hex> \
   --system-id codeql-2.26 --output results/codeql-import
 ```
 

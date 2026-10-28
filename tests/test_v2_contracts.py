@@ -1200,6 +1200,10 @@ def maximal_pack() -> dict:
             "disclosure": {"earliest_public_artifact": "2026-01-01", "cve_published": "2026-01-02",
                            "ghsa_published": "2026-01-03", "fix_commit_date": "2026-01-04",
                            "note": "dates read from the advisory"},
+            "severity": {"level": "high", "score": 7.5, "cvss_version": "3.1",
+                         "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                         "source": "https://example.invalid/advisory", "source_kind": "cna_cvss",
+                         "retrieved": "2026-01-02", "note": "Published base score, not a scanner result."},
             "disposition": {"value": "validate", "reason": "worth validating"},
             "validation": {
                 "level": "L3", "review_state": "human_approved",

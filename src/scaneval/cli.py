@@ -120,7 +120,7 @@ from .scoring import score
 
 # These mirror the case-pack contract enums so the CLI can reject a typo early. The schema in
 # scaneval/schemas stays authoritative: every value below is validated again on the way in.
-LANGUAGES = ("python", "typescript", "javascript", "go", "rust")
+LANGUAGES = ("python", "typescript", "javascript", "go", "rust", "java", "ruby")
 WORKLOADS = ("conventional_application", "conventional_automation", "ai_assisted_application",
              "agentic_application")
 COMPONENT_ROLES = ("application", "library_sdk", "infrastructure")
@@ -582,11 +582,33 @@ def _corpus_canonical(args: argparse.Namespace) -> int:
     return 0
 
 
+def _corpus_machine(args: argparse.Namespace) -> int:
+    from . import machine_review
+
+    if args.corpus_command == "machine-prepare":
+        _refuse_trial_path(args.output)
+        index = machine_review.prepare(args.pack, args.evidence, args.repository_root, args.output)
+        print(f"Prepared {len(index['packets'])} static-label review packets: {args.output}")
+        return 0
+    if args.corpus_command == "machine-record":
+        _refuse_trial_path(args.output)
+        report = machine_review.record(args.pack, args.packets, args.judgments, args.output)
+        print(_json(report["summary"]))
+        print(f"Recorded machine static-label review: {args.output}")
+        return 0
+    summary = machine_review.check(args.pack, args.packets, args.report)
+    print(_json(summary))
+    # Valid evidence can still be inconclusive; expose that distinction to automation.
+    return 0 if summary["counts"]["accept"] == summary["case_count"] else 1
+
+
 def _corpus(args: argparse.Namespace) -> int:
     return {"init": _corpus_init, "add-snapshot": _corpus_add_snapshot, "import": _corpus_import,
             "validate": _corpus_validate, "approve": _corpus_approve, "admit": _corpus_admit,
             "disposition": _corpus_disposition, "add-change-set": _corpus_add_change_set,
-            "pr-scope": _corpus_pr_scope, "canonical": _corpus_canonical}[args.corpus_command](args)
+            "pr-scope": _corpus_pr_scope, "canonical": _corpus_canonical,
+            "machine-prepare": _corpus_machine, "machine-record": _corpus_machine,
+            "machine-check": _corpus_machine}[args.corpus_command](args)
 
 
 def _plan(args: argparse.Namespace) -> int:
@@ -1279,6 +1301,23 @@ def _add_corpus_commands(sub: argparse._SubParsersAction) -> None:
     checked.add_argument("--trial-root", type=Path)
     _add_new_version(checked)
 
+    prepared = commands.add_parser("machine-prepare", help="prepare hashed evidence packets for static machine review")
+    prepared.add_argument("pack", type=Path)
+    prepared.add_argument("--evidence", type=Path, required=True)
+    prepared.add_argument("--repository-root", type=Path, required=True)
+    prepared.add_argument("--output", type=Path, required=True)
+
+    recorded = commands.add_parser("machine-record", help="validate and record LLM judgments; never human approval")
+    recorded.add_argument("pack", type=Path)
+    recorded.add_argument("--packets", type=Path, required=True)
+    recorded.add_argument("--judgments", type=Path, required=True)
+    recorded.add_argument("--output", type=Path, required=True)
+
+    verified = commands.add_parser("machine-check", help="recheck static judgments, citations, source freshness and provenance")
+    verified.add_argument("pack", type=Path)
+    verified.add_argument("--packets", type=Path, required=True)
+    verified.add_argument("--report", type=Path, required=True)
+
     approved = commands.add_parser("approve", help="record one explicit human review of a case")
     approved.add_argument("pack", type=Path)
     approved.add_argument("--case-id", required=True)
@@ -1567,6 +1606,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
+    from .datasets.cli import add_commands as add_dataset_commands
+    add_dataset_commands(sub)
+    from .benchmark_cli import add_commands as add_benchmark_commands
+    add_benchmark_commands(sub)
     validate = sub.add_parser("validate", help="validate a versioned JSON contract")
     validate.add_argument("kind", choices=sorted(CONTRACT_KINDS))
     validate.add_argument("path", type=Path)
@@ -1642,6 +1685,12 @@ def _investigate(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "dataset":
+            from .datasets.cli import dispatch
+            return dispatch(args)
+        if args.command == "benchmark":
+            from .benchmark_cli import dispatch
+            return dispatch(args)
         if args.command == "validate":
             load_document(args.path, args.kind)
             print(f"Valid {args.kind}: {args.path}")

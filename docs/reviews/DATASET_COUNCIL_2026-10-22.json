@@ -1,0 +1,92 @@
+{
+  "scope": "Dataset adapters, imported PR/CVE benchmark execution and reference-coverage scoring; not CVE-label revalidation or a real scanner benchmark.",
+  "reviewed_commit": "05acd923d0d953ad6995be290b34008f4a64720d",
+  "opus": {
+    "requested_model": "claude-opus-5-5",
+    "observed_models": [
+      "claude-opus-5-5",
+      "claude-fable-5-1"
+    ],
+    "provider": "Anthropic firstParty",
+    "tools": "disabled",
+    "packet_files": 20,
+    "packet_sha256": "2746ca92b1e349e831647cf58a59e89fd26de0048f3ef665d08863f1a5d75d35",
+    "response_sha256": "1e29f6e7d1bd82a4a70b3ef92d1feeb755c46c4bd9a45618338c23861984cad4",
+    "reported_list_cost_usd": 3.9750746,
+    "budget_cap_usd": 8,
+    "status": "success",
+    "request_sha256": "3dfaef72eb247e28809c8d511ae45e17b781aba87d82bf0eee3fdc2ce1f9ed95"
+  },
+  "artifacts": [
+    {
+      "path": "results/council-review-20261022/astra-scoring-review.md",
+      "sha256": "f42d82638919526b1f689647ea366463991eb3efcbe7cc59b2f65853e44547b8"
+    },
+    {
+      "path": "results/council-review-20261022/astra-adapters-review.md",
+      "sha256": "d5e91ec1d46c8c56e171b412aa70a8e4de45efb0ea5591bdc06634f9ee545259"
+    },
+    {
+      "path": "results/council-review-20261022/astra-binding-fix-review.md",
+      "sha256": "c0eb32d5f13261a8fb162893a381d4cccebc632e45c0c081252d6378678ac740"
+    },
+    {
+      "path": "results/council-review-20261022/astra-persistence-fix-review.md",
+      "sha256": "09d0ed18cfc40c65f6a4c7396058a46d496d25dd4cbb1fb6d23ec38f0160bb2c"
+    },
+    {
+      "path": "results/council-review-20261022/astra-opus-adapters-adjudication.md",
+      "sha256": "4c210be5214601e09d62f511ab9760519b4b84328fed12e69081bafa9b41a045"
+    },
+    {
+      "path": "results/council-review-20261022/astra-opus-scoring-adjudication.md",
+      "sha256": "8ec10343c35a7c7b48bb617152eba91b6a22b99e0fbe54762a9f6a1667cc9556"
+    },
+    {
+      "path": "results/council-review-20261022/opus-review.md",
+      "sha256": "18b2a38d8c956d4584e761be420642a4181f35ed850aeb5fd7282d54101e96bc"
+    },
+    {
+      "path": "results/council-review-20261022/opus-receipt.json",
+      "sha256": "4bdda83d7c070757b9e99daafb88fa8b93f330ea2c69849d9910ab9f577ccf25"
+    },
+    {
+      "path": "results/council-review-20261022/astra-persistence-hard-exit.json",
+      "sha256": "0fd680c2d7e70e31f6978b381059a5f08bc2605b5fafa81bfda4835b63156b01"
+    },
+    {
+      "path": "results/council-review-20261022/astra-id-fix-review.md",
+      "sha256": "07fdb02244918214147bb5752e728d7cb628f24e609b755822ef5f4060995dfb"
+    },
+    {
+      "path": "results/council-review-20261022/astra-sol-fix-review.md",
+      "sha256": "578a5287dfd65f5e4e9aba57aa41d2f0052fe7f087546df761573f23329e5fcf"
+    },
+    {
+      "path": "results/council-review-20261022/astra-sol-fix-repro.json",
+      "sha256": "dc37ad22ac8043912e804b61d816d1f8735a76f4c5ca2dabfc4cadf474ccadc1"
+    },
+    {
+      "path": "results/council-review-20261022/astra-id-fix-evidence.json",
+      "sha256": "32126eec8c39fbe32c32bf6a2813e450b487c2b4b5777dc87efb062b19bceaa2"
+    }
+  ],
+  "schema_version": "1.0",
+  "date": "2026-10-22",
+  "fixed_commit": "af06bfc6e159e0633536b405c9774f8de494baef",
+  "implementation_model": "gpt-5.6-sol",
+  "implementation_model_provenance": "Explicit collaboration.spawn_agent model selection; not self-reported introspection.",
+  "astra_review_provenance": "Existing Astra review roles; scoring agent model gpt-6-astra from earlier explicit orchestrator metadata. No provider-signed identity is claimed.",
+  "validation": {
+    "adapter_tests_passed": 33,
+    "benchmark_tests_passed": 44,
+    "additional_regression_tests_passed": 304,
+    "real_scanner_benchmark_executed": false,
+    "import_hashes_unchanged": [
+      "aacr-bench",
+      "reviewbench",
+      "martian",
+      "openssf"
+    ]
+  }
+}

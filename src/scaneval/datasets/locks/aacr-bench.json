@@ -1,0 +1,54 @@
+{
+  "dataset_id": "aacr-bench",
+  "mode": "pr-review",
+  "repository": "alibaba/aacr-bench",
+  "revision": "ee9d7fef70ef31acea2ff7ae316ce0a9575fe4df",
+  "license": "Apache-2.0",
+  "files": [
+    {
+      "path": "README.md",
+      "url": "https://raw.githubusercontent.com/alibaba/aacr-bench/ee9d7fef70ef31acea2ff7ae316ce0a9575fe4df/README.md",
+      "http_status": 200,
+      "bytes": 11343,
+      "git_blob": "59f2eea769f4d0322ec6b0dbf789ddb88c21b7b8",
+      "sha256": "sha256:724e1e45a6b413f413ff37aff2da36ac8224f9f76c77750c22385ce351d15cb9",
+      "retrieved_at": "2026-10-22T19:56:21.779896+00:00"
+    },
+    {
+      "path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/alibaba/aacr-bench/ee9d7fef70ef31acea2ff7ae316ce0a9575fe4df/LICENSE",
+      "http_status": 200,
+      "bytes": 11357,
+      "git_blob": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64",
+      "sha256": "sha256:c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "retrieved_at": "2026-10-22T19:56:21.786822+00:00"
+    },
+    {
+      "path": "dataset/positive_samples.json",
+      "url": "https://raw.githubusercontent.com/alibaba/aacr-bench/ee9d7fef70ef31acea2ff7ae316ce0a9575fe4df/dataset/positive_samples.json",
+      "http_status": 200,
+      "bytes": 1117816,
+      "git_blob": "053adcb264857b13e62d62d5d223341cbb09ec97",
+      "sha256": "sha256:02c8561f1c3994a26f427d479b2a3f6e6c8e6858161fbc903b45248fa2cb2097",
+      "retrieved_at": "2026-10-22T19:56:21.996800+00:00"
+    },
+    {
+      "path": "dataset/negative_samples.json",
+      "url": "https://raw.githubusercontent.com/alibaba/aacr-bench/ee9d7fef70ef31acea2ff7ae316ce0a9575fe4df/dataset/negative_samples.json",
+      "http_status": 200,
+      "bytes": 508475,
+      "git_blob": "c986541917d820bdca529fa276c5b2570e512396",
+      "sha256": "sha256:d4e9f5b610033914e5e36b066ee4c6177f037642a011949f68dd4e20bfa77e2b",
+      "retrieved_at": "2026-10-22T19:56:21.952341+00:00"
+    },
+    {
+      "path": "docs/metrics.md",
+      "url": "https://raw.githubusercontent.com/alibaba/aacr-bench/ee9d7fef70ef31acea2ff7ae316ce0a9575fe4df/docs/metrics.md",
+      "http_status": 200,
+      "bytes": 7443,
+      "git_blob": "8e088434d9a9b1e9d609fe8c848b532f2fad12f6",
+      "sha256": "sha256:0ad475a8b032c6508041ae4f1613c166632cc8bc385d8b6f8b043e40896a63b4",
+      "retrieved_at": "2026-10-22T19:56:21.979265+00:00"
+    }
+  ]
+}

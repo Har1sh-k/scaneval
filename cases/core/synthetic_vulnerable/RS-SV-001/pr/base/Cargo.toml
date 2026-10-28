@@ -1,9 +1,0 @@
-[package]
-name = "workspace-refactor-agent"
-version = "0.1.0"
-edition = "2021"
-description = "An LLM-driven workspace refactor agent that rewrites source files according to a plan."
-
-[[bin]]
-name = "refactor-agent"
-path = "src/main.rs"

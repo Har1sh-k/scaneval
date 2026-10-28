@@ -1,9 +1,0 @@
-[package]
-name = "multi-agent-orchestrator"
-version = "0.1.0"
-edition = "2021"
-description = "A multi-agent orchestrator that coordinates task execution across peer agents."
-
-[[bin]]
-name = "orchestrator"
-path = "src/main.rs"

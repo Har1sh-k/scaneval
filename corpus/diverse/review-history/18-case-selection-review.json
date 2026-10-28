@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0",
+  "scope": "selection_critique",
+  "requested_model": "claude-mythos-5-1",
+  "reported_models": [
+    "claude-mythos-5-1",
+    "claude-fable-5-1"
+  ],
+  "identity_ambiguous": true,
+  "model_identity_note": "CLI usage reports Mythos and Fable for one requested model. No exclusive responding model can be certified.",
+  "verdict": "acceptable_draft_selection",
+  "suggested_additions": [],
+  "recommendation": "Retain 18 and validate. The selection already covers every requested project and four strata; the binding constraint is validation and adapter support, not count. The one gap that would justify a distinct addition is GitLab scoreability: all three GitLab targets are Ruby and unsupported by every current adapter, so a Go-language GitLab component CVE (e.g., in the in-monorepo workhorse/ tree or gitlab-org/gitaly) would let the GitLab export contribute a measurable case. I cannot supply a CVE ID or URL for such a case with confidence and will not guess one; treat this as a search direction to be independently retrieved. Likewise, kubernetes-cve-2023-5528 is Windows-only; if its Windows-compatible regression gate cannot be met, a Linux-exercisable Kubernetes replacement should be sought rather than adding a fourth Kubernetes case, which would raise repository concentration. Do not add further Python AI-tooling cases; that cluster is already 7/18.",
+  "review_sha256": "sha256:f622cfe3bebea0ab0da72564b63c47bcb1d7a5612844782452c19c427cd8fefe",
+  "receipt_sha256": "sha256:8b5378cff6e93677b780301de01bb8c0c70f11f642b56cc771986cd73881d583",
+  "local_review_path": "results/corpus-expansion-20261022/judge-review-v1.json",
+  "local_receipt_path": "results/corpus-expansion-20261022/judge-review-v1.run.json",
+  "corrections_applied": [
+    "Dropped unrelated production.rb span from GitLab CVE-2024-8641.",
+    "Tightened Windows mklink/rmdir spans in Kubernetes CVE-2023-5528.",
+    "Removed preceding getServiceAccount fragment from Kubernetes CVE-2024-3177 span.",
+    "Distinguished outbound request and event-disclosure sinks in Kubernetes CVE-2020-8555.",
+    "Restricted Codex accepted reporting locations to the actual declared exec.rs span.",
+    "Added direct GitLab GHSA URLs while retaining query receipts.",
+    "Recorded per-snapshot file/byte/extension inventory; adapter budgets remain undeclared.",
+    "Documented L1 limits and severity disagreement scope."
+  ],
+  "remaining_limits": [
+    "Candidate GitLab CVE-2024-8641 mapping lacks its unavailable issue; retain explicit source-based confidence limits.",
+    "Static label judgment, deployment readiness, runtime validation and scanner results are separate claims.",
+    "Java/Ruby adapters remain unsupported."
+  ],
+  "workflow_decision": "Per user instruction, use machine per-case review without mandatory HITL. The selection critique itself is not a per-case approval.",
+  "followup_machine_review": {
+    "model": "gpt-6-astra",
+    "identity_basis": "orchestrator_task_metadata",
+    "initial_outcomes": {
+      "accept": 17,
+      "revise": 1,
+      "abstain": 0
+    },
+    "correction": "Removed the unproven Windows rmdir allegation and narrowed Kubernetes CVE-2023-5528 to Local.Path reaching mklink; separately re-reviewed.",
+    "final_outcomes": {
+      "accept": 18,
+      "revise": 0,
+      "abstain": 0
+    },
+    "scope": "Static target labels under stated assumptions; no runtime or scanner performance claim."
+  }
+}

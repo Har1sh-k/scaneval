@@ -1,9 +1,0 @@
-[package]
-name = "local-ops-assistant"
-version = "0.1.0"
-edition = "2021"
-description = "An LLM-driven local ops assistant that runs maintenance and debug commands."
-
-[[bin]]
-name = "ops-assistant"
-path = "src/main.rs"

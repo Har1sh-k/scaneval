@@ -260,14 +260,15 @@ def test_a_modified_source_keeps_the_error_code_the_adapter_already_reported(tmp
     assert execution["provenance"]["source_modified"] is True
 
 
-def test_unsupported_language_is_not_executed_and_stays_visible(tmp_path):
+@pytest.mark.parametrize("language", ["rust", "java", "ruby"])
+def test_unsupported_language_is_not_executed_and_stays_visible(tmp_path, language):
     adapter = FakeAdapter()
-    bundle = run(tmp_path, adapter, prepared_input(tmp_path, languages=("python", "rust")))
+    bundle = run(tmp_path, adapter, prepared_input(tmp_path, languages=("python", language)))
     result = json.loads((bundle / "result.json").read_text(encoding="utf-8"))
     assert adapter.calls == 0
     assert result["status"] == "unsupported" and result["error"]["code"] == "unsupported_language"
     execution = json.loads((bundle / "execution.json").read_text(encoding="utf-8"))
-    assert execution["unsupported_languages"] == ["rust"]
+    assert execution["unsupported_languages"] == [language]
 
 
 def test_adapter_failure_and_contract_violation_never_become_empty_success(tmp_path):
