@@ -272,14 +272,25 @@ def test_real_runner_distinguishes_configured_and_mechanically_updated_packs(tmp
     configured = load_document(first / "evaluator/pack.json", "case-pack")
     configured["cases"][0]["severity"] = deepcopy(REFERENCE)
     configured["anchor_sha256"] = pack_anchor_digest(configured)
+    cases.set_canonical_id(configured, "case-a", "canonical-example")
+    alias = deepcopy(configured["cases"][0])
+    alias["case_id"] = "case-alias"
+    alias["target"]["target_id"] = "T-case-alias"
+    cases.add_case(configured, alias)
     cases.save_pack(pilot["pack_path"], configured)
     out = tmp_path / "actual-run"
     run_from_config(pilot["config_path"], out, workspace_root=pilot["workspace"], adapters={"fake": pilot["adapter"]},
                     clock=lambda: datetime(2026, 10, 27, tzinfo=timezone.utc))
     frozen = load_document(out / "evaluator/pack.json", "case-pack")
     assert canonical_sha256(frozen) != canonical_sha256(configured)
+    bundle = next((out / "invocations").iterdir())
+    plan = load_document(bundle / "evaluator/plan.json", "evaluation-plan")
+    assert plan["schema_version"] == "2.0"
+    assert all("canonical_id" not in t for t in plan["targets"])
     revise_decisions(out, lambda d: d["claim_matches"][0].update(decision="accepted"))
     report = severity.calibrate([out], configured)
+    assert len(report["records"]) == 1
+    assert report["records"][0]["canonical_id"] == "canonical-example"
     assert report["records"][0]["reason"] == "scope_draft"
     assert report["records"][0]["matched"]
     assert report["runs"][0]["frozen_pack_sha256"] == canonical_sha256(frozen)
@@ -319,3 +330,30 @@ def test_approved_diagnostic_plan_does_not_enter_official_metrics(tmp_path):
     report = severity.calibrate([run], pack)
     assert report["records"][0]["reason"] == "scope_diagnostic"
     assert report["views"][0]["evidence_scope"] == "diagnostic"
+
+
+def test_standard_plan_without_canonical_field_merges_accepted_aliases(tmp_path):
+    run, pack = fixture_run(tmp_path, count=2, aliases=True, labels={0: "High", 1: "Critical"})
+    path = next((run / "invocations").glob("*/evaluator/plan.json"))
+    plan = json.loads(path.read_text())
+    plan["schema_version"] = "2.0"
+    for target in plan["targets"]:
+        target.pop("canonical_id")
+    path.write_text(json.dumps(plan))
+    revise_decisions(run, lambda d: None)
+    report = severity.calibrate([run], pack)
+    assert report["counts"]["assessed"] == 1
+    assert report["records"][0]["selected_claim"]["claim_id"] == "c1"
+
+
+def test_explicit_weights_normalize_strata_after_validating_parent_view():
+    attrs = {t: {"project": t, "family": t, "workload": "conventional_application"} for t in "ab"}
+    policy = {**severity.aggregate.DEFAULT_POLICY, "views": ["explicit"], "target_weights": {"a": .25, "b": .75}}
+    row = {"run_id": "run", "input_id": "input", "canonical_id": "a", "matched": True, "status": "assessed", "reason": None,
+           "comparison": severity.compare_severity({"native_severity": "High"}, refs())}
+    result = severity._metrics([row], {"a": attrs["a"]}, "explicit", policy, whole_view=True, parent_attributes=attrs)
+    assert result["weights"] == {"a": 1}
+    assert result["metrics"]["underestimation"]["value"] == 1
+    policy["target_weights"] = {"a": .25}
+    result = severity._metrics([row], {"a": attrs["a"]}, "explicit", policy, whole_view=True, parent_attributes=attrs)
+    assert result["metrics"]["underestimation"]["value"] is None

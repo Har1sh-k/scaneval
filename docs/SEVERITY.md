@@ -91,7 +91,10 @@ accepted claim has one. Duplicate findings and aliases cannot increase target we
 
 Repetitions average within each run/input, then those run/input means average within a
 canonical target. Target, project, family and explicit weighting use the same declared
-aggregation policy as detection. Mixed workloads require declared workload weights.
+aggregation policy as detection. Explicit target weights are validated over the system/mode/profile
+parent view, then renormalized within condition, evidence-scope and version strata. Mixed workloads
+require declared workload weights. Missing severity changes the effective weights among assessed
+observations; coverage and weighted denominators make that missingness visible.
 Systems, modes, identity profiles, condition names and condition evidence states have
 separate views. Reports include assessment coverage, exact/over/under rates, ordinal error
 distribution and mean absolute error, numeric bias and mean absolute error, raw and weighted

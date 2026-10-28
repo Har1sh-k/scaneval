@@ -208,7 +208,7 @@ def _records(corpus, pack, frozen_packs):
                 row["reason"] = "frozen_pack_unavailable"
             elif provenance.get("pack_sha256") != frozen_packs[observation.run_id]:
                 row["reason"] = "plan_pack_binding_unavailable"
-            elif any(t not in planned or planned[t].get("canonical_id", t) != canonical for t in target_ids):
+            elif any(t not in planned or planned[t].get("canonical_id", canonical) != canonical for t in target_ids):
                 row["reason"] = "planned_target_mismatch"
             elif result["status"] != "success":
                 row["reason"] = "scan_" + result["status"]
@@ -240,8 +240,16 @@ def _counts(rows):
             "reasons": dict(sorted(Counter(r["reason"] for r in rows if r["reason"]).items()))}
 
 
-def _metrics(rows, attributes, weighting, policy, *, whole_view):
+def _metrics(rows, attributes, weighting, policy, *, whole_view, parent_attributes=None):
     weights, reason, notes = aggregate._weights(attributes, weighting, policy, whole_view=whole_view)
+    if not attributes:
+        weights, reason, notes = None, "no planned targets in this stratum", []
+    elif weighting == "explicit" and parent_attributes is not None:
+        parent_weights, parent_reason, _ = aggregate._weights(parent_attributes, weighting, policy, whole_view=True)
+        if parent_weights is None:
+            weights, reason = None, parent_reason
+        else:
+            weights, reason, notes = aggregate._weights(attributes, weighting, policy, whole_view=False)
     answer = {"weighting": weighting, "counts": _counts(rows), "unavailable_reason": reason, "notes": notes,
               "weights": {key: float(value) for key, value in (weights or {}).items()}, "metrics": {}}
     # Per-target observation means preserve target weight across repetitions and aliases.
@@ -302,16 +310,18 @@ def calibrate(run_dirs, pack: dict, *, policy: dict | None = None) -> dict:
     for key in sorted(set(strata) | set(unplanned_strata)):
         group = strata[key]
         attrs = {r["canonical_id"]: corpus.targets[r["canonical_id"]] for r in group}
+        parent_attrs = {r["canonical_id"]: corpus.targets[r["canonical_id"]] for r in rows
+                        if tuple(r[field] for field in fields[:3]) == key[:3]}
         version_rows = defaultdict(list)
         for row in group:
             versions = {r["severity"]["cvss_version"] if r["severity"] else "unavailable" for r in row["references"]}
-            version_rows[next(iter(versions)) if len(versions) == 1 else "conflicting"].append(row)
+            version_rows["unavailable" if "unavailable" in versions else next(iter(versions)) if len(versions) == 1 else "conflicting"].append(row)
         views.append({**dict(zip(fields, key)),
                       "counts": _counts(group),
                       "unplanned_assignments": unplanned_strata[key],
                       "unplanned_assignment_count": len(unplanned_strata[key]),
-                      "weightings": [_metrics(group, attrs, w, policy, whole_view=True) for w in policy["views"]],
-                      "by_cvss_version": {version: [_metrics(subset, {r["canonical_id"]: attrs[r["canonical_id"]] for r in subset}, w, policy, whole_view=False) for w in policy["views"]] for version, subset in version_rows.items()}})
+                      "weightings": [_metrics(group, attrs, w, policy, whole_view=True, parent_attributes=parent_attrs) for w in policy["views"]],
+                      "by_cvss_version": {version: [_metrics(subset, {r["canonical_id"]: attrs[r["canonical_id"]] for r in subset}, w, policy, whole_view=False, parent_attributes=parent_attrs) for w in policy["views"]] for version, subset in version_rows.items()}})
     report = {"schema_version": "2.1", "calibrator_version": VERSION, "pack_sha256": digest,
               "policy": policy, "policy_sha256": canonical_sha256(policy), "band_order": list(BANDS),
               "claim_selection": SELECTION, "reference_selection": REFERENCE_SELECTION,
