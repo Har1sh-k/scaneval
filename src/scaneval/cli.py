@@ -978,6 +978,36 @@ def _aggregate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _severity(args: argparse.Namespace) -> int:
+    from . import severity
+    pack = load_document(args.pack, "case-pack")
+    if args.verify:
+        if args.html or args.policy:
+            raise ContractError("severity --verify uses the saved policy and writes no HTML")
+        severity.verify(load_document(args.verify, "severity-report"), args.runs, pack)
+        print("Severity report matches current evidence")
+        return 0
+    destinations = [path for path in (args.output, args.html) if path is not None]
+    if len({path.expanduser().resolve() for path in destinations}) != len(destinations):
+        raise ContractError("severity JSON and HTML need distinct output paths")
+    for path in destinations:
+        _refuse_precision_path(path)
+        if path.exists() or path.is_symlink():
+            raise FileExistsError(f"refusing to overwrite {path}")
+    policy = aggregate.load_policy(args.policy) if args.policy else None
+    document = severity.calibrate(args.runs, pack, policy=policy)
+    _write_new(args.output, _json(document))
+    if args.html:
+        _write_new(args.html, severity.render_html(document))
+    counts = document["counts"]
+    print(f"Severity: {counts['assessed']} assessed, {counts['unavailable']} unavailable, "
+          f"{counts['excluded']} excluded target observations")
+    print(f"Assignments: {document['assignment_counts']['scheduled']} scheduled, "
+          f"{document['assignment_counts']['unplanned']} with no frozen plan")
+    print(f"Report: {args.output}")
+    return 0
+
+
 def _condition(args: argparse.Namespace) -> int:
     """Reclassify saved artifacts and report every condition stratum without scoring claims."""
     from . import conditions
@@ -1610,12 +1640,22 @@ def build_parser() -> argparse.ArgumentParser:
     add_dataset_commands(sub)
     from .benchmark_cli import add_commands as add_benchmark_commands
     add_benchmark_commands(sub)
+    from .model_cutoffs_cli import add_commands as add_cutoff_commands
+    add_cutoff_commands(sub)
     validate = sub.add_parser("validate", help="validate a versioned JSON contract")
     validate.add_argument("kind", choices=sorted(CONTRACT_KINDS))
     validate.add_argument("path", type=Path)
     condition = sub.add_parser("condition", help="classify saved evaluation conditions without pooling their results")
     condition.add_argument("bundles", type=Path, nargs="+")
     condition.add_argument("--output", type=Path, help="new JSON file; default stdout")
+    severity = sub.add_parser("severity", help="compare adjudicated claimed severity with frozen reference CVSS")
+    severity.add_argument("runs", type=Path, nargs="+", help="saved run directories")
+    severity.add_argument("--pack", type=Path, required=True, help="the exact frozen case pack")
+    severity_output = severity.add_mutually_exclusive_group(required=True)
+    severity_output.add_argument("--output", type=Path, help="new calibration JSON, outside runs and trials")
+    severity_output.add_argument("--verify", type=Path, help="replay and verify a saved calibration report")
+    severity.add_argument("--html", type=Path, help="optional new standalone HTML report")
+    severity.add_argument("--policy", type=Path, help="aggregation weighting policy")
     scoring = sub.add_parser("score", help="score saved output with frozen evaluator decisions")
     for name in ("plan", "result", "decisions"):
         scoring.add_argument(f"--{name}", required=True, type=Path)
@@ -1685,6 +1725,11 @@ def _investigate(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "severity":
+            return _severity(args)
+        if args.command == "model-cutoffs":
+            from .model_cutoffs_cli import dispatch
+            return dispatch(args)
         if args.command == "dataset":
             from .datasets.cli import dispatch
             return dispatch(args)

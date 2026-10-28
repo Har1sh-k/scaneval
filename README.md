@@ -52,6 +52,7 @@ The scorer reports known-target detection, recall within review budgets, and fal
 | `scaneval diagnose context-coverage <bundle>` | Compare captured context spans with labeled targets. Does not change scores. |
 | `scaneval condition <bundle>... [--output]` | Inspect saved condition evidence and separate system/policy/status coverage, offline. |
 | `scaneval aggregate <run dir>... --output` | Weight every scheduled assignment of saved runs into corpus metrics with cluster-bootstrap intervals. |
+| `scaneval severity <run dir>... --pack --output [--html]` | Compare adjudicated claimed severity with reference CVSS, with coverage, provenance and offline replay. See [severity calibration](docs/SEVERITY.md). |
 | `scaneval aggregate <run dir>... --by-condition --output` | Report separate condition/status/policy strata, complete missingness, and descriptive target outcomes. |
 | `scaneval compare <run dir>... --baseline --candidate --output` | Compare two systems assigned the same frozen work, with paired intervals. Decides no promotion. |
 | `scaneval precision sample\|queue\|record\|estimate` | Sample delivered claims from saved runs, record human reviews, and estimate reviewed precision. Does not change scores. |
@@ -121,3 +122,11 @@ Generated runs belong under ignored `results/`; source caches belong under ignor
 ## License
 
 [MIT](LICENSE). Source snapshots and external scanners retain their own licenses.
+
+### Model cutoffs and recent CVE research
+
+Inspect sourced provider cutoffs and check reviewed public-evidence chronology with
+`scaneval model-cutoffs list` and `scaneval model-cutoffs check`. The read-only
+helper preserves unknown dates and routes, distinguishes training from knowledge
+cutoffs, and reports the 2 Low / 3 Medium / 3 High / 2 Critical research target.
+See [model cutoffs](docs/MODEL_CUTOFFS.md) for usage, evidence limits, and maintenance.
