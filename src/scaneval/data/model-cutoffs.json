@@ -1,0 +1,1717 @@
+{
+  "schema_version": 1,
+  "registry_id": "provider-cutoffs-2026-10-28",
+  "retrieved_dates": [
+    "2026-10-27",
+    "2026-10-28"
+  ],
+  "scope": "Dated research snapshot of selected current text/code families, not exhaustive availability or immutable served-model proof.",
+  "policy_notes": [
+    "This establishes temporal separation from provider-documented cutoffs, not proof that a model never encountered a CVE through later training, provider context, retrieval, or evaluation contamination.",
+    "Use training-data cutoff rather than earlier reliable-knowledge cutoff for conservative CVE filtering.",
+    "Release dates and model-ID snapshot dates must not be substituted for training-data cutoff.",
+    "Z.ai has no published temporal knowledge cutoff in the official model guides/cards/repository/report reviewed, including required GLM-5.2 and GLM-5.3.",
+    "Other current xAI families lack verified opened-source cutoffs; Grok 4.6 historical candidate appears only in stale search-index excerpts.",
+    "Versioned API IDs are not exact immutable weight hashes. Provider alias routing can change and must be logged with endpoint and execution date.",
+    "A published knowledge cutoff alone is not proof that later post-training excluded a particular CVE."
+  ],
+  "models": [
+    {
+      "provider": "anthropic",
+      "model_id": "claude-opus-4-6",
+      "display_name": "Claude Opus 4.6",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://platform.claude.com/docs/en/models/opus-4-6/overview"
+      ],
+      "identity_status": "pinned_snapshot",
+      "identity_notes": "From generation 4.6, dateless canonical IDs identify fixed snapshots; earlier aliases are mutable. https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "evidence_status": "verified",
+      "notes": [
+        "Help Center August 2025 describes training data, while reliable knowledge is May 2025. These dates denote different concepts, not a contradiction."
+      ],
+      "reliable_knowledge_cutoff": {
+        "status": "published",
+        "value": "2025-05",
+        "precision": "month",
+        "upper_bound": "2025-05-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Reliable knowledge cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/opus-4-6/overview"
+      },
+      "training_data_cutoff": {
+        "status": "published",
+        "value": "2025-08",
+        "precision": "month",
+        "upper_bound": "2025-08-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Training data cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/opus-4-6/overview"
+      },
+      "knowledge_cutoff": null
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-opus-4-7",
+      "display_name": "Claude Opus 4.7",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://platform.claude.com/docs/en/models/opus-4-7/overview"
+      ],
+      "identity_status": "pinned_snapshot",
+      "identity_notes": "From generation 4.6, dateless canonical IDs identify fixed snapshots; earlier aliases are mutable. https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "evidence_status": "verified",
+      "notes": [],
+      "reliable_knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-01",
+        "precision": "month",
+        "upper_bound": "2026-01-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Reliable knowledge cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/opus-4-7/overview"
+      },
+      "training_data_cutoff": {
+        "status": "published",
+        "value": "2026-01",
+        "precision": "month",
+        "upper_bound": "2026-01-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Training data cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/opus-4-7/overview"
+      },
+      "knowledge_cutoff": null
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-opus-4-8",
+      "display_name": "Claude Opus 4.8",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://platform.claude.com/docs/en/models/opus-4-8/overview"
+      ],
+      "identity_status": "pinned_snapshot",
+      "identity_notes": "From generation 4.6, dateless canonical IDs identify fixed snapshots; earlier aliases are mutable. https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "evidence_status": "verified",
+      "notes": [],
+      "reliable_knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-01",
+        "precision": "month",
+        "upper_bound": "2026-01-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Reliable knowledge cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/opus-4-8/overview"
+      },
+      "training_data_cutoff": {
+        "status": "published",
+        "value": "2026-01",
+        "precision": "month",
+        "upper_bound": "2026-01-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Training data cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/opus-4-8/overview"
+      },
+      "knowledge_cutoff": null
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-opus-5",
+      "display_name": "Claude Opus 5",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://platform.claude.com/docs/en/models/opus-5/overview"
+      ],
+      "identity_status": "pinned_snapshot",
+      "identity_notes": "From generation 4.6, dateless canonical IDs identify fixed snapshots; earlier aliases are mutable. https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "evidence_status": "verified",
+      "notes": [],
+      "reliable_knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-05",
+        "precision": "month",
+        "upper_bound": "2026-05-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Reliable knowledge cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/opus-5/overview"
+      },
+      "training_data_cutoff": {
+        "status": "published",
+        "value": "2026-05",
+        "precision": "month",
+        "upper_bound": "2026-05-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Training data cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/opus-5/overview"
+      },
+      "knowledge_cutoff": null
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-opus-5-5",
+      "display_name": "Claude Opus 5.5",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://platform.claude.com/docs/en/models/opus-5-5/overview"
+      ],
+      "identity_status": "pinned_snapshot",
+      "identity_notes": "From generation 4.6, dateless canonical IDs identify fixed snapshots; earlier aliases are mutable. https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "evidence_status": "verified",
+      "notes": [],
+      "reliable_knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-06",
+        "precision": "month",
+        "upper_bound": "2026-06-30",
+        "upper_bound_is_inference": true,
+        "source_label": "Reliable knowledge cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/opus-5-5/overview"
+      },
+      "training_data_cutoff": {
+        "status": "published",
+        "value": "2026-06",
+        "precision": "month",
+        "upper_bound": "2026-06-30",
+        "upper_bound_is_inference": true,
+        "source_label": "Training data cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/opus-5-5/overview"
+      },
+      "knowledge_cutoff": null
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-sonnet-4-5-20250929",
+      "display_name": "Claude Sonnet 4.5",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://platform.claude.com/docs/en/models/sonnet-4-5/overview"
+      ],
+      "identity_status": "pinned_snapshot",
+      "identity_notes": "From generation 4.6, dateless canonical IDs identify fixed snapshots; earlier aliases are mutable. https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "evidence_status": "verified",
+      "notes": [
+        "Deprecated September 30, 2026; scheduled retirement November 30, 2026 on Anthropic-operated platforms."
+      ],
+      "reliable_knowledge_cutoff": {
+        "status": "published",
+        "value": "2025-01",
+        "precision": "month",
+        "upper_bound": "2025-01-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Reliable knowledge cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/sonnet-4-5/overview"
+      },
+      "training_data_cutoff": {
+        "status": "published",
+        "value": "2025-07",
+        "precision": "month",
+        "upper_bound": "2025-07-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Training data cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/sonnet-4-5/overview"
+      },
+      "knowledge_cutoff": null
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-sonnet-4-6",
+      "display_name": "Claude Sonnet 4.6",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://platform.claude.com/docs/en/models/sonnet-4-6/overview"
+      ],
+      "identity_status": "pinned_snapshot",
+      "identity_notes": "From generation 4.6, dateless canonical IDs identify fixed snapshots; earlier aliases are mutable. https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "evidence_status": "verified_with_conflicting_provider_sources",
+      "notes": [
+        "Prefer explicit distinct fields on model specifications for conservative filtering: reliable Aug 2025; training Jan 2026. Do not silently collapse into a single date.",
+        "Help Center says trained through Aug 2025; Transparency Hub instead says reliable May 2025. Conflicting primary-provider descriptions are retained, not resolved as certainty."
+      ],
+      "reliable_knowledge_cutoff": {
+        "status": "published",
+        "value": "2025-08",
+        "precision": "month",
+        "upper_bound": "2025-08-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Reliable knowledge cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/sonnet-4-6/overview"
+      },
+      "training_data_cutoff": {
+        "status": "published",
+        "value": "2026-01",
+        "precision": "month",
+        "upper_bound": "2026-01-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Training data cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/sonnet-4-6/overview"
+      },
+      "knowledge_cutoff": null,
+      "conflicting_sources": [
+        {
+          "url": "https://support.claude.com/en/articles/8114494-how-up-to-date-is-claude-s-training-data",
+          "claim": "training through August 2025",
+          "source_opened": true
+        },
+        {
+          "url": "https://www.anthropic.com/transparency",
+          "claim": "reliable knowledge through May 2025, under Sonnet 4.6 summary",
+          "source_opened": true
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-sonnet-5",
+      "display_name": "Claude Sonnet 5",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://platform.claude.com/docs/en/models/sonnet-5/overview"
+      ],
+      "identity_status": "pinned_snapshot",
+      "identity_notes": "From generation 4.6, dateless canonical IDs identify fixed snapshots; earlier aliases are mutable. https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "evidence_status": "verified",
+      "notes": [],
+      "reliable_knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-01",
+        "precision": "month",
+        "upper_bound": "2026-01-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Reliable knowledge cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/sonnet-5/overview"
+      },
+      "training_data_cutoff": {
+        "status": "published",
+        "value": "2026-01",
+        "precision": "month",
+        "upper_bound": "2026-01-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Training data cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/sonnet-5/overview"
+      },
+      "knowledge_cutoff": null
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-sonnet-5-5",
+      "display_name": "Claude Sonnet 5.5",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://platform.claude.com/docs/en/models/sonnet-5-5/overview"
+      ],
+      "identity_status": "pinned_snapshot",
+      "identity_notes": "From generation 4.6, dateless canonical IDs identify fixed snapshots; earlier aliases are mutable. https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "evidence_status": "verified",
+      "notes": [],
+      "reliable_knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-06",
+        "precision": "month",
+        "upper_bound": "2026-06-30",
+        "upper_bound_is_inference": true,
+        "source_label": "Reliable knowledge cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/sonnet-5-5/overview"
+      },
+      "training_data_cutoff": {
+        "status": "published",
+        "value": "2026-06",
+        "precision": "month",
+        "upper_bound": "2026-06-30",
+        "upper_bound_is_inference": true,
+        "source_label": "Training data cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/sonnet-5-5/overview"
+      },
+      "knowledge_cutoff": null
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-haiku-4-5-20251001",
+      "display_name": "Claude Haiku 4.5",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://platform.claude.com/docs/en/models/haiku-4-5/overview"
+      ],
+      "identity_status": "pinned_snapshot",
+      "identity_notes": "From generation 4.6, dateless canonical IDs identify fixed snapshots; earlier aliases are mutable. https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "evidence_status": "verified",
+      "notes": [],
+      "reliable_knowledge_cutoff": {
+        "status": "published",
+        "value": "2025-02",
+        "precision": "month",
+        "upper_bound": "2025-02-28",
+        "upper_bound_is_inference": true,
+        "source_label": "Reliable knowledge cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/haiku-4-5/overview"
+      },
+      "training_data_cutoff": {
+        "status": "published",
+        "value": "2025-07",
+        "precision": "month",
+        "upper_bound": "2025-07-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Training data cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/haiku-4-5/overview"
+      },
+      "knowledge_cutoff": null
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-haiku-5-5",
+      "display_name": "Claude Haiku 5.5",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://platform.claude.com/docs/en/models/haiku-5-5/overview"
+      ],
+      "identity_status": "pinned_snapshot",
+      "identity_notes": "From generation 4.6, dateless canonical IDs identify fixed snapshots; earlier aliases are mutable. https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "evidence_status": "verified",
+      "notes": [],
+      "reliable_knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-06",
+        "precision": "month",
+        "upper_bound": "2026-06-30",
+        "upper_bound_is_inference": true,
+        "source_label": "Reliable knowledge cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/haiku-5-5/overview"
+      },
+      "training_data_cutoff": {
+        "status": "published",
+        "value": "2026-06",
+        "precision": "month",
+        "upper_bound": "2026-06-30",
+        "upper_bound_is_inference": true,
+        "source_label": "Training data cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/haiku-5-5/overview"
+      },
+      "knowledge_cutoff": null
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-fable-5",
+      "display_name": "Claude Fable 5",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://platform.claude.com/docs/en/models/fable-5/overview"
+      ],
+      "identity_status": "pinned_snapshot",
+      "identity_notes": "From generation 4.6, dateless canonical IDs identify fixed snapshots; earlier aliases are mutable. https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "evidence_status": "verified",
+      "notes": [],
+      "reliable_knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-01",
+        "precision": "month",
+        "upper_bound": "2026-01-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Reliable knowledge cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/fable-5/overview"
+      },
+      "training_data_cutoff": {
+        "status": "published",
+        "value": "2026-01",
+        "precision": "month",
+        "upper_bound": "2026-01-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Training data cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/fable-5/overview"
+      },
+      "knowledge_cutoff": null
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-fable-5-1",
+      "display_name": "Claude Fable 5.1",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://platform.claude.com/docs/en/models/fable-5-1/overview"
+      ],
+      "identity_status": "pinned_snapshot",
+      "identity_notes": "From generation 4.6, dateless canonical IDs identify fixed snapshots; earlier aliases are mutable. https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "evidence_status": "verified",
+      "notes": [],
+      "reliable_knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-06",
+        "precision": "month",
+        "upper_bound": "2026-06-30",
+        "upper_bound_is_inference": true,
+        "source_label": "Reliable knowledge cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/fable-5-1/overview"
+      },
+      "training_data_cutoff": {
+        "status": "published",
+        "value": "2026-06",
+        "precision": "month",
+        "upper_bound": "2026-06-30",
+        "upper_bound_is_inference": true,
+        "source_label": "Training data cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/fable-5-1/overview"
+      },
+      "knowledge_cutoff": null
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-mythos-5",
+      "display_name": "Claude Mythos 5",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://platform.claude.com/docs/en/models/mythos-5/overview"
+      ],
+      "identity_status": "pinned_snapshot",
+      "identity_notes": "From generation 4.6, dateless canonical IDs identify fixed snapshots; earlier aliases are mutable. https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "evidence_status": "verified",
+      "notes": [
+        "Active but access requires an organization verified through Anthropic programs; available to eligible customers, not generally available to all users."
+      ],
+      "reliable_knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-01",
+        "precision": "month",
+        "upper_bound": "2026-01-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Reliable knowledge cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/mythos-5/overview"
+      },
+      "training_data_cutoff": {
+        "status": "published",
+        "value": "2026-01",
+        "precision": "month",
+        "upper_bound": "2026-01-31",
+        "upper_bound_is_inference": true,
+        "source_label": "Training data cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/mythos-5/overview"
+      },
+      "knowledge_cutoff": null
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-mythos-5-1",
+      "display_name": "Claude Mythos 5.1",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://platform.claude.com/docs/en/models/mythos-5-1/overview"
+      ],
+      "identity_status": "pinned_snapshot",
+      "identity_notes": "From generation 4.6, dateless canonical IDs identify fixed snapshots; earlier aliases are mutable. https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "evidence_status": "verified",
+      "notes": [
+        "Active but access requires an organization verified through Anthropic programs; available to eligible customers, not generally available to all users."
+      ],
+      "reliable_knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-06",
+        "precision": "month",
+        "upper_bound": "2026-06-30",
+        "upper_bound_is_inference": true,
+        "source_label": "Reliable knowledge cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/mythos-5-1/overview"
+      },
+      "training_data_cutoff": {
+        "status": "published",
+        "value": "2026-06",
+        "precision": "month",
+        "upper_bound": "2026-06-30",
+        "upper_bound_is_inference": true,
+        "source_label": "Training data cutoff",
+        "source_url": "https://platform.claude.com/docs/en/models/mythos-5-1/overview"
+      },
+      "knowledge_cutoff": null
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-mythos-preview",
+      "display_name": "Claude Mythos Preview",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://www-cdn.anthropic.com/53566bf5440a10affd749724787c8913a2ae0841.pdf"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "From generation 4.6, dateless canonical IDs identify fixed snapshots; earlier aliases are mutable. https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "evidence_status": "exact_cutoff_unknown_but_provider_published_temporal_bound",
+      "notes": [
+        "Only a temporal bound; do not label March 20 as actual published cutoff.",
+        "Do not assume Preview equals Fable 5 or Mythos 5.",
+        "Deprecation page records deprecated June 9, 2026; retirement to be announced."
+      ],
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": {
+        "status": "temporal_bound",
+        "value": null,
+        "precision": "unknown",
+        "upper_bound": "2026-03-20",
+        "upper_bound_is_inference": true,
+        "source_label": "System card section 6.8: USAMO 2026 occurs after training data cutoff",
+        "source_url": "https://www-cdn.anthropic.com/53566bf5440a10affd749724787c8913a2ae0841.pdf",
+        "derivation": "March 21–22, 2026 is after the cutoff; March 20 is an inferred inclusive day upper bound, not the actual cutoff."
+      },
+      "knowledge_cutoff": null
+    },
+    {
+      "provider": "openai",
+      "model_id": "gpt-5.6-sol",
+      "display_name": "GPT-5.6 Sol",
+      "retrieved_date": "2026-10-27",
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5.6-sol"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "The opened model page lists the same model ID in Snapshots; no dated snapshot ID was displayed.",
+      "evidence_status": "published_knowledge_only",
+      "notes": [
+        "No separate model-specific training-data endpoint established in reviewed official OpenAI documentation. Knowledge cutoff is not copied into this field."
+      ],
+      "knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-02-16",
+        "precision": "day",
+        "upper_bound": "2026-02-16",
+        "upper_bound_is_inference": false,
+        "source_label": "knowledge cutoff",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-5.6-sol"
+      },
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "openai",
+      "model_id": "gpt-5.6-terra",
+      "display_name": "GPT-5.6 Terra",
+      "retrieved_date": "2026-10-27",
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5.6-terra"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "The opened model page lists the same model ID in Snapshots; no dated snapshot ID was displayed.",
+      "evidence_status": "published_knowledge_only",
+      "notes": [
+        "No separate model-specific training-data endpoint established in reviewed official OpenAI documentation. Knowledge cutoff is not copied into this field."
+      ],
+      "knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-02-16",
+        "precision": "day",
+        "upper_bound": "2026-02-16",
+        "upper_bound_is_inference": false,
+        "source_label": "knowledge cutoff",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-5.6-terra"
+      },
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "openai",
+      "model_id": "gpt-5.6-luna",
+      "display_name": "GPT-5.6 Luna",
+      "retrieved_date": "2026-10-27",
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5.6-luna"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "The opened model page lists the same model ID in Snapshots; no dated snapshot ID was displayed.",
+      "evidence_status": "published_knowledge_only",
+      "notes": [
+        "No separate model-specific training-data endpoint established in reviewed official OpenAI documentation. Knowledge cutoff is not copied into this field."
+      ],
+      "knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-02-16",
+        "precision": "day",
+        "upper_bound": "2026-02-16",
+        "upper_bound_is_inference": false,
+        "source_label": "knowledge cutoff",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-5.6-luna"
+      },
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "openai",
+      "model_id": "gpt-5.6-cyber",
+      "display_name": "GPT-5.6 Cyber",
+      "retrieved_date": "2026-10-27",
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5.6-cyber"
+      ],
+      "identity_status": "documented_alias",
+      "identity_notes": "The opened model page lists the same model ID in Snapshots; no dated snapshot ID was displayed. Provider documentation identifies this ID as an alias; no distinct dated revision established.",
+      "evidence_status": "published_knowledge_only",
+      "notes": [
+        "No separate model-specific training-data endpoint established in reviewed official OpenAI documentation. Knowledge cutoff is not copied into this field."
+      ],
+      "knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-02-16",
+        "precision": "day",
+        "upper_bound": "2026-02-16",
+        "upper_bound_is_inference": false,
+        "source_label": "knowledge cutoff",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-5.6-cyber"
+      },
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "openai",
+      "model_id": "gpt-6-sol",
+      "display_name": "GPT-6 Sol",
+      "retrieved_date": "2026-10-27",
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-6-sol"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "The opened model page lists the same model ID in Snapshots; no dated snapshot ID was displayed.",
+      "evidence_status": "published_knowledge_only",
+      "notes": [
+        "No separate model-specific training-data endpoint established in reviewed official OpenAI documentation. Knowledge cutoff is not copied into this field."
+      ],
+      "knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-04-20",
+        "precision": "day",
+        "upper_bound": "2026-04-20",
+        "upper_bound_is_inference": false,
+        "source_label": "knowledge cutoff",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-6-sol"
+      },
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "openai",
+      "model_id": "gpt-6-astra",
+      "display_name": "GPT-6 Astra",
+      "retrieved_date": "2026-10-27",
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-6-astra"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "The opened model page lists the same model ID in Snapshots; no dated snapshot ID was displayed.",
+      "evidence_status": "published_knowledge_only",
+      "notes": [
+        "No separate model-specific training-data endpoint established in reviewed official OpenAI documentation. Knowledge cutoff is not copied into this field."
+      ],
+      "knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-04-30",
+        "precision": "day",
+        "upper_bound": "2026-04-30",
+        "upper_bound_is_inference": false,
+        "source_label": "knowledge cutoff",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-6-astra"
+      },
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "openai",
+      "model_id": "gpt-6-luna",
+      "display_name": "GPT-6 Luna",
+      "retrieved_date": "2026-10-27",
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-6-luna"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "The opened model page lists the same model ID in Snapshots; no dated snapshot ID was displayed.",
+      "evidence_status": "published_knowledge_only",
+      "notes": [
+        "No separate model-specific training-data endpoint established in reviewed official OpenAI documentation. Knowledge cutoff is not copied into this field."
+      ],
+      "knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-05-18",
+        "precision": "day",
+        "upper_bound": "2026-05-18",
+        "upper_bound_is_inference": false,
+        "source_label": "knowledge cutoff",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-6-luna"
+      },
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "openai",
+      "model_id": "gpt-6.1-sol",
+      "display_name": "GPT-6.1 Sol",
+      "retrieved_date": "2026-10-27",
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-6.1-sol"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "The opened model page lists the same model ID in Snapshots; no dated snapshot ID was displayed.",
+      "evidence_status": "published_knowledge_only",
+      "notes": [
+        "No separate model-specific training-data endpoint established in reviewed official OpenAI documentation. Knowledge cutoff is not copied into this field."
+      ],
+      "knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-04-30",
+        "precision": "day",
+        "upper_bound": "2026-04-30",
+        "upper_bound_is_inference": false,
+        "source_label": "knowledge cutoff",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-6.1-sol"
+      },
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "openai",
+      "model_id": "gpt-6.1-terra",
+      "display_name": "GPT-6.1 Terra",
+      "retrieved_date": "2026-10-27",
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-6.1-terra"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "The opened model page lists the same model ID in Snapshots; no dated snapshot ID was displayed.",
+      "evidence_status": "published_knowledge_only",
+      "notes": [
+        "No separate model-specific training-data endpoint established in reviewed official OpenAI documentation. Knowledge cutoff is not copied into this field."
+      ],
+      "knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-06-01",
+        "precision": "day",
+        "upper_bound": "2026-06-01",
+        "upper_bound_is_inference": false,
+        "source_label": "knowledge cutoff",
+        "source_url": "https://developers.openai.com/api/docs/models/gpt-6.1-terra"
+      },
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "zai",
+      "model_id": "glm-5.3",
+      "display_name": "GLM-5.3",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.z.ai/guides/llm/glm-5.3",
+        "https://huggingface.co/zai-org/GLM-5.3",
+        "https://github.com/zai-org/GLM-5",
+        "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "Coding Plan requests for GLM-5.2 and GLM-5.1 route here; no dated serving snapshot documented in reviewed pages.",
+      "evidence_status": "unknown_not_published_in_reviewed_sources",
+      "notes": [
+        "Official guide and repository state that GLM-5.3 reuses the GLM-5.2 base and improvements come from post-training; none of the opened sources supplies a temporal knowledge cutoff."
+      ],
+      "knowledge_cutoff": null,
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "zai",
+      "model_id": "glm-5.2",
+      "display_name": "GLM-5.2",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.z.ai/guides/llm/glm-5.2",
+        "https://huggingface.co/zai-org/GLM-5.2",
+        "https://github.com/zai-org/GLM-5"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "Standard API docs still enumerate glm-5.2, but Coding Plan explicitly reroutes requests to GLM-5.3; endpoint must be recorded.",
+      "evidence_status": "unknown_not_published_in_reviewed_sources",
+      "notes": [
+        "Official guide gives exact model ID and supported parameters; official card discusses capabilities and benchmarks without a knowledge cutoff."
+      ],
+      "knowledge_cutoff": null,
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "zai",
+      "model_id": "glm-5.3-flash",
+      "display_name": "GLM-5.3-Flash",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.z.ai/guides/vlm/glm-5.3-flash",
+        "https://huggingface.co/zai-org/GLM-5.3-Flash",
+        "https://github.com/zai-org/GLM-5"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "Coding Plan requests for GLM-4.7 route here.",
+      "evidence_status": "unknown_not_published_in_reviewed_sources",
+      "notes": [
+        "Official guide gives exact ID. Official card describes a newly trained base and 30T-token multimodal pretraining corpus, without a data cutoff."
+      ],
+      "knowledge_cutoff": null,
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "zai",
+      "model_id": "glm-5.3-flashx",
+      "display_name": "GLM-5.3-FlashX",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.z.ai/guides/vlm/glm-5.3-flash",
+        "https://docs.z.ai/guides/overview/pricing"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "Guide says FlashX is not yet available on Coding Plan; available via model API.",
+      "evidence_status": "unknown_not_published_in_reviewed_sources",
+      "notes": [
+        "Official guide explicitly lists this API ID and describes its higher inference speed, without a knowledge cutoff."
+      ],
+      "knowledge_cutoff": null,
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "zai",
+      "model_id": "glm-5.3-flashx-legal",
+      "display_name": "GLM-5.3-FlashX-Legal",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.z.ai/guides/vlm/glm-5.3-flash",
+        "https://docs.z.ai/guides/overview/pricing"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "No immutable serving revision verified.",
+      "evidence_status": "unknown_not_published_in_reviewed_sources",
+      "notes": [
+        "Exact ID appears in official guide and display name in pricing catalog; no cutoff or distinct training metadata found."
+      ],
+      "knowledge_cutoff": null,
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "zai",
+      "model_id": "glm-5.1",
+      "display_name": "GLM-5.1",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.z.ai/api-reference/llm/chat-completion",
+        "https://huggingface.co/zai-org/GLM-5.1"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "Coding Plan routes GLM-5.1 requests to GLM-5.3.",
+      "evidence_status": "unknown_not_published_in_reviewed_sources",
+      "notes": [
+        "Official API model enum lists this exact ID; opened official model card has no knowledge cutoff. GLM-5 technical report also has no explicit cutoff."
+      ],
+      "knowledge_cutoff": null,
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "zai",
+      "model_id": "glm-5",
+      "display_name": "GLM-5",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.z.ai/api-reference/llm/chat-completion",
+        "https://huggingface.co/zai-org/GLM-5"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "No dated serving snapshot verified.",
+      "evidence_status": "unknown_not_published_in_reviewed_sources",
+      "notes": [
+        "Official API model enum lists this exact ID; opened official model card has no knowledge cutoff. GLM-5 technical report also has no explicit cutoff."
+      ],
+      "knowledge_cutoff": null,
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "zai",
+      "model_id": "glm-4.7",
+      "display_name": "GLM-4.7",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.z.ai/api-reference/llm/chat-completion",
+        "https://huggingface.co/zai-org/GLM-4.7"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "Coding Plan routes GLM-4.7 requests to GLM-5.3-Flash.",
+      "evidence_status": "unknown_not_published_in_reviewed_sources",
+      "notes": [
+        "Official API model enum lists this exact ID; opened official model card has no knowledge cutoff. GLM-5 technical report also has no explicit cutoff."
+      ],
+      "knowledge_cutoff": null,
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "zai",
+      "model_id": "glm-4.6",
+      "display_name": "GLM-4.6",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.z.ai/api-reference/llm/chat-completion",
+        "https://huggingface.co/zai-org/GLM-4.6"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "No dated serving snapshot verified.",
+      "evidence_status": "unknown_not_published_in_reviewed_sources",
+      "notes": [
+        "Official API model enum lists this exact ID; opened official model card has no knowledge cutoff. GLM-5 technical report also has no explicit cutoff."
+      ],
+      "knowledge_cutoff": null,
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "xai",
+      "model_id": "grok-4.7",
+      "display_name": "Grok 4.7",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.x.ai/developers/models",
+        "https://docs.x.ai/developers/grok-4-7",
+        "https://docs.x.ai/developers/models/grok-4.7"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "Exact public API ID verified. No dated immutable revision exposed in reviewed model page; do not invent one.",
+      "evidence_status": "verified_published_knowledge_cutoff",
+      "notes": [
+        "The live model catalog and developer guide explicitly report May 2026 as the knowledge cutoff. Grok 4.7 Fast is stated to be the same model on faster infrastructure, only in Cursor/Grok Build."
+      ],
+      "knowledge_cutoff": {
+        "status": "published",
+        "value": "2026-05",
+        "precision": "month",
+        "upper_bound": "2026-05-31",
+        "upper_bound_is_inference": true,
+        "source_label": "knowledge cutoff",
+        "source_url": "https://docs.x.ai/developers/models"
+      },
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "xai",
+      "model_id": "grok-4.6",
+      "display_name": "Grok 4.6",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.x.ai/developers/models/grok-4.6",
+        "https://docs.x.ai/developers/pricing",
+        "https://x.ai/news/grok-4-6"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "No immutable serving revision verified.",
+      "evidence_status": "unknown_current_primary_page_verification_failed",
+      "notes": [
+        "Current pricing and model detail confirm model identity, but opened pages have no cutoff. Historical search index snippets of the provider catalog say February 1, 2026; opening both catalog variants returns updated Grok 4.7 cutoff instead."
+      ],
+      "knowledge_cutoff": null,
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null,
+      "rejected_candidate_cutoff": {
+        "value": "2026-02-01",
+        "reason": "Only stale search-index content supports it; no opened primary source preserving the claim was verified.",
+        "urls": [
+          "https://docs.x.ai/developers/models?cluster=us-east-1%2F",
+          "https://docs.x.ai/developers/models?fpr=aiscores&via=aiscores"
+        ]
+      }
+    },
+    {
+      "provider": "xai",
+      "model_id": "grok-4.5",
+      "display_name": "Grok 4.5",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.x.ai/developers/models/grok-4.5",
+        "https://docs.x.ai/developers/pricing",
+        "https://x.ai/news/grok-4-5"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "No immutable serving revision verified.",
+      "evidence_status": "unknown_not_published_in_reviewed_sources",
+      "notes": [
+        "Official pricing, model page and release post confirm model but do not publish a cutoff. Old developer guide URL redirects to Grok 4.7."
+      ],
+      "knowledge_cutoff": null,
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "xai",
+      "model_id": "grok-4.3",
+      "display_name": "Grok 4.3",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.x.ai/developers/models/grok-4.3",
+        "https://docs.x.ai/developers/pricing",
+        "https://docs.x.ai/developers/migration/may-15-retirement"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "No immutable serving revision verified.",
+      "evidence_status": "unknown_not_published_in_reviewed_sources",
+      "notes": [
+        "Official catalog confirms this current model and alias; no cutoff in reviewed sources. Several old Grok 3/4/Fast model names redirect here."
+      ],
+      "knowledge_cutoff": null,
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "xai",
+      "model_id": "grok-build-0.1",
+      "display_name": "Grok Build 0.1",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.x.ai/developers/models/grok-build-0.1",
+        "https://docs.x.ai/developers/pricing",
+        "https://docs.x.ai/developers/release-notes"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "No immutable serving revision verified.",
+      "evidence_status": "unknown_not_published_in_reviewed_sources",
+      "notes": [
+        "Current model detail and catalog confirm coding model and exact ID; no cutoff found."
+      ],
+      "knowledge_cutoff": null,
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "xai",
+      "model_id": "grok-4.20-0309-reasoning",
+      "display_name": "Grok 4.20 0309 Reasoning",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning",
+        "https://docs.x.ai/developers/pricing",
+        "https://data.x.ai/2026-04-07-grok-4-20-model-card.pdf"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "No immutable serving revision verified.",
+      "evidence_status": "unknown_not_published_in_reviewed_sources",
+      "notes": [
+        "Official model page confirms release-specific slug and aliases; official system card describes pretraining, mid-training and post-training without a temporal cutoff."
+      ],
+      "knowledge_cutoff": null,
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "xai",
+      "model_id": "grok-4.20-0309-non-reasoning",
+      "display_name": "Grok 4.20 0309 Non Reasoning",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.x.ai/developers/models/grok-4.20-0309-non-reasoning",
+        "https://docs.x.ai/developers/pricing",
+        "https://data.x.ai/2026-04-07-grok-4-20-model-card.pdf"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "No immutable serving revision verified.",
+      "evidence_status": "unknown_not_published_in_reviewed_sources",
+      "notes": [
+        "Official model page confirms release-specific slug and aliases; official family card gives no temporal training cutoff."
+      ],
+      "knowledge_cutoff": null,
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    },
+    {
+      "provider": "xai",
+      "model_id": "grok-4.20-multi-agent-0309",
+      "display_name": "Grok 4.20 Multi Agent 0309",
+      "retrieved_date": "2026-10-28",
+      "sources": [
+        "https://docs.x.ai/developers/models/grok-4.20-multi-agent-0309",
+        "https://docs.x.ai/developers/pricing",
+        "https://data.x.ai/2026-04-07-grok-4-20-model-card.pdf"
+      ],
+      "identity_status": "documented_api_id",
+      "identity_notes": "No immutable serving revision verified.",
+      "evidence_status": "unknown_not_published_in_reviewed_sources",
+      "notes": [
+        "Official model page confirms exact slug and aliases; no knowledge cutoff in card or model page."
+      ],
+      "knowledge_cutoff": null,
+      "reliable_knowledge_cutoff": null,
+      "training_data_cutoff": null
+    }
+  ],
+  "aliases": [
+    {
+      "model_id": "claude-sonnet-4-5",
+      "provider": "anthropic",
+      "target_model_id": "claude-sonnet-4-5-20250929",
+      "source_url": "https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "claude-haiku-4-5",
+      "provider": "anthropic",
+      "target_model_id": "claude-haiku-4-5-20251001",
+      "source_url": "https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "gpt-5.6",
+      "provider": "openai",
+      "target_model_id": "gpt-5.6-sol",
+      "source_url": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "~openai/gpt-astra-latest",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "~openai/gpt-luna-latest",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "~openai/gpt-mini-latest",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "~openai/gpt-sol-latest",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "~openai/gpt-terra-latest",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-5.6-luna-pro",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-5.6-luna-pro:batch",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-5.6-luna:batch",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-5.6-sol-pro",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-5.6-sol-pro:batch",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-5.6-sol:batch",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-5.6-terra-pro",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-5.6-terra-pro:batch",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-5.6-terra:batch",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-6-astra-pro",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-6-astra-pro:batch",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-6-astra:batch",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-6-luna-pro",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-6-luna-pro:batch",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-6-luna:batch",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-6-sol-pro",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-6-sol-pro:batch",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-6-sol:batch",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-6.1-sol-pro",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-6.1-sol-pro:batch",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-6.1-sol:batch",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "openai/gpt-6-luna-decisions",
+      "provider": "openrouter",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "gpt-reserve",
+      "provider": "codex-model-cache",
+      "target_model_id": null,
+      "source_url": null,
+      "notes": "No verified provider mapping or cutoff; resolve and record the served model before eligibility.",
+      "retrieved_date": "2026-10-27"
+    },
+    {
+      "model_id": "grok-4.5-latest",
+      "provider": "xai",
+      "target_model_id": "grok-4.5",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.5",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-build-latest",
+      "provider": "xai",
+      "target_model_id": "grok-4.5",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.5",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.3-latest",
+      "provider": "xai",
+      "target_model_id": "grok-4.3",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.3",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-code-fast-1",
+      "provider": "xai",
+      "target_model_id": "grok-build-0.1",
+      "source_url": "https://docs.x.ai/developers/models/grok-build-0.1",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-code-fast",
+      "provider": "xai",
+      "target_model_id": "grok-build-0.1",
+      "source_url": "https://docs.x.ai/developers/models/grok-build-0.1",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-code-fast-1-0825",
+      "provider": "xai",
+      "target_model_id": "grok-build-0.1",
+      "source_url": "https://docs.x.ai/developers/models/grok-build-0.1",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-reasoning-latest",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-reasoning",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-0309",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-beta-0309-reasoning",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-beta",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-beta-0309",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-beta-latest",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-beta-latest-reasoning",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-beta-reasoning",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-experimental-beta-0304-reasoning",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-experimental-beta-0304",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-experimental-beta-reasoning-latest",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-experimental-beta-latest",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-reasoning-gv2",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-non-reasoning",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-non-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-non-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-non-reasoning-latest",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-non-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-non-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-beta-non-reasoning",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-non-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-non-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-beta-latest-non-reasoning",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-non-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-non-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-experimental-beta-0304-non-reasoning",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-non-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-non-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-experimental-beta-non-reasoning-latest",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-non-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-non-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-beta-0309-non-reasoning",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-non-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-non-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-non-reasoning-gv2",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-0309-non-reasoning",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-0309-non-reasoning",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-multi-agent",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-multi-agent-0309",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-multi-agent-0309",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-multi-agent-latest",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-multi-agent-0309",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-multi-agent-0309",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-multi-agent-beta-latest",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-multi-agent-0309",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-multi-agent-0309",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-multi-agent-experimental-beta-0304",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-multi-agent-0309",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-multi-agent-0309",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-multi-agent-experimental-beta-latest",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-multi-agent-0309",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-multi-agent-0309",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "model_id": "grok-4.20-multi-agent-beta-0309",
+      "provider": "xai",
+      "target_model_id": "grok-4.20-multi-agent-0309",
+      "source_url": "https://docs.x.ai/developers/models/grok-4.20-multi-agent-0309",
+      "notes": "Provider route may change; record endpoint and served model at execution.",
+      "retrieved_date": "2026-10-28"
+    }
+  ],
+  "endpoint_routes": [
+    {
+      "provider": "zai",
+      "endpoint": "Coding Plan",
+      "requested_model_id": "glm-5.2",
+      "documented_target_model_id": "glm-5.3",
+      "source_url": "https://docs.z.ai/devpack/overview",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "provider": "zai",
+      "endpoint": "Coding Plan",
+      "requested_model_id": "glm-5.1",
+      "documented_target_model_id": "glm-5.3",
+      "source_url": "https://docs.z.ai/devpack/overview",
+      "retrieved_date": "2026-10-28"
+    },
+    {
+      "provider": "zai",
+      "endpoint": "Coding Plan",
+      "requested_model_id": "glm-4.7",
+      "documented_target_model_id": "glm-5.3-flash",
+      "source_url": "https://docs.z.ai/devpack/overview",
+      "retrieved_date": "2026-10-28"
+    }
+  ],
+  "routing_notes": [
+    "GLM Coding Plan routes GLM-5.2/5.1 to GLM-5.3, GLM-4.7 to GLM-5.3-Flash; standard API docs still list original IDs, so endpoint distinction is mandatory.",
+    "xAI May 15 retirement redirects grok-4-1-fast-reasoning, grok-4-1-fast-non-reasoning, grok-4-fast-reasoning, grok-4-fast-non-reasoning, grok-4-0709 and grok-3 to grok-4.3.",
+    "The retirement page's prose broadly includes grok-code-fast-1 in the grok-4.3 redirect, but its table and current Grok Build model page identify grok-build-0.1. Use current model detail as stronger specific evidence and retain this documentation inconsistency."
+  ],
+  "mode_notes": [
+    {
+      "mode": "pro",
+      "canonical_model_changes": false,
+      "source_url": "https://developers.openai.com/api/docs/guides/latest-model",
+      "note": "GPT-5.6 pro mode keeps selected model ID and sets reasoning.mode=pro. Do not invent a separate OpenAI -pro ID."
+    },
+    {
+      "mode": "pro",
+      "canonical_model_changes": false,
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning",
+      "note": "GPT-5.6 and GPT-6 support standard/pro execution modes; API example uses gpt-6.1-sol with reasoning.mode=pro."
+    },
+    {
+      "mode": "Daybreak",
+      "source_url": "https://developers.openai.com/api/docs/guides/daybreak",
+      "note": "For a -latest alias, inspect the returned model because alias resolution can change and depends on approved access."
+    }
+  ]
+}

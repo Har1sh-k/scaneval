@@ -1640,6 +1640,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_dataset_commands(sub)
     from .benchmark_cli import add_commands as add_benchmark_commands
     add_benchmark_commands(sub)
+    from .model_cutoffs_cli import add_commands as add_cutoff_commands
+    add_cutoff_commands(sub)
     validate = sub.add_parser("validate", help="validate a versioned JSON contract")
     validate.add_argument("kind", choices=sorted(CONTRACT_KINDS))
     validate.add_argument("path", type=Path)
@@ -1725,6 +1727,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "severity":
             return _severity(args)
+        if args.command == "model-cutoffs":
+            from .model_cutoffs_cli import dispatch
+            return dispatch(args)
         if args.command == "dataset":
             from .datasets.cli import dispatch
             return dispatch(args)
