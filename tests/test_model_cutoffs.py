@@ -15,7 +15,7 @@ def registry():
     return load_registry()
 
 
-def candidate(number=10000, severity="Low", when="2026-07-01", precision="day", status="reviewed"):
+def candidate(number=10000, severity="Low", when="2026-07-02", precision="day", status="reviewed"):
     return {"cve_id": f"CVE-2026-{number}", "severity": severity,
             "severity_source_url": "https://example.com/advisory",
             "chronology": {"status": status,
@@ -48,8 +48,9 @@ def test_registry_retains_training_knowledge_unknowns_and_source_conflicts(regis
 
 
 @pytest.mark.parametrize("when,precision,expected", [
-    ("2026-07-01", "day", "eligible"), ("2026-06-30", "day", "ineligible"),
-    ("2026-06-29", "day", "ineligible"), ("2026-07", "month", "eligible"),
+    ("2026-07-02", "day", "eligible"), ("2026-07-01", "day", "unresolved"),
+    ("2026-06-30", "day", "ineligible"), ("2026-06-29", "day", "ineligible"),
+    ("2026-07", "month", "unresolved"), ("2026-08", "month", "eligible"),
     ("2026-06", "month", "ineligible"),
 ])
 def test_conservative_month_boundary_is_strict(registry, when, precision, expected):
@@ -57,14 +58,24 @@ def test_conservative_month_boundary_is_strict(registry, when, precision, expect
     assert report["candidates"][0]["status"] == expected
     assert report["models"][0]["cutoff"]["upper_bound"] == "2026-06-30"
     assert report["models"][0]["cutoff"]["upper_bound_is_inference"] is True
+    assert report["models"][0]["cutoff"]["value"] == "2026-06"
+    assert report["models"][0]["utc_safety_upper_bound"] == "2026-07-01"
+    assert report["models"][0]["utc_safety_upper_bound_is_inference"] is True
+    if expected == "unresolved":
+        assert report["candidates"][0]["models"][0]["reasons"] == ["cutoff_timezone_boundary"]
 
 
 def test_leap_month_and_day_cutoff(registry):
     assert tuple(d.isoformat() for d in date_bounds("2024-02", "month")) == ("2024-02-01", "2024-02-29")
-    for when, status in [("2026-06-01", "ineligible"), ("2026-06-02", "eligible")]:
+    for when, status in [("2026-06-01", "ineligible"), ("2026-06-02", "unresolved"), ("2026-06-03", "eligible")]:
         report = result(registry, candidate(when=when), ["gpt-6.1-terra"], "documented")
         assert report["candidates"][0]["status"] == status
         assert report["models"][0]["cutoff_field"] == "knowledge_cutoff"
+        assert report["models"][0]["cutoff"]["value"] == "2026-06-01"
+        assert report["models"][0]["cutoff"]["precision"] == "day"
+        assert report["models"][0]["utc_safety_upper_bound"] == "2026-06-02"
+        if status == "unresolved":
+            assert report["candidates"][0]["models"][0]["reasons"] == ["cutoff_timezone_boundary"]
     assert result(registry, models=["gpt-6.1-terra"])["candidates"][0]["status"] == "unresolved"
 
 
@@ -74,11 +85,17 @@ def test_documented_basis_prefers_later_training_field(registry):
     assert report["candidates"][0]["status"] == "ineligible"
 
 
-def test_provider_temporal_bound_keeps_unknown_actual_cutoff(registry):
-    report = result(registry, candidate(when="2026-03-21"), ["claude-mythos-preview"])
-    assert report["candidates"][0]["status"] == "eligible"
+@pytest.mark.parametrize("when,expected", [("2026-03-20", "ineligible"),
+                                         ("2026-03-21", "unresolved"), ("2026-03-22", "eligible")])
+def test_provider_temporal_bound_keeps_unknown_actual_cutoff(registry, when, expected):
+    report = result(registry, candidate(when=when), ["claude-mythos-preview"])
+    assert report["candidates"][0]["status"] == expected
     assert report["models"][0]["cutoff"]["value"] is None
     assert report["models"][0]["cutoff"]["status"] == "temporal_bound"
+    assert report["models"][0]["utc_safety_upper_bound"] == "2026-03-21"
+    assert report["models"][0]["utc_safety_upper_bound_is_inference"] is True
+    if expected == "unresolved":
+        assert report["candidates"][0]["models"][0]["reasons"] == ["cutoff_timezone_boundary"]
 
 
 @pytest.mark.parametrize("model,reason", [("glm-5.3", "cutoff_unknown_for_basis"),
@@ -98,7 +115,7 @@ def test_pending_chronology_and_earlier_artifact_prevent_eligibility(registry):
     pending = result(registry, c)["candidates"][0]
     assert pending["status"] == "unresolved"
     assert pending["earliest_public_evidence_lower_bound"] is None
-    assert pending["earliest_observed_artifact_date_lower_bound"] == "2026-07-01"
+    assert pending["earliest_observed_artifact_date_lower_bound"] == "2026-07-02"
     c["chronology"]["status"] = "reviewed"
     earlier = copy.deepcopy(c["chronology"]["public_artifacts"][0])
     earlier.update(date="2026-06-01", kind="pull_request")
@@ -221,7 +238,8 @@ def test_cli_lists_registry_supports_custom_copy_and_rejects_malformed_inputs(tm
     assert main(["model-cutoffs", "list", "--registry", str(registry_path)]) == 0
     assert capsys.readouterr().out == registry_text
     path = tmp_path / "candidates.json"
-    for bad in ['{"schema_version":NaN}', '{"schema_version":1,"schema_version":1}', '[]', '{']:
+    for bad in ['{"schema_version":NaN}', '{"note":1e400}', '{"note":-1e400}',
+                '{"schema_version":1,"schema_version":1}', '[]', '{']:
         path.write_text(bad)
         assert main(["model-cutoffs", "check", str(path), "--model", "claude-opus-5-5"]) == 2
         assert "scaneval:" in capsys.readouterr().err
@@ -270,7 +288,9 @@ def test_cli_json_escapes_controls_without_changing_values(registry, tmp_path, c
 
 
 @pytest.mark.parametrize("text,error", [('{"schema_version":1,"schema_version":1}', "duplicate JSON key"),
-                                        ('{"schema_version":NaN}', "invalid JSON number")])
+                                        ('{"schema_version":NaN}', "invalid JSON number"),
+                                        ('{"note":1e400}', "invalid JSON number"),
+                                        ('{"note":-1e400}', "invalid JSON number")])
 def test_packaged_registry_uses_strict_json_loader(tmp_path, monkeypatch, text, error):
     data = tmp_path / "data"
     data.mkdir()
@@ -278,6 +298,35 @@ def test_packaged_registry_uses_strict_json_loader(tmp_path, monkeypatch, text, 
     monkeypatch.setattr(model_cutoffs, "files", lambda package: tmp_path)
     with pytest.raises(CutoffError, match=error):
         load_registry()
+
+
+@pytest.mark.parametrize("number", ["1e400", "-1e400"])
+@pytest.mark.parametrize("input_kind", ["candidate", "registry_check", "registry_list"])
+def test_cli_rejects_overflow_in_extra_fields(registry, tmp_path, capsys, number, input_kind):
+    candidate_path = tmp_path / "candidates.json"
+    registry_path = tmp_path / "registry.json"
+    candidate_path.write_text(json.dumps(complete_pack()))
+    registry_path.write_text(json.dumps(registry))
+    path = candidate_path if input_kind == "candidate" else registry_path
+    path.write_text(path.read_text()[:-1] + ', "extra": ' + number + '}')
+    if input_kind == "registry_list":
+        args = ["model-cutoffs", "list"]
+    else:
+        args = ["model-cutoffs", "check", str(candidate_path), "--model", "claude-opus-5-5"]
+    assert main(args + ["--registry", str(registry_path)]) == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "invalid JSON number" in output.err and "Traceback" not in output.err
+
+
+@pytest.mark.parametrize("number", [float("inf"), float("-inf"), float("nan")])
+@pytest.mark.parametrize("input_kind", ["candidate", "registry"])
+def test_direct_assessment_wraps_nonfinite_digest_errors(registry, number, input_kind):
+    candidates = complete_pack()
+    target = candidates if input_kind == "candidate" else registry
+    target["extra"] = number
+    with pytest.raises(CutoffError, match="cannot hash invalid JSON input"):
+        assess_candidates(registry, candidates, ["claude-opus-5-5"])
 
 
 def test_committed_research_candidates_remain_pending(registry):

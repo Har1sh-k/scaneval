@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import calendar
 import hashlib
-from datetime import date
+from datetime import date, timedelta
 from importlib.resources import files
 from importlib.resources.abc import Traversable
 import json
+import math
 from pathlib import Path
 import re
 from urllib.parse import urlsplit
@@ -46,7 +47,7 @@ def _url(value: object) -> bool:
 
 
 def date_bounds(value: str, precision: str) -> tuple[date, date]:
-    """Return inclusive UTC calendar dates; month endpoints are inferences."""
+    """Return inclusive calendar dates without assuming a source time zone."""
     pattern = {"day": r"\d{4}-\d{2}-\d{2}", "month": r"\d{4}-\d{2}"}.get(precision) if isinstance(precision, str) else None
     _require(isinstance(value, str) and pattern is not None and re.fullmatch(pattern, value) is not None,
              f"invalid {precision!r} date: {value!r}")
@@ -66,9 +67,16 @@ def _pairs(pairs: list[tuple]) -> dict:
     return result
 
 
+def _finite_float(value: str) -> float:
+    number = float(value)
+    _require(math.isfinite(number), f"invalid JSON number: {value!r}")
+    return number
+
+
 def read_json(path: Path | Traversable) -> dict:
     try:
         result = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_pairs,
+                            parse_float=_finite_float,
                             parse_constant=lambda value: (_ for _ in ()).throw(CutoffError(f"invalid JSON number: {value!r}")))
     except (OSError, ValueError, RecursionError) as exc:
         raise CutoffError(f"could not read {str(path)!r}: {exc!r}") from exc
@@ -161,15 +169,28 @@ def _model_boundary(registry: dict, model_id: str, basis: str) -> dict:
                 "identity_notes": model["identity_notes"]}
     fields = CUTOFF_FIELDS if basis == "documented" else ("training_data_cutoff",)
     field = next((field for field in fields if model[field] is not None), None)
+    utc_upper = None
+    if field:
+        try:
+            utc_upper = (date.fromisoformat(model[field]["upper_bound"]) + timedelta(days=1)).isoformat()
+        except OverflowError as exc:
+            raise CutoffError(f"{model_id!r}: cutoff cannot be expanded for time zone uncertainty") from exc
     return {"model_id": model_id, "status": "known" if field else "unresolved",
             "reason": None if field else "cutoff_unknown_for_basis", "cutoff_field": field,
             "cutoff": model[field] if field else None, "retrieved_date": model["retrieved_date"],
+            "utc_safety_upper_bound": utc_upper,
+            "utc_safety_upper_bound_is_inference": True if field else None,
+            "utc_safety_upper_bound_derivation": "Add one calendar day because the provider cutoff time zone is not established." if field else None,
             "identity_status": model["identity_status"], "identity_notes": model["identity_notes"],
             "evidence_status": model["evidence_status"]}
 
 
 def _digest(document: dict) -> str:
-    return hashlib.sha256(json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+    try:
+        encoded = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise CutoffError(f"cannot hash invalid JSON input: {exc!r}") from exc
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def assess_candidates(registry: dict, document: dict, model_ids: list[str], *, basis: str = "training") -> dict:
@@ -194,8 +215,11 @@ def assess_candidates(registry: dict, document: dict, model_ids: list[str], *, b
                 reasons.append("earliest_public_evidence_review_pending")
             if reasons:
                 status = "unresolved"
-            elif lower > date.fromisoformat(boundary["cutoff"]["upper_bound"]):
+            elif lower > date.fromisoformat(boundary["utc_safety_upper_bound"]):
                 status = "eligible"
+            elif lower > date.fromisoformat(boundary["cutoff"]["upper_bound"]):
+                status = "unresolved"
+                reasons.append("cutoff_timezone_boundary")
             else:
                 status = "ineligible"
                 reasons.append("earliest_evidence_not_strictly_after_cutoff")

@@ -26,9 +26,11 @@ conflicts are retained. Exact API IDs are not automatically immutable revisions.
 - A cutoff is a published day/month or a provider-supported temporal upper bound.
   Month end is computed conservatively and explicitly labeled an inference.
   Release dates and date-looking model names are never cutoff substitutes.
-  Day/month values use UTC calendar dates; normalize timestamped source evidence
-  to UTC before extracting its date. Preserve unresolved source timezone ambiguity
-  in pending chronology rather than inventing an exact public date.
+  Public evidence uses UTC calendar dates; normalize timestamped source evidence
+  to UTC before extracting its date. Keep ambiguous artifact chronology pending.
+  Provider cutoff dates do not establish a time zone. Preserve their published
+  date/precision and report a separate UTC safety upper bound one day later,
+  explicitly labeled an inference. Apply this to provider temporal bounds too.
 - Aliases are catalogued separately and never silently resolved by the helper.
   Callers select documented exact IDs after recording the actually served model
   and endpoint. Unknown IDs and known aliases return unresolved eligibility.
@@ -45,8 +47,11 @@ conflicts are retained. Exact API IDs are not automatically immutable revisions.
   helper checks this declaration structurally; it does not authenticate sources or
   independently prove there was no earlier artifact.
 - Eligibility requires the earliest-public-evidence lower bound to be strictly
-  later than the conservative cutoff upper bound. Equal, overlapping, unknown,
-  pending, contradictory, and malformed inputs cannot yield eligibility.
+  later than the UTC safety upper bound. Dates at or before the original cutoff
+  upper bound are ineligible; the additional day is unresolved with reason
+  `cutoff_timezone_boundary`. A June 30 original upper bound therefore makes
+  July 1 unresolved and July 2 the first eligible UTC day. Unknown, pending,
+  contradictory, and malformed inputs cannot yield eligibility.
 - Report every selected model and every candidate. Pack completeness requires at
   least 10 distinct eligible CVEs and at least 2 Low, 3 Medium, 3 High, and 2 Critical
   under the selected authority across all selected models. A missing cutoff keeps
@@ -77,6 +82,7 @@ Tests cover exact/day/month boundaries (including leap years), training versus
 knowledge, provider temporal bounds, unknown cutoffs, aliases, evidence gaps,
 invalid dates/duplicates, full severity coverage and shortages, packaged data,
 custom registry input, deterministic CLI results, and nonzero exit outcomes.
+Nonfinite numbers, including exponent overflow, are invalid JSON input (exit 2).
 No paid scan is needed. Run focused tests and existing CLI regression coverage.
 
 Use Elephant/Goldfish: retain this committed specification before implementation;

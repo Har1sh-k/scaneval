@@ -19,7 +19,7 @@ fields. Null means the reviewed sources did not establish the field.
 | Grok 4.7 | May 2026; conservative upper bound May 31 | Knowledge cutoff only; other researched current Grok cutoffs remain unknown. [Model guide](https://docs.x.ai/developers/grok-4-7). |
 | GLM, including GLM-5.2 and GLM-5.3 | Unknown | Official guides/cards reviewed did not publish a temporal cutoff. [GLM-5.3 guide](https://docs.z.ai/guides/llm/glm-5.3). |
 
-July 1, 2026 is after the latest *known* conservative bound in this snapshot. It is
+July 2, 2026 is after the latest *known* UTC safety bound in this snapshot. It is
 not a universal training-exclusion threshold: GLM dates remain unknown and OpenAI
 and Grok knowledge cutoffs do not establish their last training-data dates. Mythos
 Preview has a separately sourced upper bound from its system card; that inferred
@@ -85,16 +85,28 @@ to `reviewed` only after inspecting earlier public history, explain that work in
 Kinds are `advisory`, `issue`, `pull_request`, `release`, `public_commit`, and
 `proof_of_concept`. Retain every relevant earlier artifact; the helper uses the
 minimum date lower bound. A month is conservatively expanded to its first day for
-public evidence and its last day for a cutoff. The comparison is strictly `>`;
-equality or overlapping intervals does not pass.
+public evidence and its last day for a cutoff. Provider cutoff time zones are not
+established, so the helper preserves that original date/precision and reports a
+separate `utc_safety_upper_bound` one calendar day later, explicitly labeled an
+inference. This also applies to the Mythos Preview temporal bound; it does not
+claim that any provider published a UTC cutoff.
 
-Dates use UTC calendar days and months. Convert timestamped source evidence to UTC
-before extracting its date; keep chronology pending if an unresolved source
-timezone could change the eligibility boundary. CVE IDs require ASCII digits and
+Public evidence uses UTC calendar days and months. Convert timestamped source
+evidence to UTC before extracting its date; keep chronology pending if an
+unresolved artifact timezone could change the eligibility boundary. Eligibility
+requires a lower bound strictly after the UTC safety bound. Dates at or before
+the original cutoff upper bound are ineligible; the additional day remains
+unresolved with reason `cutoff_timezone_boundary`. For a June 30 cutoff upper
+bound, July 1 is unresolved and July 2 is the first eligible UTC date. A July-only
+artifact likewise remains unresolved because its lower bound is July 1.
+
+CVE IDs require ASCII digits and
 canonical sequence numbers: four digits (including necessary leading zeros), or
 more than four digits without a leading zero. Registry `identity_status` accepts
 only `pinned_snapshot`, `documented_api_id`, or `documented_alias`; an unknown
 status is invalid input. Documented aliases remain unresolved.
+Nonfinite numbers, including exponent overflow such as `1e400`, are invalid input
+and return exit 2 rather than an unresolved report.
 
 A fix's author/committer timestamp or a CVE assignment/publication timestamp alone
 does not establish earliest public disclosure. An observed artifact is an upper
