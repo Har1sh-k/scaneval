@@ -8,6 +8,9 @@
 # id it prints is specific to that platform. NODE_IMAGE=node:26.7.0-bookworm-slim (or another
 # Debian-based node:26.7.0 tag) when the digest belongs to a tag other than the default
 # node:26.7.0-trixie-slim, so the receipt names the tag the digest was resolved from.
+# HARNESS_BUNDLE=/private/path/harness.bundle to take the harness commit from a full-history
+# `git bundle` instead of fetching it from GitHub; see README.md. It is passed as a BuildKit
+# secret, so it never enters the build context or a layer.
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -29,6 +32,17 @@ if [ -n "$missing" ]; then
   exit 2
 fi
 
+if [ -n "${HARNESS_BUNDLE:-}" ]; then
+  if [ ! -f "$HARNESS_BUNDLE" ] || [ ! -r "$HARNESS_BUNDLE" ]; then
+    echo "HARNESS_BUNDLE must be a readable regular file, got: $HARNESS_BUNDLE" >&2
+    exit 2
+  fi
+  # docker parses --secret as CSV, so these characters would split or quote the path.
+  case $HARNESS_BUNDLE in
+    *,* | *\"*) echo "HARNESS_BUNDLE must not contain ',' or '\"', got: $HARNESS_BUNDLE" >&2; exit 2 ;;
+  esac
+fi
+
 iidfile=$(mktemp)
 trap 'rm -f "$iidfile"' EXIT
 
@@ -37,6 +51,7 @@ docker build \
   -f "$here/Dockerfile" \
   ${NODE_IMAGE:+--build-arg "NODE_IMAGE=$NODE_IMAGE"} \
   --build-arg "NODE_DIGEST=$NODE_DIGEST" \
+  ${HARNESS_BUNDLE:+--secret "id=harness_bundle,src=$HARNESS_BUNDLE"} \
   --iidfile "$iidfile" \
   -t "$tag" \
   "$root"

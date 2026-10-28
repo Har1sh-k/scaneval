@@ -8,6 +8,7 @@
 #
 # Everything the scan executes is image-owned under /opt/scaneval:
 #   harness/                  clean upstream SV-Agent checkout at HARNESS_COMMIT, npm ci'd
+#                             (shallow when fetched online, full history from a bundle)
 #   harness/node_modules/.bin/tsx
 #   node_modules/             Pi 1.4.0 and its locked dependencies (bin on PATH)
 #   observer/                 built sdk/typescript dist
@@ -32,10 +33,20 @@ FROM base AS harness
 ARG HARNESS_REPOSITORY=https://github.com/anshumanbh/securevibes-agent.git
 ARG HARNESS_COMMIT=f959cbcf010c7e41f780c718b65b1724d3aecb43
 WORKDIR /opt/scaneval/harness
-# Fetch exactly one immutable commit; no branch name is resolved.
-RUN git init -q . \
+# Fetch exactly one immutable commit; no branch name is resolved. When the repository is not
+# publicly reachable, build.sh can pass a full-history `git bundle` of the pinned commit as the
+# optional harness_bundle secret: it is mounted only for this RUN, never enters a layer, and
+# carries Git objects rather than credentials. Either way FETCH_HEAD must be HARNESS_COMMIT.
+RUN --mount=type=secret,id=harness_bundle,required=false \
+    git init -q . \
  && git remote add origin "$HARNESS_REPOSITORY" \
- && git fetch -q --depth 1 origin "$HARNESS_COMMIT" \
+ && if [ -f /run/secrets/harness_bundle ]; then \
+      git fetch -q /run/secrets/harness_bundle HEAD; \
+    else \
+      git fetch -q --depth 1 origin "$HARNESS_COMMIT"; \
+    fi \
+ && { test "$(git rev-parse FETCH_HEAD)" = "$HARNESS_COMMIT" \
+      || { echo "harness source is $(git rev-parse FETCH_HEAD), expected $HARNESS_COMMIT" >&2; exit 1; }; } \
  && git -c advice.detachedHead=false checkout -q FETCH_HEAD \
  && test "$(git rev-parse HEAD)" = "$HARNESS_COMMIT" \
  && test -z "$(git status --porcelain)"

@@ -9,7 +9,7 @@ state and output mounts, and the credentials declared for that run.
 
 | Path | Contents | Pinned by |
 |---|---|---|
-| `/opt/scaneval/harness` | Clean upstream SV-Agent checkout (shallow `.git` kept) with `npm ci` dependencies | `HARNESS_COMMIT` (default `f959cbcf010c7e41f780c718b65b1724d3aecb43`) and the harness's own `package-lock.json` |
+| `/opt/scaneval/harness` | Clean upstream SV-Agent checkout (`.git` kept: shallow when fetched online, full history from a bundle) with `npm ci` dependencies | `HARNESS_COMMIT` (default `f959cbcf010c7e41f780c718b65b1724d3aecb43`) and the harness's own `package-lock.json` |
 | `/opt/scaneval/harness/node_modules/.bin/tsx` | The tsx the driver runs under | harness lockfile (tsx 4.21.0) |
 | `/opt/scaneval/node_modules` | `@earendil-works/pi-coding-agent` 1.4.0 and dependencies; `pi` is on `PATH` | `package.json` / `package-lock.json` in this directory |
 | `/opt/scaneval/observer/` | Built `sdk/typescript` dist (`index.js`, `index.d.ts`, `package.json`) | `sdk/typescript/package-lock.json` |
@@ -31,7 +31,7 @@ timestamps; identical inputs produce identical bytes.
 {
   "schema_version": 1,
   "harness": { "commit": "f959cbcf…", "package_version": "0.1.0", "package_name": "securevibes-agent",
-               "repository": "https://github.com/anshumanbh/securevibes-agent.git",
+               "repository": "https://github.com/anshumanbh/securevibes-agent.git", "history": "shallow",
                "lockfile_sha256": "sha256:…", "tsx_version": "4.21.0" },
   "pi": { "package": "@earendil-works/pi-coding-agent", "version": "1.4.0",
           "integrity": "sha512-…", "lockfile_sha256": "sha256:…" },
@@ -71,9 +71,10 @@ Prerequisites:
    `bookworm-slim`, also pass `--build-arg NODE_IMAGE=<that tag>` (or `NODE_IMAGE=` to
    `build.sh`). Otherwise the receipt names the wrong tag. `base_os` in the receipt is read from
    the image itself either way.
-3. Network access during the build to the Debian archive, registry.npmjs.org and github.com
-   (the harness commit is fetched with `git fetch --depth 1 origin <sha>`). Scans themselves
-   install nothing.
+3. Network access during the build to the Debian archive and registry.npmjs.org. The harness
+   commit is fetched with `git fetch --depth 1 origin <sha>`, which works whenever the
+   repository is publicly reachable from the builder. Otherwise supply it as a Git bundle (see
+   [Harness from a Git bundle](#harness-from-a-git-bundle)). Scans themselves install nothing.
 4. BuildKit (the default builder in current Docker), which provides the
    `Dockerfile.dockerignore` allowlist and the build-time bind mount for the receipt script.
 
@@ -86,6 +87,41 @@ docker build -f containers/sv-agent/Dockerfile \
   --build-arg NODE_DIGEST=sha256:<digest> \
   -t scaneval-sv-agent:f959cbc-pi1.4.0 .
 ```
+
+### Harness from a Git bundle
+
+When the builder cannot fetch the harness anonymously (the build has no GitHub credentials and
+must not be given any), create a bundle on a host that can, from a clean, authenticated,
+full-history checkout:
+
+```sh
+cd /path/to/securevibes-agent                       # clean checkout with full history
+test "$(git rev-parse --is-shallow-repository)" = false || git fetch --unshallow
+git checkout --detach f959cbcf010c7e41f780c718b65b1724d3aecb43
+git rev-parse HEAD                                  # must print the HARNESS_COMMIT pin
+git bundle create /some/private/path/harness.bundle HEAD
+git bundle list-heads /some/private/path/harness.bundle   # <HARNESS_COMMIT> HEAD
+```
+
+Then build with it:
+
+```sh
+HARNESS_BUNDLE=/some/private/path/harness.bundle NODE_DIGEST=sha256:<digest> containers/sv-agent/build.sh
+# equivalent to adding: --secret id=harness_bundle,src=/some/private/path/harness.bundle
+```
+
+- The build fetches `HEAD` from the bundle and fails unless it is exactly `HARNESS_COMMIT`;
+  there is no way to substitute another commit. The checkout is the bundle's actual Git
+  objects, and `runtime.json` records the commit read from it plus `"history": "full"`.
+- A bundle made from a shallow clone lists prerequisite commits that the build cannot have, so
+  the fetch fails its connectivity check. Run `git fetch --unshallow` before bundling.
+  `git bundle verify <path>` on the host reports such prerequisites.
+- The bundle reaches the build only as a BuildKit secret mount for the single fetch step. It is
+  not in the build context (`Dockerfile.dockerignore` excludes everything not listed), not in
+  any layer, and not in the image config. No `.git/config`, credential store or token is
+  involved. Keep the bundle outside this repository and never commit it.
+- `build.sh` requires an existing readable regular file and rejects paths containing `,` or
+  `"`, which docker's `--secret` option cannot carry.
 
 With a `docker-container` buildx driver, add `--load` so the image lands in the local engine.
 Never push the image. The OCI backend runs with `--pull never` and only uses images already

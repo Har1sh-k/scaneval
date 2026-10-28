@@ -87,6 +87,8 @@ const receipt = {
     package_version: harnessPackage.version,
     package_name: harnessPackage.name,
     repository: expected("HARNESS_REPOSITORY"),
+    // "shallow" for the online --depth 1 fetch, "full" when the commit came from a git bundle.
+    history: existsSync(join(HARNESS, ".git", "shallow")) ? "shallow" : "full",
     lockfile_sha256: sha256(join(HARNESS, "package-lock.json")),
     tsx_version: harnessTsx.version,
   },
