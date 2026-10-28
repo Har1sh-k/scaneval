@@ -760,6 +760,7 @@ def test_a_clean_run_produces_claims_artifacts_and_a_trace_of_what_deepsec_recor
 
     assert result["status"] == "success", execution["error"]
     assert execution["adapter"]["name"] == "deepsec"
+    assert execution["versions"]["kind_mapping"] == "1.2.0"
     assert execution["provenance"]["source_modified"] is False
     assert execution["timed_out"] is False
     assert result["schema_version"] == "2.0" and "omitted_paths" not in result, "a full run reports no omission"
@@ -1226,6 +1227,49 @@ def test_a_slug_maps_to_a_kind_through_its_separators_and_an_unknown_one_stays_u
     assert kind_for_slug("auth-bypass") != "unmapped"
     assert kind_for_slug("other-race-condition") == "unmapped"
     assert kind_for_slug(None) == "unmapped"
+
+
+@pytest.mark.parametrize("slug,kind", [
+    ("missing-auth", "auth_bypass"),
+    ("acl-check", "authz_bypass"),
+    ("go-command-injection", "command_injection"),
+])
+def test_native_deepsec_kinds_import_with_original_identity(slug, kind):
+    payload = [{"title": "[HIGH] Native allegation", "description": "Native evidence",
+                "metadata": {"filePath": "src/example.go", "lineNumbers": [12],
+                             "vulnSlug": slug, "severity": "HIGH"}}]
+    imported = import_export(payload, artifact_id="native-export",
+                             ids={("src/example.go", "Native allegation"): "native-finding"})
+    assert imported.lost == 0
+    claim, = imported.claims
+    assert claim["kind"] == kind
+    assert claim["native_rule_id"] == "deepsec:" + slug
+    assert claim["native_id"] == claim["claim_id"] == "native-finding"
+    assert claim["raw_artifact_id"] == "native-export"
+    assert claim["evidence_text"] == "Native evidence"
+    assert claim["primary_location"] == {"path": "src/example.go", "start_line": 12, "end_line": 12}
+
+
+@pytest.mark.parametrize("slug", [
+    "other-missing-auth", "other-acl-check", "other-go-command-injection", "rce",
+    "missing-authentication", "go-command-injection-extra", "missing_auth", "ACL-CHECK",
+])
+def test_unknown_native_slugs_do_not_gain_a_kind_from_the_title_or_near_matches(slug):
+    imported = import_export([{"title": "Command injection and missing authentication",
+                              "metadata": {"filePath": "src/example.go", "vulnSlug": slug}}])
+    claim, = imported.claims
+    assert claim["kind"] == "unmapped"
+    assert claim["native_rule_id"] == "deepsec:" + slug
+
+
+def test_deepsec_mapping_is_versioned_and_separate_from_harness_classes():
+    from scaneval.kinds import kind_for_harness_class, load_mapping, mapping_version
+
+    mapping = load_mapping()
+    assert mapping_version() == "1.2.0"
+    assert set(mapping["deepsec_slugs"].values()) <= set(mapping["canonical_kinds"])
+    for slug in mapping["deepsec_slugs"]:
+        assert kind_for_harness_class(slug.replace("-", "")) == "unmapped"
 
 
 def test_a_path_that_cannot_name_a_file_inside_the_tree_is_returned_with_its_reason():

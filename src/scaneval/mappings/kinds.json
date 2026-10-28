@@ -1,5 +1,5 @@
 {
-  "mapping_version": "1.1.0",
+  "mapping_version": "1.2.0",
   "description": "Versioned native-to-canonical kind mapping. Importers preserve the native rule, class, and CWE identity on every claim; unmapped kinds stay unmapped rather than being dropped or guessed from titles.",
   "canonical_kinds": [
     "command_injection",
@@ -23,6 +23,11 @@
     "CWE-863": "authz_bypass",
     "CWE-89": "sql_injection",
     "CWE-564": "sql_injection"
+  },
+  "deepsec_slugs": {
+    "missing-auth": "auth_bypass",
+    "acl-check": "authz_bypass",
+    "go-command-injection": "command_injection"
   },
   "harness_classes": {
     "commandinjection": "command_injection",

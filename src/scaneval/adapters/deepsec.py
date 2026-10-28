@@ -128,7 +128,7 @@ from typing import Any, NamedTuple, Sequence
 
 from ..collectors import EXTERNAL_PREFIX, relocate_paths, workspace_path
 from ..execution import list_directory
-from ..kinds import kind_for_harness_class
+from ..kinds import kind_for_harness_class, load_mapping
 from ..observer import Observer, create_jsonl_sink
 from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command
 from .llm_harness import Enclosure, read_record
@@ -239,14 +239,17 @@ def session_id_usable(session_id: Any) -> bool:
 def kind_for_slug(slug: str | None) -> str:
     """The canonical kind for a DeepSec ``vulnSlug``.
 
-    DeepSec spells its matcher slugs with hyphens (``sql-injection``) where the kind mapping
-    keys them without separators, so the separators are removed before the lookup. An
+    Producer-specific slugs use the versioned DeepSec table, matched exactly. Common
+    slugs use the existing harness table: DeepSec spells ``sql-injection`` with hyphens
+    where that table keys it without separators, so separators are removed for the fallback. An
     ``other-`` slug the agent minted for a novel finding, and any slug the mapping does not
     know, stays ``unmapped`` and keeps its native identity on the claim.
     """
     if not slug:
         return kind_for_harness_class(None)
-    return kind_for_harness_class(re.sub(r"[-_\s]", "", str(slug)))
+    native = str(slug)
+    return (load_mapping()["deepsec_slugs"].get(native)
+            or kind_for_harness_class(re.sub(r"[-_\s]", "", native)))
 
 
 def claim_path(raw: str) -> tuple[str, str]:
