@@ -288,14 +288,13 @@ def test_oci_settings_carry_defaults_and_refuse_what_the_contract_cannot_express
 
 
 def test_adapters_that_do_not_declare_oci_compatibility_are_refused_under_oci():
-    """llm-harness and DeepSec have no Linux image and no audit that every process goes through a backend."""
+    """DeepSec has no Linux image and no audit that every process goes through a backend."""
     oci = settings()
-    for name in ("llm-harness", "deepsec"):
-        adapter = get_adapter(name)
-        assert adapter.oci_compatible is False
-        reason = refusal_for(adapter, oci)
-        assert reason is not None and f"refuses adapter {name!r}" in reason and "not invoked" in reason
-        assert refusal_for(adapter, resolve_execution(None, "none")) is None
+    adapter = get_adapter("deepsec")
+    assert adapter.oci_compatible is False
+    reason = refusal_for(adapter, oci)
+    assert reason is not None and "refuses adapter 'deepsec'" in reason and "not invoked" in reason
+    assert refusal_for(adapter, resolve_execution(None, "none")) is None
 
     class Claims(Adapter):
         name = "claims"
@@ -305,6 +304,25 @@ def test_adapters_that_do_not_declare_oci_compatibility_are_refused_under_oci():
             raise AssertionError("not called")
 
     assert refusal_for(Claims(), oci) is not None
+
+
+def test_llm_harness_is_refused_or_admitted_by_the_runtime_its_configuration_selects():
+    """Only the image runtime runs under oci, and only there; the host runtime stays local-only."""
+    adapter = get_adapter("llm-harness")
+    assert adapter.oci_compatible is True
+    local = SystemSpec("h", "llm-harness", {"harness": "securevibes-agent", "model": "m/x"})
+    image = SystemSpec("h", "llm-harness", {"harness": "securevibes-agent", "model": "openai-codex/x",
+                                            "runtime": "oci_image"})
+    assert "refuses adapter 'llm-harness' on config.runtime local" in refusal_for(adapter, settings(), local)
+    assert refusal_for(adapter, resolve_execution(None, "none"), local) is None
+    assert "only under the oci execution backend" in refusal_for(adapter, resolve_execution(None, "none"), image)
+    assert "only under the oci execution backend" in refusal_for(adapter, settings(), image)
+    research = resolve_execution({"backend": "oci", "image": IMAGE, "proxy_image": IMAGE,
+                                  "egress": [{"host": "chatgpt.com", "port": 443}],
+                                  "retrieval": {"policy": "recorded_public_v1", "allowed_origins": ["https://example.com"],
+                                                "capture": "content", "retention": "bundle"}}, "public_research")
+    assert refusal_for(adapter, research, image) is None
+    assert "on config.runtime local" in refusal_for(adapter, research, local)
 
 
 # --- the egress proxy script, run locally --------------------------------------------------
@@ -1307,9 +1325,10 @@ def test_a_create_the_client_gave_up_on_leaves_nothing_on_the_engine(tmp_path, r
 def test_backend_for_builds_nothing_for_local_and_refuses_what_refusal_for_refuses(tmp_path):
     assert backend_for(resolve_execution(None, "none"), adapter=ScannerAdapter(), spec=None, preparation={},
                        run_id="r", invocation_id="i", scratch_root=tmp_path) is None
-    for name in ("llm-harness", "deepsec"):
+    for name, spec in (("llm-harness", SystemSpec("h", "llm-harness", {"harness": "securevibes-agent"})),
+                       ("deepsec", None)):
         with pytest.raises(IsolationError, match="refuses adapter"):
-            backend_for(settings(), adapter=get_adapter(name), spec=None, preparation={}, run_id="r",
+            backend_for(settings(), adapter=get_adapter(name), spec=spec, preparation={}, run_id="r",
                         invocation_id="i", scratch_root=tmp_path)
     assert list(tmp_path.iterdir()) == []
     held = backend_for(settings(), adapter=ScannerAdapter(), spec=None, preparation={}, run_id="r",
@@ -1386,7 +1405,7 @@ def write_config(root: Path, systems: list[dict], *, policy: str = "none") -> Pa
     return path
 
 
-def test_the_runner_skips_llm_harness_and_deepsec_under_oci_before_they_prepare(pilot, monkeypatch):
+def test_the_runner_skips_host_llm_harness_and_deepsec_under_oci_before_they_prepare(pilot, monkeypatch):
     prepared = []
     for name in ("llm-harness", "deepsec"):
         adapter_class = type(get_adapter(name))

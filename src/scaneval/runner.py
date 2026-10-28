@@ -805,7 +805,7 @@ def _prepare_system(entry: dict, cache_root: Path, default_policy: str,
         # Checked before the preparation phase runs: a system this run cannot record is not one
         # to spend a checkout or a download on.
         _vet_adapter_identity(spec, adapter)
-        refusal = isolation.refusal_for(adapter, settings)
+        refusal = isolation.refusal_for(adapter, settings, spec)
         if refusal is not None:
             raise isolation.IsolationError(refusal)
         prepared = adapter.prepare(spec, cache_root)

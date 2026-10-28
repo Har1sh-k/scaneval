@@ -26,8 +26,9 @@ Selection is three steps, all here. :func:`resolve_execution` reads one system's
 block from a 2.1 run configuration into :class:`ExecutionSettings`, adding the checks the
 contract cannot express. :func:`refusal_for` names why an adapter cannot run under the selected
 backend: under ``oci`` that is every adapter not declaring ``oci_compatible``, which today is
-``llm-harness`` and ``deepsec``, whose tools exist only as host installs and whose processes have
-not been audited to go through the backend. :func:`backend_for` builds the backend for one
+``deepsec``, whose tools exist only as host installs and whose processes have not been audited to
+go through the backend, and ``llm-harness`` on its host runtime (its image runtime is the one that
+runs under ``oci``, and only there). :func:`backend_for` builds the backend for one
 invocation, or returns ``None`` for ``local``. Nothing here ever turns a system configured for
 ``oci`` into a local run.
 """
@@ -218,21 +219,29 @@ def _limits(values: dict[str, Any]) -> Limits:
     return Limits(**chosen)
 
 
-def refusal_for(adapter: Any, settings: ExecutionSettings) -> str | None:
+def refusal_for(adapter: Any, settings: ExecutionSettings, spec: Any = None) -> str | None:
     """Why *adapter* cannot run under *settings*' backend, or ``None`` when it can.
 
     The local backend runs anything. ``oci`` runs only an adapter declaring ``oci_compatible``,
     because anything else starts processes the backend would not hold or needs host installs no
     image carries. The refusal is decided before the adapter's preparation runs, so a refused
     system fetches nothing and touches nothing.
+
+    An adapter whose compatibility depends on its configuration (``llm-harness``, whose host
+    runtime has no image and whose image runtime has no host) also provides
+    ``execution_refusal(spec, settings)``; when *spec* is given its answer is the refusal, so a
+    system configured for the wrong backend is skipped before preparation too.
     """
-    if settings.backend == "local" or getattr(adapter, "oci_compatible", False) is True:
-        return None
-    name = getattr(adapter, "name", type(adapter).__name__)
-    return (f"the oci execution backend refuses adapter {name!r}: it is not oci_compatible, which "
-            "means no audited Linux image runs its scanner and not every process it starts is known "
-            "to go through the backend; the system was not invoked rather than run outside the "
-            "boundary or on the host")
+    if settings.backend != "local" and getattr(adapter, "oci_compatible", False) is not True:
+        name = getattr(adapter, "name", type(adapter).__name__)
+        return (f"the oci execution backend refuses adapter {name!r}: it is not oci_compatible, which "
+                "means no audited Linux image runs its scanner and not every process it starts is known "
+                "to go through the backend; the system was not invoked rather than run outside the "
+                "boundary or on the host")
+    check = getattr(adapter, "execution_refusal", None)
+    if spec is not None and callable(check):
+        return check(spec, settings)
+    return None
 
 
 def backend_for(settings: ExecutionSettings, *, adapter: Any, spec: Any, preparation: dict,
@@ -251,7 +260,7 @@ def backend_for(settings: ExecutionSettings, *, adapter: Any, spec: Any, prepara
     """
     if settings.backend == "local":
         return None
-    refusal = refusal_for(adapter, settings)
+    refusal = refusal_for(adapter, settings, spec)
     if refusal is not None:
         raise IsolationError(refusal)
     from .oci import OciBackend

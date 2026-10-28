@@ -72,12 +72,13 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import time
 from typing import Any, NamedTuple
 
 from ..execution import list_directory, read_regular_file
 from ..kinds import kind_for_harness_class
 from ..materialize import HARNESS_STATE_DIRS, Containment, MaterializationError, git_command
-from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command
+from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, active_backend, build_env, run_command
 
 
 DRIVER = Path(__file__).with_name("llm_harness_driver.mts")
@@ -106,7 +107,385 @@ TOOL_POLICY = {
     "pi": "the whole tool surface is disabled with --no-tools.",
     "claude": "network and spawn tools are denied with --disallowedTools; file tools such as Read and Bash remain permitted inside an isolated working directory.",
     "mock": "no model process is spawned, so no tool surface exists.",
+    "pi-oci": ("an explicit allowlist (--tools scaneval_fetch, scaneval_git, scaneval_read, and scaneval_search only "
+               "when a search endpoint is declared) served by the image-owned research extension loaded with "
+               "--no-extensions -e; MCP, skills, prompt templates, themes, context files and project trust are "
+               "disabled, and no built-in file, shell, edit or write tool is declared."),
 }
+
+# The two places the harness can run. ``local`` is the host checkout this adapter has always run,
+# unchanged. ``oci_image`` is an image-owned runtime (Node, tsx, the pinned harness, Pi, the observer
+# SDK, this driver, the Pi runner and the research extension, all inside the scanner image), run
+# only under the oci backend with public_research. Neither ever stands in for the other.
+RUNTIMES = ("local", "oci_image")
+IMAGE_PATHS = {
+    "root": "/opt/scaneval/harness",
+    "tsx": "/opt/scaneval/harness/node_modules/.bin/tsx",
+    "driver": "/opt/scaneval/llm_harness_driver.mts",
+    "pi_runner": "/opt/scaneval/pi_oci_runner.mts",
+    "pi_extension": "/opt/scaneval/pi_open_context.mts",
+    "pi_synthetic_extension": "/opt/scaneval/pi_synthetic_provider.mts",
+    "observer_sdk": "/opt/scaneval/observer/index.js",
+    "runtime_receipt": "/opt/scaneval/runtime.json",
+    "pi_binary": "pi",
+}
+IMAGE_PROVIDERS = ("openai-codex",)
+# DIAGNOSTIC ONLY: an in-process deterministic provider that calls no model, for exercising the
+# image route end to end. A run on it is recorded as diagnostic, never as scanner evidence.
+SYNTHETIC_MODEL = "scaneval-synthetic/deterministic-open-context"
+THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+DEFAULT_PI_AUTH_ENV = "SV_AGENT_PI_AUTH_JSON"
+# Configuration that only the image runtime reads. A local system naming any of them is refused
+# rather than run with the setting silently ignored.
+IMAGE_ONLY_KEYS = frozenset({"image_paths", "thinking_level", "pi_auth_env", "research_search",
+                             "research_preflight_url", "expected_harness_commit", "expected_pi_version",
+                             "synthetic_tool_calls"})
+_ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+MAX_JOURNAL_FILES = 1000
+_UNPARSED = object()
+
+
+def check_pi_credential(raw: str | None, provider: str, name: str, *, now: float | None = None) -> None:
+    """Refuse a Pi OAuth credential document that cannot be the one this route needs.
+
+    The same shape the driver checks inside the container, checked here first so a run with a
+    missing or malformed credential is refused before any container starts. Every message names
+    the variable and the defect, never a value, and no parser error is chained, because a JSON
+    error carries the document it failed on.
+    """
+    if not raw:
+        raise AdapterError(f"{name} is not set in this process's environment: export in it a JSON object holding "
+                           f"exactly one {provider!r} OAuth entry (the {provider} entry of a Pi auth.json), and "
+                           f"declare it under execution.credentials with provider {provider!r}")
+    if len(raw) > 65536:
+        raise AdapterError(f"{name} is larger than 65536 characters, which no single Pi OAuth entry is")
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        parsed = _UNPARSED
+    # Raised outside the handler, so the parser's error, which holds the document, is not chained.
+    if parsed is _UNPARSED:
+        raise AdapterError(f"{name} is not JSON; it must hold {{{provider!r}: {{\"type\": \"oauth\", ...}}}}")
+    if not isinstance(parsed, dict):
+        raise AdapterError(f"{name} is not a JSON object")
+    if list(parsed) != [provider]:
+        raise AdapterError(f"{name} must hold exactly one entry, for provider {provider!r}; it holds {len(parsed)} "
+                           f"entr{'y' if len(parsed) == 1 else 'ies'}" + (" for another provider" if len(parsed) == 1 else ""))
+    entry = parsed[provider]
+    if not isinstance(entry, dict) or entry.get("type") != "oauth":
+        raise AdapterError(f"the {provider} entry in {name} must be an OAuth credential (type 'oauth'); this route "
+                           "accepts no API key and falls back to no paid provider")
+    for field in ("access", "refresh"):
+        if not isinstance(entry.get(field), str) or not entry[field]:
+            raise AdapterError(f"the {provider} OAuth entry in {name} has no {field} token")
+    expires = entry.get("expires")
+    if isinstance(expires, bool) or not isinstance(expires, (int, float)):
+        raise AdapterError(f"the {provider} OAuth entry in {name} has no numeric expiry")
+    if expires <=((now if now is not None else time.time()) * 1000) + 60_000:
+        raise AdapterError(f"the {provider} OAuth credential in {name} has expired or expires within a minute; "
+                           "refresh it explicitly (pi auth check) before the run, it is not refreshed for you")
+
+
+def image_settings(config: dict) -> dict[str, Any]:
+    """The image runtime's validated settings, or an :class:`AdapterError` naming the field.
+
+    Everything is decided from configuration alone, so ``prepare()`` can refuse a bad system
+    without touching the host, and the paths are paths inside the image, never checked here.
+    """
+    harness = config.get("harness")
+    if harness != "securevibes-agent":
+        raise AdapterError("runtime oci_image runs the securevibes-agent harness only; "
+                           f"config.harness is {harness!r}")
+    if config.get("runner", "default") != "default":
+        raise AdapterError("runtime oci_image runs the default Pi route; for a diagnostic run without a model use "
+                           f"config.model {SYNTHETIC_MODEL!r} rather than the mock runner")
+    if str(config.get("mode", "bootstrap")) != "bootstrap":
+        raise AdapterError("runtime oci_image runs bootstrap (full) scans only")
+    model = config.get("model")
+    if not isinstance(model, str) or not model:
+        raise AdapterError("config.model (harness model route) is required")
+    synthetic = model == SYNTHETIC_MODEL
+    provider, _, model_id = model.partition("/")
+    if not synthetic and (provider not in IMAGE_PROVIDERS or not _MODEL_ID.match(model_id)):
+        raise AdapterError(f"runtime oci_image supports the provider route(s) {', '.join(IMAGE_PROVIDERS)} as "
+                           f"'<provider>/<model id>', not {model!r}; no other provider or model is substituted")
+    thinking = config.get("thinking_level", "high")
+    if thinking not in THINKING_LEVELS:
+        raise AdapterError(f"config.thinking_level must be one of {', '.join(THINKING_LEVELS)}, not {thinking!r}")
+    auth_env = config.get("pi_auth_env", None if synthetic else DEFAULT_PI_AUTH_ENV)
+    if synthetic:
+        if auth_env is not None:
+            raise AdapterError("the synthetic diagnostic route takes no credential; remove config.pi_auth_env")
+    elif (not isinstance(auth_env, str) or not _ENV_NAME.match(auth_env)
+          or auth_env.startswith(("GIT_", "SCANEVAL_", "PI_"))
+          or auth_env in {"HOME", "PATH", "TMPDIR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}):
+        raise AdapterError("config.pi_auth_env must name an environment variable outside the GIT_, SCANEVAL_ and PI_ "
+                           f"namespaces, not {auth_env!r}")
+    search = config.get("research_search", False)
+    if not isinstance(search, bool):
+        raise AdapterError("config.research_search must be a boolean")
+    preflight = config.get("research_preflight_url")
+    if preflight is not None and (not isinstance(preflight, str) or not preflight.startswith("https://")
+                                  or len(preflight) > 2048 or any(ord(ch) < 33 for ch in preflight)):
+        raise AdapterError("config.research_preflight_url must be one https:// URL")
+    paths = dict(IMAGE_PATHS)
+    overrides = config.get("image_paths") or {}
+    if not isinstance(overrides, dict) or set(overrides) - set(IMAGE_PATHS):
+        raise AdapterError(f"config.image_paths may name only {', '.join(sorted(IMAGE_PATHS))}")
+    for key, value in overrides.items():
+        if not isinstance(value, str) or not value or "\x00" in value or "\n" in value or (
+                key != "pi_binary" and not value.startswith("/")):
+            raise AdapterError(f"config.image_paths.{key} must be an absolute path inside the image")
+        paths[key] = value
+    if "root" in overrides and "tsx" not in overrides:
+        paths["tsx"] = paths["root"].rstrip("/") + "/node_modules/.bin/tsx"
+    expected_commit = config.get("expected_harness_commit")
+    if expected_commit is not None and (not isinstance(expected_commit, str) or not _COMMIT.match(expected_commit)):
+        raise AdapterError("config.expected_harness_commit must be a full 40-character commit id")
+    expected_pi = config.get("expected_pi_version")
+    if expected_pi is not None and (not isinstance(expected_pi, str) or not expected_pi.strip()):
+        raise AdapterError("config.expected_pi_version must be a version string")
+    calls = config.get("synthetic_tool_calls")
+    if calls is not None:
+        if not synthetic:
+            raise AdapterError("config.synthetic_tool_calls applies only to the synthetic diagnostic model route")
+        if (not isinstance(calls, list) or len(calls) > 16
+                or not all(isinstance(call, dict) and set(call) <= {"name", "arguments"}
+                           and isinstance(call.get("name"), str) and isinstance(call.get("arguments", {}), dict)
+                           for call in calls)):
+            raise AdapterError("config.synthetic_tool_calls must be at most 16 {name, arguments} objects")
+    return {"synthetic": synthetic, "provider": "scaneval-synthetic" if synthetic else provider,
+            "model_id": model_id, "model": model, "thinking": thinking, "auth_env": auth_env, "search": search,
+            "preflight": preflight, "paths": paths, "expected_commit": expected_commit,
+            "expected_pi": expected_pi.strip() if isinstance(expected_pi, str) else None,
+            "tool_calls": list(calls or [])}
+
+
+def _receipt_value(receipt: Any, *paths: tuple[str, ...]) -> str | None:
+    """The first string at any of *paths* in the image's runtime receipt, or ``None``."""
+    for path in paths:
+        value = receipt
+        for key in path:
+            value = value.get(key) if isinstance(value, dict) else None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def read_tool_journal(directory: Path, enclosure: "Enclosure") -> tuple[list[dict], dict[str, Any], list[str]]:
+    """The research extension's journal files: artifacts to register, a summary, and notes.
+
+    Written by code inside the scanner container, so it is read like every other path the scanner
+    owns: listed with the one listing, each entry a regular file proved in the same open that reads
+    it, and the whole directory contained in this run's raw output. What it says is the extension's
+    own account of what it registered and what each tool returned; it is availability and execution
+    evidence, never evidence of what a model consumed.
+    """
+    artifacts: list[dict] = []
+    notes: list[str] = []
+    summary: dict[str, Any] = {"files": 0, "loaded": [], "tools": {}, "unreadable": 0, "malformed": 0}
+    if enclosure.write(directory) is None:
+        notes.append("the research tool journal does not resolve inside this run's raw output; it was not read")
+        summary["unreadable"] += 1
+        return artifacts, summary, notes
+    try:
+        entries = list_directory(directory)
+    except FileNotFoundError:
+        return artifacts, summary, notes
+    except OSError as exc:
+        notes.append(f"the research tool journal could not be listed ({exc.strerror or exc})")
+        summary["unreadable"] += 1
+        return artifacts, summary, notes
+    for entry in sorted(entries, key=lambda item: item.name)[:MAX_JOURNAL_FILES]:
+        path = Path(entry.path)
+        if not re.fullmatch(r"pi-[0-9]+-[0-9a-f]{12}\.jsonl", entry.name):
+            summary["unreadable"] += 1
+            notes.append("the research tool journal holds an unexpected entry; it was not read")
+            continue
+        data, failure = read_record(path, enclosure.write(path))
+        if data is None:
+            summary["unreadable"] += 1
+            notes.append(f"a research tool journal file could not be read ({failure})")
+            continue
+        summary["files"] += 1
+        artifacts.append({"id": f"open-context-tools/{entry.name}", "path": path})
+        for line in data.decode("utf-8", errors="replace").splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                summary["malformed"] += 1
+                continue
+            if not isinstance(record, dict):
+                summary["malformed"] += 1
+            elif record.get("event") == "loaded" and isinstance(record.get("tools"), list):
+                summary["loaded"].append(sorted(str(name) for name in record["tools"]))
+            elif record.get("event") == "tool" and isinstance(record.get("tool"), str):
+                outcomes = summary["tools"].setdefault(record["tool"], {})
+                outcome = str(record.get("outcome") or "unknown")
+                outcomes[outcome] = outcomes.get(outcome, 0) + 1
+    if len(entries) > MAX_JOURNAL_FILES:
+        notes.append(f"the research tool journal holds {len(entries)} files; only the first {MAX_JOURNAL_FILES} were read")
+    return artifacts, summary, notes
+
+
+def _counts(value: Any) -> dict[str, int]:
+    """A ``{name: count}`` table the driver reported, keeping only entries this can read."""
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): count for key, count in value.items()
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 0}
+
+
+def _listed(table: dict[str, int]) -> str:
+    return ", ".join(f"{name} x{count}" for name, count in sorted(table.items())) or "none"
+
+
+def image_tools(settings: dict[str, Any]) -> list[str]:
+    """The exact tool allowlist the image route declares to the model."""
+    return ["scaneval_fetch", *(["scaneval_search"] if settings["search"] else []), "scaneval_git", "scaneval_read"]
+
+
+def image_run_account(image: dict[str, Any], output: Any,
+                      journal: dict[str, Any]) -> tuple[list[str], dict[str, str] | None, dict[str, str]]:
+    """Notes, a failure if any, and tool versions for one image-runtime run, from what it reported.
+
+    The failure is ``error`` when what ran is not what the system pins (a different harness commit
+    or Pi version than configured, or a model other than the pinned one addressed), and ``partial``
+    when the research tools the condition depends on were not shown available in every Pi process.
+    Tool availability, tool execution and model consumption are kept as three separate statements:
+    the extension's journal shows the first, Pi's own JSON stream the second, and nothing here the
+    third.
+    """
+    out = output if isinstance(output, dict) else {}
+    runtime = out.get("runtime") if isinstance(out.get("runtime"), dict) else {}
+    route = out.get("pi_route") if isinstance(out.get("pi_route"), dict) else {}
+    calls = out.get("pi_calls") if isinstance(out.get("pi_calls"), dict) else {}
+    receipt = runtime.get("receipt")
+    commit = _receipt_value(receipt, ("harness_commit",), ("harness", "commit"))
+    package = _receipt_value(receipt, ("harness_package_version",), ("harness", "package_version"))
+    pi_receipt = _receipt_value(receipt, ("pi_version",), ("pi", "version"))
+    node_receipt = _receipt_value(receipt, ("node_version",), ("node", "version"))
+    pi_observed = runtime.get("pi_version") if isinstance(runtime.get("pi_version"), str) else None
+    node_observed = runtime.get("node_version") if isinstance(runtime.get("node_version"), str) else None
+    files = runtime.get("files") if isinstance(runtime.get("files"), dict) else {}
+    versions = {"runtime": "oci_image", "harness": f"securevibes-agent@{commit or 'unknown'}",
+                "harness_package": str(package), "pi": pi_observed or pi_receipt or "unknown",
+                "node": node_observed or node_receipt or "unknown"}
+    for role in ("runner", "extension", "extension_tools", "synthetic_provider"):
+        entry = files.get(role)
+        if isinstance(entry, dict) and isinstance(entry.get("sha256"), str):
+            versions[f"pi_{role}"] = entry["sha256"]
+    notes: list[str] = []
+    errors: list[str] = []
+    partial: list[str] = []
+    if not runtime:
+        notes.append("The driver reported no image runtime identity, so which harness, Pi and Node ran is unknown.")
+    else:
+        if receipt is None:
+            notes.append(f"The image's runtime receipt was not read ({runtime.get('receipt_error') or 'no reason'}); "
+                         "the harness commit and package version are unknown.")
+        notes.append(f"Image runtime: harness commit {commit or 'unknown'} (package {package or 'unknown'}) per the "
+                     f"image receipt; Pi {pi_observed or 'unknown'} as the binary reported it (receipt: "
+                     f"{pi_receipt or 'none'}); Node {node_observed or 'unknown'} as the driver process reported it "
+                     f"(receipt: {node_receipt or 'none'}). Digests of the driver, runner and extension files the "
+                     "driver loaded are recorded with the tool versions.")
+    # Compared only when the driver got far enough to report a runtime: a driver that failed before
+    # that has its own error, which an unknown identity must not replace.
+    if runtime and image["expected_commit"] and commit != image["expected_commit"]:
+        errors.append(f"the image's harness commit is {commit or 'unknown'}, not the configured "
+                      f"{image['expected_commit']}")
+    if pi_observed and pi_receipt and pi_receipt not in pi_observed:
+        errors.append(f"the Pi binary reports {pi_observed!r}, which contradicts the image receipt's {pi_receipt!r}")
+    if runtime and image["expected_pi"] and image["expected_pi"] not in (pi_observed or pi_receipt or ""):
+        errors.append(f"Pi {pi_observed or pi_receipt or 'unknown'} ran, not the configured {image['expected_pi']}")
+    declared = route.get("tools")
+    expected_tools = image_tools(image)
+    if route and declared != expected_tools:
+        errors.append(f"the driver declared the tools {declared!r}, not the configured allowlist {expected_tools!r}")
+    if not route:
+        notes.append("The driver reported no Pi route, so the tools and reasoning level it applied are unknown.")
+    else:
+        notes.append(f"Requested model route {image['model']} with reasoning level {image['thinking']} on every call; "
+                     f"declared tools {', '.join(expected_tools)} and nothing else.")
+    addressed = _counts(calls.get("models_addressed"))
+    providers = _counts(calls.get("providers_addressed"))
+    unexpected = sorted(set(addressed) - {image["model_id"], "unknown"}) + sorted(
+        set(providers) - {image["provider"], "unknown"})
+    if unexpected:
+        errors.append("Pi reported addressing a provider or model other than the pinned route: " + ", ".join(unexpected))
+    pi_count = calls.get("calls") if isinstance(calls.get("calls"), int) else 0
+    loaded = [entry for entry in journal.get("loaded", []) if isinstance(entry, list)]
+    if pi_count and not loaded:
+        partial.append(f"Pi ran {pi_count} time(s) but the research extension journaled no tool registration, so "
+                       "research tool availability is not established")
+    short = [sorted(set(expected_tools) - set(entry)) for entry in loaded if set(expected_tools) - set(entry)]
+    if short:
+        partial.append(f"{len(short)} Pi process(es) registered without {', '.join(short[0])}, so the research tools "
+                       "were not available to every model call")
+    if loaded:
+        notes.append(f"Tool availability: the research extension reported registering its tools in {len(loaded)} Pi "
+                     f"process(es), across {pi_count} Pi invocation(s) counting retries. That is the extension's own "
+                     "account of what it offered, not of what the model did.")
+    executions = calls.get("tool_executions") if isinstance(calls.get("tool_executions"), dict) else {}
+    executed = ", ".join(f"{name} ok={entry.get('ok')} error={entry.get('error')}" for name, entry in sorted(executions.items())
+                         if isinstance(entry, dict)) or "none"
+    journaled = ", ".join(f"{tool} " + "/".join(f"{outcome}={count}" for outcome, count in sorted(outcomes.items()))
+                          for tool, outcomes in sorted((journal.get("tools") or {}).items())) or "none"
+    notes.append(f"Tool execution: Pi's JSON stream reported {executed}; the extension journaled {journaled}. Neither "
+                 "shows that fetched content or history entered a model request or shaped a finding: retrieval is "
+                 "recorded by the proxy, and model consumption stays unverifiable.")
+    research = route.get("research") if isinstance(route.get("research"), dict) else {}
+    preflight = research.get("preflight")
+    if isinstance(preflight, dict):
+        notes.append(f"Research transport preflight (the driver, before any model call; not model research): "
+                     f"{preflight.get('url')} -> {preflight.get('outcome')} "
+                     f"(retrieval event {preflight.get('retrieval_event_id')}).")
+    overridden = calls.get("thinking_overridden")
+    if isinstance(overridden, int) and overridden:
+        notes.append(f"{overridden} harness call(s) asked for another reasoning level; each ran at the pinned "
+                     f"{image['thinking']}.")
+    replaced = _counts(calls.get("replaced_stage_flags"))
+    if replaced:
+        notes.append(f"Stage flags replaced by the route's explicit tool policy: {_listed(replaced)}.")
+    unparsed = calls.get("unparsed_stream_records")
+    if isinstance(unparsed, int) and unparsed:
+        notes.append(f"{unparsed} record(s) of Pi's JSON stream could not be parsed; the call outcomes still come "
+                     "from the last parsed assistant message.")
+    credential = route.get("credential") if isinstance(route.get("credential"), dict) else {}
+    if not image["synthetic"]:
+        if credential.get("removed") is True:
+            notes.append(f"The {image['provider']} OAuth credential was materialized only in the container's private "
+                         "agent directory and was removed when the scan ended; no value is recorded.")
+        else:
+            notes.append(f"The private Pi agent directory holding the {image['provider']} credential was not shown "
+                         "removed; it lived on the container's private /tmp, which ends with the container.")
+    stops = _counts(calls.get("stop_reasons"))
+    if stops:
+        notes.append(f"Pi stop reasons over {pi_count} invocation(s): {_listed(stops)}.")
+    failure = None
+    if errors:
+        failure = {"status": "error", "code": "runtime_mismatch", "message": "; ".join(errors)[:2000]}
+    elif partial:
+        failure = {"status": "partial", "code": "research_tools_unavailable", "message": "; ".join(partial)[:2000]}
+    return notes, failure, versions
+
+
+def image_model_identity(image: dict[str, Any], output: Any) -> dict[str, Any]:
+    """Requested and observed model identity for the image route, without promoting either."""
+    if image["synthetic"]:
+        return {"requested": image["model"], "resolved": "synthetic-deterministic", "verification": "not_applicable",
+                "notes": ["Synthetic in-process Pi provider; diagnostic only, no model was called."]}
+    calls = output.get("pi_calls") if isinstance(output, dict) and isinstance(output.get("pi_calls"), dict) else {}
+    addressed = _counts(calls.get("models_addressed"))
+    providers = _counts(calls.get("providers_addressed"))
+    notes = ["Pi names, in each assistant message, the provider and model it addressed. That is the client's own "
+             "routing record, not the provider's statement of the model or revision it served, so no resolved "
+             "model is recorded."]
+    if addressed or providers:
+        notes.append(f"Pi addressed models {_listed(addressed)} through providers {_listed(providers)}.")
+    return {"requested": image["model"], "resolved": None, "verification": "unverified", "notes": notes}
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -909,7 +1288,7 @@ def session_history_notes(manifest: list[dict[str, Any]], registered: dict[str, 
 
 class LlmHarnessAdapter(Adapter):
     name = "llm-harness"
-    adapter_version = "2.4.0"
+    adapter_version = "2.5.0"
     requires_git = True
     # A full request runs the harness's bootstrap mode; a PR request runs its pr mode over the base
     # and head commits the request names (see the module docstring).
@@ -927,6 +1306,83 @@ class LlmHarnessAdapter(Adapter):
     # harness state directory cannot be stripped by one of them and treated as ordinary
     # content by the other.
     state_dirs = tuple(sorted(HARNESS_STATE_DIRS))
+    # Declared for the image runtime alone, and the declaration is kept honest in scan(): a system on
+    # runtime ``local`` that reaches an oci backend is refused there before anything starts, and one
+    # on ``oci_image`` that reaches no oci backend is refused the same way. On the image runtime every
+    # process starts through :func:`run_command` from the scanning thread, with the image's own tsx,
+    # and every host read of what the container wrote goes through :func:`read_record`,
+    # :func:`~scaneval.execution.list_directory`, or a no-follow stat beneath a contained path.
+    oci_compatible = True
+
+    @staticmethod
+    def _runtime(spec: SystemSpec) -> str:
+        runtime = spec.config.get("runtime", "local")
+        if runtime not in RUNTIMES:
+            raise AdapterError(f"config.runtime must be one of {', '.join(RUNTIMES)}, not {runtime!r}")
+        if runtime == "local":
+            stray = sorted(IMAGE_ONLY_KEYS & set(spec.config))
+            if stray:
+                raise AdapterError(f"config {', '.join(stray)} appl{'ies' if len(stray) == 1 else 'y'} only to "
+                                   "runtime oci_image; the local runtime would ignore it")
+        return runtime
+
+    def execution_refusal(self, spec: SystemSpec, settings: Any) -> str | None:
+        """Why this system's runtime cannot run under *settings*' backend, decided before preparation.
+
+        The host runtime runs only on the local backend and the image runtime only under oci with
+        public_research. scan() checks the same again against the backend actually holding it.
+        """
+        runtime = self._runtime(spec)
+        backend = getattr(settings, "backend", None)
+        if runtime == "local" and backend != "local":
+            return (f"the {backend} execution backend refuses adapter 'llm-harness' on config.runtime local: the "
+                    "host harness checkout has no image and its processes would run outside the boundary; select "
+                    "config.runtime oci_image to run the image-owned harness")
+        if runtime == "oci_image" and (backend != "oci" or getattr(settings, "network_policy", None) != "public_research"):
+            return ("config.runtime oci_image runs only under the oci execution backend with network policy "
+                    f"public_research, not {backend} with {getattr(settings, 'network_policy', None)}; it is never "
+                    "run on the host, and closed-book systems use the local runtime")
+        return None
+
+    def condition_controls(self, spec: SystemSpec, preparation: dict) -> dict[str, Any]:
+        """The image route's research controls; the local route supplies none, as before.
+
+        Read from the configuration this adapter enforces in scan(): the image route declares fetch
+        and history tools to the model, search only when configured, and nothing that installs or
+        updates software. Provider-side retrieval is the provider's and stays unverifiable.
+        """
+        if spec.config.get("runtime", "local") != "oci_image":
+            return {}
+        settings = image_settings(spec.config)
+        return {"inference": "offline" if settings["synthetic"] else "remote",
+                "tools": {"browser": "disabled", "web_search": "enabled" if settings["search"] else "disabled",
+                          "remote_fetch": "enabled", "package_install": "disabled", "scanner_update": "disabled"},
+                "basis": "adapter_controls",
+                "provider": ({"capability": "not_applicable", "control": "not_applicable", "attestation": None}
+                             if settings["synthetic"] else
+                             {"name": settings["provider"], "capability": "unverifiable",
+                              "control": "unverifiable", "attestation": None})}
+
+    def _prepare_image(self, spec: SystemSpec) -> dict[str, Any]:
+        """Preparation of the image runtime: configuration only, nothing on the host is inspected.
+
+        The paths are inside the scanner image, which this process cannot see; what actually ran is
+        read back from the driver's own report of the image's receipt, versions and file digests.
+        """
+        settings = image_settings(spec.config)
+        return {
+            "runtime": "oci_image",
+            "harness": {"name": "securevibes-agent", "root": settings["paths"]["root"],
+                        "configured_root": settings["paths"]["root"], "location": "scanner image",
+                        "package_version": None, "git_head": None, "working_tree_modified": None,
+                        "expected_commit": settings["expected_commit"], "state_dir": ".securevibes"},
+            "observer_sdk": settings["paths"]["observer_sdk"],
+            "runner": "default",
+            "model": spec.config["model"],
+            "pi": {"provider": settings["provider"], "model_id": settings["model_id"],
+                   "thinking_level": settings["thinking"], "expected_version": settings["expected_pi"],
+                   "synthetic": settings["synthetic"]},
+        }
 
     def _preset(self, spec: SystemSpec) -> tuple[str, dict[str, Any], Path]:
         """The harness preset and its root, resolved to an absolute path.
@@ -946,6 +1402,8 @@ class LlmHarnessAdapter(Adapter):
         return harness, HARNESS_PRESETS[harness], root
 
     def prepare(self, spec: SystemSpec, cache_root: Path) -> dict[str, Any]:
+        if self._runtime(spec) == "oci_image":
+            return self._prepare_image(spec)
         harness, preset, root = self._preset(spec)
         tsx = root / "node_modules" / ".bin" / "tsx"
         missing = [str(p) for p in (root / preset["engine_entry"], root / preset["runner_entry"], tsx) if not p.exists()]
@@ -986,8 +1444,55 @@ class LlmHarnessAdapter(Adapter):
             "model": spec.config["model"],
         }
 
+    def _image_preflight(self, spec: SystemSpec, request: dict, backend: Any) -> dict[str, Any]:
+        """Refuse an image-runtime scan that would not run where and how it is recorded.
+
+        The backend must be the real oci backend holding this scan under public_research, because
+        that is what supplies the recorded retrieval API the research tools use and the boundary the
+        open-context condition is classified from. The credential must be declared to that backend
+        under the configured provider, and present and well formed here, so a missing one is refused
+        before any container starts; its value is never read into a message.
+        """
+        from ..isolation.oci import OciBackend
+
+        settings = image_settings(spec.config)
+        if not isinstance(backend, OciBackend):
+            raise AdapterError("config.runtime oci_image runs only under the oci execution backend with network policy "
+                               "public_research; this scan has no oci backend, and the image runtime is never run on "
+                               "the host")
+        policy = backend.settings.network_policy
+        if policy != "public_research":
+            raise AdapterError(f"config.runtime oci_image runs its research route only under network policy "
+                               f"public_research, not {policy!r}; closed-book scans use the local runtime, so no "
+                               "research tool reaches them")
+        if request["input"]["mode"] != "full":
+            raise AdapterError("config.runtime oci_image carries out full scans only; a PR request is refused rather "
+                               "than scanned as a full tree")
+        retrieval = backend.settings.retrieval or {}
+        if bool(retrieval.get("search_endpoint")) != settings["search"]:
+            raise AdapterError("config.research_search must be true exactly when execution.retrieval declares a "
+                               "search_endpoint, so the declared tools are the ones the boundary serves")
+        if not settings["synthetic"]:
+            declared = dict(backend.settings.credentials)
+            if declared.get(settings["auth_env"]) != settings["provider"]:
+                raise AdapterError(f"execution.credentials must declare {{env: {settings['auth_env']}, provider: "
+                                   f"{settings['provider']}}} so the OAuth credential reaches the container by name")
+            check_pi_credential(os.environ.get(settings["auth_env"]), settings["provider"], settings["auth_env"])
+        return settings
+
     def scan(self, *, request, source_dir, raw_dir, spec, preparation, timeout_seconds, trace_mode, trace_dir):
-        harness, preset, root = self._preset(spec)
+        backend = active_backend()
+        image: dict[str, Any] | None = None
+        if self._runtime(spec) == "oci_image":
+            image = self._image_preflight(spec, request, backend)
+            harness, preset = "securevibes-agent", HARNESS_PRESETS["securevibes-agent"]
+            root = Path(image["paths"]["root"])
+        else:
+            if backend is not None:
+                raise AdapterError(f"config.runtime local runs the host harness checkout, which no "
+                                   f"{getattr(backend, 'name', 'execution')} backend holds; select config.runtime "
+                                   "oci_image to run the image-owned harness under it")
+            harness, preset, root = self._preset(spec)
         requested = request["input"]["mode"]
         if requested not in self.scan_modes:
             raise AdapterError(f"llm-harness carries out {', '.join(sorted(self.scan_modes))} scans, not "
@@ -1034,6 +1539,24 @@ class LlmHarnessAdapter(Adapter):
             "output_path": str(raw_dir / "driver-output.json"), "progress_path": str(raw_dir / "driver-progress.log"),
             "flush_timeout_ms": int(spec.config.get("flush_timeout_ms", 30000)),
         }
+        journal_dir = raw_dir / "open-context-tools"
+        if image is not None:
+            paths = image["paths"]
+            config["runtime"] = "oci_image"
+            config["image"] = {
+                "pi_runner_entry": paths["pi_runner"], "pi_extension": paths["pi_extension"],
+                "pi_synthetic_extension": paths["pi_synthetic_extension"] if image["synthetic"] else None,
+                "exec_entry": "src/runtime/exec.ts", "pi_binary": paths["pi_binary"],
+                "pi_provider": image["provider"], "pi_model_id": image["model_id"],
+                "thinking_level": image["thinking"], "pi_auth_env": image["auth_env"],
+                "runtime_receipt": paths["runtime_receipt"],
+                # Created by the driver inside the container, so the container user owns it.
+                "research": {"search": image["search"], "journal_dir": str(journal_dir),
+                             "preflight_url": image["preflight"]},
+                "synthetic": ({"tool_calls": image["tool_calls"],
+                               "harness_mock": paths["root"].rstrip("/") + "/" + preset["mock_entry"]}
+                              if image["synthetic"] else None),
+            }
         state_dir = source_dir / preset["state_dir"]
         # The one enclosure every read and every copy destination below goes through: the
         # harness may read from and write to both of these directories while it runs, so each
@@ -1045,9 +1568,17 @@ class LlmHarnessAdapter(Adapter):
         config_path = raw_dir / "driver-config.json"
         config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         (raw_dir / "driver-progress.log").write_text("", encoding="utf-8")
-        argv = [str(root / "node_modules" / ".bin" / "tsx"), str(DRIVER), "--config", str(config_path)]
-        result = run_command(argv, cwd=root, timeout_seconds=timeout_seconds, env=build_env(self.env_passthrough),
-                             stdout_path=raw_dir / "driver-stdout.txt", stderr_path=raw_dir / "driver-stderr.txt")
+        if image is not None:
+            # The image's own tsx and driver, from the mounted workspace: the container's working
+            # directory must be a mounted path, and the harness root exists only in the image. No
+            # provider key is passed: the backend passes the declared credential by name alone.
+            argv = [image["paths"]["tsx"], image["paths"]["driver"], "--config", str(config_path)]
+            result = run_command(argv, cwd=Path(source_dir), timeout_seconds=timeout_seconds, env=build_env(),
+                                 stdout_path=raw_dir / "driver-stdout.txt", stderr_path=raw_dir / "driver-stderr.txt")
+        else:
+            argv = [str(root / "node_modules" / ".bin" / "tsx"), str(DRIVER), "--config", str(config_path)]
+            result = run_command(argv, cwd=root, timeout_seconds=timeout_seconds, env=build_env(self.env_passthrough),
+                                 stdout_path=raw_dir / "driver-stdout.txt", stderr_path=raw_dir / "driver-stderr.txt")
         artifacts = [{"id": "driver-output", "path": raw_dir / "driver-output.json"},
                      {"id": "driver-stdout", "path": raw_dir / "driver-stdout.txt"},
                      {"id": "driver-stderr", "path": raw_dir / "driver-stderr.txt"},
@@ -1205,6 +1736,10 @@ class LlmHarnessAdapter(Adapter):
             notes.append("Model requests are captured per CLI attempt: the harness runner reported every attempt "
                          "inside its own retry loop and the retry decision it made. An attempt is a CLI invocation, "
                          "not an API request, so what the CLI did inside one attempt is still not observable here.")
+        elif image is not None:
+            notes.append("Model requests are captured per logical harness call; retries inside the harness runner are "
+                         "counted per Pi process under pi_calls but not traced, and token usage is Pi's own account "
+                         "from its JSON stream.")
         else:
             notes.append("Model requests are captured per logical harness call; retries inside the harness runner and token usage are not observable at this boundary.")
         if engine_hooks:
@@ -1242,7 +1777,7 @@ class LlmHarnessAdapter(Adapter):
             policy = TOOL_POLICY.get(route)
             if policy:
                 notes.append(f"Declared tool policy on the {route} route: {policy} This is the argv the harness built, not an observation of what the CLI did.")
-        if not mock_only:
+        if not mock_only and image is None:
             notes.append("Tool dispatch was not observed: it happens inside the model CLI subprocess. Absence of tool events is not evidence that no tool ran.")
         notes.append("Native scan-site lines and source/sink symbols were imported when present; "
                      "no missing location or symbol was inferred.")
@@ -1250,6 +1785,14 @@ class LlmHarnessAdapter(Adapter):
             notes.append("Prepared state: fresh. The harness's state directory is stripped from every export, so "
                          "this review started with the harness's default threat model and no earlier finding, "
                          "decision, or context note; nothing is carried from one invocation to the next.")
+        image_failure: dict[str, str] | None = None
+        image_versions: dict[str, str] = {}
+        if image is not None:
+            journal_artifacts, journal, journal_notes = read_tool_journal(journal_dir, enclosure)
+            artifacts.extend(journal_artifacts)
+            notes.extend(journal_notes)
+            image_notes, image_failure, image_versions = image_run_account(image, output, journal)
+            notes.extend(image_notes)
         served_models = sorted({str(name) for name in (output.get("models_served") or [])}) \
             if isinstance(output, dict) and isinstance(output.get("models_served"), list) else []
         model_identity: dict[str, Any] = {
@@ -1272,6 +1815,11 @@ class LlmHarnessAdapter(Adapter):
             model_identity = {"requested": str(spec.config["model"]), "resolved": "deterministic-mock", "verification": "not_applicable",
                               "notes": ["Deterministic mock runner; diagnostic only, no model was called."]}
             notes.append("DIAGNOSTIC: deterministic mock runner, no model calls; results are not scanner evidence.")
+        if image is not None:
+            model_identity = image_model_identity(image, output)
+            if image["synthetic"]:
+                notes.append("DIAGNOSTIC: synthetic in-process Pi provider, no model was called; results exercise the "
+                             "image route and are not scanner evidence or a publishable approval of it.")
         # Token counts and cost come from the model CLI's own json result object, summed by the
         # driver over the attempts that reported one. An attempt that reported none contributes
         # nothing, so both are floors rather than totals, and the cost is an estimate the CLI
@@ -1296,9 +1844,11 @@ class LlmHarnessAdapter(Adapter):
         base = dict(command=argv, claims=claims, artifacts=artifacts, capture=capture, notes=notes,
                     model_identity=model_identity, usage=usage, trace_path=trace_path, capture_state=capture_state,
                     bundles_resolved=accounting.lost == 0,
-                    tool_versions={"harness": f"{harness}@{preparation['harness'].get('git_head') or 'unknown'}",
-                                   "harness_package": str(preparation["harness"].get("package_version")),
-                                   "driver": str(output.get("driver_version", "unknown"))})
+                    tool_versions=({"driver": str(output.get("driver_version", "unknown")) if isinstance(output, dict)
+                                    else "unknown", **image_versions} if image is not None else
+                                   {"harness": f"{harness}@{preparation['harness'].get('git_head') or 'unknown'}",
+                                    "harness_package": str(preparation["harness"].get("package_version")),
+                                    "driver": str(output.get("driver_version", "unknown"))}))
 
         def stderr_tail(limit: int = 2000) -> str:
             """The tail of this run's own driver stderr, empty when it could not be read.
@@ -1326,12 +1876,21 @@ class LlmHarnessAdapter(Adapter):
             return NativeOutcome(status="timeout", exit_code=None, timed_out=True,
                                  error={"code": "timeout",
                                         "message": with_loss(f"harness exceeded {timeout_seconds}s")}, **base)
+        if image_failure is not None and image_failure["status"] == "error":
+            # What ran is not what the system pins: nothing it produced is this system's observation.
+            return NativeOutcome(status="error", exit_code=result.exit_code,
+                                 error={"code": image_failure["code"], "message": with_loss(image_failure["message"])},
+                                 **base)
         if not usable_summary:
             failure = (output.get("error") or {}) if isinstance(output, dict) else {}
             message = failure.get("message") or stderr_tail()
             return NativeOutcome(status="error", exit_code=result.exit_code,
                                  error={"code": f"driver_exit_{result.exit_code}",
                                         "message": with_loss(str(message)[:2000])}, **base)
+        if image_failure is not None:
+            return NativeOutcome(status="partial", exit_code=result.exit_code,
+                                 error={"code": image_failure["code"], "message": with_loss(image_failure["message"])},
+                                 **base)
         budget = usable_summary.get("budget") or {}
         if isinstance(budget, dict) and "estimatedSpentUsd" in budget:
             notes.append(f"Harness cost estimate (not measured): {budget.get('estimatedSpentUsd')} USD "
