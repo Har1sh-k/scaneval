@@ -16,7 +16,9 @@
     "counts",
     "records",
     "views",
-    "limits"
+    "limits",
+    "unplanned_assignments",
+    "assignment_counts"
   ],
   "properties": {
     "schema_version": {
@@ -69,7 +71,8 @@
           "run_id",
           "manifest_sha256",
           "schedule_sha256",
-          "config_sha256"
+          "config_sha256",
+          "frozen_pack_sha256"
         ],
         "properties": {
           "run_id": {
@@ -86,6 +89,17 @@
           "config_sha256": {
             "type": "string",
             "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "frozen_pack_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       }
@@ -109,6 +123,30 @@
       "type": "array",
       "items": {
         "type": "string"
+      }
+    },
+    "unplanned_assignments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/unplanned_assignment"
+      }
+    },
+    "assignment_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scheduled",
+        "unplanned"
+      ],
+      "properties": {
+        "scheduled": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unplanned": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     }
   },
@@ -848,7 +886,10 @@
         "condition_status",
         "counts",
         "weightings",
-        "by_cvss_version"
+        "by_cvss_version",
+        "evidence_scope",
+        "unplanned_assignments",
+        "unplanned_assignment_count"
       ],
       "properties": {
         "system_id": {
@@ -883,6 +924,19 @@
               "$ref": "#/$defs/weighting"
             }
           }
+        },
+        "evidence_scope": {
+          "type": "string"
+        },
+        "unplanned_assignments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/unplanned_assignment"
+          }
+        },
+        "unplanned_assignment_count": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -908,7 +962,8 @@
         "accepted_claim_ids",
         "references",
         "comparison",
-        "bindings"
+        "bindings",
+        "evidence_scope"
       ],
       "properties": {
         "system_id": {
@@ -1033,6 +1088,66 @@
               "pattern": "^sha256:[0-9a-f]{64}$"
             }
           }
+        },
+        "evidence_scope": {
+          "type": "string"
+        }
+      }
+    },
+    "unplanned_assignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "input_id",
+        "system_id",
+        "assignment_id",
+        "mode",
+        "profile",
+        "condition",
+        "condition_status",
+        "evidence_scope",
+        "reason",
+        "detail",
+        "repetition"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "input_id": {
+          "type": "string"
+        },
+        "system_id": {
+          "type": "string"
+        },
+        "assignment_id": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "condition": {
+          "type": "string"
+        },
+        "condition_status": {
+          "type": "string"
+        },
+        "evidence_scope": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "repetition": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     }

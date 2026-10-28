@@ -1002,6 +1002,8 @@ def _severity(args: argparse.Namespace) -> int:
     counts = document["counts"]
     print(f"Severity: {counts['assessed']} assessed, {counts['unavailable']} unavailable, "
           f"{counts['excluded']} excluded target observations")
+    print(f"Assignments: {document['assignment_counts']['scheduled']} scheduled, "
+          f"{document['assignment_counts']['unplanned']} with no frozen plan")
     print(f"Report: {args.output}")
     return 0
 

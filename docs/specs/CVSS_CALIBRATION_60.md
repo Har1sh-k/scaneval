@@ -11,7 +11,7 @@ credit, rewrite decisions, create approvals, or fetch reference ratings implicit
 
 Use the existing frozen schedules, canonical target identity, saved adjudication bindings,
 and aggregation weighting policy. The supplied pack must exactly match every frozen pack.
-Only successful, resolved observations with current `human_approved` finding reviews and
+Only successful, resolved observations with reviewed label scope, current `human_approved` finding reviews and
 an accepted claim for that target enter calibration. Draft/probable/unresolved, partial,
 unsupported, failed, missing and stale observations remain explicit exclusions. This
 approval is an existing saved-record claim, not authenticated reviewer identity.
@@ -55,6 +55,10 @@ references, selected claim, raw label/numeric evidence, band error, outcome, num
 and exact reasons for unavailability/exclusion. Bind to full result, plan, decisions, review
 record, pack, target definition, reference and policy digests. Replay recomputes everything;
 any changed evidence invalidates the old report. No cached output is trusted as current.
+Distinguish the configured pack bound by the schedule from the mechanically updated runtime
+pack bound by plans. Permit only mechanical fields to change and retain both full digests.
+Assignments with unavailable frozen plans must have explicit records and counts even though
+their target count is unknown; they must not disappear from the report.
 
 Show assessed, unavailable, excluded, total matched and scheduled target observations;
 coverage, exact/over/under rates, band error distribution/MAE, numeric bias/MAE, denominators,

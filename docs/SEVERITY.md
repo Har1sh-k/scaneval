@@ -13,14 +13,17 @@ scaneval severity results/run-a results/run-b --pack corpus/diverse/pack.json \
 ```
 
 Both output paths must be new and outside saved runs and materialized trials. The pack
-must match the exact hash frozen by every run. Use `--policy` with an existing aggregation
+must match the configured-pack hash in every schedule. The runtime `evaluator/pack.json`
+may differ through mechanical checks and newly recorded tree hashes; its full hash is
+recorded separately and must match each plan. Labels, severity, review history and any
+already-declared tree hashes must agree across both copies. Use `--policy` with an existing aggregation
 policy for declared workload or explicit target weights. Replay uses the saved policy and
 returns exit 2 if any evidence or derived result no longer agrees; it performs no scan.
 
 ## Eligibility and missingness
 
-Only successful, resolved observations with current, recorded `human_approved` finding
-decisions and a directly accepted claim enter severity calibration. This records a review
+Only successful, resolved observations with reviewed label scope, current recorded
+`human_approved` finding decisions and a directly accepted claim enter severity calibration. This records a review
 assertion; it does not authenticate a person. The command never manufactures approval.
 Draft, stale, missing, unresolved, unmatched, unsupported, partial and failed observations
 remain excluded with reasons. Accepted findings on partial runs may have detection credit
@@ -30,7 +33,9 @@ Missing reference or claimed severity is **unavailable**, never zero. Reports in
 scheduled target observations, accepted matches (including excluded matches), eligible
 matched observations, assessed, unavailable and excluded counts. Canonical target counts
 are separate from observation counts. No targets can be reconstructed from an unavailable
-frozen plan; its assignment remains visible through the run schedule binding.
+frozen plan; its assignment is listed explicitly in `unplanned_assignments`, with scheduled
+and unplanned assignment counts. Draft and diagnostic evidence have separate scope strata
+and are excluded from official calibration.
 
 ## What is compared
 
@@ -90,8 +95,8 @@ aggregation policy as detection. Mixed workloads require declared workload weigh
 Systems, modes, identity profiles, condition names and condition evidence states have
 separate views. Reports include assessment coverage, exact/over/under rates, ordinal error
 distribution and mean absolute error, numeric bias and mean absolute error, raw and weighted
-denominators, and version strata. Version strata with no selected reference cannot be
-assigned a version; they remain in whole-view counts. No confidence intervals are produced.
+denominators, and version strata. Version strata include excluded rows as well as assessed ones; absent or conflicting
+reference versions have explicit `unavailable` or `conflicting` strata. No confidence intervals are produced.
 
 Every report binds full results, plans, decisions, review records, target definitions,
 references, pack, schedules, manifests, configurations and policy by canonical hashes.

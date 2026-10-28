@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from copy import deepcopy
 from decimal import Decimal
+from fractions import Fraction
 from html import escape
 import json
 from pathlib import Path
@@ -115,10 +116,45 @@ def _read_observation(corpus, observation):
     observe(plan, result, decisions)
     if any(observation.observed[name + "_sha256"] != canonical_sha256(value) for name, value in (("plan", plan), ("decisions", decisions), ("result", result))):
         raise ContractError("severity evidence changed while reading the run")
+    state = ("missing" if record is None else "stale" if
+             record["plan_sha256"] != canonical_sha256(plan) or record["decisions_sha256"] != canonical_sha256(decisions)
+             or record["run_id"] != result["run_id"] else record["state"])
+    if state != observation.review_state:
+        raise ContractError("severity review state changed while reading the run")
     return plan, decisions, record, result
 
 
-def _records(corpus, pack):
+def _pack_content(pack):
+    """Remove only fields mechanical checks can update; retain labels and review history."""
+    projection = deepcopy(pack)
+    projection.pop("anchor_sha256", None)
+    for snapshot in projection["snapshots"]:
+        snapshot.pop("tree_hash", None)
+    for case in projection["cases"]:
+        for field in ("checks", "check_sets", "checks_failed", "level", "review_state"):
+            case["validation"].pop(field, None)
+    return projection
+
+
+def _frozen_packs(corpus, pack):
+    frozen = {}
+    expected = canonical_sha256(_pack_content(pack))
+    for run in corpus.runs:
+        path = aggregate._inside(run.directory, "evaluator/pack.json", "frozen evaluator pack")
+        if not path.exists():
+            frozen[run.run_id] = None
+            continue
+        current = load_document(path, "case-pack")
+        if canonical_sha256(_pack_content(current)) != expected:
+            raise ContractError("frozen evaluator pack changed configured labels, reference severity or review history")
+        actual_snapshots = {s["snapshot_id"]: s for s in current["snapshots"]}
+        if any(s.get("tree_hash") is not None and actual_snapshots[s["snapshot_id"]].get("tree_hash") != s["tree_hash"] for s in pack["snapshots"]):
+            raise ContractError("frozen evaluator pack changed a configured source tree hash")
+        frozen[run.run_id] = canonical_sha256(current)
+    return frozen
+
+
+def _records(corpus, pack, frozen_packs):
     by_case = {case["case_id"]: case for case in pack["cases"]}
     references = defaultdict(list)
     for case in pack["cases"]:
@@ -127,9 +163,19 @@ def _records(corpus, pack):
     for entries in references.values():
         entries.sort(key=lambda entry: entry["case_id"])
     rows = []
+    unplanned = []
     for key, observation in sorted(corpus.observations.items()):
         scheduled = corpus.inputs[key[:2]]
         frozen = scheduled["plan"]
+        condition = observation.condition or {}
+        identity = {"run_id": observation.run_id, "input_id": observation.input_id,
+                    "system_id": observation.system_id, "assignment_id": observation.assignment_id,
+                    "repetition": observation.repetition, "mode": scheduled["mode"], "profile": scheduled["profile"],
+                    "condition": condition.get("condition", "unavailable"), "condition_status": condition.get("status", "unavailable"),
+                    "evidence_scope": observation.scope or "unavailable"}
+        if frozen["state"] != "frozen":
+            unplanned.append({**identity, "reason": "frozen_plan_unavailable", "detail": frozen.get("reason", "")})
+            continue
         groups = defaultdict(list)
         for target in frozen.get("targets", []):
             case = by_case.get(target["case_id"])
@@ -137,13 +183,9 @@ def _records(corpus, pack):
                 raise ContractError("scheduled target identity does not match the supplied frozen pack")
             groups[target["canonical_id"]].append(target)
         evidence = _read_observation(corpus, observation)
-        condition = observation.condition or {}
         for canonical, targets in sorted(groups.items()):
             target_ids = sorted(target["target_id"] for target in targets)
-            row = {"run_id": observation.run_id, "input_id": observation.input_id,
-                   "system_id": observation.system_id, "assignment_id": observation.assignment_id,
-                   "repetition": observation.repetition, "mode": scheduled["mode"], "profile": scheduled["profile"],
-                   "condition": condition.get("condition", "unavailable"), "condition_status": condition.get("status", "unavailable"),
+            row = {**identity,
                    "canonical_id": canonical, "target_ids": target_ids, "status": "excluded",
                    "reason": observation.reason, "matched": False, "selected_claim": None, "accepted_claim_ids": [],
                    "references": sorted(references[canonical], key=lambda entry: entry["case_id"]),
@@ -162,7 +204,9 @@ def _records(corpus, pack):
             row["matched"] = bool(accepted)
             provenance = plan.get("provenance", {})
             planned = {target["target_id"]: target for target in plan["targets"]}
-            if provenance.get("pack_sha256") != cases.pack_sha256(pack):
+            if frozen_packs[observation.run_id] is None:
+                row["reason"] = "frozen_pack_unavailable"
+            elif provenance.get("pack_sha256") != frozen_packs[observation.run_id]:
                 row["reason"] = "plan_pack_binding_unavailable"
             elif any(t not in planned or planned[t].get("canonical_id", t) != canonical for t in target_ids):
                 row["reason"] = "planned_target_mismatch"
@@ -172,6 +216,8 @@ def _records(corpus, pack):
                 row["reason"] = "unresolved_bundles"
             elif observation.review_state != "human_approved":
                 row["reason"] = "review_" + str(observation.review_state)
+            elif observation.scope != "reviewed":
+                row["reason"] = "scope_" + str(observation.scope)
             elif any(match["target_id"] in target_ids and match["decision"] == "unresolved" for match in decisions["claim_matches"]):
                 row["reason"] = "unresolved_match"
             elif not accepted:
@@ -183,7 +229,7 @@ def _records(corpus, pack):
                 row["status"] = row["comparison"]["status"]
                 row["reason"] = row["comparison"]["reason"]
             rows.append(row)
-    return rows
+    return rows, unplanned
 
 
 def _counts(rows):
@@ -206,7 +252,10 @@ def _metrics(rows, attributes, weighting, policy, *, whole_view):
         units = defaultdict(list)
         for row in group:
             units[(row["run_id"], row["input_id"])].append(row)
-        return sum(sum(value(row) for row in unit) / len(unit) for unit in units.values()) / len(units)
+        def exact(row):
+            v = value(row)
+            return Fraction(int(v)) if isinstance(v, bool) else Fraction(str(v))
+        return sum(sum((exact(row) for row in unit), Fraction(0)) / len(unit) for unit in units.values()) / len(units)
     eligible = lambda r: r["status"] != "excluded"
     assessed = lambda r: r["status"] == "assessed"
     numeric = lambda r: assessed(r) and r["comparison"]["numeric_delta"] is not None
@@ -224,9 +273,9 @@ def _metrics(rows, attributes, weighting, policy, *, whole_view):
     for name, (numerator, denominator) in definitions.items():
         n = d = None
         if weights is not None:
-            n = sum(float(weights[t]) * mean_observation(group, numerator) for t, group in grouped.items())
-            d = sum(float(weights[t]) * mean_observation(group, denominator) for t, group in grouped.items())
-        answer["metrics"][name] = {"value": n / d if d else None, "weighted_numerator": n, "weighted_denominator": d,
+            n = sum((weights[t] * mean_observation(group, numerator) for t, group in grouped.items()), Fraction(0))
+            d = sum((weights[t] * mean_observation(group, denominator) for t, group in grouped.items()), Fraction(0))
+        answer["metrics"][name] = {"value": float(n / d) if d else None, "weighted_numerator": float(n) if n is not None else None, "weighted_denominator": float(d) if d is not None else None,
                                    "denominator_observations": sum(denominator(r) for r in rows),
                                    "denominator_targets": sum(any(denominator(r) for r in group) for group in grouped.values())}
     return answer
@@ -240,17 +289,27 @@ def calibrate(run_dirs, pack: dict, *, policy: dict | None = None) -> dict:
     if any(run.schedule["pack"]["sha256"] != digest for run in corpus.runs):
         raise ContractError("severity pack must match the exact pack frozen by every run")
     policy = aggregate.resolve_policy(policy)
-    rows = _records(corpus, pack)
+    frozen_packs = _frozen_packs(corpus, pack)
+    rows, unplanned = _records(corpus, pack, frozen_packs)
+    fields = ("system_id", "mode", "profile", "condition", "condition_status", "evidence_scope")
     strata = defaultdict(list)
+    unplanned_strata = defaultdict(list)
     for row in rows:
-        strata[tuple(row[key] for key in ("system_id", "mode", "profile", "condition", "condition_status"))].append(row)
+        strata[tuple(row[key] for key in fields)].append(row)
+    for row in unplanned:
+        unplanned_strata[tuple(row[key] for key in fields)].append(row)
     views = []
-    for key, group in sorted(strata.items()):
+    for key in sorted(set(strata) | set(unplanned_strata)):
+        group = strata[key]
         attrs = {r["canonical_id"]: corpus.targets[r["canonical_id"]] for r in group}
-        versions = sorted({r["comparison"]["reference"]["cvss_version"] for r in group if r["comparison"] and r["comparison"]["reference"]})
-        version_rows = {version: [r for r in group if r["comparison"] and r["comparison"]["reference"] and r["comparison"]["reference"]["cvss_version"] == version] for version in versions}
-        views.append({**dict(zip(("system_id", "mode", "profile", "condition", "condition_status"), key)),
+        version_rows = defaultdict(list)
+        for row in group:
+            versions = {r["severity"]["cvss_version"] if r["severity"] else "unavailable" for r in row["references"]}
+            version_rows[next(iter(versions)) if len(versions) == 1 else "conflicting"].append(row)
+        views.append({**dict(zip(fields, key)),
                       "counts": _counts(group),
+                      "unplanned_assignments": unplanned_strata[key],
+                      "unplanned_assignment_count": len(unplanned_strata[key]),
                       "weightings": [_metrics(group, attrs, w, policy, whole_view=True) for w in policy["views"]],
                       "by_cvss_version": {version: [_metrics(subset, {r["canonical_id"]: attrs[r["canonical_id"]] for r in subset}, w, policy, whole_view=False) for w in policy["views"]] for version, subset in version_rows.items()}})
     report = {"schema_version": "2.1", "calibrator_version": VERSION, "pack_sha256": digest,
@@ -258,8 +317,9 @@ def calibrate(run_dirs, pack: dict, *, policy: dict | None = None) -> dict:
               "claim_selection": SELECTION, "reference_selection": REFERENCE_SELECTION,
               "label_mapping": {label: label for label in BANDS},
               "cross_version_policy": "exclude numeric and ordinal comparisons",
-              "runs": [{"run_id": run.run_id, "manifest_sha256": canonical_sha256(run.manifest), "schedule_sha256": canonical_sha256(run.schedule), "config_sha256": canonical_sha256(run.config)} for run in corpus.runs],
-              "counts": _counts(rows), "records": rows, "views": views,
+              "runs": [{"run_id": run.run_id, "manifest_sha256": canonical_sha256(run.manifest), "schedule_sha256": canonical_sha256(run.schedule), "config_sha256": canonical_sha256(run.config), "frozen_pack_sha256": frozen_packs[run.run_id]} for run in corpus.runs],
+              "counts": _counts(rows), "records": rows, "views": views, "unplanned_assignments": unplanned,
+              "assignment_counts": {"scheduled": len(corpus.observations), "unplanned": len(unplanned)},
               "limits": ["Review approval is recorded, not authenticated.", "Reference CVSS is a sourced rating, not absolute ground truth.",
                          "Vector syntax is checked; supplied scores are not recalculated from vectors.",
                          "No calibration confidence intervals; detection, precision and promotion decisions are unchanged."]}
@@ -278,6 +338,11 @@ def validate_report(report: dict) -> None:
         raise ContractError("severity policy digest mismatch")
     if report["counts"] != _counts(report["records"]):
         raise ContractError("severity coverage counts do not match records")
+    unplanned_ids = {(r["run_id"], r["assignment_id"]) for r in report["unplanned_assignments"]}
+    if (len(unplanned_ids) != len(report["unplanned_assignments"])
+            or report["assignment_counts"]["unplanned"] != len(unplanned_ids)
+            or report["assignment_counts"]["scheduled"] < len(unplanned_ids)):
+        raise ContractError("severity unplanned assignment counts do not match records")
     if (report["claim_selection"] != SELECTION or report["reference_selection"] != REFERENCE_SELECTION
             or report["label_mapping"] != {label: label for label in BANDS}
             or report["cross_version_policy"] != "exclude numeric and ordinal comparisons"):
@@ -310,4 +375,4 @@ def render_html(report: dict) -> str:
                    f"<td>{escape(r['status'])}: {escape(r['reason'] or '')}</td>"
                    f"<td><pre>{show(r['references'])}</pre></td><td><pre>{show(r['comparison'])}</pre></td>"
                    f"<td><pre>{show(r['selected_claim'])}</pre></td></tr>" for r in report["records"])
-    return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; base-uri \'none\'"><title>CVSS severity calibration</title><style>body{font:16px system-ui;margin:2rem}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:.5rem;vertical-align:top}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:35rem}</style><h1>CVSS severity calibration</h1><p>Reference CVSS is a sourced rating. Calibration does not change detection credit. Excluded and unavailable observations remain visible.</p><h2>Coverage</h2><pre>' + show(report["counts"]) + '</pre><h2>Weighted metrics and version strata</h2><pre>' + show(report["views"]) + '</pre><h2>Target comparisons</h2><table><thead><tr><th>Target / observation</th><th>Status</th><th>Reference evidence</th><th>Comparison</th><th>Selected claim</th></tr></thead><tbody>' + rows + '</tbody></table><h2>Policy and limits</h2><pre>' + show({k: report[k] for k in ("band_order", "claim_selection", "reference_selection", "cross_version_policy", "limits")}) + '</pre></html>'
+    return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; base-uri \'none\'"><title>CVSS severity calibration</title><style>body{font:16px system-ui;margin:2rem}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:.5rem;vertical-align:top}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:35rem}</style><h1>CVSS severity calibration</h1><p>Reference CVSS is a sourced rating. Calibration does not change detection credit. Excluded and unavailable observations remain visible.</p><h2>Coverage</h2><pre>' + show({"targets": report["counts"], "assignments": report["assignment_counts"], "unplanned_assignments": report["unplanned_assignments"]}) + '</pre><h2>Weighted metrics and version strata</h2><pre>' + show(report["views"]) + '</pre><h2>Target comparisons</h2><table><thead><tr><th>Target / observation</th><th>Status</th><th>Reference evidence</th><th>Comparison</th><th>Selected claim</th></tr></thead><tbody>' + rows + '</tbody></table><h2>Policy and limits</h2><pre>' + show({k: report[k] for k in ("band_order", "claim_selection", "reference_selection", "cross_version_policy", "limits")}) + '</pre></html>'

@@ -1,5 +1,6 @@
 """Calibration math and saved-evidence replay, using fictional reviewed fixtures only."""
 from copy import deepcopy
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from scaneval.cli import main
 from scaneval.contracts import ContractError, canonical_sha256, load_document, validate_document
 from test_v2_aggregate import planned, target, scan, write_run, CLOCK, REVIEWER
 from test_v2_cases import SNAPSHOT
+from test_v2_runner import pilot, upstream, run as run_pilot
 
 VECTOR = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"
 REFERENCE = {"level": "critical", "score": 9.1, "cvss_version": "3.1", "vector": VECTOR,
@@ -96,6 +98,7 @@ def fixture_run(tmp_path, *, states=None, labels=None, numeric=None, count=1, re
         options = (states or {}).get(repetition, {})
         outcomes[("input", "sys-a", repetition)] = scan(hits={t["target_id"]: index + 1 for index, t in enumerate(targets)}, **options)
     run = write_run(tmp_path, "run-severity", [planned("input", targets=targets)], repetitions=repetitions, outcomes=outcomes, pack=identity)
+    (run / "evaluator/pack.json").write_text(json.dumps(pack))
     for bundle in (run / "invocations").iterdir():
         result = load_document(bundle / "result.json", "scan-result")
         result["schema_version"] = "2.1"
@@ -259,3 +262,60 @@ def test_claimed_cvss_field_is_optional_in_21_and_rejected_in_20(tmp_path):
         validate_document("scan-result", result)
     result["claims"][0].pop("claimed_cvss")
     validate_document("scan-result", result)
+
+
+def test_real_runner_distinguishes_configured_and_mechanically_updated_packs(tmp_path, pilot):
+    from scaneval.contracts import pack_anchor_digest
+    from scaneval.runner import run_from_config
+    first = tmp_path / "preparation"
+    run_pilot(pilot, first)
+    configured = load_document(first / "evaluator/pack.json", "case-pack")
+    configured["cases"][0]["severity"] = deepcopy(REFERENCE)
+    configured["anchor_sha256"] = pack_anchor_digest(configured)
+    cases.save_pack(pilot["pack_path"], configured)
+    out = tmp_path / "actual-run"
+    run_from_config(pilot["config_path"], out, workspace_root=pilot["workspace"], adapters={"fake": pilot["adapter"]},
+                    clock=lambda: datetime(2026, 10, 27, tzinfo=timezone.utc))
+    frozen = load_document(out / "evaluator/pack.json", "case-pack")
+    assert canonical_sha256(frozen) != canonical_sha256(configured)
+    revise_decisions(out, lambda d: d["claim_matches"][0].update(decision="accepted"))
+    report = severity.calibrate([out], configured)
+    assert report["records"][0]["reason"] == "scope_draft"
+    assert report["records"][0]["matched"]
+    assert report["runs"][0]["frozen_pack_sha256"] == canonical_sha256(frozen)
+    severity.verify(report, [out], configured)
+
+
+def test_unavailable_frozen_plan_is_an_explicit_assignment(tmp_path, pilot):
+    out = tmp_path / "actual-run"
+    configured = load_document(pilot["pack_path"], "case-pack")
+    run_pilot(pilot, out)
+    report = severity.calibrate([out], configured)
+    assert report["counts"]["target_observations"] == 0
+    assert report["assignment_counts"] == {"scheduled": 1, "unplanned": 1}
+    assert report["unplanned_assignments"][0]["reason"] == "frozen_plan_unavailable"
+    assert len(report["views"][0]["unplanned_assignments"]) == 1
+
+
+def test_mutated_runtime_reference_is_rejected_even_with_new_anchor(tmp_path):
+    from scaneval.contracts import pack_anchor_digest
+    run, pack = fixture_run(tmp_path)
+    changed = deepcopy(pack)
+    changed["cases"][0]["severity"]["note"] += " tampered rating selection"
+    changed["anchor_sha256"] = pack_anchor_digest(changed)
+    (run / "evaluator/pack.json").write_text(json.dumps(changed))
+    with pytest.raises(ContractError, match="reference severity"):
+        severity.calibrate([run], pack)
+
+
+def test_approved_diagnostic_plan_does_not_enter_official_metrics(tmp_path):
+    run, pack = fixture_run(tmp_path)
+    path = next((run / "invocations").glob("*/evaluator/plan.json"))
+    plan = json.loads(path.read_text())
+    plan["scope"] = "diagnostic"
+    plan["targets"][0]["validation_level"] = "fixture"
+    path.write_text(json.dumps(plan))
+    revise_decisions(run, lambda d: None)
+    report = severity.calibrate([run], pack)
+    assert report["records"][0]["reason"] == "scope_diagnostic"
+    assert report["views"][0]["evidence_scope"] == "diagnostic"
