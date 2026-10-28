@@ -31,6 +31,10 @@ training date is used for conservative filtering.
 
 ```sh
 scaneval model-cutoffs list
+scaneval model-cutoffs prepare-chronology docs/research/recent-cve-candidates.json \
+  --severity-authority 'CNA-primary base severity' > /tmp/recent-cve-chronology.json
+scaneval model-cutoffs check /tmp/recent-cve-chronology.json \
+  --model claude-opus-5-5
 scaneval model-cutoffs check docs/research/recent-cve-chronology.json \
   --model claude-opus-5-5
 scaneval model-cutoffs check docs/research/recent-cve-chronology.json \
@@ -47,13 +51,54 @@ mutable `-latest` aliases, and third-party model names. A documented ID need not
 identify immutable weights; retain the returned identity and execution date in
 any later benchmark provenance.
 
-Both commands print JSON and write no files. `check` exits 0 only when at least ten
+All commands print JSON and write no files; shell redirection above saves the
+projection at the caller's chosen path. `prepare-chronology` exits 0 when projection
+succeeds and 2 for invalid input. `check` exits 0 only when at least ten
 distinct CVEs are eligible across **every** selected model and satisfy the target
 of at least 2 Low, 3 Medium, 3 High, and 2 Critical. Exit 1 means valid but
 insufficient or unresolved evidence/coverage; exit 2 means invalid input. Reports
 include canonical input hashes, all model outcomes, per-stratum shortages, and
 explicit claim limits. `--registry PATH` reads a proposed registry offline.
-Neither command executes a model/scanner or changes corpus admission.
+None of these commands executes a model/scanner or changes corpus admission.
+
+## Preparing a pending chronology
+
+`prepare-chronology` accepts the versioned research dossier and an explicit pack
+severity authority. It checks the selected CVSS 3.0/3.1/4.0 rating's numeric score,
+severity band, proposed stratum, authority and source URL. It preserves that
+selected rating without recalculating its vector or resolving other authorities'
+disagreements. Every projected case is **pending**, even if input text claims
+review, approval or eligibility.
+
+The projection consumes the dossier's explicitly observed public timestamp, URL,
+native evidence kind, date note and optional scope note. Its supported native
+kinds are `maintainer_advisory_publication`, `public_release_publication`, and
+`public_pull_request_creation`. It requires timestamps with seconds and an
+explicit `Z` or numeric offset, converts them to UTC days, and retains the original
+timestamps. Missing/unknown timezones (including `-00:00`), date-only or month-only
+values, unsupported kinds and invalid URLs return exit 2. CVE publication and
+commit author/committer dates are never substitutes for missing observations.
+
+The v1 dossier's `dates.related_predecessor` explicitly denotes a related advisory.
+Its publication is included with a `related_predecessor` relationship, original
+timestamp, source, current-body update day, wording flag and scope caveat. This
+preserves Composer's July 1 observation without declaring it the first disclosure
+of the exact August bypass. A successful round trip exposes observed dates but
+still reports zero eligible cases and no established earliest-public lower bounds.
+
+Output includes `projection_provenance` with policy version
+`scaneval.dossier-chronology.v1`, source dossier schema version
+`scaneval.research-candidate-dossier.v1`, and the complete parsed dossier's SHA-256
+using sorted, compact, UTF-8 JSON. The digest covers unused research fields too.
+`check` validates the provenance's exact fields, versions and digest syntax,
+requires projected chronology to remain pending, and preserves the provenance in
+its report. This is a caller-supplied content binding; `check` does not reopen or
+authenticate the dossier. Original artifact details remain in the hashed input.
+
+Existing standalone chronology declarations remain supported. A separately
+reviewed declaration uses that existing contract without the pending-projection
+marker; removing the marker alone does not establish that review occurred. See
+the [projection contract](designs/chronology-projection.md) for the bounded policy.
 
 ## Evidence declaration
 
@@ -140,8 +185,9 @@ Maintenance is a repeatable review workflow, not a background scheduler:
 3. Validate pinned vulnerable/fixed source and reporting locations through the
    corpus evidence workflow before any admission. Keep those decisions separate
    from this chronology-only report.
-4. Run `model-cutoffs check` for the intended exact model set and save the report
-   alongside that dated research update. An unknown cutoff or unresolved route
+4. Use `model-cutoffs prepare-chronology` after a dossier update to regenerate
+   pending observations, then run `model-cutoffs check` for the intended exact
+   model set and save the report alongside that dated research update. An unknown cutoff or unresolved route
    blocks a universal claim and stays in the report. Rerun after new evidence.
 5. Submit updated registry/dossiers and the deterministic validation evidence for
    review. Do not change `pending` to `reviewed` to make the quota pass.
