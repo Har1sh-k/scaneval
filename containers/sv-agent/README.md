@@ -84,6 +84,7 @@ Build from the repository root:
 NODE_DIGEST=sha256:<digest> containers/sv-agent/build.sh            # tag scaneval-sv-agent:f959cbc-pi1.4.0
 # equivalent to:
 docker build -f containers/sv-agent/Dockerfile \
+  --build-context harness-source=/path/to/empty-directory \
   --build-arg NODE_DIGEST=sha256:<digest> \
   -t scaneval-sv-agent:f959cbc-pi1.4.0 .
 ```
@@ -107,7 +108,7 @@ Then build with it:
 
 ```sh
 HARNESS_BUNDLE=/some/private/path/harness.bundle NODE_DIGEST=sha256:<digest> containers/sv-agent/build.sh
-# equivalent to adding: --secret id=harness_bundle,src=/some/private/path/harness.bundle
+# build.sh creates a temporary named context containing only harness.bundle
 ```
 
 - The build fetches `HEAD` from the bundle and fails unless it is exactly `HARNESS_COMMIT`;
@@ -116,12 +117,15 @@ HARNESS_BUNDLE=/some/private/path/harness.bundle NODE_DIGEST=sha256:<digest> con
 - A bundle made from a shallow clone lists prerequisite commits that the build cannot have, so
   the fetch fails its connectivity check. Run `git fetch --unshallow` before bundling.
   `git bundle verify <path>` on the host reports such prerequisites.
-- The bundle reaches the build only as a BuildKit secret mount for the single fetch step. It is
-  not in the build context (`Dockerfile.dockerignore` excludes everything not listed), not in
-  any layer, and not in the image config. No `.git/config`, credential store or token is
-  involved. Keep the bundle outside this repository and never commit it.
-- `build.sh` requires an existing readable regular file and rejects paths containing `,` or
-  `"`, which docker's `--secret` option cannot carry.
+- The helper copies the bundle into a temporary, isolated `harness-source` named build
+  context containing only `harness.bundle`. The fetch step mounts it read-only and never
+  copies the bundle into a layer. The checkout's Git objects are retained as documented above.
+  This avoids BuildKit's 500 KiB secret limit; a source bundle is source data, not a credential.
+  No GitHub credentials or host Git configuration are copied. Keep the bundle outside this
+  repository and never commit it. The helper removes its temporary context on exit.
+- Direct Docker builds must supply `--build-context harness-source=DIR`: an empty directory
+  for an online fetch, or a directory containing only `harness.bundle` for an offline fetch.
+  The helper supports paths containing spaces and avoids exposing unrelated source directories.
 
 With a `docker-container` buildx driver, add `--load` so the image lands in the local engine.
 Never push the image. The OCI backend runs with `--pull never` and only uses images already

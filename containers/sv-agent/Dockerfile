@@ -2,6 +2,7 @@
 #
 # Build from the repository root so the observer SDK and adapter sources are in context:
 #   docker build -f containers/sv-agent/Dockerfile \
+#     --build-context harness-source=/path/to/empty-directory \
 #     --build-arg NODE_DIGEST=sha256:<index digest of node:26.7.0-trixie-slim> \
 #     -t scaneval-sv-agent:f959cbc-pi1.4.0 .
 # See README.md next to this file for resolving the digest and pinning the built image id.
@@ -35,13 +36,14 @@ ARG HARNESS_COMMIT=f959cbcf010c7e41f780c718b65b1724d3aecb43
 WORKDIR /opt/scaneval/harness
 # Fetch exactly one immutable commit; no branch name is resolved. When the repository is not
 # publicly reachable, build.sh can pass a full-history `git bundle` of the pinned commit as the
-# optional harness_bundle secret: it is mounted only for this RUN, never enters a layer, and
-# carries Git objects rather than credentials. Either way FETCH_HEAD must be HARNESS_COMMIT.
-RUN --mount=type=secret,id=harness_bundle,required=false \
+# harness-source named context: its bundle is mounted only for this RUN, never copied into
+# a layer, and carries Git objects rather than credentials. build.sh always supplies the
+# context, empty for an online fetch. Either way FETCH_HEAD must be HARNESS_COMMIT.
+RUN --mount=type=bind,from=harness-source,target=/run/harness-source \
     git init -q . \
  && git remote add origin "$HARNESS_REPOSITORY" \
- && if [ -f /run/secrets/harness_bundle ]; then \
-      git fetch -q /run/secrets/harness_bundle HEAD; \
+ && if [ -f /run/harness-source/harness.bundle ]; then \
+      git fetch -q /run/harness-source/harness.bundle HEAD; \
     else \
       git fetch -q --depth 1 origin "$HARNESS_COMMIT"; \
     fi \
