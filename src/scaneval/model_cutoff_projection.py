@@ -92,25 +92,27 @@ def _observed_artifacts(candidate: dict, cid: str) -> list[dict]:
     scope = dates.get("earliest_observed_public_evidence_scope")
     if "earliest_observed_public_evidence_scope" in dates:
         _require(_text(scope), f"{cid}: observed evidence scope must be nonempty text")
-    scope_note = note + (" " + scope if scope is not None else "")
+    candidate_scope_note = note + (" " + scope if scope is not None else "")
     artifacts = [{"kind": NATIVE_KINDS[kind], "date": day, "precision": "day",
                   "date_basis": "public_availability", "source_url": source,
                   "original_timestamp": original, "native_evidence_kind": kind,
-                  "relationship": "candidate", "scope_note": scope_note}]
+                  "relationship": "candidate", "scope_note": candidate_scope_note}]
     if "related_predecessor" in dates:
         related = _object(dates["related_predecessor"], f"{cid}: related predecessor")
         original = related.get("published_at")
         day = _utc_day(original)
         source = _source_url(related.get("url"), f"{cid}: related predecessor source")
         updated = related.get("current_body_updated_at_day")
-        date_bounds(updated, "day")
+        updated_day, _ = date_bounds(updated, "day")
+        _require(updated_day.isoformat() >= day,
+                 f"{cid}: predecessor update day precedes its publication UTC day")
         wording = related.get("publication_time_wording_established")
         _require(type(wording) is bool, f"{cid}: predecessor wording flag must be boolean")
         artifacts.append({"kind": "advisory", "date": day, "precision": "day",
                           "date_basis": "public_availability", "source_url": source,
                           "original_timestamp": original,
                           "native_evidence_kind": "related_predecessor_advisory_publication",
-                          "relationship": "related_predecessor", "scope_note": RELATED_SCOPE + " " + scope_note,
+                          "relationship": "related_predecessor", "scope_note": RELATED_SCOPE + " " + note,
                           "current_body_updated_at_day": updated,
                           "publication_time_wording_established": wording})
     return artifacts

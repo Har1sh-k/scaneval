@@ -51,6 +51,15 @@ def set_path(document, path, value):
     target[path[-1]] = value
 
 
+def add_related_predecessor(dossier, published_at="2026-07-01T09:31:11Z", updated="2026-07-07"):
+    dossier["candidates"][0]["dates"]["related_predecessor"] = {
+        "published_at": published_at,
+        "url": "https://example.com/advisory/predecessor",
+        "current_body_updated_at_day": updated,
+        "publication_time_wording_established": False,
+    }
+
+
 def test_committed_dossier_cli_round_trip_is_pending_bound_and_read_only(tmp_path, capsys):
     source = Path(__file__).resolve().parents[1] / "docs/research/recent-cve-candidates.json"
     original = source.read_bytes()
@@ -87,6 +96,15 @@ def test_committed_dossier_cli_round_trip_is_pending_bound_and_read_only(tmp_pat
     assert predecessor["publication_time_wording_established"] is False
     assert "wording" in predecessor["scope_note"].lower()
     assert "distinct" in predecessor["scope_note"].lower()
+    research_composer = next(c for c in research["candidates"] if c["cve_id"] == composer["cve_id"])
+    candidate_artifact = next(a for a in composer["chronology"]["public_artifacts"]
+                              if a["relationship"] == "candidate")
+    shared_note = research_composer["dates"]["note"]
+    candidate_scope = research_composer["dates"]["earliest_observed_public_evidence_scope"]
+    assert shared_note in candidate_artifact["scope_note"]
+    assert candidate_scope in candidate_artifact["scope_note"]
+    assert shared_note in predecessor["scope_note"]
+    assert candidate_scope not in predecessor["scope_note"]
 
     path = tmp_path / "chronology.json"
     path.write_text(first.out)
@@ -119,6 +137,49 @@ def test_projection_preserves_selected_rating_and_scope_without_mutating_input(d
     assert observation["date_basis"] == "public_availability"
     assert "Exact-bypass advisory only." in observation["scope_note"]
     assert dossier == before
+
+
+def test_related_predecessor_scope_keeps_shared_note_separate_from_candidate_scope(dossier):
+    add_related_predecessor(dossier)
+    dates = dossier["candidates"][0]["dates"]
+    artifacts = prepare_chronology(dossier, AUTHORITY)["candidates"][0]["chronology"]["public_artifacts"]
+    candidate = next(a for a in artifacts if a["relationship"] == "candidate")
+    predecessor = next(a for a in artifacts if a["relationship"] == "related_predecessor")
+    assert dates["note"] in candidate["scope_note"]
+    assert dates["earliest_observed_public_evidence_scope"] in candidate["scope_note"]
+    assert dates["note"] in predecessor["scope_note"]
+    assert dates["earliest_observed_public_evidence_scope"] not in predecessor["scope_note"]
+    assert "wording" in predecessor["scope_note"].lower()
+    assert "distinctness" in predecessor["scope_note"].lower()
+
+
+def test_later_predecessor_advisory_publication_is_allowed_for_an_older_weakness(dossier):
+    add_related_predecessor(dossier, published_at="2026-09-01T09:31:11Z", updated="2026-09-02")
+    artifacts = prepare_chronology(dossier, AUTHORITY)["candidates"][0]["chronology"]["public_artifacts"]
+    candidate = next(a for a in artifacts if a["relationship"] == "candidate")
+    predecessor = next(a for a in artifacts if a["relationship"] == "related_predecessor")
+    assert predecessor["date"] > candidate["date"]
+
+
+def test_predecessor_update_day_uses_publication_timestamp_utc_day(dossier):
+    add_related_predecessor(dossier, published_at="2026-09-01T00:30:00+02:00", updated="2026-08-31")
+    predecessor = prepare_chronology(dossier, AUTHORITY)["candidates"][0]["chronology"]["public_artifacts"][1]
+    assert predecessor["date"] == "2026-08-31"
+    dossier["candidates"][0]["dates"]["related_predecessor"]["current_body_updated_at_day"] = "2026-08-30"
+    with pytest.raises(CutoffError, match="update day precedes its publication UTC day"):
+        prepare_chronology(dossier, AUTHORITY)
+
+
+def test_contradictory_predecessor_chronology_is_cli_exit_2(dossier, tmp_path, capsys):
+    add_related_predecessor(dossier, published_at="2026-07-02T00:30:00+02:00", updated="2026-06-30")
+    path = tmp_path / "dossier.json"
+    path.write_text(json.dumps(dossier))
+    assert main(["model-cutoffs", "prepare-chronology", str(path),
+                 "--severity-authority", AUTHORITY]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "update day precedes its publication UTC day" in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_whole_dossier_hash_binds_unconsumed_fields_and_is_key_order_independent(dossier):
