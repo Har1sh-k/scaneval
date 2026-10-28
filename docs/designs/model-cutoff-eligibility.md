@@ -72,6 +72,25 @@ New records and candidate updates are ordinary reviewable changes: refresh prima
 provider sources, retain retrieval dates and historical Git evidence, record routes
 at execution, and rerun the deterministic CLI when any selected model changes.
 
+The bounded [issue #92](https://github.com/Har1sh-k/scaneval/issues/92) increment
+updates only the Composer CVE-2026-59944 dossier and shared timezone metadata.
+It records affected-release ancestry, historical source-presence bounds, pinned
+license and environment evidence, and the declared scope of a prior-public-history
+search. Raw responses, source files, receipts, and mechanical check reports remain
+outside Git under `/tmp`; committed references retain their URLs and digests.
+
+Composer remains on hold: a predecessor advisory and release were public in July;
+the currently retained advisory describes the broader binary-path escape and
+permission change. Its July 7 update means publication time alone does not establish
+which wording was present July 1. A proposed clean-bin symlink-bypass
+label needs an explicit distinctness decision and stronger earliest-public
+chronology before temporal admission. A newer CVE publication cannot reset that
+history. Preserve all ten candidates' pending status, unknown model cutoffs, and
+separate original June 30 provider month-end, inferred July 1 UTC safety bound,
+and July 2 first clearly later UTC day. These are latest-known documented bounds,
+not evidence of exclusion from every model's training. This increment makes no
+machine-review, human-approval, fixed-control, or benchmark-readiness decision.
+
 [SASTBench](https://arxiv.org/html/2601.02941v1) uses a configurable CVE report-date
 cutoff with February 2025 in the paper. The earliest-public-artifact check above is
 ScanEval's stricter extension, not a requirement attributed to that paper.
