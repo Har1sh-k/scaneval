@@ -48,21 +48,30 @@ class Window:
         }
 
 
-def parse_windows(result: object) -> tuple[Window, ...]:
-    """Select only the Codex bucket; do not guess from another model's quota."""
+LIMIT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+
+
+def valid_limit_id(value: object) -> bool:
+    return isinstance(value, str) and LIMIT_ID.fullmatch(value) is not None
+
+
+def visible_bucket_keys(result: object) -> tuple[str, ...]:
+    """Return bounded public bucket identifiers, never unrelated account fields."""
     if not isinstance(result, dict):
         raise Stop("invalid_usage")
     buckets = result.get("rateLimitsByLimitId")
     if buckets is not None:
-        if not isinstance(buckets, dict) or "codex" not in buckets:
-            raise Stop("missing_codex_bucket")
-        bucket = buckets["codex"]
-    else:
-        bucket = result.get("rateLimits")
-    if not isinstance(bucket, dict) or bucket.get("limitId") not in (None, "codex"):
-        raise Stop("invalid_codex_bucket")
-    if bucket.get("spendControlReached") is True or bucket.get("rateLimitReachedType"):
-        raise Stop("quota_unavailable")
+        if (not isinstance(buckets, dict) or len(buckets) > 256
+                or any(not valid_limit_id(key) for key in buckets)):
+            raise Stop("invalid_bucket_map")
+        return tuple(sorted(buckets))
+    bucket = result.get("rateLimits")
+    if not isinstance(bucket, dict) or not valid_limit_id(bucket.get("limitId")):
+        raise Stop("invalid_legacy_bucket")
+    return (bucket["limitId"],)
+
+
+def _bucket_windows(bucket: dict) -> tuple[Window, ...]:
     windows = []
     for name in ("primary", "secondary"):
         if name not in bucket:
@@ -79,9 +88,41 @@ def parse_windows(result: object) -> tuple[Window, ...]:
         if not 0 <= used <= 100 or reset <= 0 or duration <= 0:
             raise Stop("invalid_window")
         windows.append(Window(name, used, reset, duration))
+    return tuple(windows)
+
+
+def parse_windows(result: object, *, limit_id: str = "codex",
+                  allow_other_limit_windows: bool = False) -> tuple[Window, ...]:
+    """Select an explicitly identified quota and refuse other active quotas by default."""
+    if not valid_limit_id(limit_id) or type(allow_other_limit_windows) is not bool:
+        raise Stop("invalid_limit_selection")
+    visible_bucket_keys(result)
+    buckets = result.get("rateLimitsByLimitId")
+    if buckets is not None:
+        if limit_id not in buckets:
+            raise Stop("missing_codex_bucket" if limit_id == "codex" else "missing_selected_bucket")
+        bucket = buckets[limit_id]
+    else:
+        bucket = result.get("rateLimits")
+    if not isinstance(bucket, dict) or bucket.get("limitId") != limit_id:
+        raise Stop("invalid_codex_bucket" if limit_id == "codex" else "invalid_selected_bucket")
+    if bucket.get("spendControlReached") is True or bucket.get("rateLimitReachedType"):
+        raise Stop("quota_unavailable")
+    windows = _bucket_windows(bucket)
     if not any(window.duration_minutes == 10080 for window in windows):
         raise Stop("missing_weekly_window")
-    return tuple(windows)
+    for key, other in (buckets or {}).items():
+        if key == limit_id:
+            continue
+        if not isinstance(other, dict):
+            raise Stop("invalid_other_bucket")
+        if any(other.get(name) is not None for name in ("primary", "secondary")):
+            if other.get("limitId") != key:
+                raise Stop("invalid_other_bucket")
+            _bucket_windows(other)  # An opt-in does not excuse malformed reported windows.
+            if not allow_other_limit_windows:
+                raise Stop("other_limit_windows_present")
+    return windows
 
 
 @dataclass
@@ -339,6 +380,33 @@ class AppServer:
 
 
 CONTAINER_ID = re.compile(r"[0-9a-f]{64}\Z")
+MAX_CONTAINER_IDS = 2048
+MAX_REGISTRY_BYTES = 256 * 1024
+MAX_DOCKER_OUTPUT_BYTES = 512 * 1024
+
+
+def safe_control_parent(path: Path) -> None:
+    """A private operator directory must exist before any workload starts."""
+    try:
+        info = path.parent.stat()
+    except OSError:
+        raise Stop("unsafe_control_parent") from None
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        raise Stop("unsafe_control_parent")
+
+
+def safe_registration(info: os.stat_result) -> bool:
+    return (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+            and info.st_uid == os.geteuid() and not info.st_mode & 0o022)
+
+
+def unique_json_fields(pairs: list[tuple]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate field")
+        result[key] = value
+    return result
 
 
 class Containers:
@@ -346,7 +414,7 @@ class Containers:
 
     def __init__(self, ids: list[str], cidfiles: list[Path], docker: str, grace: float,
                  registry: Path | None = None, remove: bool = False):
-        if any(not CONTAINER_ID.fullmatch(value) for value in ids):
+        if len(ids) > MAX_CONTAINER_IDS or any(not CONTAINER_ID.fullmatch(value) for value in ids):
             raise Stop("invalid_container_id")
         if len(set(cidfiles)) != len(cidfiles):
             raise Stop("duplicate_cidfile")
@@ -375,7 +443,7 @@ class Containers:
                 failed = True
                 continue
             try:
-                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                if not safe_registration(os.fstat(descriptor)):
                     failed = True
                     continue
                 value = os.read(descriptor, 128).decode("ascii").strip()
@@ -401,24 +469,26 @@ class Containers:
             except OSError:
                 raise Stop("invalid_container_registration") from None
             try:
-                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                if not safe_registration(os.fstat(descriptor)):
                     raise Stop("invalid_container_registration")
-                raw = os.read(descriptor, 65537)
-                if len(raw) > 65536:
+                raw = os.read(descriptor, MAX_REGISTRY_BYTES + 1)
+                if len(raw) > MAX_REGISTRY_BYTES:
                     raise Stop("invalid_container_registration")
-                value = json.loads(raw)
-                if (not isinstance(value, dict) or type(value.get("schema")) is not int
+                value = json.loads(raw, object_pairs_hook=unique_json_fields)
+                if (not isinstance(value, dict) or set(value) != {"schema", "container_ids"} or type(value.get("schema")) is not int
                         or value["schema"] != 1 or not isinstance(value.get("container_ids"), list)):
                     raise Stop("invalid_container_registration")
                 ids = value["container_ids"]
-                if len(ids) > 256 or any(not isinstance(item, str) or not CONTAINER_ID.fullmatch(item)
-                                         for item in ids):
+                if (len(ids) > MAX_CONTAINER_IDS or any(not isinstance(item, str) or not CONTAINER_ID.fullmatch(item)
+                                         for item in ids) or len(set(ids)) != len(ids)):
                     raise Stop("invalid_container_registration")
                 ids = set(ids)
                 if self.registry_ids is not None and not self.registry_ids <= ids:
                     raise Stop("invalid_container_registration")
                 self.registry_ids = ids
                 self.ids.update(ids)
+                if len(self.ids) > MAX_CONTAINER_IDS:
+                    raise Stop("invalid_container_registration")
             except (OSError, ValueError, UnicodeError):
                 raise Stop("invalid_container_registration") from None
             finally:
@@ -441,6 +511,9 @@ class Containers:
                 while selector.get_map() or owned.exit_code() is None:
                     if time.monotonic() >= deadline:
                         return None, b"", b""
+                    if not selector.get_map():
+                        time.sleep(min(.05, max(0, deadline - time.monotonic())))
+                        continue
                     for key, _ in selector.select(min(.05, max(0, deadline - time.monotonic()))):
                         try:
                             chunk = os.read(key.fd, 8192)
@@ -450,7 +523,7 @@ class Containers:
                             selector.unregister(key.fileobj)
                             continue
                         output[key.data].extend(chunk)
-                        if sum(map(len, output)) > 65536:
+                        if sum(map(len, output)) > MAX_DOCKER_OUTPUT_BYTES:
                             return None, b"", b""
             return owned.exit_code(), bytes(output[0]), bytes(output[1])
         except OSError:
@@ -460,22 +533,41 @@ class Containers:
                 if not owned.stop(min(self.grace, .2)):
                     return None, b"", b""
 
-    @staticmethod
-    def proves_missing(container_id: str, code: int | None, out: bytes, err: bytes) -> bool:
-        # Refuse ambiguous or connection failures. These exact Docker errors
-        # are accepted only alongside a successful daemon version read.
-        expected = {
-            f"Error: No such object: {container_id}",
-            f"Error: No such container: {container_id}",
-            f"Error response from daemon: No such container: {container_id}",
-        }
+    def inspection_states(self, code: int | None, out: bytes, err: bytes) -> dict[str, str]:
+        """Account for every exact ID once across a single batch's two output streams."""
+        unknown = dict.fromkeys(self.ids, "unverified")
+        if code not in (0, 1):
+            return unknown
+        states: dict[str, str] = {}
         try:
-            return code == 1 and not out.strip() and err.decode("utf-8").strip() in expected
-        except UnicodeError:
-            return False
+            for line in out.decode("utf-8").splitlines():
+                if not line.strip():
+                    continue
+                observed = json.loads(line, object_pairs_hook=unique_json_fields)
+                if (not isinstance(observed, dict) or set(observed) != {"id", "running"}
+                        or not isinstance(observed["id"], str) or observed["id"] not in self.ids
+                        or observed["id"] in states or type(observed["running"]) is not bool):
+                    return unknown
+                states[observed["id"]] = "still_running" if observed["running"] else ("not_removed" if self.remove else "stopped")
+            missing = {prefix + ident: ident for ident in self.ids for prefix in (
+                "Error: No such object: ", "Error: No such container: ",
+                "Error response from daemon: No such container: ")}
+            for line in err.decode("utf-8").splitlines():
+                if not line.strip():
+                    continue
+                ident = missing.get(line)
+                if code != 1 or ident is None or ident in states:
+                    return unknown
+                states[ident] = "pending_missing"
+        except (ValueError, UnicodeError, RecursionError):
+            return unknown
+        if set(states) != self.ids or (code == 1 and "pending_missing" not in states.values()):
+            return unknown
+        return states
 
     def stop(self) -> tuple[int, int]:
         failures = 0
+        self.cleanup = []
         try:
             self.refresh()
         except Stop:
@@ -484,40 +576,31 @@ class Containers:
             deadline = time.monotonic() + 10
             action = ["container", "rm", "--force"] if self.remove else ["container", "stop", "--time", "0"]
             code, _, _ = self.control([*action, "--", *sorted(self.ids)], deadline)
-            pending_missing = []
-            for container_id in sorted(self.ids):
-                state = ("removed" if self.remove else "stopped") if code == 0 else "unverified"
-                if code != 0:
-                    status, out, err = self.control(["container", "inspect", "--format",
-                        '{"id":{{json .Id}},"running":{{json .State.Running}}}', "--", container_id], deadline)
-                    if status == 0:
-                        try:
-                            observed = json.loads(out)
-                            if observed.get("id") == container_id and type(observed.get("running")) is bool:
-                                state = "still_running" if observed["running"] else ("not_removed" if self.remove else "stopped")
-                        except (ValueError, AttributeError, UnicodeError):
-                            pass
-                    elif self.proves_missing(container_id, status, out, err):
-                        state = "pending_missing"
-                record = {"container_id": container_id, "state": state}
-                self.cleanup.append(record)
-                if state == "pending_missing":
-                    pending_missing.append(record)
-            if pending_missing:
+            states = dict.fromkeys(self.ids, "removed" if self.remove else "stopped")
+            if code != 0:
+                status, out, err = self.control(["container", "inspect", "--format",
+                    '{"id":{{json .Id}},"running":{{json .State.Running}}}', "--", *sorted(self.ids)], deadline)
+                states = self.inspection_states(status, out, err)
+            if "pending_missing" in states.values():
                 status, out, _ = self.control(["version", "--format", "{{json .Server.Version}}"], deadline)
                 try:
                     server_version = json.loads(out) if status == 0 else None
                 except (ValueError, UnicodeError):
                     server_version = None
-                for record in pending_missing:
-                    record["state"] = "not_found" if isinstance(server_version, str) and server_version else "unverified"
-            failures += sum(record["state"] not in ("stopped", "removed", "not_found") for record in self.cleanup)
+                for ident, state in states.items():
+                    if state == "pending_missing":
+                        states[ident] = "not_found" if isinstance(server_version, str) and server_version else "unverified"
+            self.cleanup = [{"container_id": ident, "state": states[ident]} for ident in sorted(self.ids)]
+            failures += sum(state not in ("stopped", "removed", "not_found") for state in states.values())
         return len(self.ids), failures
 
 
 class Controller:
     def __init__(self, options: Options, source: AppServer, receipts: Receipts,
-                 containers: Containers, stop_file: Path | None = None):
+                 containers: Containers, stop_file: Path | None = None, *,
+                 limit_id: str = "codex", allow_other_limit_windows: bool = False):
+        if not valid_limit_id(limit_id) or type(allow_other_limit_windows) is not bool:
+            raise Stop("invalid_limit_selection")
         self.options = options
         self.source = source
         self.receipts = receipts
@@ -526,6 +609,9 @@ class Controller:
         self.interrupted = False
         self.deadline = math.inf
         self.stop_file = stop_file
+        self.limit_id = limit_id
+        self.allow_other_limit_windows = allow_other_limit_windows
+        self.reported_start = False
 
     def check(self) -> None:
         if self.interrupted:
@@ -538,14 +624,40 @@ class Controller:
         self.policy.check_time(now, time.time())
 
     def observe(self) -> None:
-        result = self.source.read(self.options.read_timeout, self.check)
-        windows = parse_windows(result)
+        keys: tuple[str, ...] = ()
+        windows: tuple[Window, ...] = ()
+        visibility_available = False
+        request_started = time.monotonic()
         try:
+            result = self.source.read(self.options.read_timeout, self.check)
+            keys = visible_bucket_keys(result)
+            visibility_available = True
+            if not self.reported_start:
+                # Actual visible keys are available only after the first response.
+                self.receipts.emit("guard_started", **self.start_fields(), visible_bucket_keys=list(keys))
+                self.reported_start = True
+            windows = parse_windows(result, limit_id=self.limit_id,
+                                    allow_other_limit_windows=self.allow_other_limit_windows)
             self.policy.accept(windows, now=time.monotonic(), wall=time.time())
+            self.policy.observed_at = request_started
         except Stop as error:
-            self.receipts.emit("usage_rejected", reason=str(error), windows=[w.receipt() for w in windows])
+            self.receipts.emit("usage_rejected", reason=str(error), windows=[w.receipt() for w in windows],
+                               selected_limit_id=self.limit_id, visible_bucket_keys=list(keys),
+                               bucket_visibility_available=visibility_available)
             raise
-        self.receipts.emit("usage_accepted", windows=[w.receipt() for w in windows])
+        self.receipts.emit("usage_accepted", windows=[w.receipt() for w in windows],
+                           selected_limit_id=self.limit_id, visible_bucket_keys=list(keys),
+                           bucket_visibility_available=True)
+
+    def start_fields(self) -> dict:
+        return {"poll_seconds": self.options.poll,
+                "read_timeout_seconds": self.options.read_timeout,
+                "stale_after_seconds": self.options.stale_after,
+                "max_runtime_seconds": self.options.max_runtime,
+                "container_action": "remove" if self.containers.remove else "stop",
+                "upstream_observation_time_available": False,
+                "selected_limit_id": self.limit_id,
+                "allow_other_limit_windows": self.allow_other_limit_windows}
 
     def run(self, command: list[str]) -> int:
         child = None
@@ -554,12 +666,7 @@ class Controller:
         cleanup_okay = True
         self.deadline = time.monotonic() + self.options.max_runtime
         try:
-            self.receipts.emit("guard_started", poll_seconds=self.options.poll,
-                               read_timeout_seconds=self.options.read_timeout,
-                               stale_after_seconds=self.options.stale_after,
-                               max_runtime_seconds=self.options.max_runtime,
-                               container_action="remove" if self.containers.remove else "stop",
-                               upstream_observation_time_available=False)
+            self.receipts.emit("guard_initializing", **self.start_fields())
             self.source.start(self.options.read_timeout, self.check)
             self.observe()
             self.containers.refresh()
@@ -631,6 +738,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--receipts", type=Path, required=True, help="New private JSONL receipt file")
     parser.add_argument("--codex", default="codex", help="Installed Codex executable")
     parser.add_argument("--docker", default="docker", help="Docker executable for registered containers")
+    parser.add_argument("--limit-id", default="codex", help="Exact quota bucket ID to supervise")
+    parser.add_argument("--allow-other-limit-windows", action="store_true",
+                        help="Explicitly allow reported quota windows outside the selected bucket")
     parser.add_argument("--poll-seconds", type=float, default=30)
     parser.add_argument("--read-timeout-seconds", type=float, default=10)
     parser.add_argument("--stale-after-seconds", type=float, default=45)
@@ -658,20 +768,32 @@ def main(argv: list[str] | None = None) -> int:
         options = Options(args.poll_seconds, args.read_timeout_seconds,
                           args.stale_after_seconds, args.max_runtime_seconds, args.grace_seconds)
         options.validate()
+        if args.container_registry is not None:
+            if not args.remove_containers or args.stop_file is None:
+                raise Stop("dynamic_container_controls_required")
+            if not Path(args.docker).is_absolute() or not os.access(args.docker, os.X_OK):
+                raise Stop("absolute_real_docker_required")
+            safe_control_parent(args.container_registry)
+        if args.stop_file is not None:
+            safe_control_parent(args.stop_file)
+        for cidfile in args.container_cidfile:
+            safe_control_parent(cidfile)
         if args.stop_file is not None and (args.stop_file.exists() or args.stop_file.is_symlink()):
             raise Stop("stop_file_already_exists")
         containers = Containers(args.container_id, args.container_cidfile, args.docker, options.grace,
                                 args.container_registry, args.remove_containers)
         receipts = Receipts(args.receipts)
         source = AppServer([args.codex, "app-server", "--listen", "stdio://"], options.grace)
-        controller = Controller(options, source, receipts, containers, args.stop_file)
+        controller = Controller(options, source, receipts, containers, args.stop_file,
+                                limit_id=args.limit_id,
+                                allow_other_limit_windows=args.allow_other_limit_windows)
 
         def interrupted(signum, frame):
             # Record only. Never interrupt Popen before its owned PID is stored,
             # nor let a second signal interrupt bounded cleanup.
             controller.interrupted = True
 
-        for signum in (signal.SIGINT, signal.SIGTERM):
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
             old_handlers[signum] = signal.signal(signum, interrupted)
         return controller.run(command)
     except Stop as error:

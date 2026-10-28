@@ -302,3 +302,35 @@ def test_recursion_and_nonprivate_configuration_fail_closed(setup):
     (root / "config.json").chmod(0o644)
     assert invoke(setup,"version").returncode == 2
     assert events(root) == []
+
+
+def test_wrapper_registry_capacity_matches_guard_and_preserves_prior_ids(setup):
+    root, _, _ = setup
+    ids = [f"{i:064x}" for i in range(2047)]
+    (root / "registry.json").write_text(json.dumps({"schema":1,"container_ids":ids}))
+    created = invoke(setup,*create_args())
+    assert created.returncode == 0
+    stored = json.loads((root / "registry.json").read_text())["container_ids"]
+    assert len(stored) == 2048 and set(ids) <= set(stored)
+    refused = invoke(setup,*create_args("overflow"))
+    assert refused.returncode == 2 and "container_registry_full" in refused.stderr
+    assert len(json.loads((root / "registry.json").read_text())["container_ids"]) == 2048
+    assert len(json.loads((root / "state.json").read_text())) == 1
+
+
+@pytest.mark.parametrize("unsafe", ["writable_registry", "hardlink_registry", "writable_parent", "missing_parent"])
+def test_wrapper_refuses_unsafe_control_paths_before_docker(setup,unsafe):
+    root, data, _ = setup
+    registry = root / "registry.json"
+    registry.write_text('{"schema":1,"container_ids":[]}')
+    if unsafe == "writable_registry": registry.chmod(0o666)
+    elif unsafe == "hardlink_registry": os.link(registry,root / "alias")
+    elif unsafe == "writable_parent": root.chmod(0o777)
+    else:
+        data["stop_file"] = str(root / "missing" / "stop")
+        (root / "config.json").write_text(json.dumps(data))
+    try:
+        assert invoke(setup,*create_args()).returncode == 2
+        assert events(root) == []
+    finally:
+        root.chmod(0o700)

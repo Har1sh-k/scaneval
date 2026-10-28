@@ -29,8 +29,8 @@ import time
 
 CONFIG_ENV = "SCANEVAL_GUARD_DOCKER_CONFIG"
 ACTIVE_ENV = "SCANEVAL_GUARD_DOCKER_ACTIVE"
-MAX_BYTES = 65536
-MAX_IDS = 256
+MAX_BYTES = 256 * 1024
+MAX_IDS = 2048
 CONTROL_TIMEOUT = 10
 ID = re.compile(r"[0-9a-f]{64}\Z")
 ROLES = ("worker", "proxy", "probe")
@@ -69,7 +69,8 @@ def _read_json(path: Path, *, missing: bool = False, private: bool = False) -> d
         with os.fdopen(fd, "rb") as source:
             info = os.fstat(source.fileno())
             if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_BYTES
-                    or (private and (info.st_uid != os.geteuid() or info.st_mode & 0o077))):
+                    or info.st_uid != os.geteuid() or info.st_mode & 0o022
+                    or (private and info.st_mode & 0o077)):
                 raise Refused("unsafe_json_file")
             data = source.read(MAX_BYTES + 1)
         if len(data) > MAX_BYTES:
@@ -104,6 +105,10 @@ def load_config() -> Config:
         raise Refused("invalid_run_allowlist")
     if not real.is_file() or not os.access(real, os.X_OK) or real.resolve() == Path(__file__).resolve():
         raise Refused("invalid_real_docker")
+    for control_path in (path, registry, stop):
+        info = control_path.parent.stat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            raise Refused("unsafe_control_parent")
     paths = [path.resolve(), registry.resolve(), stop.resolve(), Path(str(registry) + ".lock").resolve()]
     if len(set(paths)) != len(paths):
         raise Refused("overlapping_control_paths")

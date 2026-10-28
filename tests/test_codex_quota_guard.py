@@ -526,7 +526,7 @@ def test_dynamic_registry_cannot_disappear_or_be_symlink_or_oversized(tmp_path):
     with pytest.raises(guard.Stop, match="invalid_container_registration"):
         containers.refresh()
     registry.unlink()
-    registry.write_text(" " * 65537)
+    registry.write_text(" " * (guard.MAX_REGISTRY_BYTES + 1))
     with pytest.raises(guard.Stop, match="invalid_container_registration"):
         containers.refresh()
     assert containers.ids == {"a" * 64}
@@ -667,7 +667,7 @@ def test_cidfile_cannot_preexist_and_cannot_be_symlink_or_fifo(tmp_path):
         containers.refresh()
 
 
-@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT])
 def test_cli_signal_stops_only_owned_job_and_app_server(tmp_path, signum):
     (tmp_path / "responses.json").write_text(json.dumps([usage()]))
     executable = tmp_path / "fake-codex"
@@ -676,7 +676,7 @@ def test_cli_signal_stops_only_owned_job_and_app_server(tmp_path, signum):
     executable.chmod(0o700)
     marker = tmp_path / "job-pid"
     command = [sys.executable, str(TOOL), "--receipts", str(tmp_path / "receipts.jsonl"),
-               "--codex", str(executable), "--grace-seconds", ".1", "--",
+               "--codex", str(executable), "--grace-seconds", ".1", "--stop-file", str(tmp_path / "signal.stop"), "--",
                sys.executable, "-c", f"import os,pathlib,time; pathlib.Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(30)"]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     try:
@@ -687,9 +687,113 @@ def test_cli_signal_stops_only_owned_job_and_app_server(tmp_path, signum):
         assert out == err == b""
         assert events(tmp_path)[-1]["reason"] == "interrupted"
         assert events(tmp_path)[-1]["cleanup_okay"] is True
+        assert (tmp_path / "signal.stop").stat().st_mode & 0o777 == 0o600
         with pytest.raises(ProcessLookupError):
             os.kill(int(marker.read_text()), 0)
     finally:
         if process.poll() is None:
             process.kill()
             process.wait()
+
+
+def test_many_historical_ids_use_one_batched_inspection_and_one_daemon_check(tmp_path):
+    ids = [f"{i:064x}" for i in range(1, 81)]
+    log = tmp_path / "calls.jsonl"
+    docker = tmp_path / "docker-many"
+    docker.write_text(f"#!{sys.executable}\n" + f"LOG={str(log)!r}\n" + r'''
+import json, pathlib, sys, time
+args = sys.argv[1:]
+with pathlib.Path(LOG).open('a') as f: f.write(json.dumps(args) + '\n')
+if args[:2] == ['container','rm']: sys.exit(1)
+if args[:2] == ['container','inspect']:
+    time.sleep(.3)
+    for ident in args[args.index('--')+1:]:
+        print('Error response from daemon: No such container: '+ident,file=sys.stderr)
+    sys.exit(1)
+if args[0] == 'version': print(json.dumps('fixture-daemon')); sys.exit(0)
+sys.exit(2)
+''')
+    docker.chmod(0o700)
+    containers = guard.Containers(ids, [], str(docker), .1, remove=True)
+    started = time.monotonic()
+    assert containers.stop() == (80, 0)
+    assert time.monotonic() - started < 3
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(calls) == 3
+    assert calls[1][:2] == ["container", "inspect"]
+    assert calls[1][calls[1].index("--") + 1:] == sorted(ids)
+    assert all(record["state"] == "not_found" for record in containers.cleanup)
+
+
+@pytest.mark.parametrize("fault", ["duplicate", "foreign", "omitted", "unexpected_stderr", "both_streams", "bad_json"])
+def test_batch_inspection_requires_unambiguous_accounting_for_every_id(fault):
+    a, b = "a"*64, "b"*64
+    containers = guard.Containers([a,b], [], "/usr/bin/true", .1)
+    out = json.dumps({"id":a,"running":False}) + "\n"
+    err = f"Error: No such object: {b}\n"
+    if fault == "duplicate": err += err
+    if fault == "foreign": err += f"Error: No such object: {'c'*64}\n"
+    if fault == "omitted": err = ""
+    if fault == "unexpected_stderr": err += "untrusted daemon error\n"
+    if fault == "both_streams": err += f"Error: No such object: {a}\n"
+    if fault == "bad_json": out = '{"id":"'+a+'","id":"'+a+'","running":false}\n'
+    assert containers.inspection_states(1,out.encode(),err.encode()) == {a:"unverified",b:"unverified"}
+
+
+def test_mixed_inspection_maps_existing_and_missing_exact_ids():
+    a, b = "a"*64, "b"*64
+    containers = guard.Containers([a,b], [], "/usr/bin/true", .1)
+    out = (json.dumps({"id":a,"running":False})+"\n").encode()
+    err = f"Error: No such container: {b}\n".encode()
+    assert containers.inspection_states(1,out,err) == {a:"stopped",b:"pending_missing"}
+    containers.remove = True
+    assert containers.inspection_states(1,out,err) == {a:"not_removed",b:"pending_missing"}
+
+
+def test_registry_capacity_is_documented_and_excess_is_refused(tmp_path):
+    registry = tmp_path / "registry.json"
+    ids = [f"{i:064x}" for i in range(guard.MAX_CONTAINER_IDS)]
+    registry.write_text(json.dumps({"schema":1,"container_ids":ids}))
+    containers = guard.Containers([], [], "/usr/bin/true", .1, registry)
+    containers.refresh()
+    assert len(containers.ids) == 2048
+    assert registry.stat().st_size < guard.MAX_REGISTRY_BYTES
+    registry.write_text(json.dumps({"schema":1,"container_ids":ids+["f"*64]}))
+    with pytest.raises(guard.Stop,match="invalid_container_registration"):
+        containers.refresh()
+
+
+@pytest.mark.parametrize("unsafe", ["writable", "hardlink", "foreign_owner"])
+def test_registry_metadata_must_be_owned_and_not_replaceable_by_other_users(tmp_path, monkeypatch, unsafe):
+    registry = tmp_path / "registry.json"
+    registry.write_text('{"schema":1,"container_ids":[]}')
+    if unsafe == "writable": registry.chmod(0o666)
+    elif unsafe == "hardlink": os.link(registry,tmp_path / "other")
+    else:
+        real = os.fstat
+        def other_owner(fd):
+            fields = list(real(fd)); fields[4] = os.geteuid()+1
+            return os.stat_result(fields)
+        monkeypatch.setattr(os,"fstat",other_owner)
+    with pytest.raises(guard.Stop,match="invalid_container_registration"):
+        guard.Containers([],[],"/usr/bin/true",.1,registry).refresh()
+
+
+@pytest.mark.parametrize("flags", [[], ["--remove-containers"], ["--stop-file","STOP"]])
+def test_dynamic_registry_requires_all_launch_gate_controls_before_usage(tmp_path,flags,capsys):
+    flags = [str(tmp_path / "stopped") if value == "STOP" else value for value in flags]
+    result = guard.main(["--receipts",str(tmp_path / "receipts.jsonl"),"--container-registry",str(tmp_path / "registry.json"),
+                         *flags,"--codex","must-not-start","--","must-not-start"])
+    assert result == 125
+    assert "dynamic_container_controls_required" in capsys.readouterr().err
+    assert not (tmp_path / "receipts.jsonl").exists()
+
+
+@pytest.mark.parametrize("parent", ["missing", "writable"])
+def test_control_parent_is_validated_before_receipts_or_usage_start(tmp_path,parent,capsys):
+    directory = tmp_path / parent
+    if parent == "writable": directory.mkdir(); directory.chmod(0o777)
+    assert guard.main(["--receipts",str(tmp_path / "receipts.jsonl"),"--stop-file",str(directory / "stop"),
+                       "--codex","must-not-start","--","must-not-start"]) == 125
+    assert "unsafe_control_parent" in capsys.readouterr().err
+    assert not (tmp_path / "receipts.jsonl").exists()
