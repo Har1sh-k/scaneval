@@ -144,3 +144,41 @@ registry evolution, Docker cleanup proofs, stop-marker ordering, and opt-in
 exact-ID removal. Repository hygiene checks pass two tests with one existing
 skip. No real model calls or scans were used for this evidence. Fresh Opus 5.5
 implementation review and wrapper integration validation remain the next gate.
+
+## Review corrections before live use
+
+The first independent Opus review identified three required corrections. Complete
+these before a fresh review or any model workload:
+
+- Treat SIGINT, SIGTERM, SIGHUP and SIGQUIT as controlled interruptions. Each must
+  close the stop gate and clean up owned process groups and registered containers.
+- Verify failed Docker cleanup with one bounded batch inspect over the exact
+  registered IDs, rather than one process per historical container. Account for
+  each ID exactly once via a well-formed ID/running JSON line or an exact
+  missing-container diagnostic; a separate successful daemon-version read is
+  required for missing IDs. Duplicate, unexpected and incomplete accounting
+  remains unverified. Support at most 2,048 registered containers in a 256 KiB
+  registry in both guard and wrapper. This is an explicit per-run budget; it is
+  large enough for repeated worker/proxy/probe creation across a 50-case run,
+  while keeping the full-ID command line bounded.
+- Select quota explicitly with `--limit-id` (default `codex`), require the selected
+  bucket's `limitId` to match, and record the selection and visible bucket keys.
+  Other buckets containing windows cause refusal unless the operator explicitly
+  supplies `--allow-other-limit-windows`; the exception must remain visible in
+  receipts. This makes unaccounted model-specific quota an explicit decision.
+
+Dynamic registry mode requires `--container-registry`, `--stop-file`, and
+`--remove-containers` together, and an absolute real Docker executable. Validate
+control-path parents before starting any workload: they must already exist,
+belong to the current user, and prohibit group/other writes. Existing registry
+files must be bounded regular files with one link, the current owner, and no
+group/other write permission. Apply the same checks in the launch wrapper; do
+not weaken them for shared `/tmp`. The operator creates a private directory.
+
+Add regression coverage for hangup/quit cleanup, mixed existing/missing batch
+results, ambiguous/duplicate/foreign diagnostics, capacity, bucket selection and
+visibility, unsafe parents/registry metadata, and missing dynamic-mode coupling.
+Then run a harmless real Docker workload on the dedicated test engine, including
+one already-removed registered ID and one sleeping container. Require a permanent
+stop marker, exact owned-ID removal, no surviving owned group, and retained
+sanitized receipts. This integration calls no model; quota reads are read-only.
