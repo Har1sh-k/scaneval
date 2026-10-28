@@ -1,0 +1,13 @@
+{
+  "name": "@scaneval/sv-agent-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Image-owned Pi runtime for the SV-Agent OCI image; installed at /opt/scaneval with npm ci",
+  "type": "module",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.4.0"
+  },
+  "overrides": {
+    "protobufjs": "7.6.6"
+  }
+}
