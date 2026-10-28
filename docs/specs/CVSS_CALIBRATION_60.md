@@ -18,8 +18,9 @@ approval is an existing saved-record claim, not authenticated reviewer identity.
 
 Count a canonical target once per observation. Select the directly accepted claim with the
 lowest native rank, then claim ID; for unranked output select by claim ID. Selection never
-looks at severity. Merge aliases before selecting. Repeated observations average within
-canonical targets before target/project/family weighting; they do not inflate target weight.
+looks at severity. Merge aliases before selecting. Repetitions average within run/input,
+then run/input means average within canonical targets before target/project/family weighting;
+they do not inflate target weight.
 Separate systems, modes, profiles and declared/evidenced condition strata.
 
 ## Evidence and comparisons
