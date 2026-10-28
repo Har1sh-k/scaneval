@@ -14,8 +14,10 @@ Exit 0 means projection succeeded; invalid input returns exit 2.
 ## Projection contract
 
 - Accept only `scaneval.research-candidate-dossier.v1`. Validate consumed objects,
-  unique canonical ASCII CVE IDs, required strings and public HTTP(S) URLs.
-  Ignore unrelated research fields; they remain bound by the whole-dossier hash.
+  unique canonical ASCII CVE IDs, required strings and structurally valid HTTP(S)
+  source URLs. URL validation does not establish public reachability; perform no
+  DNS, network, or private-address checks. Ignore unrelated research fields; they
+  remain bound by the whole-dossier hash.
 - Require an explicit nonempty severity authority from the caller. Retain each
   selected rating's authority, source, CVSS version, score and band. Accept CVSS
   3.0, 3.1 and 4.0, finite nonboolean numeric scores in 0.1–10.0 with at most one
@@ -28,18 +30,26 @@ Exit 0 means projection succeeded; invalid input returns exit 2.
   `public_pull_request_creation`. Unsupported kinds fail; there is no fallback to
   CVE publication, commit author/committer dates, titles, or URL-pattern guesses.
 - Require a full timestamp with seconds and an explicit `Z` or numeric UTC offset.
-  Convert it to a UTC calendar day, preserve the original timestamp and native
-  kind, and emit day precision. Reject missing/unknown timezones, invalid dates,
-  offsets and out-of-range UTC conversions. Do not invent day precision for a
-  source that supplies only a day or month.
-- Retain the date note and optional evidence-scope caveat. The existing v1
-  `dates.related_predecessor` field explicitly represents a related advisory:
-  retain its publication, URL, current-body update day and publication-wording
-  flag, and mark the artifact `related_predecessor`. Its policy caveat states that
-  publication does not establish contemporaneous wording or exact-weakness
-  distinctness. This field mapping is versioned semantics, not inference from a
-  URL. Composer therefore exposes its July 1 related observation without an
-  established earliest-public-evidence lower bound.
+  Accept an optional fractional second of one through six digits; reject longer
+  fractions without rounding. Convert the timestamp to a UTC calendar day,
+  preserve the original timestamp and native kind, and emit day precision. Reject
+  missing/unknown timezones, invalid dates, offsets and out-of-range UTC
+  conversions. Do not invent day precision for a source that supplies only a day
+  or month.
+- Retain the date note and optional evidence-scope caveat on the candidate
+  artifact. The existing v1 `dates.related_predecessor` field explicitly
+  represents a related advisory: retain its publication, URL, current-body update
+  day and publication-wording flag, and mark the artifact `related_predecessor`.
+  Its scope note retains the shared date note plus the predecessor relationship
+  caveat, but not the candidate-only evidence-scope caveat. Require the recorded
+  update day's UTC date to be on or after the predecessor publication timestamp's
+  UTC date. Do not require predecessor publication to be on or before the
+  candidate observation: an older weakness can receive a later advisory
+  publication. The predecessor policy caveat states that publication does not
+  establish contemporaneous wording or exact-weakness distinctness. This field
+  mapping is versioned semantics, not inference from a URL. Composer therefore
+  exposes its July 1 related observation without an established
+  earliest-public-evidence lower bound.
 - Every output chronology is `pending`, regardless of dossier claims about
   review, approval, completeness, or eligibility. Observations do not establish
   an earliest lower bound or training exclusion. The CLI does not certify that
