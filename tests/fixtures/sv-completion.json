@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "execution": {
+    "status": "completed",
+    "evidence": "engine-returned-summary"
+  },
+  "modelCalls": {
+    "status": "no-recorded-failures",
+    "unit": "logical-invocations",
+    "transportAttempts": "not-recorded",
+    "attempted": 1,
+    "succeeded": 1,
+    "failed": 0,
+    "pending": 0,
+    "failureSamples": [],
+    "truncatedFailureSamples": 0
+  },
+  "changedFileSupport": {
+    "status": "not-recorded"
+  },
+  "structuralCoverage": {
+    "status": "not-recorded",
+    "planningInspections": {
+      "attempted": 0,
+      "parsed": 0,
+      "failed": 0
+    },
+    "requiredInspectionFailures": 0,
+    "failureSamples": [],
+    "truncatedFailureSamples": 0
+  },
+  "lintCoverage": {
+    "status": "complete",
+    "failures": 0,
+    "failureSamples": [],
+    "inconclusiveRuleIds": []
+  },
+  "hypothesisEvaluation": {
+    "status": "complete",
+    "planned": 1,
+    "evaluated": 1,
+    "failedIds": [],
+    "unevaluatedIds": []
+  },
+  "sourceAssessment": {
+    "status": "unassessed",
+    "files": [
+      {
+        "path": "app.py",
+        "outcome": "unassessed",
+        "reason": "analysis_completion_not_established"
+      }
+    ]
+  },
+  "markerAssessment": {
+    "scope": "marker-reviews",
+    "status": "none-pending",
+    "pendingReviews": 0,
+    "pendingSites": 0,
+    "pendingInspectionGaps": 0,
+    "carriedForwardReviews": 0,
+    "ledgerPath": ".securevibes/review-ledger.json"
+  },
+  "coverage": {
+    "status": "unknown",
+    "reasons": [
+      "structural_coverage_not_recorded",
+      "source_analysis_completion_not_established"
+    ]
+  }
+}

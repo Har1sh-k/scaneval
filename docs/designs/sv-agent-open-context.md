@@ -52,6 +52,9 @@ reason; no implicit provider, model, scanner, or condition fallback is allowed.
   environment name, not a mount of the operator's entire Pi directory. One operator-owned refresh supplies unexpired access credentials to the shards; do not
   concurrently rotate copied refresh credentials inside independent calls. Authentication refresh
   stays explicit; no silent fallback to a paid API provider. Host auth checks never print keys.
+  Require access-only input (type/access/expires/optional accountId); reject any refresh or unknown
+  field before container launch. Expiry must be finite and exceed timeout + 300 + 60 seconds.
+  The private Pi OAuth document carries a disabled nonsecret refresh sentinel, never a real refresh token.
 - All untrusted output reads must retain the existing containment/regular-file protections.
   Review direct read_text/stat/followed-link paths before declaring OCI support. Invalid model
   routes, version receipts, configuration, credentials and tool policy must fail clearly.
@@ -61,6 +64,8 @@ reason; no implicit provider, model, scanner, or condition fallback is allowed.
 - Consume the pinned harness native summary.completion model-health/coverage report. Its
   incomplete or unknown coverage and malformed completion evidence must never become success
   or silence credit; retain the native reasons. This is independent of condition attestation.
+  Validate native enum values, execution evidence, count conservation and failure samples; require
+  the report for the image runtime, while absence remains compatible with older local harnesses.
 
 ## Verification
 

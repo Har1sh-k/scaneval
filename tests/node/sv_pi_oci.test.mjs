@@ -242,3 +242,32 @@ test("a malformed retrieval endpoint or repository root is refused before any to
   mkdirSync(join(repo, "sub"));
   assert.equal(tools.loadSettings({ SCANEVAL_OPEN_CONTEXT_REPO: repo }).retrieval, null);
 });
+
+// Optional installed-Pi check, with fabricated credentials and no transport. The ordinary
+// runner tests above need no Pi installation. Set SCANEVAL_PI_PACKAGE_ROOT to the pinned 1.4.0
+// package to exercise its real OAuth resolver and Codex auth derivation, never its CLI/login.
+test("Pi 1.4.0 resolves the access-only sentinel without attempting refresh", {
+  skip: !process.env.SCANEVAL_PI_PACKAGE_ROOT,
+}, async () => {
+  const root = process.env.SCANEVAL_PI_PACKAGE_ROOT;
+  assert.equal(JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version, "1.4.0");
+  const ai = join(root, "node_modules", "@earendil-works", "pi-ai", "dist");
+  const { resolveProviderAuth } = await import(join(ai, "auth", "resolve.js"));
+  const { openaiCodexOAuth } = await import(join(ai, "auth", "oauth", "openai-codex.js"));
+  let reads = 0;
+  let modifications = 0;
+  const fakeAccess = "fabricated-access-no-network";
+  const credentials = {
+    async read() {
+      reads++;
+      return { type: "oauth", access: fakeAccess, refresh: "scaneval-refresh-disabled",
+        expires: Date.now() + (1800 + 300 + 60) * 1000, accountId: "fabricated-account" };
+    },
+    async modify() { modifications++; throw new Error("unexpected refresh attempt"); },
+  };
+  const resolved = await resolveProviderAuth({ id: "openai-codex", auth: { oauth: openaiCodexOAuth } },
+    credentials, { async env() { throw new Error("unexpected ambient credential access"); } });
+  assert.deepEqual(resolved, { auth: { apiKey: fakeAccess }, source: "OAuth" });
+  assert.equal(reads, 1);
+  assert.equal(modifications, 0);
+});

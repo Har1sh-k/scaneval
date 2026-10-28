@@ -67,6 +67,7 @@ import binascii
 import errno
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -144,26 +145,52 @@ _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 MAX_JOURNAL_FILES = 1000
+# Pi refreshes an OAuth token with less than five minutes left. The container's copy carries no
+# refresh token, so the access token must outlive the scan's limit, that window, and a margin.
+PI_REFRESH_WINDOW_SECONDS = 300
+
+
+def credential_validity(timeout_seconds: float) -> float:
+    """Seconds the access token must remain valid for a scan of *timeout_seconds*."""
+    if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
+            or not 0 < timeout_seconds <= 2**53 - 1 or not math.isfinite(timeout_seconds)):
+        raise AdapterError("the image scan timeout must be a finite positive number")
+    return float(timeout_seconds) + PI_REFRESH_WINDOW_SECONDS + 60
+
+
 _UNPARSED = object()
 
 
-def check_pi_credential(raw: str | None, provider: str, name: str, *, now: float | None = None) -> None:
+def check_pi_credential(raw: str | None, provider: str, name: str, *, now: float | None = None,
+                        valid_for_seconds: float = PI_REFRESH_WINDOW_SECONDS + 60) -> None:
     """Refuse a Pi OAuth credential document that cannot be the one this route needs.
 
     The same shape the driver checks inside the container, checked here first so a run with a
     missing or malformed credential is refused before any container starts. Every message names
     the variable and the defect, never a value, and no parser error is chained, because a JSON
     error carries the document it failed on.
+
+    The access token must stay valid for *valid_for_seconds*: the container's copy never carries
+    the refresh token, so nothing inside a scan can refresh, and concurrent shards cannot rotate
+    one operator credential underneath each other. Refreshing is the operator's, once, before.
     """
     if not raw:
         raise AdapterError(f"{name} is not set in this process's environment: export in it a JSON object holding "
-                           f"exactly one {provider!r} OAuth entry (the {provider} entry of a Pi auth.json), and "
+                           f"exactly one access-only {provider!r} OAuth entry (omit refresh and other fields), and "
                            f"declare it under execution.credentials with provider {provider!r}")
     if len(raw) > 65536:
         raise AdapterError(f"{name} is larger than 65536 characters, which no single Pi OAuth entry is")
+    def unique_fields(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate credential field")
+            result[key] = value
+        return result
+
     try:
-        parsed = json.loads(raw)
-    except ValueError:
+        parsed = json.loads(raw, object_pairs_hook=unique_fields)
+    except (ValueError, RecursionError):
         parsed = _UNPARSED
     # Raised outside the handler, so the parser's error, which holds the document, is not chained.
     if parsed is _UNPARSED:
@@ -177,15 +204,28 @@ def check_pi_credential(raw: str | None, provider: str, name: str, *, now: float
     if not isinstance(entry, dict) or entry.get("type") != "oauth":
         raise AdapterError(f"the {provider} entry in {name} must be an OAuth credential (type 'oauth'); this route "
                            "accepts no API key and falls back to no paid provider")
-    for field in ("access", "refresh"):
-        if not isinstance(entry.get(field), str) or not entry[field]:
-            raise AdapterError(f"the {provider} OAuth entry in {name} has no {field} token")
+    if "refresh" in entry:
+        raise AdapterError(f"the {provider} OAuth entry in {name} must be access-only: omit the refresh field; "
+                           "a refresh token must never enter a scanner container")
+    if set(entry) - {"type", "access", "expires", "accountId"}:
+        raise AdapterError(f"the {provider} OAuth entry in {name} contains unsupported fields; "
+                           "export only type, access, expires, and optional accountId")
+    if "accountId" in entry and (not isinstance(entry["accountId"], str) or not entry["accountId"]):
+        raise AdapterError(f"the {provider} OAuth entry in {name} has an invalid accountId")
+    if not isinstance(entry.get("access"), str) or not entry["access"]:
+        raise AdapterError(f"the {provider} OAuth entry in {name} has no access token")
     expires = entry.get("expires")
-    if isinstance(expires, bool) or not isinstance(expires, (int, float)):
+    if (isinstance(expires, bool) or not isinstance(expires, (int, float))
+            or not -2**53 < expires < 2**53 or not math.isfinite(expires)):
         raise AdapterError(f"the {provider} OAuth entry in {name} has no numeric expiry")
-    if expires <=((now if now is not None else time.time()) * 1000) + 60_000:
-        raise AdapterError(f"the {provider} OAuth credential in {name} has expired or expires within a minute; "
-                           "refresh it explicitly (pi auth check) before the run, it is not refreshed for you")
+    if (isinstance(valid_for_seconds, bool) or not isinstance(valid_for_seconds, (int, float))
+            or not PI_REFRESH_WINDOW_SECONDS + 60 <= valid_for_seconds < 2**53
+            or not math.isfinite(valid_for_seconds)):
+        raise AdapterError("the Pi access-token validity window must be finite and include its refresh margin")
+    if expires <= ((now if now is not None else time.time()) + valid_for_seconds) * 1000:
+        raise AdapterError(f"the {provider} access token in {name} has expired or expires within {int(valid_for_seconds)} seconds, "
+                           "before this scan's limit and Pi's refresh window; refresh it explicitly once (pi auth "
+                           "check) before the run, nothing inside the scan refreshes it")
 
 
 def image_settings(config: dict) -> dict[str, Any]:
@@ -470,6 +510,154 @@ def image_run_account(image: dict[str, Any], output: Any,
     elif partial:
         failure = {"status": "partial", "code": "research_tools_unavailable", "message": "; ".join(partial)[:2000]}
     return notes, failure, versions
+
+
+COMPLETION_COVERAGE = ("complete", "incomplete", "unknown", "not-required")
+
+
+def _valid_completion(completion: Any) -> bool:
+    """Check the pinned ScanCompletionReport/ModelCallHealth wire shape and arithmetic.
+
+    This reads native reporting only; it does not reconstruct or change engine decisions.
+    Unknown enum values never acquire success by looking like a truthy status string.
+    """
+    def count(value: Any) -> bool:
+        return type(value) is int and 0 <= value <= 2**53 - 1
+
+    def strings(value: Any) -> bool:
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+    if not isinstance(completion, dict) or type(completion.get("schemaVersion")) is not int or completion["schemaVersion"] != 1:
+        return False
+    if completion.get("execution") != {"status": "completed", "evidence": "engine-returned-summary"}:
+        return False
+    calls, coverage = completion.get("modelCalls"), completion.get("coverage")
+    if (not isinstance(calls, dict) or not isinstance(coverage, dict)
+            or calls.get("unit") != "logical-invocations" or calls.get("transportAttempts") != "not-recorded"
+            or not all(count(calls.get(key)) for key in ("attempted", "succeeded", "failed", "pending", "truncatedFailureSamples"))
+            or coverage.get("status") not in COMPLETION_COVERAGE or not strings(coverage.get("reasons"))):
+        return False
+    if calls["attempted"] != calls["succeeded"] + calls["failed"] + calls["pending"]:
+        return False
+    expected = "failures-recorded" if calls["failed"] else "no-recorded-failures" if calls["attempted"] else "not-run"
+    samples = calls.get("failureSamples")
+    if (calls.get("status") != expected or not isinstance(samples, list) or len(samples) > 20
+            or calls["failed"] != len(samples) + calls["truncatedFailureSamples"]):
+        return False
+    seen = set()
+    for sample in samples:
+        if (not isinstance(sample, dict) or not count(sample.get("callId"))
+                or not 1 <= sample["callId"] <= calls["attempted"] or sample["callId"] in seen
+                or sample.get("phase") not in ("planning", "hypothesis-validation", "static-validation", "consensus-resolution", "mitigation-verification", "specialist")
+                or sample.get("kind") not in ("nonzero-exit", "exception")
+                or ("code" in sample and (type(sample["code"]) is not int or not -(2**53 - 1) <= sample["code"] <= 2**53 - 1
+                                        or (sample["kind"] == "nonzero-exit" and sample["code"] == 0)))):
+            return False
+        seen.add(sample["callId"])
+    # The remaining native sections carry the evidence underlying coverage. Validate their
+    # public states and required counters/lists; retained sample details remain raw artifacts.
+    sections = {
+        "changedFileSupport": ("complete", "incomplete", "not-required", "not-recorded"),
+        "structuralCoverage": ("complete", "incomplete", "not-recorded"),
+        "lintCoverage": ("complete", "incomplete"),
+        "hypothesisEvaluation": ("complete", "incomplete", "not-required", "not-recorded"),
+        "sourceAssessment": ("unassessed", "not-recorded", "not-required"),
+        "markerAssessment": ("pending", "none-pending", "not-recorded"),
+    }
+    for name, states in sections.items():
+        if not isinstance(completion.get(name), dict) or completion[name].get("status") not in states:
+            return False
+    changed = completion["changedFileSupport"]
+    if changed["status"] != "not-recorded":
+        scope = changed.get("scope")
+        if (not isinstance(scope, dict) or not all(count(scope.get(key)) for key in
+                ("totalChangedFiles", "changedFilesInScope", "unsupportedChangedFiles", "excludedChangedFiles", "knownNonCodeChangedFiles", "unknownUnsupportedChangedFiles"))
+                or not isinstance(scope.get("unsupportedExtensionHistogram"), dict)
+                or not all(count(value) for value in scope["unsupportedExtensionHistogram"].values())):
+            return False
+        expected_scope = "incomplete" if scope["unknownUnsupportedChangedFiles"] else "complete" if scope["changedFilesInScope"] else "not-required"
+        if changed["status"] != expected_scope:
+            return False
+    structural, lint = completion["structuralCoverage"], completion["lintCoverage"]
+    hypotheses, source, marker = (completion[key] for key in ("hypothesisEvaluation", "sourceAssessment", "markerAssessment"))
+    inspections = structural.get("planningInspections")
+    if (not isinstance(inspections, dict) or not all(count(inspections.get(key)) for key in ("attempted", "parsed", "failed"))
+            or inspections["attempted"] != inspections["parsed"] + inspections["failed"]
+            or not all(count(structural.get(key)) for key in ("requiredInspectionFailures", "truncatedFailureSamples"))
+            or not isinstance(structural.get("failureSamples"), list)
+            or not count(lint.get("failures")) or not strings(lint.get("failureSamples")) or not strings(lint.get("inconclusiveRuleIds"))
+            or not all(count(hypotheses.get(key)) for key in ("planned", "evaluated"))
+            or not strings(hypotheses.get("failedIds")) or not strings(hypotheses.get("unevaluatedIds"))
+            or not isinstance(source.get("files"), list)):
+        return False
+    for sample in structural["failureSamples"]:
+        if (not isinstance(sample, dict) or not all(isinstance(sample.get(key), str) for key in ("path", "operation", "reason"))
+                or "contentHash" not in sample or not (sample["contentHash"] is None or isinstance(sample["contentHash"], str))
+                or sample.get("role") not in ("changed", "required-dependency", "unknown")
+                or sample.get("origin") not in ("planning-discovery", "required-inspection")):
+            return False
+    for item in source["files"]:
+        if (not isinstance(item, dict) or not isinstance(item.get("path"), str) or item.get("outcome") != "unassessed"
+                or item.get("reason") not in ("analysis_completion_not_established", "not_fully_delivered")):
+            return False
+    if marker["status"] != "not-recorded":
+        if (marker.get("scope") != "marker-reviews" or not isinstance(marker.get("ledgerPath"), str)
+                or not all(count(marker.get(key)) for key in ("pendingReviews", "pendingSites", "pendingInspectionGaps", "carriedForwardReviews"))
+                or (marker["status"] == "pending") != bool(marker["pendingReviews"])):
+            return False
+    if (coverage["status"] in ("complete", "not-required")) != (not coverage["reasons"]):
+        return False
+    # An internally contradictory positive aggregate is unreadable evidence, not success.
+    if coverage["status"] in ("complete", "not-required"):
+        if (marker["status"] == "not-recorded" or hypotheses["status"] == "not-recorded"
+                or source["status"] == "not-recorded"
+                or (coverage["status"] == "complete" and structural["status"] == "not-recorded")
+                or any(completion[name]["status"] in ("incomplete", "pending", "unassessed") for name in sections)):
+            return False
+        if (lint["failures"] or lint["inconclusiveRuleIds"] or hypotheses["failedIds"] or hypotheses["unevaluatedIds"]
+                or hypotheses["planned"] != hypotheses["evaluated"] or source["files"]
+                or inspections["failed"] or structural["requiredInspectionFailures"] or structural["truncatedFailureSamples"]):
+            return False
+    return True
+
+
+def read_completion(summary: Any, *, required: bool) -> tuple[list[str], str | None, str | None]:
+    """The harness's own completion report: notes, and a ``partial`` error code and message if any.
+
+    ``summary.completion`` is the engine's account of whether the scan it returned is complete:
+    its model-call health and its assessment coverage, with the reasons. Coverage that the engine
+    calls incomplete or unknown, model calls it records as failed or still pending, and a report in
+    a shape this cannot read all make the run ``partial``, so none of them earns completion or
+    quiet credit, and the engine's own reasons travel with the outcome. A report that is absent is
+    no statement at all on a harness build that predates it; on one that always returns it, which
+    *required* says, absence is the same unreadable evidence.
+    """
+    absent = not isinstance(summary, dict) or "completion" not in summary
+    completion = summary.get("completion") if isinstance(summary, dict) else None
+    if absent:
+        if required:
+            return ([], "completion_unavailable",
+                    "the harness returned no completion report, so whether its scan is complete is unknown")
+        return [], None, None
+    if not _valid_completion(completion):
+        return ([], "completion_malformed",
+                "the harness completion report is not in a shape this adapter can read, so whether its scan is "
+                "complete is unknown")
+    coverage, calls = completion["coverage"], completion["modelCalls"]
+    reasons = coverage["reasons"]
+    counts = {key: calls[key] for key in ("attempted", "succeeded", "failed", "pending")}
+    status = coverage["status"]
+    shown = ", ".join(reasons[:20]) + (f", and {len(reasons) - 20} more" if len(reasons) > 20 else "")
+    notes = [f"Harness completion report: assessment coverage {status}"
+             + (f" ({shown})" if reasons else "") + f"; model calls {calls['status']} "
+             f"({counts['succeeded']}/{counts['attempted']} succeeded, {counts['failed']} failed, "
+             f"{counts['pending']} pending, counted per logical invocation)."]
+    if calls["status"] == "failures-recorded" or counts["failed"] or counts["pending"]:
+        return (notes, "completion_model_calls",
+                f"the harness recorded {counts['failed']} failed and {counts['pending']} pending model call(s)")
+    if status in ("incomplete", "unknown"):
+        return notes, f"completion_{status}", f"the harness reports its assessment coverage {status}: {shown or 'no reason given'}"
+    return notes, None, None
 
 
 def image_model_identity(image: dict[str, Any], output: Any) -> dict[str, Any]:
@@ -1444,7 +1632,7 @@ class LlmHarnessAdapter(Adapter):
             "model": spec.config["model"],
         }
 
-    def _image_preflight(self, spec: SystemSpec, request: dict, backend: Any) -> dict[str, Any]:
+    def _image_preflight(self, spec: SystemSpec, request: dict, backend: Any, timeout_seconds: float) -> dict[str, Any]:
         """Refuse an image-runtime scan that would not run where and how it is recorded.
 
         The backend must be the real oci backend holding this scan under public_research, because
@@ -1477,14 +1665,15 @@ class LlmHarnessAdapter(Adapter):
             if declared.get(settings["auth_env"]) != settings["provider"]:
                 raise AdapterError(f"execution.credentials must declare {{env: {settings['auth_env']}, provider: "
                                    f"{settings['provider']}}} so the OAuth credential reaches the container by name")
-            check_pi_credential(os.environ.get(settings["auth_env"]), settings["provider"], settings["auth_env"])
+            check_pi_credential(os.environ.get(settings["auth_env"]), settings["provider"], settings["auth_env"],
+                                valid_for_seconds=credential_validity(timeout_seconds))
         return settings
 
     def scan(self, *, request, source_dir, raw_dir, spec, preparation, timeout_seconds, trace_mode, trace_dir):
         backend = active_backend()
         image: dict[str, Any] | None = None
         if self._runtime(spec) == "oci_image":
-            image = self._image_preflight(spec, request, backend)
+            image = self._image_preflight(spec, request, backend, timeout_seconds)
             harness, preset = "securevibes-agent", HARNESS_PRESETS["securevibes-agent"]
             root = Path(image["paths"]["root"])
         else:
@@ -1550,6 +1739,7 @@ class LlmHarnessAdapter(Adapter):
                 "pi_provider": image["provider"], "pi_model_id": image["model_id"],
                 "thinking_level": image["thinking"], "pi_auth_env": image["auth_env"],
                 "runtime_receipt": paths["runtime_receipt"],
+                "credential_valid_for_ms": int(credential_validity(timeout_seconds) * 1000),
                 # Created by the driver inside the container, so the container user owns it.
                 "research": {"search": image["search"], "journal_dir": str(journal_dir),
                              "preflight_url": image["preflight"]},
@@ -1973,6 +2163,15 @@ class LlmHarnessAdapter(Adapter):
             return NativeOutcome(status="partial", exit_code=result.exit_code,
                                  error={"code": "harness_inconclusive",
                                         "message": with_loss(f"degradation={usable_summary.get('degradation')} scan_status={scan_status} reasons={scan_stats.get('reasons')}")}, **base)
+        completion_notes, completion_code, completion_message = read_completion(
+            usable_summary, required=image is not None)
+        notes.extend(completion_notes)
+        if completion_code:
+            # The engine's own statement that this scan is not shown complete: never success, so
+            # never quiet credit, and its reasons are the error's.
+            return NativeOutcome(status="partial", exit_code=result.exit_code,
+                                 error={"code": completion_code, "message": with_loss(completion_message)[:2000]},
+                                 **base)
         if loss_message:
             # A scan whose findings did not all survive the import is not a clean run: it is
             # partial, and the count and the reason travel with it as an explicit error.

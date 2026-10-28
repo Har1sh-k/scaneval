@@ -262,18 +262,32 @@ research tools is `partial` (`research_tools_unavailable`). Pi's message metadat
 provider and model Pi addressed; that is the client's routing record, so no resolved model is
 recorded, and a route other than the pinned one is an error.
 
-The credential. Export the `openai-codex` entry of a Pi `auth.json` as a JSON object with that one
-key, refreshed beforehand, in the variable named by `config.pi_auth_env` (default
-`SV_AGENT_PI_AUTH_JSON`; the `GIT_`, `SCANEVAL_` and `PI_` namespaces are refused, and
-`public_research` refuses the first two as credentials anyway), and declare it under
-`execution.credentials` with provider `openai-codex`. The adapter checks its presence and shape
-before any container starts; the driver removes the variable from its own environment before the
-harness loads, writes the entry to `auth.json` (mode 0600) in a private agent directory on the
-container's `/tmp`, passes Pi an allowlisted environment that carries no key, and removes the
-directory when the scan ends. No message carries a value. An API key, a second provider, or an
-expired token is refused; there is no fallback to a paid provider. If Pi refreshes the token during
-a run it does so in that private copy, which is discarded, so a provider that rotates refresh tokens
-may invalidate the operator's stored one.
+The credential. Refresh the operator's credential once before launching shards, then export
+an **access-only** JSON object with one `openai-codex` key in the variable named by
+`config.pi_auth_env` (default `SV_AGENT_PI_AUTH_JSON`). Its OAuth entry accepts only `type`,
+`access`, `expires` (Unix milliseconds), and optional `accountId`; omit `refresh` and every
+other field. Declare that variable under `execution.credentials` with provider `openai-codex`.
+The `GIT_`, `SCANEVAL_` and `PI_` variable namespaces are refused. The adapter rejects refresh
+material and unknown fields before starting any container and never rewrites the host environment.
+An API key, second provider, malformed or non-finite expiry, or insufficient token lifetime is
+refused without printing credential values or field names supplied by the credential.
+
+The access token must outlive the configured scan timeout plus Pi 1.4.0's five-minute refresh
+window and a sixty-second margin. The driver checks the access-only document again, removes its
+variable before the harness loads, and writes only the permitted fields plus a nonsecret disabled
+refresh sentinel to `auth.json` (mode 0600) in the container's private `/tmp` agent directory.
+Pi receives an allowlisted environment without the credential variable, and the directory is
+removed when the scan ends. The sentinel satisfies Pi's OAuth record shape; sufficiently fresh
+access credentials use its normal OAuth resolver without refreshing. No real refresh token is
+forwarded or written inside a scan, and there is no fallback to a paid provider.
+
+The pinned harness's native `summary.completion` report is required for the image route. Invalid
+execution evidence, unknown states, inconsistent logical-call counts, failed or pending calls,
+and incomplete or unknown coverage produce `partial`, preserving native reasons and any findings
+already imported. A legacy local harness may omit the report; an explicitly malformed report is
+not treated as legacy absence. Research/history attestation and scan assessment completeness
+remain separate: the synthetic image fixture can attest `open_context` while its native source
+assessment is `unknown`, so its outcome is `partial`.
 
 `model: "scaneval-synthetic/deterministic-open-context"` selects a DIAGNOSTIC in-process provider
 that calls no model: it issues `synthetic_tool_calls` and then answers with the harness's own

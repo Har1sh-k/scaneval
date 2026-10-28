@@ -45,6 +45,7 @@ interface ImageRuntimeConfig {
   pi_model_id: string;
   thinking_level: string;
   pi_auth_env: string | null;
+  credential_valid_for_ms: number;
   runtime_receipt: string;
   research: { search: boolean; journal_dir: string; preflight_url: string | null };
   synthetic: { tool_calls: unknown[]; harness_mock: string } | null;
@@ -670,6 +671,7 @@ function snapshotContextRecord(record: Record<string, unknown>): {
 // ---- image runtime (config.runtime = "oci_image") ----------------------------------------------
 
 const MAX_CREDENTIAL_CHARS = 64 * 1024;
+const REFRESH_DISABLED = "scaneval-refresh-disabled";
 const MAX_RECEIPT_BYTES = 64 * 1024;
 // What a Pi process of the image route inherits from this driver's environment, by name. Nothing
 // else is passed: no provider API key, no credential variable, no operator setting.
@@ -694,7 +696,8 @@ interface ImageRuntimeState {
  * Every message names the variable and what was wrong with its shape, never a value: an error
  * here travels into the driver output and the adapter's record.
  */
-function piAuthDocument(raw: string | undefined, provider: string, name: string, now = Date.now()): string {
+function piAuthDocument(raw: string | undefined, provider: string, name: string, validForMs: number,
+                        now = Date.now()): string {
   if (raw === undefined || raw === "") {
     throw new Error(`the Pi credential variable ${name} is not set in the scanner container: declare it under `
       + `execution.credentials with provider ${provider}, and export in it a JSON object holding exactly one `
@@ -720,19 +723,38 @@ function piAuthDocument(raw: string | undefined, provider: string, name: string,
     throw new Error(`the ${provider} entry in ${name} must be an OAuth credential (type "oauth"); this route accepts `
       + "no API key and falls back to no paid provider");
   }
-  for (const field of ["access", "refresh"]) {
-    if (typeof entry[field] !== "string" || !(entry[field] as string)) {
-      throw new Error(`the ${provider} OAuth entry in ${name} has no ${field} token`);
-    }
+  if (Object.hasOwn(entry, "refresh")) {
+    throw new Error(`the ${provider} OAuth entry in ${name} must be access-only: omit the refresh field; `
+      + "a refresh token must never enter a scanner container");
   }
-  if (typeof entry.expires !== "number" || !Number.isFinite(entry.expires)) {
+  if (Object.keys(entry).some((key) => !["type", "access", "expires", "accountId"].includes(key))) {
+    throw new Error(`the ${provider} OAuth entry in ${name} contains unsupported fields; `
+      + "export only type, access, expires, and optional accountId");
+  }
+  if (Object.hasOwn(entry, "accountId") && (typeof entry.accountId !== "string" || !entry.accountId)) {
+    throw new Error(`the ${provider} OAuth entry in ${name} has an invalid accountId`);
+  }
+  if (typeof entry.access !== "string" || !entry.access) {
+    throw new Error(`the ${provider} OAuth entry in ${name} has no access token`);
+  }
+  if (typeof entry.expires !== "number" || !Number.isFinite(entry.expires) || Math.abs(entry.expires) >= 2 ** 53) {
     throw new Error(`the ${provider} OAuth entry in ${name} has no numeric expiry`);
   }
-  if (entry.expires <= now + 60_000) {
-    throw new Error(`the ${provider} OAuth credential in ${name} has expired or expires within a minute; refresh it `
-      + "explicitly (pi auth check) before the run, it is not refreshed for you");
+  if (!Number.isFinite(validForMs) || validForMs < 360_000 || validForMs >= 2 ** 53) {
+    throw new Error("the Pi access-token validity window must be finite and include its refresh margin");
   }
-  return JSON.stringify({ [provider]: entry });
+  if (entry.expires <= now + validForMs) {
+    throw new Error(`the ${provider} access token in ${name} has expired or expires within ${Math.round(validForMs / 1000)} seconds, `
+      + "before this scan's limit and Pi's refresh window; refresh it explicitly once (pi auth check) before the run, "
+      + "nothing inside the scan refreshes it");
+  }
+  // Only the fields Pi needs to use the access token. The refresh token is never written: Pi
+  // cannot refresh inside the scan, so no copy of the operator's credential is ever rotated by
+  // one shard underneath another. A refresh Pi attempts anyway fails, visibly, with this value.
+  return JSON.stringify({ [provider]: {
+    type: "oauth", access: entry.access, refresh: REFRESH_DISABLED, expires: entry.expires,
+    ...(typeof entry.accountId === "string" ? { accountId: entry.accountId } : {}),
+  } });
 }
 
 function fileDigest(path: string): string | null {
@@ -776,7 +798,8 @@ function prepareImageRuntime(config: DriverConfig): ImageRuntimeState {
   if (image.synthetic && rawCredential !== undefined) {
     throw new Error("the synthetic diagnostic route takes no credential, and one was passed");
   }
-  const authText = image.synthetic ? null : piAuthDocument(rawCredential, image.pi_provider, image.pi_auth_env ?? "(none)");
+  const authText = image.synthetic ? null : piAuthDocument(rawCredential, image.pi_provider, image.pi_auth_env ?? "(none)",
+    image.credential_valid_for_ms);
   if (!process.env.SCANEVAL_RETRIEVAL_URL) {
     throw new Error("the open-context research route needs SCANEVAL_RETRIEVAL_URL, which the oci backend sets "
       + "only under the public_research network policy; it was not set, so nothing was run");

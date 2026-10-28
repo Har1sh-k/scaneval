@@ -166,7 +166,11 @@ def test_synthetic_image_run_researches_reads_ancestor_history_and_attests_open_
     bundle = out / row["bundle_path"]
     execution = load_document(bundle / "execution.json", "execution-record")
     result = load_document(bundle / "result.json", "scan-result")
-    assert row["status"] == "success", (result.get("error"), result.get("notes"))
+    # This fixture proves transport/history/research. The native harness explicitly leaves
+    # source assessment unknown; successful tool calls must not turn that into scan success.
+    assert row["status"] == "partial", (result.get("error"), result.get("notes"))
+    assert result["error"]["code"] == "completion_unknown"
+    assert "source_analysis_completion_not_established" in result["error"]["message"]
     assert any("DIAGNOSTIC: synthetic" in note for note in result["notes"])
     assert execution["model_identity"]["verification"] == "not_applicable"
     output = json.loads((bundle / "raw" / "driver-output.json").read_text())

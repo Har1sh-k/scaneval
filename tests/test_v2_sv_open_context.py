@@ -25,7 +25,7 @@ import pytest
 from scaneval.adapters import get_adapter
 from scaneval.adapters.base import AdapterError, CommandResult, SystemSpec, routed_through
 from scaneval.adapters.llm_harness import (
-    DEFAULT_PI_AUTH_ENV, SYNTHETIC_MODEL, check_pi_credential, image_settings,
+    DEFAULT_PI_AUTH_ENV, SYNTHETIC_MODEL, check_pi_credential, credential_validity, image_settings, read_completion,
 )
 from scaneval.isolation import resolve_execution
 from scaneval.isolation.oci import OciBackend
@@ -45,7 +45,7 @@ COMMIT = "f959cbcf010c7e41f780c718b65b1724d3aecb43"
 
 
 def credential(*, expires_in: float = 3600, provider: str = "openai-codex", kind: str = "oauth") -> str:
-    return json.dumps({provider: {"type": kind, "access": ACCESS, "refresh": REFRESH,
+    return json.dumps({provider: {"type": kind, "access": ACCESS,
                                   "expires": int((time.time() + expires_in) * 1000), "accountId": "acct"}})
 
 
@@ -66,10 +66,12 @@ class HostOciBackend(OciBackend):
     proxy variables, and each declared credential by name from this process's environment.
     """
 
-    def __init__(self, settings, scratch: Path, extra_env: dict[str, str], *, forward_credentials: bool = True):
+    def __init__(self, settings, scratch: Path, extra_env: dict[str, str], *, forward_credentials: bool = True,
+                 credential_override: str | None = None):
         super().__init__(settings, run_id="run-sv-oc", invocation_id="inv-sv-oc", scratch_root=scratch)
         self.extra_env = extra_env
         self.forward_credentials = forward_credentials
+        self.credential_override = credential_override
         self.commands: list[dict] = []
         self.scratch_dirs: list[str] = []
 
@@ -95,6 +97,8 @@ class HostOciBackend(OciBackend):
             for key, _provider in self.settings.credentials:
                 if key in os.environ:
                     environment[key] = os.environ[key]
+        if self.credential_override is not None:
+            environment[DEFAULT_PI_AUTH_ENV] = self.credential_override
         started = time.monotonic()
         with open(stdout_path, "wb") as out, open(stderr_path, "wb") as err:
             completed = subprocess.run(argv, cwd=cwd, env=environment, stdout=out, stderr=err,
@@ -280,9 +284,10 @@ export async function runRuntimeScan(options: any): Promise<any> {
   }
   return { newFindings: findings, updatedFindings: [], runtimeProfile: "full", degraded: false,
     bootstrapScan: { llmCalls: 1, failedCalls: result.code === 0 ? 0 : 1, status: "complete", hypothesisCoverage: 1 },
+    completion: __COMPLETION__,
     fixture: { leaked, runnerStderr: result.stderr.slice(0, 500) } };
 }
-""".replace("__PROMPT__", PROMPT)
+""".replace("__PROMPT__", PROMPT).replace("__COMPLETION__", (ROOT / "tests/fixtures/sv-completion.json").read_text())
 
 # Upstream's retry/isolation composition, reduced to what the image route relies on. When
 # SCANEVAL_SV_HARNESS_ROOT names the pinned checkout, its real pi-runner.ts and exec.ts are used.
@@ -334,8 +339,11 @@ const control = existsSync(join(here, "control.json")) ? JSON.parse(readFileSync
 let stdin = "";
 for await (const chunk of process.stdin) stdin += chunk;
 const auth = join(process.env.PI_CODING_AGENT_DIR, "auth.json");
-const authFacts = existsSync(auth)
-  ? { exists: true, mode: (statSync(auth).mode & 0o777).toString(8), providers: Object.keys(JSON.parse(readFileSync(auth, "utf8"))) }
+const authDocument = existsSync(auth) ? JSON.parse(readFileSync(auth, "utf8")) : null;
+const authFacts = authDocument
+  ? { exists: true, mode: (statSync(auth).mode & 0o777).toString(8), providers: Object.keys(authDocument),
+      refreshDisabled: authDocument["openai-codex"]?.refresh === "scaneval-refresh-disabled",
+      fields: Object.keys(authDocument["openai-codex"]).sort() }
   : { exists: false };
 mkdirSync(join(here, "captures"), { recursive: true });
 writeFileSync(join(here, "captures", `${process.pid}.json`), JSON.stringify({ argv, stdin, cwd: process.cwd(),
@@ -461,8 +469,12 @@ def _fixture(tmp_path: Path, *, receipt_commit: str = COMMIT) -> dict:
 
 
 def _fixture_run(tmp_path, monkeypatch, retrieval, *, config: dict | None = None, forward_credentials=True,
-                 control: dict | None = None, receipt_commit: str = COMMIT):
+                 control: dict | None = None, receipt_commit: str = COMMIT, container_credential: str | None = None,
+                 completion_override="native"):
     fixture = _fixture(tmp_path, receipt_commit=receipt_commit)
+    if completion_override != "native":
+        engine = STUB_ENGINE.replace((ROOT / "tests/fixtures/sv-completion.json").read_text(), json.dumps(completion_override))
+        Path(fixture["paths"]["root"], "src/runtime/engine.ts").write_text(engine)
     if control:
         (fixture["bin"] / "control.json").write_text(json.dumps(control))
     monkeypatch.setenv(DEFAULT_PI_AUTH_ENV, credential())
@@ -478,7 +490,8 @@ def _fixture_run(tmp_path, monkeypatch, retrieval, *, config: dict | None = None
     backend = HostOciBackend(settings_for(), tmp_path, {
         "HTTPS_PROXY": "http://127.0.0.1:9", "HTTP_PROXY": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9",
         "http_proxy": "http://127.0.0.1:9", "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1",
-        "SCANEVAL_RETRIEVAL_URL": retrieval}, forward_credentials=forward_credentials)
+        "SCANEVAL_RETRIEVAL_URL": retrieval}, forward_credentials=forward_credentials,
+        credential_override=container_credential)
     try:
         with routed_through(backend):
             outcome = adapter.scan(request=_request(), source_dir=fixture["source"], raw_dir=raw, spec=spec,
@@ -506,7 +519,9 @@ def _no_secret_anywhere(*roots: Path, extra: str = "") -> None:
 def test_fixture_run_exercises_research_history_and_tool_policy_without_leaking_the_credential(
         tmp_path, monkeypatch, retrieval):
     outcome, output, captures, backend, fixture, raw, trace = _fixture_run(tmp_path, monkeypatch, retrieval)
-    assert outcome.status == "success", (outcome.error, outcome.notes)
+    assert outcome.status == "partial", (outcome.error, outcome.notes)
+    assert outcome.error["code"] == "completion_unknown"
+    assert "source_analysis_completion_not_established" in outcome.error["message"]
     # The driver ran with the image's tsx, from the mounted workspace, never from the harness root.
     command = backend.commands[0]
     assert command["argv"][:2] == [fixture["paths"]["tsx"], fixture["paths"]["driver"]]
@@ -522,7 +537,8 @@ def test_fixture_run_exercises_research_history_and_tool_policy_without_leaking_
     assert pi["stdin"] == PROMPT and not any(PROMPT in word for word in pi["argv"])
     assert pi["cwd"] != str(fixture["source"])
     assert DEFAULT_PI_AUTH_ENV not in pi["envNames"] and "OPENAI_API_KEY" not in pi["envNames"]
-    assert pi["authFacts"] == {"exists": True, "mode": "600", "providers": ["openai-codex"]}
+    assert pi["authFacts"] == {"exists": True, "mode": "600", "providers": ["openai-codex"],
+                               "refreshDisabled": True, "fields": ["access", "accountId", "expires", "refresh", "type"]}
     # Neither the harness process nor anything it started saw the credential variable.
     assert output["summary"]["fixture"]["leaked"] == []
     # Research went straight to the retrieval API, as a tool, and the denial is the service's.
@@ -586,3 +602,144 @@ def test_node_level_runner_and_tool_tests_pass():
     completed = subprocess.run(["node", "--test", str(ROOT / "tests" / "node" / "sv_pi_oci.test.mjs")],
                                capture_output=True, text=True, timeout=300, check=False)
     assert completed.returncode == 0, completed.stdout[-4000:] + completed.stderr[-2000:]
+
+
+def _completion():
+    return json.loads((ROOT / "tests/fixtures/sv-completion.json").read_text())
+
+
+def _no_source_completion():
+    """Pinned native shape for a scan explicitly requiring no source assessment."""
+    report = _completion()
+    report["changedFileSupport"] = {"status": "not-required", "scope": {
+        "totalChangedFiles": 1, "changedFilesInScope": 0, "unsupportedChangedFiles": 0,
+        "excludedChangedFiles": 0, "knownNonCodeChangedFiles": 1,
+        "unknownUnsupportedChangedFiles": 0, "unsupportedExtensionHistogram": {}}}
+    report["hypothesisEvaluation"] = {"status": "not-required", "planned": 0, "evaluated": 0,
+                                       "failedIds": [], "unevaluatedIds": []}
+    report["sourceAssessment"] = {"status": "not-required", "files": []}
+    report["coverage"] = {"status": "not-required", "reasons": []}
+    return report
+
+
+def test_completion_absence_is_legacy_only_and_null_is_malformed():
+    assert read_completion({}, required=False) == ([], None, None)
+    assert read_completion({}, required=True)[1] == "completion_unavailable"
+    assert read_completion({"completion": None}, required=False)[1] == "completion_malformed"
+    assert read_completion({"completion": _no_source_completion()}, required=True)[1] is None
+    notes, code, message = read_completion({"completion": _completion()}, required=True)
+    assert code == "completion_unknown"
+    assert "source_analysis_completion_not_established" in message
+    assert "logical invocation" in notes[0]
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda r: r.update(schemaVersion=True),
+    lambda r: r.pop("execution"),
+    lambda r: r["execution"].update(status="pending"),
+    lambda r: r["modelCalls"].update(status="unknown"),
+    lambda r: r["modelCalls"].update(status="not-run"),
+    lambda r: r["modelCalls"].update(attempted=2),
+    lambda r: r["modelCalls"].update(attempted=True),
+    lambda r: r["modelCalls"].update(unit="transport-attempts"),
+    lambda r: r["modelCalls"].pop("failureSamples"),
+    lambda r: r["modelCalls"].update(truncatedFailureSamples=1),
+    lambda r: r["coverage"].update(status="future-state"),
+    lambda r: r["coverage"].update(reasons="not a list"),
+    lambda r: r["coverage"].update(status="complete", reasons=[]),
+    lambda r: r.pop("sourceAssessment"),
+    lambda r: r["structuralCoverage"]["planningInspections"].update(failed=1),
+])
+def test_malformed_or_contradictory_native_completion_never_means_success(mutate):
+    report = _completion()
+    mutate(report)
+    assert read_completion({"completion": report}, required=True)[1] == "completion_malformed"
+
+
+def test_failed_and_pending_calls_and_incomplete_coverage_are_partial():
+    report = _completion()
+    report["modelCalls"].update(status="failures-recorded", succeeded=0, failed=1,
+                                failureSamples=[{"callId": 1, "phase": "planning", "kind": "nonzero-exit", "code": 1}])
+    assert read_completion({"completion": report}, required=True)[1] == "completion_model_calls"
+    report["modelCalls"]["failureSamples"][0]["callId"] = 2
+    assert read_completion({"completion": report}, required=True)[1] == "completion_malformed"
+    report = _completion()
+    report["modelCalls"].update(succeeded=0, pending=1)
+    assert read_completion({"completion": report}, required=True)[1] == "completion_model_calls"
+    report = _completion()
+    report["coverage"] = {"status": "incomplete", "reasons": ["structural_coverage_incomplete"]}
+    report["structuralCoverage"].update(status="incomplete", requiredInspectionFailures=1)
+    assert read_completion({"completion": report}, required=True)[1] == "completion_incomplete"
+
+
+@pytest.mark.parametrize("completion,expected", [
+    (None, "completion_malformed"),
+    ({**_completion(), "modelCalls": {**_completion()["modelCalls"], "status": "unknown"}}, "completion_malformed"),
+    ({**_completion(), "modelCalls": {**_completion()["modelCalls"], "succeeded": 0, "pending": 1}}, "completion_model_calls"),
+])
+def test_real_driver_completion_fault_preserves_findings_without_success(tmp_path, monkeypatch, retrieval, completion, expected):
+    outcome, _output, _captures, _backend, _fixture_data, raw, trace = _fixture_run(
+        tmp_path, monkeypatch, retrieval, completion_override=completion)
+    assert outcome.status == "partial"
+    assert outcome.error["code"] == expected
+    assert [claim["claim_id"] for claim in outcome.claims] == ["f-1"]
+    _no_secret_anywhere(raw, trace, extra=repr(outcome))
+
+
+@pytest.mark.parametrize("extra", [{"refresh": REFRESH}, {"refresh": ""}, {REFRESH: "opaque"}, {"metadata": {"refresh": REFRESH}}])
+def test_host_rejects_refresh_material_and_unrecognized_fields_before_container_entry(tmp_path, monkeypatch, extra):
+    document = json.loads(credential())
+    document["openai-codex"].update(extra)
+    raw = json.dumps(document)
+    monkeypatch.setenv(DEFAULT_PI_AUTH_ENV, raw)
+    backend = HostOciBackend(settings_for(), tmp_path, {})
+    with pytest.raises(AdapterError) as caught:
+        _scan(get_adapter("llm-harness"), SystemSpec("s", "llm-harness", IMAGE), tmp_path, backend)
+    assert backend.commands == []
+    assert os.environ[DEFAULT_PI_AUTH_ENV] == raw, "the shared host environment is never rewritten"
+    assert ACCESS not in str(caught.value) and REFRESH not in str(caught.value)
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+
+
+@pytest.mark.parametrize("expires", [float("nan"), float("inf"), float("-inf"), 10**100, True, ACCESS])
+def test_host_expiry_is_finite_numeric_without_secret_error_context(expires):
+    document = json.loads(credential())
+    document["openai-codex"]["expires"] = expires
+    with pytest.raises(AdapterError, match="numeric expiry") as caught:
+        check_pi_credential(json.dumps(document), "openai-codex", DEFAULT_PI_AUTH_ENV)
+    assert ACCESS not in repr(caught.value) and REFRESH not in repr(caught.value)
+    assert caught.value.__context__ is None
+
+
+def test_access_token_must_outlive_timeout_plus_pi_refresh_window_and_margin():
+    now = 1000
+    window = credential_validity(1800)
+    assert window == 2160
+    document = json.loads(credential())
+    document["openai-codex"]["expires"] = (now + window) * 1000
+    with pytest.raises(AdapterError, match="expires within 2160 seconds"):
+        check_pi_credential(json.dumps(document), "openai-codex", DEFAULT_PI_AUTH_ENV, now=now, valid_for_seconds=window)
+    document["openai-codex"]["expires"] += 1
+    check_pi_credential(json.dumps(document), "openai-codex", DEFAULT_PI_AUTH_ENV, now=now, valid_for_seconds=window)
+    for timeout in (float("nan"), float("inf"), True, -1):
+        with pytest.raises(AdapterError):
+            credential_validity(timeout)
+
+
+def test_duplicate_credential_fields_are_refused_without_dumping_document():
+    raw = '{"openai-codex":{"type":"oauth","access":"' + ACCESS + '","access":"' + REFRESH + '"}}'
+    with pytest.raises(AdapterError, match="not JSON") as caught:
+        check_pi_credential(raw, "openai-codex", DEFAULT_PI_AUTH_ENV)
+    assert ACCESS not in repr(caught.value) and REFRESH not in repr(caught.value)
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+
+
+@pytest.mark.parametrize("extra", [{"refresh": REFRESH}, {REFRESH: ACCESS}, {"expires": 1e309}])
+def test_driver_checks_access_only_credentials_again_without_dumping_fields(tmp_path, monkeypatch, retrieval, extra):
+    document = json.loads(credential())
+    document["openai-codex"].update(extra)
+    outcome, _output, captures, _backend, _fixture_data, raw, trace = _fixture_run(
+        tmp_path, monkeypatch, retrieval, container_credential=json.dumps(document))
+    assert outcome.status == "error"
+    assert captures == []
+    _no_secret_anywhere(raw, trace, extra=repr(outcome))
