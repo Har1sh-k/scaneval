@@ -56,6 +56,7 @@ SCHEMA_VERSIONS: dict[str, tuple[str, ...]] = {
     "gate-decision": ("2.1",),
     "condition-record": ("2.1",),
     "experiment-matrix": ("2.1",),
+    "severity-report": ("2.1",),
 }
 CONTRACT_KINDS = frozenset(SCHEMA_VERSIONS)
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:")
@@ -1124,6 +1125,9 @@ def _validate_scan_result(document: dict[str, Any]) -> None:
     declared = {artifact["id"] for artifact in document.get("raw_artifacts", [])}
     native = document["ranking"] == "native"
     for index, claim in enumerate(claims, start=1):
+        if "claimed_cvss" in claim:
+            from .severity import validate_claimed_cvss
+            validate_claimed_cvss(claim["claimed_cvss"])
         _validate_location(claim["primary_location"], f"claims[{index - 1}].primary_location")
         for related_index, location in enumerate(claim.get("related_locations", [])):
             _validate_location(
@@ -2580,7 +2584,13 @@ def _validate_experiment_matrix(document: dict) -> None:
     validate_matrix(document)
 
 
+def _validate_severity_report(document: dict) -> None:
+    from .severity import validate_report
+    validate_report(document)
+
+
 _RUNTIME_VALIDATORS = {
+    "severity-report": _validate_severity_report,
     "case-pack": _validate_case_pack,
     "review-record": _validate_review_record,
     "run-config": _validate_run_config,

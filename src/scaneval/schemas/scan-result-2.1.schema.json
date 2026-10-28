@@ -201,8 +201,14 @@
             "minLength": 1
           }
         },
-        "native_source_symbol": {"type": "string", "minLength": 1},
-        "native_sink_symbol": {"type": "string", "minLength": 1},
+        "native_source_symbol": {
+          "type": "string",
+          "minLength": 1
+        },
+        "native_sink_symbol": {
+          "type": "string",
+          "minLength": 1
+        },
         "evidence_text": {
           "type": "string"
         },
@@ -219,6 +225,39 @@
         "raw_artifact_id": {
           "type": "string",
           "minLength": 1
+        },
+        "claimed_cvss": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "score",
+            "version",
+            "provenance"
+          ],
+          "properties": {
+            "score": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "version": {
+              "enum": [
+                "3.0",
+                "3.1",
+                "4.0"
+              ]
+            },
+            "provenance": {
+              "enum": [
+                "native",
+                "imported",
+                "self_reported"
+              ]
+            },
+            "vector": {
+              "type": "string"
+            }
+          }
         }
       }
     },
