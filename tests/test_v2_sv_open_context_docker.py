@@ -171,7 +171,7 @@ def test_synthetic_image_run_researches_reads_ancestor_history_and_attests_open_
     assert row["status"] == "partial", (result.get("error"), result.get("notes"))
     assert result["error"]["code"] == "completion_unknown"
     assert "source_analysis_completion_not_established" in result["error"]["message"]
-    assert any("DIAGNOSTIC: synthetic" in note for note in result["notes"])
+    assert any("DIAGNOSTIC: synthetic" in note for note in execution["notes"])
     assert execution["model_identity"]["verification"] == "not_applicable"
     output = json.loads((bundle / "raw" / "driver-output.json").read_text())
     assert output["runtime"]["receipt"] is not None and output["runtime"]["pi_version"]
