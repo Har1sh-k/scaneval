@@ -1,0 +1,103 @@
+# Codex quota guard for operator experiments
+
+Status: specification committed before implementation. Implementation and test
+evidence follow in separate commits. Code review is reserved for a fresh Opus
+5.5 reviewer before any PR; this document does not claim review approval.
+
+## Scope and invariant
+
+Add a standalone, standard-library POSIX operator utility at
+`tools/codex_quota_guard.py`. It wraps one explicitly supplied command, starts
+that command in an owned process group, and allows it to run only while every
+reported Codex quota window satisfies `1 < remaining_percent < 90`. Require a
+weekly (10080 minute) window so that a short-window reading cannot silently
+replace the experiment's weekly budget. A null secondary window is allowed;
+missing/malformed readings or a changed set/duration of windows are not.
+
+The first valid reading establishes the baseline. Every later accepted reading
+must have the same window reset timestamps and no increase in remaining quota.
+Stop at a known reset deadline even if the next endpoint response has not
+arrived. A reset, quota increase, either inclusive boundary, lost usage access,
+malformed response, read timeout, stale local observation, interruption, runtime
+deadline, or audit-write failure is terminal. Never automatically restart the
+experiment after a refusal.
+
+## Read-only quota source
+
+Use the installed `codex app-server --listen stdio://`, with the ordinary
+`initialize` / `initialized` handshake, then
+`account/rateLimits/read` with `excludeResetCreditDetails: true`. Do not create
+threads or turns, consume reset credits, request fallback reserve exposure,
+read auth files, print account details, or issue model requests. Discard
+app-server stderr and unrelated notifications. Bound transport buffers, total
+request time, and subprocess cleanup. A protocol failure does not trigger a
+retry or an alternative model call.
+
+This contract was checked against the locally installed Codex CLI 0.165.0
+generated JSON schema. `usedPercent` is an integer, `resetsAt` is Unix seconds,
+and `windowDurationMins` identifies the window. Prefer the explicitly keyed
+`rateLimitsByLimitId.codex` bucket; accept the legacy `rateLimits` view only when
+its bucket is unambiguous. Explicitly absent/malformed Codex data must not fall
+back to another bucket. Credits and unrelated model quotas do not override the
+strict Codex window checks. Official protocol reference:
+<https://learn.chatgpt.com/docs/app-server>.
+
+## Timers, containment, and audit
+
+Default poll interval: 30 seconds; read timeout: 10 seconds; maximum local
+observation age: 45 seconds. Configuration has finite, positive upper bounds
+(poll at most 60 seconds, read at most 30 seconds, local age at most 120 seconds)
+and must leave enough freshness time for a scheduled read. Require a bounded
+overall runtime (default six hours, at most one day). Check reset/freshness/
+runtime deadlines while waiting for both responses and command completion.
+
+Terminate only the command's registered process group and the owned app-server
+group, first with TERM, then KILL after a bounded grace period. Never search for
+or kill processes by name, scan other sessions, or terminate unrelated Codex or
+Claude work. Clean up descendants even when the direct command exits. Detached
+processes that leave the owned group are outside this utility's containment
+contract and must not be used by the wrapped job.
+
+Docker work must register exact full container IDs or explicitly supplied
+Docker `--cidfile` paths. Read those paths during monitoring and immediately
+before cleanup; freeze each observed ID, reject changes/malformed files, and
+stop only the registered IDs with bounded Docker calls. No container discovery,
+prefix matches, label sweeps, pruning, deletion, or arbitrary PID attachment.
+An unregistered detached container is outside the contract. The operator must
+ensure every experiment container is registered before it consumes quota.
+
+Write an exclusive new mode-0600 JSONL receipt file. Receipts contain an
+allowlisted schema of timestamps, window percentages/durations/reset times,
+terminal reason codes, process-group IDs, exit status, and cleanup counts.
+Never persist raw protocol payloads, errors, prompts, command arguments,
+environment, tokens, auth state, account identity, or child output in receipts.
+Keep experiment output on its own normal streams. Any receipt failure stops
+the owned work. Unknown exceptions produce a fixed sanitized failure reason.
+
+## Limits and acceptance evidence
+
+Whole-percent reporting, upstream reporting delay, already accepted/in-flight
+requests, and consumption by other sessions prevent a hard remaining-token
+guarantee. The endpoint has no source observation timestamp: local request
+freshness is enforced, but upstream cache freshness cannot be established.
+Identical successful readings are not themselves evidence of stale data. A
+guard killed with SIGKILL, machine suspension/failure, detached processes, or
+unregistered containers cannot be controlled by a userspace monitor.
+
+Use fabricated endpoint/process fixtures only. Tests must demonstrate:
+
+- strict threshold refusal before launch; valid, equal and decreasing remaining
+  quota; upward movement and changed/elapsed resets stop;
+- missing, malformed, ambiguous, changed-window, stale and unavailable readings
+  fail closed, including blocked or noisy transport;
+- deadline enforcement while a read is pending and while the job is running;
+- TERM/KILL cleanup of an owned process group including stubborn descendants,
+  with unrelated process survival;
+- exact container registration and bounded cleanup with no broad discovery;
+- sanitized receipts and protocol calls limited to the handshake and usage read;
+- successful command exit, nonzero command exit and signal interruption.
+
+Follow Elephant/Goldfish artifact separation: commit this specification first,
+then logical implementation/test/documentation commits. Use the configured Git
+author without AI co-author trailers. Preserve the existing dirty checkout.
+Do not run scans, push, open a PR, or perform code review in this work stream.
