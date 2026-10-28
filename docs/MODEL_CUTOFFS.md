@@ -88,6 +88,14 @@ minimum date lower bound. A month is conservatively expanded to its first day fo
 public evidence and its last day for a cutoff. The comparison is strictly `>`;
 equality or overlapping intervals does not pass.
 
+Dates use UTC calendar days and months. Convert timestamped source evidence to UTC
+before extracting its date; keep chronology pending if an unresolved source
+timezone could change the eligibility boundary. CVE IDs require ASCII digits and
+canonical sequence numbers: four digits (including necessary leading zeros), or
+more than four digits without a leading zero. Registry `identity_status` accepts
+only `pinned_snapshot`, `documented_api_id`, or `documented_alias`; an unknown
+status is invalid input. Documented aliases remain unresolved.
+
 A fix's author/committer timestamp or a CVE assignment/publication timestamp alone
 does not establish earliest public disclosure. An observed artifact is an upper
 bound on when exposure first occurred, until an earlier-evidence search supports

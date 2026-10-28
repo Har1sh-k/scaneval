@@ -26,5 +26,5 @@ def dispatch(args: argparse.Namespace) -> int:
     else:
         result = assess_candidates(registry, read_json(args.candidates), args.models, basis=args.basis)
         status = 0 if result["pack_target_met"] else 1
-    print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False))
+    print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False))
     return status

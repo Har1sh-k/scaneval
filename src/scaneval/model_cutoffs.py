@@ -9,6 +9,7 @@ import calendar
 import hashlib
 from datetime import date
 from importlib.resources import files
+from importlib.resources.abc import Traversable
 import json
 from pathlib import Path
 import re
@@ -20,6 +21,7 @@ class CutoffError(RuntimeError):
 
 
 CUTOFF_FIELDS = ("training_data_cutoff", "knowledge_cutoff", "reliable_knowledge_cutoff")
+IDENTITY_STATUSES = {"pinned_snapshot", "documented_api_id", "documented_alias"}
 TARGET = {"Low": 2, "Medium": 3, "High": 3, "Critical": 2}
 ARTIFACT_KINDS = {"advisory", "issue", "pull_request", "release", "public_commit", "proof_of_concept"}
 
@@ -44,7 +46,7 @@ def _url(value: object) -> bool:
 
 
 def date_bounds(value: str, precision: str) -> tuple[date, date]:
-    """Return an inclusive interval; month endpoints are conservative inferences."""
+    """Return inclusive UTC calendar dates; month endpoints are inferences."""
     pattern = {"day": r"\d{4}-\d{2}-\d{2}", "month": r"\d{4}-\d{2}"}.get(precision) if isinstance(precision, str) else None
     _require(isinstance(value, str) and pattern is not None and re.fullmatch(pattern, value) is not None,
              f"invalid {precision!r} date: {value!r}")
@@ -59,18 +61,18 @@ def date_bounds(value: str, precision: str) -> tuple[date, date]:
 def _pairs(pairs: list[tuple]) -> dict:
     result = {}
     for key, value in pairs:
-        _require(key not in result, f"duplicate JSON key: {key}")
+        _require(key not in result, f"duplicate JSON key: {key!r}")
         result[key] = value
     return result
 
 
-def read_json(path: Path) -> dict:
+def read_json(path: Path | Traversable) -> dict:
     try:
         result = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_pairs,
-                            parse_constant=lambda value: (_ for _ in ()).throw(CutoffError(f"invalid JSON number: {value}")))
+                            parse_constant=lambda value: (_ for _ in ()).throw(CutoffError(f"invalid JSON number: {value!r}")))
     except (OSError, ValueError, RecursionError) as exc:
-        raise CutoffError(f"could not read {path}: {exc}") from exc
-    _require(isinstance(result, dict), f"{path} must contain an object")
+        raise CutoffError(f"could not read {str(path)!r}: {exc!r}") from exc
+    _require(isinstance(result, dict), f"{str(path)!r} must contain an object")
     return result
 
 
@@ -85,26 +87,27 @@ def validate_registry(registry: dict) -> None:
         _require(_text(mid) and mid not in ids, f"missing or duplicate model_id: {mid!r}")
         ids.add(mid)
         for key in ("provider", "display_name", "identity_status", "identity_notes", "evidence_status"):
-            _require(_text(model.get(key)), f"{mid}: {key} is required")
+            _require(_text(model.get(key)), f"{mid!r}: {key} is required")
+        _require(model["identity_status"] in IDENTITY_STATUSES, f"{mid!r}: unsupported identity_status: {model['identity_status']!r}")
         retrieved, _ = date_bounds(model.get("retrieved_date"), "day")
-        _require(isinstance(model.get("sources"), list) and bool(model["sources"]) and all(_url(s) for s in model["sources"]), f"{mid}: source URLs required")
+        _require(isinstance(model.get("sources"), list) and bool(model["sources"]) and all(_url(s) for s in model["sources"]), f"{mid!r}: source URLs required")
         for key in CUTOFF_FIELDS:
-            _require(key in model, f"{mid}: explicitly record {key}, including null for unknown")
+            _require(key in model, f"{mid!r}: explicitly record {key}, including null for unknown")
             bound = model[key]
             if bound is None:
                 continue
-            _require(isinstance(bound, dict), f"{mid}: invalid {key}")
-            _require(_url(bound.get("source_url")) and _text(bound.get("source_label")), f"{mid}: cutoff source and label required")
+            _require(isinstance(bound, dict), f"{mid!r}: invalid {key}")
+            _require(_url(bound.get("source_url")) and _text(bound.get("source_label")), f"{mid!r}: cutoff source and label required")
             upper, _ = date_bounds(bound.get("upper_bound"), "day")
-            _require(upper <= retrieved, f"{mid}: cutoff cannot follow its retrieval date")
+            _require(upper <= retrieved, f"{mid!r}: cutoff cannot follow its retrieval date")
             if bound.get("status") == "published":
                 _, expected = date_bounds(bound.get("value"), bound.get("precision"))
-                _require(expected == upper, f"{mid}: upper_bound disagrees with published date")
-                _require(bound.get("upper_bound_is_inference") is (bound["precision"] == "month"), f"{mid}: mark month-end inference explicitly")
+                _require(expected == upper, f"{mid!r}: upper_bound disagrees with published date")
+                _require(bound.get("upper_bound_is_inference") is (bound["precision"] == "month"), f"{mid!r}: mark month-end inference explicitly")
             elif bound.get("status") == "temporal_bound":
-                _require(bound.get("value") is None and bound.get("precision") == "unknown" and bound.get("upper_bound_is_inference") is True and _text(bound.get("derivation")), f"{mid}: temporal bound needs explicit derivation, not an invented exact cutoff")
+                _require(bound.get("value") is None and bound.get("precision") == "unknown" and bound.get("upper_bound_is_inference") is True and _text(bound.get("derivation")), f"{mid!r}: temporal bound needs explicit derivation, not an invented exact cutoff")
             else:
-                raise CutoffError(f"{mid}: unsupported cutoff status")
+                raise CutoffError(f"{mid!r}: unsupported cutoff status")
     _require(isinstance(registry.get("aliases"), list), "aliases must be a list")
     aliases = set()
     for alias in registry["aliases"]:
@@ -112,16 +115,13 @@ def validate_registry(registry: dict) -> None:
         aid = alias.get("model_id")
         _require(_text(aid) and aid not in ids and aid not in aliases, f"missing, conflicting, or duplicate alias: {aid!r}")
         aliases.add(aid)
-        _require(alias.get("target_model_id") is None or (_text(alias["target_model_id"]) and alias["target_model_id"] in ids), f"{aid}: unknown alias target")
-        _require(_text(alias.get("provider")) and _text(alias.get("notes")), f"{aid}: alias provider and notes required")
-        _require(alias.get("source_url") is None or _url(alias["source_url"]), f"{aid}: invalid alias source")
+        _require(alias.get("target_model_id") is None or (_text(alias["target_model_id"]) and alias["target_model_id"] in ids), f"{aid!r}: unknown alias target")
+        _require(_text(alias.get("provider")) and _text(alias.get("notes")), f"{aid!r}: alias provider and notes required")
+        _require(alias.get("source_url") is None or _url(alias["source_url"]), f"{aid!r}: invalid alias source")
 
 
 def load_registry(path: Path | None = None) -> dict:
-    if path is None:
-        registry = json.loads(files("scaneval").joinpath("data/model-cutoffs.json").read_text(encoding="utf-8"))
-    else:
-        registry = read_json(path)
+    registry = read_json(files("scaneval").joinpath("data/model-cutoffs.json") if path is None else path)
     validate_registry(registry)
     return registry
 
@@ -134,7 +134,7 @@ def validate_candidates(document: dict) -> None:
     for candidate in document["candidates"]:
         _require(isinstance(candidate, dict), "candidate must be an object")
         cid = candidate.get("cve_id")
-        _require(isinstance(cid, str) and re.fullmatch(r"CVE-\d{4}-\d{4,}", cid) is not None and cid not in ids, f"invalid or duplicate CVE: {cid!r}")
+        _require(isinstance(cid, str) and re.fullmatch(r"CVE-[0-9]{4}-(?:[0-9]{4}|[1-9][0-9]{4,})", cid) is not None and cid not in ids, f"invalid or duplicate CVE: {cid!r}")
         ids.add(cid)
         _require(_text(candidate.get("severity")) and candidate["severity"] in TARGET, f"{cid}: invalid severity")
         _require(_url(candidate.get("severity_source_url")), f"{cid}: severity_source_url is required")

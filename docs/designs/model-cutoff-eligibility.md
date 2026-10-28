@@ -21,9 +21,14 @@ conflicts are retained. Exact API IDs are not automatically immutable revisions.
 - Store versioned packaged JSON. Each model has a provider, exact documented ID,
   source URLs, retrieval date, identity notes, and separate knowledge,
   reliable-knowledge, and training-data fields. Unknown fields remain null.
+  Identity status must be `pinned_snapshot`, `documented_api_id`, or
+  `documented_alias`; unrecognized statuses are invalid input.
 - A cutoff is a published day/month or a provider-supported temporal upper bound.
   Month end is computed conservatively and explicitly labeled an inference.
   Release dates and date-looking model names are never cutoff substitutes.
+  Day/month values use UTC calendar dates; normalize timestamped source evidence
+  to UTC before extracting its date. Preserve unresolved source timezone ambiguity
+  in pending chronology rather than inventing an exact public date.
 - Aliases are catalogued separately and never silently resolved by the helper.
   Callers select documented exact IDs after recording the actually served model
   and endpoint. Unknown IDs and known aliases return unresolved eligibility.
@@ -33,6 +38,8 @@ conflicts are retained. Exact API IDs are not automatically immutable revisions.
   comparison cannot claim exclusion from training or absence of contamination.
 - Input candidate records identify a unique CVE, one declared severity authority,
   severity, and chronology. Pending chronology is allowed and remains ineligible.
+  CVE IDs use ASCII digits and canonical numbering: exactly four sequence digits,
+  or more than four without a leading zero. Alternate spellings cannot fill quotas.
   Reviewed chronology must include the earliest public artifact date and precision,
   evidence URLs, and a review note explaining the earlier-evidence search. The
   helper checks this declaration structurally; it does not authenticate sources or

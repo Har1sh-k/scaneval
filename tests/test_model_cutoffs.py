@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from scaneval.cli import main
+from scaneval import model_cutoffs
 from scaneval.model_cutoffs import CutoffError, assess_candidates, date_bounds, load_registry
 
 
@@ -126,6 +127,39 @@ def test_complete_target_and_shortage_are_reported_by_unique_cve(registry):
         assess_candidates(registry, pack, ["claude-opus-5-5"])
 
 
+@pytest.mark.parametrize("cve_id", ["CVE-2026-010000", "CVE-2026-00001",
+                                    "CVE-２０２６-10000", "CVE-2026-１００００"])
+def test_noncanonical_cve_spellings_cannot_count_as_distinct_cases(registry, cve_id):
+    pack = complete_pack()
+    pack["candidates"][-1]["cve_id"] = cve_id
+    with pytest.raises(CutoffError, match="invalid or duplicate CVE"):
+        assess_candidates(registry, pack, ["claude-opus-5-5"])
+
+
+@pytest.mark.parametrize("cve_id", ["CVE-2026-0001", "CVE-2026-9999", "CVE-2026-10000"])
+def test_canonical_four_and_longer_digit_cve_ids_are_accepted(registry, cve_id):
+    c = candidate()
+    c["cve_id"] = cve_id
+    assert result(registry, c)["eligible_total"] == 1
+
+
+@pytest.mark.parametrize("identity_status", ["alias", "documented-alias", "future_status"])
+def test_unrecognized_identity_status_cannot_authorize_eligibility(registry, identity_status):
+    model = next(m for m in registry["models"] if m["model_id"] == "claude-opus-5-5")
+    model["identity_status"] = identity_status
+    with pytest.raises(CutoffError, match="unsupported identity_status"):
+        result(registry)
+
+
+@pytest.mark.parametrize("identity_status,expected", [("pinned_snapshot", "eligible"),
+                                                      ("documented_api_id", "eligible"),
+                                                      ("documented_alias", "unresolved")])
+def test_supported_identity_statuses_preserve_alias_uncertainty(registry, identity_status, expected):
+    model = next(m for m in registry["models"] if m["model_id"] == "claude-opus-5-5")
+    model["identity_status"] = identity_status
+    assert result(registry)["candidates"][0]["status"] == expected
+
+
 @pytest.mark.parametrize("value,precision", [("2026-02-29", "day"), ("2026-13", "month"),
                                              ("20260701", "day"), ("2026", "year"),
                                              ("2026-01", []), (None, "day")])
@@ -191,6 +225,59 @@ def test_cli_lists_registry_supports_custom_copy_and_rejects_malformed_inputs(tm
         path.write_text(bad)
         assert main(["model-cutoffs", "check", str(path), "--model", "claude-opus-5-5"]) == 2
         assert "scaneval:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("field", ["duplicate_key", "model_id", "alias_id"])
+def test_cli_escapes_untrusted_identifiers_in_errors(registry, tmp_path, capsys, field):
+    payload = "untrusted\x1b[31m\x07\u009b\u202e"
+    path = tmp_path / "registry.json"
+    if field == "duplicate_key":
+        key = json.dumps(payload)
+        text = "{" + key + ": 1, " + key + ": 2}"
+    else:
+        if field == "model_id":
+            registry["models"][0].update(model_id=payload, provider="")
+        else:
+            registry["aliases"][0].update(model_id=payload, target_model_id="unknown")
+        text = json.dumps(registry)
+    path.write_text(text)
+    assert main(["model-cutoffs", "list", "--registry", str(path)]) == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert repr(payload) in output.err
+    assert all(control not in output.err for control in ("\x1b", "\x07", "\u009b", "\u202e"))
+
+
+@pytest.mark.parametrize("command", ["list", "check"])
+def test_cli_json_escapes_controls_without_changing_values(registry, tmp_path, capsys, command):
+    payload = "untrusted\x1b[31m\x07\u009b\u202e"
+    registry["models"][0]["identity_notes"] = payload
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(registry))
+    args = ["model-cutoffs", command]
+    if command == "check":
+        candidate_path = tmp_path / "candidates.json"
+        candidate_path.write_text(json.dumps(document(candidate())))
+        args.extend([str(candidate_path), "--model", payload])
+    args.extend(["--registry", str(registry_path)])
+    assert main(args) == (0 if command == "list" else 1)
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert output.out.isascii()
+    assert "\x1b" not in output.out and "\x07" not in output.out
+    parsed = json.loads(output.out)
+    assert parsed["models"][0]["identity_notes" if command == "list" else "model_id"] == payload
+
+
+@pytest.mark.parametrize("text,error", [('{"schema_version":1,"schema_version":1}', "duplicate JSON key"),
+                                        ('{"schema_version":NaN}', "invalid JSON number")])
+def test_packaged_registry_uses_strict_json_loader(tmp_path, monkeypatch, text, error):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "model-cutoffs.json").write_text(text)
+    monkeypatch.setattr(model_cutoffs, "files", lambda package: tmp_path)
+    with pytest.raises(CutoffError, match=error):
+        load_registry()
 
 
 def test_committed_research_candidates_remain_pending(registry):
