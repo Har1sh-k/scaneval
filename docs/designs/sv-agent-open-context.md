@@ -84,6 +84,15 @@ reason; no implicit provider, model, scanner, or condition fallback is allowed.
    Preserve run/config/image/model/research evidence locally and summarize completion and
    provisional detection honestly; unresolved claims must not become confirmed detections.
 
+## Implementation status
+
+Steps 1-3 are implemented: `config.runtime: "oci_image"` in `llm-harness`, the image driver route,
+`pi_oci_runner.mts`, `pi_open_context.mts` with `pi_open_context_tools.mjs`, and the diagnostic
+`pi_synthetic_provider.mts` (see [open context](../OPEN_CONTEXT.md#sv-agent-image-runtime)).
+Focused tests run locally without Docker or a model; the real-boundary fixture
+(`tests/test_v2_sv_open_context_docker.py`) needs the built image and has not been run yet. Steps 4
+and 5 are not done: live support is unverified until the bounded smoke succeeds.
+
 Use logical commits without AI coauthor trailers. Fresh independent reviewers read the design
 and final implementation; fix substantiated findings and rerun the affected checks. Do not
 commit experiment results or change unrelated working trees.

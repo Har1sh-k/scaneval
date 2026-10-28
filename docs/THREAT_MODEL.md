@@ -274,10 +274,18 @@ A system whose 2.1 run configuration carries `"execution": {"backend": "oci", "i
 "<name>@sha256:<digest>"}` runs every scanner process in a Docker container of its own
 (`src/scaneval/isolation/`). Only an adapter that declares `oci_compatible` may: every process it
 starts goes through `run_command`, its scanner exists in a Linux image, and every host-side read of
-what a command wrote is one that does not follow a link. Today that is `semgrep`. `llm-harness`
-and `deepsec` are refused, with the reason recorded as the system's skip reason, because their
-tools are host installs with no Linux image and not every process they start is known to go
-through the backend. A system configured for `oci` is never run locally in its place, and a policy
+what a command wrote is one that does not follow a link. Today that is `semgrep`, and `llm-harness`
+on its image runtime (`config.runtime: "oci_image"`, under `public_research` only; see
+[open context](OPEN_CONTEXT.md#sv-agent-image-runtime)). `deepsec`, and `llm-harness` on its host
+runtime, are refused, with the reason recorded as the system's skip reason, because their tools are
+host installs with no Linux image and not every process they start is known to go through the
+backend. On the image runtime the one container runs the driver, the harness and every Pi and Git
+process they start; the adapter's host reads of what that container wrote (driver output, stderr,
+finding and plan records, Pi sessions, the research tool journal) all go through the same
+contained, regular-file reads. The Pi OAuth credential is passed by name, exists in the container
+only in a private `/tmp` agent directory that Pi's declared tools cannot reach, and is never
+recorded; Pi and the research extension run in the same process, so a defect in Pi or the
+extension, not the boundary, is what would expose it. A system configured for `oci` is never run locally in its place, and a policy
 the backend cannot implement is a recorded refusal of the invocation, never a weaker policy.
 
 **What it enforces, for each scanner process.** `tests/test_v2_isolation_docker.py` checks each of

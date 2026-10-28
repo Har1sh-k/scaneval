@@ -8,10 +8,11 @@ observations, including observations with incomplete condition evidence.
 
 The condition is independent of `profile`. It currently requires a `standard`, `full` input and
 the externally enforced OCI `public_research` network policy. The runner refuses a local backend
-or weaker policy. An incompatible adapter is unavailable, never rerun locally: Semgrep is the
-current built-in OCI-compatible adapter; `llm-harness` and `deepsec` remain unsupported under OCI.
-Semgrep itself does not investigate the web. Integrations that use the recorded retrieval API
-must run every scanner process through the audited OCI command seam.
+or weaker policy. An incompatible adapter is unavailable, never rerun locally: the built-in
+OCI-compatible adapters are Semgrep and `llm-harness` on its image runtime (`config.runtime:
+"oci_image"`, [below](#sv-agent-image-runtime)); `deepsec` and `llm-harness` on its host runtime
+remain unsupported under OCI. Semgrep itself does not investigate the web. Integrations that use
+the recorded retrieval API must run every scanner process through the audited OCI command seam.
 
 ## Complete runnable fixture
 
@@ -198,3 +199,86 @@ are trusted parts of this boundary ([threat model](THREAT_MODEL.md)).
 Condition coverage and capture/history coverage belong beside detection metrics. Aggregation
 must keep `open_context` separate from `closed_book_standard`, `identity_reduced`, and failed or
 incomplete attestations; never publish one pooled headline detection rate across those groups.
+
+## SV-Agent image runtime
+
+`llm-harness` has two runtimes. `local` (the default, unchanged) runs a host checkout of the
+harness and is refused under `oci`. `oci_image` runs an image-owned runtime and is accepted only
+under the `oci` backend with `public_research`: it is refused before preparation, and again when
+the scan starts, on any other backend or policy, so closed-book systems never receive its research
+tools. Preparation inspects nothing on the host; the configured paths are inside the image.
+
+The image holds Node, the pinned upstream harness under `/opt/scaneval/harness` with its own
+`tsx`, Pi, the observer SDK, and copies of `llm_harness_driver.mts`, `pi_oci_runner.mts`,
+`pi_open_context.mts`, `pi_open_context_tools.mjs`, and the diagnostic
+`pi_synthetic_provider.mts` from `src/scaneval/adapters/`, plus a receipt at
+`/opt/scaneval/runtime.json` (`harness.commit`, `harness.package_version`, `pi.version`,
+`node.version`, or the same names flattened with underscores). The driver runs with the image's
+`tsx` from the mounted workspace and reports the receipt, the Pi and Node versions the processes
+themselves report, and digests of the driver, runner and extension files it loaded. Set
+`expected_harness_commit` and `expected_pi_version` to make any disagreement an error.
+
+```json
+{"system_id": "sv-agent-open-context", "adapter": "llm-harness",
+ "config": {"harness": "securevibes-agent", "runtime": "oci_image", "model": "openai-codex/gpt-5.6-sol",
+            "thinking_level": "high", "expected_harness_commit": "f959cbcf010c7e41f780c718b65b1724d3aecb43"},
+ "execution": {"backend": "oci", "image": "<sv-agent image>@sha256:<digest>",
+               "proxy_image": "<proxy image>@sha256:<digest>",
+               "egress": [{"host": "chatgpt.com", "port": 443}],
+               "credentials": [{"env": "SV_AGENT_PI_AUTH_JSON", "provider": "openai-codex"}],
+               "retrieval": {"policy": "recorded_public_v1", "allowed_origins": ["https://nvd.nist.gov"],
+                             "capture": "content", "retention": "bundle"}}}
+```
+
+The route. `openai-codex/<model>` is the only provider route; any other provider or model is
+refused, and a harness stage asking for another route fails rather than being redirected.
+`thinking_level` (default `high`) is applied to every call, whatever the stage asked for, and the
+override is counted. The image runner replaces only the innermost exec of the harness: it is
+composed under the harness's own `createRetryingPiRunner(createIsolatedPiRunner(...))`, so retry
+classification, per-call temporary working directories and argv NUL escaping stay upstream's, and
+no stage, prompt or file selection changes. Its transport differences are stated in
+`pi_oci_runner.mts`: the prompt travels on stdin (Pi trims leading and trailing whitespace of
+piped input), Pi runs in JSON mode and the engine receives exactly the text `--print` would have
+printed, and argv is rebuilt with `--no-extensions -e <extension>`, an exact `--tools` allowlist,
+and MCP, skills, prompt templates, themes, context files and project trust disabled. Pi's own
+`--no-tools` would remove the extension's tools too; stage-passed `--no-tools` is replaced by the
+allowlist and counted.
+
+The tools. `scaneval_fetch` and, only when `execution.retrieval.search_endpoint` is declared and
+`config.research_search` is `true`, `scaneval_search` post to `$SCANEVAL_RETRIEVAL_URL` directly,
+never through the inference proxy, labelled `browser_tool`. `scaneval_git` runs fixed read-only
+history operations (`log`, `show`, `file`, `blame`, `grep`) against the repository root the driver
+names, not the per-call temporary directory, with no user or system Git configuration.
+`scaneval_read` reads or lists the exported source and cannot leave it. No built-in Pi tool is
+declared: the built-in file tools read any absolute path, which includes Pi's agent directory and
+the run's raw output. `config.research_preflight_url` makes the driver fetch one URL before any
+model call, labelled `scanner_native` and reported as transport evidence, not research.
+
+Three separate statements. The extension journals, per Pi process, which tools it registered
+(availability) and the metadata of each call it served; Pi's JSON stream reports each tool
+execution (execution); and nothing establishes that a result entered a model request or shaped a
+finding (consumption), which stays unverifiable. A run whose Pi processes did not all register the
+research tools is `partial` (`research_tools_unavailable`). Pi's message metadata names the
+provider and model Pi addressed; that is the client's routing record, so no resolved model is
+recorded, and a route other than the pinned one is an error.
+
+The credential. Export the `openai-codex` entry of a Pi `auth.json` as a JSON object with that one
+key, refreshed beforehand, in the variable named by `config.pi_auth_env` (default
+`SV_AGENT_PI_AUTH_JSON`; the `GIT_`, `SCANEVAL_` and `PI_` namespaces are refused, and
+`public_research` refuses the first two as credentials anyway), and declare it under
+`execution.credentials` with provider `openai-codex`. The adapter checks its presence and shape
+before any container starts; the driver removes the variable from its own environment before the
+harness loads, writes the entry to `auth.json` (mode 0600) in a private agent directory on the
+container's `/tmp`, passes Pi an allowlisted environment that carries no key, and removes the
+directory when the scan ends. No message carries a value. An API key, a second provider, or an
+expired token is refused; there is no fallback to a paid provider. If Pi refreshes the token during
+a run it does so in that private copy, which is discarded, so a provider that rotates refresh tokens
+may invalidate the operator's stored one.
+
+`model: "scaneval-synthetic/deterministic-open-context"` selects a DIAGNOSTIC in-process provider
+that calls no model: it issues `synthetic_tool_calls` and then answers with the harness's own
+deterministic mock response. It exists to exercise the route inside the real boundary
+(`tests/test_v2_sv_open_context_docker.py`, gated on `SCANEVAL_SV_IMAGE`); its results are recorded
+as diagnostic and are never scanner evidence. Live support for the real route is not verified until
+the pinned image has run the bounded live smoke described in
+[the design](designs/sv-agent-open-context.md).
