@@ -434,6 +434,13 @@ def pairing_binding_cases() -> Iterable[Case]:
                     if (multiplicities.count(2) == 1 and all(value == 1 for value in multiplicities if value != 2)
                             and binding == "exact" and terminal_mode == "completed"):
                         tags.add("fault:duplicate_receipt_only")
+                    if all(value == 1 for value in multiplicities) and binding == "exact":
+                        if terminal_mode == "inconclusive":
+                            tags.add("fault:inconclusive_terminal_only")
+                        elif terminal_mode == "missing":
+                            tags.add("fault:missing_terminal_only")
+                    if all(value == 1 for value in multiplicities) and binding != "exact" and terminal_mode == "completed":
+                        tags.add(f"fault:binding_{binding}_only")
                     state = AbstractState("complete", files, obligations, tuple(receipts))
                     yield _case(f"pairing-o{obligation_count}-m{''.join(map(str, multiplicities))}-b{binding}-t{terminal_mode}",
                                 "pairing_binding", state, *tags)
@@ -460,6 +467,8 @@ def workflow_stage_cases() -> Iterable[Case]:
     receipt = ReceiptState(0, terminals=_terminals_for(obligation, files))
     for bits in product((False, True), repeat=5):
         tags = {f"stage:{name}:failing" for name, healthy in zip(STAGE_NAMES, bits) if not healthy}
+        if sum(bits) == 4:
+            tags.add("fault:workflow_stage_only")
         yield _case("stages-" + "".join("1" if bit else "0" for bit in bits), "workflow_stages",
                     AbstractState("complete", files, (obligation,), (receipt,), stages=bits), *tags)
 
@@ -579,14 +588,14 @@ def required_witnesses(cases: list[Case], decisions: dict[str, Decision]) -> dic
         "accepted_two_independent_files": lambda case: "reach:two_independent_files" in case.tags,
         "accepted_zero_findings": lambda case: "reach:findings:0" in case.tags,
         "accepted_findings": lambda case: "reach:findings:1" in case.tags,
-        "rejected_unassigned": lambda case: "inventory:unassigned" in case.tags and not oracle(case.state),
+        "rejected_unassigned": lambda case: case.name == "inventory-f1-p1-dunassigned-a1",
         "rejected_unsupported": lambda case: "inventory:unsupported" in case.tags,
         "rejected_missing_receipt": lambda case: "fault:missing_receipt_only" in case.tags,
         "rejected_duplicate_receipt": lambda case: "fault:duplicate_receipt_only" in case.tags,
-        "rejected_inconclusive_terminal": lambda case: "terminal:inconclusive" in case.tags,
-        "rejected_missing_terminal": lambda case: "terminal:missing" in case.tags,
-        "rejected_workflow_stage": lambda case: any(tag.startswith("stage:") for tag in case.tags),
-        "rejected_native_health": lambda case: any(tag.startswith("native:") for tag in case.tags),
+        "rejected_inconclusive_terminal": lambda case: "fault:inconclusive_terminal_only" in case.tags,
+        "rejected_missing_terminal": lambda case: "fault:missing_terminal_only" in case.tags,
+        "rejected_workflow_stage": lambda case: "fault:workflow_stage_only" in case.tags,
+        "rejected_native_health": lambda case: "fault:native_failure_only" in case.tags,
         "rejected_failed_call": lambda case: "completion:call:failed" in case.tags,
         "rejected_pending_call": lambda case: "completion:call:pending" in case.tags,
         "rejected_bad_legacy_reason": lambda case: "completion:reasons:invalid" in case.tags,
@@ -595,6 +604,9 @@ def required_witnesses(cases: list[Case], decisions: dict[str, Decision]) -> dic
         "rejected_duplicate_inventory": lambda case: "malformed:duplicate-inventory" in case.tags,
         "rejected_duplicate_obligation": lambda case: "malformed:duplicate-obligation" in case.tags,
         "rejected_duplicate_terminal": lambda case: "malformed:duplicate-terminal" in case.tags,
+        **{f"rejected_binding_{binding}": (lambda case, binding=binding:
+              f"fault:binding_{binding}_only" in case.tags)
+           for binding in ("invocation", "model", "hypothesis", "shard", "source", "request", "file")},
     }
     witnesses: dict[str, str] = {}
     for requirement, predicate in requirements.items():

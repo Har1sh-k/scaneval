@@ -75,6 +75,9 @@ def test_critical_predicates_have_non_vacuity_witnesses_and_runtime_source_hashe
         "rejected_pending_call", "rejected_bad_legacy_reason", "rejected_partial_source",
         "rejected_malformed", "rejected_duplicate_inventory",
         "rejected_duplicate_obligation", "rejected_duplicate_terminal",
+        "rejected_binding_invocation", "rejected_binding_model", "rejected_binding_hypothesis",
+        "rejected_binding_shard", "rejected_binding_source", "rejected_binding_request",
+        "rejected_binding_file",
     } == set(witnesses)
     hashes = checker_result["source_binding"]["sha256"]
     assert "src/scaneval/adapters/llm_harness.py" in hashes
