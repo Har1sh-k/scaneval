@@ -2422,10 +2422,25 @@ def test_review_workflow_not_required_needs_exact_exclusion_inventory_and_metada
     report["inventory"] = [report["inventory"][0]]
     report["obligations"] = []
     report["receipts"] = []
+    completion = summary["completion"]
+    completion["modelCalls"].update(status="not-run", attempted=0, succeeded=0, failed=0, pending=0)
+    completion["changedFileSupport"] = {
+        "status": "not-required",
+        "scope": {
+            "totalChangedFiles": 1, "changedFilesInScope": 0, "unsupportedChangedFiles": 0,
+            "excludedChangedFiles": 1, "knownNonCodeChangedFiles": 1,
+            "unknownUnsupportedChangedFiles": 0, "unsupportedExtensionHistogram": {},
+        },
+    }
+    completion["hypothesisEvaluation"].update(status="not-required", planned=0, evaluated=0)
+    completion["sourceAssessment"] = {"status": "not-required", "files": []}
+    completion["coverage"] = {"status": "not-required", "reasons": []}
 
     reading = read_review_workflow(summary)
+    _notes, code, message = read_completion(summary, required=True, workflow=reading)
 
     assert reading.status == "not-required" and reading.code is None
+    assert code is message is None
     assert report["scope"]["sourceRef"] == summary["headRef"]
     assert any("only explicit exclusions" in note for note in reading.notes)
 
