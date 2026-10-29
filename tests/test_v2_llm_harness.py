@@ -2463,6 +2463,7 @@ def test_positive_review_workflow_fails_closed_for_malformed_and_cross_bound_evi
         yield "missing field", lambda s: s["reviewWorkflow"].pop("inventory")
         yield "duplicate inventory", lambda s: s["reviewWorkflow"]["inventory"].append(
             deepcopy(s["reviewWorkflow"]["inventory"][1]))
+        yield "non-scalar obligation identity", lambda s: s["reviewWorkflow"]["obligations"][0].update(invocationId=[])
         yield "duplicate obligation", lambda s: s["reviewWorkflow"]["obligations"].append(
             deepcopy(s["reviewWorkflow"]["obligations"][0]))
         yield "duplicate receipt", lambda s: s["reviewWorkflow"]["receipts"].append(
@@ -2479,6 +2480,7 @@ def test_positive_review_workflow_fails_closed_for_malformed_and_cross_bound_evi
         yield "missing request", lambda s: s["reviewWorkflow"]["obligations"][0].pop("requestDigest")
         yield "duplicate terminal", lambda s: s["reviewWorkflow"]["receipts"][0]["files"][0]["terminals"].append(
             deepcopy(s["reviewWorkflow"]["receipts"][0]["files"][0]["terminals"][0]))
+        yield "non-scalar terminal procedure", lambda s: s["reviewWorkflow"]["receipts"][0]["files"][0]["terminals"][0].update(procedure=[])
         yield "invalid terminal", lambda s: s["reviewWorkflow"]["receipts"][0]["files"][0]["terminals"][0].update(status="done")
         yield "inconclusive terminal", lambda s: s["reviewWorkflow"]["receipts"][0]["files"][0]["terminals"][0].update(status="inconclusive")
         yield "unassigned inventory", lambda s: s["reviewWorkflow"]["inventory"][1].update(disposition="unassigned")
@@ -2487,6 +2489,7 @@ def test_positive_review_workflow_fails_closed_for_malformed_and_cross_bound_evi
         yield "bad disposition enum", lambda s: s["reviewWorkflow"]["inventory"][1].update(disposition="reviewed")
         yield "head mismatch", lambda s: s.update(headRef="b" * 40)
         yield "unsupported consensus", lambda s: s.update(consensus={"status": "complete"})
+        yield "non-scalar stage", lambda s: s["reviewWorkflow"]["stages"].update(lint=[])
         yield "stage failure", lambda s: s["reviewWorkflow"]["stages"].update(lint="incomplete")
         yield "lint failure", lambda s: s["repositoryLint"].update(status="inconclusive", failures=1)
         yield "marker gap", lambda s: s["reviewAssessment"].update(status="pending", pendingReviews=1)
@@ -2560,6 +2563,20 @@ def test_completed_declared_review_workflow_can_produce_native_success(tmp_path,
     assert len(result["claims"]) == len(records)
     assert any("completed declared bootstrap review workflow" in note for note in execution["notes"])
     assert any("source assessment remains unassessed" in note for note in execution["notes"])
+
+
+def test_both_native_report_failures_remain_visible_when_workflow_takes_precedence(tmp_path, monkeypatch):
+    summary = _review_workflow_summary()
+    summary["reviewWorkflow"].update(status="incomplete", reasons=["missing_receipt:[invocation-1]"], receipts=[])
+    summary["completion"]["schemaVersion"] = 2
+    output = {**DRIVER_OUTPUT, "summary": summary}
+
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {}, output=output)
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert execution["status"] == "partial" and execution["error"]["code"] == "review_workflow_incomplete"
+    assert any("Harness review workflow v1: incomplete" in note for note in execution["notes"])
+    assert any("Harness completion report:" in note and "not in a shape" in note for note in execution["notes"])
 
 
 def test_malformed_review_workflow_retains_imported_findings_on_partial(tmp_path, monkeypatch):

@@ -603,8 +603,16 @@ def _procedures(value: Any, *, required: bool) -> bool:
             and (not required or "security-review" in value))
 
 
-def _workflow_identity(value: dict[str, Any]) -> tuple[Any, Any, Any, Any]:
-    return value.get("invocationId"), value.get("model"), value.get("hypothesisId"), value.get("shardIndex")
+def _workflow_identity(value: dict[str, Any]) -> tuple[str | None, str | None, str | None, int | None]:
+    """A hashable identity even while a hostile JSON value is still being rejected."""
+    invocation = value.get("invocationId")
+    model = value.get("model")
+    hypothesis = value.get("hypothesisId")
+    shard = value.get("shardIndex")
+    return (invocation if isinstance(invocation, str) else None,
+            model if isinstance(model, str) else None,
+            hypothesis if isinstance(hypothesis, str) else None,
+            shard if type(shard) is int else None)
 
 
 def _workflow_file_identity(value: dict[str, Any]) -> tuple[Any, Any, Any, Any]:
@@ -663,7 +671,9 @@ def _review_workflow_shape(report: Any) -> list[str]:
         "markers": {"complete", "incomplete", "not-recorded"},
         "specialists": {"complete", "incomplete", "not-recorded"},
     }
-    if not isinstance(stages, dict) or any(stages.get(name) not in values for name, values in stage_values.items()):
+    if (not isinstance(stages, dict) or any(not isinstance(stages.get(name), str)
+                                            or stages.get(name) not in values
+                                            for name, values in stage_values.items())):
         issue("stages")
 
     inventory_paths: set[str] = set()
@@ -761,7 +771,8 @@ def _review_workflow_shape(report: Any) -> list[str]:
                 continue
             seen: set[str] = set()
             for terminal in terminals:
-                if (not isinstance(terminal, dict) or terminal.get("procedure") not in REVIEW_WORKFLOW_PROCEDURES
+                if (not isinstance(terminal, dict) or not isinstance(terminal.get("procedure"), str)
+                        or terminal.get("procedure") not in REVIEW_WORKFLOW_PROCEDURES
                         or terminal.get("procedure") in seen
                         or terminal.get("status") not in ("completed", "inconclusive")
                         or not _wire_text(terminal.get("reason"), maximum=1_000)):
@@ -901,9 +912,11 @@ def _review_workflow_reconciliation(summary: dict[str, Any], report: dict[str, A
                   "markers": "complete", "specialists": "complete"}:
         issue("stage_incomplete")
     lint = summary.get("repositoryLint")
+    lint_rules = summary.get("repositoryLintRules", [])
     if (not isinstance(lint, dict) or lint.get("status") != "ok" or lint.get("failures") != 0
-            or any(rule.get("status") != "ok" or rule.get("failures", 0) or rule.get("baseFailures", 0)
-                   for rule in summary.get("repositoryLintRules", []) if isinstance(rule, dict))):
+            or not isinstance(lint_rules, list)
+            or any(not isinstance(rule, dict) or rule.get("status") != "ok" or rule.get("failures", 0)
+                   or rule.get("baseFailures", 0) for rule in lint_rules)):
         issue("lint_incomplete")
     marker = summary.get("reviewAssessment")
     if not isinstance(marker, dict) or marker.get("status") != "none-pending" or any(
@@ -2560,8 +2573,10 @@ class LlmHarnessAdapter(Adapter):
         notes.extend(completion_notes)
         native_completion_code = workflow.code or completion_code
         native_completion_message = workflow.message or completion_message
-        if native_completion_code and native_completion_message and not (workflow.notes or completion_notes):
-            notes.append(f"Harness native completion evidence: {native_completion_message}.")
+        if workflow.code and workflow.message and not workflow.notes:
+            notes.append(f"Harness review workflow v1: {workflow.message}.")
+        if completion_code and completion_message and not completion_notes:
+            notes.append(f"Harness completion report: {completion_message}.")
         if result.timed_out:
             return NativeOutcome(status="timeout", exit_code=None, timed_out=True,
                                  error={"code": "timeout",
