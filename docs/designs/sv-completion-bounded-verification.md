@@ -49,7 +49,7 @@ run time; generated output is written outside the repository and is not committe
 
 ## Finite domain
 
-The checker enumerates exactly 708 cases in eight semantic families plus malformed boundaries:
+The checker enumerates exactly 711 cases in eight semantic families plus malformed boundaries:
 
 1. **Inventory/assignment product — 144 cases.** File count is 1 or 2; required-procedure count is
    1 or 2; each inventory disposition is `supported`, `unassigned`, or `unsupported`; and every
@@ -76,9 +76,10 @@ The checker enumerates exactly 708 cases in eight semantic families plus malform
    obligations or receipts.
 8. **Finding/review reachability — 2 cases.** The same valid two-file, two-obligation,
    two-procedure workflow with zero and one declared finding.
-9. **Malformed shape/type/numeric boundaries — 17 cases.** Wrong report/container types, Boolean
-   and out-of-range integer boundaries, malformed procedure/file/terminal containers, and invalid
-   completion counters are explicit rejecting cases.
+9. **Malformed shape/type/numeric boundaries — 20 cases.** Wrong report/container types, Boolean
+   and out-of-range integer boundaries, malformed procedure/file/terminal containers, duplicate
+   inventory, obligation, and terminal records, and invalid completion counters are explicit
+   rejecting cases.
 
 Families 1–6 are exhaustive only over the dimensions and finite values stated above. The checker
 does not claim their Cartesian product with each other, arbitrary strings, arbitrary list sizes,
@@ -92,6 +93,37 @@ faulty **abstract acceptance functions**: always accept, always reject, ignore a
 collapse duplicate receipts, and ignore native failure. These are checker self-tests, not claims
 that five source-level mutants of `llm_harness.py` were compiled and killed. Each self-test records
 a concrete generated witness.
+
+## Reproduction
+
+From the repository root, using the project interpreter requested for this work:
+
+```bash
+PYTHONPATH=$PWD/src /Users/hk/Documents/GitHub/scaneval/.venv/bin/python \
+  scripts/check_sv_completion_properties.py \
+  --output /private/tmp/scaneval-sv-completion-properties.json
+
+PYTHONPATH=$PWD/src /Users/hk/Documents/GitHub/scaneval/.venv/bin/python -m pytest -q \
+  tests/test_sv_completion_properties.py
+
+PYTHONPATH=$PWD/src /Users/hk/Documents/GitHub/scaneval/.venv/bin/python -m pytest -q \
+  tests/test_v2_llm_harness.py \
+  -k 'review_workflow or completed_declared_review_workflow or legacy_completion_without_review_workflow'
+```
+
+A conforming run reports `checked: 711`, `expected_accepted: 37`,
+`expected_rejected: 674`, no production mismatch, and one concrete witness for every faulty
+acceptance function. The JSON also emits the current Git commit and SHA-256 values for the
+production adapter, checker, fixture, and this design. Those values are generated from the checked
+working tree; the mutable JSON result belongs under `/private/tmp` and is not committed. The new
+pytest file is under the ordinary `testpaths`, so the existing Python CI job runs it without a new
+dependency or an optics-only job.
+
+The all-excluded case materializes the valid combined wire form: review workflow `not-required`
+and legacy completion `not-required`. The current upstream producer branch does not demonstrate
+that combined result for a bootstrap all-excluded repository; its completion builder can retain
+`not-recorded`/`unknown` states there. The generated positive therefore establishes consumer
+contract reachability, not that the present producer emits it. No producer evidence is invented.
 
 ## Exclusions
 
