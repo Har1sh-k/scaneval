@@ -7,7 +7,7 @@ description: Build or review scanner execution adapters that invoke native scann
 
 Build the narrowest adapter that runs the scanner's real workflow without changing its meaning. Preserve native evidence, normalize only what the contract requires, and make unsupported or incomplete work visible. The adapter executes a scanner; it does not receive labels, decide whether findings are true, or turn failure into an empty successful scan.
 
-Read [references/failure-patterns.md](references/failure-patterns.md) before designing completion evidence, live diagnostics, open-context support, model/runtime identity, native kind mappings, or multi-stage process handling.
+Read [references/failure-patterns.md](references/failure-patterns.md) before designing completion evidence, live diagnostics, open-context support, model/runtime identity, native kind mappings, or multi-stage process handling. For a high-risk acceptance state machine, [references/property-verification.md](references/property-verification.md) gives an optional bounded verification pattern.
 
 ## Establish the native contract
 
@@ -22,14 +22,14 @@ Inspect the repository's adapter protocol, schemas, runner, existing adapters, s
 
 Write a versioned evidence contract with one obligation per claim of completion: native stage receipts, source inventory/scope, model-call health, import conservation, omissions, runtime identity, and cleanup. Make the positive success criterion observable before launching an expensive run.
 
-Require at least:
+Set these acceptance targets:
 
 - one successful fixture that uses real source and satisfies every completion obligation;
 - meaningful failure fixtures for timeout, nonzero stage exit, malformed/missing export, partial batch, unsupported mode, unknown native kind, and scope omission where applicable;
 - explicit outcomes for `success`, `partial`, `unsupported`, `error`, and `timeout`, preserving usable findings on incomplete runs;
 - visible omitted scope and unresolved/unknown completion. Unknown is not a zero-finding success.
 
-If the scanner cannot provide positive evidence for an obligation, keep that obligation unknown and the run partial. Do not infer review completeness from successful calls, delivered findings, process exit, or an empty result.
+If the scanner cannot provide positive evidence for an obligation, keep that obligation unknown and the run partial. Do not infer review completeness from successful calls, delivered findings, process exit, or an empty result. If no genuine real-source success fixture can attain every obligation, document the capability gap, keep affected runs partial, and stop before broad runs; never fabricate a positive fixture or weaken the criterion.
 
 ## Implement the native path
 
@@ -46,6 +46,6 @@ If the scanner cannot provide positive evidence for an obligation, keep that obl
 2. Exercise realistic native payloads and every failure path. Check count conservation, status precedence, omitted scope, artifact bindings, and mapping provenance.
 3. Validate request/result schemas and exact offline replay before publishing any number. In ScanEval-style repositories, confirm current syntax with CLI help, then use `validate` on saved contracts and `replay` on the completed bundle.
 4. Obtain an independent review of the adapter boundary, evidence contract, cleanup, and unsupported paths. Fix substantiated findings and rerun affected checks.
-5. With explicit authorization, run one bounded live smoke in a fresh directory. Make the intended probe part of the actual scanner/model input and require its recorded calls and matching receipts. Stop after the smoke; expand only when separately authorized and the success criterion holds.
+5. With explicit authorization, run one bounded live smoke in a fresh directory. For a model/tool-enabled workflow, put the intended probe in the actual scanner/model input and require recorded calls with matching receipts. For a rule-based scanner, use a native positive criterion such as an expected rule match with stage and artifact receipts; do not require model calls from a scanner that makes none. Stop after the smoke; expand only when separately authorized and the success criterion holds.
 
 Report deterministic test results, live-smoke evidence, detection outcomes, and label/readiness status as separate statements. Keep partial and unsupported assignments in the denominator required by the evaluator; never quietly drop them. State remaining evidence gaps and do not claim the adapter prevents future integration failures.
