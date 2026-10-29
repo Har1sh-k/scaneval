@@ -43,11 +43,13 @@ def _canonical_cve_id(value: object) -> bool:
 
 
 def _url(value: object) -> bool:
-    if not _text(value):
+    if not _text(value) or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value):
         return False
     try:
         parsed = urlsplit(value)
-        return parsed.scheme in {"https", "http"} and bool(parsed.hostname) and not parsed.username
+        parsed.port  # Reject nonnumeric and out-of-range ports.
+        return (parsed.scheme in {"https", "http"} and bool(parsed.hostname)
+                and parsed.username is None and parsed.password is None)
     except ValueError:
         return False
 
