@@ -62,9 +62,16 @@ The reference record preserves the pack-selected score, vector, version, source 
 source kind, retrieval date and note. The explicit selection rule is to keep that frozen
 selection, including the note describing source disagreements. The command does not fetch
 or silently substitute a newer CNA, vendor or NVD score. All reference records for aliases
-remain visible. Different scores, versions or vectors for one canonical target make the
-comparison unavailable; equivalent ratings use the lowest case ID's reference while retaining
-every source. A missing alias reference also remains unavailable.
+remain visible. Under current `severity-calibration-2` semantics, reordered complete base
+vectors and equivalent numeric spellings such as `9` and `9.0` are the same rating; genuine
+score, version or metric differences make the comparison unavailable. Equivalent ratings use
+the lowest case ID's original reference while retaining every source. A missing or malformed
+alias reference also remains unavailable.
+
+Reports declare their calibration revision. New reports use `severity-calibration-2`.
+`--verify` replays saved `severity-calibration-1` reports with their historical exact-JSON
+rating comparison and selected-reference validation rules, so old reports are not silently
+reinterpreted under current semantics.
 
 For CVSS 3.0, 3.1 and 4.0, the ordered bands are None (0), Low (0.1–3.9), Medium
 (4.0–6.9), High (7.0–8.9), Critical (9.0–10.0), following the
