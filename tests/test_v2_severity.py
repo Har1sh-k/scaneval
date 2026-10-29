@@ -70,6 +70,14 @@ def test_missing_or_conflicting_alias_references_are_unavailable():
     assert severity.compare_severity(claim, refs() + refs({**REFERENCE, "score": 8.0, "level": "high"}))["reason"] == "conflicting_references"
 
 
+def test_malformed_reference_cvss_is_unavailable_instead_of_crashing():
+    malformed = deepcopy(REFERENCE)
+    malformed.pop("score")
+    result = severity.compare_severity({"native_severity": "critical"}, refs(malformed))
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "invalid_reference_cvss"
+
+
 @pytest.mark.parametrize("score,expected", [(0, "none"), (.1, "low"), (3.9, "low"), (4, "medium"), (6.9, "medium"), (7, "high"), (8.9, "high"), (9, "critical"), (10, "critical")])
 def test_band_boundaries(score, expected):
     assert severity.band(score) == expected

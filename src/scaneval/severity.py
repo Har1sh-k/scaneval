@@ -71,15 +71,19 @@ def compare_severity(claim: dict, references: list[dict]) -> dict:
 
     if not references or any(entry["severity"] is None for entry in references):
         return unavailable("reference_unavailable")
-    ratings = {canonical_sha256({k: entry["severity"][k] for k in ("score", "cvss_version", "vector")}) for entry in references}
-    if len(ratings) != 1:
+    ratings = []
+    for entry in references:
+        try:
+            rating = {k: entry["severity"][k] for k in ("score", "cvss_version", "vector")}
+            validate_claimed_cvss({"score": rating["score"], "version": rating["cvss_version"],
+                                   "vector": rating["vector"], "provenance": "imported"})
+        except (ContractError, KeyError, TypeError):
+            return unavailable("invalid_reference_cvss")
+        ratings.append(rating)
+    if len({canonical_sha256(rating) for rating in ratings}) != 1:
         return unavailable("conflicting_references")
     ref = deepcopy(sorted(references, key=lambda entry: entry["case_id"])[0]["severity"])
     result["reference"] = ref
-    try:
-        validate_claimed_cvss({"score": ref["score"], "version": ref["cvss_version"], "vector": ref["vector"], "provenance": "imported"})
-    except ContractError:
-        return unavailable("invalid_reference_cvss")
     result["reference_band"] = band(ref["score"])
     label = native.strip().lower() if isinstance(native, str) else None
     label_band = label if label in BANDS else None
