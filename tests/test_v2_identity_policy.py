@@ -805,6 +805,16 @@ def test_supported_identity_url_leaves_are_disclosed_without_declared_tokens_or_
     assert verify_manifest(record, summary, **saved_bindings(inspection, source=tree)) == summary
 
 
+def test_manifest_refuses_metadata_edits_not_bound_to_the_inspected_final_file_hash(tmp_path):
+    data = b'{"homepage":""}'
+    record = edit(json.dumps({"homepage": ORIGINAL}).encode(), replacement="").record
+    tree = source(tmp_path, {"package.json": data})
+    inspection = inspect_tree(tree, policy(), requirements=[ALIAS], metadata_edits=[record])
+
+    with pytest.raises(ContractError, match="inspected final file hash"):
+        manifest(inspection, metadata_edits=[record])
+
+
 def test_applied_metadata_review_covers_only_its_exact_leaf_and_final_file_digest(tmp_path):
     original = json.dumps({"homepage": ORIGINAL, "bugs": "https://example.invalid/issues"}).encode()
     change = edit(original, replacement="https://example.invalid/neutral")

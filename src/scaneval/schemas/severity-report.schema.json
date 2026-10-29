@@ -25,7 +25,10 @@
       "const": "2.1"
     },
     "calibrator_version": {
-      "const": "severity-calibration-1"
+      "enum": [
+        "severity-calibration-1",
+        "severity-calibration-2"
+      ]
     },
     "pack_sha256": {
       "type": "string",

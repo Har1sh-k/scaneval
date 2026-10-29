@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 import base64
 import hashlib
@@ -27,6 +28,8 @@ from scaneval.adapters.llm_harness import (
     capture_status,
     import_harness_findings,
     parse_frontmatter,
+    read_completion,
+    read_review_workflow,
     read_self_report,
     reconcile_import,
     snapshot_findings,
@@ -435,8 +438,9 @@ def test_mock_run_records_the_mock_route_and_its_policy_note(tmp_path):
     # 2.2.0 is the release that made the capture matrix depend on the harness build: the same
     # adapter now reports different categories against different harnesses, which is a change a
     # reader of an old execution record must be able to date. 2.3.0 added the harness's pr mode;
-    # 2.4.0 distinguishes a declared recovered planner timeout from an unresolved runner failure.
-    assert execution["adapter"]["version"] == "2.5.0"
+    # 2.4.0 distinguishes a declared recovered planner timeout from an unresolved runner failure,
+    # and 2.6.0 consumes the additive review-workflow completion contract.
+    assert execution["adapter"]["version"] == "2.6.0"
 
 
 # Where an observation came from, as the trace event contract spells it. Two of these are this
@@ -2382,6 +2386,491 @@ DRIVER_OUTPUT = {
 }
 
 
+def _review_workflow_summary() -> dict:
+    return json.loads((ROOT / "tests/fixtures/sv-review-workflow-summary.json").read_text())
+
+
+def _workflow_inventory_entry(summary: dict, path: str) -> dict:
+    return next(entry for entry in summary["reviewWorkflow"]["inventory"] if entry["path"] == path)
+
+
+def _refresh_workflow_digest(summary: dict) -> None:
+    report = summary["reviewWorkflow"]
+    report["scope"]["inventoryDigest"] = llm_harness._canonical_inventory_digest(
+        report["scope"], report["inventory"])
+
+
+def _replace_workflow_exclusion(summary: dict, path: str, reason: str) -> None:
+    report = summary["reviewWorkflow"]
+    entry = _workflow_inventory_entry(summary, "README.md")
+    old_prefix = llm_harness._profile_prefix(entry["path"])
+    entry.update(path=path, classification="excluded", disposition="excluded", reason=reason)
+    report["inventory"].sort(key=lambda item: llm_harness._js_code_units(item["path"]))
+    summary["changedFiles"] = [item["path"] for item in report["inventory"]]
+    new_prefix = llm_harness._profile_prefix(path)
+    next(surface for surface in summary["executionAnchorCoverage"]["surfaces"]
+         if surface["prefix"] == old_prefix)["prefix"] = new_prefix
+    summary["executionAnchorCoverage"]["surfaces"].sort(
+        key=lambda item: llm_harness._js_code_units(item["prefix"]))
+    summary["completion"]["coverage"]["reasons"] = [
+        reason.replace(f"execution_anchor:{old_prefix}:", f"execution_anchor:{new_prefix}:")
+        for reason in summary["completion"]["coverage"]["reasons"]
+    ]
+    _refresh_workflow_digest(summary)
+
+
+def test_review_workflow_fixture_roundtrips_and_preserves_both_native_accounts():
+    summary = _review_workflow_summary()
+    roundtripped = json.loads(json.dumps(summary, sort_keys=True))
+    workflow = read_review_workflow(roundtripped)
+    notes, code, message = read_completion(roundtripped, required=True, workflow=workflow)
+
+    assert roundtripped == summary
+    assert workflow.status == "complete" and workflow.code is None
+    assert code is message is None
+    assert any("completed declared bootstrap review workflow" in note for note in workflow.notes)
+    assert any("assessment coverage incomplete" in note for note in notes)
+    assert any("not as assessed-safe source" in note for note in notes)
+
+
+def test_legacy_completion_without_review_workflow_is_unchanged():
+    completion = json.loads((ROOT / "tests/fixtures/sv-completion.json").read_text())
+    summary = {"completion": completion}
+    workflow = read_review_workflow(summary)
+    _notes, code, message = read_completion(summary, required=True, workflow=workflow)
+
+    assert workflow.present is False and workflow.code is None
+    assert code == "completion_unknown"
+    assert "source_analysis_completion_not_established" in message
+
+
+def test_review_workflow_not_required_needs_exact_exclusion_inventory_and_metadata():
+    summary = _review_workflow_summary()
+    report = summary["reviewWorkflow"]
+    report["status"] = "not-required"
+    report["inventory"] = [report["inventory"][0]]
+    report["obligations"] = []
+    report["receipts"] = []
+    report["inputs"] = []
+    report["stages"] = {
+        "planner": "not-applicable", "executionAnchors": "not-applicable",
+        "modelCalls": "not-applicable", "structural": "not-applicable",
+        "lint": "complete", "markers": "complete", "specialists": "not-applicable",
+    }
+    report["stageEvidence"] = {"lint": report["stageEvidence"]["lint"]}
+    summary["changedFiles"] = [report["inventory"][0]["path"]]
+    summary.pop("bootstrapScan")
+    _refresh_workflow_digest(summary)
+    completion = summary["completion"]
+    completion["modelCalls"].update(status="not-run", attempted=0, succeeded=0, failed=0, pending=0)
+    completion["changedFileSupport"] = {
+        "status": "not-required",
+        "scope": {
+            "totalChangedFiles": 1, "changedFilesInScope": 0, "unsupportedChangedFiles": 0,
+            "excludedChangedFiles": 1, "knownNonCodeChangedFiles": 1,
+            "unknownUnsupportedChangedFiles": 0, "unsupportedExtensionHistogram": {},
+        },
+    }
+    completion["hypothesisEvaluation"].update(status="not-required", planned=0, evaluated=0)
+    completion["sourceAssessment"] = {"status": "not-required", "files": []}
+    completion["coverage"] = {"status": "not-required", "reasons": []}
+
+    reading = read_review_workflow(summary)
+    _notes, code, message = read_completion(summary, required=True, workflow=reading)
+
+    assert reading.status == "not-required" and reading.code is None
+    assert code is message is None
+    assert report["scope"]["sourceRef"] == summary["headRef"]
+    assert any("only explicit exclusions" in note for note in reading.notes)
+
+
+@pytest.mark.parametrize(("status", "reason", "expected"), [
+    ("incomplete", "missing_receipt:[invocation-1]", "review_workflow_incomplete"),
+    ("unknown", "review_workflow_evidence_not_recorded", "review_workflow_unknown"),
+])
+def test_non_positive_review_workflow_status_never_earns_success(status, reason, expected):
+    summary = _review_workflow_summary()
+    report = summary["reviewWorkflow"]
+    report.update(status=status, reasons=[reason], receipts=[])
+
+    reading = read_review_workflow(summary)
+
+    assert reading.status == status and reading.code == expected
+
+
+def test_unsupported_review_workflow_mode_never_earns_success():
+    summary = _review_workflow_summary()
+    report = summary["reviewWorkflow"]
+    summary["mode"] = report["scope"]["mode"] = "pr"
+    report.update(status="unknown", inventory=[], obligations=[], receipts=[], inputs=[],
+                  reasons=["unsupported_mode:pr"])
+    report["scope"] = {
+        "mode": "pr", "inventoryDigestPreimage": "review-workflow-inventory/v1",
+        "policy": {"version": "bootstrap-source-review/v1", "additionalCodeExtensions": []},
+    }
+    report["stages"] = {key: "not-recorded" for key in (
+        "planner", "executionAnchors", "modelCalls", "structural", "lint", "markers", "specialists")}
+    report["stageEvidence"] = {"lint": {"configuration": "not-recorded", "ruleIds": []}}
+
+    reading = read_review_workflow(summary)
+
+    assert reading.status == "unknown" and reading.code == "review_workflow_unknown"
+
+
+def test_positive_review_workflow_fails_closed_for_malformed_and_cross_bound_evidence():
+    def cases():
+        yield "missing field", lambda s: s["reviewWorkflow"].pop("inventory")
+        yield "duplicate inventory", lambda s: s["reviewWorkflow"]["inventory"].append(
+            deepcopy(s["reviewWorkflow"]["inventory"][1]))
+        yield "non-scalar obligation identity", lambda s: s["reviewWorkflow"]["obligations"][0].update(invocationId=[])
+        yield "duplicate obligation", lambda s: s["reviewWorkflow"]["obligations"].append(
+            deepcopy(s["reviewWorkflow"]["obligations"][0]))
+        yield "duplicate receipt", lambda s: s["reviewWorkflow"]["receipts"].append(
+            deepcopy(s["reviewWorkflow"]["receipts"][0]))
+        yield "missing receipt", lambda s: s["reviewWorkflow"].update(receipts=[])
+        yield "missing obligation file", lambda s: s["reviewWorkflow"]["obligations"][0].update(files=[])
+        yield "missing receipt file", lambda s: s["reviewWorkflow"]["receipts"][0].update(files=[])
+        yield "swapped shard", lambda s: s["reviewWorkflow"]["receipts"][0].update(shardIndex=2)
+        yield "swapped model", lambda s: s["reviewWorkflow"]["receipts"][0].update(model="other/model")
+        yield "swapped hypothesis", lambda s: s["reviewWorkflow"]["receipts"][0].update(hypothesisId="TM-OTHER")
+        yield "swapped revision", lambda s: s["reviewWorkflow"]["receipts"][0].update(sourceRef="b" * 40)
+        yield "swapped hash", lambda s: s["reviewWorkflow"]["receipts"][0]["files"][0].update(sha256="0" * 64)
+        yield "swapped request", lambda s: s["reviewWorkflow"]["receipts"][0].update(requestDigest="0" * 64)
+        yield "missing request", lambda s: s["reviewWorkflow"]["obligations"][0].pop("requestDigest")
+        yield "duplicate terminal", lambda s: s["reviewWorkflow"]["receipts"][0]["files"][0]["terminals"].append(
+            deepcopy(s["reviewWorkflow"]["receipts"][0]["files"][0]["terminals"][0]))
+        yield "non-scalar terminal procedure", lambda s: s["reviewWorkflow"]["receipts"][0]["files"][0]["terminals"][0].update(procedure=[])
+        yield "invalid terminal", lambda s: s["reviewWorkflow"]["receipts"][0]["files"][0]["terminals"][0].update(status="done")
+        yield "inconclusive terminal", lambda s: s["reviewWorkflow"]["receipts"][0]["files"][0]["terminals"][0].update(status="inconclusive")
+        yield "unassigned inventory", lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(disposition="unassigned")
+        yield "unsupported inventory", lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(
+            classification="unsupported", disposition="unsupported", sha256=None, bytes=None, requiredProcedures=[])
+        yield "bad disposition enum", lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(disposition="reviewed")
+        yield "head mismatch", lambda s: s.update(headRef="b" * 40)
+        yield "unsupported consensus", lambda s: s.update(consensus={"status": "complete"})
+        yield "non-scalar stage", lambda s: s["reviewWorkflow"]["stages"].update(lint=[])
+        yield "stage failure", lambda s: s["reviewWorkflow"]["stages"].update(lint="incomplete")
+        yield "lint failure", lambda s: s["repositoryLint"].update(status="inconclusive", failures=1)
+        yield "marker gap", lambda s: s["reviewAssessment"].update(status="pending", pendingReviews=1)
+        yield "specialist gap", lambda s: s["specialistsActivated"].append({"id": "auth", "workflowHint": "auth"})
+        yield "relationship parser gap", lambda s: s["bootstrapScan"]["hypothesisSelections"][0].update(
+            relationshipExtractionFailures=[{"path": "src/neutral.ts", "operation": "exports", "reason": "parser-exception"}])
+        yield "hypothesis failure", lambda s: s["bootstrapScan"].update(
+            status="inconclusive", failedHypothesisIds=["TM-REVIEW-001"])
+        yield "omitted source", lambda s: s["bootstrapScan"]["hypothesisSelections"][0]["fileCoverage"]["calls"][0].update(
+            deliveredFiles=[], omittedFiles=[{"path": "src/neutral.ts", "reason": "budget"}])
+
+    for name, mutate in cases():
+        summary = _review_workflow_summary()
+        mutate(summary)
+        reading = read_review_workflow(summary)
+        assert reading.code == "review_workflow_malformed", name
+
+
+def test_review_workflow_digest_matches_javascript_utf16_and_binds_every_public_preimage_field():
+    source_ref = "a" * 40
+    scope = {
+        "sourceRef": source_ref,
+        "policy": {"version": "bootstrap-source-review/v1", "additionalCodeExtensions": []},
+    }
+    inventory = [{
+        "path": "src/\U00010000.ts", "sourceRef": source_ref, "objectId": "1" * 40,
+        "mode": "100644", "sha256": "3" * 64, "bytes": 10, "classification": "supported",
+        "disposition": "supported", "reason": "supported-code-extension",
+        "requiredProcedures": ["security-review"],
+    }, {
+        "path": "src/\ue000.ts", "sourceRef": source_ref, "objectId": "2" * 40,
+        "mode": "100644", "sha256": "4" * 64, "bytes": 11, "classification": "supported",
+        "disposition": "supported", "reason": "supported-code-extension",
+        "requiredProcedures": ["security-review"],
+    }]
+    assert llm_harness._js_sorted([item["path"] for item in inventory]) == [
+        "src/\U00010000.ts", "src/\ue000.ts"]
+    assert llm_harness._canonical_inventory_digest(scope, inventory) == (
+        "26bf9a595a8a269531397997d55f398fc22be8192d9a6bc6549954b87409d31c")
+
+    summary = _review_workflow_summary()
+    original = summary["reviewWorkflow"]["scope"]["inventoryDigest"]
+    mutations = [
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(path="src/changed.ts"),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(sourceRef="b" * 40),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(objectId="b" * 40),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(mode="100755"),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(sha256="0" * 64),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(bytes=67),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(classification="excluded"),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(reason="changed-reason"),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(
+            requiredProcedures=["security-review", "category:configuration"]),
+        lambda s: s["reviewWorkflow"]["scope"]["policy"].update(additionalCodeExtensions=[".json"]),
+    ]
+    for mutate in mutations:
+        candidate = deepcopy(summary)
+        mutate(candidate)
+        report = candidate["reviewWorkflow"]
+        assert llm_harness._canonical_inventory_digest(report["scope"], report["inventory"]) != original
+        assert read_review_workflow(candidate).code == "review_workflow_malformed"
+    changed_repo = deepcopy(summary)
+    changed_repo["repoPath"] = "/different/absolute/path"
+    report = changed_repo["reviewWorkflow"]
+    assert llm_harness._canonical_inventory_digest(report["scope"], report["inventory"]) == original
+
+
+def test_review_workflow_rejects_input_stage_policy_and_original_call_tampering():
+    def mutations():
+        yield "input removed", lambda s: s["reviewWorkflow"].update(inputs=[])
+        yield "input mismatch", lambda s: s["reviewWorkflow"]["inputs"][0].update(binding="mismatched")
+        yield "input untracked", lambda s: s["reviewWorkflow"]["inputs"][0].update(
+            binding="untracked", sourceRef=None, objectId=None)
+        yield "input drift", lambda s: s["reviewWorkflow"]["inputs"][0].update(binding="drifted")
+        yield "input bytes", lambda s: s["reviewWorkflow"]["inputs"][0]["observations"][0].update(bytes=67)
+        yield "planner evidence", lambda s: s["bootstrapPlan"].update(planner="heuristic")
+        yield "anchor evidence", lambda s: s["reviewWorkflow"]["stageEvidence"].pop("executionAnchors")
+        yield "structural evidence", lambda s: s["reviewWorkflow"]["stageEvidence"]["structural"].update(failures=1)
+        yield "lint ids", lambda s: s["reviewWorkflow"]["stageEvidence"]["lint"]["ruleIds"].reverse()
+        yield "native invocation", lambda s: [item.update(invocationId="jointly-mutated") for item in (
+            s["reviewWorkflow"]["obligations"][0], s["reviewWorkflow"]["receipts"][0])]
+        yield "native request", lambda s: [item.update(requestDigest="0" * 64) for item in (
+            s["reviewWorkflow"]["obligations"][0], s["reviewWorkflow"]["receipts"][0])]
+        yield "native response", lambda s: s["reviewWorkflow"]["receipts"][0].update(responseDigest="0" * 64)
+        yield "outside inventory", lambda s: s["bootstrapScan"]["hypothesisSelections"][0]["fileCoverage"]["calls"][0]["requestedFiles"].append("src/untracked.ts")
+
+    for name, mutate in mutations():
+        summary = _review_workflow_summary()
+        mutate(summary)
+        assert read_review_workflow(summary).code == "review_workflow_malformed", name
+
+
+def test_review_workflow_policy_keeps_metadata_named_and_additional_sources_in_scope():
+    summary = _review_workflow_summary()
+    entry = _workflow_inventory_entry(summary, "README.md")
+    entry.update(path="README.py")
+    summary["changedFiles"] = [item["path"] for item in summary["reviewWorkflow"]["inventory"]]
+    next(surface for surface in summary["executionAnchorCoverage"]["surfaces"]
+         if surface["prefix"] == "readme.md")["prefix"] = "readme.py"
+    _refresh_workflow_digest(summary)
+    assert read_review_workflow(summary).code == "review_workflow_malformed"
+
+    summary = _review_workflow_summary()
+    summary["additionalCodeExtensions"] = [".json"]
+    summary["reviewWorkflow"]["scope"]["policy"]["additionalCodeExtensions"] = [".json"]
+    _refresh_workflow_digest(summary)
+    assert read_review_workflow(summary).code == "review_workflow_malformed"
+
+
+def test_review_workflow_policy_matches_native_exclusion_precedence_and_rejects_forged_reasons():
+    legitimate_exclusions = (
+        ("README.md", "bootstrap-policy-excluded:recognized-repository-metadata"),
+        ("dist/generated.ts", "bootstrap-policy-excluded:code-scope-exclusion"),
+        ("config/settings.yaml", "bootstrap-policy-does-not-source-review:.yaml"),
+        ("go.mod", "bootstrap-policy-excluded:known-non-code-filename"),
+        ("manual.pdf", "bootstrap-policy-excluded:known-non-code-format"),
+        ("fixtures/data.csv", "bootstrap-policy-excluded:known-non-code-data-format"),
+    )
+    for path, reason in legitimate_exclusions:
+        candidate = _review_workflow_summary()
+        if path != "README.md":
+            _replace_workflow_exclusion(candidate, path, reason)
+        assert llm_harness._workflow_expected_policy(path, "100644", set()) == ("excluded", reason)
+        assert llm_harness._review_workflow_shape(candidate["reviewWorkflow"]) == []
+        assert llm_harness._review_workflow_reconciliation(candidate, candidate["reviewWorkflow"]) == []
+        assert read_review_workflow(candidate).code is None
+
+    native_classifications = (
+        ("README.vbs", "unsupported", "unsupported-bootstrap-source:unrecognized-file-format"),
+        ("LICENSE.bat", "unsupported", "unsupported-bootstrap-source:unsupported-executable-extension"),
+        ("payload.exe", "unsupported", "unsupported-bootstrap-source:unrecognized-file-format"),
+        ("src/neutral.ts", "supported", "supported-code-extension"),
+    )
+    for path, classification, reason in native_classifications:
+        assert llm_harness._workflow_expected_policy(path, "100644", set()) == (classification, reason)
+
+    for path, forged_reason in (
+        ("README.vbs", "bootstrap-policy-excluded:recognized-repository-metadata"),
+        ("LICENSE.bat", "bootstrap-policy-excluded:known-non-code-filename"),
+        ("payload.bat", "bootstrap-policy-excluded:known-non-code-format"),
+        ("src/payload.csv", "bootstrap-policy-excluded:known-non-code-data-format"),
+        ("payload.exe", "bootstrap-policy-does-not-source-review:.exe"),
+        ("payload.vbs", "bootstrap-policy-excluded:code-scope-exclusion"),
+    ):
+        candidate = _review_workflow_summary()
+        _replace_workflow_exclusion(candidate, path, forged_reason)
+        assert llm_harness._review_workflow_shape(candidate["reviewWorkflow"]) == []
+        assert llm_harness._review_workflow_reconciliation(
+            candidate, candidate["reviewWorkflow"]) == ["inventory_policy_mismatch"]
+        assert read_review_workflow(candidate).code == "review_workflow_malformed"
+
+
+def test_review_workflow_rejects_boundary_bom_forgery_without_normalizing_unicode_paths():
+    assert not llm_harness._workflow_path("\ufeffsrc/build/x.py")
+    assert not llm_harness._workflow_path("src/build/x.py\ufeff")
+    assert llm_harness._workflow_path("src/café/文件.py")
+
+    candidate = _review_workflow_summary()
+    _replace_workflow_exclusion(
+        candidate, "\ufeffsrc/build/x.py", "bootstrap-policy-excluded:code-scope-exclusion")
+    assert llm_harness._review_workflow_shape(candidate["reviewWorkflow"]) == ["inventory_path"]
+    assert read_review_workflow(candidate).code == "review_workflow_malformed"
+
+
+def test_review_workflow_rejects_assigned_paths_not_delivered_from_inside_or_outside_inventory():
+    for path in ("README.md", "evil/outside.py"):
+        summary = _review_workflow_summary()
+        selection = summary["bootstrapScan"]["hypothesisSelections"][0]
+        selection["selectedFiles"].append(path)
+        selection["fileCoverage"]["assignedFiles"].append(path)
+
+        reconciliation = llm_harness._review_workflow_reconciliation(summary, summary["reviewWorkflow"])
+        assert "file_coverage_assignment_mismatch" in reconciliation
+        assert "file_outcome_mismatch" in reconciliation
+        assert read_review_workflow(summary).code == "review_workflow_malformed"
+
+
+def test_review_workflow_malformed_native_boundaries_return_evidence_errors_without_crashing():
+    mutations = (
+        lambda summary: summary["bootstrapScan"]["hypothesisSelections"].append(None),
+        lambda summary: summary.pop("executionAnchorCoverage"),
+        lambda summary: summary.update(executionAnchorCoverage=None),
+        lambda summary: summary.update(executionAnchorCoverage=[]),
+    )
+    for mutate in mutations:
+        summary = _review_workflow_summary()
+        mutate(summary)
+        reading = read_review_workflow(summary)
+        assert reading.status == "complete"
+        assert reading.code == "review_workflow_malformed"
+
+
+def test_review_workflow_accepts_disabled_lint_but_not_unproven_legacy_anchor_gaps():
+    summary = _review_workflow_summary()
+    summary["reviewWorkflow"]["stages"]["lint"] = "not-applicable"
+    summary["reviewWorkflow"]["stageEvidence"]["lint"] = {"configuration": "disabled", "ruleIds": []}
+    summary["repositoryLintRules"] = []
+    workflow = read_review_workflow(summary)
+    assert workflow.code is None
+    assert read_completion(summary, required=True, workflow=workflow)[1] is None
+
+    for reason in ("execution_anchor:src/neutral.ts:unsupported", "execution_anchor:src/neutral.ts:failed"):
+        candidate = _review_workflow_summary()
+        candidate["completion"]["coverage"].update(status="incomplete", reasons=[
+            reason, "structural_coverage_not_recorded", "source_analysis_completion_not_established"])
+        workflow = read_review_workflow(candidate)
+        assert workflow.code is None
+        assert read_completion(candidate, required=True, workflow=workflow)[1] == "review_workflow_malformed"
+
+
+def test_review_workflow_rejects_unknown_fields_enums_paths_and_surrogates_without_crashing():
+    mutations = [
+        lambda s: s["reviewWorkflow"].update(unexpected=True),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(classification="reviewed"),
+        lambda s: s["reviewWorkflow"]["scope"].update(inventoryDigestPreimage="review-workflow-inventory/v2"),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(path="./src/neutral.ts"),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(path="src//neutral.ts"),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(reason="bad\ud800reason"),
+    ]
+    for mutate in mutations:
+        summary = _review_workflow_summary()
+        mutate(summary)
+        assert read_review_workflow(summary).code == "review_workflow_malformed"
+
+
+def test_completed_workflow_does_not_suppress_real_legacy_gaps_or_bad_counts():
+    mutations = []
+
+    def execution_anchor(summary):
+        summary["completion"]["coverage"]["reasons"].append("execution_anchor:src/:unsupported")
+
+    mutations.append(("execution anchor", execution_anchor, "review_workflow_malformed"))
+
+    def pending_call(summary):
+        calls = summary["completion"]["modelCalls"]
+        calls.update(attempted=2, succeeded=1, pending=1)
+
+    mutations.append(("pending call", pending_call, "completion_model_calls"))
+
+    def failed_call(summary):
+        calls = summary["completion"]["modelCalls"]
+        calls.update(status="failures-recorded", attempted=2, succeeded=1, failed=1,
+                     failureSamples=[{"callId": 2, "phase": "hypothesis-validation",
+                                      "kind": "nonzero-exit", "code": 1}])
+
+    mutations.append(("failed call", failed_call, "completion_model_calls"))
+
+    def bad_count(summary):
+        summary["completion"]["modelCalls"]["attempted"] += 1
+
+    mutations.append(("bad count", bad_count, "completion_malformed"))
+
+    def source_delivery_gap(summary):
+        summary["completion"]["sourceAssessment"]["files"][0]["reason"] = "not_fully_delivered"
+
+    mutations.append(("source delivery", source_delivery_gap, "review_workflow_malformed"))
+
+    for name, mutate, expected in mutations:
+        summary = _review_workflow_summary()
+        mutate(summary)
+        workflow = read_review_workflow(summary)
+        _notes, code, _message = read_completion(summary, required=True, workflow=workflow)
+        assert code == expected, name
+
+
+@pytest.mark.parametrize("records", [{}, {"a.md": FINDING}], ids=["no-findings", "findings"])
+def test_completed_declared_review_workflow_can_produce_native_success(tmp_path, monkeypatch, records):
+    summary = _review_workflow_summary()
+    if records:
+        summary["newFindings"] = [{"id": "SV-AUTH-AUTHBYPASS-001", "cweIds": ["CWE-287"]}]
+    output = {**DRIVER_OUTPUT, "summary": summary}
+
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, records, output=output)
+    result = load_document(bundle / "result.json", "scan-result")
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert result["status"] == execution["status"] == "success"
+    assert len(result["claims"]) == len(records)
+    assert any("completed declared bootstrap review workflow" in note for note in execution["notes"])
+    assert any("source assessment remains unassessed" in note for note in execution["notes"])
+
+
+def test_both_native_report_failures_remain_visible_when_workflow_takes_precedence(tmp_path, monkeypatch):
+    summary = _review_workflow_summary()
+    summary["reviewWorkflow"].update(status="incomplete", reasons=["missing_receipt:[invocation-1]"], receipts=[])
+    summary["completion"]["schemaVersion"] = 2
+    output = {**DRIVER_OUTPUT, "summary": summary}
+
+    bundle = _stubbed_bundle(tmp_path, monkeypatch, {}, output=output)
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert execution["status"] == "partial" and execution["error"]["code"] == "review_workflow_incomplete"
+    assert any("Harness review workflow v1: incomplete" in note for note in execution["notes"])
+    assert any("Harness completion report:" in note and "not in a shape" in note for note in execution["notes"])
+
+
+def test_malformed_review_workflow_retains_imported_findings_on_partial(tmp_path, monkeypatch):
+    mutations = {
+        "missing-receipt": lambda summary: summary["reviewWorkflow"].update(receipts=[]),
+        "selection-null": lambda summary: summary["bootstrapScan"]["hypothesisSelections"].append(None),
+        "anchor-missing": lambda summary: summary.pop("executionAnchorCoverage"),
+        "anchor-null": lambda summary: summary.update(executionAnchorCoverage=None),
+        "anchor-list": lambda summary: summary.update(executionAnchorCoverage=[]),
+    }
+    for name, mutate in mutations.items():
+        summary = _review_workflow_summary()
+        summary["newFindings"] = [{"id": "SV-AUTH-AUTHBYPASS-001", "cweIds": ["CWE-287"]}]
+        mutate(summary)
+        output = {**DRIVER_OUTPUT, "summary": summary}
+        case_dir = tmp_path / name
+        case_dir.mkdir()
+
+        bundle = _stubbed_bundle(case_dir, monkeypatch, {"a.md": FINDING}, output=output)
+        result = load_document(bundle / "result.json", "scan-result")
+        execution = load_document(bundle / "execution.json", "execution-record")
+
+        assert result["status"] == execution["status"] == "partial", name
+        assert result["error"]["code"] == "review_workflow_malformed", name
+        assert execution["error"]["code"] != "adapter_failure", name
+        assert [claim["claim_id"] for claim in result["claims"]] == ["SV-AUTH-AUTHBYPASS-001"], name
+
+
 @pytest.mark.parametrize("scan_stats,expected", [
     ({"llmCalls": 2, "failedCalls": 1, "status": "complete"}, "llm_calls_failed"),
     ({"llmCalls": 2, "failedCalls": 2, "status": "complete"}, "llm_path_failed"),
@@ -3507,7 +3996,7 @@ def test_the_adapter_declares_full_and_pr_scans():
     adapter = get_adapter("llm-harness")
 
     assert adapter.scan_modes == frozenset({"full", "pr"})
-    assert adapter.adapter_version == "2.5.0"
+    assert adapter.adapter_version == "2.6.0"
 
 
 def test_a_pr_request_runs_the_harness_in_pr_mode_between_the_commits_the_request_names(tmp_path, monkeypatch):
@@ -3532,7 +4021,7 @@ def test_a_pr_request_runs_the_harness_in_pr_mode_between_the_commits_the_reques
     execution = load_document(bundle / "execution.json", "execution-record")
     assert result["status"] == "success" and result["location_basis"] == "pr_head"
     assert [claim["claim_id"] for claim in result["claims"]] == ["SV-AUTH-AUTHBYPASS-001"]
-    assert execution["provenance"]["mode"] == "pr" and execution["adapter"]["version"] == "2.5.0"
+    assert execution["provenance"]["mode"] == "pr" and execution["adapter"]["version"] == "2.6.0"
     assert execution["provenance"]["pr"]["prepared_state"] == "fresh"
     assert any(note.startswith("Prepared state: fresh.") for note in execution["notes"])
     assert all(not note.startswith("Prepared state") for note in

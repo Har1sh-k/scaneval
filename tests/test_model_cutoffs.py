@@ -110,6 +110,18 @@ def test_unknown_models_and_routes_cannot_certify_universal_eligibility(registry
     assert report["eligible_total"] == 0
 
 
+@pytest.mark.parametrize("source_url", [
+    "https://example.com/advisory\n",
+    "https://:secret@example.com/advisory",
+    "https://example.com:bad/advisory",
+])
+def test_malformed_artifact_sources_cannot_authorize_eligibility(registry, source_url):
+    c = candidate()
+    c["chronology"]["public_artifacts"][0]["source_url"] = source_url
+    with pytest.raises(CutoffError, match="artifact kind and source URL required"):
+        result(registry, c)
+
+
 def test_pending_chronology_and_earlier_artifact_prevent_eligibility(registry):
     c = candidate(status="pending")
     pending = result(registry, c)["candidates"][0]
@@ -333,8 +345,40 @@ def test_committed_research_candidates_remain_pending(registry):
     root = Path(__file__).resolve().parents[1]
     research = json.loads((root / "docs/research/recent-cve-candidates.json").read_text())
     chronology = json.loads((root / "docs/research/recent-cve-chronology.json").read_text())
+    assert len(research["candidates"]) == 10
     assert {c["cve_id"] for c in research["candidates"]} == {c["cve_id"] for c in chronology["candidates"]}
     assert all(c["machine_reviewed"] is False and c["temporally_eligible"] is False for c in research["candidates"])
+    assert all(c["chronology"]["status"] == "pending" and c["chronology"]["public_artifacts"] == []
+               for c in chronology["candidates"])
+
+    by_id = {c["cve_id"]: c for c in research["candidates"]}
+    low_cases = [by_id[cve] for cve in ("CVE-2026-105742", "CVE-2026-106449")]
+    for case in low_cases:
+        assert case["status"] == "research_candidate_pending"
+        assert case["candidate_vulnerable_revision"]["introducing_commit"] is None
+        assert case["dates"]["earliest_public_evidence_lower_bound"] is None
+        assert case["dates"]["exhaustive_prior_public_history_checked"] is False
+        assert case["research_notes"]["research_update_date"] == "2026-10-29"
+        provenance = case["research_notes"]["exposure_provenance"]
+        assert provenance["limitation"].strip()
+        assert provenance["authenticated_model_invocation_receipt"] is False
+        assert provenance["establishes_training_contamination"] is False
+
+    docling = by_id["CVE-2026-105742"]
+    assert docling["research_notes"]["introduction_candidate"]["merge_commit_sha"] == \
+        "0a15088e63c08842f5cc3b85b55f06231e5bcf60"
+    assert docling["research_notes"]["exposure_provenance"]["verification_status"] == \
+        "verified_in_retained_primary_source_extract"
+
+    lz4 = by_id["CVE-2026-106449"]
+    ancestry = {item["relationship"]: item for item in lz4["research_notes"]["release_ancestry"]}
+    assert ancestry["v1.11.3_to_candidate_vulnerable_revision"]["ahead_by"] == 26
+    assert ancestry["v1.11.3_to_candidate_vulnerable_revision"]["behind_by"] == 0
+    assert ancestry["candidate_fix_to_v1.11.4"]["ahead_by"] == 2
+    assert ancestry["candidate_fix_to_v1.11.4"]["behind_by"] == 0
+    assert lz4["research_notes"]["exposure_provenance"]["verification_status"] == \
+        "verified_in_retained_primary_source_extract"
+
     report = assess_candidates(registry, chronology, ["claude-opus-5-5"])
     assert report["eligible_total"] == 0
     assert all(c["status"] == "unresolved" and c["earliest_public_evidence_lower_bound"] is None for c in report["candidates"])

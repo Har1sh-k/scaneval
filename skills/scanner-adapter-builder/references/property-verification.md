@@ -26,3 +26,9 @@ A small finite-domain exhaustive checker is appropriate when it states:
 - the trusted base and any assumptions or unmodeled behavior.
 
 Call fuzzing, property tests, and finite-domain exhaustive enumeration what they are. They can provide strong bounded evidence, but they are not a formal proof of the whole implementation. Likewise, a proved abstract contract plus differential tests still leaves an implementation-correspondence gap unless the link from production code to the model is itself proved. Do not claim bug-free behavior, complete formal verification, or guarantees beyond the stated bounds.
+
+## Distinguish fault checks
+
+Abstract fault-function self-tests—always accept, always reject, ignore a required receipt, collapse duplicates, or ignore native failure—show that the checker detects deliberately faulty models. Runtime suppression of a real production rejection guard instead yields a concrete implementation counterexample. Neither is compiled source mutation or a whole-program formal proof.
+
+For either method, state the exact production entrypoint and version, bounds, fixture provenance, trusted base, and unmodeled domain; retain counterexamples as regressions. Do not hardcode changing case totals or link private run artifacts. [ScanEval issue #104](https://github.com/Har1sh-k/scaneval/issues/104) and [securevibes-agent PR #206](https://github.com/anshumanbh/securevibes-agent/pull/206) are ongoing work, not evidence that an upstream change is merged, accepted, or approved.
