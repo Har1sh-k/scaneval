@@ -34,13 +34,14 @@ structural/lint evidence, and legacy completion. The healthy outer template is
 `tests/fixtures/sv-review-workflow-summary.json`, regenerated from a deterministic upstream engine
 run whose imports were bound to producer head `73ae7aa9ba14425abb066306cfabfea4fd83d3eb`, with no
 model/network call. Its legitimate `README.md` metadata exclusion remains part of a complete
-workflow.
+workflow; generated conformance cases also cover native path, configuration, known-filename,
+known-format, and data-segment exclusions.
 
 The trusted computing base is the oracle, materializer, fixture, Python runtime, and checker. The
 checker emits source SHA-256 values and the current Git revision; generated JSON stays outside the
 repository.
 
-## Finite domain: 834 cases
+## Finite domain: 850 cases
 
 1. **Inventory/assignment product — 144.** One or two files; one or two procedures; each file is
    supported, unassigned, or unsupported; every ordered obligation plan of length zero, one, or two
@@ -59,12 +60,14 @@ repository.
 7. **All-excluded reachability — 1.** Nonempty exclusion-only inventory with exact `not-required`
    stages and no review work.
 8. **Finding reachability — 2.** Valid independent two-file workflows with zero and one finding.
-9. **Malformed boundaries — 20.** Container/type/integer, duplicate, procedure, file, terminal, and
-   completion-counter boundaries.
-10. **Corrected-contract guards — 27.** Digest/preimage, policy, metadata-named code, a positive
-    documented `README.md` exclusion, self-consistent forged metadata reasons on unknown,
-    executable, and arbitrary extensionless names, additional source extensions, inputs,
-    planner/anchor/structural evidence, disabled lint, original invocation/request/response
+9. **Malformed boundaries — 24.** Container/type/integer, duplicate, procedure, file, terminal,
+   completion-counter, malformed hypothesis-selection entry, and missing/null/list execution-anchor
+   summary boundaries.
+10. **Corrected-contract guards — 39.** Digest/preimage, exact native classification/reason policy,
+    metadata-named code, positive metadata/path/configuration/known-filename/known-format/
+    data-segment exclusions, self-consistent forged metadata and non-metadata exclusion reasons,
+    additional source extensions, inputs, planner/anchor/structural evidence, assigned-but-
+    undelivered in- and out-of-inventory paths, disabled lint, original invocation/request/response
     identity, obligation bytes, head/mode/model cardinality, positive reasons, out-of-inventory
     calls, `not-required` stage failure, and unknown field/enum cases.
 
@@ -74,8 +77,8 @@ arbitrary object graphs.
 ## Non-vacuity and faulty-function checks
 
 The checker requires accepted witnesses for complete workflows, all-excluded `not-required`,
-explicitly disabled lint, zero findings, nonzero findings, and independent multi-file review. It
-also requires rejecting witnesses for every critical family.
+explicitly disabled lint, zero findings, nonzero findings, independent multi-file review, and each
+native exclusion family above. It also requires rejecting witnesses for every critical family.
 
 Five intentionally faulty **abstract acceptance functions** remain honestly labelled as checker
 self-tests: always accept, always reject, ignore missing receipt, collapse duplicate receipts, and
@@ -88,10 +91,10 @@ concrete counterexample:
 - mismatched input binding;
 - planner stage-evidence mismatch;
 - original native-call to obligation/receipt binding;
-- forged recognized-repository-metadata policy on an unsupported suffix.
+- forged native inventory classification/reason policy.
 
 Each guard-removal witness is first rejected by unmodified production and then accepted only by the
-faulty patched decision. This verifies that digest, input, stage, original-call, and metadata-policy
+faulty patched decision. This verifies that digest, input, stage, original-call, and inventory-policy
 negatives are meaningful rather than tag-only oracle cases.
 
 ## Reproduction
@@ -109,8 +112,8 @@ PYTHONPATH=$PWD/src .venv/bin/python -m pytest -q \
   -k 'review_workflow or completed_declared_review_workflow or legacy_completion_without_review_workflow'
 ```
 
-A conforming run reports `checked: 834`, `expected_accepted: 35`,
-`expected_rejected: 799`, no production mismatch, all required witnesses, and all ten faulty
+A conforming run reports `checked: 850`, `expected_accepted: 40`,
+`expected_rejected: 810`, no production mismatch, all required witnesses, and all ten faulty
 functions detected. Plain `pytest` collection is supported because the test loads the checker by
 absolute file path rather than relying on the repository root being on `sys.path`.
 
@@ -118,6 +121,6 @@ absolute file path rather than relying on the repository root being on `sys.path
 
 This checker does not prove producer truthfulness, Git inventory capture, actual source delivery,
 cryptographic security, semantic model understanding, provider identity, network/container
-behavior, or behavior outside the finite domain. It does not replace fresh review, Anshuman's pending review
-of upstream PR 206, the coordinated upstream pin, or bounded live smoke; it makes no readiness
-claim.
+behavior, or behavior outside the finite domain. It does not replace fresh review, Anshuman's
+pending review of upstream PR 206, the coordinated upstream pin, or bounded live smoke; it makes no
+readiness claim.

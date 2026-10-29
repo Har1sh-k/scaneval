@@ -48,18 +48,22 @@ Positive credit additionally requires:
 
 1. scope mode and source ref agree with `summary.mode` and `summary.headRef`; the policy agrees with
    the original summary, and the sorted inventory agrees with the original bootstrap file surface;
-2. built-in source extensions and declared additional source extensions cannot receive a metadata
-   bypass. Repository metadata recognition is limited to extensionless README/LICENSE/COPYING/
-   NOTICE and the explicit `.md`, `.rst`, `.adoc`, and `.txt` forms. `README.py`, `LICENSE.js`, and
-   `NOTICE.php` remain source unless the exact supported path-exclusion policy applies;
-   `README.vbs`, `LICENSE.bat`, and other unknown or executable suffixes remain unsupported with
-   their native reasons. A self-consistent export cannot forge the recognized-metadata reason for
-   one of those paths or for an arbitrary name. Original classification, reason, and derived
-   disposition remain distinct and consistent;
+2. every inventory classification and reason independently equals native `73ae7aa` policy with its
+   exact precedence: non-regular mode, path exclusion, configured extension, bootstrap source,
+   repository metadata, known non-code filename/format/data segment, extensionless source,
+   planner-supported-but-not-bootstrap configuration/template/JSON, unsupported executable, then
+   unknown format. Repository metadata is limited to extensionless README/LICENSE/COPYING/NOTICE
+   and their explicit `.md`, `.rst`, `.adoc`, and `.txt` forms. `README.py`, `LICENSE.js`, and
+   `NOTICE.php` remain source unless exact path exclusion applies; `README.vbs`, `LICENSE.bat`, and
+   other unknown or executable suffixes remain unsupported with their native reasons. Forged
+   metadata, known-non-code, no-source-review, or code-scope-exclusion reasons cannot acquire
+   success. Original classification, reason, and derived disposition remain distinct;
 3. every supported source is assigned, every obligation file matches inventory bytes/procedures,
    and every obligation has exactly one matching receipt with completed terminals;
 4. every native dispatched call has unique invocation/request/response identity and exact ordered
-   agreement with its obligation and receipt. Requested or delivered paths outside inventory are
+   agreement with its obligation and receipt. Assigned paths are a subset of delivered paths,
+   delivered paths are inventory-backed, and native `fileOutcomes` exactly cover the ordered union
+   of assigned, requested, and omitted paths. Requested or delivered paths outside inventory are
    blocking;
 5. every observed primary, related, or configuration/native input is inventory-backed and
    `matched`. Supported primary observations must exactly equal inventory SHA-256 and byte count,
@@ -87,8 +91,9 @@ all other legacy gaps remain blocking. Findings are preserved on partial outcome
 
 The accepted outcome is labelled only a **completed declared bootstrap review workflow**. It does
 not attest a provider/model revision, prove semantic understanding, assess source as safe, or make
-a whole-repository safety claim. Excluded metadata/configuration is an explicit workflow scope
-limitation, not evidence that the file is harmless.
+a whole-repository safety claim. Excluded metadata, known non-code files, configuration, and
+policy-excluded paths are explicit workflow scope limitations, not evidence that a file is
+harmless.
 
 ## Fixture, verification, and rollout
 
@@ -96,9 +101,10 @@ limitation, not evidence that the file is harmless.
 upstream engine run whose imports were bound to the checkout at
 `73ae7aa9ba14425abb066306cfabfea4fd83d3eb`, using an in-process test runner and no model/network
 call. The fixture includes a legitimate excluded `README.md` in an otherwise complete workflow.
-The bounded consumer checker exercises 834 finite cases, including all seven stage bits,
-self-consistent forged metadata exclusions, and concrete runtime simulations that remove digest,
-input, stage-evidence, original-call, and metadata-policy guards. See
+The bounded consumer checker exercises 850 finite cases, including all seven stage bits, malformed
+native-summary boundaries, assigned-but-undelivered counterexamples, self-consistent forged native
+policy exclusions, and concrete runtime simulations that remove digest, input, stage-evidence,
+original-call, and inventory-policy guards. See
 [SV completion bounded verification](sv-completion-bounded-verification.md).
 
 Consumer support is not a readiness claim. Upstream PR 206 remains pending Anshuman review and is

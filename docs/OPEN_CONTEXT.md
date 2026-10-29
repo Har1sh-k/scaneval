@@ -302,9 +302,13 @@ newer SV-Agent builds. A reconciled positive report is labelled only as a **comp
 bootstrap review workflow**. The consumer recomputes the portable public inventory digest and
 reconciles original classification/policy, observed native inputs, dispatched-call
 invocation/request/response identity, obligations, terminals, and planner/anchor/structural/lint
-stage evidence. Repository metadata recognition is limited to extensionless README/LICENSE/
-COPYING/NOTICE and `.md`, `.rst`, `.adoc`, or `.txt`; unknown and executable suffixes remain
-unsupported and cannot forge the metadata-exclusion reason. Source assessment remains
+stage evidence. Every inventory classification and reason is checked against the exact native
+`73ae7aa` precedence for path exclusions, configured and built-in source, repository metadata,
+known non-code files, planner-only formats, executable suffixes, and unknown formats. Repository
+metadata recognition is limited to extensionless README/LICENSE/COPYING/NOTICE and `.md`, `.rst`,
+`.adoc`, or `.txt`; unsupported paths cannot forge metadata, known-non-code, no-source-review, or
+code-scope-exclusion reasons. Assigned paths must be delivered and inventory-backed, and native
+file outcomes must cover the assigned/requested/omitted union. Source assessment remains
 `unassessed`; this is native producer-declared and cross-checked byte identity, not provider
 attestation, semantic proof, or a claim that source is safe. Exact legacy execution-anchor gaps may
 be explained only by inventory-backed explicit exclusions; failed anchors and unsupported source

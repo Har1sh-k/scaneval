@@ -623,6 +623,10 @@ def malformed_cases() -> Iterable[Case]:
         mutation("completion-schema-bool", lambda s: s["completion"].update(schemaVersion=True)),
         mutation("completion-count-bool", lambda s: s["completion"]["modelCalls"].update(attempted=True)),
         mutation("completion-count-too-large", lambda s: s["completion"]["modelCalls"].update(attempted=2**53)),
+        mutation("hypothesis-selection-entry", lambda s: s["bootstrapScan"]["hypothesisSelections"].append(None)),
+        mutation("execution-anchor-missing", lambda s: s.pop("executionAnchorCoverage")),
+        mutation("execution-anchor-null", lambda s: s.update(executionAnchorCoverage=None)),
+        mutation("execution-anchor-list", lambda s: s.update(executionAnchorCoverage=[])),
     ]
     yield from cases
 
@@ -674,26 +678,55 @@ def contract_guard_cases() -> Iterable[Case]:
     yield case("recognized-metadata-readme-md", lambda _summary: None,
                "reach:recognized_metadata", state=mixed_state, expected=True)
 
-    def forged_metadata_exclusion(path: str) -> Callable[[dict], None]:
+    def replace_exclusion(path: str, reason: str | None = None) -> Callable[[dict], None]:
         def mutate(summary: dict) -> None:
             report = summary["reviewWorkflow"]
             entry = next(item for item in report["inventory"] if item["path"] == "README.md")
             old_prefix = llm_harness._profile_prefix(entry["path"])
-            entry["path"] = path
+            expected_classification, expected_reason = llm_harness._workflow_expected_policy(
+                path, entry["mode"], set(report["scope"]["policy"]["additionalCodeExtensions"]))
+            entry.update(path=path, classification="excluded", disposition="excluded",
+                         reason=reason or expected_reason)
+            if expected_classification != "excluded" and reason is None:
+                raise AssertionError(f"{path} is not a native exclusion")
+            report["inventory"].sort(key=lambda item: llm_harness._js_code_units(item["path"]))
             summary["changedFiles"] = [item["path"] for item in report["inventory"]]
+            new_prefix = llm_harness._profile_prefix(path)
             for surface in summary["executionAnchorCoverage"]["surfaces"]:
                 if surface["prefix"] == old_prefix:
-                    surface["prefix"] = llm_harness._profile_prefix(path)
+                    surface["prefix"] = new_prefix
+            summary["executionAnchorCoverage"]["surfaces"].sort(
+                key=lambda item: llm_harness._js_code_units(item["prefix"]))
             report["scope"]["inventoryDigest"] = llm_harness._canonical_inventory_digest(
                 report["scope"], report["inventory"])
         return mutate
 
-    yield case("forged-metadata-readme-vbs", forged_metadata_exclusion("README.vbs"),
-               "guard:metadata", state=mixed_state)
-    yield case("forged-metadata-license-bat", forged_metadata_exclusion("LICENSE.bat"),
-               state=mixed_state)
-    yield case("forged-metadata-arbitrary-extensionless", forged_metadata_exclusion("arbitraryname"),
-               state=mixed_state)
+    for name, path, tag in (
+        ("recognized-code-scope-exclusion", "dist/generated.ts", "reach:code_scope_exclusion"),
+        ("recognized-no-source-review", "config/settings.yaml", "reach:no_source_review"),
+        ("recognized-known-non-code-filename", "go.mod", "reach:known_non_code_filename"),
+        ("recognized-known-non-code-format", "manual.pdf", "reach:known_non_code_format"),
+        ("recognized-known-non-code-data", "fixtures/data.csv", "reach:known_non_code_data"),
+    ):
+        yield case(name, replace_exclusion(path), tag, state=mixed_state, expected=True)
+
+    yield case("forged-metadata-readme-vbs", replace_exclusion(
+        "README.vbs", "bootstrap-policy-excluded:recognized-repository-metadata"), state=mixed_state)
+    yield case("forged-metadata-license-bat", replace_exclusion(
+        "LICENSE.bat", "bootstrap-policy-excluded:recognized-repository-metadata"), state=mixed_state)
+    yield case("forged-metadata-arbitrary-extensionless", replace_exclusion(
+        "arbitraryname", "bootstrap-policy-excluded:recognized-repository-metadata"), state=mixed_state)
+    yield case("forged-known-non-code-filename", replace_exclusion(
+        "LICENSE.bat", "bootstrap-policy-excluded:known-non-code-filename"),
+        "guard:policy", state=mixed_state)
+    yield case("forged-known-non-code-format", replace_exclusion(
+        "payload.bat", "bootstrap-policy-excluded:known-non-code-format"), state=mixed_state)
+    yield case("forged-known-non-code-data", replace_exclusion(
+        "src/payload.csv", "bootstrap-policy-excluded:known-non-code-data-format"), state=mixed_state)
+    yield case("forged-no-source-review", replace_exclusion(
+        "payload.exe", "bootstrap-policy-does-not-source-review:.exe"), state=mixed_state)
+    yield case("forged-code-scope-exclusion", replace_exclusion(
+        "payload.vbs", "bootstrap-policy-excluded:code-scope-exclusion"), state=mixed_state)
 
     def additional_extension_bypass(summary: dict) -> None:
         report = summary["reviewWorkflow"]
@@ -764,6 +797,16 @@ def contract_guard_cases() -> Iterable[Case]:
 
     yield case("guard-call-outside-inventory", call_outside_inventory)
 
+    def assigned_but_undelivered(path: str) -> Callable[[dict], None]:
+        def mutate(summary: dict) -> None:
+            selection = summary["bootstrapScan"]["hypothesisSelections"][0]
+            selection["selectedFiles"].append(path)
+            selection["fileCoverage"]["assignedFiles"].append(path)
+        return mutate
+
+    yield case("guard-assigned-undelivered-inventory", assigned_but_undelivered("README.md"))
+    yield case("guard-assigned-undelivered-outside-inventory", assigned_but_undelivered("evil/outside.py"))
+
     excluded_state = AbstractState("not-required", (FileState(0, "excluded"),), (), (),
                                    completion=CompletionState(mode="not-required"))
     yield case("not-required-failing-stage", lambda s: s["reviewWorkflow"]["stages"].update(
@@ -784,8 +827,8 @@ def generated_cases() -> list[Case]:
     names = [case.name for case in cases]
     if len(names) != len(set(names)):
         raise AssertionError("generated case names are not unique")
-    if len(cases) != 834:
-        raise AssertionError(f"finite-domain drift: expected 834 cases, generated {len(cases)}")
+    if len(cases) != 850:
+        raise AssertionError(f"finite-domain drift: expected 850 cases, generated {len(cases)}")
     return cases
 
 
@@ -805,6 +848,11 @@ def required_witnesses(cases: list[Case], decisions: dict[str, Decision]) -> dic
         "accepted_findings": lambda case: "reach:findings:1" in case.tags,
         "accepted_disabled_lint": lambda case: "reach:disabled_lint" in case.tags,
         "accepted_recognized_metadata": lambda case: "reach:recognized_metadata" in case.tags,
+        "accepted_code_scope_exclusion": lambda case: "reach:code_scope_exclusion" in case.tags,
+        "accepted_no_source_review": lambda case: "reach:no_source_review" in case.tags,
+        "accepted_known_non_code_filename": lambda case: "reach:known_non_code_filename" in case.tags,
+        "accepted_known_non_code_format": lambda case: "reach:known_non_code_format" in case.tags,
+        "accepted_known_non_code_data": lambda case: "reach:known_non_code_data" in case.tags,
         "rejected_unassigned": lambda case: case.name == "inventory-f1-p1-dunassigned-a1",
         "rejected_unsupported": lambda case: "inventory:unsupported" in case.tags,
         "rejected_missing_receipt": lambda case: "fault:missing_receipt_only" in case.tags,
@@ -829,6 +877,11 @@ def required_witnesses(cases: list[Case], decisions: dict[str, Decision]) -> dic
         "rejected_unknown_metadata_suffix": lambda case: case.name == "forged-metadata-readme-vbs",
         "rejected_executable_metadata_suffix": lambda case: case.name == "forged-metadata-license-bat",
         "rejected_extensionless_metadata_forgery": lambda case: case.name == "forged-metadata-arbitrary-extensionless",
+        "rejected_forged_known_non_code_filename": lambda case: case.name == "forged-known-non-code-filename",
+        "rejected_forged_known_non_code_format": lambda case: case.name == "forged-known-non-code-format",
+        "rejected_forged_known_non_code_data": lambda case: case.name == "forged-known-non-code-data",
+        "rejected_forged_no_source_review": lambda case: case.name == "forged-no-source-review",
+        "rejected_forged_code_scope_exclusion": lambda case: case.name == "forged-code-scope-exclusion",
         "rejected_additional_extension_bypass": lambda case: case.name == "additional-extension-bypass",
         "rejected_original_invocation": lambda case: case.name == "guard-original-invocation",
         "rejected_original_request": lambda case: case.name == "guard-original-request",
@@ -839,6 +892,12 @@ def required_witnesses(cases: list[Case], decisions: dict[str, Decision]) -> dic
         "rejected_multiple_models": lambda case: case.name == "guard-multiple-models",
         "rejected_positive_reasons": lambda case: case.name == "guard-positive-reasons",
         "rejected_call_outside_inventory": lambda case: case.name == "guard-call-outside-inventory",
+        "rejected_assigned_undelivered_inventory": lambda case: case.name == "guard-assigned-undelivered-inventory",
+        "rejected_assigned_undelivered_outside_inventory": lambda case: case.name == "guard-assigned-undelivered-outside-inventory",
+        "rejected_malformed_selection_entry": lambda case: case.name == "hypothesis-selection-entry",
+        "rejected_missing_anchor_summary": lambda case: case.name == "execution-anchor-missing",
+        "rejected_null_anchor_summary": lambda case: case.name == "execution-anchor-null",
+        "rejected_list_anchor_summary": lambda case: case.name == "execution-anchor-list",
         "rejected_not_required_stage": lambda case: case.name == "not-required-failing-stage",
         "rejected_unknown_field": lambda case: case.name == "unknown-report-field",
         "rejected_unknown_enum": lambda case: case.name == "unknown-classification",
@@ -910,9 +969,9 @@ def mutant_results(cases: list[Case]) -> dict[str, dict]:
             "original_obligation_set_mismatch",
         }) if "guard:original" in case.tags else _production_acceptor(case, summary)
 
-    def remove_metadata_policy_guard(case: Case, summary: dict) -> bool:
+    def remove_inventory_policy_guard(case: Case, summary: dict) -> bool:
         return without_guards(summary, reconciliation={"inventory_policy_mismatch"}) \
-            if "guard:metadata" in case.tags else _production_acceptor(case, summary)
+            if "guard:policy" in case.tags else _production_acceptor(case, summary)
 
     mutants = {
         "always_accept": always_accept,
@@ -924,7 +983,7 @@ def mutant_results(cases: list[Case]) -> dict[str, dict]:
         "remove_input_guard": remove_input_guard,
         "remove_stage_evidence_guard": remove_stage_evidence_guard,
         "remove_original_binding_guards": remove_original_binding_guards,
-        "remove_metadata_policy_guard": remove_metadata_policy_guard,
+        "remove_inventory_policy_guard": remove_inventory_policy_guard,
     }
     results = {}
     for name, acceptor in mutants.items():
