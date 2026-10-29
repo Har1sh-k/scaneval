@@ -532,6 +532,29 @@ def native_record(*findings: dict, path: str = "src/example.go",
     }
 
 
+def native_git_info() -> dict:
+    return {
+        "recentCommitters": [{"name": "A", "email": "a@example.com",
+                              "date": "2026-09-25T12:00:00.000Z"}],
+        "enrichedAt": "2026-09-25T12:03:00.000Z",
+        "ownership": {
+            "contributors": [{"email": "a@example.com", "name": "A",
+                              "github_username": "a", "score": 1,
+                              "context": "owner", "last_contrib": "today"}],
+            "escalationTeams": [{
+                "name": "Security", "slug": "security", "source": "fixture",
+                "escalation_path_id": "ep-1", "slack_channel_id": None,
+                "manager": {"email": "manager@example.com", "slack_user_id": "U1"},
+                "current_oncall": {"name": "On Call", "email": "oncall@example.com",
+                                   "slack_user_id": "U2", "github_username": "oncall"},
+            }],
+            "approvers": [{"owner": "security", "owner_type": "team", "pattern": None,
+                           "is_primary": True, "is_direct": False}],
+            "fetchedAt": "2026-09-25T12:03:00.000Z",
+        },
+    }
+
+
 def fake_deepsec_root(tmp_path: Path, **control) -> Path:
     """A DeepSec installation whose executable is the fake CLI above, with its control file."""
     root = tmp_path / "deepsec-workspace-install"
@@ -2299,6 +2322,138 @@ def test_an_invalid_resolved_revalidation_is_not_classified_as_an_intended_exclu
                    for note in execution["notes"])
 
 
+@pytest.mark.parametrize(("collection", "key"), [
+    ("escalationTeams", "slack_channel_id"),
+    ("approvers", "pattern"),
+])
+def test_missing_required_nullable_ownership_key_invalidates_a_resolved_record(
+        tmp_path, monkeypatch, collection, key):
+    """Nullable means an explicit null is valid; it does not make the key optional."""
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            record["findings"][0]["revalidation"] = native_revalidation("fixed")
+            record["gitInfo"] = native_git_info()
+            record["gitInfo"]["ownership"][collection][0].pop(key)
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    result, execution = documents(invoke(tmp_path, root))
+
+    assert result["status"] == "partial" and result["error"]["code"] == "import_loss"
+    assert len(result["claims"]) == 1, "the other valid record remains usable"
+    assert any("Native load reconciliation failed closed" in note and key in note
+               and "is missing" in note for note in execution["notes"])
+    assert not any("revalidation verdict 'fixed'" in note for note in execution["notes"])
+
+
+def test_explicit_null_nullable_ownership_keys_are_valid_controls(tmp_path, monkeypatch):
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            record["findings"][0]["revalidation"] = native_revalidation("fixed")
+            record["gitInfo"] = native_git_info()
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    result, execution = documents(invoke(tmp_path, root))
+
+    assert result["status"] == "success" and len(result["claims"]) == 1
+    assert any("1 with revalidation verdict 'fixed'" in note for note in execution["notes"])
+    assert not any("Native load reconciliation failed closed" in note for note in execution["notes"])
+
+
+def test_nan_in_an_unknown_record_key_is_a_controlled_record_read_failure_not_an_exclusion(
+        tmp_path, monkeypatch):
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            record["analysisHistory"] = []
+            record["unused"] = float("nan")
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    result, execution = documents(invoke(tmp_path, root))
+
+    assert result["status"] == "partial" and result["error"]["code"] == "import_loss"
+    assert len(result["claims"]) == 1
+    assert any("DeepSec record not read" in note and "non-standard JSON constant NaN" in note
+               for note in execution["notes"])
+    assert not any("actual empty analysisHistory" in note for note in execution["notes"])
+
+
+@pytest.mark.parametrize(("constant", "token"), [
+    (float("nan"), "NaN"), (float("inf"), "Infinity"), (float("-inf"), "-Infinity"),
+])
+def test_nonstandard_model_config_constants_make_a_resolved_record_unreadable(
+        tmp_path, monkeypatch, constant, token):
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            record["findings"][0]["revalidation"] = native_revalidation("fixed")
+            record["analysisHistory"][-1]["modelConfig"]["unused"] = constant
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    result, execution = documents(invoke(tmp_path, root))
+
+    assert result["status"] == "partial" and result["error"]["code"] == "import_loss"
+    assert len(result["claims"]) == 1
+    assert any(f"non-standard JSON constant {token}" in note for note in execution["notes"])
+    assert not any("revalidation verdict 'fixed'" in note for note in execution["notes"])
+
+
+def test_a_nonstandard_constant_in_the_export_is_an_unreadable_export(tmp_path, monkeypatch):
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "export":
+            export_path = Path(kwargs["cwd"]).parent / "deepsec-export.json"
+            exported = json.loads(export_path.read_text(encoding="utf-8"))
+            exported[0]["unused"] = float("nan")
+            export_path.write_text(json.dumps(exported), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    result, execution = documents(invoke(tmp_path, root))
+
+    assert result["status"] == "error" and result["error"]["code"] == "unreadable_export"
+    assert result["claims"] == []
+    assert "non-standard JSON constant NaN" in result["error"]["message"]
+    assert execution["status"] == "error"
+
+
 @pytest.mark.parametrize("damage", ["record-envelope", "finding-evidence"])
 def test_native_schema_damage_fails_closed_while_preserving_exported_claims(
         tmp_path, monkeypatch, damage):
@@ -3542,6 +3697,64 @@ def test_an_exhausted_quota_is_partial_with_the_source_deepsec_named_when_some_f
                for note in outcome.notes)
     assert any("DeepSec's own summary said Anthropic API credits exhausted, 1 errored batch(es)" in note
                for note in outcome.notes)
+
+
+@pytest.mark.parametrize(("control", "expected_code"), [
+    ({"quota_at_batch": 1}, "quota_exhausted"),
+    ({"fail_batches": [1]}, "deepsec_batches_failed"),
+])
+def test_status_only_native_validation_does_not_outrank_quota_or_failed_batch(
+        tmp_path, monkeypatch, control, expected_code):
+    root = fake_deepsec_root(tmp_path, **control)
+    workspace, pr = pr_workspace(
+        tmp_path, {"src/a.js": "1\n", "src/b.js": "2\n", "src/c.js": "3\n"})
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "export":
+            records = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))
+            extra = native_record(path="src/status-only.js")
+            extra["status"] = "not-a-deepsec-status"
+            (records[0].parent / "status-only.js.json").write_text(
+                json.dumps(extra), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr, batch_size=1)
+
+    assert outcome.status == "partial" and outcome.error["code"] == expected_code
+    assert outcome.claims, "claims from finished files remain available"
+    assert any("Native load reconciliation failed closed" in note and "record.status" in note
+               for note in outcome.notes)
+
+
+def test_real_import_loss_precedes_invalid_status_even_when_no_pr_file_remains_finished(
+        tmp_path, monkeypatch):
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "export":
+            records = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))
+            for index, record_path in enumerate(records):
+                record = json.loads(record_path.read_text(encoding="utf-8"))
+                record["status"] = "not-a-deepsec-status"
+                if index == 0:
+                    record.pop("lastScannedAt")
+                record_path.write_text(json.dumps(record), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
+
+    assert outcome.status == "partial" and outcome.error["code"] == "import_loss"
+    assert len(outcome.claims) == 2, "genuine reconciliation loss must not discard usable exports"
+    assert outcome.bundles_resolved is False
+    assert any("lastScannedAt" in note for note in outcome.notes)
+    assert any("status this adapter cannot classify" in note for note in outcome.notes)
 
 
 def test_an_exhausted_quota_before_any_file_finished_is_an_error_with_no_claims(tmp_path):

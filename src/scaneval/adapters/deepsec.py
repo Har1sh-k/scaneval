@@ -763,7 +763,8 @@ def _json_records(directory: Path, enclosure: Enclosure, *, suffix: str = ".json
                 failures.append(f"{relative}: the record could not be read ({failure})")
                 continue
             try:
-                payload = json.loads(data.decode("utf-8"))
+                payload = json.loads(
+                    data.decode("utf-8"), parse_constant=_reject_nonstandard_json_constant)
             except (UnicodeDecodeError, ValueError) as exc:
                 failures.append(f"{relative}: the record is not readable JSON ({exc})")
                 continue
@@ -1225,13 +1226,21 @@ class NativeExportPopulation(NamedTuple):
     ids: Counter[str]
     identities: FindingIdIndex
     derived_identities: FindingIdIndex
+    status_identities: FindingIdIndex
+    status_derived_identities: FindingIdIndex
     no_latest_analysis: int
     resolved: Counter[str]
     validation_issues: tuple[str, ...]
+    status_validation_issues: tuple[str, ...]
 
     @property
     def excluded(self) -> int:
         return self.no_latest_analysis + self.resolved.total()
+
+
+def _reject_nonstandard_json_constant(value: str) -> Any:
+    """Reject numeric tokens accepted by Python but rejected by JavaScript ``JSON.parse``."""
+    raise ValueError(f"non-standard JSON constant {value}")
 
 
 def _native_number(value: Any) -> bool:
@@ -1351,7 +1360,9 @@ def _native_git_issue(value: Any, label: str) -> str | None:
             team, ("name", "slug", "source", "escalation_path_id"), item_label)
         if issue:
             return issue
-        if team.get("slack_channel_id") is not None and not isinstance(team.get("slack_channel_id"), str):
+        if "slack_channel_id" not in team:
+            return f"{item_label}.slack_channel_id is missing"
+        if team["slack_channel_id"] is not None and not isinstance(team["slack_channel_id"], str):
             return f"{item_label}.slack_channel_id is neither a string nor null"
         issue = _native_strings(team.get("manager"), ("email", "slack_user_id"),
                                 f"{item_label}.manager")
@@ -1371,7 +1382,9 @@ def _native_git_issue(value: Any, label: str) -> str | None:
         issue = _native_strings(approver, ("owner", "owner_type"), item_label)
         if issue:
             return issue
-        if approver.get("pattern") is not None and not isinstance(approver.get("pattern"), str):
+        if "pattern" not in approver:
+            return f"{item_label}.pattern is missing"
+        if approver["pattern"] is not None and not isinstance(approver["pattern"], str):
             return f"{item_label}.pattern is neither a string nor null"
         for field in ("is_primary", "is_direct"):
             if not isinstance(approver.get(field), bool):
@@ -1404,8 +1417,9 @@ def _native_record_envelope_issue(record: dict) -> str | None:
         issue = _native_analysis_issue(entry, f"record.analysisHistory[{index}]")
         if issue:
             return issue
-    if record.get("status") not in RECORD_STATUSES:
-        return f"record.status is not one of {RECORD_STATUSES}"
+    # Status is classified separately by ``native_export_population``. It is still a native
+    # envelope failure, but by itself it must not masquerade as lost import evidence and outrank
+    # the adapter's established quota/batch failure codes.
     for field in ("lockedByRunId", "lockedAt"):
         if field in record and not isinstance(record[field], str):
             return f"record.{field} is not a string"
@@ -1615,15 +1629,23 @@ def native_export_population(files: tuple[tuple[str, dict], ...]) -> NativeExpor
     identifiers: Counter[str] = Counter()
     identities: FindingIdIndex = {}
     derived_identities: FindingIdIndex = {}
+    status_identities: FindingIdIndex = {}
+    status_derived_identities: FindingIdIndex = {}
     no_latest_analysis = 0
     resolved: Counter[str] = Counter()
     validation_issues: list[str] = []
+    status_validation_issues: list[str] = []
     for name, record in files:
         issue = _native_record_envelope_issue(record)
         if issue:
             validation_issues.append(
                 f"{name}: {issue}; DeepSec's FileRecord envelope validation skips the whole record")
             continue
+        status_only = record.get("status") not in RECORD_STATUSES
+        if status_only:
+            status_validation_issues.append(
+                f"{name}: record.status is not one of {RECORD_STATUSES}; "
+                "DeepSec's FileRecord envelope validation skips the whole record")
         valid_findings: list[dict] = []
         for index, finding in enumerate(record["findings"]):
             issue = _native_finding_issue(finding, f"finding[{index}]")
@@ -1634,23 +1656,29 @@ def native_export_population(files: tuple[tuple[str, dict], ...]) -> NativeExpor
             valid_findings.append(finding)
         effective_ids = _effective_finding_ids(record, valid_findings)
         if not record["analysisHistory"]:
-            no_latest_analysis += len(valid_findings)
+            if not status_only:
+                no_latest_analysis += len(valid_findings)
             continue
+        target_identities = status_identities if status_only else identities
+        target_derived = status_derived_identities if status_only else derived_identities
         for finding, (identifier, was_derived) in zip(valid_findings, effective_ids):
             revalidation = finding.get("revalidation")
             verdict = revalidation.get("verdict") if isinstance(revalidation, dict) else None
             if verdict in DEFAULT_EXPORT_RESOLVED_VERDICTS:
-                resolved[verdict] += 1
+                if not status_only:
+                    resolved[verdict] += 1
                 continue
-            identifiers[identifier] += 1
+            if not status_only:
+                identifiers[identifier] += 1
             identity = _record_finding_identity(record, finding)
             if identity is not None:
-                identities.setdefault(identity, Counter())[identifier] += 1
+                target_identities.setdefault(identity, Counter())[identifier] += 1
                 if was_derived:
-                    derived_identities.setdefault(identity, Counter())[identifier] += 1
+                    target_derived.setdefault(identity, Counter())[identifier] += 1
     return NativeExportPopulation(
-        identifiers, identities, derived_identities, no_latest_analysis, resolved,
-        tuple(validation_issues))
+        identifiers, identities, derived_identities, status_identities,
+        status_derived_identities, no_latest_analysis, resolved,
+        tuple(validation_issues), tuple(status_validation_issues))
 
 
 def finding_ids(files: tuple[tuple[str, dict], ...]) -> FindingIdIndex:
@@ -2757,7 +2785,8 @@ class DeepsecAdapter(Adapter):
             export_failure = f"the export was not read ({failure})"
         else:
             try:
-                exported = json.loads(data.decode("utf-8"))
+                exported = json.loads(
+                    data.decode("utf-8"), parse_constant=_reject_nonstandard_json_constant)
             except (UnicodeDecodeError, ValueError) as exc:
                 export_failure = f"the export is not readable JSON ({exc})"
         imported = DeepsecImport([], [], 0, 0, [])
@@ -2766,17 +2795,31 @@ class DeepsecAdapter(Adapter):
         identity_gaps = 0
         findings_lost = 0
         native_validation_failures = 0
+        native_status_validation_failures = 0
         finding_import_notes: list[str] = []
         if export_failure is None:
             native_population = native_export_population(records.files)
             native_validation_failures = len(native_population.validation_issues)
+            native_status_validation_failures = len(native_population.status_validation_issues)
             finding_import_notes.extend(
                 "Native load reconciliation failed closed: " + issue
-                for issue in native_population.validation_issues)
+                for issue in (*native_population.validation_issues,
+                              *native_population.status_validation_issues))
+            join_identities = {
+                identity: Counter(identifiers)
+                for identity, identifiers in native_population.identities.items()
+            }
+            for identity, identifiers in native_population.status_identities.items():
+                join_identities.setdefault(identity, Counter()).update(identifiers)
+            join_derived_identities = {
+                identity: Counter(identifiers)
+                for identity, identifiers in native_population.derived_identities.items()
+            }
+            for identity, identifiers in native_population.status_derived_identities.items():
+                join_derived_identities.setdefault(identity, Counter()).update(identifiers)
             try:
                 imported = import_export(
-                    exported, ids=native_population.identities,
-                    derived_ids=native_population.derived_identities)
+                    exported, ids=join_identities, derived_ids=join_derived_identities)
             except AdapterError as exc:
                 export_failure = str(exc)
             else:
@@ -2893,7 +2936,8 @@ class DeepsecAdapter(Adapter):
             # Everything this run already knows it did not see. A category may not claim
             # completeness over a population this run could not read in full, and none may
             # claim it over an observer that reported a hole in its own record.
-            record_failures=len(records.failures) + native_validation_failures,
+            record_failures=(len(records.failures) + native_validation_failures
+                             + native_status_validation_failures),
             # An unjoined claim was submitted, but the record/export population cannot be proved
             # complete; this count is used only as the matrix's incomplete-population signal.
             findings_lost=findings_lost + identity_gaps,
@@ -3042,8 +3086,9 @@ class DeepsecAdapter(Adapter):
                     # So is a changed path DeepSec never listed: the claims about the rest are a
                     # part delivered, and a budget read off a part reads as one read off the whole.
                     bundles_resolved=(findings_lost == 0 and identity_gaps == 0
-                                      and native_validation_failures == 0 and not records.failures
-                                      and statuses.incomplete == 0
+                                      and native_validation_failures == 0
+                                      and native_status_validation_failures == 0
+                                      and not records.failures and statuses.incomplete == 0
                                       and (pr is None or not (statuses.errored or omitted))))
         exit_code = None
         for step in ("export", "process", "scan"):
@@ -3121,16 +3166,6 @@ class DeepsecAdapter(Adapter):
                                  error={"code": code, "message": message}, omitted_paths=unexamined,
                                  examined_nothing=nothing_examined, **base)
 
-        if statuses.invalid:
-            # The status-specific failure remains stronger than the same schema defect's effect on
-            # native export reconciliation. It already says the whole record is unresolved, while
-            # calling it generic import loss would discard the more precise reason.
-            return stopped("invalid_record_status",
-                           f"{len(statuses.invalid)} of {len(records.files)} "
-                           "file record(s) carry a status DeepSec does not "
-                           "declare, so whether it finished with them cannot "
-                           "be read: "
-                           + "; ".join(f"{name}: {reason}" for name, reason in statuses.invalid[:5]))
         if findings_lost or identity_gaps or native_validation_failures or records.failures:
             detail = "; ".join(list(imported.notes) + finding_import_notes + list(records.failures))
             if missing_export_lower == missing_export_upper:
@@ -3171,6 +3206,13 @@ class DeepsecAdapter(Adapter):
                            f"{len(errored_files)} file(s) in status 'error', {len(records.debug)} parse-failure "
                            f"dump(s) and {refusals} refusal(s): part of the {subject} reached no verdict{counted}"
                            f"{caused}")
+        if statuses.invalid:
+            return stopped("invalid_record_status",
+                           f"{len(statuses.invalid)} of {len(records.files)} "
+                           "file record(s) carry a status DeepSec does not "
+                           "declare, so whether it finished with them cannot "
+                           "be read: "
+                           + "; ".join(f"{name}: {reason}" for name, reason in statuses.invalid[:5]))
         if unfinished_files:
             # The AI stage never finished with these files. A ``success`` here would let the
             # scoring contract treat every assigned control as completed and grant quiet credit
