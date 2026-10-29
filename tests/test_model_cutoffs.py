@@ -110,6 +110,18 @@ def test_unknown_models_and_routes_cannot_certify_universal_eligibility(registry
     assert report["eligible_total"] == 0
 
 
+@pytest.mark.parametrize("source_url", [
+    "https://example.com/advisory\n",
+    "https://:secret@example.com/advisory",
+    "https://example.com:bad/advisory",
+])
+def test_malformed_artifact_sources_cannot_authorize_eligibility(registry, source_url):
+    c = candidate()
+    c["chronology"]["public_artifacts"][0]["source_url"] = source_url
+    with pytest.raises(CutoffError, match="artifact kind and source URL required"):
+        result(registry, c)
+
+
 def test_pending_chronology_and_earlier_artifact_prevent_eligibility(registry):
     c = candidate(status="pending")
     pending = result(registry, c)["candidates"][0]
