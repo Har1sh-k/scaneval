@@ -117,6 +117,7 @@ is an error.
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 from importlib import import_module
 import json
 import os
@@ -1212,18 +1213,309 @@ class FindingIdentity(NamedTuple):
 
 FindingIdIndex = dict[FindingIdentity, Counter[str]]
 
+NATIVE_SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "HIGH_BUG", "BUG", "LOW")
+NATIVE_CONFIDENCES = ("high", "medium", "low")
+NATIVE_REVALIDATION_VERDICTS = (
+    "true-positive", "false-positive", "fixed", "uncertain", "accepted-risk", "duplicate")
+
 
 class NativeExportPopulation(NamedTuple):
-    """Eligible native ids, their exact export identities, and intentional exclusions."""
+    """Native-loaded findings, exact export identities, exclusions, and validation gaps."""
 
     ids: Counter[str]
     identities: FindingIdIndex
+    derived_identities: FindingIdIndex
     no_latest_analysis: int
     resolved: Counter[str]
+    validation_issues: tuple[str, ...]
 
     @property
     def excluded(self) -> int:
         return self.no_latest_analysis + self.resolved.total()
+
+
+def _native_number(value: Any) -> bool:
+    """Whether *value* is a finite JavaScript/JSON number accepted by Zod's number schema."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and value == value and value not in (float("inf"), float("-inf")))
+
+
+def _native_strings(value: Any, fields: tuple[str, ...], label: str) -> str | None:
+    if not isinstance(value, dict):
+        return f"{label} is a {_shape(value)}, not an object"
+    for field in fields:
+        if not isinstance(value.get(field), str):
+            return f"{label}.{field} is not a string"
+    return None
+
+
+def _native_candidate_issue(value: Any, label: str) -> str | None:
+    issue = _native_strings(value, ("vulnSlug", "snippet", "matchedPattern"), label)
+    if issue:
+        return issue
+    lines = value.get("lineNumbers")
+    if not isinstance(lines, list) or not all(_native_number(line) for line in lines):
+        return f"{label}.lineNumbers is not an array of numbers"
+    return None
+
+
+def _native_refusal_issue(value: Any, label: str) -> str | None:
+    if not isinstance(value, dict):
+        return f"{label} is a {_shape(value)}, not an object"
+    if not isinstance(value.get("refused"), bool):
+        return f"{label}.refused is not a boolean"
+    for field in ("reason", "raw"):
+        if field in value and not isinstance(value[field], str):
+            return f"{label}.{field} is not a string"
+    if "skipped" in value:
+        skipped = value["skipped"]
+        if not isinstance(skipped, list):
+            return f"{label}.skipped is not an array"
+        for index, item in enumerate(skipped):
+            item_label = f"{label}.skipped[{index}]"
+            issue = _native_strings(item, ("reason",), item_label)
+            if issue:
+                return issue
+            if "filePath" in item and not isinstance(item["filePath"], str):
+                return f"{item_label}.filePath is not a string"
+    return None
+
+
+def _native_analysis_issue(value: Any, label: str) -> str | None:
+    issue = _native_strings(
+        value, ("runId", "investigatedAt", "agentType", "model"), label)
+    if issue:
+        return issue
+    for field in ("durationMs", "findingCount"):
+        if not _native_number(value.get(field)):
+            return f"{label}.{field} is not a number"
+    if not isinstance(value.get("modelConfig"), dict):
+        return f"{label}.modelConfig is not an object"
+    for field in ("durationApiMs", "numTurns", "costUsd", "reinvestigateMarker"):
+        if field in value and not _native_number(value[field]):
+            return f"{label}.{field} is not a number"
+    for field in ("agentSessionId", "codexStderr"):
+        if field in value and not isinstance(value[field], str):
+            return f"{label}.{field} is not a string"
+    if "phase" in value and value["phase"] not in ("process", "revalidate"):
+        return f"{label}.phase is not 'process' or 'revalidate'"
+    if "usage" in value:
+        usage = value["usage"]
+        if not isinstance(usage, dict):
+            return f"{label}.usage is not an object"
+        for field in ("inputTokens", "outputTokens", "cacheReadInputTokens",
+                      "cacheCreationInputTokens"):
+            if not _native_number(usage.get(field)):
+                return f"{label}.usage.{field} is not a number"
+    if "refusal" in value:
+        return _native_refusal_issue(value["refusal"], f"{label}.refusal")
+    return None
+
+
+def _native_git_issue(value: Any, label: str) -> str | None:
+    if not isinstance(value, dict):
+        return f"{label} is a {_shape(value)}, not an object"
+    committers = value.get("recentCommitters")
+    if not isinstance(committers, list):
+        return f"{label}.recentCommitters is not an array"
+    for index, committer in enumerate(committers):
+        issue = _native_strings(
+            committer, ("name", "email", "date"), f"{label}.recentCommitters[{index}]")
+        if issue:
+            return issue
+    if not isinstance(value.get("enrichedAt"), str):
+        return f"{label}.enrichedAt is not a string"
+    if "ownership" not in value:
+        return None
+    ownership = value["ownership"]
+    if not isinstance(ownership, dict):
+        return f"{label}.ownership is not an object"
+    contributors = ownership.get("contributors")
+    if not isinstance(contributors, list):
+        return f"{label}.ownership.contributors is not an array"
+    for index, contributor in enumerate(contributors):
+        item_label = f"{label}.ownership.contributors[{index}]"
+        issue = _native_strings(
+            contributor, ("email", "name", "github_username", "context", "last_contrib"),
+            item_label)
+        if issue:
+            return issue
+        if not _native_number(contributor.get("score")):
+            return f"{item_label}.score is not a number"
+    teams = ownership.get("escalationTeams")
+    if not isinstance(teams, list):
+        return f"{label}.ownership.escalationTeams is not an array"
+    for index, team in enumerate(teams):
+        item_label = f"{label}.ownership.escalationTeams[{index}]"
+        issue = _native_strings(
+            team, ("name", "slug", "source", "escalation_path_id"), item_label)
+        if issue:
+            return issue
+        if team.get("slack_channel_id") is not None and not isinstance(team.get("slack_channel_id"), str):
+            return f"{item_label}.slack_channel_id is neither a string nor null"
+        issue = _native_strings(team.get("manager"), ("email", "slack_user_id"),
+                                f"{item_label}.manager")
+        if issue:
+            return issue
+        issue = _native_strings(
+            team.get("current_oncall"),
+            ("name", "email", "slack_user_id", "github_username"),
+            f"{item_label}.current_oncall")
+        if issue:
+            return issue
+    approvers = ownership.get("approvers")
+    if not isinstance(approvers, list):
+        return f"{label}.ownership.approvers is not an array"
+    for index, approver in enumerate(approvers):
+        item_label = f"{label}.ownership.approvers[{index}]"
+        issue = _native_strings(approver, ("owner", "owner_type"), item_label)
+        if issue:
+            return issue
+        if approver.get("pattern") is not None and not isinstance(approver.get("pattern"), str):
+            return f"{item_label}.pattern is neither a string nor null"
+        for field in ("is_primary", "is_direct"):
+            if not isinstance(approver.get(field), bool):
+                return f"{item_label}.{field} is not a boolean"
+    if not isinstance(ownership.get("fetchedAt"), str):
+        return f"{label}.ownership.fetchedAt is not a string"
+    return None
+
+
+def _native_record_envelope_issue(record: dict) -> str | None:
+    """Validate DeepSec's FileRecord envelope, whose findings are salvaged separately."""
+    issue = _native_strings(
+        record, ("filePath", "projectId", "lastScannedAt", "lastScannedRunId", "fileHash"),
+        "record")
+    if issue:
+        return issue
+    candidates = record.get("candidates")
+    if not isinstance(candidates, list):
+        return "record.candidates is not an array"
+    for index, candidate in enumerate(candidates):
+        issue = _native_candidate_issue(candidate, f"record.candidates[{index}]")
+        if issue:
+            return issue
+    if not isinstance(record.get("findings"), list):
+        return "record.findings is not an array"
+    history = record.get("analysisHistory")
+    if not isinstance(history, list):
+        return "record.analysisHistory is not an array"
+    for index, entry in enumerate(history):
+        issue = _native_analysis_issue(entry, f"record.analysisHistory[{index}]")
+        if issue:
+            return issue
+    if record.get("status") not in RECORD_STATUSES:
+        return f"record.status is not one of {RECORD_STATUSES}"
+    for field in ("lockedByRunId", "lockedAt"):
+        if field in record and not isinstance(record[field], str):
+            return f"record.{field} is not a string"
+    if "gitInfo" in record:
+        return _native_git_issue(record["gitInfo"], "record.gitInfo")
+    return None
+
+
+def _native_revalidation_issue(value: Any, label: str) -> str | None:
+    issue = _native_strings(value, ("reasoning", "revalidatedAt", "runId", "model"), label)
+    if issue:
+        return issue
+    if value.get("verdict") not in NATIVE_REVALIDATION_VERDICTS:
+        return f"{label}.verdict is not a declared DeepSec verdict"
+    if "adjustedSeverity" in value and value["adjustedSeverity"] not in NATIVE_SEVERITIES:
+        return f"{label}.adjustedSeverity is not a declared DeepSec severity"
+    if "duplicateOf" in value and not isinstance(value["duplicateOf"], str):
+        return f"{label}.duplicateOf is not a string"
+    return None
+
+
+def _native_finding_issue(value: Any, label: str) -> str | None:
+    issue = _native_strings(
+        value, ("vulnSlug", "title", "description", "recommendation"), label)
+    if issue:
+        return issue
+    if "findingId" in value and not isinstance(value["findingId"], str):
+        return f"{label}.findingId is not a string"
+    if value.get("severity") not in NATIVE_SEVERITIES:
+        return f"{label}.severity is not a declared DeepSec severity"
+    if value.get("confidence") not in NATIVE_CONFIDENCES:
+        return f"{label}.confidence is not a declared DeepSec confidence"
+    lines = value.get("lineNumbers")
+    if not isinstance(lines, list) or not all(_native_number(line) for line in lines):
+        return f"{label}.lineNumbers is not an array of numbers"
+    if "producedByRunId" in value and not isinstance(value["producedByRunId"], str):
+        return f"{label}.producedByRunId is not a string"
+    if "triage" in value:
+        triage = value["triage"]
+        issue = _native_strings(triage, ("reasoning", "triagedAt", "model"), f"{label}.triage")
+        if issue:
+            return issue
+        if triage.get("priority") not in ("P0", "P1", "P2", "skip"):
+            return f"{label}.triage.priority is not a declared priority"
+        if triage.get("exploitability") not in ("trivial", "moderate", "difficult"):
+            return f"{label}.triage.exploitability is not a declared exploitability"
+        if triage.get("impact") not in ("critical", "high", "medium", "low"):
+            return f"{label}.triage.impact is not a declared impact"
+    if "revalidation" in value:
+        return _native_revalidation_issue(value["revalidation"], f"{label}.revalidation")
+    return None
+
+
+def _javascript_utf8(value: str) -> bytes:
+    """Encode a Python string as Node's UTF-8 encoder treats JavaScript UTF-16 strings.
+
+    JSON can legally carry escaped lone surrogates. Python's default UTF-8 encoder raises on
+    them, while Node replaces each unpaired UTF-16 code unit with U+FFFD and combines a valid
+    surrogate pair. Reproducing that rule keeps deterministic native IDs from crashing on valid
+    JSON or silently hashing Python's different replacement byte.
+    """
+    scalars: list[str] = []
+    index = 0
+    while index < len(value):
+        codepoint = ord(value[index])
+        if 0xD800 <= codepoint <= 0xDBFF:
+            if index + 1 < len(value):
+                following = ord(value[index + 1])
+                if 0xDC00 <= following <= 0xDFFF:
+                    scalars.append(chr(0x10000 + ((codepoint - 0xD800) << 10)
+                                       + following - 0xDC00))
+                    index += 2
+                    continue
+            scalars.append("\ufffd")
+        elif 0xDC00 <= codepoint <= 0xDFFF:
+            scalars.append("\ufffd")
+        else:
+            scalars.append(value[index])
+        index += 1
+    return "".join(scalars).encode("utf-8")
+
+
+def _native_finding_id(project: str, raw_path: str, title: str) -> str:
+    """DeepSec 2.3.10 ``computeFindingId``, byte-for-byte and without touching records."""
+    normalized = raw_path.replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    material = f"{project}\0{normalized}\0{title}"
+    return f"finding_{hashlib.sha256(_javascript_utf8(material)).hexdigest()[:16]}"
+
+
+def _effective_finding_ids(record: dict, findings: list[dict]) -> tuple[tuple[str, bool], ...]:
+    """Pure ``ensureFindingIds`` output as ``(id, was_derived)`` in finding order."""
+    used = {finding["findingId"] for finding in findings if finding.get("findingId")}
+    effective: list[tuple[str, bool]] = []
+    for finding in findings:
+        stored = finding.get("findingId")
+        if stored:
+            effective.append((stored, False))
+            continue
+        title = finding["title"]
+        identifier = _native_finding_id(record["projectId"], record["filePath"], title)
+        ordinal = 2
+        while identifier in used:
+            identifier = _native_finding_id(
+                record["projectId"], record["filePath"], f"{title}\0{ordinal}")
+            ordinal += 1
+        used.add(identifier)
+        effective.append((identifier, True))
+    return tuple(effective)
 
 
 def _identity_value(value: Any) -> Any:
@@ -1300,54 +1592,65 @@ def _export_finding_identity(entry: dict, metadata: dict, path: str) -> FindingI
 
 
 def native_export_population(files: tuple[tuple[str, dict], ...]) -> NativeExportPopulation:
-    """The record occurrences eligible for DeepSec 2.3.10's unchanged default export.
+    """Reproduce the population DeepSec 2.3.10 actually loads and exports, without mutation.
 
-    ``exportCommand`` skips a whole FileRecord when it has no latest ``analysisHistory`` entry,
-    then, unless ``--include-resolved`` was passed, skips findings revalidated as fixed,
-    false-positive, accepted-risk or duplicate. This adapter passes only format, project and
-    output arguments, so comparing the export with every record finding would call those
-    intentional producer exclusions import loss.
+    ``loadAllFileRecords`` first validates the FileRecord envelope, dropping the whole record if
+    any non-finding field is invalid. Its salvage path then validates findings one by one and
+    drops malformed findings. Only after that does it call ``ensureFindingIds`` in memory. The
+    raw JSON record is not rewritten. This function follows the same order, records every native
+    validation gap, and never uses malformed evidence to claim an intended producer exclusion.
 
-    Only a missing value or an empty history list is accepted as the verified no-latest case.
-    A malformed history shape is not silently promoted to an expected exclusion: its findings
-    remain in the comparison, so an export mismatch still fails closed.
+    The only verified no-latest case is an actual empty, schema-valid ``analysisHistory`` list.
+    Missing, null, non-array and malformed histories make the FileRecord envelope invalid and are
+    therefore unresolved import evidence, not successful default-export exclusions. Likewise a
+    resolved verdict counts as an intended exclusion only when the entire Finding and its full
+    Revalidation satisfy the pinned schemas.
 
-    ``ensureFindingIds`` gives colliding title-derived ids distinct ``title + NUL + n`` hashes.
-    The export omits those ids and later sorts by severity, project and path, so path/title FIFO
-    is not a valid join. Identity therefore uses the fields export copies unchanged: project,
-    path, raw title, severity, slug, lineNumbers, confidence and revalidation. Resolved findings
-    are excluded before this index is built, preventing a hidden resolved id from being attached
-    to an open claim. If multiple distinct ids still have the same retained identity, the export
-    cannot distinguish them and the importer leaves their claims unjoined rather than guessing.
+    ``ensureFindingIds`` preloads every truthy stored id, preserves it, then derives missing or
+    empty ids from project id, the raw path with backslashes replaced and only one initial ``./``
+    removed, and the raw title. A collision retries ``title + NUL + n`` from 2. The pure port here
+    reproduces Node's UTF-8 handling, including escaped surrogate code units, but never mutates a
+    record or artifact. Derived provenance travels separately from the native-equivalent id.
     """
     identifiers: Counter[str] = Counter()
     identities: FindingIdIndex = {}
+    derived_identities: FindingIdIndex = {}
     no_latest_analysis = 0
     resolved: Counter[str] = Counter()
-    for _name, record in files:
-        findings = record.get("findings")
-        if not isinstance(findings, list):
+    validation_issues: list[str] = []
+    for name, record in files:
+        issue = _native_record_envelope_issue(record)
+        if issue:
+            validation_issues.append(
+                f"{name}: {issue}; DeepSec's FileRecord envelope validation skips the whole record")
             continue
-        usable_findings = [finding for finding in findings if isinstance(finding, dict)]
-        history = record.get("analysisHistory")
-        if history is None or (isinstance(history, list) and not history):
-            no_latest_analysis += len(usable_findings)
+        valid_findings: list[dict] = []
+        for index, finding in enumerate(record["findings"]):
+            issue = _native_finding_issue(finding, f"finding[{index}]")
+            if issue:
+                validation_issues.append(
+                    f"{name}: {issue}; DeepSec's salvage loader drops this malformed finding")
+                continue
+            valid_findings.append(finding)
+        effective_ids = _effective_finding_ids(record, valid_findings)
+        if not record["analysisHistory"]:
+            no_latest_analysis += len(valid_findings)
             continue
-        verified_latest = isinstance(history, list) and isinstance(history[-1], dict)
-        for finding in usable_findings:
+        for finding, (identifier, was_derived) in zip(valid_findings, effective_ids):
             revalidation = finding.get("revalidation")
             verdict = revalidation.get("verdict") if isinstance(revalidation, dict) else None
-            if verified_latest and verdict in DEFAULT_EXPORT_RESOLVED_VERDICTS:
+            if verdict in DEFAULT_EXPORT_RESOLVED_VERDICTS:
                 resolved[verdict] += 1
-                continue
-            identifier = finding.get("findingId")
-            if not isinstance(identifier, str) or not identifier:
                 continue
             identifiers[identifier] += 1
             identity = _record_finding_identity(record, finding)
             if identity is not None:
                 identities.setdefault(identity, Counter())[identifier] += 1
-    return NativeExportPopulation(identifiers, identities, no_latest_analysis, resolved)
+                if was_derived:
+                    derived_identities.setdefault(identity, Counter())[identifier] += 1
+    return NativeExportPopulation(
+        identifiers, identities, derived_identities, no_latest_analysis, resolved,
+        tuple(validation_issues))
 
 
 def finding_ids(files: tuple[tuple[str, dict], ...]) -> FindingIdIndex:
@@ -1356,7 +1659,8 @@ def finding_ids(files: tuple[tuple[str, dict], ...]) -> FindingIdIndex:
 
 
 def import_export(payload: Any, *, artifact_id: str = ARTIFACT_EXPORT,
-                  ids: FindingIdIndex | None = None) -> DeepsecImport:
+                  ids: FindingIdIndex | None = None,
+                  derived_ids: FindingIdIndex | None = None) -> DeepsecImport:
     """Translate an ``export --format json`` payload into atomic claims.
 
     The payload is a JSON array of exported findings, each carrying the rendered ``title`` and
@@ -1374,6 +1678,9 @@ def import_export(payload: Any, *, artifact_id: str = ARTIFACT_EXPORT,
     lost = 0
     unjoined = 0
     available_ids = {identity: Counter(identifiers) for identity, identifiers in (ids or {}).items()}
+    native_derived = {identity: Counter(identifiers)
+                      for identity, identifiers in (derived_ids or {}).items()}
+    noted_derived: set[tuple[FindingIdentity, str]] = set()
     if not isinstance(payload, list):
         raise AdapterError(f"deepsec export is a {_shape(payload)}, not an array of findings")
     used: set[str] = set()
@@ -1419,6 +1726,19 @@ def import_export(payload: Any, *, artifact_id: str = ARTIFACT_EXPORT,
                 # the same native identity. Distinct ids for one retained identity are not safe
                 # to hand out by occurrence, because the export carries no ordering key for them.
                 identifier = remaining[0]
+                derived_count = native_derived.get(identity, Counter())[identifier]
+                population_count = identifiers[identifier]
+                provenance = (identity, identifier)
+                if derived_count and provenance not in noted_derived:
+                    qualifier = ("every matching raw FileRecord occurrence lacked a stored findingId"
+                                 if derived_count == population_count else
+                                 f"{derived_count} of {population_count} matching raw FileRecord occurrence(s) "
+                                 "lacked a stored findingId")
+                    notes.append(
+                        f"For this retained identity, {qualifier}. Native finding id {identifier!r} was "
+                        "deterministically reproduced in memory with DeepSec 2.3.10's ensureFindingIds "
+                        "algorithm; the raw record and artifact were not changed.")
+                    noted_derived.add(provenance)
                 identifiers[identifier] -= 1
         claim_id = identifier or f"deepsec-{index}"
         while claim_id in used:
@@ -2445,11 +2765,18 @@ class DeepsecAdapter(Adapter):
         missing_export_upper = 0
         identity_gaps = 0
         findings_lost = 0
+        native_validation_failures = 0
         finding_import_notes: list[str] = []
         if export_failure is None:
             native_population = native_export_population(records.files)
+            native_validation_failures = len(native_population.validation_issues)
+            finding_import_notes.extend(
+                "Native load reconciliation failed closed: " + issue
+                for issue in native_population.validation_issues)
             try:
-                imported = import_export(exported, ids=native_population.identities)
+                imported = import_export(
+                    exported, ids=native_population.identities,
+                    derived_ids=native_population.derived_identities)
             except AdapterError as exc:
                 export_failure = str(exc)
             else:
@@ -2490,8 +2817,8 @@ class DeepsecAdapter(Adapter):
                     excluded_reasons = []
                     if native_population.no_latest_analysis:
                         excluded_reasons.append(
-                            f"{native_population.no_latest_analysis} because the file record had no latest "
-                            "analysisHistory entry")
+                            f"{native_population.no_latest_analysis} because the schema-valid file record had "
+                            "an actual empty analysisHistory list")
                     excluded_reasons.extend(
                         f"{native_population.resolved[verdict]} with revalidation verdict {verdict!r}"
                         for verdict in DEFAULT_EXPORT_RESOLVED_VERDICTS
@@ -2566,7 +2893,7 @@ class DeepsecAdapter(Adapter):
             # Everything this run already knows it did not see. A category may not claim
             # completeness over a population this run could not read in full, and none may
             # claim it over an observer that reported a hole in its own record.
-            record_failures=len(records.failures),
+            record_failures=len(records.failures) + native_validation_failures,
             # An unjoined claim was submitted, but the record/export population cannot be proved
             # complete; this count is used only as the matrix's incomplete-population signal.
             findings_lost=findings_lost + identity_gaps,
@@ -2714,7 +3041,8 @@ class DeepsecAdapter(Adapter):
                     # the run goes on, so the claims of the batches that finished are all there is.
                     # So is a changed path DeepSec never listed: the claims about the rest are a
                     # part delivered, and a budget read off a part reads as one read off the whole.
-                    bundles_resolved=(findings_lost == 0 and identity_gaps == 0 and not records.failures
+                    bundles_resolved=(findings_lost == 0 and identity_gaps == 0
+                                      and native_validation_failures == 0 and not records.failures
                                       and statuses.incomplete == 0
                                       and (pr is None or not (statuses.errored or omitted))))
         exit_code = None
@@ -2769,24 +3097,6 @@ class DeepsecAdapter(Adapter):
                                         "message": f"deepsec exported findings this adapter could not "
                                                    f"read: {export_failure}; stderr: {tail('export')}"[:2000]},
                                  **base)
-        if findings_lost or identity_gaps or records.failures:
-            detail = "; ".join(list(imported.notes) + finding_import_notes + list(records.failures))
-            if missing_export_lower == missing_export_upper:
-                omission = (f"{missing_export_lower} record finding(s) are established to have no "
-                            "export entry")
-            else:
-                omission = (f"record findings with no export entry are bounded between "
-                            f"{missing_export_lower} and {missing_export_upper} because unidentified "
-                            "entries cannot be correlated")
-            return NativeOutcome(status="partial", exit_code=exit_code, claims=imported.claims,
-                                 error={"code": "import_loss",
-                                        "message": (f"{imported.lost} exported finding(s) could not be imported; "
-                                                    f"{omission}; {identity_gaps} imported claim(s) could not be "
-                                                    f"joined to native identity; and {len(records.failures)} "
-                                                    f"DeepSec record(s) could not be imported. Counts from "
-                                                    f"unidentified exports and unmatched records are bounds, not "
-                                                    f"additive losses: {detail}")[:2000]},
-                                 omitted_paths=unexamined, examined_nothing=nothing_examined, **base)
 
         def stopped(code: str, message: str) -> NativeOutcome:
             """The outcome of a run that reached no verdict on part of what it was given.
@@ -2811,6 +3121,37 @@ class DeepsecAdapter(Adapter):
                                  error={"code": code, "message": message}, omitted_paths=unexamined,
                                  examined_nothing=nothing_examined, **base)
 
+        if statuses.invalid:
+            # The status-specific failure remains stronger than the same schema defect's effect on
+            # native export reconciliation. It already says the whole record is unresolved, while
+            # calling it generic import loss would discard the more precise reason.
+            return stopped("invalid_record_status",
+                           f"{len(statuses.invalid)} of {len(records.files)} "
+                           "file record(s) carry a status DeepSec does not "
+                           "declare, so whether it finished with them cannot "
+                           "be read: "
+                           + "; ".join(f"{name}: {reason}" for name, reason in statuses.invalid[:5]))
+        if findings_lost or identity_gaps or native_validation_failures or records.failures:
+            detail = "; ".join(list(imported.notes) + finding_import_notes + list(records.failures))
+            if missing_export_lower == missing_export_upper:
+                omission = (f"{missing_export_lower} record finding(s) are established to have no "
+                            "export entry")
+            else:
+                omission = (f"record findings with no export entry are bounded between "
+                            f"{missing_export_lower} and {missing_export_upper} because unidentified "
+                            "entries cannot be correlated")
+            return NativeOutcome(status="partial", exit_code=exit_code, claims=imported.claims,
+                                 error={"code": "import_loss",
+                                        "message": (f"{imported.lost} exported finding(s) could not be imported; "
+                                                    f"{omission}; {identity_gaps} imported claim(s) could not be "
+                                                    f"joined to native identity; {native_validation_failures} "
+                                                    "native record/finding validation issue(s) prevented exact "
+                                                    f"reconciliation; and {len(records.failures)} DeepSec "
+                                                    "record(s) could not be imported. Counts from "
+                                                    f"unidentified exports and unmatched records are bounds, not "
+                                                    f"additive losses: {detail}")[:2000]},
+                                 omitted_paths=unexamined, examined_nothing=nothing_examined, **base)
+
         if pr is not None and output.quota and (statuses.errored or statuses.unfinished):
             return stopped("quota_exhausted",
                            f"deepsec process stopped: {output.quota} exhausted, in DeepSec's own words. "
@@ -2830,16 +3171,6 @@ class DeepsecAdapter(Adapter):
                            f"{len(errored_files)} file(s) in status 'error', {len(records.debug)} parse-failure "
                            f"dump(s) and {refusals} refusal(s): part of the {subject} reached no verdict{counted}"
                            f"{caused}")
-        if statuses.invalid:
-            # A record whose state this cannot read is not a record this run can claim to have
-            # finished. Reported before the unfinished ones because it is the stronger failure:
-            # there, the run knows what it did not do; here, it does not know what it did.
-            return stopped("invalid_record_status",
-                           f"{len(statuses.invalid)} of {len(records.files)} "
-                           "file record(s) carry a status DeepSec does not "
-                           "declare, so whether it finished with them cannot "
-                           "be read: "
-                           + "; ".join(f"{name}: {reason}" for name, reason in statuses.invalid[:5]))
         if unfinished_files:
             # The AI stage never finished with these files. A ``success`` here would let the
             # scoring contract treat every assigned control as completed and grant quiet credit

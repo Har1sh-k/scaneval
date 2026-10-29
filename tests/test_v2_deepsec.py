@@ -49,6 +49,7 @@ from scaneval.adapters.deepsec import (
     import_export,
     kind_for_slug,
     line_span,
+    native_export_population,
     project_id_for,
     read_process_output,
     sessions_from,
@@ -478,13 +479,57 @@ else:
 
 
 def native_finding_id(project: str, path: str, title: str, occurrence: int = 1) -> str:
-    """DeepSec 2.3.10 ``ensureFindingIds``: colliding titles use ``title + NUL + n``."""
+    """DeepSec 2.3.10 ``ensureFindingIds`` for ordinary Unicode scalar strings."""
     normalized = path.replace("\\", "/")
     if normalized.startswith("./"):
         normalized = normalized[2:]
     identity_title = title if occurrence == 1 else f"{title}\0{occurrence}"
     digest = hashlib.sha256(f"{project}\0{normalized}\0{identity_title}".encode()).hexdigest()
     return f"finding_{digest[:16]}"
+
+
+def native_analysis_entry() -> dict:
+    return {
+        "runId": "native-run", "investigatedAt": "2026-09-25T12:01:00.000Z",
+        "durationMs": 1, "agentType": "claude-agent-sdk", "model": "native-model",
+        "modelConfig": {}, "findingCount": 1,
+    }
+
+
+def native_revalidation(verdict: str, reasoning: str = "resolved by fixture") -> dict:
+    return {
+        "verdict": verdict, "reasoning": reasoning,
+        "revalidatedAt": "2026-09-25T12:02:00.000Z", "runId": "native-revalidate",
+        "model": "native-model",
+    }
+
+
+def native_finding(*, title: str = "Native allegation", finding_id: str | None = "native-finding",
+                   severity: str = "HIGH", slug: str = "command-injection",
+                   lines: list[int] | None = None, confidence: str = "high",
+                   revalidation: dict | None = None) -> dict:
+    finding = {
+        "severity": severity, "vulnSlug": slug, "title": title,
+        "description": "Native evidence", "lineNumbers": [12] if lines is None else lines,
+        "recommendation": "Review the native allegation.", "confidence": confidence,
+        "producedByRunId": "native-run",
+    }
+    if finding_id is not None:
+        finding["findingId"] = finding_id
+    if revalidation is not None:
+        finding["revalidation"] = revalidation
+    return finding
+
+
+def native_record(*findings: dict, path: str = "src/example.go",
+                  project: str = "native-project", history: object = ...) -> dict:
+    return {
+        "filePath": path, "projectId": project, "candidates": [],
+        "lastScannedAt": "2026-09-25T12:00:00.000Z", "lastScannedRunId": "native-scan",
+        "fileHash": "0" * 64, "findings": list(findings),
+        "analysisHistory": [native_analysis_entry()] if history is ... else history,
+        "status": "analyzed",
+    }
 
 
 def fake_deepsec_root(tmp_path: Path, **control) -> Path:
@@ -1192,11 +1237,9 @@ def test_an_export_entry_whose_path_leaves_the_tree_is_import_loss_and_not_a_cla
 
 
 def test_a_finding_is_joined_to_the_native_id_the_file_records_hold_and_noted_when_it_is_not():
-    files = (("src/a.py.json", {
-        "projectId": "p", "filePath": "./src/a.py", "analysisHistory": [{"runId": "r"}],
-        "findings": [{"title": "Shell injection", "findingId": "finding_deadbeefdeadbeef",
-                      "severity": "HIGH", "vulnSlug": "command-injection", "lineNumbers": [3],
-                      "confidence": "high"}]}),)
+    files = (("src/a.py.json", native_record(
+        native_finding(title="Shell injection", finding_id="finding_deadbeefdeadbeef", lines=[3]),
+        project="p", path="./src/a.py")),)
     index = finding_ids(files)
     exported = {"title": "[HIGH] Shell injection", "description": "", "severity": "HIGH",
                 "metadata": {"projectId": "p", "filePath": "src/a.py", "lineNumbers": [3],
@@ -1209,6 +1252,61 @@ def test_a_finding_is_joined_to_the_native_id_the_file_records_hold_and_noted_wh
     assert "native_id" not in stranger.claims[0]
     assert stranger.lost == 0 and stranger.unjoined == 1, "the usable claim is not import loss"
     assert any("no native finding id" in note for note in stranger.notes)
+
+
+def test_native_missing_ids_are_derived_purely_after_preloading_every_existing_collision_slot():
+    project = "native-project"
+    path = ".\\src\\example.go"
+    title = "Shared title"
+    base = native_finding_id(project, path, title)
+    second_slot = native_finding_id(project, path, title, 2)
+    findings = [
+        native_finding(title=title, finding_id=None, lines=[1]),
+        native_finding(title="occupies base", finding_id=base, lines=[2]),
+        native_finding(title="occupies second", finding_id=second_slot, lines=[3]),
+        native_finding(title="Empty id", finding_id="", lines=[4]),
+        native_finding(title="Stored id", finding_id="finding_stored", lines=[5]),
+    ]
+    record = native_record(*findings, project=project, path=path)
+    before = json.dumps(record, ensure_ascii=False, sort_keys=True)
+
+    population = native_export_population((("src/example.go.json", record),))
+
+    by_title = {identity.title: identifiers for identity, identifiers in population.identities.items()}
+    assert by_title[title] == Counter({native_finding_id(project, path, title, 3): 1})
+    assert by_title["Empty id"] == Counter({native_finding_id(project, path, "Empty id"): 1})
+    assert by_title["Stored id"] == Counter({"finding_stored": 1})
+    assert population.derived_identities[next(identity for identity in population.identities
+                                                if identity.title == title)] == by_title[title]
+    assert json.dumps(record, ensure_ascii=False, sort_keys=True) == before, \
+        "the in-memory backfill never changes the raw record object"
+
+
+def test_native_id_utf8_path_and_surrogate_semantics_match_the_pinned_node_source():
+    assert deepsec_module._native_finding_id(
+        "π-project", "././src\\é😀.js", "漏洞 😀") == "finding_3202ea615634078d"
+    assert deepsec_module._native_finding_id(
+        "p", "src\\x.js", "\ud800X\udc00") == "finding_2a4525d683bd49b1"
+
+
+def test_a_derived_native_id_is_joined_with_explicit_non_mutating_provenance():
+    finding = native_finding(finding_id=None)
+    record = native_record(finding)
+    population = native_export_population((("src/example.go.json", record),))
+    payload = [{"title": "[HIGH] Native allegation", "description": "Native evidence",
+                "severity": "HIGH", "metadata": {
+                    "projectId": "native-project", "filePath": "src/example.go",
+                    "lineNumbers": [12], "severity": "HIGH", "vulnSlug": "command-injection",
+                    "confidence": "high", "runId": "native-run"}}]
+
+    imported = import_export(payload, ids=population.identities,
+                             derived_ids=population.derived_identities)
+
+    expected = native_finding_id("native-project", "src/example.go", "Native allegation")
+    assert imported.claims[0]["native_id"] == expected
+    assert any(expected in note and "deterministically reproduced in memory" in note
+               and "raw record and artifact were not changed" in note for note in imported.notes)
+    assert "findingId" not in finding
 
 
 def test_a_payload_that_is_not_an_array_of_findings_is_refused_rather_than_read_as_empty():
@@ -1283,14 +1381,8 @@ def test_a_slug_maps_to_a_kind_through_its_separators_and_an_unknown_one_stays_u
     ("go-command-injection", "command_injection"),
 ])
 def test_native_deepsec_kinds_import_with_original_identity(slug, kind):
-    record = (("src/example.go.json", {
-        "filePath": "src/example.go", "projectId": "native-project",
-        "analysisHistory": [{"runId": "native-run"}],
-        "findings": [{"findingId": "native-finding", "severity": "HIGH", "vulnSlug": slug,
-                      "title": "Native allegation", "description": "Native evidence",
-                      "lineNumbers": [12], "recommendation": "Review the native allegation.",
-                      "confidence": "high", "producedByRunId": "native-run"}],
-    }),)
+    record = (("src/example.go.json", native_record(
+        native_finding(slug=slug))),)
     payload = [{"title": "[HIGH] Native allegation", "description": "Native evidence",
                 "severity": "HIGH", "metadata": {
                     "projectId": "native-project", "filePath": "src/example.go",
@@ -2027,7 +2119,7 @@ def test_default_export_resolved_exclusions_are_evidence_not_import_loss(tmp_pat
                 resolved = dict(source)
                 resolved["title"] = source["title"] + " " + verdict
                 resolved["findingId"] = source["findingId"] + "-" + str(index)
-                resolved["revalidation"] = {"verdict": verdict, "reasoning": "resolved by fixture"}
+                resolved["revalidation"] = native_revalidation(verdict)
                 record["findings"].append(resolved)
             record_path.write_text(json.dumps(record), encoding="utf-8")
         return result
@@ -2071,12 +2163,74 @@ def test_a_record_without_latest_analysis_is_truthfully_excluded_by_default_expo
     result, execution = documents(bundle)
     assert result["status"] == "success" and len(result["claims"]) == 1, execution["error"]
     note = next(note for note in execution["notes"] if "producer exclusions" in note)
-    assert "1 because the file record had no latest analysisHistory entry" in note
+    assert "1 because the schema-valid file record had an actual empty analysisHistory list" in note
     assert not any("had no JSON export entry" in note for note in execution["notes"])
 
 
-def test_a_malformed_analysis_history_is_not_promoted_to_an_expected_exclusion(tmp_path, monkeypatch):
-    """Only the verified absent/empty case is excluded; malformed record coverage fails closed."""
+@pytest.mark.parametrize(("id_state", "omit_export"), [
+    ("missing", False), ("empty", False), ("missing", True),
+])
+def test_load_time_native_id_backfill_reconciles_exports_and_detects_omissions_without_mutation(
+        tmp_path, monkeypatch, id_state, omit_export):
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+    observed: dict[str, object] = {}
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            finding = record["findings"][0]
+            if id_state == "missing":
+                finding.pop("findingId")
+            else:
+                finding["findingId"] = ""
+            expected = native_finding_id(record["projectId"], record["filePath"], finding["title"])
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+            relative_record = record_path.as_posix().split("/files/", 1)[1]
+            observed.update(raw=record_path.read_bytes(), expected=expected, title=finding["title"],
+                            artifact_id="deepsec-file/" + relative_record)
+        elif argv[1] == "export" and omit_export:
+            export = Path(kwargs["cwd"]).parent / "deepsec-export.json"
+            payload = json.loads(export.read_text(encoding="utf-8"))
+            payload = [entry for entry in payload
+                       if entry["title"] != "[HIGH] " + str(observed["title"])]
+            export.write_text(json.dumps(payload), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    registered = {artifact["id"]: artifact["path"] for artifact in execution["raw_artifacts"]}
+    assert (bundle / registered[str(observed["artifact_id"])]).read_bytes() == observed["raw"], \
+        "the adapter must not write load-time ids back to DeepSec's record artifact"
+    if omit_export:
+        assert result["status"] == "partial" and result["error"]["code"] == "import_loss"
+        assert any("1 eligible record finding occurrence(s) had no JSON export entry" in note
+                   for note in execution["notes"])
+        assert observed["expected"] not in {claim.get("native_id") for claim in result["claims"]}
+    else:
+        assert result["status"] == "success", execution["error"]
+        claim = next(claim for claim in result["claims"]
+                     if claim.get("native_id") == observed["expected"])
+        assert claim["allegation"] == observed["title"]
+        assert any(str(observed["expected"]) in note
+                   and "deterministically reproduced in memory" in note
+                   for note in execution["notes"])
+
+
+@pytest.mark.parametrize("damage", ["missing", "null", "object", "malformed-entry"])
+def test_an_invalid_analysis_history_is_not_promoted_to_an_expected_exclusion(
+        tmp_path, monkeypatch, damage):
+    """Only an actual empty valid list is excluded; every invalid schema shape fails closed."""
     root = fake_deepsec_root(tmp_path)
     stub_collector(monkeypatch, tmp_path)
     adapter = get_adapter("deepsec")
@@ -2089,8 +2243,14 @@ def test_a_malformed_analysis_history_is_not_promoted_to_an_expected_exclusion(t
         if argv[1] == "process":
             record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
             record = json.loads(record_path.read_text(encoding="utf-8"))
-            record["analysisHistory"] = {}
-            record["findings"][0]["revalidation"] = {"verdict": "fixed", "reasoning": "malformed fixture"}
+            if damage == "missing":
+                record.pop("analysisHistory")
+            elif damage == "null":
+                record["analysisHistory"] = None
+            elif damage == "object":
+                record["analysisHistory"] = {}
+            else:
+                record["analysisHistory"] = [{"runId": "missing every other required field"}]
             record_path.write_text(json.dumps(record), encoding="utf-8")
         return result
 
@@ -2101,10 +2261,75 @@ def test_a_malformed_analysis_history_is_not_promoted_to_an_expected_exclusion(t
                             network_policy="model_provider_only", clock=CLOCK)
     result, execution = documents(bundle)
     assert result["status"] == "partial" and result["error"]["code"] == "import_loss"
-    assert any("1 eligible record finding occurrence(s) had no JSON export entry" in note
+    assert any("Native load reconciliation failed closed" in note and "analysisHistory" in note
                for note in execution["notes"])
-    assert not any("no latest analysisHistory entry" in note for note in execution["notes"])
+    assert not any("producer exclusions" in note and "analysisHistory" in note
+                   for note in execution["notes"])
     assert not any("revalidation verdict 'fixed'" in note for note in execution["notes"])
+
+
+def test_an_invalid_resolved_revalidation_is_not_classified_as_an_intended_exclusion(
+        tmp_path, monkeypatch):
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            record["findings"][0]["revalidation"] = {"verdict": "fixed"}
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    assert result["status"] == "partial" and result["error"]["code"] == "import_loss"
+    assert any("salvage loader drops this malformed finding" in note
+               and "revalidation.reasoning" in note for note in execution["notes"])
+    assert not any("producer exclusions" in note and "revalidation verdict 'fixed'" in note
+                   for note in execution["notes"])
+
+
+@pytest.mark.parametrize("damage", ["record-envelope", "finding-evidence"])
+def test_native_schema_damage_fails_closed_while_preserving_exported_claims(
+        tmp_path, monkeypatch, damage):
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            if damage == "record-envelope":
+                record.pop("lastScannedAt")
+            else:
+                record["findings"][0].pop("recommendation")
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    assert result["status"] == "partial" and result["error"]["code"] == "import_loss"
+    assert len(result["claims"]) == 2, "the usable JSON export claims are retained"
+    assert any("Native load reconciliation failed closed" in note for note in execution["notes"])
 
 
 def test_native_distinct_same_title_ids_join_by_retained_fields_after_real_export_sort(tmp_path, monkeypatch):
@@ -2172,7 +2397,7 @@ def test_a_resolved_first_same_title_finding_never_lends_its_id_to_the_open_seco
             title = "Repeated resolution title"
             first["title"] = title
             first["findingId"] = native_finding_id(record["projectId"], record["filePath"], title)
-            first["revalidation"] = {"verdict": "duplicate", "reasoning": "old resolved occurrence"}
+            first["revalidation"] = native_revalidation("duplicate", "old resolved occurrence")
             second = dict(first)
             second.pop("revalidation")
             second["lineNumbers"] = [99]
@@ -2282,7 +2507,7 @@ def test_reused_identical_native_ids_conserve_multiplicity_when_the_export_is_co
             duplicate["lineNumbers"] = [99]
             record["findings"].append(duplicate)
             resolved_duplicate = dict(duplicate)
-            resolved_duplicate["revalidation"] = {"verdict": "duplicate", "reasoning": "same issue"}
+            resolved_duplicate["revalidation"] = native_revalidation("duplicate", "same issue")
             record["findings"].append(resolved_duplicate)
             record_path.write_text(json.dumps(record), encoding="utf-8")
         return result
@@ -2357,7 +2582,7 @@ def test_a_native_finding_missing_from_the_export_is_import_loss_not_silent_succ
             resolved = dict(record["findings"][0])
             resolved["title"] += " fixed"
             resolved["findingId"] += "-fixed"
-            resolved["revalidation"] = {"verdict": "fixed", "reasoning": "fixed by fixture"}
+            resolved["revalidation"] = native_revalidation("fixed", "fixed by fixture")
             record["findings"].append(resolved)
             record_path.write_text(json.dumps(record), encoding="utf-8")
         elif argv[1] == "export":
