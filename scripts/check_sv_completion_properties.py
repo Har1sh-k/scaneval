@@ -19,6 +19,7 @@ from pathlib import Path
 import subprocess
 from typing import Callable, Iterable
 
+from scaneval.adapters import llm_harness
 from scaneval.adapters.llm_harness import read_completion, read_review_workflow
 
 
@@ -27,9 +28,10 @@ FIXTURE = ROOT / "tests/fixtures/sv-review-workflow-summary.json"
 ADAPTER = ROOT / "src/scaneval/adapters/llm_harness.py"
 DESIGN = ROOT / "docs/designs/sv-completion-bounded-verification.md"
 SOURCE_REF = "a" * 40
+PRODUCER_HEAD = "8b8aff6d9a868ba2d1bbda23cee882b5f836cc3f"
 PROCEDURES = ("security-review", "category:configuration")
 HEALTH_NAMES = ("model", "delivery", "lint", "markers", "specialists")
-STAGE_NAMES = ("modelCalls", "structural", "lint", "markers", "specialists")
+STAGE_NAMES = ("planner", "executionAnchors", "modelCalls", "structural", "lint", "markers", "specialists")
 ALLOWED_REASONS = frozenset({"source_analysis_completion_not_established", "structural_coverage_not_recorded"})
 
 
@@ -42,7 +44,9 @@ class FileState:
     @property
     def path(self) -> str:
         if self.disposition == "excluded":
-            return f"README{self.index + 1}.md"
+            return ("README.md", "LICENSE")[self.index]
+        if self.disposition == "unsupported":
+            return f"src/file{self.index + 1}.weird"
         prefix = "config" if self.procedure_count == 2 else "src"
         return f"{prefix}/file{self.index + 1}.ts"
 
@@ -87,7 +91,7 @@ class AbstractState:
     files: tuple[FileState, ...]
     obligations: tuple[ObligationState, ...]
     receipts: tuple[ReceiptState, ...]
-    stages: tuple[bool, ...] = (True, True, True, True, True)
+    stages: tuple[bool, ...] = (True, True, True, True, True, True, True)
     native_health: tuple[bool, ...] = (True, True, True, True, True)
     completion: CompletionState = CompletionState()
     finding_count: int = 0
@@ -101,6 +105,7 @@ class Case:
     state: AbstractState
     tags: set[str] = field(default_factory=set)
     mutate: Callable[[dict], None] | None = None
+    expected: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -133,20 +138,23 @@ def _file_wire(file: FileState) -> dict:
 
 def _inventory_wire(file: FileState) -> dict:
     source = _file_wire(file)
+    classification = "supported" if file.source_capable else file.disposition
     if not file.source_capable:
         source.update(sha256=None, bytes=None, requiredProcedures=[])
     return {
         "path": file.path,
         "sourceRef": SOURCE_REF,
         "objectId": str(file.index + 1) * 40,
+        "mode": "100644",
         "sha256": source["sha256"],
         "bytes": source["bytes"],
+        "classification": classification,
         "disposition": file.disposition,
         "reason": {
             "supported": "supported-code-extension",
-            "unassigned": "eligible-source-not-assigned",
-            "unsupported": "unsupported-bootstrap-source:extension",
-            "excluded": "known-non-code-filename",
+            "unassigned": "supported-code-extension",
+            "unsupported": "unsupported-bootstrap-source:unrecognized-file-format",
+            "excluded": "bootstrap-policy-excluded:recognized-repository-metadata",
         }[file.disposition],
         "requiredProcedures": source["requiredProcedures"],
     }
@@ -201,33 +209,50 @@ def _scope(total: int, source_count: int, unsupported_count: int = 0, excluded_c
 
 
 def materialize(state: AbstractState) -> dict:
-    """Turn an abstract state into native JSON without consulting production validators."""
+    """Turn an abstract state into the corrected native wire without consulting validators."""
     summary = json.loads(FIXTURE.read_text(encoding="utf-8"))
     report = summary["reviewWorkflow"]
     report.update(status=state.status, reasons=[])
-    report["inventory"] = [_inventory_wire(file) for file in state.files]
-    report["obligations"] = []
-    for obligation in state.obligations:
-        report["obligations"].append({
-            **_identity(obligation.index),
-            "files": [_file_wire(state.files[index]) for index in obligation.files],
-        })
+    inventory = [_inventory_wire(file) for file in state.files]
+    inventory.sort(key=lambda entry: llm_harness._js_code_units(entry["path"]))
+    report["inventory"] = inventory
+    summary.update(mode="bootstrap", headRef=SOURCE_REF, changedFiles=[entry["path"] for entry in inventory],
+                   additionalCodeExtensions=[])
+    report["scope"] = {
+        "mode": "bootstrap", "sourceRef": SOURCE_REF,
+        "inventoryDigestPreimage": "review-workflow-inventory/v1",
+        "policy": {"version": "bootstrap-source-review/v1", "additionalCodeExtensions": []},
+    }
+    report["obligations"] = [{
+        **_identity(obligation.index),
+        "files": [_file_wire(state.files[index]) for index in obligation.files],
+    } for obligation in state.obligations]
     report["receipts"] = [_receipt_wire(receipt, state.obligations, state.files) for receipt in state.receipts]
+
     healthy_stages = {
-        "modelCalls": "complete", "structural": "not-applicable", "lint": "complete",
-        "markers": "complete", "specialists": "complete",
+        "planner": "complete", "executionAnchors": "complete", "modelCalls": "complete",
+        "structural": "complete", "lint": "complete", "markers": "complete",
+        "specialists": "not-applicable",
     }
-    failing_stages = {
-        "modelCalls": "incomplete", "structural": "incomplete", "lint": "incomplete",
-        "markers": "incomplete", "specialists": "incomplete",
+    report["stages"] = {
+        name: healthy_stages[name] if state.stages[index] else "incomplete"
+        for index, name in enumerate(STAGE_NAMES)
     }
-    report["stages"] = {name: healthy_stages[name] if state.stages[index] else failing_stages[name]
-                        for index, name in enumerate(STAGE_NAMES)}
+    report["stageEvidence"] = {
+        "planner": {"planner": "llm", "degraded": False, "notes": ["llm-planner-success"]},
+        "executionAnchors": {"scope": "repository", "failedSurfaces": [], "unsupportedSurfaces": []},
+        "structural": {"scope": "scanner-related-context", "attemptedCalls": len(state.obligations),
+                       "seedFiles": sum(len(obligation.files) for obligation in state.obligations),
+                       "relatedFiles": 0, "failures": 0},
+        "lint": {"configuration": "custom", "ruleIds": ["fixture-rule"]},
+    }
 
     selections = []
+    requested_paths: set[str] = set()
     for obligation in state.obligations:
         identity = _identity(obligation.index)
         paths = [state.files[index].path for index in obligation.files]
+        requested_paths.update(paths)
         delivered = list(paths)
         omitted: list[dict] = []
         if not state.native_health[1] and obligation.index == state.obligations[0].index:
@@ -237,14 +262,17 @@ def materialize(state: AbstractState) -> dict:
             "model": identity["model"], "hypothesisId": identity["hypothesisId"],
             "vulnerabilityClass": "inputvalidation", "priority": "high",
             "filesConsidered": len(paths), "selectedFiles": paths, "validatedFiles": delivered,
-            "relationshipExtractionFailures": [], "relationshipExtractionFailuresTruncated": 0,
+            "relationshipInspection": {"attemptedCalls": 1, "seedFiles": len(paths),
+                                       "relatedFiles": 0, "failures": 0},
             "fileCoverage": {
                 "hypothesisId": identity["hypothesisId"], "assignedFiles": paths,
                 "requestedFiles": paths, "deliveredFiles": delivered, "partialFiles": [],
                 "omittedAssignedFiles": omitted, "coverage": "complete" if not omitted else "incomplete",
                 "fileOutcomes": [{"path": path, "outcome": "unassessed",
-                                  "reason": "analysis_completion_not_established"} for path in paths],
-                "calls": [{"shardIndex": identity["shardIndex"], "requestedFiles": paths,
+                                  "reason": "analysis_completion_not_established"} for path in delivered],
+                "calls": [{**{key: identity[key] for key in ("invocationId", "requestDigest")},
+                           "responseDigest": f"{(obligation.index + 7) % 10}" * 64,
+                           "shardIndex": identity["shardIndex"], "requestedFiles": paths,
                            "deliveredFiles": delivered, "partialFiles": [], "omittedFiles": omitted,
                            "transport": "succeeded"}],
             },
@@ -254,20 +282,43 @@ def materialize(state: AbstractState) -> dict:
     scan.update(
         status="ok" if state.native_health[0] else "inconclusive",
         reasons=[] if state.native_health[0] else ["model_invocations_failed"],
-        llmCalls=count, failedCalls=0 if state.native_health[0] else 1,
-        quotaFailureCount=0, hypothesesPlanned=count, hypothesesAttempted=count,
+        failureSamples=[] if state.native_health[0] else ["fixture failure"],
+        llmCalls=count, failedCalls=0 if state.native_health[0] else 1, quotaFailureCount=0,
+        hypothesesPlanned=count, hypothesesAttempted=count,
         hypothesesEvaluated=count if state.native_health[0] else max(0, count - 1),
-        hypothesisCoverage=1 if state.native_health[0] else 0,
+        hypothesisCoverage=1 if state.native_health[0] and count else 0,
         evaluatedHypothesisIds=[item["hypothesisId"] for item in selections] if state.native_health[0] else [],
         failedHypothesisIds=[] if state.native_health[0] else ([selections[0]["hypothesisId"]] if selections else ["TM-FAILED"]),
-        unevaluatedHypothesisIds=[], focusedFiles=sum(len(item["selectedFiles"]) for item in selections),
-        actualLlmFilesScanned=sum(len(item["validatedFiles"]) for item in selections),
-        hypothesisSelections=selections,
+        unevaluatedHypothesisIds=[], hypothesisSelections=selections,
     )
+    summary["bootstrapPlan"] = {
+        "planner": "llm", "focusedFileCount": len(requested_paths),
+        "focusedFiles": sorted(requested_paths), "hypothesisCount": count,
+        "notes": ["llm-planner-success"],
+    }
+    surfaces = []
+    for prefix in sorted({llm_harness._profile_prefix(entry["path"]) for entry in inventory}):
+        matching = [entry for entry in inventory if llm_harness._profile_prefix(entry["path"]) == prefix]
+        surfaces.append({"prefix": prefix,
+                         "discovery": "supported" if any(entry["classification"] == "supported" for entry in matching) else "unsupported",
+                         "languages": ["javascript"] if any(entry["classification"] == "supported" for entry in matching) else [],
+                         "sinkClasses": [], "anchorFiles": [], "hypotheses": []})
+    summary["executionAnchorCoverage"] = {"scope": "repository", "surfaces": surfaces, "advisories": []}
+
+    report["inputs"] = []
+    for path in llm_harness._js_sorted(list(requested_paths)):
+        entry = next((item for item in inventory if item["path"] == path), None)
+        if entry and entry["classification"] == "supported":
+            report["inputs"].append({
+                "path": path, "roles": ["native-source-read", "primary"],
+                "observations": [{"sha256": entry["sha256"], "bytes": entry["bytes"]}],
+                "sourceRef": SOURCE_REF, "objectId": entry["objectId"], "binding": "matched",
+            })
+
     summary["repositoryLint"] = {"status": "ok", "failures": 0, "failureSamples": []}
+    summary["repositoryLintRules"] = [{"id": "fixture-rule", "status": "ok", "failures": 0}]
     if not state.native_health[2]:
         summary["repositoryLint"] = {"status": "inconclusive", "failures": 1, "failureSamples": ["lint failed"]}
-    summary["repositoryLintRules"] = []
     summary["reviewAssessment"] = {
         "scope": "marker-reviews", "status": "none-pending", "pendingReviews": 0,
         "pendingSites": 0, "pendingInspectionGaps": 0, "carriedForwardReviews": 0,
@@ -285,22 +336,25 @@ def materialize(state: AbstractState) -> dict:
         }]
 
     completion = summary["completion"]
-    supported = [file for file in state.files if file.disposition == "supported"]
+    supported_files = [file for file in state.files if file.disposition == "supported"]
+    completion["changedFileSupport"] = {"status": "not-recorded"}
     completion["sourceAssessment"] = {
         "status": "unassessed",
         "files": [{"path": file.path, "outcome": "unassessed",
                    "reason": "analysis_completion_not_established" if state.completion.source_delivery == "analysis"
-                             else "not_fully_delivered"} for file in supported],
+                             else "not_fully_delivered"} for file in supported_files],
     }
-    completion["structuralCoverage"]["status"] = state.completion.structural
+    completion["structuralCoverage"].update(
+        status=state.completion.structural, planningInspections={"attempted": 0, "parsed": 0, "failed": 0},
+        requiredInspectionFailures=0, failureSamples=[], truncatedFailureSamples=0)
     completion["coverage"] = {"status": "unknown", "reasons": list(state.completion.reasons)}
     completion["hypothesisEvaluation"].update(
         status="complete", planned=len(state.obligations), evaluated=len(state.obligations),
         failedIds=[], unevaluatedIds=[])
     calls = completion["modelCalls"]
+    attempted = max(1, len(state.obligations) + 1)
     if state.completion.call_health == "healthy":
-        calls.update(status="no-recorded-failures", attempted=max(1, len(state.obligations)),
-                     succeeded=max(1, len(state.obligations)), failed=0, pending=0,
+        calls.update(status="no-recorded-failures", attempted=attempted, succeeded=attempted, failed=0, pending=0,
                      failureSamples=[], truncatedFailureSamples=0)
     elif state.completion.call_health == "failed":
         calls.update(status="failures-recorded", attempted=1, succeeded=0, failed=1, pending=0,
@@ -311,20 +365,25 @@ def materialize(state: AbstractState) -> dict:
                      failureSamples=[], truncatedFailureSamples=0)
 
     if state.completion.mode == "not-required":
+        report["inputs"] = []
+        report["stages"] = {
+            "planner": "not-applicable", "executionAnchors": "not-applicable",
+            "modelCalls": "not-applicable", "structural": "not-applicable", "lint": "complete",
+            "markers": "complete", "specialists": "not-applicable",
+        }
+        report["stageEvidence"] = {"lint": {"configuration": "custom", "ruleIds": ["fixture-rule"]}}
+        summary.pop("bootstrapScan", None)
         completion["modelCalls"].update(status="not-run", attempted=0, succeeded=0, failed=0, pending=0,
                                         failureSamples=[], truncatedFailureSamples=0)
-        completion["changedFileSupport"] = {
-            "status": "not-required",
-            "scope": _scope(len(state.files), 0, excluded_count=len(state.files)),
-        }
+        completion["changedFileSupport"] = {"status": "not-required", "scope": _scope(
+            len(state.files), 0, excluded_count=len(state.files))}
         completion["hypothesisEvaluation"].update(status="not-required", planned=0, evaluated=0,
                                                    failedIds=[], unevaluatedIds=[])
         completion["sourceAssessment"] = {"status": "not-required", "files": []}
         completion["coverage"] = {"status": "not-required", "reasons": []}
-    summary["newFindings"] = [
-        {"id": f"SV-GENERATED-{index + 1}", "cweIds": ["CWE-20"]}
-        for index in range(state.finding_count)
-    ]
+    report["scope"]["inventoryDigest"] = llm_harness._canonical_inventory_digest(report["scope"], inventory)
+    summary["newFindings"] = [{"id": f"SV-GENERATED-{index + 1}", "cweIds": ["CWE-20"]}
+                              for index in range(state.finding_count)]
     return summary
 
 
@@ -334,8 +393,8 @@ def oracle(state: AbstractState) -> bool:
         return False
     if state.status == "not-required":
         return (all(file.disposition == "excluded" for file in state.files)
-                and not state.obligations and not state.receipts
-                and state.completion.mode == "not-required")
+                and not state.obligations and not state.receipts and all(state.stages)
+                and all(state.native_health) and state.completion.mode == "not-required")
     if (any(file.disposition != "supported" for file in state.files)
             or not all(state.stages) or not all(state.native_health)):
         return False
@@ -366,8 +425,12 @@ def oracle(state: AbstractState) -> bool:
         if any(status != "completed" for _file_index, _procedure, status in matching[0].terminals):
             return False
     completion = state.completion
+    expected_reasons = {"source_analysis_completion_not_established"}
+    if completion.structural == "not-recorded":
+        expected_reasons.add("structural_coverage_not_recorded")
     return (completion.mode == "workflow" and completion.call_health == "healthy"
-            and bool(completion.reasons) and set(completion.reasons) <= ALLOWED_REASONS
+            and len(completion.reasons) == len(set(completion.reasons))
+            and set(completion.reasons) == expected_reasons
             and completion.source_delivery == "analysis"
             and completion.structural in ("not-recorded", "complete"))
 
@@ -381,8 +444,12 @@ def production_decision(summary: dict) -> Decision:
 
 
 def _case(name: str, family: str, state: AbstractState, *tags: str,
-          mutate: Callable[[dict], None] | None = None) -> Case:
-    return Case(name, family, state, set(tags), mutate)
+          mutate: Callable[[dict], None] | None = None, expected: bool | None = None) -> Case:
+    return Case(name, family, state, set(tags), mutate, expected)
+
+
+def expected_decision(case: Case) -> bool:
+    return oracle(case.state) if case.expected is None else case.expected
 
 
 def inventory_assignment_cases() -> Iterable[Case]:
@@ -465,7 +532,7 @@ def workflow_stage_cases() -> Iterable[Case]:
     files = (FileState(0),)
     obligation = ObligationState(0, (0,))
     receipt = ReceiptState(0, terminals=_terminals_for(obligation, files))
-    for bits in product((False, True), repeat=5):
+    for bits in product((False, True), repeat=len(STAGE_NAMES)):
         tags = {f"stage:{name}:failing" for name, healthy in zip(STAGE_NAMES, bits) if not healthy}
         if sum(bits) == 4:
             tags.add("fault:workflow_stage_only")
@@ -560,17 +627,142 @@ def malformed_cases() -> Iterable[Case]:
     yield from cases
 
 
+def contract_guard_cases() -> Iterable[Case]:
+    files = (FileState(0),)
+    obligation = ObligationState(0, (0,))
+    receipt = ReceiptState(0, terminals=_terminals_for(obligation, files))
+    base = AbstractState("complete", files, (obligation,), (receipt,))
+
+    def case(name: str, mutate: Callable[[dict], None], *tags: str, state: AbstractState = base,
+             expected: bool = False) -> Case:
+        return _case(name, "contract_guards", state, *tags, mutate=mutate, expected=expected)
+
+    yield case("guard-digest-tamper", lambda s: s["reviewWorkflow"]["scope"].update(
+        inventoryDigest="0" * 64), "guard:digest")
+    yield case("guard-input-binding", lambda s: s["reviewWorkflow"]["inputs"][0].update(
+        binding="mismatched"), "guard:input")
+    yield case("guard-input-observation", lambda s: s["reviewWorkflow"]["inputs"][0]["observations"][0].update(
+        sha256="0" * 64))
+    yield case("guard-input-missing", lambda s: s["reviewWorkflow"].update(inputs=[]))
+    yield case("guard-planner-evidence", lambda s: s["bootstrapPlan"].update(planner="heuristic"), "guard:stage")
+    yield case("guard-anchor-evidence", lambda s: s["reviewWorkflow"]["stageEvidence"].pop("executionAnchors"))
+    yield case("guard-structural-evidence", lambda s: s["reviewWorkflow"]["stageEvidence"].pop("structural"))
+
+    def disable_lint(summary: dict) -> None:
+        summary["reviewWorkflow"]["stages"]["lint"] = "not-applicable"
+        summary["reviewWorkflow"]["stageEvidence"]["lint"] = {"configuration": "disabled", "ruleIds": []}
+        summary["repositoryLintRules"] = []
+
+    yield case("configured-disabled-lint", disable_lint, "reach:disabled_lint", expected=True)
+
+    mixed_files = (FileState(0, "excluded"), FileState(1))
+    mixed_obligation = ObligationState(0, (1,))
+    mixed_state = AbstractState("complete", mixed_files, (mixed_obligation,), (
+        ReceiptState(0, terminals=_terminals_for(mixed_obligation, mixed_files)),))
+
+    def metadata_source_bypass(summary: dict) -> None:
+        entry = next(item for item in summary["reviewWorkflow"]["inventory"] if item["path"] == "README.md")
+        entry["path"] = "README.py"
+        summary["changedFiles"] = [item["path"] for item in summary["reviewWorkflow"]["inventory"]]
+        for surface in summary["executionAnchorCoverage"]["surfaces"]:
+            if surface["prefix"] == "readme.md":
+                surface["prefix"] = "readme.py"
+        report = summary["reviewWorkflow"]
+        report["scope"]["inventoryDigest"] = llm_harness._canonical_inventory_digest(report["scope"], report["inventory"])
+
+    yield case("metadata-named-code-bypass", metadata_source_bypass, state=mixed_state)
+
+    def additional_extension_bypass(summary: dict) -> None:
+        report = summary["reviewWorkflow"]
+        entry = next(item for item in report["inventory"] if item["classification"] == "excluded")
+        old_prefix = llm_harness._profile_prefix(entry["path"])
+        entry.update(path="config/data.json", reason="bootstrap-policy-does-not-source-review:.json")
+        for surface in summary["executionAnchorCoverage"]["surfaces"]:
+            if surface["prefix"] == old_prefix:
+                surface["prefix"] = "config/data.json"
+        summary["changedFiles"] = [item["path"] for item in report["inventory"]]
+        summary["additionalCodeExtensions"] = [".json"]
+        report["scope"]["policy"]["additionalCodeExtensions"] = [".json"]
+        report["scope"]["inventoryDigest"] = llm_harness._canonical_inventory_digest(report["scope"], report["inventory"])
+
+    yield case("additional-extension-bypass", additional_extension_bypass, state=mixed_state)
+
+    def joint_invocation(summary: dict) -> None:
+        for key in ("obligations", "receipts"):
+            summary["reviewWorkflow"][key][0]["invocationId"] = "jointly-mutated-invocation"
+
+    yield case("guard-original-invocation", joint_invocation, "guard:original")
+
+    def joint_request(summary: dict) -> None:
+        for key in ("obligations", "receipts"):
+            summary["reviewWorkflow"][key][0]["requestDigest"] = "0" * 64
+
+    yield case("guard-original-request", joint_request)
+    yield case("guard-original-response", lambda s: s["reviewWorkflow"]["receipts"][0].update(
+        responseDigest="0" * 64))
+
+    def joint_bytes(summary: dict) -> None:
+        for key in ("obligations", "receipts"):
+            summary["reviewWorkflow"][key][0]["files"][0]["bytes"] += 1
+
+    yield case("guard-obligation-inventory-bytes", joint_bytes)
+    yield case("guard-head-ref", lambda s: s.update(headRef="b" * 40))
+
+    def positive_pr(summary: dict) -> None:
+        summary["mode"] = "pr"
+        summary["reviewWorkflow"]["scope"]["mode"] = "pr"
+
+    yield case("guard-positive-mode", positive_pr)
+
+    two_files = (FileState(0), FileState(1))
+    two_obligations = (ObligationState(0, (0,)), ObligationState(1, (1,)))
+    two_receipts = tuple(ReceiptState(item.index, terminals=_terminals_for(item, two_files))
+                         for item in two_obligations)
+    two_state = AbstractState("complete", two_files, two_obligations, two_receipts)
+
+    def multiple_models(summary: dict) -> None:
+        summary["reviewWorkflow"]["obligations"][1]["model"] = "other/model"
+        summary["reviewWorkflow"]["receipts"][1]["model"] = "other/model"
+        summary["bootstrapScan"]["hypothesisSelections"][1]["model"] = "other/model"
+
+    yield case("guard-multiple-models", multiple_models, state=two_state)
+    yield case("guard-positive-reasons", lambda s: s["reviewWorkflow"].update(reasons=["contradiction"]))
+
+    def call_outside_inventory(summary: dict) -> None:
+        selection = summary["bootstrapScan"]["hypothesisSelections"][0]
+        coverage = selection["fileCoverage"]
+        call = coverage["calls"][0]
+        for value in (selection["selectedFiles"], selection["validatedFiles"], coverage["assignedFiles"],
+                      coverage["requestedFiles"], coverage["deliveredFiles"], call["requestedFiles"],
+                      call["deliveredFiles"]):
+            value.append("src/untracked.ts")
+        coverage["fileOutcomes"].append({"path": "src/untracked.ts", "outcome": "unassessed",
+                                         "reason": "analysis_completion_not_established"})
+
+    yield case("guard-call-outside-inventory", call_outside_inventory)
+
+    excluded_state = AbstractState("not-required", (FileState(0, "excluded"),), (), (),
+                                   completion=CompletionState(mode="not-required"))
+    yield case("not-required-failing-stage", lambda s: s["reviewWorkflow"]["stages"].update(
+        planner="incomplete"), state=excluded_state)
+    yield case("unknown-report-field", lambda s: s["reviewWorkflow"].update(unexpected=True))
+    yield case("unknown-classification", lambda s: s["reviewWorkflow"]["inventory"][0].update(
+        classification="reviewed"))
+    yield case("unknown-digest-preimage", lambda s: s["reviewWorkflow"]["scope"].update(
+        inventoryDigestPreimage="review-workflow-inventory/v2"))
+
+
 def generated_cases() -> list[Case]:
     cases = [
         *inventory_assignment_cases(), *pairing_binding_cases(), *terminal_cases(),
         *workflow_stage_cases(), *native_health_cases(), *completion_cases(),
-        *reachability_cases(), *malformed_cases(),
+        *reachability_cases(), *malformed_cases(), *contract_guard_cases(),
     ]
     names = [case.name for case in cases]
     if len(names) != len(set(names)):
         raise AssertionError("generated case names are not unique")
-    if len(cases) != 711:
-        raise AssertionError(f"finite-domain drift: expected 711 cases, generated {len(cases)}")
+    if len(cases) != 830:
+        raise AssertionError(f"finite-domain drift: expected 830 cases, generated {len(cases)}")
     return cases
 
 
@@ -588,6 +780,7 @@ def required_witnesses(cases: list[Case], decisions: dict[str, Decision]) -> dic
         "accepted_two_independent_files": lambda case: "reach:two_independent_files" in case.tags,
         "accepted_zero_findings": lambda case: "reach:findings:0" in case.tags,
         "accepted_findings": lambda case: "reach:findings:1" in case.tags,
+        "accepted_disabled_lint": lambda case: "reach:disabled_lint" in case.tags,
         "rejected_unassigned": lambda case: case.name == "inventory-f1-p1-dunassigned-a1",
         "rejected_unsupported": lambda case: "inventory:unsupported" in case.tags,
         "rejected_missing_receipt": lambda case: "fault:missing_receipt_only" in case.tags,
@@ -604,6 +797,25 @@ def required_witnesses(cases: list[Case], decisions: dict[str, Decision]) -> dic
         "rejected_duplicate_inventory": lambda case: "malformed:duplicate-inventory" in case.tags,
         "rejected_duplicate_obligation": lambda case: "malformed:duplicate-obligation" in case.tags,
         "rejected_duplicate_terminal": lambda case: "malformed:duplicate-terminal" in case.tags,
+        "rejected_digest_tamper": lambda case: case.name == "guard-digest-tamper",
+        "rejected_input_binding": lambda case: case.name == "guard-input-binding",
+        "rejected_input_removal": lambda case: case.name == "guard-input-missing",
+        "rejected_stage_evidence": lambda case: case.name == "guard-planner-evidence",
+        "rejected_metadata_code_bypass": lambda case: case.name == "metadata-named-code-bypass",
+        "rejected_additional_extension_bypass": lambda case: case.name == "additional-extension-bypass",
+        "rejected_original_invocation": lambda case: case.name == "guard-original-invocation",
+        "rejected_original_request": lambda case: case.name == "guard-original-request",
+        "rejected_original_response": lambda case: case.name == "guard-original-response",
+        "rejected_obligation_inventory_bytes": lambda case: case.name == "guard-obligation-inventory-bytes",
+        "rejected_stale_head": lambda case: case.name == "guard-head-ref",
+        "rejected_positive_mode": lambda case: case.name == "guard-positive-mode",
+        "rejected_multiple_models": lambda case: case.name == "guard-multiple-models",
+        "rejected_positive_reasons": lambda case: case.name == "guard-positive-reasons",
+        "rejected_call_outside_inventory": lambda case: case.name == "guard-call-outside-inventory",
+        "rejected_not_required_stage": lambda case: case.name == "not-required-failing-stage",
+        "rejected_unknown_field": lambda case: case.name == "unknown-report-field",
+        "rejected_unknown_enum": lambda case: case.name == "unknown-classification",
+        "rejected_unknown_preimage": lambda case: case.name == "unknown-digest-preimage",
         **{f"rejected_binding_{binding}": (lambda case, binding=binding:
               f"fault:binding_{binding}_only" in case.tags)
            for binding in ("invocation", "model", "hypothesis", "shard", "source", "request", "file")},
@@ -611,7 +823,7 @@ def required_witnesses(cases: list[Case], decisions: dict[str, Decision]) -> dic
     witnesses: dict[str, str] = {}
     for requirement, predicate in requirements.items():
         for case in cases:
-            if predicate(case) and decisions[case.name].accepted == oracle(case.state):
+            if predicate(case) and decisions[case.name].accepted == expected_decision(case):
                 witnesses[requirement] = case.name
                 break
         else:
@@ -624,10 +836,7 @@ def _production_acceptor(case: Case, summary: dict) -> bool:
 
 
 def mutant_results(cases: list[Case]) -> dict[str, dict]:
-    """Concrete witnesses against intentionally faulty abstract acceptance functions.
-
-    These functions are checker self-tests, not compiled source mutants of llm_harness.py.
-    """
+    """Concrete witnesses for abstract faults and runtime production-guard removals."""
     def always_accept(_case: Case, _summary: dict) -> bool:
         return True
 
@@ -643,24 +852,59 @@ def mutant_results(cases: list[Case]) -> dict[str, dict]:
     def ignore_native_failure(case: Case, summary: dict) -> bool:
         return True if "fault:native_failure_only" in case.tags else _production_acceptor(case, summary)
 
+    def without_guards(summary: dict, *, shape: set[str] = set(), reconciliation: set[str] = set()) -> bool:
+        original_shape = llm_harness._review_workflow_shape
+        original_reconciliation = llm_harness._review_workflow_reconciliation
+        llm_harness._review_workflow_shape = lambda report: [
+            issue for issue in original_shape(report) if issue not in shape]
+        llm_harness._review_workflow_reconciliation = lambda native, report: [
+            issue for issue in original_reconciliation(native, report) if issue not in reconciliation]
+        try:
+            return production_decision(summary).accepted
+        finally:
+            llm_harness._review_workflow_shape = original_shape
+            llm_harness._review_workflow_reconciliation = original_reconciliation
+
+    def remove_digest_guard(case: Case, summary: dict) -> bool:
+        return without_guards(summary, shape={"inventory_digest_mismatch"}) \
+            if "guard:digest" in case.tags else _production_acceptor(case, summary)
+
+    def remove_input_guard(case: Case, summary: dict) -> bool:
+        return without_guards(summary, reconciliation={"input_binding_gap"}) \
+            if "guard:input" in case.tags else _production_acceptor(case, summary)
+
+    def remove_stage_evidence_guard(case: Case, summary: dict) -> bool:
+        return without_guards(summary, reconciliation={"planner_evidence_mismatch"}) \
+            if "guard:stage" in case.tags else _production_acceptor(case, summary)
+
+    def remove_original_binding_guards(case: Case, summary: dict) -> bool:
+        return without_guards(summary, reconciliation={
+            "call_obligation_binding_mismatch", "call_receipt_binding_mismatch",
+            "original_obligation_set_mismatch",
+        }) if "guard:original" in case.tags else _production_acceptor(case, summary)
+
     mutants = {
         "always_accept": always_accept,
         "always_reject": always_reject,
         "ignore_missing_receipt": ignore_missing_receipt,
         "collapse_duplicate_receipts": collapse_duplicate_receipts,
         "ignore_native_failure": ignore_native_failure,
+        "remove_digest_guard": remove_digest_guard,
+        "remove_input_guard": remove_input_guard,
+        "remove_stage_evidence_guard": remove_stage_evidence_guard,
+        "remove_original_binding_guards": remove_original_binding_guards,
     }
     results = {}
     for name, acceptor in mutants.items():
         witness = None
         for case in cases:
             actual = acceptor(case, case_summary(case))
-            expected = oracle(case.state)
+            expected = expected_decision(case)
             if actual != expected:
                 witness = {"case": case.name, "expected": expected, "faulty_accepted": actual}
                 break
-        results[name] = {"kind": "abstract_acceptance_function", "detected": witness is not None,
-                         "witness": witness}
+        kind = "production_guard_removal" if name.startswith("remove_") else "abstract_acceptance_function"
+        results[name] = {"kind": kind, "detected": witness is not None, "witness": witness}
     return results
 
 
@@ -672,10 +916,14 @@ def source_binding() -> dict:
     try:
         commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
                                 capture_output=True, text=True).stdout.strip()
+        dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, check=True,
+                                    capture_output=True, text=True).stdout)
     except (OSError, subprocess.CalledProcessError):
-        commit = None
+        commit, dirty = None, None
     return {
         "git_commit": commit,
+        "worktree_dirty": dirty,
+        "producer_contract": {"head": PRODUCER_HEAD, "wire": "corrected reviewWorkflow v1"},
         "sha256": {
             str(ADAPTER.relative_to(ROOT)): _sha256(ADAPTER),
             str(FIXTURE.relative_to(ROOT)): _sha256(FIXTURE),
@@ -692,7 +940,7 @@ def run_checker() -> dict:
     for case in cases:
         decision = production_decision(case_summary(case))
         decisions[case.name] = decision
-        expected = oracle(case.state)
+        expected = expected_decision(case)
         if decision.accepted != expected:
             mismatches.append({
                 "case": case.name, "family": case.family, "expected": expected,
@@ -703,9 +951,9 @@ def run_checker() -> dict:
     mutants = mutant_results(cases)
     witnesses = required_witnesses(cases, decisions) if not mismatches else {}
     family_counts = Counter(case.family for case in cases)
-    accepted = sum(oracle(case.state) for case in cases)
+    accepted = sum(expected_decision(case) for case in cases)
     return {
-        "checker": "sv-completion-properties/v1",
+        "checker": "sv-completion-properties/v2",
         "claim": "bounded generated verification and concrete conformance; no full formal proof artifact",
         "checked": len(cases),
         "expected_accepted": accepted,
@@ -719,7 +967,7 @@ def run_checker() -> dict:
             "finite domains are exhaustive only over the dimensions documented in docs/designs/sv-completion-bounded-verification.md",
             "no proof of Git inventory completeness or classification, producer truthfulness, actual source delivery, or semantic model understanding",
             "no proof of network/container behavior, hash security, provider identity, or arbitrary Python/TypeScript executions",
-            "faulty acceptance functions are abstract checker self-tests, not compiled source-level mutants",
+            "five faulty acceptance functions are abstract self-tests; four additional checks are temporary runtime production-guard removals, not compiled source mutants",
             "the current upstream producer does not demonstrate a bootstrap all-excluded completion report; this checker materializes the wire contract's valid not-required form",
         ],
         "ok": not mismatches and all(item["detected"] for item in mutants.values()),
