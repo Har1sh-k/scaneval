@@ -1,0 +1,4 @@
+interface:
+  display_name: "Scanner Adapter Builder"
+  short_description: "Build evidence-backed scanner execution adapters"
+  default_prompt: "Use $scanner-adapter-builder to design or review this scanner execution adapter and its verification evidence."
