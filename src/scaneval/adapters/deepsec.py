@@ -1471,17 +1471,17 @@ class TraceResult(NamedTuple):
     refusals_recorded: dict = {}
 
 
-def _overlapping(candidates: tuple[Candidate, ...], path: str,
+def _overlapping(candidates: tuple[Candidate, ...], path: str, slug: str,
                  start: int | None, end: int | None) -> list[str]:
-    """Candidate ids on *path* whose lines overlap ``[start, end]``, or all of them file-level.
+    """Candidate ids of *slug* on *path* that overlap ``[start, end]``, or all file-level.
 
-    A finding that cited no line cannot be narrowed to a candidate by line, so every candidate
-    on the same file is listed: the link says these are the candidates that were on this file,
-    not that the agent read any particular one.
+    A finding that cited no line cannot be narrowed by line, so every candidate of the same
+    native vulnerability class on the file is listed. The slug remains part of the intersection:
+    a regex hit for an unrelated class on the same line is not evidence for this finding.
     """
     ids = []
     for candidate in candidates:
-        if candidate.path != path:
+        if candidate.path != path or candidate.slug != slug:
             continue
         if start is None or end is None or not candidate.lines:
             ids.append(candidate.candidate_id)
@@ -1754,7 +1754,7 @@ def write_trace(*, trace_dir: Path, trace_mode: str, run_id: str, source_dir: Pa
                 candidate_id=finding["claim_id"], claim_id=finding["claim_id"],
                 metadata={"source": "harness_record", "stage": "process",
                           "file_path": finding["path"],
-                          "candidate_ids": _overlapping(candidates, finding["path"],
+                          "candidate_ids": _overlapping(candidates, finding["path"], finding["slug"],
                                                         finding["start"], finding["end"]),
                           "vulnerability_class": finding["slug"],
                           "severity": finding["severity"], "confidence": finding["confidence"],

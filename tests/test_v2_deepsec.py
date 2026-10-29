@@ -862,6 +862,25 @@ def test_a_clean_run_produces_claims_artifacts_and_a_trace_of_what_deepsec_recor
     assert any("Transcript paths were matched against" in note for note in execution["notes"])
 
 
+def test_a_submitted_finding_does_not_link_an_unrelated_regex_hit_on_the_same_line(tmp_path, monkeypatch):
+    """Candidate linkage is the explicit native path/class/line intersection.
+
+    The fake finding is command injection on line 9, where only DeepSec's SQL matcher fired.
+    Line-only intersection used to attach that SQL candidate to the command-injection finding.
+    """
+    root = fake_deepsec_root(tmp_path, lines=[9])
+    stub_collector(monkeypatch, tmp_path)
+    bundle = invoke(tmp_path, root)
+    events = trace_events(bundle)
+
+    submitted = [event for event in events if event["type"] == "finding.submitted"]
+    assert submitted and all(event["metadata"]["candidate_ids"] == [] for event in submitted)
+    assert any(event["type"] == "finding.candidate"
+               and event["metadata"]["vulnerability_class"] == "sql-injection"
+               and 9 in event["metadata"]["line_numbers"] for event in events), \
+        "the unrelated native regex hit remains explicit in the trace"
+
+
 def test_no_trace_event_carries_the_operator_home_directory(tmp_path, monkeypatch):
     """A trace is shared evidence; a path into somebody's home is not part of the run."""
     root = fake_deepsec_root(tmp_path)
