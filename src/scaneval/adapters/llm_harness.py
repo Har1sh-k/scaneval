@@ -787,6 +787,8 @@ def _review_workflow_reconciliation(summary: dict[str, Any], report: dict[str, A
         issue("mode_mismatch")
     if scope.get("mode") != "bootstrap":
         issue("unsupported_mode")
+    if summary.get("consensus") is not None:
+        issue("unsupported_consensus")
     if not all(key in scope for key in ("repository", "sourceRef", "inventoryDigest")):
         issue("scope_metadata_missing")
     if summary.get("headRef") != source_ref:

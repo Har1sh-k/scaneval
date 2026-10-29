@@ -2486,6 +2486,7 @@ def test_positive_review_workflow_fails_closed_for_malformed_and_cross_bound_evi
             disposition="unsupported", sha256=None, bytes=None, requiredProcedures=[])
         yield "bad disposition enum", lambda s: s["reviewWorkflow"]["inventory"][1].update(disposition="reviewed")
         yield "head mismatch", lambda s: s.update(headRef="b" * 40)
+        yield "unsupported consensus", lambda s: s.update(consensus={"status": "complete"})
         yield "stage failure", lambda s: s["reviewWorkflow"]["stages"].update(lint="incomplete")
         yield "lint failure", lambda s: s["repositoryLint"].update(status="inconclusive", failures=1)
         yield "marker gap", lambda s: s["reviewAssessment"].update(status="pending", pendingReviews=1)
