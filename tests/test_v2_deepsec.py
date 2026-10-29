@@ -19,6 +19,7 @@ root, and the session's own ``call_id``.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import json
@@ -1000,9 +1001,11 @@ def test_a_failed_scan_never_reaches_the_later_steps_and_is_named_as_the_scan(tm
 def test_an_export_that_cannot_be_read_is_never_a_successful_scan(tmp_path, monkeypatch):
     stub_collector(monkeypatch, tmp_path)
     missing = fake_deepsec_root(tmp_path / "a", no_export=True)
-    result, _ = documents(invoke(tmp_path / "a", missing, out="out-missing"))
+    result, execution = documents(invoke(tmp_path / "a", missing, out="out-missing"))
     assert result["status"] == "error" and result["error"]["code"] == "unreadable_export"
     assert result["claims"] == []
+    assert not any("no JSON export entry" in note for note in execution["notes"]), \
+        "an export that was never read cannot support an omission claim"
 
     broken = fake_deepsec_root(tmp_path / "b", bad_export=True)
     result, _ = documents(invoke(tmp_path / "b", broken, out="out-broken"))
@@ -1162,7 +1165,7 @@ def test_an_export_entry_whose_path_leaves_the_tree_is_import_loss_and_not_a_cla
         {"title": "[HIGH] c", "description": "", "metadata": "not an object"},
         "not an object at all",
     ])
-    assert imported.claims == [] and imported.lost == 4
+    assert imported.claims == [] and imported.lost == 4 and imported.unjoined == 0
     assert any("absolute path" in note for note in imported.notes)
     assert any("'..' segment" in note for note in imported.notes)
 
@@ -1179,6 +1182,7 @@ def test_a_finding_is_joined_to_the_native_id_the_file_records_hold_and_noted_wh
     stranger = import_export([{"title": "[HIGH] Other", "description": "", "metadata": {
         "filePath": "src/a.py", "lineNumbers": [3], "vulnSlug": "x"}}], ids=index)
     assert "native_id" not in stranger.claims[0]
+    assert stranger.lost == 0 and stranger.unjoined == 1, "the usable claim is not import loss"
     assert any("no native finding id" in note for note in stranger.notes)
 
 
@@ -1970,6 +1974,77 @@ def test_a_record_this_run_could_not_read_makes_the_candidate_population_partial
     assert execution["capture"]["finding_candidate"] == "partial"
 
 
+def test_duplicate_native_ids_conserve_multiplicity_when_the_export_is_complete(tmp_path, monkeypatch):
+    """Two occurrences with one native id remain two claims and do not create false loss."""
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            duplicate = dict(record["findings"][0])
+            duplicate["lineNumbers"] = [99]
+            record["findings"].append(duplicate)
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    assert result["status"] == "success", execution["error"]
+    assert len(result["claims"]) == 3
+    native_ids = Counter(claim.get("native_id") for claim in result["claims"])
+    assert native_ids.most_common(1)[0][1] == 2
+    assert len({claim["claim_id"] for claim in result["claims"]}) == 3
+
+
+def test_one_of_two_findings_with_the_same_native_id_missing_from_export_is_loss(tmp_path, monkeypatch):
+    """A set comparison hid this deficit because the surviving occurrence carried the same id."""
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            duplicate = dict(record["findings"][0])
+            duplicate["lineNumbers"] = [99]
+            record["findings"].append(duplicate)
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        elif argv[1] == "export":
+            export = Path(kwargs["cwd"]).parent / "deepsec-export.json"
+            payload = json.loads(export.read_text(encoding="utf-8"))
+            payload.pop(0)
+            export.write_text(json.dumps(payload), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    assert result["status"] == "partial" and result["error"]["code"] == "import_loss"
+    assert len(result["claims"]) == 2
+    assert "0 exported finding(s) could not be imported, 1 record finding(s) had no export entry" \
+        in result["error"]["message"]
+    assert any("1 additional native finding occurrence" in note for note in execution["notes"])
+
+
 def test_a_native_finding_missing_from_the_export_is_import_loss_not_silent_success(tmp_path, monkeypatch):
     """The process record is authoritative evidence that export must conserve.
 
@@ -2002,7 +2077,73 @@ def test_a_native_finding_missing_from_the_export_is_import_loss_not_silent_succ
     assert len(result["claims"]) == 1, "the finding export did retain is still reported"
     assert result["bundles_resolved"] is False
     assert execution["capture"]["finding_submitted"] == "partial"
-    assert any("file records hold 1 native finding" in note for note in execution["notes"])
+    assert any("1 additional native finding occurrence" in note for note in execution["notes"])
+
+
+@pytest.mark.parametrize("damage", ["metadata", "path"])
+def test_an_unimportable_export_entry_is_not_counted_again_as_export_omission(tmp_path, monkeypatch, damage):
+    """One exported finding failed import; the same record occurrence is not a second loss."""
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "export":
+            export = Path(kwargs["cwd"]).parent / "deepsec-export.json"
+            payload = json.loads(export.read_text(encoding="utf-8"))
+            if damage == "metadata":
+                payload[0]["metadata"] = "not an object"
+            else:
+                payload[0]["metadata"]["filePath"] = "/etc/shadow"
+            export.write_text(json.dumps(payload), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    assert result["status"] == "partial" and len(result["claims"]) == 1
+    assert "1 exported finding(s) could not be imported, 0 record finding(s) had no export entry" \
+        in result["error"]["message"]
+    assert not any("additional native finding occurrence" in note for note in execution["notes"])
+
+
+def test_an_unjoinable_export_identity_preserves_the_claim_and_is_not_called_omission(tmp_path, monkeypatch):
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "export":
+            export = Path(kwargs["cwd"]).parent / "deepsec-export.json"
+            payload = json.loads(export.read_text(encoding="utf-8"))
+            payload[0]["title"] = "[HIGH] title that is not in the file record"
+            export.write_text(json.dumps(payload), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    assert result["status"] == "partial" and len(result["claims"]) == 2
+    assert "0 exported finding(s) could not be imported, 0 record finding(s) had no export entry, " \
+           "1 imported claim(s) could not be joined to native identity" in result["error"]["message"]
+    assert result["bundles_resolved"] is False
+    assert execution["capture"]["finding_submitted"] == "partial"
+    assert any("usable claims were preserved" in note for note in execution["notes"])
+    assert not any("additional native finding occurrence" in note for note in execution["notes"])
 
 
 def test_an_export_finding_that_was_lost_makes_finding_submitted_partial(tmp_path, monkeypatch):
@@ -2920,6 +3061,8 @@ def test_a_pr_run_whose_export_fails_after_an_exit_of_1_is_an_export_error(tmp_p
     workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
     outcome, *_ = scan_pr(tmp_path, root, workspace, pr)
     assert outcome.status == "error" and outcome.error["code"] == "export_exit_5" and outcome.claims == []
+    assert not any("no JSON export entry" in note for note in outcome.notes), \
+        "a failed export step cannot support an omission claim"
 
 
 def test_a_pr_process_that_outlives_the_budget_is_a_timeout_like_any_other_step(tmp_path):
