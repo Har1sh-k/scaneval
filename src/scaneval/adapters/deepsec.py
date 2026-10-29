@@ -176,6 +176,9 @@ PROCESS_ERRORED_BATCHES = re.compile(r"^ *Errored batches: ([0-9]+)$", re.MULTIL
 PROCESS_OUTPUT_TAIL = 16384
 # Direct mode's exit for findings, an errored batch and an exhausted quota, and for a runtime failure.
 DIRECT_MODE_EXIT = 1
+# DeepSec 2.3.10's exportCommand applies these exclusions unless --include-resolved is
+# passed. This adapter deliberately preserves the producer's defaults and passes no such flag.
+DEFAULT_EXPORT_RESOLVED_VERDICTS = ("fixed", "false-positive", "accepted-risk", "duplicate")
 
 
 def _shape(value: Any) -> str:
@@ -1193,21 +1196,59 @@ class DeepsecImport(NamedTuple):
     findings: list[dict]
 
 
-def native_finding_ids(files: tuple[tuple[str, dict], ...]) -> Counter[str]:
-    """Multiplicity of every usable native finding id in the file records.
+class NativeExportPopulation(NamedTuple):
+    """Native finding ids the default JSON export is expected to emit, and why it omits others."""
 
-    DeepSec derives an id from project, path and title, so separate findings can legitimately
-    share it. Conservation is therefore a multiset comparison: a set would hide one omitted
-    occurrence whenever another occurrence with the same id survived. Only non-empty string ids
-    are counted, because malformed record entries cannot be correlated without inventing identity.
+    ids: Counter[str]
+    no_latest_analysis: int
+    resolved: Counter[str]
+
+    @property
+    def excluded(self) -> int:
+        return self.no_latest_analysis + self.resolved.total()
+
+
+def native_export_population(files: tuple[tuple[str, dict], ...]) -> NativeExportPopulation:
+    """The record occurrences eligible for DeepSec 2.3.10's unchanged default export.
+
+    ``exportCommand`` skips a whole FileRecord when it has no latest ``analysisHistory`` entry,
+    then, unless ``--include-resolved`` was passed, skips findings revalidated as fixed,
+    false-positive, accepted-risk or duplicate. This adapter passes only format, project and
+    output arguments, so comparing the export with every record finding would call those
+    intentional producer exclusions import loss.
+
+    Only a missing value or an empty history list is accepted as the verified no-latest case.
+    A malformed history shape is not silently promoted to an expected exclusion: its findings
+    remain in the comparison, so an export mismatch still fails closed.
+
+    Eligible ids remain a multiset: DeepSec derives an id from project, path and title, so
+    separate findings can legitimately share one. Only non-empty string ids are counted,
+    because malformed record entries cannot be correlated without inventing identity; the
+    existing record/import failure paths remain responsible for evidence they cannot read.
     """
-    return Counter(
-        identifier
-        for _name, record in files
-        for finding in (record.get("findings") if isinstance(record.get("findings"), list) else ())
-        if isinstance(finding, dict)
-        if isinstance(identifier := finding.get("findingId"), str) and identifier
-    )
+    identifiers: Counter[str] = Counter()
+    no_latest_analysis = 0
+    resolved: Counter[str] = Counter()
+    for _name, record in files:
+        findings = record.get("findings")
+        if not isinstance(findings, list):
+            continue
+        usable_findings = [finding for finding in findings if isinstance(finding, dict)]
+        history = record.get("analysisHistory")
+        if history is None or (isinstance(history, list) and not history):
+            no_latest_analysis += len(usable_findings)
+            continue
+        verified_latest = isinstance(history, list) and isinstance(history[-1], dict)
+        for finding in usable_findings:
+            revalidation = finding.get("revalidation")
+            verdict = revalidation.get("verdict") if isinstance(revalidation, dict) else None
+            if verified_latest and verdict in DEFAULT_EXPORT_RESOLVED_VERDICTS:
+                resolved[verdict] += 1
+                continue
+            identifier = finding.get("findingId")
+            if isinstance(identifier, str) and identifier:
+                identifiers[identifier] += 1
+    return NativeExportPopulation(identifiers, no_latest_analysis, resolved)
 
 
 def finding_ids(files: tuple[tuple[str, dict], ...]) -> dict[tuple[str, str], str]:
@@ -2327,11 +2368,11 @@ class DeepsecAdapter(Adapter):
             except AdapterError as exc:
                 export_failure = str(exc)
             else:
-                record_finding_ids = native_finding_ids(records.files)
+                native_population = native_export_population(records.files)
                 imported_finding_ids = Counter(
                     claim["native_id"] for claim in imported.claims
                     if isinstance(claim.get("native_id"), str) and claim["native_id"])
-                unmatched_records = record_finding_ids - imported_finding_ids
+                unmatched_records = native_population.ids - imported_finding_ids
                 # An unimportable export entry or an imported claim with no joinable identity may
                 # represent one unmatched record occurrence. Account for those unknown identities
                 # before calling anything absent from the export; otherwise one bad export entry is
@@ -2351,6 +2392,21 @@ class DeepsecAdapter(Adapter):
                         f"{identity_gaps} JSON export claim(s) were imported but could not be joined to native "
                         "finding identity; the usable claims were preserved, but record/export conservation "
                         "could not be fully resolved.")
+                if native_population.excluded:
+                    excluded_reasons = []
+                    if native_population.no_latest_analysis:
+                        excluded_reasons.append(
+                            f"{native_population.no_latest_analysis} because the file record had no latest "
+                            "analysisHistory entry")
+                    excluded_reasons.extend(
+                        f"{native_population.resolved[verdict]} with revalidation verdict {verdict!r}"
+                        for verdict in DEFAULT_EXPORT_RESOLVED_VERDICTS
+                        if native_population.resolved[verdict])
+                    finding_import_notes.append(
+                        f"DeepSec's unchanged default export intentionally excluded "
+                        f"{native_population.excluded} record finding occurrence(s): "
+                        f"{'; '.join(excluded_reasons)}. These producer exclusions are expected and are not "
+                        "counted as import loss.")
 
         # A PR review's own facts. ``output`` is what DeepSec printed and is advisory only: what an
         # exit 1 means is read from the records it left, which is where each of its three causes

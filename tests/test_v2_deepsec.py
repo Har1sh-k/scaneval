@@ -435,7 +435,12 @@ def do_export(argv):
     findings = []
     for path in sorted((base / "files").rglob("*.json")):
         record = json.loads(path.read_text(encoding="utf-8"))
+        if not record.get("analysisHistory"):
+            continue
         for finding in record.get("findings", []):
+            verdict = (finding.get("revalidation") or {}).get("verdict")
+            if verdict in ("fixed", "false-positive", "accepted-risk", "duplicate"):
+                continue
             findings.append({
                 "title": "[%s] %s" % (finding["severity"], finding["title"]),
                 "description": "**File:** `%s`\\n\\n## Finding\\n\\n%s" % (record["filePath"],
@@ -446,7 +451,8 @@ def do_export(argv):
                              "lineNumbers": finding["lineNumbers"], "severity": finding["severity"],
                              "vulnSlug": finding["vulnSlug"], "confidence": finding["confidence"],
                              "discoveredAt": "2026-09-25T12:01:00.000Z",
-                             "runId": "20260925120100-process"}})
+                             "runId": "20260925120100-process",
+                             "revalidation": finding.get("revalidation")}})
     Path(out).write_text(json.dumps(findings, indent=2) + "\\n", encoding="utf-8")
     print("Exported %d finding(s)" % len(findings))
 
@@ -1974,8 +1980,106 @@ def test_a_record_this_run_could_not_read_makes_the_candidate_population_partial
     assert execution["capture"]["finding_candidate"] == "partial"
 
 
+def test_default_export_resolved_exclusions_are_evidence_not_import_loss(tmp_path, monkeypatch):
+    """The adapter preserves DeepSec's defaults and names every intentionally hidden verdict."""
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            source = record["findings"][0]
+            for index, verdict in enumerate(("fixed", "false-positive", "accepted-risk", "duplicate"), start=1):
+                resolved = dict(source)
+                resolved["title"] = source["title"] + " " + verdict
+                resolved["findingId"] = source["findingId"] + "-" + str(index)
+                resolved["revalidation"] = {"verdict": verdict, "reasoning": "resolved by fixture"}
+                record["findings"].append(resolved)
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    assert result["status"] == "success" and len(result["claims"]) == 2, execution["error"]
+    note = next(note for note in execution["notes"] if "producer exclusions" in note)
+    assert "4 record finding occurrence(s)" in note
+    for verdict in ("fixed", "false-positive", "accepted-risk", "duplicate"):
+        assert f"1 with revalidation verdict '{verdict}'" in note
+    assert "not counted as import loss" in note
+
+
+def test_a_record_without_latest_analysis_is_truthfully_excluded_by_default_export(tmp_path, monkeypatch):
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            record["analysisHistory"] = []
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    assert result["status"] == "success" and len(result["claims"]) == 1, execution["error"]
+    note = next(note for note in execution["notes"] if "producer exclusions" in note)
+    assert "1 because the file record had no latest analysisHistory entry" in note
+    assert not any("additional native finding occurrence" in note for note in execution["notes"])
+
+
+def test_a_malformed_analysis_history_is_not_promoted_to_an_expected_exclusion(tmp_path, monkeypatch):
+    """Only the verified absent/empty case is excluded; malformed record coverage fails closed."""
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            record["analysisHistory"] = {}
+            record["findings"][0]["revalidation"] = {"verdict": "fixed", "reasoning": "malformed fixture"}
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    assert result["status"] == "partial" and result["error"]["code"] == "import_loss"
+    assert any("1 additional native finding occurrence" in note for note in execution["notes"])
+    assert not any("no latest analysisHistory entry" in note for note in execution["notes"])
+    assert not any("revalidation verdict 'fixed'" in note for note in execution["notes"])
+
+
 def test_duplicate_native_ids_conserve_multiplicity_when_the_export_is_complete(tmp_path, monkeypatch):
-    """Two occurrences with one native id remain two claims and do not create false loss."""
+    """Two eligible occurrences survive while a resolved occurrence of that id stays hidden."""
     root = fake_deepsec_root(tmp_path)
     stub_collector(monkeypatch, tmp_path)
     adapter = get_adapter("deepsec")
@@ -1991,6 +2095,9 @@ def test_duplicate_native_ids_conserve_multiplicity_when_the_export_is_complete(
             duplicate = dict(record["findings"][0])
             duplicate["lineNumbers"] = [99]
             record["findings"].append(duplicate)
+            resolved_duplicate = dict(duplicate)
+            resolved_duplicate["revalidation"] = {"verdict": "duplicate", "reasoning": "same issue"}
+            record["findings"].append(resolved_duplicate)
             record_path.write_text(json.dumps(record), encoding="utf-8")
         return result
 
@@ -2005,6 +2112,7 @@ def test_duplicate_native_ids_conserve_multiplicity_when_the_export_is_complete(
     native_ids = Counter(claim.get("native_id") for claim in result["claims"])
     assert native_ids.most_common(1)[0][1] == 2
     assert len({claim["claim_id"] for claim in result["claims"]}) == 3
+    assert any("1 with revalidation verdict 'duplicate'" in note for note in execution["notes"])
 
 
 def test_one_of_two_findings_with_the_same_native_id_missing_from_export_is_loss(tmp_path, monkeypatch):
@@ -2046,11 +2154,7 @@ def test_one_of_two_findings_with_the_same_native_id_missing_from_export_is_loss
 
 
 def test_a_native_finding_missing_from_the_export_is_import_loss_not_silent_success(tmp_path, monkeypatch):
-    """The process record is authoritative evidence that export must conserve.
-
-    Dropping one valid finding from the separately rendered JSON export used to return success
-    with one claim, silently losing the other finding DeepSec had already recorded.
-    """
+    """An eligible omission stays loss even beside an intentionally excluded resolved finding."""
     root = fake_deepsec_root(tmp_path)
     stub_collector(monkeypatch, tmp_path)
     adapter = get_adapter("deepsec")
@@ -2060,7 +2164,16 @@ def test_a_native_finding_missing_from_the_export_is_import_loss_not_silent_succ
 
     def run_command(argv, **kwargs):
         result = original(argv, **kwargs)
-        if argv[1] == "export":
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            resolved = dict(record["findings"][0])
+            resolved["title"] += " fixed"
+            resolved["findingId"] += "-fixed"
+            resolved["revalidation"] = {"verdict": "fixed", "reasoning": "fixed by fixture"}
+            record["findings"].append(resolved)
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        elif argv[1] == "export":
             export = Path(kwargs["cwd"]).parent / "deepsec-export.json"
             payload = json.loads(export.read_text(encoding="utf-8"))
             payload.pop()
@@ -2078,6 +2191,7 @@ def test_a_native_finding_missing_from_the_export_is_import_loss_not_silent_succ
     assert result["bundles_resolved"] is False
     assert execution["capture"]["finding_submitted"] == "partial"
     assert any("1 additional native finding occurrence" in note for note in execution["notes"])
+    assert any("1 with revalidation verdict 'fixed'" in note for note in execution["notes"])
 
 
 @pytest.mark.parametrize("damage", ["metadata", "path"])
