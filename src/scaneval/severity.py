@@ -77,6 +77,8 @@ def compare_severity(claim: dict, references: list[dict]) -> dict:
             rating = {k: entry["severity"][k] for k in ("score", "cvss_version", "vector")}
             validate_claimed_cvss({"score": rating["score"], "version": rating["cvss_version"],
                                    "vector": rating["vector"], "provenance": "imported"})
+            prefix, *tokens = rating["vector"].split("/")
+            rating["vector"] = "/".join((prefix, *sorted(tokens)))
         except (ContractError, KeyError, TypeError):
             return unavailable("invalid_reference_cvss")
         ratings.append(rating)

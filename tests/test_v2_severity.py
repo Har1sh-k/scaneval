@@ -78,6 +78,14 @@ def test_malformed_reference_cvss_is_unavailable_instead_of_crashing():
     assert result["reason"] == "invalid_reference_cvss"
 
 
+def test_equivalent_alias_reference_vectors_are_canonically_deduplicated():
+    reordered = deepcopy(REFERENCE)
+    reordered["vector"] = "CVSS:3.1/A:N/I:H/C:H/S:U/UI:N/PR:N/AC:L/AV:N"
+    result = severity.compare_severity({"native_severity": "critical"}, refs() + refs(reordered))
+    assert result["status"] == "assessed"
+    assert result["reason"] is None
+
+
 @pytest.mark.parametrize("score,expected", [(0, "none"), (.1, "low"), (3.9, "low"), (4, "medium"), (6.9, "medium"), (7, "high"), (8.9, "high"), (9, "critical"), (10, "critical")])
 def test_band_boundaries(score, expected):
     assert severity.band(score) == expected
