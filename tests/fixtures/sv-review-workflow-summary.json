@@ -1,0 +1,906 @@
+{
+  "mode": "bootstrap",
+  "repoPath": "/var/folders/34/szc45dvj02b34px3jv_y9mfw0000gn/T/sv-review-workflow-consumer-fixture-irZesk",
+  "headRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
+  "changedFiles": [
+    ".github/workflows/ci.yml",
+    "LICENSE",
+    "README.md",
+    "package.json",
+    "src/neutral.ts",
+    "tsconfig.json"
+  ],
+  "dependencyInventory": {
+    "version": 1,
+    "catalogRevision": "e935b52a0f63a4911c898f4cd688916aaf2e13fc6aaed677bc521dfb38701cab",
+    "head": {
+      "ref": "aa0135348318b45db6e014f91c092f86e96f34eb",
+      "records": [],
+      "coverage": {
+        "status": "ok",
+        "files": [
+          {
+            "path": "package.json",
+            "format": "package.json",
+            "status": "parsed",
+            "records": 0
+          }
+        ],
+        "issues": []
+      }
+    },
+    "events": [],
+    "incompleteChangedFiles": []
+  },
+  "repositoryLint": {
+    "status": "ok",
+    "scopeFiles": 0,
+    "candidateFiles": 0,
+    "parsedFiles": 0,
+    "findingsEmitted": 0,
+    "failures": 0,
+    "failureSamples": []
+  },
+  "repositoryLintRules": [
+    {
+      "id": "nested-attribute-binding",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": []
+    },
+    {
+      "id": "html-safe-encoding",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": []
+    },
+    {
+      "id": "conditional-authz-skip-scope",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": []
+    },
+    {
+      "id": "preauth-upload-path-binding",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": []
+    },
+    {
+      "id": "upload-checkpoint-revalidation",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": []
+    },
+    {
+      "id": "cli-tool-config-isolation",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": []
+    },
+    {
+      "id": "query-cost-multiplier-shortcircuit",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": []
+    },
+    {
+      "id": "mcp-tool-authz",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": []
+    },
+    {
+      "id": "untrusted-path-url-join",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": []
+    },
+    {
+      "id": "template-sandbox-integrity",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": []
+    },
+    {
+      "id": "escaped-offset-identity-mapping",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": []
+    },
+    {
+      "id": "reparent-cleanup-completeness",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": []
+    },
+    {
+      "id": "sibling-gitlab-graphql-second-boundary",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": [],
+      "baseFailures": 0,
+      "counters": {
+        "members": 0,
+        "gated": 0,
+        "ungated": 0,
+        "exempt": 0,
+        "filtered": 0,
+        "unresolvedMembers": 0,
+        "unknownEdges": 0,
+        "deltaEvents": 0,
+        "occurrences": 0,
+        "identities": 0
+      }
+    },
+    {
+      "id": "sibling-gitlab-mcp-custom-authorize",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": [],
+      "baseFailures": 0,
+      "counters": {
+        "members": 0,
+        "gated": 0,
+        "ungated": 0,
+        "exempt": 0,
+        "filtered": 0,
+        "unresolvedMembers": 0,
+        "unknownEdges": 0,
+        "deltaEvents": 0,
+        "occurrences": 0,
+        "identities": 0
+      }
+    },
+    {
+      "id": "sibling-chromium-frame-binder-pdf-refusal",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": [],
+      "baseFailures": 0,
+      "counters": {
+        "members": 0,
+        "gated": 0,
+        "ungated": 0,
+        "exempt": 0,
+        "filtered": 0,
+        "unresolvedMembers": 0,
+        "unknownEdges": 0,
+        "deltaEvents": 0,
+        "occurrences": 0,
+        "identities": 0
+      }
+    },
+    {
+      "id": "sibling-chromium-picker-activation-consume",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": [],
+      "baseFailures": 0,
+      "counters": {
+        "members": 0,
+        "gated": 0,
+        "ungated": 0,
+        "exempt": 0,
+        "filtered": 0,
+        "unresolvedMembers": 0,
+        "unknownEdges": 0,
+        "deltaEvents": 0,
+        "occurrences": 0,
+        "identities": 0
+      }
+    },
+    {
+      "id": "sibling-aigw-route-unit-primitive",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": [],
+      "baseFailures": 0,
+      "counters": {
+        "members": 0,
+        "gated": 0,
+        "ungated": 0,
+        "exempt": 0,
+        "filtered": 0,
+        "unresolvedMembers": 0,
+        "unknownEdges": 0,
+        "deltaEvents": 0,
+        "occurrences": 0,
+        "identities": 0
+      }
+    },
+    {
+      "id": "sibling-aigw-route-unit-primitive-v2",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": [],
+      "baseFailures": 0,
+      "counters": {
+        "members": 0,
+        "gated": 0,
+        "ungated": 0,
+        "exempt": 0,
+        "filtered": 0,
+        "unresolvedMembers": 0,
+        "unknownEdges": 0,
+        "deltaEvents": 0,
+        "occurrences": 0,
+        "identities": 0
+      }
+    },
+    {
+      "id": "sibling-gitlab-shell-repo-access",
+      "status": "ok",
+      "scopeFiles": 0,
+      "candidateFiles": 0,
+      "parsedFiles": 0,
+      "findingsEmitted": 0,
+      "withheldCandidates": 0,
+      "unresolvedFiles": 0,
+      "diagnostics": 0,
+      "failures": 0,
+      "failureSamples": [],
+      "baseFailures": 0,
+      "counters": {
+        "members": 0,
+        "gated": 0,
+        "ungated": 0,
+        "exempt": 0,
+        "filtered": 0,
+        "unresolvedMembers": 0,
+        "unknownEdges": 0,
+        "deltaEvents": 0,
+        "occurrences": 0,
+        "identities": 0
+      }
+    }
+  ],
+  "newFindings": [],
+  "updatedFindings": [],
+  "patternGroups": [],
+  "triageSuppression": {
+    "falsePositiveSuppressed": 0,
+    "acceptedRiskSuppressed": 0,
+    "reopened": 0
+  },
+  "contextNotesApplied": [],
+  "ciGate": {
+    "result": "pass",
+    "policy": "D-007",
+    "reasons": [
+      "no blocking crown-jewel findings"
+    ],
+    "blockingFindings": []
+  },
+  "reviewAssessment": {
+    "scope": "marker-reviews",
+    "status": "none-pending",
+    "pendingReviews": 0,
+    "pendingSites": 0,
+    "pendingInspectionGaps": 0,
+    "carriedForwardReviews": 0,
+    "ledgerPath": ".securevibes/reviews.json"
+  },
+  "runtimeProfile": "degraded",
+  "runMode": "degraded",
+  "degraded": true,
+  "analysisMode": "llm",
+  "additionalCodeExtensions": [],
+  "codebaseProfile": {
+    "lastUpdated": "2026-10-29T17:35:22.048Z",
+    "frameworks": [],
+    "productSurfaces": [],
+    "trustBoundaries": [],
+    "sensitiveData": [],
+    "pathSignals": [],
+    "notes": []
+  },
+  "executionAnchorCoverage": {
+    "scope": "repository",
+    "surfaces": [
+      {
+        "prefix": ".github/workflows",
+        "discovery": "unsupported",
+        "languages": [],
+        "sinkClasses": [],
+        "anchorFiles": [],
+        "hypotheses": []
+      },
+      {
+        "prefix": "license",
+        "discovery": "unsupported",
+        "languages": [],
+        "sinkClasses": [],
+        "anchorFiles": [],
+        "hypotheses": []
+      },
+      {
+        "prefix": "package.json",
+        "discovery": "unsupported",
+        "languages": [],
+        "sinkClasses": [],
+        "anchorFiles": [],
+        "hypotheses": []
+      },
+      {
+        "prefix": "readme.md",
+        "discovery": "unsupported",
+        "languages": [],
+        "sinkClasses": [],
+        "anchorFiles": [],
+        "hypotheses": []
+      },
+      {
+        "prefix": "src/neutral.ts",
+        "discovery": "supported",
+        "languages": [
+          "javascript"
+        ],
+        "sinkClasses": [],
+        "anchorFiles": [],
+        "hypotheses": []
+      },
+      {
+        "prefix": "tsconfig.json",
+        "discovery": "unsupported",
+        "languages": [],
+        "sinkClasses": [],
+        "anchorFiles": [],
+        "hypotheses": []
+      }
+    ],
+    "advisories": []
+  },
+  "specialistsActivated": [],
+  "budget": {
+    "capUsd": 25,
+    "estimatedCostPerLlmFileUsd": 0.08,
+    "estimatedLlmFiles": 2,
+    "estimatedSpentUsd": 0.16,
+    "status": "ok",
+    "actualLlmFilesScanned": 1
+  },
+  "bootstrapPlan": {
+    "planner": "llm",
+    "focusedFileCount": 2,
+    "focusedFiles": [
+      "src/neutral.ts",
+      "LICENSE"
+    ],
+    "hypothesisCount": 1,
+    "notes": [
+      "llm-planner-success"
+    ]
+  },
+  "bootstrapScan": {
+    "status": "ok",
+    "reasons": [],
+    "llmCalls": 1,
+    "failedCalls": 0,
+    "quotaFailureCount": 0,
+    "failureSamples": [],
+    "failureRate": 0,
+    "hypothesesPlanned": 1,
+    "hypothesesAttempted": 1,
+    "hypothesesEvaluated": 1,
+    "hypothesisCoverage": 1,
+    "evaluatedHypothesisIds": [
+      "TM-REVIEW-001"
+    ],
+    "failedHypothesisIds": [],
+    "unevaluatedHypothesisIds": [],
+    "focusedFiles": 2,
+    "actualLlmFilesScanned": 1,
+    "maxFilesPerLlmCall": 24,
+    "sentinelsAvailable": 18,
+    "sentinelsSelected": 2,
+    "uniqueSentinelsSelected": 2,
+    "sentinelHypothesesWithMatches": 1,
+    "hypothesisSelections": [
+      {
+        "model": "test/review-workflow",
+        "hypothesisId": "TM-REVIEW-001",
+        "vulnerabilityClass": "inputvalidation",
+        "priority": "medium",
+        "filesConsidered": 1,
+        "selectedFiles": [
+          "src/neutral.ts"
+        ],
+        "validatedFiles": [
+          "src/neutral.ts"
+        ],
+        "fileCoverage": {
+          "hypothesisId": "TM-REVIEW-001",
+          "assignedFiles": [
+            "src/neutral.ts"
+          ],
+          "requestedFiles": [
+            "src/neutral.ts"
+          ],
+          "deliveredFiles": [
+            "src/neutral.ts"
+          ],
+          "partialFiles": [],
+          "fileOutcomes": [
+            {
+              "path": "src/neutral.ts",
+              "outcome": "unassessed",
+              "reason": "analysis_completion_not_established"
+            }
+          ],
+          "calls": [
+            {
+              "shardIndex": 1,
+              "requestedFiles": [
+                "src/neutral.ts"
+              ],
+              "deliveredFiles": [
+                "src/neutral.ts"
+              ],
+              "partialFiles": [],
+              "omittedFiles": [],
+              "transport": "succeeded",
+              "invocationId": "92d737de-1588-486f-a09f-6af3fc284a8b",
+              "requestDigest": "50259f801fa7d2422a4d71b5a9a108d59a51df109fcf06263b3b6200ddec9ec5",
+              "responseDigest": "7746732a82bd1163d26c875749f0574fe1e60d784585f9841a70e18cc4096275"
+            }
+          ],
+          "coverage": "complete",
+          "omittedAssignedFiles": []
+        },
+        "relationshipInspection": {
+          "attemptedCalls": 1,
+          "seedFiles": 1,
+          "relatedFiles": 0,
+          "failures": 0
+        },
+        "executionMechanismContexts": [
+          {
+            "scope": "node-child-process-api",
+            "requestedRef": null,
+            "sources": [
+              {
+                "path": "src/neutral.ts",
+                "contentHash": "72893e68d86edf7a52bd4890976d90178eb466c1d52c1b44f6aa362ed3641b25",
+                "contentStatus": "present",
+                "promptContentScope": "complete",
+                "status": "inspected"
+              }
+            ],
+            "calls": [],
+            "limits": []
+          }
+        ]
+      }
+    ]
+  },
+  "writePlan": {
+    "strategy": "direct-write",
+    "reason": "bootstrap mode direct knowledge write",
+    "targetFiles": [
+      ".securevibes/reviews.json",
+      ".securevibes/bootstrap-plan.md",
+      ".securevibes/dependency-inventory.json",
+      ".securevibes/scan-log.md",
+      ".securevibes/specialists.json",
+      ".securevibes/specialists.md",
+      ".securevibes/threat-model.md"
+    ]
+  },
+  "reviewWorkflow": {
+    "schemaVersion": 1,
+    "workflow": "bootstrap-source-review",
+    "sourceAssessment": "unassessed",
+    "status": "complete",
+    "scope": {
+      "mode": "bootstrap",
+      "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
+      "inventoryDigest": "f91d93b319420e33a7b6c7014dcbf5a781f69517f8d929faaec79cc093acef1e",
+      "inventoryDigestPreimage": "review-workflow-inventory/v1",
+      "policy": {
+        "version": "bootstrap-source-review/v1",
+        "additionalCodeExtensions": []
+      }
+    },
+    "inventory": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
+        "objectId": "85935ed78e3ad1b0127b6ef6efeea9abd654ea72",
+        "mode": "100644",
+        "sha256": null,
+        "bytes": null,
+        "classification": "excluded",
+        "disposition": "excluded",
+        "reason": "bootstrap-policy-does-not-source-review:.yml",
+        "requiredProcedures": []
+      },
+      {
+        "path": "LICENSE",
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
+        "objectId": "c3a5043e1ca8e5a4723131c8dac0cd54fafd6f36",
+        "mode": "100644",
+        "sha256": null,
+        "bytes": null,
+        "classification": "excluded",
+        "disposition": "excluded",
+        "reason": "bootstrap-policy-excluded:recognized-repository-metadata",
+        "requiredProcedures": []
+      },
+      {
+        "path": "README.md",
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
+        "objectId": "1b305c626d6b76d6dd95133010bfe47e8700c951",
+        "mode": "100644",
+        "sha256": null,
+        "bytes": null,
+        "classification": "excluded",
+        "disposition": "excluded",
+        "reason": "bootstrap-policy-excluded:recognized-repository-metadata",
+        "requiredProcedures": []
+      },
+      {
+        "path": "package.json",
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
+        "objectId": "f956bf6ea87815daeab8d8064de61f520d777d21",
+        "mode": "100644",
+        "sha256": null,
+        "bytes": null,
+        "classification": "excluded",
+        "disposition": "excluded",
+        "reason": "bootstrap-policy-does-not-source-review:.json",
+        "requiredProcedures": []
+      },
+      {
+        "path": "src/neutral.ts",
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
+        "objectId": "3c16c28ecb726d51ff25193da9b1637eabae1df0",
+        "mode": "100644",
+        "sha256": "72893e68d86edf7a52bd4890976d90178eb466c1d52c1b44f6aa362ed3641b25",
+        "bytes": 66,
+        "classification": "supported",
+        "disposition": "supported",
+        "reason": "supported-code-extension",
+        "requiredProcedures": [
+          "security-review"
+        ]
+      },
+      {
+        "path": "tsconfig.json",
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
+        "objectId": "3330a0cb91e661bb049dba3b26f1d1d1b6c1139c",
+        "mode": "100644",
+        "sha256": null,
+        "bytes": null,
+        "classification": "excluded",
+        "disposition": "excluded",
+        "reason": "bootstrap-policy-does-not-source-review:.json",
+        "requiredProcedures": []
+      }
+    ],
+    "obligations": [
+      {
+        "invocationId": "92d737de-1588-486f-a09f-6af3fc284a8b",
+        "model": "test/review-workflow",
+        "hypothesisId": "TM-REVIEW-001",
+        "shardIndex": 1,
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
+        "files": [
+          {
+            "path": "src/neutral.ts",
+            "sha256": "72893e68d86edf7a52bd4890976d90178eb466c1d52c1b44f6aa362ed3641b25",
+            "bytes": 66,
+            "requiredProcedures": [
+              "security-review"
+            ]
+          }
+        ],
+        "requestDigest": "50259f801fa7d2422a4d71b5a9a108d59a51df109fcf06263b3b6200ddec9ec5"
+      }
+    ],
+    "receipts": [
+      {
+        "schemaVersion": 1,
+        "invocationId": "92d737de-1588-486f-a09f-6af3fc284a8b",
+        "model": "test/review-workflow",
+        "hypothesisId": "TM-REVIEW-001",
+        "shardIndex": 1,
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
+        "requestDigest": "50259f801fa7d2422a4d71b5a9a108d59a51df109fcf06263b3b6200ddec9ec5",
+        "responseDigest": "7746732a82bd1163d26c875749f0574fe1e60d784585f9841a70e18cc4096275",
+        "files": [
+          {
+            "path": "src/neutral.ts",
+            "sha256": "72893e68d86edf7a52bd4890976d90178eb466c1d52c1b44f6aa362ed3641b25",
+            "bytes": 66,
+            "requiredProcedures": [
+              "security-review"
+            ],
+            "terminals": [
+              {
+                "procedure": "security-review",
+                "status": "completed",
+                "reason": "Reviewed the complete pinned source."
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "inputs": [
+      {
+        "path": "src/neutral.ts",
+        "roles": [
+          "native-source-read",
+          "primary"
+        ],
+        "observations": [
+          {
+            "sha256": "72893e68d86edf7a52bd4890976d90178eb466c1d52c1b44f6aa362ed3641b25",
+            "bytes": 66
+          }
+        ],
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
+        "objectId": "3c16c28ecb726d51ff25193da9b1637eabae1df0",
+        "binding": "matched"
+      }
+    ],
+    "stages": {
+      "planner": "complete",
+      "executionAnchors": "complete",
+      "modelCalls": "complete",
+      "structural": "complete",
+      "lint": "complete",
+      "markers": "complete",
+      "specialists": "not-applicable"
+    },
+    "stageEvidence": {
+      "planner": {
+        "planner": "llm",
+        "degraded": false,
+        "notes": [
+          "llm-planner-success"
+        ]
+      },
+      "executionAnchors": {
+        "scope": "repository",
+        "failedSurfaces": [],
+        "unsupportedSurfaces": []
+      },
+      "structural": {
+        "scope": "scanner-related-context",
+        "attemptedCalls": 1,
+        "seedFiles": 1,
+        "relatedFiles": 0,
+        "failures": 0
+      },
+      "lint": {
+        "configuration": "default",
+        "ruleIds": [
+          "nested-attribute-binding",
+          "html-safe-encoding",
+          "conditional-authz-skip-scope",
+          "preauth-upload-path-binding",
+          "upload-checkpoint-revalidation",
+          "cli-tool-config-isolation",
+          "query-cost-multiplier-shortcircuit",
+          "mcp-tool-authz",
+          "untrusted-path-url-join",
+          "template-sandbox-integrity",
+          "escaped-offset-identity-mapping",
+          "reparent-cleanup-completeness",
+          "sibling-gitlab-graphql-second-boundary",
+          "sibling-gitlab-mcp-custom-authorize",
+          "sibling-chromium-frame-binder-pdf-refusal",
+          "sibling-chromium-picker-activation-consume",
+          "sibling-aigw-route-unit-primitive",
+          "sibling-aigw-route-unit-primitive-v2",
+          "sibling-gitlab-shell-repo-access"
+        ]
+      }
+    },
+    "reasons": []
+  },
+  "completion": {
+    "schemaVersion": 1,
+    "execution": {
+      "status": "completed",
+      "evidence": "engine-returned-summary"
+    },
+    "modelCalls": {
+      "status": "no-recorded-failures",
+      "unit": "logical-invocations",
+      "transportAttempts": "not-recorded",
+      "attempted": 2,
+      "succeeded": 2,
+      "failed": 0,
+      "pending": 0,
+      "failureSamples": [],
+      "truncatedFailureSamples": 0
+    },
+    "changedFileSupport": {
+      "status": "not-recorded"
+    },
+    "structuralCoverage": {
+      "status": "not-recorded",
+      "planningInspections": {
+        "attempted": 0,
+        "parsed": 0,
+        "failed": 0
+      },
+      "requiredInspectionFailures": 0,
+      "failureSamples": [],
+      "truncatedFailureSamples": 0
+    },
+    "lintCoverage": {
+      "status": "complete",
+      "failures": 0,
+      "failureSamples": [],
+      "inconclusiveRuleIds": []
+    },
+    "hypothesisEvaluation": {
+      "status": "complete",
+      "planned": 1,
+      "evaluated": 1,
+      "failedIds": [],
+      "unevaluatedIds": []
+    },
+    "sourceAssessment": {
+      "status": "unassessed",
+      "files": [
+        {
+          "path": "src/neutral.ts",
+          "outcome": "unassessed",
+          "reason": "analysis_completion_not_established"
+        }
+      ]
+    },
+    "markerAssessment": {
+      "scope": "marker-reviews",
+      "status": "none-pending",
+      "pendingReviews": 0,
+      "pendingSites": 0,
+      "pendingInspectionGaps": 0,
+      "carriedForwardReviews": 0,
+      "ledgerPath": ".securevibes/reviews.json"
+    },
+    "coverage": {
+      "status": "incomplete",
+      "reasons": [
+        "execution_anchor:.github/workflows:unsupported",
+        "execution_anchor:license:unsupported",
+        "execution_anchor:package.json:unsupported",
+        "execution_anchor:readme.md:unsupported",
+        "execution_anchor:tsconfig.json:unsupported",
+        "structural_coverage_not_recorded",
+        "source_analysis_completion_not_established"
+      ]
+    }
+  }
+}

@@ -106,12 +106,14 @@ Focused tests run locally without Docker or a model; the real-boundary fixture
 synthetic provider. This verifies the boundary and tool plumbing, not live model behavior.
 Steps 4 and 5 are not done: live support is unverified until the bounded smoke succeeds.
 
-The pinned upstream completion contract makes completed bootstrap assessment unreachable:
-source assessment is always `unassessed` or `not-recorded`, each of which adds an unknown
-coverage reason. A live smoke may independently verify transport, history and research;
-that cannot satisfy the complete-scan gate for step 5. Keep the full-corpus run stopped until
-an upstream evidence-backed completion contract is available. Preserve partial findings and
-native reasons, and do not infer assessment from delivery, process exit or an empty response.
+The default pinned upstream completion contract still makes completed bootstrap workflow
+acceptance unreachable: source assessment is always `unassessed` or `not-recorded`, each of which
+adds an unknown coverage reason, and that revision predates `summary.reviewWorkflow`. ScanEval can
+consume the newer additive review-workflow v1 contract described in
+[the completion-consumer design](sv-review-workflow.md), while continuing to label source
+assessment unassessed. Until a reviewed upstream commit is pinned and the bounded live smoke
+passes, keep the full-corpus run stopped. Preserve partial findings and both native reports; do not
+infer assessment from delivery, process exit, a terminal string, or an empty response.
 
 Use logical commits without AI coauthor trailers. Fresh independent reviewers read the design
 and final implementation; fix substantiated findings and rerun the affected checks. Do not

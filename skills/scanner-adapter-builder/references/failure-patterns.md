@@ -16,6 +16,16 @@ The upstream proposal is tracked by [securevibes-agent issue #205](https://githu
 
 **Regression/acceptance check:** A fixture over real source reaches `success` only with positive evidence for every required source obligation. Missing, malformed, contradictory, incomplete, or unknown completion yields `partial` or `error` as specified, retains findings, and cannot become a zero detection score.
 
+## Treating a canonical digest as classification proof
+
+**Symptom:** A self-consistent inventory digest is accepted even though an excluded file could not legitimately receive its claimed native classification or reason.
+
+**Cause:** A digest binds bytes; it does not validate their meaning. Every exclusion must satisfy the exact versioned producer policy in both directions. Unknown or executable content must not forge known-non-code, configuration, metadata, or code-scope exclusions. Cross-language details can also disagree: JavaScript trimming can remove leading U+FEFF where Python stripping does not, and UTF-16 ordering can differ from code-point ordering. Normalizing such a bound path after hashing changes the asserted identity.
+
+**Corrective action:** Validate classification and reason against the pinned producer policy while preserving the original hashed identity; reject ambiguous bound paths rather than normalizing them into agreement. Use producer conformance probes, positive examples for each legitimate exclusion family, and self-consistent forgery counterexamples. If a native summary is malformed, preserve usable findings and return the specified incomplete outcome instead of crashing.
+
+**Regression/acceptance check:** Each exclusion is accepted only for its exact classification/reason pair. A forged policy remains rejected after recomputing its digest; ordering or U+FEFF ambiguity is refused; malformed summaries retain findings.
+
 ## A diagnostic instruction that never reached the model
 
 **Symptom:** A live diagnostic appears to ask the model to use web research or Git history, tools are registered, and network preflight succeeds, yet no model-issued research/history call exists.
@@ -77,6 +87,16 @@ ScanEval's merged [PR #101](https://github.com/Har1sh-k/scaneval/pull/101) added
 **Corrective action:** Use bounded shared deadlines, explicit cancellation, process-group or container cleanup, bounded reap checks, and per-stage receipts. Capture the exact runtime receipt before trusting output. Treat terminal guard/run identifiers as immutable; use a fresh directory and identifiers for every attempt. Never commit credentials, raw source, prompts, findings, or unsanitized traces in design notes or result samples.
 
 **Regression/acceptance check:** Timeout and interruption fixtures prove descendants are gone or report cleanup failure, retain partial stdout/stderr, and cannot become success. A retry cannot open an existing create-only output or mutate a terminal record.
+
+## Trusting host state instead of the execution seam
+
+**Symptom:** A guard or wrapper works interactively but not through the adapter: restricted subprocess setup strips its configuration, a non-executable wrapper falls back to another CLI, or prepared/pending verification state is treated as permission to launch.
+
+**Cause:** The caller's environment and PATH are not the scanner's effective environment. Readiness was published before exact pins and checks completed, and attempt ownership or cleanup was inferred rather than observed.
+
+**Corrective action:** Make the launcher supply its own exact configuration, then verify the wrapper is executable and the resolved CLI is the intended binary before execution. Pending state never authorizes execution; publish ready state only after all checks pass. Bind resources to the exact attempt, retain the failed command and partial artifacts, and clean up owned process groups, containers, and networks before reporting completion.
+
+**Regression/acceptance check:** Exercise the real environment-filtering seam, missing execute bits and CLI fallback, pending pins, cross-attempt ownership, failed commands with partial artifacts, and cleanup failures. Cleanup failure blocks completion. Report the covered regressions; do not claim all future failures are prevented.
 
 ## Promoting deterministic tests into integration or benchmark evidence
 
