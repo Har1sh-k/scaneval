@@ -1,0 +1,239 @@
+{
+  "mode": "bootstrap",
+  "repoPath": "/workspace",
+  "headRef": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "bootstrapScan": {
+    "status": "ok",
+    "reasons": [],
+    "llmCalls": 1,
+    "failedCalls": 0,
+    "quotaFailureCount": 0,
+    "failureSamples": [],
+    "failureRate": 0,
+    "hypothesesPlanned": 1,
+    "hypothesesAttempted": 1,
+    "hypothesesEvaluated": 1,
+    "hypothesisCoverage": 1,
+    "evaluatedHypothesisIds": ["TM-001"],
+    "failedHypothesisIds": [],
+    "unevaluatedHypothesisIds": [],
+    "focusedFiles": 1,
+    "actualLlmFilesScanned": 1,
+    "maxFilesPerLlmCall": 1,
+    "hypothesisSelections": [
+      {
+        "model": "openai-codex/gpt-5.6-sol",
+        "hypothesisId": "TM-001",
+        "vulnerabilityClass": "inputvalidation",
+        "priority": "high",
+        "filesConsidered": 1,
+        "selectedFiles": ["src/app.ts"],
+        "validatedFiles": ["src/app.ts"],
+        "relationshipExtractionFailures": [],
+        "relationshipExtractionFailuresTruncated": 0,
+        "fileCoverage": {
+          "hypothesisId": "TM-001",
+          "assignedFiles": ["src/app.ts"],
+          "requestedFiles": ["src/app.ts"],
+          "deliveredFiles": ["src/app.ts"],
+          "partialFiles": [],
+          "omittedAssignedFiles": [],
+          "coverage": "complete",
+          "fileOutcomes": [
+            {
+              "path": "src/app.ts",
+              "outcome": "unassessed",
+              "reason": "analysis_completion_not_established"
+            }
+          ],
+          "calls": [
+            {
+              "shardIndex": 1,
+              "requestedFiles": ["src/app.ts"],
+              "deliveredFiles": ["src/app.ts"],
+              "partialFiles": [],
+              "omittedFiles": [],
+              "transport": "succeeded"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "repositoryLint": {
+    "status": "ok",
+    "failures": 0,
+    "failureSamples": []
+  },
+  "repositoryLintRules": [],
+  "reviewAssessment": {
+    "scope": "marker-reviews",
+    "status": "none-pending",
+    "pendingReviews": 0,
+    "pendingSites": 0,
+    "pendingInspectionGaps": 0,
+    "carriedForwardReviews": 0,
+    "ledgerPath": ".securevibes/review-ledger.json"
+  },
+  "specialistsActivated": [],
+  "specialistScans": [],
+  "reviewWorkflow": {
+    "schemaVersion": 1,
+    "workflow": "bootstrap-source-review",
+    "status": "complete",
+    "sourceAssessment": "unassessed",
+    "scope": {
+      "mode": "bootstrap",
+      "repository": "/workspace",
+      "sourceRef": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "inventoryDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "policy": "bootstrap-source-review/v1"
+    },
+    "inventory": [
+      {
+        "path": "README.md",
+        "sourceRef": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "objectId": "1111111111111111111111111111111111111111",
+        "sha256": null,
+        "bytes": null,
+        "disposition": "excluded",
+        "reason": "known-non-code-filename",
+        "requiredProcedures": []
+      },
+      {
+        "path": "src/app.ts",
+        "sourceRef": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "objectId": "2222222222222222222222222222222222222222",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "bytes": 42,
+        "disposition": "supported",
+        "reason": "supported-code-extension",
+        "requiredProcedures": ["security-review"]
+      }
+    ],
+    "obligations": [
+      {
+        "invocationId": "invocation-1",
+        "model": "openai-codex/gpt-5.6-sol",
+        "hypothesisId": "TM-001",
+        "shardIndex": 1,
+        "sourceRef": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requestDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "files": [
+          {
+            "path": "src/app.ts",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 42,
+            "requiredProcedures": ["security-review"]
+          }
+        ]
+      }
+    ],
+    "receipts": [
+      {
+        "schemaVersion": 1,
+        "invocationId": "invocation-1",
+        "model": "openai-codex/gpt-5.6-sol",
+        "hypothesisId": "TM-001",
+        "shardIndex": 1,
+        "sourceRef": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requestDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "responseDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "files": [
+          {
+            "path": "src/app.ts",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "bytes": 42,
+            "requiredProcedures": ["security-review"],
+            "terminals": [
+              {
+                "procedure": "security-review",
+                "status": "completed",
+                "reason": "Reviewed the complete pinned source for the required procedure."
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "stages": {
+      "modelCalls": "complete",
+      "structural": "not-applicable",
+      "lint": "complete",
+      "markers": "complete",
+      "specialists": "complete"
+    },
+    "reasons": []
+  },
+  "completion": {
+    "schemaVersion": 1,
+    "execution": {
+      "status": "completed",
+      "evidence": "engine-returned-summary"
+    },
+    "modelCalls": {
+      "status": "no-recorded-failures",
+      "unit": "logical-invocations",
+      "transportAttempts": "not-recorded",
+      "attempted": 1,
+      "succeeded": 1,
+      "failed": 0,
+      "pending": 0,
+      "failureSamples": [],
+      "truncatedFailureSamples": 0
+    },
+    "changedFileSupport": {
+      "status": "not-recorded"
+    },
+    "structuralCoverage": {
+      "status": "not-recorded",
+      "planningInspections": {
+        "attempted": 0,
+        "parsed": 0,
+        "failed": 0
+      },
+      "requiredInspectionFailures": 0,
+      "failureSamples": [],
+      "truncatedFailureSamples": 0
+    },
+    "lintCoverage": {
+      "status": "complete",
+      "failures": 0,
+      "failureSamples": [],
+      "inconclusiveRuleIds": []
+    },
+    "hypothesisEvaluation": {
+      "status": "complete",
+      "planned": 1,
+      "evaluated": 1,
+      "failedIds": [],
+      "unevaluatedIds": []
+    },
+    "sourceAssessment": {
+      "status": "unassessed",
+      "files": [
+        {
+          "path": "src/app.ts",
+          "outcome": "unassessed",
+          "reason": "analysis_completion_not_established"
+        }
+      ]
+    },
+    "markerAssessment": {
+      "scope": "marker-reviews",
+      "status": "none-pending",
+      "pendingReviews": 0,
+      "pendingSites": 0,
+      "pendingInspectionGaps": 0,
+      "carriedForwardReviews": 0,
+      "ledgerPath": ".securevibes/review-ledger.json"
+    },
+    "coverage": {
+      "status": "unknown",
+      "reasons": [
+        "structural_coverage_not_recorded",
+        "source_analysis_completion_not_established"
+      ]
+    }
+  }
+}

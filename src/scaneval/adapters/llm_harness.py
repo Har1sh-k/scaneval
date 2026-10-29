@@ -551,6 +551,423 @@ def image_run_account(image: dict[str, Any], output: Any,
 
 
 COMPLETION_COVERAGE = ("complete", "incomplete", "unknown", "not-required")
+REVIEW_WORKFLOW_STATUSES = ("complete", "incomplete", "unknown", "not-required")
+REVIEW_WORKFLOW_MODES = ("bootstrap", "pr", "batch")
+REVIEW_WORKFLOW_PROCEDURES = frozenset({
+    "security-review", "category:rails-initializer", "category:rails-routes",
+    "category:configuration", "category:convention-dsl",
+})
+REVIEW_WORKFLOW_MAX_FILES = 50_000
+REVIEW_WORKFLOW_MAX_RECEIPTS = 100_000
+REVIEW_WORKFLOW_MAX_FILE_BYTES = 8 * 1024 * 1024
+REVIEW_WORKFLOW_MAX_TOTAL_BYTES = 256 * 1024 * 1024
+_HASH40 = re.compile(r"^[a-f0-9]{40}$")
+_HASH64 = re.compile(r"^[a-f0-9]{64}$")
+
+
+class ReviewWorkflowReading(NamedTuple):
+    """One parsed native workflow report, without upgrading its evidence claims."""
+
+    present: bool
+    status: str | None
+    report: dict[str, Any] | None
+    notes: list[str]
+    code: str | None
+    message: str | None
+
+
+def _wire_count(value: Any, maximum: int = 2**53 - 1) -> bool:
+    return type(value) is int and 0 <= value <= maximum
+
+
+def _wire_text(value: Any, *, maximum: int = 10_000) -> bool:
+    return isinstance(value, str) and 0 < len(value) <= maximum and "\x00" not in value
+
+
+def _workflow_path(value: Any) -> bool:
+    if not _wire_text(value, maximum=60_000) or value.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", value):
+        return False
+    return "\\" not in value and value not in (".", "..") and ".." not in value.split("/")
+
+
+def _unique_texts(value: Any, *, maximum: int, item_maximum: int = 10_000) -> bool:
+    return (isinstance(value, list) and len(value) <= maximum
+            and all(_wire_text(item, maximum=item_maximum) for item in value)
+            and len(set(value)) == len(value))
+
+
+def _procedures(value: Any, *, required: bool) -> bool:
+    return (_unique_texts(value, maximum=16, item_maximum=100)
+            and (not required or bool(value))
+            and all(item in REVIEW_WORKFLOW_PROCEDURES for item in value)
+            and (not required or "security-review" in value))
+
+
+def _workflow_identity(value: dict[str, Any]) -> tuple[Any, Any, Any, Any]:
+    return value.get("invocationId"), value.get("model"), value.get("hypothesisId"), value.get("shardIndex")
+
+
+def _workflow_file_identity(value: dict[str, Any]) -> tuple[Any, Any, Any, Any]:
+    procedures = value.get("requiredProcedures")
+    return value.get("path"), value.get("sha256"), value.get("bytes"), tuple(procedures) if isinstance(procedures, list) else None
+
+
+def _review_workflow_shape(report: Any) -> list[str]:
+    """Validate the closed v1 values and bounded repeated records; return terse defects."""
+    issues: list[str] = []
+
+    def issue(name: str) -> None:
+        if name not in issues and len(issues) < 50:
+            issues.append(name)
+
+    if not isinstance(report, dict):
+        return ["report_not_object"]
+    if type(report.get("schemaVersion")) is not int or report.get("schemaVersion") != 1:
+        issue("schema_version")
+    if report.get("workflow") != "bootstrap-source-review":
+        issue("workflow")
+    if report.get("status") not in REVIEW_WORKFLOW_STATUSES:
+        issue("status")
+    if report.get("sourceAssessment") != "unassessed":
+        issue("source_assessment")
+    scope = report.get("scope")
+    if (not isinstance(scope, dict) or scope.get("mode") not in REVIEW_WORKFLOW_MODES
+            or scope.get("policy") != "bootstrap-source-review/v1"):
+        issue("scope")
+    elif ("repository" in scope and not _wire_text(scope.get("repository"), maximum=60_000)):
+        issue("scope_repository")
+    elif ("sourceRef" in scope and not isinstance(scope.get("sourceRef"), str)) or (
+            isinstance(scope.get("sourceRef"), str) and not _HASH40.fullmatch(scope["sourceRef"])):
+        issue("scope_source_ref")
+    elif ("inventoryDigest" in scope and not isinstance(scope.get("inventoryDigest"), str)) or (
+            isinstance(scope.get("inventoryDigest"), str) and not _HASH64.fullmatch(scope["inventoryDigest"])):
+        issue("scope_inventory_digest")
+    inventory, obligations, receipts = (report.get(key) for key in ("inventory", "obligations", "receipts"))
+    if not isinstance(inventory, list) or len(inventory) > REVIEW_WORKFLOW_MAX_FILES:
+        issue("inventory")
+        inventory = []
+    if not isinstance(obligations, list) or len(obligations) > REVIEW_WORKFLOW_MAX_RECEIPTS:
+        issue("obligations")
+        obligations = []
+    if not isinstance(receipts, list) or len(receipts) > REVIEW_WORKFLOW_MAX_RECEIPTS:
+        issue("receipts")
+        receipts = []
+    reasons = report.get("reasons")
+    if not _unique_texts(reasons, maximum=REVIEW_WORKFLOW_MAX_RECEIPTS, item_maximum=10_000):
+        issue("reasons")
+    stages = report.get("stages")
+    stage_values = {
+        "modelCalls": {"complete", "incomplete", "not-recorded"},
+        "structural": {"complete", "incomplete", "not-applicable", "not-recorded"},
+        "lint": {"complete", "incomplete", "not-recorded"},
+        "markers": {"complete", "incomplete", "not-recorded"},
+        "specialists": {"complete", "incomplete", "not-recorded"},
+    }
+    if not isinstance(stages, dict) or any(stages.get(name) not in values for name, values in stage_values.items()):
+        issue("stages")
+
+    inventory_paths: set[str] = set()
+    total_bytes = 0
+    for entry in inventory:
+        if not isinstance(entry, dict):
+            issue("inventory_entry")
+            continue
+        path, disposition = entry.get("path"), entry.get("disposition")
+        if not _workflow_path(path) or path in inventory_paths:
+            issue("inventory_path")
+        elif isinstance(path, str):
+            inventory_paths.add(path)
+        if (not isinstance(entry.get("sourceRef"), str) or not _HASH40.fullmatch(entry["sourceRef"])
+                or not isinstance(entry.get("objectId"), str) or not _HASH40.fullmatch(entry["objectId"])
+                or disposition not in ("supported", "excluded", "unsupported", "unassigned")
+                or not _wire_text(entry.get("reason"), maximum=10_000)):
+            issue("inventory_identity")
+        requires_source = disposition in ("supported", "unassigned")
+        if requires_source:
+            if (not isinstance(entry.get("sha256"), str) or not _HASH64.fullmatch(entry["sha256"])
+                    or not _wire_count(entry.get("bytes"), REVIEW_WORKFLOW_MAX_FILE_BYTES)
+                    or not _procedures(entry.get("requiredProcedures"), required=True)):
+                issue("inventory_source")
+            elif isinstance(entry.get("bytes"), int):
+                total_bytes += entry["bytes"]
+        elif (entry.get("sha256") is not None or entry.get("bytes") is not None
+              or not _procedures(entry.get("requiredProcedures"), required=False)
+              or entry.get("requiredProcedures")):
+            issue("inventory_non_source")
+    if total_bytes > REVIEW_WORKFLOW_MAX_TOTAL_BYTES:
+        issue("inventory_total_bytes")
+
+    obligation_ids: set[tuple[Any, Any, Any, Any]] = set()
+    for obligation in obligations:
+        if not isinstance(obligation, dict):
+            issue("obligation_entry")
+            continue
+        identity = _workflow_identity(obligation)
+        if (not all(_wire_text(value, maximum=1_000) for value in identity[:3])
+                or not _wire_count(identity[3]) or identity[3] < 1
+                or not isinstance(obligation.get("sourceRef"), str) or not _HASH40.fullmatch(obligation["sourceRef"])):
+            issue("obligation_identity")
+        if identity in obligation_ids:
+            issue("duplicate_obligation")
+        obligation_ids.add(identity)
+        if "requestDigest" in obligation and (not isinstance(obligation.get("requestDigest"), str)
+                                               or not _HASH64.fullmatch(obligation["requestDigest"])):
+            issue("obligation_request_digest")
+        files = obligation.get("files")
+        if not isinstance(files, list) or not files or len(files) > REVIEW_WORKFLOW_MAX_FILES:
+            issue("obligation_files")
+            continue
+        paths: set[str] = set()
+        for file in files:
+            if (not isinstance(file, dict) or not _workflow_path(file.get("path")) or file.get("path") in paths
+                    or not isinstance(file.get("sha256"), str) or not _HASH64.fullmatch(file["sha256"])
+                    or not _wire_count(file.get("bytes"), REVIEW_WORKFLOW_MAX_FILE_BYTES)
+                    or not _procedures(file.get("requiredProcedures"), required=True)):
+                issue("obligation_file")
+            elif isinstance(file.get("path"), str):
+                paths.add(file["path"])
+
+    receipt_ids: set[tuple[Any, Any, Any, Any]] = set()
+    for receipt in receipts:
+        if not isinstance(receipt, dict):
+            issue("receipt_entry")
+            continue
+        identity = _workflow_identity(receipt)
+        if (receipt.get("schemaVersion") != 1 or not all(_wire_text(value, maximum=1_000) for value in identity[:3])
+                or not _wire_count(identity[3]) or identity[3] < 1
+                or not isinstance(receipt.get("sourceRef"), str) or not _HASH40.fullmatch(receipt["sourceRef"])
+                or not isinstance(receipt.get("requestDigest"), str) or not _HASH64.fullmatch(receipt["requestDigest"])
+                or not isinstance(receipt.get("responseDigest"), str) or not _HASH64.fullmatch(receipt["responseDigest"])):
+            issue("receipt_identity")
+        if identity in receipt_ids:
+            issue("duplicate_receipt")
+        receipt_ids.add(identity)
+        files = receipt.get("files")
+        if not isinstance(files, list) or not files or len(files) > REVIEW_WORKFLOW_MAX_FILES:
+            issue("receipt_files")
+            continue
+        paths: set[str] = set()
+        for file in files:
+            if (not isinstance(file, dict) or not _workflow_path(file.get("path")) or file.get("path") in paths
+                    or not isinstance(file.get("sha256"), str) or not _HASH64.fullmatch(file["sha256"])
+                    or not _wire_count(file.get("bytes"), REVIEW_WORKFLOW_MAX_FILE_BYTES)
+                    or not _procedures(file.get("requiredProcedures"), required=True)):
+                issue("receipt_file")
+                continue
+            paths.add(file["path"])
+            terminals = file.get("terminals")
+            if not isinstance(terminals, list) or len(terminals) > 16:
+                issue("terminals")
+                continue
+            seen: set[str] = set()
+            for terminal in terminals:
+                if (not isinstance(terminal, dict) or terminal.get("procedure") not in REVIEW_WORKFLOW_PROCEDURES
+                        or terminal.get("procedure") in seen
+                        or terminal.get("status") not in ("completed", "inconclusive")
+                        or not _wire_text(terminal.get("reason"), maximum=1_000)):
+                    issue("terminal")
+                elif isinstance(terminal.get("procedure"), str):
+                    seen.add(terminal["procedure"])
+            if seen != set(file["requiredProcedures"]):
+                issue("terminal_coverage")
+    return issues
+
+
+def _review_workflow_reconciliation(summary: dict[str, Any], report: dict[str, Any]) -> list[str]:
+    """Reconcile a structurally valid positive report with its inventory and original stages."""
+    issues: list[str] = []
+
+    def issue(name: str) -> None:
+        if name not in issues and len(issues) < 50:
+            issues.append(name)
+
+    scope = report["scope"]
+    source_ref = scope.get("sourceRef")
+    if summary.get("mode") != scope.get("mode"):
+        issue("mode_mismatch")
+    if scope.get("mode") != "bootstrap":
+        issue("unsupported_mode")
+    if not all(key in scope for key in ("repository", "sourceRef", "inventoryDigest")):
+        issue("scope_metadata_missing")
+    if summary.get("headRef") != source_ref:
+        issue("head_ref_mismatch")
+    if isinstance(summary.get("repoPath"), str) and summary.get("repoPath") != scope.get("repository"):
+        issue("repository_mismatch")
+    inventory = report["inventory"]
+    by_path = {entry["path"]: entry for entry in inventory}
+    if not inventory:
+        issue("empty_inventory")
+    if any(entry["sourceRef"] != source_ref for entry in inventory):
+        issue("inventory_source_ref_mismatch")
+    supported = {path: entry for path, entry in by_path.items() if entry["disposition"] in ("supported", "unassigned")}
+    if any(entry["disposition"] in ("unsupported", "unassigned") for entry in inventory):
+        issue("inventory_gap")
+
+    obligations = report["obligations"]
+    observed_assignments: dict[tuple[str, str, int, str], int] = {}
+    obligation_by_id = {_workflow_identity(item): item for item in obligations}
+    for obligation in obligations:
+        if obligation["sourceRef"] != source_ref or "requestDigest" not in obligation:
+            issue("obligation_binding")
+        for file in obligation["files"]:
+            entry = supported.get(file["path"])
+            if entry is None or _workflow_file_identity(file) != _workflow_file_identity(entry):
+                issue("obligation_source_mismatch")
+            key = (obligation["model"], obligation["hypothesisId"], obligation["shardIndex"], file["path"])
+            observed_assignments[key] = observed_assignments.get(key, 0) + 1
+    if any(not any(file["path"] == path for obligation in obligations for file in obligation["files"])
+           for path in supported):
+        issue("unassigned_inventory")
+    models = {obligation["model"] for obligation in obligations}
+    if len(models) > 1:
+        issue("multiple_models")
+
+    receipt_by_id = {_workflow_identity(item): item for item in report["receipts"]}
+    if set(receipt_by_id) != set(obligation_by_id):
+        issue("receipt_set_mismatch")
+    for identity, obligation in obligation_by_id.items():
+        receipt = receipt_by_id.get(identity)
+        if receipt is None:
+            continue
+        if (receipt["sourceRef"] != obligation["sourceRef"]
+                or receipt["requestDigest"] != obligation.get("requestDigest")
+                or [_workflow_file_identity(item) for item in receipt["files"]]
+                != [_workflow_file_identity(item) for item in obligation["files"]]):
+            issue("receipt_binding_mismatch")
+        if any(terminal["status"] != "completed" for file in receipt["files"] for terminal in file["terminals"]):
+            issue("inconclusive_terminal")
+
+    scan = summary.get("bootstrapScan")
+    expected_assignments: dict[tuple[str, str, int, str], int] = {}
+    if not isinstance(scan, dict):
+        issue("bootstrap_scan_missing")
+    else:
+        if scan.get("status") != "ok" or scan.get("failedCalls") != 0 or scan.get("quotaFailureCount") != 0:
+            issue("bootstrap_scan_incomplete")
+        counts = [scan.get(key) for key in ("hypothesesPlanned", "hypothesesEvaluated")]
+        if not all(_wire_count(value) for value in counts) or counts[0] != counts[1]:
+            issue("hypothesis_counts")
+        if scan.get("hypothesisCoverage") != 1:
+            issue("hypothesis_coverage")
+        if not _unique_texts(scan.get("failedHypothesisIds"), maximum=REVIEW_WORKFLOW_MAX_RECEIPTS) or scan.get("failedHypothesisIds"):
+            issue("failed_hypotheses")
+        if not _unique_texts(scan.get("unevaluatedHypothesisIds"), maximum=REVIEW_WORKFLOW_MAX_RECEIPTS) or scan.get("unevaluatedHypothesisIds"):
+            issue("unevaluated_hypotheses")
+        selections = scan.get("hypothesisSelections")
+        if not isinstance(selections, list) or len(selections) > REVIEW_WORKFLOW_MAX_RECEIPTS:
+            issue("hypothesis_selections")
+            selections = []
+        for selection in selections:
+            if not isinstance(selection, dict) or not _wire_text(selection.get("model"), maximum=1_000) or not _wire_text(selection.get("hypothesisId"), maximum=1_000):
+                issue("hypothesis_selection_identity")
+                continue
+            failures = selection.get("relationshipExtractionFailures", [])
+            truncated = selection.get("relationshipExtractionFailuresTruncated", 0)
+            if not isinstance(failures, list) or failures or not _wire_count(truncated) or truncated:
+                issue("relationship_source_gap")
+            coverage = selection.get("fileCoverage")
+            if not isinstance(coverage, dict):
+                issue("file_coverage_missing")
+                continue
+            if (coverage.get("hypothesisId") != selection["hypothesisId"] or coverage.get("coverage") != "complete"
+                    or coverage.get("partialFiles") != [] or coverage.get("omittedAssignedFiles") != []):
+                issue("file_coverage_incomplete")
+            calls = coverage.get("calls")
+            if not isinstance(calls, list) or len(calls) > REVIEW_WORKFLOW_MAX_RECEIPTS:
+                issue("file_calls")
+                continue
+            for call in calls:
+                if not isinstance(call, dict) or not _wire_count(call.get("shardIndex")) or call["shardIndex"] < 1:
+                    issue("file_call_identity")
+                    continue
+                requested, delivered = call.get("requestedFiles"), call.get("deliveredFiles")
+                if (not _unique_texts(requested, maximum=REVIEW_WORKFLOW_MAX_FILES, item_maximum=60_000)
+                        or not _unique_texts(delivered, maximum=REVIEW_WORKFLOW_MAX_FILES, item_maximum=60_000)
+                        or set(requested) != set(delivered) or call.get("partialFiles") != []
+                        or call.get("omittedFiles") != [] or call.get("transport") != "succeeded"):
+                    issue("file_call_incomplete")
+                    continue
+                for path in requested:
+                    if path in supported:
+                        key = (selection["model"], selection["hypothesisId"], call["shardIndex"], path)
+                        expected_assignments[key] = expected_assignments.get(key, 0) + 1
+    if expected_assignments != observed_assignments:
+        issue("assignment_mismatch")
+
+    stages = report["stages"]
+    if stages != {"modelCalls": "complete", "structural": "not-applicable", "lint": "complete",
+                  "markers": "complete", "specialists": "complete"}:
+        issue("stage_incomplete")
+    lint = summary.get("repositoryLint")
+    if (not isinstance(lint, dict) or lint.get("status") != "ok" or lint.get("failures") != 0
+            or any(rule.get("status") != "ok" or rule.get("failures", 0) or rule.get("baseFailures", 0)
+                   for rule in summary.get("repositoryLintRules", []) if isinstance(rule, dict))):
+        issue("lint_incomplete")
+    marker = summary.get("reviewAssessment")
+    if not isinstance(marker, dict) or marker.get("status") != "none-pending" or any(
+            marker.get(key) != 0 for key in ("pendingReviews", "pendingSites", "pendingInspectionGaps")):
+        issue("markers_incomplete")
+    activated = summary.get("specialistsActivated")
+    scans = summary.get("specialistScans", [])
+    if not isinstance(activated, list) or not isinstance(scans, list):
+        issue("specialists_malformed")
+    else:
+        by_id = {item.get("id"): item for item in scans if isinstance(item, dict) and isinstance(item.get("id"), str)}
+        for activation in activated:
+            specialist_id = activation.get("id") if isinstance(activation, dict) else None
+            specialist = by_id.get(specialist_id)
+            if (specialist is None or specialist.get("status") != "ok" or specialist.get("assessmentStatus") == "not-assessed"
+                    or specialist.get("failedCalls", 0) != 0 or specialist.get("quotaFailureCount", 0) != 0):
+                issue("specialist_incomplete")
+    return issues
+
+
+def read_review_workflow(summary: Any) -> ReviewWorkflowReading:
+    """Read and reconcile ``summary.reviewWorkflow`` without treating it as source safety."""
+    if not isinstance(summary, dict) or "reviewWorkflow" not in summary:
+        return ReviewWorkflowReading(False, None, None, [], None, None)
+    report = summary.get("reviewWorkflow")
+    shape = _review_workflow_shape(report)
+    if shape:
+        shown = ", ".join(shape[:10])
+        return ReviewWorkflowReading(True, None, None, [], "review_workflow_malformed",
+                                     f"the harness review-workflow report is malformed ({shown})")
+    assert isinstance(report, dict)
+    status = report["status"]
+    reasons = report["reasons"]
+    shown = ", ".join(reasons[:20]) + (f", and {len(reasons) - 20} more" if len(reasons) > 20 else "")
+    notes = [f"Harness review workflow v1: {status}"
+             + (f" ({shown})" if reasons else "")
+             + "; native producer-declared receipts bind source, request, response, and terminal records, "
+               "but do not assess the source as safe or attest a provider/model revision."]
+    if status in ("complete", "not-required"):
+        reconciliation = _review_workflow_reconciliation(summary, report)
+        if status == "complete":
+            if not any(entry["disposition"] == "supported" for entry in report["inventory"]):
+                reconciliation.append("no_supported_inventory")
+            if reasons:
+                reconciliation.append("positive_status_has_reasons")
+        else:
+            if (not report["inventory"] or any(entry["disposition"] != "excluded" for entry in report["inventory"])
+                    or report["obligations"] or report["receipts"] or reasons):
+                reconciliation.append("not_required_scope")
+            # Exclusion-only scope has no assignments to reconcile with bootstrap hypotheses.
+            reconciliation = [item for item in reconciliation if item not in {
+                "bootstrap_scan_missing", "assignment_mismatch", "stage_incomplete", "no_supported_inventory"}]
+        if reconciliation:
+            shown_reconciliation = ", ".join(dict.fromkeys(reconciliation))
+            return ReviewWorkflowReading(True, status, report, notes, "review_workflow_malformed",
+                                         f"the harness review-workflow report contradicts its positive status ({shown_reconciliation})")
+        if status == "complete":
+            notes.append("Accepted scope: completed declared bootstrap review workflow; source assessment remains unassessed.")
+        else:
+            notes.append("Accepted scope: the immutable inventory contains only explicit exclusions, so this workflow was not required.")
+        return ReviewWorkflowReading(True, status, report, notes, None, None)
+    if not reasons:
+        return ReviewWorkflowReading(True, status, report, notes, "review_workflow_malformed",
+                                     "the harness review-workflow report has a non-positive status without a reason")
+    return ReviewWorkflowReading(True, status, report, notes, f"review_workflow_{status}",
+                                 f"the harness reports its declared review workflow {status}: {shown}")
 
 
 def _valid_completion(completion: Any) -> bool:
@@ -659,17 +1076,43 @@ def _valid_completion(completion: Any) -> bool:
     return True
 
 
-def read_completion(summary: Any, *, required: bool) -> tuple[list[str], str | None, str | None]:
-    """The harness's own completion report: notes, and a ``partial`` error code and message if any.
+def _workflow_completion_consistent(completion: dict[str, Any], report: dict[str, Any]) -> bool:
+    """Whether legacy unknown coverage is exactly the gap v1 intentionally leaves open."""
+    allowed = {"source_analysis_completion_not_established", "structural_coverage_not_recorded"}
+    coverage = completion["coverage"]
+    if coverage["status"] != "unknown" or not coverage["reasons"] or not set(coverage["reasons"]) <= allowed:
+        return False
+    calls = completion["modelCalls"]
+    if calls["status"] != "no-recorded-failures" or calls["failed"] or calls["pending"]:
+        return False
+    if completion["changedFileSupport"]["status"] != "not-recorded":
+        return False
+    structural = completion["structuralCoverage"]
+    inspections = structural["planningInspections"]
+    if (structural["status"] not in ("complete", "not-recorded") or inspections["failed"]
+            or structural["requiredInspectionFailures"] or structural["failureSamples"]
+            or structural["truncatedFailureSamples"]):
+        return False
+    lint, hypotheses = completion["lintCoverage"], completion["hypothesisEvaluation"]
+    if (lint["status"] != "complete" or lint["failures"] or lint["failureSamples"] or lint["inconclusiveRuleIds"]
+            or hypotheses["status"] != "complete" or hypotheses["planned"] != hypotheses["evaluated"]
+            or hypotheses["failedIds"] or hypotheses["unevaluatedIds"]):
+        return False
+    marker, source = completion["markerAssessment"], completion["sourceAssessment"]
+    if marker["status"] != "none-pending" or any(marker[key] for key in
+                                                   ("pendingReviews", "pendingSites", "pendingInspectionGaps")):
+        return False
+    supported = {entry["path"] for entry in report["inventory"] if entry["disposition"] == "supported"}
+    if (source["status"] != "unassessed" or {item["path"] for item in source["files"]} != supported
+            or any(item["reason"] != "analysis_completion_not_established" for item in source["files"])):
+        return False
+    return report["stages"] == {"modelCalls": "complete", "structural": "not-applicable", "lint": "complete",
+                                 "markers": "complete", "specialists": "complete"}
 
-    ``summary.completion`` is the engine's account of whether the scan it returned is complete:
-    its model-call health and its assessment coverage, with the reasons. Coverage that the engine
-    calls incomplete or unknown, model calls it records as failed or still pending, and a report in
-    a shape this cannot read all make the run ``partial``, so none of them earns completion or
-    quiet credit, and the engine's own reasons travel with the outcome. A report that is absent is
-    no statement at all on a harness build that predates it; on one that always returns it, which
-    *required* says, absence is the same unreadable evidence.
-    """
+
+def read_completion(summary: Any, *, required: bool,
+                    workflow: ReviewWorkflowReading | None = None) -> tuple[list[str], str | None, str | None]:
+    """Read legacy completion and narrowly reconcile it with review-workflow v1 when present."""
     absent = not isinstance(summary, dict) or "completion" not in summary
     completion = summary.get("completion") if isinstance(summary, dict) else None
     if absent:
@@ -693,6 +1136,14 @@ def read_completion(summary: Any, *, required: bool) -> tuple[list[str], str | N
     if calls["status"] == "failures-recorded" or counts["failed"] or counts["pending"]:
         return (notes, "completion_model_calls",
                 f"the harness recorded {counts['failed']} failed and {counts['pending']} pending model call(s)")
+    if workflow is not None and workflow.status == "complete" and workflow.code is None:
+        if not isinstance(workflow.report, dict) or not _workflow_completion_consistent(completion, workflow.report):
+            return (notes, "review_workflow_malformed",
+                    "the completed review-workflow report contradicts the original completion stages")
+        notes.append("Legacy source assessment remains unassessed and legacy coverage remains unknown only for the "
+                     "versioned workflow's source-assessment and bootstrap structural-policy gaps; the completed "
+                     "declared workflow is accepted separately, not as assessed-safe source.")
+        return notes, None, None
     if status in ("incomplete", "unknown"):
         return notes, f"completion_{status}", f"the harness reports its assessment coverage {status}: {shown or 'no reason given'}"
     return notes, None, None
@@ -1514,7 +1965,7 @@ def session_history_notes(manifest: list[dict[str, Any]], registered: dict[str, 
 
 class LlmHarnessAdapter(Adapter):
     name = "llm-harness"
-    adapter_version = "2.5.0"
+    adapter_version = "2.6.0"
     requires_git = True
     # A full request runs the harness's bootstrap mode; a PR request runs its pr mode over the base
     # and head commits the request names (see the module docstring).
@@ -2100,11 +2551,15 @@ class LlmHarnessAdapter(Adapter):
             """
             return f"{message}; {loss_message}"[:2000] if loss_message else message
 
+        workflow = read_review_workflow(usable_summary)
+        notes.extend(workflow.notes)
         completion_notes, completion_code, completion_message = read_completion(
-            usable_summary, required=image is not None)
+            usable_summary, required=image is not None or workflow.present, workflow=workflow)
         notes.extend(completion_notes)
-        if completion_code and completion_message and not completion_notes:
-            notes.append(f"Harness completion report: {completion_message}.")
+        native_completion_code = workflow.code or completion_code
+        native_completion_message = workflow.message or completion_message
+        if native_completion_code and native_completion_message and not (workflow.notes or completion_notes):
+            notes.append(f"Harness native completion evidence: {native_completion_message}.")
         if result.timed_out:
             return NativeOutcome(status="timeout", exit_code=None, timed_out=True,
                                  error={"code": "timeout",
@@ -2212,11 +2667,12 @@ class LlmHarnessAdapter(Adapter):
             return NativeOutcome(status="partial", exit_code=result.exit_code,
                                  error={"code": "harness_inconclusive",
                                         "message": with_loss(f"degradation={usable_summary.get('degradation')} scan_status={scan_status} reasons={scan_stats.get('reasons')}")}, **base)
-        if completion_code:
-            # The engine's own statement that this scan is not shown complete: never success, so
-            # never quiet credit, and its reasons are the error's.
+        if native_completion_code:
+            # The engine's native reports are additive. Either one's fail-closed statement prevents
+            # success while preserving imported findings and the other report's notes.
             return NativeOutcome(status="partial", exit_code=result.exit_code,
-                                 error={"code": completion_code, "message": with_loss(completion_message)[:2000]},
+                                 error={"code": native_completion_code,
+                                        "message": with_loss(native_completion_message or "native completion evidence is unavailable")[:2000]},
                                  **base)
         if loss_message:
             # A scan whose findings did not all survive the import is not a clean run: it is
