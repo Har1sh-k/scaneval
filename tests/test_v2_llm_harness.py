@@ -2701,6 +2701,18 @@ def test_review_workflow_policy_matches_native_exclusion_precedence_and_rejects_
         assert read_review_workflow(candidate).code == "review_workflow_malformed"
 
 
+def test_review_workflow_rejects_boundary_bom_forgery_without_normalizing_unicode_paths():
+    assert not llm_harness._workflow_path("\ufeffsrc/build/x.py")
+    assert not llm_harness._workflow_path("src/build/x.py\ufeff")
+    assert llm_harness._workflow_path("src/café/文件.py")
+
+    candidate = _review_workflow_summary()
+    _replace_workflow_exclusion(
+        candidate, "\ufeffsrc/build/x.py", "bootstrap-policy-excluded:code-scope-exclusion")
+    assert llm_harness._review_workflow_shape(candidate["reviewWorkflow"]) == ["inventory_path"]
+    assert read_review_workflow(candidate).code == "review_workflow_malformed"
+
+
 def test_review_workflow_rejects_assigned_paths_not_delivered_from_inside_or_outside_inventory():
     for path in ("README.md", "evil/outside.py"):
         summary = _review_workflow_summary()

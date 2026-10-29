@@ -302,9 +302,11 @@ newer SV-Agent builds. A reconciled positive report is labelled only as a **comp
 bootstrap review workflow**. The consumer recomputes the portable public inventory digest and
 reconciles original classification/policy, observed native inputs, dispatched-call
 invocation/request/response identity, obligations, terminals, and planner/anchor/structural/lint
-stage evidence. Every inventory classification and reason is checked against the exact native
-`73ae7aa` precedence for path exclusions, configured and built-in source, repository metadata,
-known non-code files, planner-only formats, executable suffixes, and unknown formats. Repository
+stage evidence. Inventory paths are validated without normalization, rejecting boundary whitespace
+and U+FEFF while preserving ordinary Unicode verbatim; every accepted classification and reason is
+then checked against the exact native `73ae7aa` precedence for path exclusions, configured and
+built-in source, repository metadata, known non-code files, planner-only formats, executable
+suffixes, and unknown formats. Repository
 metadata recognition is limited to extensionless README/LICENSE/COPYING/NOTICE and `.md`, `.rst`,
 `.adoc`, or `.txt`; unsupported paths cannot forge metadata, known-non-code, no-source-review, or
 code-scope-exclusion reasons. Assigned paths must be delivered and inventory-backed, and native

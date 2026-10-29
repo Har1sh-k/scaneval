@@ -727,6 +727,8 @@ def contract_guard_cases() -> Iterable[Case]:
         "payload.exe", "bootstrap-policy-does-not-source-review:.exe"), state=mixed_state)
     yield case("forged-code-scope-exclusion", replace_exclusion(
         "payload.vbs", "bootstrap-policy-excluded:code-scope-exclusion"), state=mixed_state)
+    yield case("forged-leading-bom-code-scope-exclusion", replace_exclusion(
+        "\ufeffsrc/build/x.py", "bootstrap-policy-excluded:code-scope-exclusion"), state=mixed_state)
 
     def additional_extension_bypass(summary: dict) -> None:
         report = summary["reviewWorkflow"]
@@ -827,8 +829,8 @@ def generated_cases() -> list[Case]:
     names = [case.name for case in cases]
     if len(names) != len(set(names)):
         raise AssertionError("generated case names are not unique")
-    if len(cases) != 850:
-        raise AssertionError(f"finite-domain drift: expected 850 cases, generated {len(cases)}")
+    if len(cases) != 851:
+        raise AssertionError(f"finite-domain drift: expected 851 cases, generated {len(cases)}")
     return cases
 
 
@@ -882,6 +884,7 @@ def required_witnesses(cases: list[Case], decisions: dict[str, Decision]) -> dic
         "rejected_forged_known_non_code_data": lambda case: case.name == "forged-known-non-code-data",
         "rejected_forged_no_source_review": lambda case: case.name == "forged-no-source-review",
         "rejected_forged_code_scope_exclusion": lambda case: case.name == "forged-code-scope-exclusion",
+        "rejected_boundary_bom_forged_exclusion": lambda case: case.name == "forged-leading-bom-code-scope-exclusion",
         "rejected_additional_extension_bypass": lambda case: case.name == "additional-extension-bypass",
         "rejected_original_invocation": lambda case: case.name == "guard-original-invocation",
         "rejected_original_request": lambda case: case.name == "guard-original-request",

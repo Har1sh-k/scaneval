@@ -29,11 +29,11 @@ def checker_result() -> dict:
 
 
 def test_bounded_checker_calls_production_for_all_expected_states(checker_result):
-    assert checker_result["checked"] == 850
+    assert checker_result["checked"] == 851
     assert checker_result["family_counts"] == {
         "all_excluded": 1,
         "completion_compatibility": 90,
-        "contract_guards": 39,
+        "contract_guards": 40,
         "finding_reachability": 2,
         "inventory_assignment": 144,
         "malformed_boundaries": 24,
@@ -43,7 +43,7 @@ def test_bounded_checker_calls_production_for_all_expected_states(checker_result
         "workflow_stages": 128,
     }
     assert checker_result["expected_accepted"] == 40
-    assert checker_result["expected_rejected"] == 810
+    assert checker_result["expected_rejected"] == 811
     assert checker_result["production_mismatches"] == []
     assert checker_result["ok"] is True
 
@@ -108,7 +108,7 @@ def test_critical_predicates_have_non_vacuity_witnesses_and_runtime_source_hashe
         "rejected_extensionless_metadata_forgery", "rejected_forged_known_non_code_filename",
         "rejected_forged_known_non_code_format", "rejected_forged_known_non_code_data",
         "rejected_forged_no_source_review", "rejected_forged_code_scope_exclusion",
-        "rejected_additional_extension_bypass",
+        "rejected_boundary_bom_forged_exclusion", "rejected_additional_extension_bypass",
         "rejected_original_invocation",
         "rejected_original_request", "rejected_original_response", "rejected_obligation_inventory_bytes",
         "rejected_stale_head", "rejected_positive_mode", "rejected_multiple_models",

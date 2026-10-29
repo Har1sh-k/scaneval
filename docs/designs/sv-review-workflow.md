@@ -34,7 +34,9 @@ contract has merged.
   concrete planner, anchor, structural-inspection, and effective lint evidence.
 
 Unknown fields, enums, unsafe integers, malformed hashes, non-normalized paths, surrogate-bearing
-preimage strings, duplicate identities, and unbounded repeated evidence fail closed.
+preimage strings, duplicate identities, and unbounded repeated evidence fail closed. Paths are
+validated without normalization: leading or trailing whitespace and JavaScript-trimmed U+FEFF are
+rejected, while ordinary Unicode path characters remain accepted and hashed verbatim.
 
 ## Independent reconciliation
 
@@ -48,8 +50,9 @@ Positive credit additionally requires:
 
 1. scope mode and source ref agree with `summary.mode` and `summary.headRef`; the policy agrees with
    the original summary, and the sorted inventory agrees with the original bootstrap file surface;
-2. every inventory classification and reason independently equals native `73ae7aa` policy with its
-   exact precedence: non-regular mode, path exclusion, configured extension, bootstrap source,
+2. after canonical path validation, every inventory classification and reason independently equals
+   native `73ae7aa` policy with its exact precedence: non-regular mode, path exclusion, configured
+   extension, bootstrap source,
    repository metadata, known non-code filename/format/data segment, extensionless source,
    planner-supported-but-not-bootstrap configuration/template/JSON, unsupported executable, then
    unknown format. Repository metadata is limited to extensionless README/LICENSE/COPYING/NOTICE
@@ -101,10 +104,10 @@ harmless.
 upstream engine run whose imports were bound to the checkout at
 `73ae7aa9ba14425abb066306cfabfea4fd83d3eb`, using an in-process test runner and no model/network
 call. The fixture includes a legitimate excluded `README.md` in an otherwise complete workflow.
-The bounded consumer checker exercises 850 finite cases, including all seven stage bits, malformed
+The bounded consumer checker exercises 851 finite cases, including all seven stage bits, malformed
 native-summary boundaries, assigned-but-undelivered counterexamples, self-consistent forged native
-policy exclusions, and concrete runtime simulations that remove digest, input, stage-evidence,
-original-call, and inventory-policy guards. See
+policy exclusions including a leading-U+FEFF path, and concrete runtime simulations that remove
+digest, input, stage-evidence, original-call, and inventory-policy guards. See
 [SV completion bounded verification](sv-completion-bounded-verification.md).
 
 Consumer support is not a readiness claim. Upstream PR 206 remains pending Anshuman review and is

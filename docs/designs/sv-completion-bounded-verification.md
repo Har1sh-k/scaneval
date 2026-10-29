@@ -41,7 +41,7 @@ The trusted computing base is the oracle, materializer, fixture, Python runtime,
 checker emits source SHA-256 values and the current Git revision; generated JSON stays outside the
 repository.
 
-## Finite domain: 850 cases
+## Finite domain: 851 cases
 
 1. **Inventory/assignment product — 144.** One or two files; one or two procedures; each file is
    supported, unassigned, or unsupported; every ordered obligation plan of length zero, one, or two
@@ -63,11 +63,12 @@ repository.
 9. **Malformed boundaries — 24.** Container/type/integer, duplicate, procedure, file, terminal,
    completion-counter, malformed hypothesis-selection entry, and missing/null/list execution-anchor
    summary boundaries.
-10. **Corrected-contract guards — 39.** Digest/preimage, exact native classification/reason policy,
+10. **Corrected-contract guards — 40.** Digest/preimage, exact native classification/reason policy,
     metadata-named code, positive metadata/path/configuration/known-filename/known-format/
     data-segment exclusions, self-consistent forged metadata and non-metadata exclusion reasons,
-    additional source extensions, inputs, planner/anchor/structural evidence, assigned-but-
-    undelivered in- and out-of-inventory paths, disabled lint, original invocation/request/response
+    a leading-U+FEFF forged path exclusion, additional source extensions, inputs, planner/anchor/
+    structural evidence, assigned-but-undelivered in- and out-of-inventory paths, disabled lint,
+    original invocation/request/response
     identity, obligation bytes, head/mode/model cardinality, positive reasons, out-of-inventory
     calls, `not-required` stage failure, and unknown field/enum cases.
 
@@ -112,8 +113,8 @@ PYTHONPATH=$PWD/src .venv/bin/python -m pytest -q \
   -k 'review_workflow or completed_declared_review_workflow or legacy_completion_without_review_workflow'
 ```
 
-A conforming run reports `checked: 850`, `expected_accepted: 40`,
-`expected_rejected: 810`, no production mismatch, all required witnesses, and all ten faulty
+A conforming run reports `checked: 851`, `expected_accepted: 40`,
+`expected_rejected: 811`, no production mismatch, all 69 required witnesses, and all ten faulty
 functions detected. Plain `pytest` collection is supported because the test loads the checker by
 absolute file path rather than relying on the repository root being on `sys.path`.
 

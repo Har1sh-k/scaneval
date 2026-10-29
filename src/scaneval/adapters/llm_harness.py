@@ -781,6 +781,7 @@ def _profile_prefix(path: str) -> str:
 def _workflow_path(value: Any) -> bool:
     if (not _wire_text(value, maximum=60_000) or value.startswith(("/", "\\"))
             or re.match(r"^[A-Za-z]:", value) or value != value.strip()
+            or value[:1] == "\ufeff" or value[-1:] == "\ufeff"
             or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)):
         return False
     parts = value.split("/")
