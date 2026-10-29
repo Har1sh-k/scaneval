@@ -2390,6 +2390,16 @@ def _review_workflow_summary() -> dict:
     return json.loads((ROOT / "tests/fixtures/sv-review-workflow-summary.json").read_text())
 
 
+def _workflow_inventory_entry(summary: dict, path: str) -> dict:
+    return next(entry for entry in summary["reviewWorkflow"]["inventory"] if entry["path"] == path)
+
+
+def _refresh_workflow_digest(summary: dict) -> None:
+    report = summary["reviewWorkflow"]
+    report["scope"]["inventoryDigest"] = llm_harness._canonical_inventory_digest(
+        report["scope"], report["inventory"])
+
+
 def test_review_workflow_fixture_roundtrips_and_preserves_both_native_accounts():
     summary = _review_workflow_summary()
     roundtripped = json.loads(json.dumps(summary, sort_keys=True))
@@ -2400,7 +2410,7 @@ def test_review_workflow_fixture_roundtrips_and_preserves_both_native_accounts()
     assert workflow.status == "complete" and workflow.code is None
     assert code is message is None
     assert any("completed declared bootstrap review workflow" in note for note in workflow.notes)
-    assert any("assessment coverage unknown" in note for note in notes)
+    assert any("assessment coverage incomplete" in note for note in notes)
     assert any("not as assessed-safe source" in note for note in notes)
 
 
@@ -2422,6 +2432,16 @@ def test_review_workflow_not_required_needs_exact_exclusion_inventory_and_metada
     report["inventory"] = [report["inventory"][0]]
     report["obligations"] = []
     report["receipts"] = []
+    report["inputs"] = []
+    report["stages"] = {
+        "planner": "not-applicable", "executionAnchors": "not-applicable",
+        "modelCalls": "not-applicable", "structural": "not-applicable",
+        "lint": "complete", "markers": "complete", "specialists": "not-applicable",
+    }
+    report["stageEvidence"] = {"lint": report["stageEvidence"]["lint"]}
+    summary["changedFiles"] = [report["inventory"][0]["path"]]
+    summary.pop("bootstrapScan")
+    _refresh_workflow_digest(summary)
     completion = summary["completion"]
     completion["modelCalls"].update(status="not-run", attempted=0, succeeded=0, failed=0, pending=0)
     completion["changedFileSupport"] = {
@@ -2463,10 +2483,15 @@ def test_unsupported_review_workflow_mode_never_earns_success():
     summary = _review_workflow_summary()
     report = summary["reviewWorkflow"]
     summary["mode"] = report["scope"]["mode"] = "pr"
-    report.update(status="unknown", inventory=[], obligations=[], receipts=[], reasons=["unsupported_mode:pr"])
-    report["scope"] = {"mode": "pr", "policy": "bootstrap-source-review/v1"}
-    report["stages"] = {key: "not-recorded" for key in
-                        ("modelCalls", "structural", "lint", "markers", "specialists")}
+    report.update(status="unknown", inventory=[], obligations=[], receipts=[], inputs=[],
+                  reasons=["unsupported_mode:pr"])
+    report["scope"] = {
+        "mode": "pr", "inventoryDigestPreimage": "review-workflow-inventory/v1",
+        "policy": {"version": "bootstrap-source-review/v1", "additionalCodeExtensions": []},
+    }
+    report["stages"] = {key: "not-recorded" for key in (
+        "planner", "executionAnchors", "modelCalls", "structural", "lint", "markers", "specialists")}
+    report["stageEvidence"] = {"lint": {"configuration": "not-recorded", "ruleIds": []}}
 
     reading = read_review_workflow(summary)
 
@@ -2498,10 +2523,10 @@ def test_positive_review_workflow_fails_closed_for_malformed_and_cross_bound_evi
         yield "non-scalar terminal procedure", lambda s: s["reviewWorkflow"]["receipts"][0]["files"][0]["terminals"][0].update(procedure=[])
         yield "invalid terminal", lambda s: s["reviewWorkflow"]["receipts"][0]["files"][0]["terminals"][0].update(status="done")
         yield "inconclusive terminal", lambda s: s["reviewWorkflow"]["receipts"][0]["files"][0]["terminals"][0].update(status="inconclusive")
-        yield "unassigned inventory", lambda s: s["reviewWorkflow"]["inventory"][1].update(disposition="unassigned")
-        yield "unsupported inventory", lambda s: s["reviewWorkflow"]["inventory"][1].update(
-            disposition="unsupported", sha256=None, bytes=None, requiredProcedures=[])
-        yield "bad disposition enum", lambda s: s["reviewWorkflow"]["inventory"][1].update(disposition="reviewed")
+        yield "unassigned inventory", lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(disposition="unassigned")
+        yield "unsupported inventory", lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(
+            classification="unsupported", disposition="unsupported", sha256=None, bytes=None, requiredProcedures=[])
+        yield "bad disposition enum", lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(disposition="reviewed")
         yield "head mismatch", lambda s: s.update(headRef="b" * 40)
         yield "unsupported consensus", lambda s: s.update(consensus={"status": "complete"})
         yield "non-scalar stage", lambda s: s["reviewWorkflow"]["stages"].update(lint=[])
@@ -2510,17 +2535,141 @@ def test_positive_review_workflow_fails_closed_for_malformed_and_cross_bound_evi
         yield "marker gap", lambda s: s["reviewAssessment"].update(status="pending", pendingReviews=1)
         yield "specialist gap", lambda s: s["specialistsActivated"].append({"id": "auth", "workflowHint": "auth"})
         yield "relationship parser gap", lambda s: s["bootstrapScan"]["hypothesisSelections"][0].update(
-            relationshipExtractionFailures=[{"path": "src/app.ts", "operation": "exports", "reason": "parser-exception"}])
+            relationshipExtractionFailures=[{"path": "src/neutral.ts", "operation": "exports", "reason": "parser-exception"}])
         yield "hypothesis failure", lambda s: s["bootstrapScan"].update(
-            status="inconclusive", failedHypothesisIds=["TM-001"])
+            status="inconclusive", failedHypothesisIds=["TM-REVIEW-001"])
         yield "omitted source", lambda s: s["bootstrapScan"]["hypothesisSelections"][0]["fileCoverage"]["calls"][0].update(
-            deliveredFiles=[], omittedFiles=[{"path": "src/app.ts", "reason": "budget"}])
+            deliveredFiles=[], omittedFiles=[{"path": "src/neutral.ts", "reason": "budget"}])
 
     for name, mutate in cases():
         summary = _review_workflow_summary()
         mutate(summary)
         reading = read_review_workflow(summary)
         assert reading.code == "review_workflow_malformed", name
+
+
+def test_review_workflow_digest_matches_javascript_utf16_and_binds_every_public_preimage_field():
+    source_ref = "a" * 40
+    scope = {
+        "sourceRef": source_ref,
+        "policy": {"version": "bootstrap-source-review/v1", "additionalCodeExtensions": []},
+    }
+    inventory = [{
+        "path": "src/\U00010000.ts", "sourceRef": source_ref, "objectId": "1" * 40,
+        "mode": "100644", "sha256": "3" * 64, "bytes": 10, "classification": "supported",
+        "disposition": "supported", "reason": "supported-code-extension",
+        "requiredProcedures": ["security-review"],
+    }, {
+        "path": "src/\ue000.ts", "sourceRef": source_ref, "objectId": "2" * 40,
+        "mode": "100644", "sha256": "4" * 64, "bytes": 11, "classification": "supported",
+        "disposition": "supported", "reason": "supported-code-extension",
+        "requiredProcedures": ["security-review"],
+    }]
+    assert llm_harness._js_sorted([item["path"] for item in inventory]) == [
+        "src/\U00010000.ts", "src/\ue000.ts"]
+    assert llm_harness._canonical_inventory_digest(scope, inventory) == (
+        "26bf9a595a8a269531397997d55f398fc22be8192d9a6bc6549954b87409d31c")
+
+    summary = _review_workflow_summary()
+    original = summary["reviewWorkflow"]["scope"]["inventoryDigest"]
+    mutations = [
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(path="src/changed.ts"),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(sourceRef="b" * 40),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(objectId="b" * 40),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(mode="100755"),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(sha256="0" * 64),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(bytes=67),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(classification="excluded"),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(reason="changed-reason"),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(
+            requiredProcedures=["security-review", "category:configuration"]),
+        lambda s: s["reviewWorkflow"]["scope"]["policy"].update(additionalCodeExtensions=[".json"]),
+    ]
+    for mutate in mutations:
+        candidate = deepcopy(summary)
+        mutate(candidate)
+        report = candidate["reviewWorkflow"]
+        assert llm_harness._canonical_inventory_digest(report["scope"], report["inventory"]) != original
+        assert read_review_workflow(candidate).code == "review_workflow_malformed"
+    changed_repo = deepcopy(summary)
+    changed_repo["repoPath"] = "/different/absolute/path"
+    report = changed_repo["reviewWorkflow"]
+    assert llm_harness._canonical_inventory_digest(report["scope"], report["inventory"]) == original
+
+
+def test_review_workflow_rejects_input_stage_policy_and_original_call_tampering():
+    def mutations():
+        yield "input removed", lambda s: s["reviewWorkflow"].update(inputs=[])
+        yield "input mismatch", lambda s: s["reviewWorkflow"]["inputs"][0].update(binding="mismatched")
+        yield "input untracked", lambda s: s["reviewWorkflow"]["inputs"][0].update(
+            binding="untracked", sourceRef=None, objectId=None)
+        yield "input drift", lambda s: s["reviewWorkflow"]["inputs"][0].update(binding="drifted")
+        yield "input bytes", lambda s: s["reviewWorkflow"]["inputs"][0]["observations"][0].update(bytes=67)
+        yield "planner evidence", lambda s: s["bootstrapPlan"].update(planner="heuristic")
+        yield "anchor evidence", lambda s: s["reviewWorkflow"]["stageEvidence"].pop("executionAnchors")
+        yield "structural evidence", lambda s: s["reviewWorkflow"]["stageEvidence"]["structural"].update(failures=1)
+        yield "lint ids", lambda s: s["reviewWorkflow"]["stageEvidence"]["lint"]["ruleIds"].reverse()
+        yield "native invocation", lambda s: [item.update(invocationId="jointly-mutated") for item in (
+            s["reviewWorkflow"]["obligations"][0], s["reviewWorkflow"]["receipts"][0])]
+        yield "native request", lambda s: [item.update(requestDigest="0" * 64) for item in (
+            s["reviewWorkflow"]["obligations"][0], s["reviewWorkflow"]["receipts"][0])]
+        yield "native response", lambda s: s["reviewWorkflow"]["receipts"][0].update(responseDigest="0" * 64)
+        yield "outside inventory", lambda s: s["bootstrapScan"]["hypothesisSelections"][0]["fileCoverage"]["calls"][0]["requestedFiles"].append("src/untracked.ts")
+
+    for name, mutate in mutations():
+        summary = _review_workflow_summary()
+        mutate(summary)
+        assert read_review_workflow(summary).code == "review_workflow_malformed", name
+
+
+def test_review_workflow_policy_keeps_metadata_named_and_additional_sources_in_scope():
+    summary = _review_workflow_summary()
+    entry = _workflow_inventory_entry(summary, "README.md")
+    entry.update(path="README.py")
+    summary["changedFiles"] = [item["path"] for item in summary["reviewWorkflow"]["inventory"]]
+    next(surface for surface in summary["executionAnchorCoverage"]["surfaces"]
+         if surface["prefix"] == "readme.md")["prefix"] = "readme.py"
+    _refresh_workflow_digest(summary)
+    assert read_review_workflow(summary).code == "review_workflow_malformed"
+
+    summary = _review_workflow_summary()
+    summary["additionalCodeExtensions"] = [".json"]
+    summary["reviewWorkflow"]["scope"]["policy"]["additionalCodeExtensions"] = [".json"]
+    _refresh_workflow_digest(summary)
+    assert read_review_workflow(summary).code == "review_workflow_malformed"
+
+
+def test_review_workflow_accepts_disabled_lint_but_not_unproven_legacy_anchor_gaps():
+    summary = _review_workflow_summary()
+    summary["reviewWorkflow"]["stages"]["lint"] = "not-applicable"
+    summary["reviewWorkflow"]["stageEvidence"]["lint"] = {"configuration": "disabled", "ruleIds": []}
+    summary["repositoryLintRules"] = []
+    workflow = read_review_workflow(summary)
+    assert workflow.code is None
+    assert read_completion(summary, required=True, workflow=workflow)[1] is None
+
+    for reason in ("execution_anchor:src/neutral.ts:unsupported", "execution_anchor:src/neutral.ts:failed"):
+        candidate = _review_workflow_summary()
+        candidate["completion"]["coverage"].update(status="incomplete", reasons=[
+            reason, "structural_coverage_not_recorded", "source_analysis_completion_not_established"])
+        workflow = read_review_workflow(candidate)
+        assert workflow.code is None
+        assert read_completion(candidate, required=True, workflow=workflow)[1] == "review_workflow_malformed"
+
+
+def test_review_workflow_rejects_unknown_fields_enums_paths_and_surrogates_without_crashing():
+    mutations = [
+        lambda s: s["reviewWorkflow"].update(unexpected=True),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(classification="reviewed"),
+        lambda s: s["reviewWorkflow"]["scope"].update(inventoryDigestPreimage="review-workflow-inventory/v2"),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(path="./src/neutral.ts"),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(path="src//neutral.ts"),
+        lambda s: _workflow_inventory_entry(s, "src/neutral.ts").update(reason="bad\ud800reason"),
+    ]
+    for mutate in mutations:
+        summary = _review_workflow_summary()
+        mutate(summary)
+        assert read_review_workflow(summary).code == "review_workflow_malformed"
 
 
 def test_completed_workflow_does_not_suppress_real_legacy_gaps_or_bad_counts():
@@ -2546,7 +2695,7 @@ def test_completed_workflow_does_not_suppress_real_legacy_gaps_or_bad_counts():
     mutations.append(("failed call", failed_call, "completion_model_calls"))
 
     def bad_count(summary):
-        summary["completion"]["modelCalls"]["attempted"] = 2
+        summary["completion"]["modelCalls"]["attempted"] += 1
 
     mutations.append(("bad count", bad_count, "completion_malformed"))
 
