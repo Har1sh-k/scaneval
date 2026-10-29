@@ -13,9 +13,14 @@ from . import aggregate, cases, review
 from .contracts import ContractError, canonical_sha256, load_document, validate_document
 
 BANDS = ("none", "low", "medium", "high", "critical")
-VERSION = "severity-calibration-1"
+LEGACY_VERSION = "severity-calibration-1"
+VERSION = "severity-calibration-2"
 SELECTION = "lowest native rank then claim_id; unranked: claim_id; directly accepted claims only"
-REFERENCE_SELECTION = "frozen pack-selected reference; identical rating aliases: lowest case_id; preserve all sources and notes"
+_REFERENCE_SELECTIONS = {
+    LEGACY_VERSION: "frozen pack-selected reference; identical rating aliases: lowest case_id; preserve all sources and notes",
+    VERSION: "frozen pack-selected reference; equivalent rating aliases: lowest case_id; preserve all sources and notes",
+}
+REFERENCE_SELECTION = _REFERENCE_SELECTIONS[VERSION]
 _V3 = {"AV": "NALP", "AC": "LH", "PR": "NLH", "UI": "NR", "S": "UC", "C": "NLH", "I": "NLH", "A": "NLH"}
 _V4 = {"AV": "NALP", "AC": "LH", "AT": "NP", "PR": "NLH", "UI": "NPA", "VC": "NLH", "VI": "NLH", "VA": "NLH", "SC": "NLH", "SI": "NLH", "SA": "NLH"}
 
@@ -55,7 +60,7 @@ def band(score: float) -> str:
     return "none" if score == 0 else "low" if score < 4 else "medium" if score < 7 else "high" if score < 9 else "critical"
 
 
-def compare_severity(claim: dict, references: list[dict]) -> dict:
+def compare_severity(claim: dict, references: list[dict], *, calibrator_version: str = VERSION) -> dict:
     """Compare one selected claim with the references of its canonical target."""
     native = claim.get("native_severity")
     numeric = deepcopy(claim.get("claimed_cvss"))
@@ -69,17 +74,37 @@ def compare_severity(claim: dict, references: list[dict]) -> dict:
         result["reason"] = result["numeric_reason"] = reason
         return result
 
+    if calibrator_version not in _REFERENCE_SELECTIONS:
+        raise ContractError(f"unsupported severity calibrator version {calibrator_version!r}")
     if not references or any(entry["severity"] is None for entry in references):
         return unavailable("reference_unavailable")
-    ratings = {canonical_sha256({k: entry["severity"][k] for k in ("score", "cvss_version", "vector")}) for entry in references}
-    if len(ratings) != 1:
-        return unavailable("conflicting_references")
-    ref = deepcopy(sorted(references, key=lambda entry: entry["case_id"])[0]["severity"])
-    result["reference"] = ref
-    try:
-        validate_claimed_cvss({"score": ref["score"], "version": ref["cvss_version"], "vector": ref["vector"], "provenance": "imported"})
-    except ContractError:
-        return unavailable("invalid_reference_cvss")
+    if calibrator_version == LEGACY_VERSION:
+        ratings = {canonical_sha256({k: entry["severity"][k] for k in ("score", "cvss_version", "vector")}) for entry in references}
+        if len(ratings) != 1:
+            return unavailable("conflicting_references")
+        ref = deepcopy(sorted(references, key=lambda entry: entry["case_id"])[0]["severity"])
+        result["reference"] = ref
+        try:
+            validate_claimed_cvss({"score": ref["score"], "version": ref["cvss_version"],
+                                   "vector": ref["vector"], "provenance": "imported"})
+        except ContractError:
+            return unavailable("invalid_reference_cvss")
+    else:
+        ratings = []
+        for entry in references:
+            try:
+                rating = {k: entry["severity"][k] for k in ("score", "cvss_version", "vector")}
+                validate_claimed_cvss({"score": rating["score"], "version": rating["cvss_version"],
+                                       "vector": rating["vector"], "provenance": "imported"})
+                prefix, *tokens = rating["vector"].split("/")
+                ratings.append((Decimal(str(rating["score"])), rating["cvss_version"],
+                                "/".join((prefix, *sorted(tokens)))))
+            except (ContractError, KeyError, TypeError):
+                return unavailable("invalid_reference_cvss")
+        if len(set(ratings)) != 1:
+            return unavailable("conflicting_references")
+        ref = deepcopy(sorted(references, key=lambda entry: entry["case_id"])[0]["severity"])
+        result["reference"] = ref
     result["reference_band"] = band(ref["score"])
     label = native.strip().lower() if isinstance(native, str) else None
     label_band = label if label in BANDS else None
@@ -154,7 +179,7 @@ def _frozen_packs(corpus, pack):
     return frozen
 
 
-def _records(corpus, pack, frozen_packs):
+def _records(corpus, pack, frozen_packs, calibrator_version):
     by_case = {case["case_id"]: case for case in pack["cases"]}
     references = defaultdict(list)
     for case in pack["cases"]:
@@ -225,7 +250,7 @@ def _records(corpus, pack, frozen_packs):
             else:
                 selected = min((claims[c] for c in accepted), key=lambda claim: (claim.get("rank", 0), claim["claim_id"]))
                 row["selected_claim"] = deepcopy(selected)
-                row["comparison"] = compare_severity(selected, row["references"])
+                row["comparison"] = compare_severity(selected, row["references"], calibrator_version=calibrator_version)
                 row["status"] = row["comparison"]["status"]
                 row["reason"] = row["comparison"]["reason"]
             rows.append(row)
@@ -289,8 +314,10 @@ def _metrics(rows, attributes, weighting, policy, *, whole_view, parent_attribut
     return answer
 
 
-def calibrate(run_dirs, pack: dict, *, policy: dict | None = None) -> dict:
-    """Recompute calibration from exact saved evidence. No mutation, network, or inference."""
+def _calibrate(run_dirs, pack: dict, *, policy: dict | None, calibrator_version: str) -> dict:
+    """Recompute one declared calibration revision from exact saved evidence."""
+    if calibrator_version not in _REFERENCE_SELECTIONS:
+        raise ContractError(f"unsupported severity calibrator version {calibrator_version!r}")
     validate_document("case-pack", pack)
     corpus = aggregate._load_corpus(run_dirs)
     digest = cases.pack_sha256(pack)
@@ -298,7 +325,7 @@ def calibrate(run_dirs, pack: dict, *, policy: dict | None = None) -> dict:
         raise ContractError("severity pack must match the exact pack frozen by every run")
     policy = aggregate.resolve_policy(policy)
     frozen_packs = _frozen_packs(corpus, pack)
-    rows, unplanned = _records(corpus, pack, frozen_packs)
+    rows, unplanned = _records(corpus, pack, frozen_packs, calibrator_version)
     fields = ("system_id", "mode", "profile", "condition", "condition_status", "evidence_scope")
     strata = defaultdict(list)
     unplanned_strata = defaultdict(list)
@@ -322,9 +349,9 @@ def calibrate(run_dirs, pack: dict, *, policy: dict | None = None) -> dict:
                       "unplanned_assignment_count": len(unplanned_strata[key]),
                       "weightings": [_metrics(group, attrs, w, policy, whole_view=True, parent_attributes=parent_attrs) for w in policy["views"]],
                       "by_cvss_version": {version: [_metrics(subset, {r["canonical_id"]: attrs[r["canonical_id"]] for r in subset}, w, policy, whole_view=False, parent_attributes=parent_attrs) for w in policy["views"]] for version, subset in version_rows.items()}})
-    report = {"schema_version": "2.1", "calibrator_version": VERSION, "pack_sha256": digest,
+    report = {"schema_version": "2.1", "calibrator_version": calibrator_version, "pack_sha256": digest,
               "policy": policy, "policy_sha256": canonical_sha256(policy), "band_order": list(BANDS),
-              "claim_selection": SELECTION, "reference_selection": REFERENCE_SELECTION,
+              "claim_selection": SELECTION, "reference_selection": _REFERENCE_SELECTIONS[calibrator_version],
               "label_mapping": {label: label for label in BANDS},
               "cross_version_policy": "exclude numeric and ordinal comparisons",
               "runs": [{"run_id": run.run_id, "manifest_sha256": canonical_sha256(run.manifest), "schedule_sha256": canonical_sha256(run.schedule), "config_sha256": canonical_sha256(run.config), "frozen_pack_sha256": frozen_packs[run.run_id]} for run in corpus.runs],
@@ -336,9 +363,15 @@ def calibrate(run_dirs, pack: dict, *, policy: dict | None = None) -> dict:
     return validate_document("severity-report", report)
 
 
+def calibrate(run_dirs, pack: dict, *, policy: dict | None = None) -> dict:
+    """Generate a report under the current calibration semantics."""
+    return _calibrate(run_dirs, pack, policy=policy, calibrator_version=VERSION)
+
+
 def verify(report: dict, run_dirs, pack: dict) -> None:
     validate_document("severity-report", report)
-    if canonical_sha256(report) != canonical_sha256(calibrate(run_dirs, pack, policy=report["policy"])):
+    replay = _calibrate(run_dirs, pack, policy=report["policy"], calibrator_version=report["calibrator_version"])
+    if canonical_sha256(report) != canonical_sha256(replay):
         raise ContractError("severity report is stale or changed: replay does not match current evidence")
 
 
@@ -353,7 +386,8 @@ def validate_report(report: dict) -> None:
             or report["assignment_counts"]["unplanned"] != len(unplanned_ids)
             or report["assignment_counts"]["scheduled"] < len(unplanned_ids)):
         raise ContractError("severity unplanned assignment counts do not match records")
-    if (report["claim_selection"] != SELECTION or report["reference_selection"] != REFERENCE_SELECTION
+    calibrator_version = report["calibrator_version"]
+    if (report["claim_selection"] != SELECTION or report["reference_selection"] != _REFERENCE_SELECTIONS[calibrator_version]
             or report["label_mapping"] != {label: label for label in BANDS}
             or report["cross_version_policy"] != "exclude numeric and ordinal comparisons"):
         raise ContractError("severity policy does not match the declared calibrator version")
@@ -372,7 +406,7 @@ def validate_report(report: dict) -> None:
             claim = row["selected_claim"]
             if not row["matched"] or claim is None or claim["claim_id"] not in row["accepted_claim_ids"]:
                 raise ContractError("severity comparison needs a selected accepted claim")
-            computed = compare_severity(claim, row["references"])
+            computed = compare_severity(claim, row["references"], calibrator_version=calibrator_version)
             if row["comparison"] != computed or row["status"] != computed["status"] or row["reason"] != computed["reason"]:
                 raise ContractError("severity comparison does not match its evidence")
 

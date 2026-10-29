@@ -14,13 +14,14 @@ from test_v2_cases import SNAPSHOT
 from test_v2_runner import pilot, upstream, run as run_pilot
 
 VECTOR = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"
+VECTOR4 = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N"
 REFERENCE = {"level": "critical", "score": 9.1, "cvss_version": "3.1", "vector": VECTOR,
              "source": "https://example.invalid/advisory", "source_kind": "cna_cvss",
              "retrieved": "2026-10-27", "note": "CNA selected; vendor rates this High."}
 
 
-def refs(reference=REFERENCE):
-    return [{"case_id": "example", "severity": deepcopy(reference), "case_sha256": canonical_sha256(reference)}]
+def refs(reference=REFERENCE, case_id="example"):
+    return [{"case_id": case_id, "severity": deepcopy(reference), "case_sha256": canonical_sha256(reference)}]
 
 
 @pytest.mark.parametrize("label,error,outcome", [("critical", 0, "exact"), (" HIGH ", -1, "underestimated"), ("low", -3, "underestimated")])
@@ -70,6 +71,54 @@ def test_missing_or_conflicting_alias_references_are_unavailable():
     assert severity.compare_severity(claim, refs() + refs({**REFERENCE, "score": 8.0, "level": "high"}))["reason"] == "conflicting_references"
 
 
+def test_malformed_reference_cvss_is_unavailable_instead_of_crashing():
+    malformed = deepcopy(REFERENCE)
+    malformed.pop("score")
+    result = severity.compare_severity({"native_severity": "critical"}, refs(malformed))
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "invalid_reference_cvss"
+
+
+@pytest.mark.parametrize(("reference", "reordered_vector"), [
+    (REFERENCE, "CVSS:3.1/A:N/I:H/C:H/S:U/UI:N/PR:N/AC:L/AV:N"),
+    ({**REFERENCE, "cvss_version": "4.0", "vector": VECTOR4},
+     "CVSS:4.0/SA:N/SI:N/SC:N/VA:N/VI:H/VC:H/UI:N/PR:N/AT:N/AC:L/AV:N"),
+])
+def test_equivalent_alias_vectors_preserve_lowest_case_original_evidence(reference, reordered_vector):
+    reordered = {**reference, "vector": reordered_vector}
+    result = severity.compare_severity({"native_severity": "critical"},
+                                       refs(reordered, "case-a") + refs(reference, "case-b"))
+    assert result["status"] == "assessed"
+    assert result["reason"] is None
+    assert result["reference"] == reordered
+
+
+def test_equivalent_numeric_notation_is_new_semantics_only():
+    integer = {**REFERENCE, "score": 9}
+    decimal = {**REFERENCE, "score": 9.0}
+    references = refs(integer, "case-a") + refs(decimal, "case-b")
+    assert severity.compare_severity({"native_severity": "critical"}, references)["status"] == "assessed"
+    legacy = severity.compare_severity({"native_severity": "critical"}, references,
+                                       calibrator_version=severity.LEGACY_VERSION)
+    assert legacy["reason"] == "conflicting_references"
+
+
+def test_genuine_metric_difference_still_conflicts():
+    changed = {**REFERENCE, "vector": VECTOR.replace("A:N", "A:L")}
+    result = severity.compare_severity({"native_severity": "critical"},
+                                       refs(REFERENCE, "case-a") + refs(changed, "case-b"))
+    assert result["reason"] == "conflicting_references"
+
+
+def test_invalid_nonselected_reference_is_rejected_in_new_semantics():
+    invalid = {**REFERENCE, "score": 8.0, "level": "high", "vector": VECTOR + "/E:H"}
+    references = refs(REFERENCE, "case-a") + refs(invalid, "case-z")
+    assert severity.compare_severity({"native_severity": "critical"}, references)["reason"] == "invalid_reference_cvss"
+    legacy = severity.compare_severity({"native_severity": "critical"}, references,
+                                       calibrator_version=severity.LEGACY_VERSION)
+    assert legacy["reason"] == "conflicting_references"
+
+
 @pytest.mark.parametrize("score,expected", [(0, "none"), (.1, "low"), (3.9, "low"), (4, "medium"), (6.9, "medium"), (7, "high"), (8.9, "high"), (9, "critical"), (10, "critical")])
 def test_band_boundaries(score, expected):
     assert severity.band(score) == expected
@@ -81,13 +130,13 @@ def test_malformed_numeric_evidence_is_rejected(patch):
         severity.validate_claimed_cvss({"score": 9.1, "version": "3.1", "provenance": "native", **patch})
 
 
-def fixture_run(tmp_path, *, states=None, labels=None, numeric=None, count=1, repetitions=1, aliases=False):
+def fixture_run(tmp_path, *, states=None, labels=None, numeric=None, references=None, count=1, repetitions=1, aliases=False):
     pack = cases.new_pack("org.example", "severity-fixture", "Fictional calibration fixtures")
     cases.add_snapshot(pack, SNAPSHOT)
     targets = []
     for index in range(count):
         case = cases.draft_case(f"example{index}", snapshot_id=SNAPSHOT["snapshot_id"], kind="command_injection", description="Fictional source bug", represents="A fictional severity test", workload="conventional_application", component_role="application", aliases=[], evidence=[])
-        case["severity"] = deepcopy(REFERENCE)
+        case["severity"] = deepcopy((references or {}).get(index, REFERENCE))
         cases.add_case(pack, case)
         if aliases:
             cases.set_canonical_id(pack, case["case_id"], "canonical-example")
@@ -120,6 +169,25 @@ def fixture_run(tmp_path, *, states=None, labels=None, numeric=None, count=1, re
         for filename, data in (("result.json", result), ("evaluator/plan.json", plan), ("evaluator/decisions.json", decisions), ("evaluator/review-record.json", refreshed)):
             (bundle / filename).write_text(json.dumps(data))
     return run, pack
+
+
+def test_generated_legacy_report_replays_historical_semantics_and_new_reports_use_revision_2(tmp_path):
+    reordered = {**REFERENCE, "vector": "CVSS:3.1/A:N/I:H/C:H/S:U/UI:N/PR:N/AC:L/AV:N"}
+    run, pack = fixture_run(tmp_path, count=2, aliases=True, references={0: reordered})
+    legacy = severity._calibrate([run], pack, policy=None, calibrator_version=severity.LEGACY_VERSION)
+    assert legacy == severity._calibrate([run], pack, policy=None, calibrator_version=severity.LEGACY_VERSION)
+    assert legacy["calibrator_version"] == "severity-calibration-1"
+    assert legacy["records"][0]["reason"] == "conflicting_references"
+    pack_path, report_path = tmp_path / "pack.json", tmp_path / "legacy-severity.json"
+    pack_path.write_text(json.dumps(pack))
+    report_path.write_text(json.dumps(legacy))
+    assert main(["severity", str(run), "--pack", str(pack_path), "--verify", str(report_path)]) == 0
+
+    current = severity.calibrate([run], pack)
+    assert current["calibrator_version"] == "severity-calibration-2"
+    assert current["records"][0]["status"] == "assessed"
+    assert current["records"][0]["comparison"]["reference"]["vector"] == reordered["vector"]
+    severity.verify(current, [run], pack)
 
 
 def test_complete_saved_run_cli_and_replay(tmp_path):
