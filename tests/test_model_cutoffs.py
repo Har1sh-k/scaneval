@@ -333,8 +333,31 @@ def test_committed_research_candidates_remain_pending(registry):
     root = Path(__file__).resolve().parents[1]
     research = json.loads((root / "docs/research/recent-cve-candidates.json").read_text())
     chronology = json.loads((root / "docs/research/recent-cve-chronology.json").read_text())
+    assert len(research["candidates"]) == 10
     assert {c["cve_id"] for c in research["candidates"]} == {c["cve_id"] for c in chronology["candidates"]}
     assert all(c["machine_reviewed"] is False and c["temporally_eligible"] is False for c in research["candidates"])
+    assert all(c["chronology"]["status"] == "pending" and c["chronology"]["public_artifacts"] == []
+               for c in chronology["candidates"])
+
+    by_id = {c["cve_id"]: c for c in research["candidates"]}
+    docling = by_id["CVE-2026-105742"]
+    assert docling["candidate_vulnerable_revision"]["introducing_commit"] is None
+    assert docling["research_notes"]["introduction_candidate"]["merge_commit_sha"] == \
+        "0a15088e63c08842f5cc3b85b55f06231e5bcf60"
+    assert docling["research_notes"]["exposure_provenance"]["classification"] == \
+        "public_upstream_attribution"
+
+    lz4 = by_id["CVE-2026-106449"]
+    ancestry = {item["relationship"]: item for item in lz4["research_notes"]["release_ancestry"]}
+    assert ancestry["v1.11.3_to_candidate_vulnerable_revision"]["ahead_by"] == 26
+    assert ancestry["v1.11.3_to_candidate_vulnerable_revision"]["behind_by"] == 0
+    assert ancestry["candidate_fix_to_v1.11.4"]["ahead_by"] == 2
+    assert ancestry["candidate_fix_to_v1.11.4"]["behind_by"] == 0
+    assert lz4["research_notes"]["exposure_provenance"]["classification"] == \
+        "public_upstream_attribution"
+    assert all(by_id[cve]["dates"]["earliest_public_evidence_lower_bound"] is None
+               for cve in ("CVE-2026-105742", "CVE-2026-106449"))
+
     report = assess_candidates(registry, chronology, ["claude-opus-5-5"])
     assert report["eligible_total"] == 0
     assert all(c["status"] == "unresolved" and c["earliest_public_evidence_lower_bound"] is None for c in report["candidates"])
