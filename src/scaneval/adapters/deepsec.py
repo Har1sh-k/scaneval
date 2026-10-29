@@ -1185,8 +1185,9 @@ class DeepsecImport(NamedTuple):
 
     ``lost`` is the number of exported findings that did not become claims. ``unjoined`` is
     different: those export entries did become usable claims, but the export carries no native
-    id and its path/title could not be joined back to a file record. The caller degrades either
-    case, while keeping the usable unjoined claims and never counting them as dropped findings.
+    id and its retained fields could not establish one exact record identity. The caller
+    degrades either case, while keeping the usable unjoined claims and never counting them as
+    dropped findings.
     """
 
     claims: list[dict]
@@ -1196,16 +1197,106 @@ class DeepsecImport(NamedTuple):
     findings: list[dict]
 
 
+class FindingIdentity(NamedTuple):
+    """Fields copied unchanged from one record finding into the JSON export."""
+
+    project: str
+    path: str
+    title: str
+    severity: str
+    slug: str
+    lines: tuple[Any, ...]
+    confidence: str
+    revalidation: tuple[Any, ...] | None
+
+
+FindingIdIndex = dict[FindingIdentity, Counter[str]]
+
+
 class NativeExportPopulation(NamedTuple):
-    """Native finding ids the default JSON export is expected to emit, and why it omits others."""
+    """Eligible native ids, their exact export identities, and intentional exclusions."""
 
     ids: Counter[str]
+    identities: FindingIdIndex
     no_latest_analysis: int
     resolved: Counter[str]
 
     @property
     def excluded(self) -> int:
         return self.no_latest_analysis + self.resolved.total()
+
+
+def _identity_value(value: Any) -> Any:
+    """A hashable, type-preserving form of a JSON value used only for exact comparison."""
+    if isinstance(value, dict):
+        return ("object", tuple(sorted((str(key), _identity_value(item))
+                                       for key, item in value.items())))
+    if isinstance(value, list):
+        return ("array", tuple(_identity_value(item) for item in value))
+    if value is None:
+        return ("null",)
+    if isinstance(value, bool):
+        return ("boolean", value)
+    if isinstance(value, str):
+        return ("string", value)
+    if isinstance(value, (int, float)):
+        return ("number", value)
+    return (type(value).__name__, repr(value))
+
+
+def _retained_revalidation(value: Any) -> tuple[Any, ...] | None:
+    """The two revalidation members ``exportCommand`` retains, including absence vs null."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return ("invalid", _identity_value(value))
+    return tuple((key, key in value, _identity_value(value.get(key)))
+                 for key in ("verdict", "reasoning"))
+
+
+def _record_finding_identity(record: dict, finding: dict) -> FindingIdentity | None:
+    """Exact identity available on both a native record finding and its JSON export entry."""
+    project = record.get("projectId")
+    raw_path = record.get("filePath")
+    title = finding.get("title")
+    severity = finding.get("severity")
+    slug = finding.get("vulnSlug")
+    lines = finding.get("lineNumbers")
+    confidence = finding.get("confidence")
+    if not all(isinstance(value, str) for value in (project, raw_path, title, severity,
+                                                    slug, confidence)):
+        return None
+    path, unusable = claim_path(raw_path)
+    if unusable or not isinstance(lines, list):
+        return None
+    return FindingIdentity(project, path, title, severity, slug,
+                           tuple(_identity_value(line) for line in lines), confidence,
+                           _retained_revalidation(finding.get("revalidation")))
+
+
+def _export_finding_identity(entry: dict, metadata: dict, path: str) -> FindingIdentity | None:
+    """Reconstruct the raw record identity without applying display-title normalization."""
+    project = metadata.get("projectId")
+    rendered_title = entry.get("title")
+    rendered_severity = entry.get("severity")
+    severity = metadata.get("severity")
+    slug = metadata.get("vulnSlug")
+    lines = metadata.get("lineNumbers")
+    confidence = metadata.get("confidence")
+    if not all(isinstance(value, str) for value in (project, rendered_title, rendered_severity,
+                                                    severity, slug, confidence)):
+        return None
+    if rendered_severity != severity:
+        return None
+    prefix = f"[{severity}] "
+    if not rendered_title.startswith(prefix) or not isinstance(lines, list):
+        return None
+    # Native export uses exactly ``[severity] ${finding.title}``; retaining the remainder
+    # verbatim is essential because finding ids include title whitespace.
+    title = rendered_title[len(prefix):]
+    return FindingIdentity(project, path, title, severity, slug,
+                           tuple(_identity_value(line) for line in lines), confidence,
+                           _retained_revalidation(metadata.get("revalidation")))
 
 
 def native_export_population(files: tuple[tuple[str, dict], ...]) -> NativeExportPopulation:
@@ -1221,12 +1312,16 @@ def native_export_population(files: tuple[tuple[str, dict], ...]) -> NativeExpor
     A malformed history shape is not silently promoted to an expected exclusion: its findings
     remain in the comparison, so an export mismatch still fails closed.
 
-    Eligible ids remain a multiset: DeepSec derives an id from project, path and title, so
-    separate findings can legitimately share one. Only non-empty string ids are counted,
-    because malformed record entries cannot be correlated without inventing identity; the
-    existing record/import failure paths remain responsible for evidence they cannot read.
+    ``ensureFindingIds`` gives colliding title-derived ids distinct ``title + NUL + n`` hashes.
+    The export omits those ids and later sorts by severity, project and path, so path/title FIFO
+    is not a valid join. Identity therefore uses the fields export copies unchanged: project,
+    path, raw title, severity, slug, lineNumbers, confidence and revalidation. Resolved findings
+    are excluded before this index is built, preventing a hidden resolved id from being attached
+    to an open claim. If multiple distinct ids still have the same retained identity, the export
+    cannot distinguish them and the importer leaves their claims unjoined rather than guessing.
     """
     identifiers: Counter[str] = Counter()
+    identities: FindingIdIndex = {}
     no_latest_analysis = 0
     resolved: Counter[str] = Counter()
     for _name, record in files:
@@ -1246,46 +1341,22 @@ def native_export_population(files: tuple[tuple[str, dict], ...]) -> NativeExpor
                 resolved[verdict] += 1
                 continue
             identifier = finding.get("findingId")
-            if isinstance(identifier, str) and identifier:
-                identifiers[identifier] += 1
-    return NativeExportPopulation(identifiers, no_latest_analysis, resolved)
-
-
-def finding_ids(files: tuple[tuple[str, dict], ...]) -> dict[tuple[str, str], str]:
-    """``{(file path, title): findingId}`` from the file records.
-
-    ``export --format json`` in DeepSec 2.3.10 renders a finding for an issue tracker and does
-    not carry the ``findingId`` the file record holds, so the id a claim reports as its
-    ``native_id`` is recovered here. The key is the pair DeepSec itself derives the id from
-    (``computeFindingId(projectId, filePath, title)``), which is why it joins exactly.
-    """
-    index: dict[tuple[str, str], str] = {}
-    for name, record in files:
-        # Both spellings: the export renders ``metadata.filePath`` from the record's own text,
-        # and everything else this adapter publishes is keyed on where DeepSec put the record.
-        # Indexing both keeps the join exact without publishing the scanner's text anywhere.
-        declared, unusable = claim_path(str(record.get("filePath") or ""))
-        stored, external = record_path(name, record)
-        paths = [path for path in ((None if unusable else declared),
-                                   (None if external else stored)) if path]
-        if not paths:
-            continue
-        findings = record.get("findings")
-        if not isinstance(findings, list):
-            continue
-        for finding in findings:
-            if not isinstance(finding, dict):
+            if not isinstance(identifier, str) or not identifier:
                 continue
-            identifier = finding.get("findingId")
-            title = finding.get("title")
-            if isinstance(identifier, str) and identifier and isinstance(title, str):
-                for path in paths:
-                    index.setdefault((path, title), identifier)
-    return index
+            identifiers[identifier] += 1
+            identity = _record_finding_identity(record, finding)
+            if identity is not None:
+                identities.setdefault(identity, Counter())[identifier] += 1
+    return NativeExportPopulation(identifiers, identities, no_latest_analysis, resolved)
+
+
+def finding_ids(files: tuple[tuple[str, dict], ...]) -> FindingIdIndex:
+    """Exact default-export identity to eligible native-id multisets from file records."""
+    return native_export_population(files).identities
 
 
 def import_export(payload: Any, *, artifact_id: str = ARTIFACT_EXPORT,
-                  ids: dict[tuple[str, str], str] | None = None) -> DeepsecImport:
+                  ids: FindingIdIndex | None = None) -> DeepsecImport:
     """Translate an ``export --format json`` payload into atomic claims.
 
     The payload is a JSON array of exported findings, each carrying the rendered ``title`` and
@@ -1302,7 +1373,7 @@ def import_export(payload: Any, *, artifact_id: str = ARTIFACT_EXPORT,
     findings: list[dict] = []
     lost = 0
     unjoined = 0
-    ids = ids or {}
+    available_ids = {identity: Counter(identifiers) for identity, identifiers in (ids or {}).items()}
     if not isinstance(payload, list):
         raise AdapterError(f"deepsec export is a {_shape(payload)}, not an array of findings")
     used: set[str] = set()
@@ -1325,6 +1396,8 @@ def import_export(payload: Any, *, artifact_id: str = ARTIFACT_EXPORT,
                          "raw export keeps the entry verbatim")
             continue
         raw_title = entry.get("title")
+        # Display normalization is deliberately separate from native identity. In particular,
+        # trailing whitespace is stripped from the allegation but retained by the exact join.
         title = TITLE_SEVERITY.sub("", raw_title).strip() if isinstance(raw_title, str) else ""
         slug = str(metadata.get("vulnSlug") or "")
         allegation = title or f"deepsec:{slug or 'finding'} at {path}"
@@ -1336,7 +1409,17 @@ def import_export(payload: Any, *, artifact_id: str = ARTIFACT_EXPORT,
         else:
             notes.append(f"export entry {index} ({path}) cited no line number; the claim is file-level "
                          "and no range was inferred")
-        identifier = ids.get((path, title))
+        identity = _export_finding_identity(entry, metadata, path)
+        identifiers = available_ids.get(identity) if identity is not None else None
+        identifier = None
+        if identifiers:
+            remaining = [candidate for candidate, count in identifiers.items() if count > 0]
+            if len(remaining) == 1:
+                # Reused identical ids remain safe: every indistinguishable occurrence names
+                # the same native identity. Distinct ids for one retained identity are not safe
+                # to hand out by occurrence, because the export carries no ordering key for them.
+                identifier = remaining[0]
+                identifiers[identifier] -= 1
         claim_id = identifier or f"deepsec-{index}"
         while claim_id in used:
             # Two findings DeepSec could not tell apart would otherwise collide into one claim
@@ -1355,8 +1438,8 @@ def import_export(payload: Any, *, artifact_id: str = ARTIFACT_EXPORT,
             claim["native_id"] = identifier
         else:
             unjoined += 1
-            notes.append(f"export entry {index} ({path}) could not be joined to a file record, so no "
-                         "native finding id is recorded for it")
+            notes.append(f"export entry {index} ({path}) could not establish one exact native record "
+                         "identity, so no native finding id is recorded for it")
         severity = metadata.get("severity") or entry.get("severity")
         if isinstance(severity, str) and severity:
             claim["native_severity"] = severity
@@ -2358,35 +2441,46 @@ class DeepsecAdapter(Adapter):
             except (UnicodeDecodeError, ValueError) as exc:
                 export_failure = f"the export is not readable JSON ({exc})"
         imported = DeepsecImport([], [], 0, 0, [])
-        missing_export_entries = 0
+        missing_export_lower = 0
+        missing_export_upper = 0
         identity_gaps = 0
         findings_lost = 0
         finding_import_notes: list[str] = []
         if export_failure is None:
+            native_population = native_export_population(records.files)
             try:
-                imported = import_export(exported, ids=finding_ids(records.files))
+                imported = import_export(exported, ids=native_population.identities)
             except AdapterError as exc:
                 export_failure = str(exc)
             else:
-                native_population = native_export_population(records.files)
                 imported_finding_ids = Counter(
                     claim["native_id"] for claim in imported.claims
                     if isinstance(claim.get("native_id"), str) and claim["native_id"])
                 unmatched_records = native_population.ids - imported_finding_ids
-                # An unimportable export entry or an imported claim with no joinable identity may
-                # represent one unmatched record occurrence. Account for those unknown identities
-                # before calling anything absent from the export; otherwise one bad export entry is
-                # counted once as an import failure and again as an omission.
+                unmatched_count = unmatched_records.total()
                 unidentified_exports = imported.lost + imported.unjoined
-                missing_export_entries = max(unmatched_records.total() - unidentified_exports, 0)
+                # Each unidentified export entry may correspond to at most one unmatched record
+                # occurrence, but it may instead be unrelated. Without correlation that yields a
+                # bound, not an exact subtraction: saying zero here hid a real dropped finding
+                # whenever an unrelated unjoinable entry happened to offset it.
+                missing_export_lower = max(unmatched_count - unidentified_exports, 0)
+                missing_export_upper = unmatched_count
                 identity_gaps = imported.unjoined
-                findings_lost = imported.lost + missing_export_entries
-                if missing_export_entries:
-                    finding_import_notes.append(
-                        f"After accounting for {unidentified_exports} export entry or claim(s) whose native "
-                        f"identity could not be established, DeepSec's file records still hold "
-                        f"{missing_export_entries} additional native finding occurrence(s) with no JSON export "
-                        "entry; those findings could not be imported, so the run is incomplete.")
+                findings_lost = imported.lost + missing_export_lower
+                if unmatched_count:
+                    if missing_export_lower == missing_export_upper:
+                        finding_import_notes.append(
+                            f"Exact native identity reconciliation establishes that "
+                            f"{missing_export_lower} eligible record finding occurrence(s) had no JSON export "
+                            "entry; those findings could not be imported, so the run is incomplete.")
+                    else:
+                        finding_import_notes.append(
+                            f"{unmatched_count} eligible record finding occurrence(s) remain unmatched, and "
+                            f"{unidentified_exports} export entry or imported claim(s) have no established "
+                            "native identity. The unidentified entries may account for some or all of those "
+                            f"records, so the number with no JSON export entry is bounded between "
+                            f"{missing_export_lower} and {missing_export_upper}; no exact omission count is "
+                            "claimed without correlation.")
                 if identity_gaps:
                     finding_import_notes.append(
                         f"{identity_gaps} JSON export claim(s) were imported but could not be joined to native "
@@ -2677,13 +2771,21 @@ class DeepsecAdapter(Adapter):
                                  **base)
         if findings_lost or identity_gaps or records.failures:
             detail = "; ".join(list(imported.notes) + finding_import_notes + list(records.failures))
+            if missing_export_lower == missing_export_upper:
+                omission = (f"{missing_export_lower} record finding(s) are established to have no "
+                            "export entry")
+            else:
+                omission = (f"record findings with no export entry are bounded between "
+                            f"{missing_export_lower} and {missing_export_upper} because unidentified "
+                            "entries cannot be correlated")
             return NativeOutcome(status="partial", exit_code=exit_code, claims=imported.claims,
                                  error={"code": "import_loss",
-                                        "message": (f"{imported.lost} exported finding(s) could not be imported, "
-                                                    f"{missing_export_entries} record finding(s) had no export "
-                                                    f"entry, {identity_gaps} imported claim(s) could not be joined "
-                                                    f"to native identity, and {len(records.failures)} DeepSec "
-                                                    f"record(s) could not be imported: {detail}")[:2000]},
+                                        "message": (f"{imported.lost} exported finding(s) could not be imported; "
+                                                    f"{omission}; {identity_gaps} imported claim(s) could not be "
+                                                    f"joined to native identity; and {len(records.failures)} "
+                                                    f"DeepSec record(s) could not be imported. Counts from "
+                                                    f"unidentified exports and unmatched records are bounds, not "
+                                                    f"additive losses: {detail}")[:2000]},
                                  omitted_paths=unexamined, examined_nothing=nothing_examined, **base)
 
         def stopped(code: str, message: str) -> NativeOutcome:

@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -453,6 +454,10 @@ def do_export(argv):
                              "discoveredAt": "2026-09-25T12:01:00.000Z",
                              "runId": "20260925120100-process",
                              "revalidation": finding.get("revalidation")}})
+    severity_order = {"CRITICAL": 0, "HIGH": 1, "HIGH_BUG": 2, "MEDIUM": 3, "BUG": 4, "LOW": 5}
+    findings.sort(key=lambda finding: (severity_order[finding["metadata"]["severity"]],
+                                       finding["metadata"]["projectId"],
+                                       finding["metadata"]["filePath"]))
     Path(out).write_text(json.dumps(findings, indent=2) + "\\n", encoding="utf-8")
     print("Exported %d finding(s)" % len(findings))
 
@@ -470,6 +475,16 @@ else:
     sys.stderr.write("fake deepsec: unknown command %r\\n" % argv)
     sys.exit(2)
 '''
+
+
+def native_finding_id(project: str, path: str, title: str, occurrence: int = 1) -> str:
+    """DeepSec 2.3.10 ``ensureFindingIds``: colliding titles use ``title + NUL + n``."""
+    normalized = path.replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    identity_title = title if occurrence == 1 else f"{title}\0{occurrence}"
+    digest = hashlib.sha256(f"{project}\0{normalized}\0{identity_title}".encode()).hexdigest()
+    return f"finding_{digest[:16]}"
 
 
 def fake_deepsec_root(tmp_path: Path, **control) -> Path:
@@ -1177,16 +1192,20 @@ def test_an_export_entry_whose_path_leaves_the_tree_is_import_loss_and_not_a_cla
 
 
 def test_a_finding_is_joined_to_the_native_id_the_file_records_hold_and_noted_when_it_is_not():
-    files = (("src/a.py.json", {"filePath": "./src/a.py", "findings": [
-        {"title": "Shell injection", "findingId": "finding_deadbeefdeadbeef"}]}),)
+    files = (("src/a.py.json", {
+        "projectId": "p", "filePath": "./src/a.py", "analysisHistory": [{"runId": "r"}],
+        "findings": [{"title": "Shell injection", "findingId": "finding_deadbeefdeadbeef",
+                      "severity": "HIGH", "vulnSlug": "command-injection", "lineNumbers": [3],
+                      "confidence": "high"}]}),)
     index = finding_ids(files)
-    assert index[("src/a.py", "Shell injection")] == "finding_deadbeefdeadbeef"
-    joined = import_export([{"title": "[HIGH] Shell injection", "description": "", "metadata": {
-        "filePath": "src/a.py", "lineNumbers": [3], "vulnSlug": "command-injection"}}], ids=index)
+    exported = {"title": "[HIGH] Shell injection", "description": "", "severity": "HIGH",
+                "metadata": {"projectId": "p", "filePath": "src/a.py", "lineNumbers": [3],
+                             "severity": "HIGH", "vulnSlug": "command-injection",
+                             "confidence": "high"}}
+    joined = import_export([exported], ids=index)
     assert joined.claims[0]["native_id"] == "finding_deadbeefdeadbeef"
     assert joined.claims[0]["claim_id"] == "finding_deadbeefdeadbeef"
-    stranger = import_export([{"title": "[HIGH] Other", "description": "", "metadata": {
-        "filePath": "src/a.py", "lineNumbers": [3], "vulnSlug": "x"}}], ids=index)
+    stranger = import_export([{**exported, "title": "[HIGH] Other"}], ids=index)
     assert "native_id" not in stranger.claims[0]
     assert stranger.lost == 0 and stranger.unjoined == 1, "the usable claim is not import loss"
     assert any("no native finding id" in note for note in stranger.notes)
@@ -2044,7 +2063,7 @@ def test_a_record_without_latest_analysis_is_truthfully_excluded_by_default_expo
     assert result["status"] == "success" and len(result["claims"]) == 1, execution["error"]
     note = next(note for note in execution["notes"] if "producer exclusions" in note)
     assert "1 because the file record had no latest analysisHistory entry" in note
-    assert not any("additional native finding occurrence" in note for note in execution["notes"])
+    assert not any("had no JSON export entry" in note for note in execution["notes"])
 
 
 def test_a_malformed_analysis_history_is_not_promoted_to_an_expected_exclusion(tmp_path, monkeypatch):
@@ -2073,13 +2092,171 @@ def test_a_malformed_analysis_history_is_not_promoted_to_an_expected_exclusion(t
                             network_policy="model_provider_only", clock=CLOCK)
     result, execution = documents(bundle)
     assert result["status"] == "partial" and result["error"]["code"] == "import_loss"
-    assert any("1 additional native finding occurrence" in note for note in execution["notes"])
+    assert any("1 eligible record finding occurrence(s) had no JSON export entry" in note
+               for note in execution["notes"])
     assert not any("no latest analysisHistory entry" in note for note in execution["notes"])
     assert not any("revalidation verdict 'fixed'" in note for note in execution["notes"])
 
 
-def test_duplicate_native_ids_conserve_multiplicity_when_the_export_is_complete(tmp_path, monkeypatch):
-    """Two eligible occurrences survive while a resolved occurrence of that id stays hidden."""
+def test_native_distinct_same_title_ids_join_by_retained_fields_after_real_export_sort(tmp_path, monkeypatch):
+    """Severity/project/path sorting cannot turn a same-title join into path/title FIFO."""
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+    expected: dict[str, str] = {}
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            first = record["findings"][0]
+            title = "The same native title"
+            first.update({"title": title, "severity": "LOW", "vulnSlug": "sql-injection",
+                          "lineNumbers": [19], "confidence": "high"})
+            first["findingId"] = native_finding_id(record["projectId"], record["filePath"], title)
+            second = dict(first)
+            second.update({"severity": "CRITICAL", "vulnSlug": "command-injection",
+                           "lineNumbers": [4], "confidence": "medium",
+                           "findingId": native_finding_id(record["projectId"], record["filePath"], title, 2)})
+            record["findings"].append(second)
+            expected.update(first=first["findingId"], second=second["findingId"])
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    assert result["status"] == "success", execution["error"]
+    by_id = {claim.get("native_id"): claim for claim in result["claims"]}
+    assert by_id[expected["first"]]["native_severity"] == "LOW"
+    assert by_id[expected["first"]]["native_rule_id"] == "deepsec:sql-injection"
+    assert by_id[expected["first"]]["primary_location"]["start_line"] == 19
+    assert by_id[expected["second"]]["native_severity"] == "CRITICAL"
+    assert by_id[expected["second"]]["native_rule_id"] == "deepsec:command-injection"
+    assert by_id[expected["second"]]["primary_location"]["start_line"] == 4
+    assert result["claims"][0]["native_id"] == expected["second"], \
+        "the fake export mirrors native severity/project/path sorting"
+
+
+def test_a_resolved_first_same_title_finding_never_lends_its_id_to_the_open_second(tmp_path, monkeypatch):
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+    expected: dict[str, str] = {}
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            first = record["findings"][0]
+            title = "Repeated resolution title"
+            first["title"] = title
+            first["findingId"] = native_finding_id(record["projectId"], record["filePath"], title)
+            first["revalidation"] = {"verdict": "duplicate", "reasoning": "old resolved occurrence"}
+            second = dict(first)
+            second.pop("revalidation")
+            second["lineNumbers"] = [99]
+            second["findingId"] = native_finding_id(record["projectId"], record["filePath"], title, 2)
+            record["findings"].append(second)
+            expected.update(resolved=first["findingId"], open=second["findingId"])
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    assert result["status"] == "success", execution["error"]
+    native_ids = {claim.get("native_id") for claim in result["claims"]}
+    assert expected["open"] in native_ids
+    assert expected["resolved"] not in native_ids
+    assert any("1 with revalidation verdict 'duplicate'" in note for note in execution["notes"])
+
+
+def test_trailing_whitespace_in_the_native_title_is_preserved_for_identity_only(tmp_path, monkeypatch):
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+    expected: dict[str, str] = {}
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            finding = record["findings"][0]
+            finding["title"] += "  "
+            finding["findingId"] = native_finding_id(record["projectId"], record["filePath"], finding["title"])
+            expected["id"] = finding["findingId"]
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    assert result["status"] == "success", execution["error"]
+    claim = next(claim for claim in result["claims"] if claim.get("native_id") == expected["id"])
+    assert not claim["allegation"].endswith(" "), "display cleanup stays separate from raw identity"
+
+
+def test_indistinguishable_export_occurrences_with_distinct_native_ids_stay_unresolved(tmp_path, monkeypatch):
+    """When every retained field is identical, occurrence order is not enough to guess an id."""
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+    forbidden: set[str] = set()
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "process":
+            record_path = sorted((Path(kwargs["cwd"]) / "data").rglob("files/**/*.json"))[0]
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            first = record["findings"][0]
+            first["findingId"] = native_finding_id(record["projectId"], record["filePath"], first["title"])
+            second = dict(first)
+            second["findingId"] = native_finding_id(record["projectId"], record["filePath"], first["title"], 2)
+            record["findings"].append(second)
+            forbidden.update((first["findingId"], second["findingId"]))
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    assert result["status"] == "partial" and result["error"]["code"] == "import_loss"
+    unresolved = [claim for claim in result["claims"] if claim["primary_location"]["path"] == "src/db.js"]
+    assert len(unresolved) == 2 and all("native_id" not in claim for claim in unresolved)
+    assert forbidden.isdisjoint(claim.get("native_id") for claim in unresolved)
+    assert any("bounded between 0 and 2" in note for note in execution["notes"])
+
+
+def test_reused_identical_native_ids_conserve_multiplicity_when_the_export_is_complete(tmp_path, monkeypatch):
+    """Even a malformed record that reuses one id preserves each eligible occurrence."""
     root = fake_deepsec_root(tmp_path)
     stub_collector(monkeypatch, tmp_path)
     adapter = get_adapter("deepsec")
@@ -2115,8 +2292,8 @@ def test_duplicate_native_ids_conserve_multiplicity_when_the_export_is_complete(
     assert any("1 with revalidation verdict 'duplicate'" in note for note in execution["notes"])
 
 
-def test_one_of_two_findings_with_the_same_native_id_missing_from_export_is_loss(tmp_path, monkeypatch):
-    """A set comparison hid this deficit because the surviving occurrence carried the same id."""
+def test_one_of_two_findings_with_a_reused_native_id_missing_from_export_is_loss(tmp_path, monkeypatch):
+    """Corrupt identical ids still need multiset rather than set conservation."""
     root = fake_deepsec_root(tmp_path)
     stub_collector(monkeypatch, tmp_path)
     adapter = get_adapter("deepsec")
@@ -2148,9 +2325,10 @@ def test_one_of_two_findings_with_the_same_native_id_missing_from_export_is_loss
     result, execution = documents(bundle)
     assert result["status"] == "partial" and result["error"]["code"] == "import_loss"
     assert len(result["claims"]) == 2
-    assert "0 exported finding(s) could not be imported, 1 record finding(s) had no export entry" \
+    assert "0 exported finding(s) could not be imported; 1 record finding(s) are established to have no export entry" \
         in result["error"]["message"]
-    assert any("1 additional native finding occurrence" in note for note in execution["notes"])
+    assert any("1 eligible record finding occurrence(s) had no JSON export entry" in note
+               for note in execution["notes"])
 
 
 def test_a_native_finding_missing_from_the_export_is_import_loss_not_silent_success(tmp_path, monkeypatch):
@@ -2190,13 +2368,14 @@ def test_a_native_finding_missing_from_the_export_is_import_loss_not_silent_succ
     assert len(result["claims"]) == 1, "the finding export did retain is still reported"
     assert result["bundles_resolved"] is False
     assert execution["capture"]["finding_submitted"] == "partial"
-    assert any("1 additional native finding occurrence" in note for note in execution["notes"])
+    assert any("1 eligible record finding occurrence(s) had no JSON export entry" in note
+               for note in execution["notes"])
     assert any("1 with revalidation verdict 'fixed'" in note for note in execution["notes"])
 
 
 @pytest.mark.parametrize("damage", ["metadata", "path"])
-def test_an_unimportable_export_entry_is_not_counted_again_as_export_omission(tmp_path, monkeypatch, damage):
-    """One exported finding failed import; the same record occurrence is not a second loss."""
+def test_an_unimportable_export_entry_reports_an_omission_bound_not_a_second_exact_loss(tmp_path, monkeypatch, damage):
+    """The damaged entry may be the unmatched record; correlation cannot prove zero omissions."""
     root = fake_deepsec_root(tmp_path)
     stub_collector(monkeypatch, tmp_path)
     adapter = get_adapter("deepsec")
@@ -2223,9 +2402,10 @@ def test_an_unimportable_export_entry_is_not_counted_again_as_export_omission(tm
                             network_policy="model_provider_only", clock=CLOCK)
     result, execution = documents(bundle)
     assert result["status"] == "partial" and len(result["claims"]) == 1
-    assert "1 exported finding(s) could not be imported, 0 record finding(s) had no export entry" \
-        in result["error"]["message"]
-    assert not any("additional native finding occurrence" in note for note in execution["notes"])
+    assert ("1 exported finding(s) could not be imported; record findings with no export entry "
+            "are bounded between 0 and 1") in result["error"]["message"]
+    assert any("bounded between 0 and 1" in note and "no exact omission count" in note
+               for note in execution["notes"])
 
 
 def test_an_unjoinable_export_identity_preserves_the_claim_and_is_not_called_omission(tmp_path, monkeypatch):
@@ -2252,12 +2432,50 @@ def test_an_unjoinable_export_identity_preserves_the_claim_and_is_not_called_omi
                             network_policy="model_provider_only", clock=CLOCK)
     result, execution = documents(bundle)
     assert result["status"] == "partial" and len(result["claims"]) == 2
-    assert "0 exported finding(s) could not be imported, 0 record finding(s) had no export entry, " \
-           "1 imported claim(s) could not be joined to native identity" in result["error"]["message"]
+    assert ("0 exported finding(s) could not be imported; record findings with no export entry "
+            "are bounded between 0 and 1") in result["error"]["message"]
+    assert "1 imported claim(s) could not be joined to native identity" in result["error"]["message"]
     assert result["bundles_resolved"] is False
     assert execution["capture"]["finding_submitted"] == "partial"
     assert any("usable claims were preserved" in note for note in execution["notes"])
-    assert not any("additional native finding occurrence" in note for note in execution["notes"])
+    assert any("bounded between 0 and 1" in note and "no exact omission count" in note
+               for note in execution["notes"])
+
+
+def test_a_dropped_eligible_finding_plus_an_unrelated_unjoinable_claim_reports_only_bounds(tmp_path,
+                                                                                          monkeypatch):
+    """An unidentified extra cannot prove that an unmatched native occurrence was exported."""
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "export":
+            export = Path(kwargs["cwd"]).parent / "deepsec-export.json"
+            payload = json.loads(export.read_text(encoding="utf-8"))
+            dropped = payload.pop(0)
+            unrelated = json.loads(json.dumps(dropped))
+            unrelated["title"] = f"[{unrelated['metadata']['severity']}] unrelated exported issue"
+            unrelated["metadata"]["vulnSlug"] = "unrelated-class"
+            payload.append(unrelated)
+            export.write_text(json.dumps(payload), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    assert result["status"] == "partial" and len(result["claims"]) == 2
+    assert "bounded between 0 and 1" in result["error"]["message"]
+    assert "0 record finding(s) had no export entry" not in result["error"]["message"]
+    assert any("bounded between 0 and 1" in note and "no exact omission count" in note
+               for note in execution["notes"])
 
 
 def test_an_export_finding_that_was_lost_makes_finding_submitted_partial(tmp_path, monkeypatch):
