@@ -945,8 +945,9 @@ def inspect_tree(source: Path, policy: dict | None, *, requirements: list[dict],
     for path in required_paths:
         if path not in hashes:
             reasons.append(f"accepted scoring path {path} is absent from the transformed export")
+    metadata_file_hashes = {path: hashes[path] for path in sorted(reviewed_metadata) if path in hashes}
     return {"tree_hash": None if unsafe else tree_hash(hashes), "file_count": len(hashes), "byte_count": byte_count,
-            "paths": sorted(hashes),
+            "paths": sorted(hashes), "metadata_file_hashes": metadata_file_hashes,
             "policy_sha256": _inspection_policy_digest(normalized), "requirements_sha256": canonical_sha256(required),
             "required_source_paths_sha256": canonical_sha256(required_paths),
             "answer_coverage": coverage, "instruction_files": sorted(instructions),
@@ -968,6 +969,7 @@ def _validate_components(inspection: dict, edits, fields, removals, skipped) -> 
     inspection_properties.update({
         "tree_hash": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
         "paths": {"type": "array", "items": {"type": "string"}},
+        "metadata_file_hashes": {"type": "object", "additionalProperties": {"$ref": "#/$defs/digest"}},
         "instruction_files": {"type": "array", "items": {"type": "string"}},
         "assistant_support_files": {"type": "array", "items": {"type": "string"}},
         "file_count": {"$ref": "#/$defs/count"}, "byte_count": {"$ref": "#/$defs/count"},
@@ -988,6 +990,10 @@ def _validate_components(inspection: dict, edits, fields, removals, skipped) -> 
     if errors:
         location = ".".join(str(part) for part in errors[0].absolute_path)
         raise ContractError(f"identity manifest component {location}: {errors[0].message}")
+    for record in fields:
+        if inspection["metadata_file_hashes"].get(record["path"]) != record["transformed_sha256"]:
+            raise ContractError(
+                "identity manifest component metadata_edits must bind each record to the inspected final file hash")
 
 
 def _inspection_blockers(inspection: dict) -> list[str]:
