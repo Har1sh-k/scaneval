@@ -580,14 +580,39 @@ REVIEW_WORKFLOW_TOOLING_ANCESTORS = frozenset({"tools", "scripts"})
 REVIEW_WORKFLOW_REGULAR_MODES = frozenset({"100644", "100755"})
 REVIEW_WORKFLOW_REPOSITORY_METADATA_BASENAMES = frozenset({"readme", "license", "copying", "notice"})
 REVIEW_WORKFLOW_REPOSITORY_METADATA_EXTENSIONS = frozenset({".adoc", ".md", ".rst", ".txt"})
-REVIEW_WORKFLOW_LITERAL_EXTENSIONS = frozenset({
-    ".html", ".htm", ".hbs", ".handlebars", ".mdx", ".yaml", ".yml", ".toml",
-    ".xml", ".qrc", ".svg", ".json5", ".jsonc", ".ini", ".cfg", ".conf",
-    ".properties", ".bazel", ".bzl", ".bazelrc", ".cmake", ".editorconfig",
-    ".prettierrc", ".nvmrc", ".env-template", ".gitmodules", ".tool-versions",
-    ".ruby-version", ".python-version", ".dockerfile", ".containerfile", ".json",
-    ".adoc", ".md", ".rst", ".txt",
-}) | REVIEW_WORKFLOW_BOOTSTRAP_EXTENSIONS
+REVIEW_WORKFLOW_WEB_TEMPLATE_EXTENSIONS = frozenset({".html", ".htm", ".hbs", ".handlebars", ".mdx"})
+REVIEW_WORKFLOW_LLM_CONFIGURATION_EXTENSIONS = frozenset({
+    ".yaml", ".yml", ".toml", ".xml", ".qrc", ".svg", ".json5", ".jsonc",
+    ".ini", ".cfg", ".conf", ".properties", ".bazel", ".bzl", ".bazelrc",
+    ".cmake", ".editorconfig", ".prettierrc", ".nvmrc", ".env-template",
+    ".gitmodules", ".tool-versions", ".ruby-version", ".python-version",
+    ".dockerfile", ".containerfile",
+})
+REVIEW_WORKFLOW_CHANGE_PLANNER_EXTENSIONS = (
+    REVIEW_WORKFLOW_BOOTSTRAP_EXTENSIONS | REVIEW_WORKFLOW_WEB_TEMPLATE_EXTENSIONS
+    | REVIEW_WORKFLOW_LLM_CONFIGURATION_EXTENSIONS | frozenset({".json"})
+)
+REVIEW_WORKFLOW_LITERAL_EXTENSIONS = (
+    REVIEW_WORKFLOW_CHANGE_PLANNER_EXTENSIONS
+    | REVIEW_WORKFLOW_REPOSITORY_METADATA_EXTENSIONS
+)
+REVIEW_WORKFLOW_KNOWN_NON_CODE_EXTENSIONS = frozenset({
+    ".7z", ".adoc", ".avif", ".avi", ".bmp", ".bz2", ".eot", ".flac", ".gif",
+    ".gz", ".ico", ".jpeg", ".jpg", ".lock", ".lockb", ".map", ".md", ".mov",
+    ".mp3", ".mp4", ".ogg", ".otf", ".pdf", ".png", ".rst", ".snap", ".tar",
+    ".tif", ".tiff", ".ttf", ".txt", ".wav", ".webm", ".webp", ".woff",
+    ".woff2", ".xz", ".zip",
+})
+REVIEW_WORKFLOW_KNOWN_NON_CODE_DATA_EXTENSIONS = frozenset({".csv", ".tsv"})
+REVIEW_WORKFLOW_UNSUPPORTED_EXECUTABLE_EXTENSIONS = frozenset({".bat", ".cmd"})
+REVIEW_WORKFLOW_NON_CODE_DATA_SEGMENTS = frozenset({
+    "assets", "docs", "example", "examples", "fixture", "fixtures", "public", "sample",
+    "samples", "static", "test-data", "testdata",
+})
+REVIEW_WORKFLOW_KNOWN_NON_CODE_FILENAMES = frozenset({
+    ".ds_store", ".dockerignore", ".eslintignore", ".gitattributes", ".gitignore",
+    ".npmignore", ".prettierignore", "go.mod", "go.sum", "go.work", "go.work.sum",
+})
 REVIEW_WORKFLOW_MAX_FILES = 50_000
 REVIEW_WORKFLOW_MAX_RECEIPTS = 100_000
 REVIEW_WORKFLOW_MAX_FILE_BYTES = 8 * 1024 * 1024
@@ -691,28 +716,53 @@ def _workflow_recognized_repository_metadata(path: str) -> bool:
             and name[:-len(extension)] in REVIEW_WORKFLOW_REPOSITORY_METADATA_BASENAMES)
 
 
-def _workflow_policy_mismatch(entry: dict[str, Any], additional_extensions: set[str]) -> bool:
-    """Catch policy claims the public path/mode makes independently contradictory."""
-    path, mode = entry["path"], entry["mode"]
-    classification, reason = entry["classification"], entry["reason"]
-    extension = _workflow_extension(path)
-    name = path.rsplit("/", 1)[-1].lower()
-    metadata_reason = "bootstrap-policy-excluded:recognized-repository-metadata"
+def _workflow_known_non_code_reason(path: str, extension: str | None) -> str | None:
+    normalized = path.lower()
+    name = normalized.rsplit("/", 1)[-1]
+    segments = [segment for segment in normalized.split("/") if segment]
+    if name in REVIEW_WORKFLOW_KNOWN_NON_CODE_FILENAMES:
+        return "known-non-code-filename"
+    if extension in REVIEW_WORKFLOW_KNOWN_NON_CODE_EXTENSIONS:
+        return "known-non-code-format"
+    if (extension in REVIEW_WORKFLOW_KNOWN_NON_CODE_DATA_EXTENSIONS
+            and any(segment in REVIEW_WORKFLOW_NON_CODE_DATA_SEGMENTS for segment in segments[:-1])):
+        return "known-non-code-data-format"
+    return None
+
+
+def _workflow_expected_policy(path: str, mode: str, additional_extensions: set[str]) -> tuple[str, str]:
+    """Port the native 73ae7aa inventory-classification precedence without fuzzy matching."""
     if mode not in REVIEW_WORKFLOW_REGULAR_MODES:
-        return classification != "unsupported" or reason != f"unsupported-git-mode:{mode}"
+        return "unsupported", f"unsupported-git-mode:{mode}"
     if _workflow_policy_excluded(path):
-        return classification != "excluded" or reason != "bootstrap-policy-excluded:code-scope-exclusion"
+        return "excluded", "bootstrap-policy-excluded:code-scope-exclusion"
+    extension = _workflow_extension(path)
+    raw_name = path.rsplit("/", 1)[-1]
+    name = raw_name.lower()
     if extension in additional_extensions:
-        return classification != "supported" or reason != "configured-code-extension"
+        return "supported", "configured-code-extension"
     if extension in REVIEW_WORKFLOW_BOOTSTRAP_EXTENSIONS:
-        return classification != "supported" or reason != "supported-code-extension"
+        return "supported", "supported-code-extension"
     if _workflow_recognized_repository_metadata(path):
-        return classification != "excluded" or reason != metadata_reason
-    if reason == metadata_reason:
-        return True
+        return "excluded", "bootstrap-policy-excluded:recognized-repository-metadata"
+    known_non_code = _workflow_known_non_code_reason(path, extension)
+    if known_non_code is not None:
+        return "excluded", f"bootstrap-policy-excluded:{known_non_code}"
     if extension is None and "." not in name:
-        return classification != "supported" or reason != "extensionless-code-scope"
-    return False
+        return "supported", "extensionless-code-scope"
+    if raw_name == ".report.json":
+        return "unsupported", "unsupported-bootstrap-source:recognized-report-content-unavailable"
+    if extension in REVIEW_WORKFLOW_CHANGE_PLANNER_EXTENSIONS:
+        return "excluded", f"bootstrap-policy-does-not-source-review:{extension}"
+    if extension in REVIEW_WORKFLOW_UNSUPPORTED_EXECUTABLE_EXTENSIONS:
+        return "unsupported", "unsupported-bootstrap-source:unsupported-executable-extension"
+    return "unsupported", "unsupported-bootstrap-source:unrecognized-file-format"
+
+
+def _workflow_policy_mismatch(entry: dict[str, Any], additional_extensions: set[str]) -> bool:
+    """Require every exported classification and reason to equal native 73ae7aa policy."""
+    expected = _workflow_expected_policy(entry["path"], entry["mode"], additional_extensions)
+    return (entry["classification"], entry["reason"]) != expected
 
 
 def _profile_prefix(path: str) -> str:
@@ -1223,6 +1273,9 @@ def _review_workflow_reconciliation(summary: dict[str, Any], report: dict[str, A
             issue("hypothesis_selections")
             selections = []
         for selection in selections:
+            if not isinstance(selection, dict):
+                issue("hypothesis_selection")
+                continue
             model, hypothesis = selection.get("model"), selection.get("hypothesisId")
             if not _wire_text(model, maximum=1_000) or not _wire_text(hypothesis, maximum=1_000):
                 issue("hypothesis_selection_identity")
@@ -1250,13 +1303,25 @@ def _review_workflow_reconciliation(summary: dict[str, Any], report: dict[str, A
             assigned = path_list(coverage.get("assignedFiles"))
             requested_all = path_list(coverage.get("requestedFiles"))
             delivered_all = path_list(coverage.get("deliveredFiles"))
+            omitted = coverage.get("omittedAssignedFiles")
+            omitted_paths: list[str] | None = None
+            if (isinstance(omitted, list) and len(omitted) <= REVIEW_WORKFLOW_MAX_FILES
+                    and all(_keys_are(item, {"path", "reason"}) and _workflow_path(item.get("path"))
+                            and item.get("reason") in ("missing", "read_error", "scope", "budget", "not_dispatched")
+                            for item in omitted)):
+                omitted_paths = [item["path"] for item in omitted]
+                if len(omitted_paths) != len(set(omitted_paths)):
+                    omitted_paths = None
             outcomes = coverage.get("fileOutcomes")
             if (coverage.get("hypothesisId") != hypothesis or coverage.get("coverage") != "complete"
-                    or coverage.get("partialFiles") != [] or coverage.get("omittedAssignedFiles") != []
+                    or coverage.get("partialFiles") != [] or omitted_paths != []
                     or None in (selected, validated, assigned, requested_all, delivered_all)
                     or selected != assigned or validated != delivered_all
                     or not isinstance(outcomes, list)):
                 issue("file_coverage_incomplete")
+            if (assigned is not None and delivered_all is not None
+                    and (not set(assigned) <= set(delivered_all) or not set(delivered_all) <= set(by_path))):
+                issue("file_coverage_assignment_mismatch")
             calls = coverage.get("calls")
             if not isinstance(calls, list) or not calls or len(calls) > REVIEW_WORKFLOW_MAX_RECEIPTS:
                 issue("file_calls")
@@ -1311,10 +1376,15 @@ def _review_workflow_reconciliation(summary: dict[str, Any], report: dict[str, A
                     issue("call_receipt_binding_mismatch")
             if requested_all != flattened_requested or delivered_all != flattened_delivered:
                 issue("file_coverage_call_mismatch")
-            if isinstance(outcomes, list) and outcomes != [{
-                    "path": path, "outcome": "unassessed", "reason": "analysis_completion_not_established"
-                    } for path in delivered_all or []]:
-                issue("file_outcome_mismatch")
+            if None not in (assigned, requested_all, delivered_all, omitted_paths):
+                expected_paths = list(dict.fromkeys([*assigned, *requested_all, *omitted_paths]))
+                expected_outcomes = [{
+                    "path": path, "outcome": "unassessed",
+                    "reason": ("analysis_completion_not_established" if path in delivered_all
+                               else "not_fully_delivered"),
+                } for path in expected_paths]
+                if outcomes != expected_outcomes:
+                    issue("file_outcome_mismatch")
         if len(selection_ids) != len(set(selection_ids)) or scan.get("evaluatedHypothesisIds") != selection_ids:
             issue("hypothesis_identity_mismatch")
         if scan.get("llmCalls") != native_call_count:
@@ -1345,7 +1415,8 @@ def _review_workflow_reconciliation(summary: dict[str, Any], report: dict[str, A
     anchor_summary = summary.get("executionAnchorCoverage")
     anchor_evidence = evidence.get("executionAnchors")
     if not only_excluded:
-        if not isinstance(anchor_summary, dict) or anchor_summary.get("scope") not in ("repository", "changed-head"):
+        anchor_scope = anchor_summary.get("scope") if isinstance(anchor_summary, dict) else None
+        if anchor_scope not in ("repository", "changed-head"):
             issue("execution_anchor_summary_missing")
             surfaces = []
         else:
@@ -1374,7 +1445,7 @@ def _review_workflow_reconciliation(summary: dict[str, Any], report: dict[str, A
                 unsupported_surfaces.append(prefix)
         failed_surfaces = _js_sorted(failed_surfaces)
         unsupported_surfaces = _js_sorted(unsupported_surfaces)
-        if anchor_evidence != {"scope": anchor_summary.get("scope"), "failedSurfaces": failed_surfaces,
+        if anchor_evidence != {"scope": anchor_scope, "failedSurfaces": failed_surfaces,
                                "unsupportedSurfaces": unsupported_surfaces}:
             issue("execution_anchor_evidence_mismatch")
         if failed_surfaces or unsupported_surfaces:

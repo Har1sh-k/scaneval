@@ -2400,6 +2400,25 @@ def _refresh_workflow_digest(summary: dict) -> None:
         report["scope"], report["inventory"])
 
 
+def _replace_workflow_exclusion(summary: dict, path: str, reason: str) -> None:
+    report = summary["reviewWorkflow"]
+    entry = _workflow_inventory_entry(summary, "README.md")
+    old_prefix = llm_harness._profile_prefix(entry["path"])
+    entry.update(path=path, classification="excluded", disposition="excluded", reason=reason)
+    report["inventory"].sort(key=lambda item: llm_harness._js_code_units(item["path"]))
+    summary["changedFiles"] = [item["path"] for item in report["inventory"]]
+    new_prefix = llm_harness._profile_prefix(path)
+    next(surface for surface in summary["executionAnchorCoverage"]["surfaces"]
+         if surface["prefix"] == old_prefix)["prefix"] = new_prefix
+    summary["executionAnchorCoverage"]["surfaces"].sort(
+        key=lambda item: llm_harness._js_code_units(item["prefix"]))
+    summary["completion"]["coverage"]["reasons"] = [
+        reason.replace(f"execution_anchor:{old_prefix}:", f"execution_anchor:{new_prefix}:")
+        for reason in summary["completion"]["coverage"]["reasons"]
+    ]
+    _refresh_workflow_digest(summary)
+
+
 def test_review_workflow_fixture_roundtrips_and_preserves_both_native_accounts():
     summary = _review_workflow_summary()
     roundtripped = json.loads(json.dumps(summary, sort_keys=True))
@@ -2639,40 +2658,75 @@ def test_review_workflow_policy_keeps_metadata_named_and_additional_sources_in_s
     assert read_review_workflow(summary).code == "review_workflow_malformed"
 
 
-def test_review_workflow_metadata_policy_accepts_documented_forms_and_rejects_self_consistent_forgery():
-    summary = _review_workflow_summary()
-    readme = _workflow_inventory_entry(summary, "README.md")
-    assert readme["classification"] == readme["disposition"] == "excluded"
-    assert readme["reason"] == "bootstrap-policy-excluded:recognized-repository-metadata"
-    assert llm_harness._review_workflow_shape(summary["reviewWorkflow"]) == []
-    assert read_review_workflow(summary).code is None
-
-    native_unsupported = (
-        ("README.vbs", "unsupported-bootstrap-source:unrecognized-file-format"),
-        ("LICENSE.bat", "unsupported-bootstrap-source:unsupported-executable-extension"),
+def test_review_workflow_policy_matches_native_exclusion_precedence_and_rejects_forged_reasons():
+    legitimate_exclusions = (
+        ("README.md", "bootstrap-policy-excluded:recognized-repository-metadata"),
+        ("dist/generated.ts", "bootstrap-policy-excluded:code-scope-exclusion"),
+        ("config/settings.yaml", "bootstrap-policy-does-not-source-review:.yaml"),
+        ("go.mod", "bootstrap-policy-excluded:known-non-code-filename"),
+        ("manual.pdf", "bootstrap-policy-excluded:known-non-code-format"),
+        ("fixtures/data.csv", "bootstrap-policy-excluded:known-non-code-data-format"),
     )
-    for path, reason in native_unsupported:
-        assert llm_harness._workflow_policy_mismatch({
-            "path": path, "mode": "100644", "classification": "unsupported", "reason": reason,
-        }, set()) is False
-
-    for forged_path in ("README.vbs", "LICENSE.bat", "arbitraryname"):
+    for path, reason in legitimate_exclusions:
         candidate = _review_workflow_summary()
-        entry = _workflow_inventory_entry(candidate, "README.md")
-        entry["path"] = forged_path
-        candidate["changedFiles"] = [item["path"] for item in candidate["reviewWorkflow"]["inventory"]]
-        next(surface for surface in candidate["executionAnchorCoverage"]["surfaces"]
-             if surface["prefix"] == "readme.md")["prefix"] = forged_path.lower()
-        candidate["completion"]["coverage"]["reasons"] = [
-            reason.replace("execution_anchor:readme.md:", f"execution_anchor:{forged_path.lower()}:")
-            for reason in candidate["completion"]["coverage"]["reasons"]
-        ]
-        _refresh_workflow_digest(candidate)
+        if path != "README.md":
+            _replace_workflow_exclusion(candidate, path, reason)
+        assert llm_harness._workflow_expected_policy(path, "100644", set()) == ("excluded", reason)
+        assert llm_harness._review_workflow_shape(candidate["reviewWorkflow"]) == []
+        assert llm_harness._review_workflow_reconciliation(candidate, candidate["reviewWorkflow"]) == []
+        assert read_review_workflow(candidate).code is None
 
+    native_classifications = (
+        ("README.vbs", "unsupported", "unsupported-bootstrap-source:unrecognized-file-format"),
+        ("LICENSE.bat", "unsupported", "unsupported-bootstrap-source:unsupported-executable-extension"),
+        ("payload.exe", "unsupported", "unsupported-bootstrap-source:unrecognized-file-format"),
+        ("src/neutral.ts", "supported", "supported-code-extension"),
+    )
+    for path, classification, reason in native_classifications:
+        assert llm_harness._workflow_expected_policy(path, "100644", set()) == (classification, reason)
+
+    for path, forged_reason in (
+        ("README.vbs", "bootstrap-policy-excluded:recognized-repository-metadata"),
+        ("LICENSE.bat", "bootstrap-policy-excluded:known-non-code-filename"),
+        ("payload.bat", "bootstrap-policy-excluded:known-non-code-format"),
+        ("src/payload.csv", "bootstrap-policy-excluded:known-non-code-data-format"),
+        ("payload.exe", "bootstrap-policy-does-not-source-review:.exe"),
+        ("payload.vbs", "bootstrap-policy-excluded:code-scope-exclusion"),
+    ):
+        candidate = _review_workflow_summary()
+        _replace_workflow_exclusion(candidate, path, forged_reason)
         assert llm_harness._review_workflow_shape(candidate["reviewWorkflow"]) == []
         assert llm_harness._review_workflow_reconciliation(
             candidate, candidate["reviewWorkflow"]) == ["inventory_policy_mismatch"]
         assert read_review_workflow(candidate).code == "review_workflow_malformed"
+
+
+def test_review_workflow_rejects_assigned_paths_not_delivered_from_inside_or_outside_inventory():
+    for path in ("README.md", "evil/outside.py"):
+        summary = _review_workflow_summary()
+        selection = summary["bootstrapScan"]["hypothesisSelections"][0]
+        selection["selectedFiles"].append(path)
+        selection["fileCoverage"]["assignedFiles"].append(path)
+
+        reconciliation = llm_harness._review_workflow_reconciliation(summary, summary["reviewWorkflow"])
+        assert "file_coverage_assignment_mismatch" in reconciliation
+        assert "file_outcome_mismatch" in reconciliation
+        assert read_review_workflow(summary).code == "review_workflow_malformed"
+
+
+def test_review_workflow_malformed_native_boundaries_return_evidence_errors_without_crashing():
+    mutations = (
+        lambda summary: summary["bootstrapScan"]["hypothesisSelections"].append(None),
+        lambda summary: summary.pop("executionAnchorCoverage"),
+        lambda summary: summary.update(executionAnchorCoverage=None),
+        lambda summary: summary.update(executionAnchorCoverage=[]),
+    )
+    for mutate in mutations:
+        summary = _review_workflow_summary()
+        mutate(summary)
+        reading = read_review_workflow(summary)
+        assert reading.status == "complete"
+        assert reading.code == "review_workflow_malformed"
 
 
 def test_review_workflow_accepts_disabled_lint_but_not_unproven_legacy_anchor_gaps():
@@ -2780,18 +2834,29 @@ def test_both_native_report_failures_remain_visible_when_workflow_takes_preceden
 
 
 def test_malformed_review_workflow_retains_imported_findings_on_partial(tmp_path, monkeypatch):
-    summary = _review_workflow_summary()
-    summary["newFindings"] = [{"id": "SV-AUTH-AUTHBYPASS-001", "cweIds": ["CWE-287"]}]
-    summary["reviewWorkflow"]["receipts"] = []
-    output = {**DRIVER_OUTPUT, "summary": summary}
+    mutations = {
+        "missing-receipt": lambda summary: summary["reviewWorkflow"].update(receipts=[]),
+        "selection-null": lambda summary: summary["bootstrapScan"]["hypothesisSelections"].append(None),
+        "anchor-missing": lambda summary: summary.pop("executionAnchorCoverage"),
+        "anchor-null": lambda summary: summary.update(executionAnchorCoverage=None),
+        "anchor-list": lambda summary: summary.update(executionAnchorCoverage=[]),
+    }
+    for name, mutate in mutations.items():
+        summary = _review_workflow_summary()
+        summary["newFindings"] = [{"id": "SV-AUTH-AUTHBYPASS-001", "cweIds": ["CWE-287"]}]
+        mutate(summary)
+        output = {**DRIVER_OUTPUT, "summary": summary}
+        case_dir = tmp_path / name
+        case_dir.mkdir()
 
-    bundle = _stubbed_bundle(tmp_path, monkeypatch, {"a.md": FINDING}, output=output)
-    result = load_document(bundle / "result.json", "scan-result")
-    execution = load_document(bundle / "execution.json", "execution-record")
+        bundle = _stubbed_bundle(case_dir, monkeypatch, {"a.md": FINDING}, output=output)
+        result = load_document(bundle / "result.json", "scan-result")
+        execution = load_document(bundle / "execution.json", "execution-record")
 
-    assert result["status"] == execution["status"] == "partial"
-    assert result["error"]["code"] == "review_workflow_malformed"
-    assert [claim["claim_id"] for claim in result["claims"]] == ["SV-AUTH-AUTHBYPASS-001"]
+        assert result["status"] == execution["status"] == "partial", name
+        assert result["error"]["code"] == "review_workflow_malformed", name
+        assert execution["error"]["code"] != "adapter_failure", name
+        assert [claim["claim_id"] for claim in result["claims"]] == ["SV-AUTH-AUTHBYPASS-001"], name
 
 
 @pytest.mark.parametrize("scan_stats,expected", [
