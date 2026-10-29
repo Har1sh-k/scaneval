@@ -2,57 +2,95 @@
 
 Upstream issue: https://github.com/anshumanbh/securevibes-agent/issues/205
 
-ScanEval acceptance: issue 95 integration acceptance, pending live smoke and a reviewed upstream pin.
+ScanEval acceptance: issue 95 integration acceptance, pending reviewed upstream pin and live smoke.
 
-## Problem
+## Contract reviewed
 
-The pinned SV-Agent revision reports `summary.completion` version 1, but delivered bootstrap source remains `sourceAssessment: unassessed`. Its aggregate coverage therefore remains `unknown` even when the producer can prove that a declared source-review workflow ran. Treating delivery, an empty findings array, process exit, or `completion.coverage.status` alone as completed analysis would be untruthful.
+This consumer was reconciled against upstream branch `fix/review-workflow-completion` at
+`8b8aff6d9a868ba2d1bbda23cee882b5f836cc3f` and the normative
+`docs/review-workflow-completion.md` at that revision. The corrected wire is pre-merge protocol
+development: no released `reviewWorkflow` version exists to grandfather. Legacy summaries without
+the additive field retain their existing completion behavior exactly. The Dockerfile and
+`DEFAULT_IMAGE_HARNESS_COMMIT` remain pinned to
+`f959cbcf010c7e41f780c718b65b1724d3aecb43`.
 
-SV-Agent adds `summary.reviewWorkflow` version 1 as a separate native report. It describes producer-declared workflow execution and binds obligations and receipts to immutable source identities. It does not assess source as safe, prove semantic understanding, attest a provider or served model revision, or replace `summary.completion`. ScanEval must preserve both accounts.
+## Accepted wire
 
-## Accepted wire contract
+`summary.reviewWorkflow` is a closed version-1 report beside, not instead of,
+`summary.completion`. It requires:
 
-The consumer accepts only the additive `summary.reviewWorkflow` contract with:
+- workflow `bootstrap-source-review`, source assessment `unassessed`, and a supported status;
+- portable scope containing mode, source ref, inventory digest, digest-preimage name, and policy
+  `{version, additionalCodeExtensions}`; no repository path is hashed or accepted in scope;
+- inventory entries preserving Git mode, original `classification` and policy `reason`, plus the
+  reconciliation-only `disposition`;
+- obligations and receipts bound to invocation, model, hypothesis, shard, source ref, request
+  digest, response digest, ordered file identities, and exact terminal coverage;
+- actual `inputs` with documented roles, byte observations, immutable source identity, and an
+  explicit matched/mismatched/untracked/drifted binding;
+- planner, execution-anchor, model-call, structural, lint, marker, and specialist stages plus
+  concrete planner, anchor, structural-inspection, and effective lint evidence.
 
-- `schemaVersion: 1`, `workflow: "bootstrap-source-review"`, and `sourceAssessment: "unassessed"`;
-- status in `complete`, `incomplete`, `unknown`, or `not-required`;
-- scope policy `bootstrap-source-review/v1`, an explicit mode, and bootstrap source identity when evidence is present;
-- an immutable inventory whose paths, Git object ids, SHA-256 values, byte counts, dispositions, reasons, and required procedures are explicit;
-- frozen obligations binding invocation, model, hypothesis, shard, source ref, request digest, files, source digests, byte counts, and required procedures;
-- receipts binding the same identity and files plus response digest and exactly one terminal for every required file/procedure pair;
-- explicit model-call, structural, lint, marker, and specialist stage states; and
-- a list of native reasons.
+Unknown fields, enums, unsafe integers, malformed hashes, non-normalized paths, surrogate-bearing
+preimage strings, duplicate identities, and unbounded repeated evidence fail closed.
 
-`complete` is accepted only for bootstrap. `not-required` is accepted only for a nonempty all-excluded inventory with no obligations or receipts. PR, batch, absent evidence, and unknown versions remain non-success.
+## Independent reconciliation
 
-## Fail-closed reconciliation
+The consumer recomputes `scope.inventoryDigest` as SHA-256 of UTF-8 `JSON.stringify`-compatible
+serialization over every public preimage field and policy. It preserves JavaScript UTF-16
+code-unit ordering for inventory paths and additional extensions. The preimage excludes absolute
+repository paths and includes `schemaVersion`, workflow, source ref, policy, and every inventory
+field except `disposition`.
 
-The parser validates required fields, closed enums, safe integer bounds, SHA formats, nonempty identifiers and reasons, normalized relative paths, and uniqueness before interpreting status. Unknown or missing fields never earn credit. Duplicate inventory paths, obligation identities, receipt identities, files, required procedures, or terminals invalidate the report.
+Positive credit additionally requires:
 
-The consumer independently reconciles the report:
+1. scope mode and source ref agree with `summary.mode` and `summary.headRef`; the policy agrees with
+   the original summary, and the sorted inventory agrees with the original bootstrap file surface;
+2. built-in source extensions and declared additional source extensions cannot receive a metadata
+   bypass. `README.py`, `LICENSE.js`, and `NOTICE.php` remain source unless the exact supported
+   path-exclusion policy applies. Original classification, reason, and derived disposition remain
+   distinct and consistent;
+3. every supported source is assigned, every obligation file matches inventory bytes/procedures,
+   and every obligation has exactly one matching receipt with completed terminals;
+4. every native dispatched call has unique invocation/request/response identity and exact ordered
+   agreement with its obligation and receipt. Requested or delivered paths outside inventory are
+   blocking;
+5. every observed primary, related, or configuration/native input is inventory-backed and
+   `matched`. Supported primary observations must exactly equal inventory SHA-256 and byte count,
+   and every original primary call has corresponding input evidence;
+6. the LLM planner is non-heuristic and non-degraded; actual execution-anchor surfaces cover
+   supported prefixes; scanner relationship inspections have no failures; effective default or
+   custom lint rules match successful native rule results; explicitly disabled lint is honestly
+   `not-applicable`; markers and activated specialists are complete;
+7. failed, missing, unsupported, stale, drifted, omitted, partial, inconclusive, duplicated, or
+   cross-bound evidence remains blocking.
 
-1. `summary.mode`, `summary.headRef`, workflow scope mode, scope source ref, every inventory source ref, and every obligation/receipt source ref agree.
-2. Every supported inventory file has immutable digest and byte evidence and is assigned; excluded files carry no source bytes or procedures; unsupported or unassigned inventory blocks completion.
-3. Inventory paths are neither omitted from nor invented by obligations. Every obligation file exactly matches its inventory identity and procedures. A file may be reviewed by more than one obligation, but each obligation is internally unique.
-4. Every obligation has exactly one receipt and no receipt is unexpected. Model, hypothesis, revision, shard, invocation, request digest, file set, file digest, byte count, and required procedures match exactly.
-5. Every receipt has exactly one terminal for every required pair and no extra terminal. Only `completed` can support positive completion; `inconclusive` blocks it.
-6. Model calls and all required workflow stages are complete. Structural `not-applicable` is accepted only for this bootstrap-v1 policy. Failed or unevaluated hypotheses, relationship/source gaps, parser failures, lint gaps, pending markers, incomplete specialists, unsupported code, inventory gaps, and model-call failures remain blocking through the original completion and scan records.
-7. A positive native status is checked against the reconciled contents. A contradiction is malformed evidence, not a legacy fallback.
+`not-required` is limited to a nonempty all-excluded inventory with no obligations, receipts,
+inputs, or native source-review work. Planner, execution-anchor, model-call, and structural stages
+must be `not-applicable`; lint, markers, and specialists must still reflect their actual configured
+states. A failed or missing stage is never erased merely because the inventory is excluded.
 
-The consumer also validates `summary.completion` version 1. For a reconciled complete workflow only, the legacy aggregate may remain `unknown` solely for `source_analysis_completion_not_established` and `structural_coverage_not_recorded`: the new report explicitly supplies workflow evidence while leaving source assessment unassessed and declaring bootstrap structural traversal not applicable. Any other completion reason remains blocking. Legacy reports without `reviewWorkflow` retain their current behavior exactly.
+## Legacy completion interaction
 
-The inventory is the only place exclusions receive credit. Known non-code files such as `README.md` are accepted only when represented by an exact excluded inventory entry with no fabricated source-review procedures; no path-prefix or extension-wide suppression is added in ScanEval.
+`summary.completion` remains required on the image route. A reconciled complete workflow may
+coexist with legacy source assessment `unassessed` and structural coverage `not-recorded`.
+Corrected version-1 evidence may also explain a legacy `execution_anchor:<prefix>:unsupported`
+reason only when the original anchor surface is uniquely recorded and every inventory path in that
+exact prefix is an explicit exclusion. Failed anchors, unsupported source, unmatched prefixes, and
+all other legacy gaps remain blocking. Findings are preserved on partial outcomes.
 
-## Outcome semantics
+The accepted outcome is labelled only a **completed declared bootstrap review workflow**. It does
+not attest a provider/model revision, prove semantic understanding, assess source as safe, or make
+a whole-repository safety claim. Excluded metadata/configuration is an explicit workflow scope
+limitation, not evidence that the file is harmless.
 
-A valid and reconciled `status: complete` permits the adapter's native outcome to be `success` only after all existing execution, model-call, native scan-status, import-loss, and runtime-identity checks also pass. The execution notes label this narrowly as a **completed declared review workflow**. They do not call the source safe or assessed.
+## Fixture, verification, and rollout
 
-`incomplete`, `unknown`, malformed, unsupported-mode, contradictory, or missing required workflow evidence produces `partial` on a run whose findings are still usable. Imported findings are retained. No partial outcome receives zero-detection or quiet-scan credit. Existing higher-priority timeout, runtime mismatch, driver, model-call, inconclusive-scan, and import-loss outcomes remain truthful; workflow notes survive beside them.
+`tests/fixtures/sv-review-workflow-summary.json` was captured from an actual deterministic upstream
+engine run at `8b8aff6` using an in-process test runner and no model/network call. The bounded
+consumer checker exercises 830 finite cases, including all seven stage bits and concrete runtime
+simulations that remove digest, input, stage-evidence, and original-call guards. See
+[SV completion bounded verification](sv-completion-bounded-verification.md).
 
-The new contract is optional for legacy local harnesses. Once present, it is authoritative enough to fail closed: malformed new evidence cannot fall back to legacy success. The image route continues to require native completion reporting.
-
-## Pinning and rollout
-
-The Dockerfile and default image harness commit remain at `f959cbcf010c7e41f780c718b65b1724d3aecb43` until the upstream implementation receives fresh review and is committed. Before that coordinated pin update, smoke configurations opt in by supplying the exact reviewed commit through the existing `expected_harness_commit` override and an image built from that same commit.
-
-Acceptance requires focused parser, reconciliation, native-outcome, legacy-compatibility, and JSON round-trip tests, followed by the bounded live smoke. The consumer decision boundary also has a [711-case bounded generated conformance check](sv-completion-bounded-verification.md), which exercises the actual Python readers but is not a full formal proof. This design does not claim issue 95 resolved or the broader corpus ready before that live acceptance passes.
+Consumer support alone is not scan readiness. A coordinated reviewed upstream pin, image build,
+and bounded live smoke remain required before issue 95 or broad-corpus readiness can be claimed.

@@ -297,15 +297,20 @@ not treated as legacy absence. Research/history attestation and scan assessment 
 remain separate: the synthetic image fixture can attest `open_context` while its native source
 assessment is `unknown`, so its outcome is `partial`.
 
-ScanEval also understands the additive `summary.reviewWorkflow` version 1 contract from newer
-SV-Agent builds. A reconciled positive report is labelled only as a **completed declared bootstrap
-review workflow**: immutable inventory, obligation, request/response receipt, terminal, stage, and
-original-summary identities agree. Source assessment remains `unassessed`; this is native
-producer-declared/provenance-checked workflow evidence, not provider attestation, semantic proof,
-or a claim that the source is safe. Malformed, incomplete, unknown, unsupported-mode, stale,
-cross-bound, omitted, duplicate, inconclusive, failed-stage, or failed/pending-call evidence stays
-`partial`, with imported findings retained. Legacy behavior is unchanged when the new field is
-absent, and a malformed present field cannot fall back to legacy success.
+ScanEval also understands the corrected additive `summary.reviewWorkflow` version 1 contract from
+newer SV-Agent builds. A reconciled positive report is labelled only as a **completed declared
+bootstrap review workflow**. The consumer recomputes the portable public inventory digest and
+reconciles original classification/policy, observed native inputs, dispatched-call
+invocation/request/response identity, obligations, terminals, and planner/anchor/structural/lint
+stage evidence. Source assessment remains `unassessed`; this is native producer-declared and
+cross-checked byte identity, not provider attestation, semantic proof, or a claim that source is
+safe. Exact legacy execution-anchor gaps may be explained only by inventory-backed explicit
+exclusions; failed anchors and unsupported source remain blocking. Malformed, incomplete, unknown,
+unsupported-mode, stale, cross-bound, omitted, duplicate, inconclusive, failed-stage, or
+failed/pending-call evidence stays `partial`, with imported findings retained. Legacy behavior is
+unchanged when the field is absent, and a malformed present field cannot fall back to legacy
+success. The supported pre-merge contract was reconciled at upstream head `8b8aff6`; the default
+image pin below still predates it.
 
 The image default remains the upstream revision
 `f959cbcf010c7e41f780c718b65b1724d3aecb43`, which predates `reviewWorkflow`. Its
