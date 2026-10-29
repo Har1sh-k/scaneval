@@ -46,6 +46,26 @@ The upstream proposal is tracked by [securevibes-agent issue #205](https://githu
 
 **Regression/acceptance check:** Fixtures cover each stage failing or timing out, mixed successful/failed batches, unreadable exports, no-candidate runs, and findings plus failure. Assert stage receipts, population counts, conservation, preserved findings, and truthful status. A zero-finding toy file establishes only that invocation's output; it does not measure accuracy, prove a false negative, or validate an open-context condition.
 
+## Reconstructing identity from a lossy native export
+
+**Symptom:** Exported claims receive the wrong native IDs through path/title or FIFO pairing, or expected exclusions, unreadable entries, and missing exports are counted as independent losses even though the export still contains usable claims.
+
+**Cause:** DeepSec 2.3.10's default JSON export omits finding IDs and sorts its rows. Its eligible population excludes resolved findings and findings in schema-valid records with no latest analysis; malformed records or findings are native load failures, not legitimate exclusions. Repeated rows can share path and title, and an unreadable or unjoinable export entry may be the same occurrence as an unmatched record, so order and additive subtraction invent certainty.
+
+**Corrective action:** Reproduce the pinned native load and default-export eligibility before reconciliation. Join only on fields copied unchanged into the export, use the native optional-ID algorithm when the version supports it, preserve raw record/export bytes, and compare multisets rather than sets. If export-visible fields cannot distinguish distinct native IDs, retain every usable claim without an ID and mark the run partial. Report honest lower and upper omission bounds without counting one unidentified export twice, and preserve established fatal, stage, and partial-failure priorities.
+
+**Regression/acceptance check:** Cover valid resolved and no-latest exclusions, malformed lookalikes that fail closed, native sort reordering, repeated identities, duplicate-ID multiplicity, distinct indistinguishable IDs, and damaged export entries. Claims remain available, exclusions are not import loss, ambiguous IDs are never guessed, and loss bounds/status precedence remain stable.
+
+## Letting the host parser define the native record contract
+
+**Symptom:** An adapter accepts a record the native scanner rejects, rejects an explicit null the native schema requires, or discards every finding because one finding is malformed. A synthetic test is then described as proof of a real scan or provider integration.
+
+**Cause:** Host JSON and schema behavior is not automatically native behavior. Python parsing can accept non-standard numeric constants that JavaScript `JSON.parse` rejects; nullable keys can still be required; and DeepSec 2.3.10 validates the record envelope before salvaging findings per record. Loose structural equivalence misses those distinctions.
+
+**Corrective action:** Mirror strict JSON parsing across all fields, including unknown ones, and the pinned required/nullable and envelope-versus-finding salvage rules needed for the claim. Preserve usable claims and raw bytes when another record or finding fails. A bounded native export-only fixture made from fabricated records may verify exporter loading, filtering, sorting, and output shape without launching an LLM security scan; report it as exporter integration only, not end-to-end scanner, model, authentication, or provider validation.
+
+**Regression/acceptance check:** Exercise non-standard constants in records and exports, missing versus explicit-null required keys, malformed envelopes, and per-finding salvage. The fabricated native fixture invokes only export, demonstrates the expected lossy format and eligibility behavior, and is never promoted into a live-scan or detection claim.
+
 ## Mistaking host configuration for the scanner's effective runtime
 
 **Symptom:** The report names a model or SDK because it was requested or because a host CLI reports that version, while the scanner actually uses an embedded SDK/client or a differently resolved native model string.
