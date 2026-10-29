@@ -578,6 +578,8 @@ REVIEW_WORKFLOW_VIRTUAL_ENV_SEGMENTS = frozenset({"bin", "lib", "lib64", "includ
 REVIEW_WORKFLOW_SOURCE_ANCESTORS = frozenset({"src", "lib"})
 REVIEW_WORKFLOW_TOOLING_ANCESTORS = frozenset({"tools", "scripts"})
 REVIEW_WORKFLOW_REGULAR_MODES = frozenset({"100644", "100755"})
+REVIEW_WORKFLOW_REPOSITORY_METADATA_BASENAMES = frozenset({"readme", "license", "copying", "notice"})
+REVIEW_WORKFLOW_REPOSITORY_METADATA_EXTENSIONS = frozenset({".adoc", ".md", ".rst", ".txt"})
 REVIEW_WORKFLOW_LITERAL_EXTENSIONS = frozenset({
     ".html", ".htm", ".hbs", ".handlebars", ".mdx", ".yaml", ".yml", ".toml",
     ".xml", ".qrc", ".svg", ".json5", ".jsonc", ".ini", ".cfg", ".conf",
@@ -680,12 +682,22 @@ def _workflow_policy_excluded(path: str) -> bool:
     return False
 
 
+def _workflow_recognized_repository_metadata(path: str) -> bool:
+    name = path.rsplit("/", 1)[-1].lower()
+    if name in REVIEW_WORKFLOW_REPOSITORY_METADATA_BASENAMES:
+        return True
+    extension = _workflow_extension(path)
+    return (extension in REVIEW_WORKFLOW_REPOSITORY_METADATA_EXTENSIONS
+            and name[:-len(extension)] in REVIEW_WORKFLOW_REPOSITORY_METADATA_BASENAMES)
+
+
 def _workflow_policy_mismatch(entry: dict[str, Any], additional_extensions: set[str]) -> bool:
     """Catch policy claims the public path/mode makes independently contradictory."""
     path, mode = entry["path"], entry["mode"]
     classification, reason = entry["classification"], entry["reason"]
     extension = _workflow_extension(path)
     name = path.rsplit("/", 1)[-1].lower()
+    metadata_reason = "bootstrap-policy-excluded:recognized-repository-metadata"
     if mode not in REVIEW_WORKFLOW_REGULAR_MODES:
         return classification != "unsupported" or reason != f"unsupported-git-mode:{mode}"
     if _workflow_policy_excluded(path):
@@ -694,8 +706,10 @@ def _workflow_policy_mismatch(entry: dict[str, Any], additional_extensions: set[
         return classification != "supported" or reason != "configured-code-extension"
     if extension in REVIEW_WORKFLOW_BOOTSTRAP_EXTENSIONS:
         return classification != "supported" or reason != "supported-code-extension"
-    if re.fullmatch(r"(?:readme|license|copying|notice)(?:\..*)?", name):
-        return classification != "excluded" or reason != "bootstrap-policy-excluded:recognized-repository-metadata"
+    if _workflow_recognized_repository_metadata(path):
+        return classification != "excluded" or reason != metadata_reason
+    if reason == metadata_reason:
+        return True
     if extension is None and "." not in name:
         return classification != "supported" or reason != "extensionless-code-scope"
     return False

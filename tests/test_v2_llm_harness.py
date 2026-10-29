@@ -2639,6 +2639,42 @@ def test_review_workflow_policy_keeps_metadata_named_and_additional_sources_in_s
     assert read_review_workflow(summary).code == "review_workflow_malformed"
 
 
+def test_review_workflow_metadata_policy_accepts_documented_forms_and_rejects_self_consistent_forgery():
+    summary = _review_workflow_summary()
+    readme = _workflow_inventory_entry(summary, "README.md")
+    assert readme["classification"] == readme["disposition"] == "excluded"
+    assert readme["reason"] == "bootstrap-policy-excluded:recognized-repository-metadata"
+    assert llm_harness._review_workflow_shape(summary["reviewWorkflow"]) == []
+    assert read_review_workflow(summary).code is None
+
+    native_unsupported = (
+        ("README.vbs", "unsupported-bootstrap-source:unrecognized-file-format"),
+        ("LICENSE.bat", "unsupported-bootstrap-source:unsupported-executable-extension"),
+    )
+    for path, reason in native_unsupported:
+        assert llm_harness._workflow_policy_mismatch({
+            "path": path, "mode": "100644", "classification": "unsupported", "reason": reason,
+        }, set()) is False
+
+    for forged_path in ("README.vbs", "LICENSE.bat", "arbitraryname"):
+        candidate = _review_workflow_summary()
+        entry = _workflow_inventory_entry(candidate, "README.md")
+        entry["path"] = forged_path
+        candidate["changedFiles"] = [item["path"] for item in candidate["reviewWorkflow"]["inventory"]]
+        next(surface for surface in candidate["executionAnchorCoverage"]["surfaces"]
+             if surface["prefix"] == "readme.md")["prefix"] = forged_path.lower()
+        candidate["completion"]["coverage"]["reasons"] = [
+            reason.replace("execution_anchor:readme.md:", f"execution_anchor:{forged_path.lower()}:")
+            for reason in candidate["completion"]["coverage"]["reasons"]
+        ]
+        _refresh_workflow_digest(candidate)
+
+        assert llm_harness._review_workflow_shape(candidate["reviewWorkflow"]) == []
+        assert llm_harness._review_workflow_reconciliation(
+            candidate, candidate["reviewWorkflow"]) == ["inventory_policy_mismatch"]
+        assert read_review_workflow(candidate).code == "review_workflow_malformed"
+
+
 def test_review_workflow_accepts_disabled_lint_but_not_unproven_legacy_anchor_gaps():
     summary = _review_workflow_summary()
     summary["reviewWorkflow"]["stages"]["lint"] = "not-applicable"

@@ -29,11 +29,11 @@ def checker_result() -> dict:
 
 
 def test_bounded_checker_calls_production_for_all_expected_states(checker_result):
-    assert checker_result["checked"] == 830
+    assert checker_result["checked"] == 834
     assert checker_result["family_counts"] == {
         "all_excluded": 1,
         "completion_compatibility": 90,
-        "contract_guards": 23,
+        "contract_guards": 27,
         "finding_reachability": 2,
         "inventory_assignment": 144,
         "malformed_boundaries": 20,
@@ -42,8 +42,8 @@ def test_bounded_checker_calls_production_for_all_expected_states(checker_result
         "terminal_product": 102,
         "workflow_stages": 128,
     }
-    assert checker_result["expected_accepted"] == 34
-    assert checker_result["expected_rejected"] == 796
+    assert checker_result["expected_accepted"] == 35
+    assert checker_result["expected_rejected"] == 799
     assert checker_result["production_mismatches"] == []
     assert checker_result["ok"] is True
 
@@ -55,6 +55,7 @@ def test_positive_boundaries_are_reachable_and_rejected_all_is_not_conforming():
         "two-independent-files-findings-0",
         "two-independent-files-findings-1",
         "configured-disabled-lint",
+        "recognized-metadata-readme-md",
     ]
     for name in names:
         case = cases[name]
@@ -74,6 +75,7 @@ def test_checker_finds_concrete_witnesses_for_abstract_faults_and_guard_removals
         "remove_input_guard",
         "remove_stage_evidence_guard",
         "remove_original_binding_guards",
+        "remove_metadata_policy_guard",
     }
     for name, check in checks.items():
         expected_kind = "production_guard_removal" if name.startswith("remove_") else "abstract_acceptance_function"
@@ -88,14 +90,16 @@ def test_critical_predicates_have_non_vacuity_witnesses_and_runtime_source_hashe
     required = {
         "accepted_complete", "accepted_all_excluded", "accepted_two_independent_files",
         "accepted_zero_findings", "accepted_findings", "accepted_disabled_lint",
-        "rejected_unassigned", "rejected_unsupported", "rejected_missing_receipt",
+        "accepted_recognized_metadata", "rejected_unassigned", "rejected_unsupported", "rejected_missing_receipt",
         "rejected_duplicate_receipt", "rejected_inconclusive_terminal", "rejected_missing_terminal",
         "rejected_workflow_stage", "rejected_native_health", "rejected_failed_call",
         "rejected_pending_call", "rejected_bad_legacy_reason", "rejected_partial_source",
         "rejected_malformed", "rejected_duplicate_inventory", "rejected_duplicate_obligation",
         "rejected_duplicate_terminal", "rejected_digest_tamper", "rejected_input_binding",
         "rejected_input_removal", "rejected_stage_evidence", "rejected_metadata_code_bypass",
-        "rejected_additional_extension_bypass", "rejected_original_invocation",
+        "rejected_unknown_metadata_suffix", "rejected_executable_metadata_suffix",
+        "rejected_extensionless_metadata_forgery", "rejected_additional_extension_bypass",
+        "rejected_original_invocation",
         "rejected_original_request", "rejected_original_response", "rejected_obligation_inventory_bytes",
         "rejected_stale_head", "rejected_positive_mode", "rejected_multiple_models",
         "rejected_positive_reasons", "rejected_call_outside_inventory",

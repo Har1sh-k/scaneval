@@ -6,13 +6,15 @@ ScanEval acceptance: issue 95 integration acceptance, pending reviewed upstream 
 
 ## Contract reviewed
 
-This consumer was reconciled against upstream branch `fix/review-workflow-completion` at
-`8b8aff6d9a868ba2d1bbda23cee882b5f836cc3f` and the normative
-`docs/review-workflow-completion.md` at that revision. The corrected wire is pre-merge protocol
-development: no released `reviewWorkflow` version exists to grandfather. Legacy summaries without
-the additive field retain their existing completion behavior exactly. The Dockerfile and
+This consumer was reconciled against upstream branch `fix/review-workflow-completion` at the final
+reviewed preview head `73ae7aa9ba14425abb066306cfabfea4fd83d3eb` and the normative
+`docs/review-workflow-completion.md` at that revision. The corrected wire is still pre-merge
+protocol development: upstream PR 206 is pending Anshuman review, must not be auto-merged, and no
+released `reviewWorkflow` version exists to grandfather. Legacy summaries without the additive
+field retain their existing completion behavior exactly. The Dockerfile and
 `DEFAULT_IMAGE_HARNESS_COMMIT` remain pinned to
-`f959cbcf010c7e41f780c718b65b1724d3aecb43`.
+`f959cbcf010c7e41f780c718b65b1724d3aecb43`; the public default does not imply that the preview
+contract has merged.
 
 ## Accepted wire
 
@@ -47,9 +49,13 @@ Positive credit additionally requires:
 1. scope mode and source ref agree with `summary.mode` and `summary.headRef`; the policy agrees with
    the original summary, and the sorted inventory agrees with the original bootstrap file surface;
 2. built-in source extensions and declared additional source extensions cannot receive a metadata
-   bypass. `README.py`, `LICENSE.js`, and `NOTICE.php` remain source unless the exact supported
-   path-exclusion policy applies. Original classification, reason, and derived disposition remain
-   distinct and consistent;
+   bypass. Repository metadata recognition is limited to extensionless README/LICENSE/COPYING/
+   NOTICE and the explicit `.md`, `.rst`, `.adoc`, and `.txt` forms. `README.py`, `LICENSE.js`, and
+   `NOTICE.php` remain source unless the exact supported path-exclusion policy applies;
+   `README.vbs`, `LICENSE.bat`, and other unknown or executable suffixes remain unsupported with
+   their native reasons. A self-consistent export cannot forge the recognized-metadata reason for
+   one of those paths or for an arbitrary name. Original classification, reason, and derived
+   disposition remain distinct and consistent;
 3. every supported source is assigned, every obligation file matches inventory bytes/procedures,
    and every obligation has exactly one matching receipt with completed terminals;
 4. every native dispatched call has unique invocation/request/response identity and exact ordered
@@ -86,11 +92,15 @@ limitation, not evidence that the file is harmless.
 
 ## Fixture, verification, and rollout
 
-`tests/fixtures/sv-review-workflow-summary.json` was captured from an actual deterministic upstream
-engine run at `8b8aff6` using an in-process test runner and no model/network call. The bounded
-consumer checker exercises 830 finite cases, including all seven stage bits and concrete runtime
-simulations that remove digest, input, stage-evidence, and original-call guards. See
+`tests/fixtures/sv-review-workflow-summary.json` was regenerated from an actual deterministic
+upstream engine run whose imports were bound to the checkout at
+`73ae7aa9ba14425abb066306cfabfea4fd83d3eb`, using an in-process test runner and no model/network
+call. The fixture includes a legitimate excluded `README.md` in an otherwise complete workflow.
+The bounded consumer checker exercises 834 finite cases, including all seven stage bits,
+self-consistent forged metadata exclusions, and concrete runtime simulations that remove digest,
+input, stage-evidence, original-call, and metadata-policy guards. See
 [SV completion bounded verification](sv-completion-bounded-verification.md).
 
-Consumer support alone is not scan readiness. A coordinated reviewed upstream pin, image build,
-and bounded live smoke remain required before issue 95 or broad-corpus readiness can be claimed.
+Consumer support is not a readiness claim. Upstream PR 206 remains pending Anshuman review and is
+not to be auto-merged. A coordinated approved upstream pin, image build, and bounded live smoke
+remain required before issue 95 or broad-corpus readiness can be claimed.

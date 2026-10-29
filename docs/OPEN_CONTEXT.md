@@ -302,15 +302,18 @@ newer SV-Agent builds. A reconciled positive report is labelled only as a **comp
 bootstrap review workflow**. The consumer recomputes the portable public inventory digest and
 reconciles original classification/policy, observed native inputs, dispatched-call
 invocation/request/response identity, obligations, terminals, and planner/anchor/structural/lint
-stage evidence. Source assessment remains `unassessed`; this is native producer-declared and
-cross-checked byte identity, not provider attestation, semantic proof, or a claim that source is
-safe. Exact legacy execution-anchor gaps may be explained only by inventory-backed explicit
-exclusions; failed anchors and unsupported source remain blocking. Malformed, incomplete, unknown,
-unsupported-mode, stale, cross-bound, omitted, duplicate, inconclusive, failed-stage, or
-failed/pending-call evidence stays `partial`, with imported findings retained. Legacy behavior is
-unchanged when the field is absent, and a malformed present field cannot fall back to legacy
-success. The supported pre-merge contract was reconciled at upstream head `8b8aff6`; the default
-image pin below still predates it.
+stage evidence. Repository metadata recognition is limited to extensionless README/LICENSE/
+COPYING/NOTICE and `.md`, `.rst`, `.adoc`, or `.txt`; unknown and executable suffixes remain
+unsupported and cannot forge the metadata-exclusion reason. Source assessment remains
+`unassessed`; this is native producer-declared and cross-checked byte identity, not provider
+attestation, semantic proof, or a claim that source is safe. Exact legacy execution-anchor gaps may
+be explained only by inventory-backed explicit exclusions; failed anchors and unsupported source
+remain blocking. Malformed, incomplete, unknown, unsupported-mode, stale, cross-bound, omitted,
+duplicate, inconclusive, failed-stage, or failed/pending-call evidence stays `partial`, with
+imported findings retained. Legacy behavior is unchanged when the field is absent, and a malformed
+present field cannot fall back to legacy success. The final preview contract was reconciled at
+upstream head `73ae7aa9ba14425abb066306cfabfea4fd83d3eb`; upstream PR 206 remains pending Anshuman
+review and must not be auto-merged. The default image pin below still predates it.
 
 The image default remains the upstream revision
 `f959cbcf010c7e41f780c718b65b1724d3aecb43`, which predates `reviewWorkflow`. Its
@@ -320,8 +323,8 @@ successful model response at the default pin still cannot produce a completed so
 through this route. Findings and diagnostic evidence remain available. Before the coordinated
 image pin changes, a bounded smoke may opt in only by building the image from the exact reviewed
 upstream commit and naming that same full commit with the existing `expected_harness_commit`
-override. Do not treat consumer support alone as live acceptance or as readiness for broad-corpus
-scoring.
+override. The public default must not imply that the preview contract has merged. Do not treat
+consumer support alone as live acceptance or as readiness for broad-corpus scoring.
 
 `model: "scaneval-synthetic/deterministic-open-context"` selects a DIAGNOSTIC in-process provider
 that calls no model: it issues `synthetic_tool_calls` and then answers with the harness's own

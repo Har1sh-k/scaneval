@@ -1,7 +1,7 @@
 {
   "mode": "bootstrap",
-  "repoPath": "/var/folders/34/szc45dvj02b34px3jv_y9mfw0000gn/T/sv-review-workflow-consumer-fixture-8OUXkV",
-  "headRef": "6d2427f070625d5f2fe2bbe3df5de7a85a9fa701",
+  "repoPath": "/var/folders/34/szc45dvj02b34px3jv_y9mfw0000gn/T/sv-review-workflow-consumer-fixture-irZesk",
+  "headRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
   "changedFiles": [
     ".github/workflows/ci.yml",
     "LICENSE",
@@ -14,7 +14,7 @@
     "version": 1,
     "catalogRevision": "e935b52a0f63a4911c898f4cd688916aaf2e13fc6aaed677bc521dfb38701cab",
     "head": {
-      "ref": "6d2427f070625d5f2fe2bbe3df5de7a85a9fa701",
+      "ref": "aa0135348318b45db6e014f91c092f86e96f34eb",
       "records": [],
       "coverage": {
         "status": "ok",
@@ -413,7 +413,7 @@
   "analysisMode": "llm",
   "additionalCodeExtensions": [],
   "codebaseProfile": {
-    "lastUpdated": "2026-10-29T17:16:15.815Z",
+    "lastUpdated": "2026-10-29T17:35:22.048Z",
     "frameworks": [],
     "productSurfaces": [],
     "trustBoundaries": [],
@@ -566,7 +566,7 @@
               "partialFiles": [],
               "omittedFiles": [],
               "transport": "succeeded",
-              "invocationId": "75f47ce4-e41a-4168-aef2-579f2d316985",
+              "invocationId": "92d737de-1588-486f-a09f-6af3fc284a8b",
               "requestDigest": "50259f801fa7d2422a4d71b5a9a108d59a51df109fcf06263b3b6200ddec9ec5",
               "responseDigest": "7746732a82bd1163d26c875749f0574fe1e60d784585f9841a70e18cc4096275"
             }
@@ -620,8 +620,8 @@
     "status": "complete",
     "scope": {
       "mode": "bootstrap",
-      "sourceRef": "6d2427f070625d5f2fe2bbe3df5de7a85a9fa701",
-      "inventoryDigest": "7df2ee8edfd9cf9710de50cece06c6e49b69daf13f2eb4361ec12fa9ae80f838",
+      "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
+      "inventoryDigest": "f91d93b319420e33a7b6c7014dcbf5a781f69517f8d929faaec79cc093acef1e",
       "inventoryDigestPreimage": "review-workflow-inventory/v1",
       "policy": {
         "version": "bootstrap-source-review/v1",
@@ -631,7 +631,7 @@
     "inventory": [
       {
         "path": ".github/workflows/ci.yml",
-        "sourceRef": "6d2427f070625d5f2fe2bbe3df5de7a85a9fa701",
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
         "objectId": "85935ed78e3ad1b0127b6ef6efeea9abd654ea72",
         "mode": "100644",
         "sha256": null,
@@ -643,7 +643,7 @@
       },
       {
         "path": "LICENSE",
-        "sourceRef": "6d2427f070625d5f2fe2bbe3df5de7a85a9fa701",
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
         "objectId": "c3a5043e1ca8e5a4723131c8dac0cd54fafd6f36",
         "mode": "100644",
         "sha256": null,
@@ -655,7 +655,7 @@
       },
       {
         "path": "README.md",
-        "sourceRef": "6d2427f070625d5f2fe2bbe3df5de7a85a9fa701",
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
         "objectId": "1b305c626d6b76d6dd95133010bfe47e8700c951",
         "mode": "100644",
         "sha256": null,
@@ -667,7 +667,7 @@
       },
       {
         "path": "package.json",
-        "sourceRef": "6d2427f070625d5f2fe2bbe3df5de7a85a9fa701",
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
         "objectId": "f956bf6ea87815daeab8d8064de61f520d777d21",
         "mode": "100644",
         "sha256": null,
@@ -679,7 +679,7 @@
       },
       {
         "path": "src/neutral.ts",
-        "sourceRef": "6d2427f070625d5f2fe2bbe3df5de7a85a9fa701",
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
         "objectId": "3c16c28ecb726d51ff25193da9b1637eabae1df0",
         "mode": "100644",
         "sha256": "72893e68d86edf7a52bd4890976d90178eb466c1d52c1b44f6aa362ed3641b25",
@@ -693,7 +693,7 @@
       },
       {
         "path": "tsconfig.json",
-        "sourceRef": "6d2427f070625d5f2fe2bbe3df5de7a85a9fa701",
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
         "objectId": "3330a0cb91e661bb049dba3b26f1d1d1b6c1139c",
         "mode": "100644",
         "sha256": null,
@@ -706,11 +706,11 @@
     ],
     "obligations": [
       {
-        "invocationId": "75f47ce4-e41a-4168-aef2-579f2d316985",
+        "invocationId": "92d737de-1588-486f-a09f-6af3fc284a8b",
         "model": "test/review-workflow",
         "hypothesisId": "TM-REVIEW-001",
         "shardIndex": 1,
-        "sourceRef": "6d2427f070625d5f2fe2bbe3df5de7a85a9fa701",
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
         "files": [
           {
             "path": "src/neutral.ts",
@@ -727,11 +727,11 @@
     "receipts": [
       {
         "schemaVersion": 1,
-        "invocationId": "75f47ce4-e41a-4168-aef2-579f2d316985",
+        "invocationId": "92d737de-1588-486f-a09f-6af3fc284a8b",
         "model": "test/review-workflow",
         "hypothesisId": "TM-REVIEW-001",
         "shardIndex": 1,
-        "sourceRef": "6d2427f070625d5f2fe2bbe3df5de7a85a9fa701",
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
         "requestDigest": "50259f801fa7d2422a4d71b5a9a108d59a51df109fcf06263b3b6200ddec9ec5",
         "responseDigest": "7746732a82bd1163d26c875749f0574fe1e60d784585f9841a70e18cc4096275",
         "files": [
@@ -766,7 +766,7 @@
             "bytes": 66
           }
         ],
-        "sourceRef": "6d2427f070625d5f2fe2bbe3df5de7a85a9fa701",
+        "sourceRef": "aa0135348318b45db6e014f91c092f86e96f34eb",
         "objectId": "3c16c28ecb726d51ff25193da9b1637eabae1df0",
         "binding": "matched"
       }

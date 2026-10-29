@@ -28,7 +28,7 @@ FIXTURE = ROOT / "tests/fixtures/sv-review-workflow-summary.json"
 ADAPTER = ROOT / "src/scaneval/adapters/llm_harness.py"
 DESIGN = ROOT / "docs/designs/sv-completion-bounded-verification.md"
 SOURCE_REF = "a" * 40
-PRODUCER_HEAD = "8b8aff6d9a868ba2d1bbda23cee882b5f836cc3f"
+PRODUCER_HEAD = "73ae7aa9ba14425abb066306cfabfea4fd83d3eb"
 PROCEDURES = ("security-review", "category:configuration")
 HEALTH_NAMES = ("model", "delivery", "lint", "markers", "specialists")
 STAGE_NAMES = ("planner", "executionAnchors", "modelCalls", "structural", "lint", "markers", "specialists")
@@ -671,6 +671,29 @@ def contract_guard_cases() -> Iterable[Case]:
         report["scope"]["inventoryDigest"] = llm_harness._canonical_inventory_digest(report["scope"], report["inventory"])
 
     yield case("metadata-named-code-bypass", metadata_source_bypass, state=mixed_state)
+    yield case("recognized-metadata-readme-md", lambda _summary: None,
+               "reach:recognized_metadata", state=mixed_state, expected=True)
+
+    def forged_metadata_exclusion(path: str) -> Callable[[dict], None]:
+        def mutate(summary: dict) -> None:
+            report = summary["reviewWorkflow"]
+            entry = next(item for item in report["inventory"] if item["path"] == "README.md")
+            old_prefix = llm_harness._profile_prefix(entry["path"])
+            entry["path"] = path
+            summary["changedFiles"] = [item["path"] for item in report["inventory"]]
+            for surface in summary["executionAnchorCoverage"]["surfaces"]:
+                if surface["prefix"] == old_prefix:
+                    surface["prefix"] = llm_harness._profile_prefix(path)
+            report["scope"]["inventoryDigest"] = llm_harness._canonical_inventory_digest(
+                report["scope"], report["inventory"])
+        return mutate
+
+    yield case("forged-metadata-readme-vbs", forged_metadata_exclusion("README.vbs"),
+               "guard:metadata", state=mixed_state)
+    yield case("forged-metadata-license-bat", forged_metadata_exclusion("LICENSE.bat"),
+               state=mixed_state)
+    yield case("forged-metadata-arbitrary-extensionless", forged_metadata_exclusion("arbitraryname"),
+               state=mixed_state)
 
     def additional_extension_bypass(summary: dict) -> None:
         report = summary["reviewWorkflow"]
@@ -761,8 +784,8 @@ def generated_cases() -> list[Case]:
     names = [case.name for case in cases]
     if len(names) != len(set(names)):
         raise AssertionError("generated case names are not unique")
-    if len(cases) != 830:
-        raise AssertionError(f"finite-domain drift: expected 830 cases, generated {len(cases)}")
+    if len(cases) != 834:
+        raise AssertionError(f"finite-domain drift: expected 834 cases, generated {len(cases)}")
     return cases
 
 
@@ -781,6 +804,7 @@ def required_witnesses(cases: list[Case], decisions: dict[str, Decision]) -> dic
         "accepted_zero_findings": lambda case: "reach:findings:0" in case.tags,
         "accepted_findings": lambda case: "reach:findings:1" in case.tags,
         "accepted_disabled_lint": lambda case: "reach:disabled_lint" in case.tags,
+        "accepted_recognized_metadata": lambda case: "reach:recognized_metadata" in case.tags,
         "rejected_unassigned": lambda case: case.name == "inventory-f1-p1-dunassigned-a1",
         "rejected_unsupported": lambda case: "inventory:unsupported" in case.tags,
         "rejected_missing_receipt": lambda case: "fault:missing_receipt_only" in case.tags,
@@ -802,6 +826,9 @@ def required_witnesses(cases: list[Case], decisions: dict[str, Decision]) -> dic
         "rejected_input_removal": lambda case: case.name == "guard-input-missing",
         "rejected_stage_evidence": lambda case: case.name == "guard-planner-evidence",
         "rejected_metadata_code_bypass": lambda case: case.name == "metadata-named-code-bypass",
+        "rejected_unknown_metadata_suffix": lambda case: case.name == "forged-metadata-readme-vbs",
+        "rejected_executable_metadata_suffix": lambda case: case.name == "forged-metadata-license-bat",
+        "rejected_extensionless_metadata_forgery": lambda case: case.name == "forged-metadata-arbitrary-extensionless",
         "rejected_additional_extension_bypass": lambda case: case.name == "additional-extension-bypass",
         "rejected_original_invocation": lambda case: case.name == "guard-original-invocation",
         "rejected_original_request": lambda case: case.name == "guard-original-request",
@@ -883,6 +910,10 @@ def mutant_results(cases: list[Case]) -> dict[str, dict]:
             "original_obligation_set_mismatch",
         }) if "guard:original" in case.tags else _production_acceptor(case, summary)
 
+    def remove_metadata_policy_guard(case: Case, summary: dict) -> bool:
+        return without_guards(summary, reconciliation={"inventory_policy_mismatch"}) \
+            if "guard:metadata" in case.tags else _production_acceptor(case, summary)
+
     mutants = {
         "always_accept": always_accept,
         "always_reject": always_reject,
@@ -893,6 +924,7 @@ def mutant_results(cases: list[Case]) -> dict[str, dict]:
         "remove_input_guard": remove_input_guard,
         "remove_stage_evidence_guard": remove_stage_evidence_guard,
         "remove_original_binding_guards": remove_original_binding_guards,
+        "remove_metadata_policy_guard": remove_metadata_policy_guard,
     }
     results = {}
     for name, acceptor in mutants.items():
@@ -967,7 +999,7 @@ def run_checker() -> dict:
             "finite domains are exhaustive only over the dimensions documented in docs/designs/sv-completion-bounded-verification.md",
             "no proof of Git inventory completeness or classification, producer truthfulness, actual source delivery, or semantic model understanding",
             "no proof of network/container behavior, hash security, provider identity, or arbitrary Python/TypeScript executions",
-            "five faulty acceptance functions are abstract self-tests; four additional checks are temporary runtime production-guard removals, not compiled source mutants",
+            "five faulty acceptance functions are abstract self-tests; five additional checks are temporary runtime production-guard removals, not compiled source mutants",
             "the current upstream producer does not demonstrate a bootstrap all-excluded completion report; this checker materializes the wire contract's valid not-required form",
         ],
         "ok": not mismatches and all(item["detected"] for item in mutants.values()),
