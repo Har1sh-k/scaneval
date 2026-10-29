@@ -90,7 +90,7 @@ def test_equivalent_alias_vectors_preserve_lowest_case_original_evidence(referen
                                        refs(reordered, "case-a") + refs(reference, "case-b"))
     assert result["status"] == "assessed"
     assert result["reason"] is None
-    assert result["reference"]["vector"] == reordered_vector
+    assert result["reference"] == reordered
 
 
 def test_equivalent_numeric_notation_is_new_semantics_only():
@@ -175,6 +175,7 @@ def test_generated_legacy_report_replays_historical_semantics_and_new_reports_us
     reordered = {**REFERENCE, "vector": "CVSS:3.1/A:N/I:H/C:H/S:U/UI:N/PR:N/AC:L/AV:N"}
     run, pack = fixture_run(tmp_path, count=2, aliases=True, references={0: reordered})
     legacy = severity._calibrate([run], pack, policy=None, calibrator_version=severity.LEGACY_VERSION)
+    assert legacy == severity._calibrate([run], pack, policy=None, calibrator_version=severity.LEGACY_VERSION)
     assert legacy["calibrator_version"] == "severity-calibration-1"
     assert legacy["records"][0]["reason"] == "conflicting_references"
     pack_path, report_path = tmp_path / "pack.json", tmp_path / "legacy-severity.json"
