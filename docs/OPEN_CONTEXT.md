@@ -297,14 +297,26 @@ not treated as legacy absence. Research/history attestation and scan assessment 
 remain separate: the synthetic image fixture can attest `open_context` while its native source
 assessment is `unknown`, so its outcome is `partial`.
 
-This is also a limitation of real bootstrap scans at the pinned upstream revision
-`f959cbcf010c7e41f780c718b65b1724d3aecb43`. Its source-assessment contract has no
-completed state: delivered source remains `unassessed`, and missing source evidence remains
-`not-recorded`. Both add an unknown-coverage reason. A successful model response therefore
-cannot produce a completed source-scan score through this route. Findings and diagnostic
-evidence remain available, but full-corpus scoring must wait for an upstream completion
-contract backed by assessment evidence. Changing the adapter to treat delivery or an empty
-findings array as completed assessment would not resolve this limitation.
+ScanEval also understands the additive `summary.reviewWorkflow` version 1 contract from newer
+SV-Agent builds. A reconciled positive report is labelled only as a **completed declared bootstrap
+review workflow**: immutable inventory, obligation, request/response receipt, terminal, stage, and
+original-summary identities agree. Source assessment remains `unassessed`; this is native
+producer-declared/provenance-checked workflow evidence, not provider attestation, semantic proof,
+or a claim that the source is safe. Malformed, incomplete, unknown, unsupported-mode, stale,
+cross-bound, omitted, duplicate, inconclusive, failed-stage, or failed/pending-call evidence stays
+`partial`, with imported findings retained. Legacy behavior is unchanged when the new field is
+absent, and a malformed present field cannot fall back to legacy success.
+
+The image default remains the upstream revision
+`f959cbcf010c7e41f780c718b65b1724d3aecb43`, which predates `reviewWorkflow`. Its
+source-assessment contract has no completed state: delivered source remains `unassessed`, and
+missing source evidence remains `not-recorded`. Both add an unknown-coverage reason, so a
+successful model response at the default pin still cannot produce a completed source-scan score
+through this route. Findings and diagnostic evidence remain available. Before the coordinated
+image pin changes, a bounded smoke may opt in only by building the image from the exact reviewed
+upstream commit and naming that same full commit with the existing `expected_harness_commit`
+override. Do not treat consumer support alone as live acceptance or as readiness for broad-corpus
+scoring.
 
 `model: "scaneval-synthetic/deterministic-open-context"` selects a DIAGNOSTIC in-process provider
 that calls no model: it issues `synthetic_tool_calls` and then answers with the harness's own
