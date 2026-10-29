@@ -340,12 +340,23 @@ def test_committed_research_candidates_remain_pending(registry):
                for c in chronology["candidates"])
 
     by_id = {c["cve_id"]: c for c in research["candidates"]}
+    low_cases = [by_id[cve] for cve in ("CVE-2026-105742", "CVE-2026-106449")]
+    for case in low_cases:
+        assert case["status"] == "research_candidate_pending"
+        assert case["candidate_vulnerable_revision"]["introducing_commit"] is None
+        assert case["dates"]["earliest_public_evidence_lower_bound"] is None
+        assert case["dates"]["exhaustive_prior_public_history_checked"] is False
+        assert case["research_notes"]["research_update_date"] == "2026-10-29"
+        provenance = case["research_notes"]["exposure_provenance"]
+        assert provenance["limitation"].strip()
+        assert provenance["authenticated_model_invocation_receipt"] is False
+        assert provenance["establishes_training_contamination"] is False
+
     docling = by_id["CVE-2026-105742"]
-    assert docling["candidate_vulnerable_revision"]["introducing_commit"] is None
     assert docling["research_notes"]["introduction_candidate"]["merge_commit_sha"] == \
         "0a15088e63c08842f5cc3b85b55f06231e5bcf60"
-    assert docling["research_notes"]["exposure_provenance"]["classification"] == \
-        "public_upstream_attribution"
+    assert docling["research_notes"]["exposure_provenance"]["verification_status"] == \
+        "verified_in_retained_primary_source_extract"
 
     lz4 = by_id["CVE-2026-106449"]
     ancestry = {item["relationship"]: item for item in lz4["research_notes"]["release_ancestry"]}
@@ -353,10 +364,8 @@ def test_committed_research_candidates_remain_pending(registry):
     assert ancestry["v1.11.3_to_candidate_vulnerable_revision"]["behind_by"] == 0
     assert ancestry["candidate_fix_to_v1.11.4"]["ahead_by"] == 2
     assert ancestry["candidate_fix_to_v1.11.4"]["behind_by"] == 0
-    assert lz4["research_notes"]["exposure_provenance"]["classification"] == \
-        "public_upstream_attribution"
-    assert all(by_id[cve]["dates"]["earliest_public_evidence_lower_bound"] is None
-               for cve in ("CVE-2026-105742", "CVE-2026-106449"))
+    assert lz4["research_notes"]["exposure_provenance"]["verification_status"] == \
+        "verified_in_retained_primary_source_extract"
 
     report = assess_candidates(registry, chronology, ["claude-opus-5-5"])
     assert report["eligible_total"] == 0
