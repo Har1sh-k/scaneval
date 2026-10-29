@@ -1951,6 +1951,41 @@ def test_a_record_this_run_could_not_read_makes_the_candidate_population_partial
     assert execution["capture"]["finding_candidate"] == "partial"
 
 
+def test_a_native_finding_missing_from_the_export_is_import_loss_not_silent_success(tmp_path, monkeypatch):
+    """The process record is authoritative evidence that export must conserve.
+
+    Dropping one valid finding from the separately rendered JSON export used to return success
+    with one claim, silently losing the other finding DeepSec had already recorded.
+    """
+    root = fake_deepsec_root(tmp_path)
+    stub_collector(monkeypatch, tmp_path)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root)
+    preparation = adapter.prepare(spec, tmp_path / "cache")
+    original = deepsec_module.run_command
+
+    def run_command(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[1] == "export":
+            export = Path(kwargs["cwd"]).parent / "deepsec-export.json"
+            payload = json.loads(export.read_text(encoding="utf-8"))
+            payload.pop()
+            export.write_text(json.dumps(payload), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(deepsec_module, "run_command", run_command)
+    bundle = run_invocation(prepared=prepared_input(tmp_path), adapter=adapter, spec=spec,
+                            preparation=preparation, out_dir=tmp_path / "out",
+                            run_id="run-deepsec", timeout_seconds=120, trace_mode="content",
+                            network_policy="model_provider_only", clock=CLOCK)
+    result, execution = documents(bundle)
+    assert result["status"] == "partial" and result["error"]["code"] == "import_loss"
+    assert len(result["claims"]) == 1, "the finding export did retain is still reported"
+    assert result["bundles_resolved"] is False
+    assert execution["capture"]["finding_submitted"] == "partial"
+    assert any("file records hold 1 native finding" in note for note in execution["notes"])
+
+
 def test_an_export_finding_that_was_lost_makes_finding_submitted_partial(tmp_path, monkeypatch):
     root = fake_deepsec_root(tmp_path)
     stub_collector(monkeypatch, tmp_path)

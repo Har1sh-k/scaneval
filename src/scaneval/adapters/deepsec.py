@@ -1191,6 +1191,23 @@ class DeepsecImport(NamedTuple):
     findings: list[dict]
 
 
+def native_finding_ids(files: tuple[tuple[str, dict], ...]) -> frozenset[str]:
+    """Every usable native finding id in the file records.
+
+    DeepSec's file records are the durable output of ``process`` and its JSON export is a
+    separate rendering step. A finding present in the former but absent from the latter is not
+    an empty result: it is a reported finding the adapter lost. Only non-empty string ids are
+    counted, because malformed record entries cannot be correlated without inventing identity.
+    """
+    return frozenset(
+        identifier
+        for _name, record in files
+        for finding in (record.get("findings") if isinstance(record.get("findings"), list) else ())
+        if isinstance(finding, dict)
+        if isinstance(identifier := finding.get("findingId"), str) and identifier
+    )
+
+
 def finding_ids(files: tuple[tuple[str, dict], ...]) -> dict[tuple[str, str], str]:
     """``{(file path, title): findingId}`` from the file records.
 
@@ -2296,11 +2313,21 @@ class DeepsecAdapter(Adapter):
             except (UnicodeDecodeError, ValueError) as exc:
                 export_failure = f"the export is not readable JSON ({exc})"
         imported = DeepsecImport([], [], 0, [])
+        record_finding_ids = native_finding_ids(records.files)
         if export_failure is None:
             try:
                 imported = import_export(exported, ids=finding_ids(records.files))
             except AdapterError as exc:
                 export_failure = str(exc)
+        imported_finding_ids = frozenset(
+            claim["native_id"] for claim in imported.claims
+            if isinstance(claim.get("native_id"), str) and claim["native_id"])
+        missing_finding_ids = record_finding_ids - imported_finding_ids
+        findings_lost = imported.lost + len(missing_finding_ids)
+        finding_import_notes = ([] if not missing_finding_ids else [
+            f"DeepSec's file records hold {len(missing_finding_ids)} native finding(s) that its JSON export did "
+            "not contain; those findings could not be imported, so the run is incomplete."
+        ])
 
         # A PR review's own facts. ``output`` is what DeepSec printed and is advisory only: what an
         # exit 1 means is read from the records it left, which is where each of its three causes
@@ -2366,7 +2393,7 @@ class DeepsecAdapter(Adapter):
             # Everything this run already knows it did not see. A category may not claim
             # completeness over a population this run could not read in full, and none may
             # claim it over an observer that reported a hole in its own record.
-            record_failures=len(records.failures), findings_lost=imported.lost,
+            record_failures=len(records.failures), findings_lost=findings_lost,
             capture_gap=bool((capture_state or {}).get("capture_gap")
                              or (capture_state or {}).get("dropped_events")))
         models = sorted({session.model for session in sessions if session.model})
@@ -2425,7 +2452,7 @@ class DeepsecAdapter(Adapter):
             "no tool ran.",
             f"{len(candidates)} regex candidate(s) and {len(sessions)} agent session(s) were read "
             f"out of {len(records.files)} file record(s).",
-        ] + notes + list(imported.notes)
+        ] + notes + list(imported.notes) + finding_import_notes
         if pr is not None:
             if config.limit is not None:
                 notes.append(f"config.limit ({config.limit}) was not passed to DeepSec: its direct mode never applies "
@@ -2511,7 +2538,7 @@ class DeepsecAdapter(Adapter):
                     # the run goes on, so the claims of the batches that finished are all there is.
                     # So is a changed path DeepSec never listed: the claims about the rest are a
                     # part delivered, and a budget read off a part reads as one read off the whole.
-                    bundles_resolved=(imported.lost == 0 and not records.failures
+                    bundles_resolved=(findings_lost == 0 and not records.failures
                                       and statuses.incomplete == 0
                                       and (pr is None or not (statuses.errored or omitted))))
         exit_code = None
@@ -2566,11 +2593,11 @@ class DeepsecAdapter(Adapter):
                                         "message": f"deepsec exported findings this adapter could not "
                                                    f"read: {export_failure}; stderr: {tail('export')}"[:2000]},
                                  **base)
-        if imported.lost or records.failures:
-            detail = "; ".join(list(imported.notes) + list(records.failures))
+        if findings_lost or records.failures:
+            detail = "; ".join(list(imported.notes) + finding_import_notes + list(records.failures))
             return NativeOutcome(status="partial", exit_code=exit_code, claims=imported.claims,
                                  error={"code": "import_loss",
-                                        "message": f"{imported.lost} exported finding(s) and "
+                                        "message": f"{findings_lost} DeepSec finding(s) and "
                                                    f"{len(records.failures)} DeepSec record(s) could not "
                                                    f"be imported: {detail}"[:2000]},
                                  omitted_paths=unexamined, examined_nothing=nothing_examined, **base)
