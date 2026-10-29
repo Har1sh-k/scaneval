@@ -1283,11 +1283,20 @@ def test_a_slug_maps_to_a_kind_through_its_separators_and_an_unknown_one_stays_u
     ("go-command-injection", "command_injection"),
 ])
 def test_native_deepsec_kinds_import_with_original_identity(slug, kind):
+    record = (("src/example.go.json", {
+        "filePath": "src/example.go", "projectId": "native-project",
+        "analysisHistory": [{"runId": "native-run"}],
+        "findings": [{"findingId": "native-finding", "severity": "HIGH", "vulnSlug": slug,
+                      "title": "Native allegation", "description": "Native evidence",
+                      "lineNumbers": [12], "recommendation": "Review the native allegation.",
+                      "confidence": "high", "producedByRunId": "native-run"}],
+    }),)
     payload = [{"title": "[HIGH] Native allegation", "description": "Native evidence",
-                "metadata": {"filePath": "src/example.go", "lineNumbers": [12],
-                             "vulnSlug": slug, "severity": "HIGH"}}]
-    imported = import_export(payload, artifact_id="native-export",
-                             ids={("src/example.go", "Native allegation"): "native-finding"})
+                "severity": "HIGH", "metadata": {
+                    "projectId": "native-project", "filePath": "src/example.go",
+                    "lineNumbers": [12], "severity": "HIGH", "vulnSlug": slug,
+                    "confidence": "high", "runId": "native-run"}}]
+    imported = import_export(payload, artifact_id="native-export", ids=finding_ids(record))
     assert imported.lost == 0
     claim, = imported.claims
     assert claim["kind"] == kind
