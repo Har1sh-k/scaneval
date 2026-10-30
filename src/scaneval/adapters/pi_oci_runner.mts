@@ -46,6 +46,7 @@ type Exec = (command: string, args: string[], options: {
 
 export interface PiInvocation {
   args?: string[];
+  stdin?: unknown;
   cwd: string;
   timeoutMs: number;
   env?: Record<string, string | undefined>;
@@ -257,6 +258,11 @@ export function createPiOciRawRunner(options: PiOciRunnerOptions) {
   }
   return {
     async runPi(invocation: PiInvocation): Promise<ExecResult & { binary: string; outputFormat: "text"; piStream: PiCallObservation }> {
+      // This runner pipes the stage's last argv word itself. A stage that already supplies its
+      // prompt on stdin would otherwise be sent a different prompt than the one it asked for.
+      if (invocation.stdin !== undefined) {
+        throw new Error("the harness stage passed a prompt on stdin; the image runner takes the prompt only from argv");
+      }
       const stage = parseStageArgs(invocation.args);
       if (stage.model !== options.requestedModel) {
         throw new Error(`the harness stage asked for model route ${JSON.stringify(stage.model)}, but this run pins `
