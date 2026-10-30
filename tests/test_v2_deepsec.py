@@ -4947,3 +4947,14 @@ def test_a_full_run_without_the_map_sends_no_manifest(tmp_path, monkeypatch):
     assert result["status"] == "success" and "omitted_paths" not in result
     assert "--manifest" not in execution["command"]
     assert "deepsec-process-manifest" not in {artifact["id"] for artifact in execution["raw_artifacts"]}
+
+
+def test_the_documented_curated_configuration_is_one_the_adapter_accepts(tmp_path):
+    """The design document's fabricated example, with only its installation path pointed at the fake CLI."""
+    text = (ROOT / "docs" / "designs" / "deepsec-curated-processing.md").read_text(encoding="utf-8")
+    example = json.loads(text.split("```json\n", 1)[1].split("```", 1)[0])
+    config = dict(example["config"], deepsec_root=str(fake_deepsec_root(tmp_path)))
+    accepted = settings(SystemSpec(example["system_id"], example["adapter"], config))
+    assert accepted.process_manifest_by_tree == {
+        tree: tuple(paths) for tree, paths in example["config"]["process_manifest_by_tree"].items()}
+    assert get_adapter("deepsec").adapter_version == "1.2.0"
