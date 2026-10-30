@@ -2,12 +2,13 @@
 
 Issue: [#117](https://github.com/Har1sh-k/scaneval/issues/117).
 
-Curated processing points DeepSec's AI stage at chosen paths of a full run. It is
-for investigating one question: given the regex candidates DeepSec finds anyway,
-what does its agent report when it is sent only these files? It is opt-in,
-diagnostic, and never a benchmark. A curated run is never a `success`, so it
-completes no control and earns no quiet credit. It is not a blind
-full-repository comparison and must not be reported as one.
+Curated processing chooses which regex candidates of a full run DeepSec assigns to
+AI batches. It is for investigating one question: given the regex candidates
+DeepSec finds anyway, what does its agent report when only the candidates on
+chosen paths are assigned a batch? It is opt-in, diagnostic, and never a
+benchmark. A curated run is never a `success`, so it completes no control and
+earns no quiet credit. It is not a blind full-repository comparison and must not
+be reported as one.
 
 ## Configuration
 
@@ -41,7 +42,11 @@ The example below is fabricated. Its tree hash and paths name no real corpus.
 
 Without the key, the adapter runs an ordinary full scan. Adapter version 1.2.0
 honors the key. An earlier adapter ignores it and runs unscoped, which is why the
-version changed.
+version changed. An experiment frozen against adapter 1.1.0 records that version in
+its systems' adapter identity, so executing it with 1.2.0 is refused as version
+drift until a new configuration is deliberately frozen, and the matrix report flags
+an execution whose adapter differs from the frozen identity as
+`adapter_version_drift`. Existing 1.1.0 runs and their replay are not rewritten.
 
 ## What runs
 
@@ -49,9 +54,11 @@ version changed.
 2. `deepsec process` runs in standard mode with `--manifest
    raw/deepsec-process-manifest.json`. That file holds exactly the configured
    array for this tree. DeepSec 2.3.10 reads the array into a `Set` and selects a
-   pending record when `Set.has(record.filePath)` holds. The match is exact, with
-   no normalization and no directory prefix. `--limit` applies after that
-   selection, and records it does not select stay `pending`.
+   pending record for an AI batch when `Set.has(record.filePath)` holds. The match
+   is exact, with no normalization and no directory prefix. `--limit` applies after
+   that selection, and records it does not select are assigned no batch and stay
+   `pending`. Selection decides batch assignment only. It is not a sandbox: the
+   agent still runs with the whole repository visible.
 3. `deepsec export` runs unchanged. It reads every record and ignores the
    manifest.
 
@@ -64,13 +71,14 @@ workspace.
 - A key that is present but malformed: `null`, `{}`, a non-object, a key that is
   not `sha256:` and 64 lowercase hex digits, a value that is not a non-empty
   array, or an item that is not a string. An explicit empty array is refused,
-  because it would send the AI stage nothing.
+  because it would assign no AI batch.
 - A path DeepSec could not record as written. That covers empty strings,
   duplicates, a NUL byte or any other control character (newline included), a
   lone surrogate, a backslash, an absolute path, a drive letter, leading or
   trailing whitespace, and an empty, `.` or `..` segment (so `./x`, `a//b`, a
-  trailing `/`, and traversal). Paths are never rewritten, because the digest has
-  to bind what DeepSec is sent.
+  trailing `/`, and traversal). The drive-letter test is any ASCII letter followed
+  by `:` at the start, so it also refuses a valid POSIX name such as `a:b`. Paths
+  are never rewritten, because the digest has to bind the manifest DeepSec reads.
 - A request whose tree hash has no entry. The adapter never falls back to an
   unscoped run.
 - A listed path that is not a regular file of that tree as spelled, checked
@@ -88,8 +96,8 @@ The curated run only names populations inside that accounting:
 
 | Population | How it is reported |
 | --- | --- |
-| Regex records on a listed path | Selected. Only these can reach the AI stage. |
-| Regex records not listed, left as the scan wrote them | Kept from the AI stage. They stay `pending`, which makes the run `scope_incomplete`, and they are the result's `omitted_paths`. |
+| Regex records on a listed path | Selected. Only these can be assigned an AI batch. |
+| Regex records not listed, left as the scan wrote them | Assigned no AI batch. They stay `pending`, which makes the run `scope_incomplete`, and they are the result's `omitted_paths`: candidates with no assigned verdict, not files shown to be unread. |
 | Listed paths with no record | No regex candidate there, or DeepSec's ignore filter skipped the file. No AI batch ran. That is native triage, not a model's miss. |
 | Unlisted records with analysis, findings, or a status other than `pending`, and claims on unlisted paths | Kept, and the run fails as `process_manifest_not_honored`. |
 
@@ -112,6 +120,13 @@ when no AI batch ran, and `partial` already withholds every quiet credit.
 - Selection uses evaluator-side knowledge. Results from it are diagnostics about
   DeepSec's agent on chosen files. They are not detection rates, false-negative
   counts, or a comparison with other systems.
+- The manifest holds paths only. It carries no benchmark label, case identifier,
+  or reason for the selection.
+- Selection assigns AI batches. It does not restrict repository access. The agent
+  still sees the whole repository and may read unselected files, for example while
+  following an import. `omitted_paths` lists candidates that got no assigned
+  verdict. It is not evidence that those files were never read. Network and
+  source policy are unchanged.
 - The adapter cannot see DeepSec's ignore filter. A listed path with no record is
   reported as "no candidate or ignored", without saying which.
 - A file whose name begins or ends with whitespace cannot be listed.

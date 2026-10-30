@@ -4668,7 +4668,7 @@ def test_a_full_run_over_a_tree_holding_a_name_deepsecs_pr_listing_cannot_resolv
 
 def curated_run(tmp_path: Path, monkeypatch, paths: list[str], *, control: dict | None = None,
                 extra_files: dict[str, str] | None = None, **overrides) -> Path:
-    """One full run through the runner whose AI stage is curated to *paths* for its own input tree."""
+    """One full run through the runner whose AI batches are limited to *paths* for its own input tree."""
     stub_collector(monkeypatch, tmp_path)
     root = fake_deepsec_root(tmp_path, **(control or {}))
     prepared = prepared_input(tmp_path, extra_files)
@@ -4818,7 +4818,7 @@ def test_a_selected_file_the_ai_stage_never_reached_is_unfinished_and_not_omitte
     assert process_argv(execution["command"])[-6:-4] == ["--limit", "1"]
     assert result["status"] == "partial" and result["error"]["code"] == "scope_incomplete"
     assert "1 of 2 file record(s) were left unfinished under config.limit 1" in result["error"]["message"]
-    assert "kept 0 regex candidate file(s)" in result["error"]["message"]
+    assert "assigned none to 0 regex candidate file(s)" in result["error"]["message"]
     assert len(result["claims"]) == 1 and result["omitted_paths"] == []
 
 
@@ -4834,7 +4834,7 @@ def test_an_ai_stage_that_did_not_keep_to_the_manifest_is_reported_with_every_cl
     assert {claim["primary_location"]["path"] for claim in result["claims"]} == {"src/db.js", "src/server.js"}
     # It was examined, out of scope, so it is not listed as a path the scanner left alone.
     assert result["omitted_paths"] == [] and result["bundles_resolved"] is False
-    assert any("did not keep to the declared scope" in note for note in execution["notes"])
+    assert any("outside the declared AI-batch assignment" in note for note in execution["notes"])
 
 
 def test_a_manifest_changed_during_the_run_is_reported(tmp_path, monkeypatch):
