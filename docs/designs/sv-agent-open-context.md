@@ -36,7 +36,10 @@ reason; no implicit provider, model, scanner, or condition fallback is allowed.
   --no-tools or instructions forbidding all external lookup. The newly pinned clean upstream
   revision does not have that old wrapper behavior. Use the harness's retry/isolation seams when
   compatible, and document any transport-only difference. Do not alter its scan stages or
-  silently truncate the source population. Preserve prompts passed on stdin and native sessions. Forward abortSignal and maxOutputBytes.
+  silently truncate the source population. The image runner takes the stage prompt only as the
+  last argv word and transports it to Pi on stdin; a stage-provided invocation.stdin is refused
+  rather than silently replaced by the argv prompt. Preserve native sessions. Forward
+  abortSignal and maxOutputBytes.
   The pinned upstream exposes neither observer hooks nor resolveRunnerBinary: explicitly resolve
   the image route as Pi for session capture and preserve unavailable inner-event evidence.
   Enforce configured high reasoning on every evaluated call, including specialist retries,
