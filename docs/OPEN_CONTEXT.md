@@ -244,7 +244,8 @@ composed under the harness's own `createRetryingPiRunner(createIsolatedPiRunner(
 classification, per-call temporary working directories and argv NUL escaping stay upstream's, and
 no stage, prompt or file selection changes. Its transport differences are stated in
 `pi_oci_runner.mts`: the prompt travels on stdin (Pi trims leading and trailing whitespace of
-piped input), Pi runs in JSON mode and the engine receives exactly the text `--print` would have
+piped input, and a stage that already pipes its own prompt is refused rather than sent the last
+argv word instead), Pi runs in JSON mode and the engine receives exactly the text `--print` would have
 printed, and argv is rebuilt with `--no-extensions -e <extension>`, an exact `--tools` allowlist,
 and MCP, skills, prompt templates, themes, context files and project trust disabled. Pi's own
 `--no-tools` would remove the extension's tools too; stage-passed `--no-tools` is replaced by the

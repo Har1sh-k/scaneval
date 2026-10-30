@@ -97,7 +97,7 @@ type PiResult = {
   binary?: string; outputFormat?: "text" | "json";
   structured?: ClaudeStructured | null; structuredParseError?: string;
 };
-type PiInvocation = { args?: string[]; request?: unknown; cwd: string; timeoutMs: number; env: NodeJS.ProcessEnv; meta?: PiMeta };
+type PiInvocation = { args?: string[]; stdin?: string; request?: unknown; cwd: string; timeoutMs: number; env: NodeJS.ProcessEnv; meta?: PiMeta };
 type PiRunner = { runPi(options: PiInvocation): Promise<PiResult> };
 
 // Compatibility fingerprint for the harness's current outer planner retry helper. Its isolation
@@ -248,20 +248,27 @@ function moveClaudeTranscript(sessionId: string | null, destination: string): bo
 interface InvocationView {
   model: string | null;
   thinking: string | null;
-  promptChars: number;
+  /** Null when the prompt travelled in a form this driver cannot read as text. */
+  promptChars: number | null;
   /** Kept inside the driver for source-map verification; emitted only through `content`. */
   prompt: string;
   route: string;
   content: Record<string, unknown>;
 }
 
-// securevibes-agent hands the runner pi-style argv with the prompt last; Fieldglass hands it a
-// structured ModelRequest whose prompt travels on stdin. Describe either without changing it.
+// securevibes-agent hands the runner pi-style argv with the prompt last, or with the prompt on
+// `stdin` beside the argv; Fieldglass hands it a structured ModelRequest whose prompt travels on
+// stdin. Describe each without changing it. A string `stdin`, even an empty one, is the prompt
+// that is piped, so it wins over the last argv word. Any other value present there is a prompt
+// this driver cannot read as text: it is reported as unknown rather than guessed from the argv,
+// and the empty prompt kept for mapping verification can only make attribution conservative.
 function describeInvocation(options: Record<string, unknown>, resolveBinary?: (args: string[]) => string): InvocationView {
   const args = Array.isArray(options.args) ? (options.args as string[]) : null;
   if (args) {
+    const stdin = options.stdin;
     const last = args.length > 0 ? args[args.length - 1] : "";
-    const prompt = typeof last === "string" ? last : "";
+    const prompt = stdin === undefined ? (typeof last === "string" ? last : "")
+      : typeof stdin === "string" ? stdin : "";
     const flag = (name: string): string | null => {
       const index = args.indexOf(name);
       return index === -1 ? null : args[index + 1] ?? null;
@@ -269,10 +276,10 @@ function describeInvocation(options: Record<string, unknown>, resolveBinary?: (a
     return {
       model: flag("--model"),
       thinking: flag("--thinking"),
-      promptChars: prompt.length,
+      promptChars: stdin === undefined || typeof stdin === "string" ? prompt.length : null,
       prompt,
       route: resolveBinary ? resolveBinary(args) : "unknown",
-      content: { args },
+      content: stdin === undefined ? { args } : { args, stdin: typeof stdin === "string" ? stdin : null },
     };
   }
   const request = (options.request ?? {}) as { route?: { driver?: string; model?: string }; effort?: string; prompt?: string };
@@ -297,13 +304,18 @@ function plannerRetryIdentity(options: PiInvocation, invocationId: unknown, stag
         || !options.args.every((arg) => typeof arg === "string")
         || typeof options.timeoutMs !== "number" || !Number.isFinite(options.timeoutMs)
         || !options.env || typeof options.env !== "object" || Array.isArray(options.env)) return null;
+    // A piped prompt is part of the request. Absent stays distinct from the empty string, and a
+    // value that is not a string has no stable text identity, so it leaves the call unpaired.
+    const stdin: unknown = options.stdin;
+    if (stdin !== undefined && typeof stdin !== "string") return null;
     const environment = Object.entries(options.env);
     if (!environment.every(([, value]) => typeof value === "string" || value === undefined)) return null;
     environment.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
     // Snapshot array values before the call can mutate them. Sorted environment entries make
     // wrapper-created copies compare by value. Hashing avoids retaining or emitting API keys;
-    // length-delimited JSON keeps boundaries unambiguous.
-    const stableRequest = JSON.stringify([options.args.slice(), options.timeoutMs, environment]);
+    // length-delimited JSON keeps boundaries unambiguous, and escapes lone surrogates rather
+    // than letting UTF-8 encoding merge distinct prompts.
+    const stableRequest = JSON.stringify([options.args.slice(), stdin ?? null, options.timeoutMs, environment]);
     return { invocationId, requestFingerprint: createHash("sha256").update(stableRequest).digest("hex") };
   } catch {
     return null;
