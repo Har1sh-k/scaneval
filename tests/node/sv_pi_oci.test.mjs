@@ -117,6 +117,15 @@ test("unsupported stage argv fails without quoting prompt text, and another mode
   assert.equal(calls.length, 0);
 });
 
+test("a stage prompt already on stdin is refused rather than replaced by the last argv word", async () => {
+  const { raw, calls } = makeRunner();
+  for (const stdin of ["PIPED-SOURCE-PROMPT", ""]) {
+    await assert.rejects(raw.runPi({ args: STAGE, stdin, cwd: "/tmp", timeoutMs: 1 }),
+      (error) => /prompt on stdin/.test(error.message) && !error.message.includes("SOURCE"));
+  }
+  assert.equal(calls.length, 0);
+});
+
 test("stage --no-tools is replaced by the explicit allowlist and reported, and sessions stay inside the root", async () => {
   const { raw, calls, observations } = makeRunner();
   await raw.runPi({ args: ["-p", "--no-tools", "--no-extensions", "--model", "openai-codex/gpt-5.6-sol", PROMPT],
