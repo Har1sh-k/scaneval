@@ -147,8 +147,11 @@ def do_scan(argv):
     base = data_dir(project)
     write(base / "project.json", {"projectId": project, "rootPath": root,
                                   "createdAt": "2026-09-25T12:00:00.000Z"})
+    # ``scan_skip`` is a file no matcher hits: DeepSec writes no record for it.
+    skipped = set(control().get("scan_skip") or [])
     for name in source_files(root):
-        write(base / "files" / (name + ".json"), scanned_record(name, project))
+        if name not in skipped:
+            write(base / "files" / (name + ".json"), scanned_record(name, project))
     write_scan_run(base, project, root)
     print("scanned %d file(s)" % len(source_files(root)))
 
@@ -163,7 +166,23 @@ def do_process(argv):
     base = data_dir(project)
     limit = int(option(argv, "--limit", "1000"))
     names = sorted(p.relative_to(base / "files").as_posix()[:-5]
-                   for p in (base / "files").rglob("*.json"))[:limit]
+                   for p in (base / "files").rglob("*.json"))
+    manifest = option(argv, "--manifest")
+    if manifest and not settings.get("ignore_manifest"):
+        # 2.3.10: the array becomes a Set and a pending record is kept when Set.has(record.filePath),
+        # exactly, before --limit applies.
+        wanted = json.loads(Path(manifest).read_text(encoding="utf-8"))
+        if not isinstance(wanted, list):
+            sys.stderr.write("Manifest must be a JSON array of file paths\\n")
+            sys.exit(1)
+        wanted = set(wanted)
+        names = [name for name in names
+                 if json.loads((base / "files" / (name + ".json")).read_text(encoding="utf-8"))["filePath"] in wanted]
+    if manifest and settings.get("tamper_manifest"):
+        Path(manifest).write_text(json.dumps(settings["tamper_manifest"]) + "\\n", encoding="utf-8")
+    names = names[:limit]
+    if manifest and not names:
+        print("No files to process")
     investigate(argv, names, settings)
     print("processed %d file(s)" % len(names))
 
@@ -4642,3 +4661,300 @@ def test_a_full_run_over_a_tree_holding_a_name_deepsecs_pr_listing_cannot_resolv
     assert name in {claim["primary_location"]["path"] for claim in result["claims"]}
     assert not any("did not investigate" in note or "prints quoted" in note or "begin or end with a space" in note
                    for note in execution["notes"])
+
+
+# --- curated processing: config.process_manifest_by_tree ---------------------------------
+
+
+def curated_run(tmp_path: Path, monkeypatch, paths: list[str], *, control: dict | None = None,
+                extra_files: dict[str, str] | None = None, **overrides) -> Path:
+    """One full run through the runner whose AI batches are limited to *paths* for its own input tree."""
+    stub_collector(monkeypatch, tmp_path)
+    root = fake_deepsec_root(tmp_path, **(control or {}))
+    prepared = prepared_input(tmp_path, extra_files)
+    adapter = get_adapter("deepsec")
+    spec = system_spec(root, process_manifest_by_tree={prepared.tree_hash: list(paths)}, **overrides)
+    return run_invocation(prepared=prepared, adapter=adapter, spec=spec,
+                          preparation=adapter.prepare(spec, tmp_path / "cache"), out_dir=tmp_path / "out",
+                          run_id="run-deepsec", timeout_seconds=300, trace_mode="content",
+                          network_policy="model_provider_only", clock=CLOCK)
+
+
+def bundle_records(bundle: Path) -> dict[str, dict]:
+    """Every FileRecord the bundle kept, by source path, read from the saved raw artifacts."""
+    execution = load_document(bundle / "execution.json", "execution-record")
+    return {artifact["id"][len("deepsec-file/"):-len(".json")]:
+            json.loads((bundle / artifact["path"]).read_text(encoding="utf-8"))
+            for artifact in execution["raw_artifacts"] if artifact["id"].startswith("deepsec-file/")}
+
+
+def process_argv(command: list[str]) -> list[str]:
+    first = command.index("&&")
+    return command[first + 1:command.index("&&", first + 1)]
+
+
+def curated_scoring(result: dict, *, accept: dict[str, str]) -> tuple[dict, dict]:
+    """A plan with one target per *accept* path and one safe control on each fixture file, all quiet."""
+    claims = {claim["primary_location"]["path"]: claim["claim_id"] for claim in result["claims"]}
+    plan = {"schema_version": "2.1", "input_hash": result["input_hash"], "scope": "diagnostic",
+            "targets": [{"target_id": target, "description": f"the planted root cause in {path}",
+                         "validation_level": "fixture"} for target, path in sorted(accept.items())],
+            "controls": [{"control_id": f"C-{path}", "description": f"the safe code in {path}",
+                          "type": "capability_safe", "validation_level": "fixture", "paths": [path]}
+                         for path in ("README.md", "src/db.js", "src/server.js")],
+            "review_budgets": [3]}
+    decisions = {"schema_version": "2.0", "run_id": result["run_id"], "input_hash": result["input_hash"],
+                 "result_sha256": canonical_sha256(result),
+                 "claim_matches": [{"claim_id": claims[path], "target_id": target, "decision": "accepted",
+                                    "reason": "the claim names the planted root cause"}
+                                   for target, path in sorted(accept.items()) if path in claims],
+                 "control_assessments": [{"control_id": control["control_id"], "decision": "quiet",
+                                          "claim_ids": [], "reason": "nothing was said about it"}
+                                         for control in plan["controls"]]}
+    return observe(plan, result, decisions), score(plan, result, decisions)
+
+
+def test_a_curated_run_sends_only_listed_regex_candidates_to_the_ai_stage(tmp_path, monkeypatch):
+    """The ordinary scan covers the repository; process selects listed records only; nothing else disappears."""
+    selected = ["src/caf\u00e9.js", "src/server.js"]
+    bundle = curated_run(tmp_path, monkeypatch, selected, extra_files={"src/caf\u00e9.js": "exec(x);\n"})
+
+    result, execution = documents(bundle)
+    command = execution["command"]
+    scan = command[:command.index("&&")]
+    assert "--manifest" not in scan and scan[1] == "scan", "the regex scan is not curated"
+    process = process_argv(command)
+    manifest_artifact = next(a for a in execution["raw_artifacts"] if a["id"] == "deepsec-process-manifest")
+    assert Path(process[process.index("--manifest") + 1]).name == "deepsec-process-manifest.json"
+    saved = (bundle / manifest_artifact["path"]).read_bytes()
+    # The exact configured spellings, in configured order, bound by the artifact digest.
+    assert json.loads(saved) == selected
+    assert manifest_artifact["sha256"] == "sha256:" + hashlib.sha256(saved).hexdigest()
+
+    records = bundle_records(bundle)
+    assert set(records) == {"src/caf\u00e9.js", "src/db.js", "src/server.js"}
+    assert {path for path, record in records.items() if record["status"] == "analyzed"} == set(selected)
+    unselected = records["src/db.js"]
+    assert (unselected["status"], unselected["analysisHistory"], unselected["findings"]) == ("pending", [], [])
+    assert {claim["primary_location"]["path"] for claim in result["claims"]} == set(selected)
+
+    assert result["status"] == "partial" and result["error"]["code"] == "scope_incomplete"
+    assert "curated diagnostic" in result["error"]["message"]
+    assert result["bundles_resolved"] is False
+    assert result["schema_version"] == "2.1" and result["omitted_paths"] == ["src/db.js"]
+    assert "examined_nothing" not in result
+    assert any(note.startswith("Curated diagnostic, not a blind full-repository benchmark") for note in execution["notes"])
+
+
+def test_a_curated_run_that_selects_every_candidate_is_no_success_and_earns_no_quiet_credit(tmp_path, monkeypatch):
+    """DeepSec does what an ordinary run does here, but the scope was chosen before the run, so nothing completes."""
+    bundle = curated_run(tmp_path, monkeypatch, ["src/db.js", "src/server.js"])
+
+    result, execution = documents(bundle)
+    assert result["status"] == "partial" and result["error"]["code"] == "scope_incomplete"
+    assert "every regex candidate" in result["error"]["message"]
+    assert result["omitted_paths"] == [] and result["bundles_resolved"] is False
+    assert len(result["claims"]) == 2
+
+    observation, record = curated_scoring(result, accept={"T1": "src/server.js"})
+    # The positive claim stays usable for detection; no control is completed or resolved by silence.
+    assert [target["detected"] for target in observation["targets"]] == [True]
+    assert all(not control["completed"] and not control["resolved"] for control in observation["controls"])
+    safe = record["metrics"]["controls"]["capability_safe"]
+    assert (safe["assigned"], safe["completed"], safe["resolved"]) == (3, 0, 0)
+    assert "Incomplete or failed execution cannot establish a successful negative control." in record["warnings"]
+    # The same bytes score the same way again: the saved result alone decides.
+    assert curated_scoring(load_document(bundle / "result.json", "scan-result"),
+                           accept={"T1": "src/server.js"})[1] == record
+
+
+@pytest.mark.parametrize(("listed", "control"), [("README.md", {}), ("src/db.js", {"scan_skip": ["src/db.js"]})],
+                         ids=["unscanned-extension", "no-matcher-hit"])
+def test_a_listed_path_without_a_regex_record_runs_no_ai_batch(tmp_path, monkeypatch, listed, control):
+    """The intersection is empty: native triage made no candidate there, which is not a model's miss."""
+    bundle = curated_run(tmp_path, monkeypatch, [listed], control=control)
+
+    result, execution = documents(bundle)
+    records = bundle_records(bundle)
+    assert listed not in records
+    assert records and all(record["analysisHistory"] == [] and record["status"] == "pending"
+                           for record in records.values())
+    assert result["claims"] == [] and result["usage"]["cost_usd"] == 0
+    assert result["status"] == "partial" and result["error"]["code"] == "scope_incomplete"
+    assert result["omitted_paths"] == sorted(records)
+    note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
+    assert f"1 listed path(s) got no file record ({listed})" in note
+    assert "no AI batch ran on them; that is native triage, not a model's miss" in note
+
+
+def test_a_curated_run_over_a_tree_with_no_regex_candidate_is_still_not_a_success(tmp_path, monkeypatch):
+    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"],
+                         control={"scan_skip": ["src/db.js", "src/server.js"]})
+
+    result, _execution = documents(bundle)
+    assert bundle_records(bundle) == {}
+    assert result["status"] == "partial" and result["error"]["code"] == "scope_incomplete"
+    assert "no AI batch ran" in result["error"]["message"]
+    assert result["claims"] == [] and result["omitted_paths"] == [] and result["bundles_resolved"] is False
+
+
+def test_a_failed_selected_batch_keeps_its_own_failure_and_its_claims(tmp_path, monkeypatch):
+    bundle = curated_run(tmp_path, monkeypatch, ["src/db.js", "src/server.js"], batch_size=1,
+                         control={"fail_batches": [0]})
+
+    result, _execution = documents(bundle)
+    records = bundle_records(bundle)
+    assert sorted(record["status"] for record in records.values()) == ["analyzed", "error"]
+    assert result["status"] == "partial" and result["error"]["code"] == "deepsec_batches_failed"
+    assert [claim["primary_location"]["path"] for claim in result["claims"]] == ["src/server.js"]
+    assert result["omitted_paths"] == [] and result["bundles_resolved"] is False
+
+
+def test_a_selected_file_the_ai_stage_never_reached_is_unfinished_and_not_omitted(tmp_path, monkeypatch):
+    """--limit applies after the manifest in 2.3.10; a selected file it leaves pending is not a curation omission."""
+    bundle = curated_run(tmp_path, monkeypatch, ["src/db.js", "src/server.js"], limit=1)
+
+    result, execution = documents(bundle)
+    assert process_argv(execution["command"])[-6:-4] == ["--limit", "1"]
+    assert result["status"] == "partial" and result["error"]["code"] == "scope_incomplete"
+    assert "1 of 2 file record(s) were left unfinished under config.limit 1" in result["error"]["message"]
+    assert "assigned none to 0 regex candidate file(s)" in result["error"]["message"]
+    assert len(result["claims"]) == 1 and result["omitted_paths"] == []
+
+
+def test_an_ai_stage_that_did_not_keep_to_the_manifest_is_reported_with_every_claim_kept(tmp_path, monkeypatch):
+    """Out-of-scope analysis and claims cannot disappear: they stay in the records and claims, and name the failure."""
+    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"], control={"ignore_manifest": True})
+
+    result, execution = documents(bundle)
+    assert bundle_records(bundle)["src/db.js"]["status"] == "analyzed"
+    assert result["status"] == "partial" and result["error"]["code"] == "process_manifest_not_honored"
+    assert "1 unlisted file record(s)" in result["error"]["message"]
+    assert "1 imported claim(s) are on unlisted paths" in result["error"]["message"]
+    assert {claim["primary_location"]["path"] for claim in result["claims"]} == {"src/db.js", "src/server.js"}
+    # It was examined, out of scope, so it is not listed as a path the scanner left alone.
+    assert result["omitted_paths"] == [] and result["bundles_resolved"] is False
+    assert any("outside the declared AI-batch assignment" in note for note in execution["notes"])
+
+
+def test_a_manifest_changed_during_the_run_is_reported(tmp_path, monkeypatch):
+    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"], control={"tamper_manifest": ["src/db.js"]})
+
+    result, execution = documents(bundle)
+    assert result["status"] == "partial" and result["error"]["code"] == "process_manifest_not_honored"
+    assert "differ from the bytes written before DeepSec started" in result["error"]["message"]
+    steps = next(note for note in execution["notes"] if "--manifest raw/deepsec-process-manifest.json" in note)
+    written = (json.dumps(["src/server.js"], indent=2) + "\n").encode("utf-8")
+    # The note keeps the digest of what DeepSec was handed; the artifact is what was left.
+    assert "sha256:" + hashlib.sha256(written).hexdigest() in steps
+    manifest = next(a for a in execution["raw_artifacts"] if a["id"] == "deepsec-process-manifest")
+    assert manifest["sha256"] == "sha256:" + hashlib.sha256(
+        (json.dumps(["src/db.js"]) + "\n").encode("utf-8")).hexdigest()
+    assert len(result["claims"]) == 1
+
+
+def test_a_curated_run_with_a_failure_before_reconciliation_keeps_that_failure(tmp_path, monkeypatch):
+    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"], control={"bad_export": True})
+
+    result, _execution = documents(bundle)
+    assert result["status"] == "error" and result["error"]["code"] == "unreadable_export"
+
+
+TREE = "sha256:" + "a" * 64
+
+
+@pytest.mark.parametrize("mapping", [
+    None, {}, [], "src/server.js",
+    {"sha256:" + "A" * 64: ["src/server.js"]}, {"a" * 64: ["src/server.js"]},
+    {"sha256:" + "a" * 64 + "\n": ["src/server.js"]},
+    {TREE: "src/server.js"}, {TREE: []}, {TREE: None}, {TREE: {"src/server.js": True}},
+    {TREE: [1]}, {TREE: [None]}, {TREE: [True]}, {TREE: [["src/server.js"]]},
+    {TREE: ["src/server.js", "src/server.js"]},
+], ids=["null", "empty-object", "list", "string", "uppercase-key", "bare-hex-key", "newline-key",
+        "string-value", "empty-list", "null-value", "object-value", "int", "null-item", "bool", "nested", "duplicate"])
+def test_a_malformed_process_manifest_map_is_refused_before_anything_runs(tmp_path, mapping):
+    with pytest.raises(AdapterError, match="process_manifest_by_tree"):
+        settings(system_spec(fake_deepsec_root(tmp_path), process_manifest_by_tree=mapping))
+
+
+@pytest.mark.parametrize("entry", [
+    "", "/etc/passwd", "../outside.js", "src/../../outside.js", "src/./server.js", "./src/server.js",
+    "src//server.js", "src/", "src\\server.js", "..\\outside.js", "C:/src/server.js", "c:server.js",
+    "\\\\host\\share\\server.js", "src/server.js\n", "src/\nserver.js", "src/server\r.js", "src/ser\tver.js",
+    "src/server\x00.js", "src/server\x7f.js", " src/server.js", "src/server.js ", "src/server\ud800.js",
+])
+def test_an_unsafe_or_non_native_process_manifest_path_is_refused(tmp_path, entry):
+    with pytest.raises(AdapterError, match="is not a usable path"):
+        settings(system_spec(fake_deepsec_root(tmp_path), process_manifest_by_tree={TREE: [entry]}))
+
+
+def test_a_process_manifest_and_files_from_are_mutually_exclusive(tmp_path):
+    listing = tmp_path / "files-from.txt"
+    listing.write_text("src/server.js\n", encoding="utf-8")
+    with pytest.raises(AdapterError, match="mutually exclusive"):
+        settings(system_spec(fake_deepsec_root(tmp_path), files_from=str(listing),
+                             process_manifest_by_tree={TREE: ["src/server.js"]}))
+
+
+def curated_scan(tmp_path: Path, prepared: PreparedInput, mapping: dict):
+    """The adapter's own scan() of *prepared* as a full request, with an empty raw directory."""
+    adapter = get_adapter("deepsec")
+    spec = system_spec(fake_deepsec_root(tmp_path), process_manifest_by_tree=mapping)
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    request = build_request("run-deepsec", prepared, spec, timeout_seconds=30, trace_mode="off")
+    return adapter.scan(request=request, source_dir=prepared.source_dir, raw_dir=raw, spec=spec,
+                        preparation={}, timeout_seconds=30, trace_mode="off", trace_dir=None)
+
+
+def test_a_curated_run_for_a_tree_the_map_does_not_name_is_refused_unscoped_never(tmp_path):
+    with pytest.raises(AdapterError, match="no entry for input tree .*refusing to fall back to an unscoped"):
+        curated_scan(tmp_path, prepared_input(tmp_path), {TREE: ["src/server.js"]})
+    assert list((tmp_path / "raw").iterdir()) == [], "nothing was written and nothing ran"
+
+
+@pytest.mark.parametrize(("listed", "reason"), [
+    ("src/missing.js", "holds no entry spelled exactly so"),
+    ("src/Server.js", "holds no entry spelled exactly so"),
+    ("src", "is not a regular file"),
+    ("README.md/x.js", "is not a directory"),
+    ("linked/server.js", "is a symbolic link"),
+], ids=["missing", "case-alias", "directory", "file-as-directory", "linked-directory"])
+def test_a_listed_path_that_is_not_a_file_of_the_tree_as_spelled_is_refused(tmp_path, listed, reason):
+    """DeepSec matches by exact string, so a path the tree does not hold as spelled would silently select nothing."""
+    prepared = prepared_input(tmp_path)
+    (prepared.source_dir / "linked").symlink_to(prepared.source_dir / "src", target_is_directory=True)
+    with pytest.raises(AdapterError, match=reason):
+        curated_scan(tmp_path, prepared, {prepared.tree_hash: [listed]})
+    assert list((tmp_path / "raw").iterdir()) == []
+
+
+def test_a_process_manifest_is_refused_for_a_pr_review_before_anything_runs(tmp_path):
+    root = fake_deepsec_root(tmp_path)
+    workspace, pr = pr_workspace(tmp_path, CHANGED_SOURCE)
+    spec = system_spec(root, process_manifest_by_tree={"sha256:" + "0" * 64: ["src/server.js"]})
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    with pytest.raises(AdapterError, match="refused for a PR review: DeepSec's direct mode ignores --manifest"):
+        get_adapter("deepsec").scan(request=pr_request(pr, spec), source_dir=workspace, raw_dir=raw, spec=spec,
+                                    preparation={}, timeout_seconds=30, trace_mode="off", trace_dir=None)
+    assert list(raw.iterdir()) == []
+
+
+def test_a_full_run_without_the_map_sends_no_manifest(tmp_path, monkeypatch):
+    stub_collector(monkeypatch, tmp_path)
+    result, execution = documents(invoke(tmp_path, fake_deepsec_root(tmp_path)))
+    assert result["status"] == "success" and "omitted_paths" not in result
+    assert "--manifest" not in execution["command"]
+    assert "deepsec-process-manifest" not in {artifact["id"] for artifact in execution["raw_artifacts"]}
+
+
+def test_the_documented_curated_configuration_is_one_the_adapter_accepts(tmp_path):
+    """The design document's fabricated example, with only its installation path pointed at the fake CLI."""
+    text = (ROOT / "docs" / "designs" / "deepsec-curated-processing.md").read_text(encoding="utf-8")
+    example = json.loads(text.split("```json\n", 1)[1].split("```", 1)[0])
+    config = dict(example["config"], deepsec_root=str(fake_deepsec_root(tmp_path)))
+    accepted = settings(SystemSpec(example["system_id"], example["adapter"], config))
+    assert accepted.process_manifest_by_tree == {
+        tree: tuple(paths) for tree, paths in example["config"]["process_manifest_by_tree"].items()}
+    assert get_adapter("deepsec").adapter_version == "1.2.0"

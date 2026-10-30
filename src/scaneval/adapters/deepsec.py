@@ -98,7 +98,28 @@ When the list is every path the change touches, so that DeepSec made a record fo
 result also says ``examined_nothing`` (:func:`~scaneval.adapters.pr.examined_nothing`), and then no
 control earns quiet credit, one on a file the change leaves alone included: a review that read none
 of the change reached no control. It says ``False`` when some path has a record. A full run reports
-no omissions and says neither.
+no omissions and says neither, unless it is curated.
+
+Curated processing is an explicit diagnostic of a full run, never a benchmark. When
+``config.process_manifest_by_tree`` is present it maps input tree hashes to neutral, repository-relative
+path arrays, and the request's ``input.tree_hash`` must be a key; a tree with no entry, a malformed map
+or path, a listed path that is not a regular file of the tree as spelled, a PR request (direct mode
+ignores ``--manifest``) and ``config.files_from`` are all refused before anything runs. DeepSec's
+ordinary ``scan`` still runs over the whole supported repository, then standard-mode ``process
+--manifest`` assigns AI batches only to the pending records whose ``filePath`` is exactly a listed
+path, and ``export`` runs unchanged. The manifest is a raw artifact holding paths only, its bytes are
+checked after the run, and the map is part of the digested system configuration. Batch assignment is
+not a sandbox: the agent still runs with the whole repository visible and may read unlisted files
+(following an import, say), so ``omitted_paths`` are candidates that were assigned no verdict, not
+files shown to be unread. Nothing is filtered out of the reconciliation: every record, status and
+exported claim counts as in an ordinary run, so the regex candidates the manifest did not list are
+assigned no AI batch, stay ``pending``, make the run ``scope_incomplete``, and are its
+``omitted_paths``. A listed path with no record had no regex candidate, or was skipped by DeepSec's ignore filter, so no
+AI batch ran on it: native triage, not a model's miss. An unlisted record carrying analysis, a finding
+or a status other than ``pending``, a claim on an unlisted path, or a manifest whose bytes changed is
+``process_manifest_not_honored``; its claims are kept. Every other failure keeps its precedence, and a
+curated run that would otherwise succeed is ``partial`` with ``scope_incomplete`` instead. Its bundles
+are never resolved, so it completes no control and earns no quiet credit.
 
 Direct mode exits 1 for three different reasons (a run that produced findings, a batch that
 errored, an exhausted quota) and also for a runtime failure such as an unresolvable range, so an
@@ -180,6 +201,10 @@ DIRECT_MODE_EXIT = 1
 # DeepSec 2.3.10's exportCommand applies these exclusions unless --include-resolved is
 # passed. This adapter deliberately preserves the producer's defaults and passes no such flag.
 DEFAULT_EXPORT_RESOLVED_VERDICTS = ("fixed", "false-positive", "accepted-risk", "duplicate")
+# A key of config.process_manifest_by_tree: the ``input.tree_hash`` a scan request carries.
+TREE_HASH = re.compile(r"sha256:[0-9a-f]{64}")
+WINDOWS_DRIVE = re.compile(r"[A-Za-z]:")
+ARTIFACT_PROCESS_MANIFEST = "deepsec-process-manifest"
 
 
 def _shape(value: Any) -> str:
@@ -431,6 +456,87 @@ class Settings(NamedTuple):
     configured_root: str
     files_from: tuple[str, ...] | None = None
     capture_claude_sessions: bool = False
+    process_manifest_by_tree: dict[str, tuple[str, ...]] | None = None
+
+
+def process_manifest_path_issue(entry: Any) -> str | None:
+    """Why *entry* cannot be a ``process --manifest`` path, or ``None`` when it can.
+
+    DeepSec 2.3.10 selects a record when ``Set.has(record.filePath)`` holds: an exact string
+    match, with no normalization and no directory prefix. The ``filePath`` its scan writes is the
+    one spelling ``assertSafeFilePath`` admits, relative, with forward slashes and no empty, ``.``
+    or ``..`` segment. So an entry must already be that spelling. Nothing is rewritten into it,
+    because what the configuration digest binds must be exactly what DeepSec's ``--manifest``
+    reads; an entry that is not that spelling would select nothing, or, through a separator or
+    traversal, name something outside the tree. A backslash, a drive letter, a control character
+    and whitespace at either end are refused for the same reason: each is either outside the
+    native spelling or one DeepSec's own listing reads differently. The drive-letter test is any
+    ASCII letter then ``:`` at the start, so it also refuses a valid POSIX name such as ``a:b``;
+    that over-refusal is in the safe direction.
+    """
+    if not isinstance(entry, str):
+        return f"it is a {_shape(entry)}, not a string"
+    if not entry:
+        return "it is empty"
+    if "\x00" in entry:
+        return "it holds a NUL byte"
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in entry):
+        return "it holds a control character"
+    if any(0xD800 <= ord(character) <= 0xDFFF for character in entry):
+        # Python's spelling of an undecodable byte in a file name; DeepSec reads that name as
+        # U+FFFD, so the two can never match.
+        return "it holds a lone surrogate, which no file path DeepSec records can"
+    if "\\" in entry:
+        return "it holds a backslash, which DeepSec refuses in a file path"
+    if entry.startswith("/"):
+        return "it is an absolute path"
+    if WINDOWS_DRIVE.match(entry):
+        return "it starts with a drive letter"
+    if entry != entry.strip():
+        return "it begins or ends with whitespace"
+    if any(part in ("", ".", "..") for part in entry.split("/")):
+        return "it has an empty, '.' or '..' segment, so it is not the one spelling DeepSec records"
+    return None
+
+
+def _process_manifest_by_tree(spec: SystemSpec) -> dict[str, tuple[str, ...]] | None:
+    """The curated AI-batch assignment of a full run, one neutral path list per input tree hash.
+
+    Absent is off, and off is the ordinary full run. Present is an object whose keys are input
+    tree hashes and whose values are non-empty arrays of paths, each checked by
+    :func:`process_manifest_path_issue` and each listed once. Anything else is refused here,
+    before a process starts: ``null`` and ``{}`` included, because a generator that wrote either
+    for an input it had no list for must not get an unscoped run in its place, and an empty list
+    too, because a run that assigns no AI batch is not the diagnostic this configures.
+    The map lives in the system configuration, so the run's configuration digest binds it, and it
+    carries paths only.
+    """
+    if "process_manifest_by_tree" not in spec.config:
+        return None
+    raw = spec.config["process_manifest_by_tree"]
+    if not isinstance(raw, dict) or not raw:
+        raise AdapterError("deepsec config.process_manifest_by_tree must be a non-empty object mapping input "
+                           f"tree hashes to path arrays, got {raw!r}"[:500])
+    result: dict[str, tuple[str, ...]] = {}
+    for tree_hash, entries in raw.items():
+        if not isinstance(tree_hash, str) or TREE_HASH.fullmatch(tree_hash) is None:
+            raise AdapterError("deepsec config.process_manifest_by_tree keys must be input tree hashes "
+                               f"(sha256:<64 lowercase hex>), got {tree_hash!r}"[:500])
+        if not isinstance(entries, list) or not entries:
+            raise AdapterError(f"deepsec config.process_manifest_by_tree[{tree_hash!r}] must be a non-empty "
+                               f"array of paths, got a {_shape(entries)}"
+                               + (" with no entry" if isinstance(entries, list) else ""))
+        seen: set[str] = set()
+        for index, entry in enumerate(entries):
+            issue = process_manifest_path_issue(entry)
+            if issue is None and entry in seen:
+                issue = "it is listed twice"
+            if issue is not None:
+                raise AdapterError(f"deepsec config.process_manifest_by_tree[{tree_hash!r}][{index}] is not a "
+                                   f"usable path: {issue} ({entry!r})"[:500])
+            seen.add(entry)
+        result[tree_hash] = tuple(entries)
+    return result
 
 
 def _files_from(spec: SystemSpec) -> tuple[str, ...] | None:
@@ -520,7 +626,7 @@ def settings(spec: SystemSpec) -> Settings:
                            f"accepts (it must match {PROJECT_ID.pattern})")
     projects_dir = Path(_text(spec, "claude_projects_dir", DEFAULT_PROJECTS_DIR) or
                         DEFAULT_PROJECTS_DIR).expanduser()
-    return Settings(
+    config = Settings(
         root=root,
         binary=binary,
         agent=_text(spec, "agent", "claude", allowed=AGENTS) or "claude",
@@ -536,7 +642,12 @@ def settings(spec: SystemSpec) -> Settings:
         configured_root=configured_root,
         files_from=_files_from(spec),
         capture_claude_sessions=_flag(spec, "capture_claude_sessions"),
+        process_manifest_by_tree=_process_manifest_by_tree(spec),
     )
+    if config.files_from is not None and config.process_manifest_by_tree is not None:
+        raise AdapterError("deepsec config.files_from and config.process_manifest_by_tree are mutually exclusive: "
+                           "the first scopes a PR review through direct mode, which ignores --manifest")
+    return config
 
 
 def _flag(spec: SystemSpec, key: str) -> bool:
@@ -2572,9 +2683,103 @@ def unreviewed_note(changes: tuple[Change, ...], files: tuple[tuple[str, dict], 
     return " ".join(sentences) or None
 
 
+def process_manifest_tree_issue(source_dir: Path, path: str,
+                                listings: dict[Path, dict[str, os.DirEntry]]) -> str | None:
+    """Why *path* names no regular file of the input tree exactly as spelled, or ``None``.
+
+    Read before DeepSec starts. Each component is looked up by its exact name in its parent's
+    listing rather than opened, so a case or Unicode-form alias that a case- or
+    normalization-insensitive filesystem would resolve is refused: DeepSec selects by exact string,
+    and such an alias would select nothing while appearing to name a file. A symbolic link in any
+    component is refused too, because the scan's record would sit at another spelling. *listings*
+    caches each directory's listing across the paths of one manifest.
+    """
+    current = source_dir
+    parts = path.split("/")
+    for index, part in enumerate(parts):
+        if current not in listings:
+            try:
+                listings[current] = {entry.name: entry for entry in list_directory(current)}
+            except OSError as exc:
+                return f"its directory could not be listed ({exc.strerror or exc})"
+        entry = listings[current].get(part)
+        if entry is None:
+            return "the input tree holds no entry spelled exactly so"
+        if entry.is_symlink():
+            return "a component of it is a symbolic link"
+        if index == len(parts) - 1:
+            return None if entry.is_file(follow_symlinks=False) else "it is not a regular file"
+        if not entry.is_dir(follow_symlinks=False):
+            return "a component of it is not a directory"
+        current = Path(entry.path)
+    return None
+
+
+class CuratedScope(NamedTuple):
+    """What one curated run's manifest selected, out of every FileRecord DeepSec left.
+
+    Read off all of ``records.files``, never a filtered copy: the status, export and identity
+    reconciliation of the run stay global, and this only names populations inside it. A record is
+    ``selected``, so eligible for an AI batch, exactly when DeepSec's own
+    ``Set.has(record.filePath)`` would hold. ``unselected`` are the regex candidates assigned no AI
+    batch, still as the scan left them, by record path; ``external`` counts those whose record name
+    is not a path inside the tree. Every unlisted record is in exactly one of those and
+    ``unexpected``. ``listed_without_record`` are listed paths DeepSec's scan made no record for (no
+    matcher hit, its ignore filter, an empty file): no AI batch could run on them, which is native
+    triage, not a model's miss. ``unexpected`` are unselected records that are not in the state a
+    fresh scan leaves (``pending``, no analysis, no finding), and ``out_of_scope_claims`` imported
+    claims on a path the manifest does not list; either says verdicts were written outside the
+    declared batch assignment. None of this says which files the agent read: selection assigns
+    batches and does not restrict repository access, so an unselected file may still have been read.
+    """
+
+    manifest: tuple[str, ...]
+    selected: tuple[str, ...]
+    unselected: tuple[str, ...]
+    external: int
+    listed_without_record: tuple[str, ...]
+    unexpected: tuple[str, ...]
+    out_of_scope_claims: int
+
+
+def curated_scope(manifest: tuple[str, ...], files: tuple[tuple[str, dict], ...], claims: list[dict],
+                  roots: tuple[Path, ...]) -> CuratedScope:
+    """Partition *files* by *manifest* the way DeepSec's standard-mode ``process`` does."""
+    listed = set(manifest)
+    selected: list[str] = []
+    unselected: list[str] = []
+    external = 0
+    unexpected: list[str] = []
+    recorded: set[str] = set()
+    for name, record in files:
+        file_path = record.get("filePath")
+        if isinstance(file_path, str):
+            recorded.add(file_path)
+        if isinstance(file_path, str) and file_path in listed:
+            selected.append(name)
+            continue
+        if not (record.get("status") == "pending" and record.get("analysisHistory") == []
+                and record.get("findings") == []):
+            # Not left as the scan wrote it, so not a candidate that simply went without an AI batch.
+            unexpected.append(name)
+            continue
+        path, outside = record_path(name, record, roots)
+        if outside:
+            external += 1
+        else:
+            unselected.append(path)
+    out_of_scope = sum(1 for claim in claims
+                       if (claim.get("primary_location") or {}).get("path") not in listed)
+    return CuratedScope(manifest, tuple(selected), tuple(sorted(set(unselected))), external,
+                        tuple(path for path in manifest if path not in recorded), tuple(unexpected),
+                        out_of_scope)
+
+
 class DeepsecAdapter(Adapter):
     name = "deepsec"
-    adapter_version = "1.1.0"
+    # 1.2.0 honors config.process_manifest_by_tree; an earlier adapter ignores the key and runs unscoped.
+    # An experiment frozen against 1.1.0 is refused as adapter version drift until it is frozen again.
+    adapter_version = "1.2.0"
     requires_git = False
     supported_languages = frozenset({"python", "javascript", "typescript", "go", "rust"})
     scan_modes = frozenset({"full", "pr"})
@@ -2652,11 +2857,31 @@ class DeepsecAdapter(Adapter):
         config = settings(spec)
         if config.files_from is not None and pr is None:
             raise AdapterError("deepsec config.files_from scopes a PR review and is refused for a full run")
+        if config.process_manifest_by_tree is not None and pr is not None:
+            raise AdapterError("deepsec config.process_manifest_by_tree assigns a full run's AI batches and is refused "
+                               "for a PR review: DeepSec's direct mode ignores --manifest, so the review would run "
+                               "unscoped")
         if config.capture_claude_sessions and trace_mode != "content":
             raise AdapterError("deepsec config.capture_claude_sessions keeps transcripts that hold prompts and "
                                "source, and requires content tracing")
         if not config.binary.exists():
             raise AdapterError(f"deepsec executable not found at {config.binary}")
+        # The curated scope of this input, resolved and checked against the tree before anything runs.
+        process_manifest: tuple[str, ...] | None = None
+        input_record = request.get("input") if isinstance(request, dict) else None
+        tree_hash = input_record.get("tree_hash") if isinstance(input_record, dict) else None
+        if config.process_manifest_by_tree is not None:
+            process_manifest = (config.process_manifest_by_tree.get(tree_hash)
+                                if isinstance(tree_hash, str) else None)
+            if process_manifest is None:
+                raise AdapterError(f"deepsec config.process_manifest_by_tree has no entry for input tree {tree_hash!r}; "
+                                   "refusing to fall back to an unscoped AI-batch assignment"[:500])
+            listings: dict[Path, dict[str, os.DirEntry]] = {}
+            for listed_path in process_manifest:
+                issue = process_manifest_tree_issue(Path(source_dir), listed_path, listings)
+                if issue is not None:
+                    raise AdapterError(f"deepsec config.process_manifest_by_tree lists {listed_path!r} for input tree "
+                                       f"{tree_hash}, but {issue}; the map does not describe this tree"[:500])
         # Read before DeepSec starts: its agent can run a shell in this workspace, ``.git`` included.
         changes = workspace_changes(Path(source_dir), pr) if pr is not None else ()
         project = project_id_for(request, config.project_id)
@@ -2683,6 +2908,19 @@ class DeepsecAdapter(Adapter):
             source_argv = ["--files-from", str(files_from_path)]
         else:
             source_argv = ["--diff", pr.revision_range] if pr is not None else []
+        # The curated scope goes to standard-mode process as the JSON array its --manifest reads,
+        # written once before DeepSec starts; these exact bytes are the artifact and are checked
+        # again after the run, because DeepSec's agent can run a shell in this directory.
+        manifest_path = Path(raw_dir) / "deepsec-process-manifest.json"
+        manifest_bytes = b""
+        if process_manifest is not None:
+            manifest_bytes = (json.dumps(list(process_manifest), indent=2) + "\n").encode("utf-8")
+            try:
+                with manifest_path.open("xb") as stream:
+                    stream.write(manifest_bytes)
+            except OSError as exc:
+                raise AdapterError(f"the deepsec process manifest could not be written: {exc}") from exc
+            source_argv = ["--manifest", str(manifest_path)]
         process_argv = [str(config.binary), "process", "--project-id", project,
                         "--root", str(source_dir),
                         *source_argv,
@@ -2704,6 +2942,7 @@ class DeepsecAdapter(Adapter):
             {"id": "deepsec-config", "path": workspace / "deepsec.config.ts"},
             {"id": "deepsec-package-json", "path": workspace / "package.json"},
             *([{"id": "deepsec-files-from", "path": files_from_path}] if "--files-from" in source_argv else []),
+            *([{"id": ARTIFACT_PROCESS_MANIFEST, "path": manifest_path}] if process_manifest is not None else []),
         ]
         notes: list[str] = []
         remaining = float(timeout_seconds)
@@ -2872,6 +3111,22 @@ class DeepsecAdapter(Adapter):
                         f"{'; '.join(excluded_reasons)}. These producer exclusions are expected and are not "
                         "counted as import loss.")
 
+        # A curated run's populations, named inside the global reconciliation above and never in place
+        # of it: every record, status and exported claim still counts exactly as in an ordinary run.
+        scope: CuratedScope | None = None
+        manifest_changed: str | None = None
+        if process_manifest is not None:
+            scope = curated_scope(process_manifest, records.files, imported.claims, roots)
+            # The regex candidates assigned no AI batch are this run's known omission: no verdict was
+            # assigned to them, which does not say the agent never read them.
+            unexamined = list(scope.unselected)
+            written, failure = read_record(manifest_path, enclosure.write(manifest_path))
+            if written is None:
+                manifest_changed = f"the process manifest could not be read back after the run ({failure})"
+            elif written != manifest_bytes:
+                manifest_changed = ("the process manifest's bytes after the run differ from the bytes written "
+                                    "before DeepSec started")
+
         # A PR review's own facts. ``output`` is what DeepSec printed and is advisory only: what an
         # exit 1 means is read from the records it left, which is where each of its three causes
         # (findings, an errored batch, an exhausted quota) is written down as it happens.
@@ -2970,7 +3225,14 @@ class DeepsecAdapter(Adapter):
                                     else {}).get("package_version") or "unknown"),
             "agent": config.agent,
         }
-        if pr is None:
+        if pr is None and process_manifest is not None:
+            steps_note = ("DeepSec ran as three CLI steps in one workspace under raw/deepsec-workspace: scan over the "
+                          "whole supported repository, process in standard mode with --manifest "
+                          f"raw/deepsec-process-manifest.json ({len(process_manifest)} path(s), sha256:"
+                          f"{hashlib.sha256(manifest_bytes).hexdigest()}), and export. The recorded command is those "
+                          "three argv lists in order, separated by '&&'; each step's stdout and stderr is its own raw "
+                          "artifact.")
+        elif pr is None:
             steps_note = (f"DeepSec ran as three CLI steps in one workspace under raw/deepsec-workspace: scan, "
                           f"process and export. The recorded command is those three argv lists in order, "
                           f"separated by '&&'; each step's stdout and stderr is its own raw artifact.")
@@ -3000,6 +3262,37 @@ class DeepsecAdapter(Adapter):
             f"{len(candidates)} regex candidate(s) and {len(sessions)} agent session(s) were read "
             f"out of {len(records.files)} file record(s).",
         ] + notes + list(imported.notes) + finding_import_notes
+        if scope is not None:
+            left_out = len(scope.unselected) + scope.external
+            notes.append(
+                f"Curated diagnostic, not a blind full-repository benchmark: config.process_manifest_by_tree chose "
+                f"{len(scope.manifest)} repository-relative path(s) for input tree {tree_hash} before the run. The "
+                "manifest holds those paths only, with no case identifier, label, weakness class, expected result "
+                "or reason for the selection. "
+                f"Its regex scan left {len(records.files)} file record(s); {len(scope.selected)} are on a listed "
+                "path, which are the only ones standard-mode process could assign to an AI batch, and "
+                f"{left_out} regex candidate file(s) were assigned no AI batch"
+                + (f" ({_listed(scope.unselected)})" if scope.unselected else "")
+                + (f", {scope.external} of them under a record name outside the tree" if scope.external else "")
+                + ". Their records stay as DeepSec wrote them, and a run that carries claims lists their paths "
+                "as omitted. Batch assignment does not restrict repository access: the agent still sees the "
+                "whole repository and may have read unlisted files, so an omitted path is a candidate with no "
+                "assigned verdict, not evidence that it was never read. "
+                f"{len(scope.listed_without_record)} listed path(s) got no file record"
+                + (f" ({_listed(scope.listed_without_record)})" if scope.listed_without_record else "")
+                + ": DeepSec's scan found no regex candidate there or its ignore filter skipped them, so no AI "
+                "batch ran on them; that is native triage, not a model's miss. A curated run is never a success "
+                "and its bundles are unresolved, so it completes no control and earns no quiet credit.")
+            if scope.unexpected or scope.out_of_scope_claims:
+                notes.append(
+                    f"{len(scope.unexpected)} file record(s) the manifest does not list are not in the state a "
+                    "fresh scan leaves (status 'pending', no analysis, no finding)"
+                    + (f" ({_listed(scope.unexpected)})" if scope.unexpected else "")
+                    + f", and {scope.out_of_scope_claims} imported claim(s) are on a path the manifest does not "
+                    "list. All of them are kept in this run's records and claims, but they say DeepSec wrote "
+                    "verdicts outside the declared AI-batch assignment.")
+            if manifest_changed:
+                notes.append(f"Process manifest integrity: {manifest_changed}.")
         if pr is not None:
             if config.limit is not None:
                 notes.append(f"config.limit ({config.limit}) was not passed to DeepSec: its direct mode never applies "
@@ -3055,7 +3348,11 @@ class DeepsecAdapter(Adapter):
             notes.append(
                 f"{unfinished_files} of {len(records.files)} file record(s) were left unfinished "
                 f"({', '.join(statuses.unfinished[:5])}): DeepSec's scan stage found them and its "
-                "AI stage either never reached them, which is what config.limit"
+                "AI stage either "
+                + ("gave them no batch, which is what config.process_manifest_by_tree does to every candidate "
+                   "it does not list and "
+                   if process_manifest is not None else "never reached them, which is what ")
+                + "config.limit"
                 + (f" ({config.limit})" if config.limit is not None else "")
                 + " does, or was still holding them when the run ended. No model reached a "
                 "verdict on those files, so silence about them is not a negative result.")
@@ -3089,7 +3386,9 @@ class DeepsecAdapter(Adapter):
                                       and native_validation_failures == 0
                                       and native_status_validation_failures == 0
                                       and not records.failures and statuses.incomplete == 0
-                                      and (pr is None or not (statuses.errored or omitted))))
+                                      and (pr is None or not (statuses.errored or omitted))
+                                      # Claims over a curated scope are a part chosen before the run.
+                                      and process_manifest is None))
         exit_code = None
         for step in ("export", "process", "scan"):
             result = results.get(step)
@@ -3213,6 +3512,16 @@ class DeepsecAdapter(Adapter):
                            "declare, so whether it finished with them cannot "
                            "be read: "
                            + "; ".join(f"{name}: {reason}" for name, reason in statuses.invalid[:5]))
+        if scope is not None and (scope.unexpected or scope.out_of_scope_claims or manifest_changed):
+            # The run cannot show its verdicts kept to the declared batch assignment, which is a stronger
+            # failure than a scope left incomplete. Every record and claim stays; only the status says so.
+            return stopped("process_manifest_not_honored",
+                           f"config.process_manifest_by_tree declared {len(scope.manifest)} path(s) for DeepSec's AI "
+                           f"batches, but {len(scope.unexpected)} unlisted file record(s) carry analysis, findings or "
+                           f"a status other than 'pending', {scope.out_of_scope_claims} imported claim(s) are on "
+                           "unlisted paths"
+                           + (f", and {manifest_changed}" if manifest_changed else "")
+                           + "; the claims are kept, but the run is not the declared curated diagnostic")
         if unfinished_files:
             # The AI stage never finished with these files. A ``success`` here would let the
             # scoring contract treat every assigned control as completed and grant quiet credit
@@ -3225,7 +3534,12 @@ class DeepsecAdapter(Adapter):
                            f"({', '.join(statuses.unfinished[:5])}): DeepSec "
                            "reached no verdict on them, so this run observed "
                            f"part of the {subject} and says nothing about the "
-                           "rest")
+                           "rest"
+                           + (f"; config.process_manifest_by_tree limited AI batches to {len(scope.manifest)} "
+                              f"listed path(s) and assigned none to {len(scope.unselected) + scope.external} regex "
+                              "candidate file(s), so this is a curated diagnostic and not a full-repository "
+                              "observation"
+                              if scope is not None else ""))
         if omitted:
             # Known omissions of the change: DeepSec's listing cannot resolve these names (git quotes them, or
             # DeepSec trims the space at an end of them), so it never selected them and no model was given them.
@@ -3252,5 +3566,16 @@ class DeepsecAdapter(Adapter):
                                        "and left no file record, and its output does not carry the statement DeepSec "
                                        "prints when a diff selects no file, so an empty review cannot be told from a "
                                        f"run that read nothing; stderr: {tail('process')}")[:2000]}, **base)
+        if scope is not None:
+            # Every regex candidate was on a listed path, or none was. DeepSec then did what an ordinary run
+            # does, but which paths could get an AI batch was decided before the run with evaluator-side
+            # knowledge, so the run still completes no control: a curated diagnostic is never a success.
+            reached = ("every regex candidate file DeepSec's scan produced was on a listed path"
+                       if scope.selected else
+                       "DeepSec's scan produced no regex candidate on any listed path, so no AI batch ran")
+            return stopped("scope_incomplete",
+                           f"config.process_manifest_by_tree limited this full run's AI batches to "
+                           f"{len(scope.manifest)} listed path(s) before it started, and {reached}; a curated diagnostic "
+                           "is never a complete or blind observation of the full repository")
         return NativeOutcome(status="success", exit_code=exit_code, claims=imported.claims,
                              omitted_paths=unexamined, examined_nothing=nothing_examined, **base)
