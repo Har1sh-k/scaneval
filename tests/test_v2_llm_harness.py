@@ -1797,6 +1797,194 @@ export async function runRuntimeScan(options: any): Promise<any> {
     assert execution["status"] == "partial"
 
 
+# One invocation object reused for a declared timeout retry, with only its piped prompt set per
+# call. ``null`` leaves ``stdin`` absent, which is a different request from an empty string.
+STDIN_RETRY_ENGINE = r'''
+export const HARNESS_OBSERVER_VERSION = 1;
+const STDINS: (string | null)[] = __STDINS__;
+export async function runRuntimeScan(options: any): Promise<any> {
+  options.observer.onContextSupplied({ invocationId: "planner-1", stage: "planner",
+    promptChars: 4, spans: [], inputs: [] });
+  const invocation: any = { args: ["-p", "--model", "test/mock", "plan"], cwd: options.repoPath,
+    timeoutMs: 1000, env: { RETRY_TEST_SECRET: "must-not-appear-in-driver-output" },
+    meta: { invocationId: "planner-1", stage: "planner" } };
+  for (const stdin of STDINS) {
+    if (stdin === null) delete invocation.stdin; else invocation.stdin = stdin;
+    try { await options.llmRunner.runPi(invocation); } catch { /* timeout-only helper retries once */ }
+  }
+  return { newFindings: [], updatedFindings: [],
+    bootstrapPlan: { planner: "llm", notes: ["llm-planner-success", "llm-planner-timeout-retry:1"] },
+    bootstrapScan: { llmCalls: 1, failedCalls: 0, status: "ok", hypothesisCoverage: 1 },
+    runtimeProfile: "full", degraded: false, observer: { version: 1, hookFailures: 0 } };
+}
+'''
+
+
+@pytest.mark.parametrize(("stdins", "paired"), [
+    (["plan-a", "plan-b"], False),
+    ([None, ""], False),
+    (["", None], False),
+    (["plan", "plan "], False),
+    (["\ud800", "\udfff"], False),
+    (["plan", "plan"], True),
+    (["", ""], True),
+    ([None, None], True),
+], ids=["different", "absent-then-empty", "empty-then-absent", "untrimmed", "lone-surrogates",
+        "same", "same-empty", "argv-only"])
+def test_a_planner_retry_pairs_only_with_the_same_piped_prompt(tmp_path, stdins, paired):
+    engine = STDIN_RETRY_ENGINE.replace("__STDINS__", json.dumps(stdins))
+    runner = DECLARED_RETRY_RUNNER.replace("__FAIL_ON__", "[1]")
+    root = _stub_harness(tmp_path, "stdin-planner-retry", engine=engine, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="stdin-planner-retry", runner="default",
+                                 capture_pi_sessions=False)
+    output = json.loads((bundle / "raw/driver-output.json").read_text())
+    execution = load_document(bundle / "execution.json", "execution-record")
+    events = [json.loads(line) for line in (bundle / "trace/events.jsonl").read_text().splitlines()]
+
+    assert output["model_calls"] == 2
+    assert output["planner_timeout_retry_declarations"] == 1
+    assert output["planner_timeout_failures_observed"] == 1
+    requests = [event for event in events if event["type"] == "model.request"]
+    if any(isinstance(stdin, str) and any(0xD800 <= ord(char) <= 0xDFFF for char in stdin) for stdin in stdins):
+        # The trace sink refuses text that is not well-formed Unicode. The loss is reported,
+        # and the identity that pairs retries is computed before and apart from emission.
+        assert requests == []
+        assert output["trace"]["state"]["capture_gap"] is True
+        assert output["trace"]["state"]["dropped_events"] == 2
+    else:
+        assert [event["content"].get("stdin", None) for event in requests] == stdins
+    if paired:
+        assert output["planner_timeout_recoveries"] == [{
+            "invocation_id": "planner-1", "failed_runner_call_id": "call-1",
+            "recovery_runner_call_id": "call-2"}]
+        assert output["model_call_failures"] == output["model_call_failures_recovered"] == 1
+        assert output["model_call_failures_unrecovered"] == 0
+        assert execution["status"] == "success", execution.get("error")
+    else:
+        assert output["planner_timeout_recovery_candidates"] == 0
+        assert output["planner_timeout_recoveries"] == []
+        assert output["model_call_failures"] == output["model_call_failures_unrecovered"] == 1
+        assert output["model_call_failures_recovered"] == 0
+        assert execution["status"] == "partial"
+    assert "must-not-appear-in-driver-output" not in json.dumps(output)
+    assert "must-not-appear-in-driver-output" not in (bundle / "trace/events.jsonl").read_text()
+
+
+def test_a_piped_prompt_that_is_not_text_leaves_a_planner_retry_unpaired(tmp_path):
+    engine = STDIN_RETRY_ENGINE.replace("__STDINS__", "[]").replace(
+        "  for (const stdin of STDINS) {",
+        "  for (const stdin of [new Uint8Array([112]), new Uint8Array([112])] as any[]) {")
+    runner = DECLARED_RETRY_RUNNER.replace("__FAIL_ON__", "[1]")
+    root = _stub_harness(tmp_path, "bytes-planner-retry", engine=engine, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="bytes-planner-retry", runner="default",
+                                 capture_pi_sessions=False)
+    output = json.loads((bundle / "raw/driver-output.json").read_text())
+    execution = load_document(bundle / "execution.json", "execution-record")
+
+    assert output.get("error") is None, "optional correlation must not fail the driver"
+    assert output["planner_timeout_failures_observed"] == 1
+    assert output["planner_timeout_recovery_candidates"] == 0
+    assert output["model_call_failures"] == output["model_call_failures_unrecovered"] == 1
+    assert execution["status"] == "partial"
+
+
+# Every request shape the runner boundary carries, sent once each. The runner answers with what
+# it was handed, so the response shows the piped prompt reached it unchanged.
+STDIN_CAPTURE_ENGINE = r'''
+export const HARNESS_OBSERVER_VERSION = 1;
+const ARGS = ["-p", "--model", "test/mock", "--thinking", "high", "argv-last"];
+export async function runRuntimeScan(options: any): Promise<any> {
+  const calls: any[] = [
+    { id: "argv-only", args: ARGS },
+    { id: "piped", args: ARGS, stdin: "piped prompt\n" },
+    { id: "piped-empty", args: ARGS, stdin: "" },
+    { id: "piped-bytes", args: ARGS, stdin: new Uint8Array([112]) },
+    { id: "structured", request: { route: { driver: "structured-route", model: "test/structured" },
+      effort: "low", prompt: "structured prompt" } },
+  ];
+  for (const { id, ...shape } of calls) {
+    await options.llmRunner.runPi({ ...shape, cwd: options.repoPath, timeoutMs: 1000,
+      env: { STDIN_TEST_SECRET: "must-not-appear-in-trace" }, meta: { invocationId: id, stage: "llm-static.file" } });
+  }
+  return { newFindings: [], updatedFindings: [],
+    bootstrapScan: { llmCalls: calls.length, failedCalls: 0, status: "complete", hypothesisCoverage: 1 },
+    runtimeProfile: "full", degraded: false, observer: { version: 1, hookFailures: 0 } };
+}
+'''
+STDIN_CAPTURE_RUNNER = r'''
+__HOOKS_EXPORT__
+export function resolveRunnerBinary(): string { return "pi"; }
+export function createDefaultPiRunner(options: any = {}) {
+  return { async runPi(invocation: any) {
+    const start = { invocationId: invocation.meta?.invocationId, stage: invocation.meta?.stage,
+      attempt: 1, maxAttempts: 1, binary: "pi", modelRequested: "test/mock", thinking: "high",
+      outputFormat: "text", promptChars: 7, timeoutMs: invocation.timeoutMs };
+    options.hooks?.onAttemptStart(start);
+    const stdin = invocation.stdin === undefined ? "<absent>"
+      : typeof invocation.stdin === "string" ? invocation.stdin : "<bytes>";
+    const stdout = JSON.stringify({ stdin, last: invocation.args?.at(-1) ?? null });
+    options.hooks?.onAttemptEnd({ ...start, durationMs: 1, code: 0, stdoutChars: stdout.length,
+      stderrChars: 0, willRetry: false });
+    return { code: 0, stdout, stderr: "" };
+  } };
+}
+'''
+
+
+@pytest.mark.parametrize("hooked", [False, True], ids=["wrapper-only", "runner-hooks"])
+@pytest.mark.parametrize("trace_mode", ["content", "metadata"])
+def test_the_recorded_prompt_is_the_piped_one_and_an_empty_pipe_still_wins(tmp_path, hooked, trace_mode):
+    runner = STDIN_CAPTURE_RUNNER.replace(
+        "__HOOKS_EXPORT__", "export const PI_RUNNER_HOOKS_VERSION = 1;" if hooked else "")
+    root = _stub_harness(tmp_path, "stdin-capture", engine=STDIN_CAPTURE_ENGINE, runner=runner)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="stdin-capture", runner="default",
+                                 trace_mode=trace_mode, capture_pi_sessions=False)
+    output = json.loads((bundle / "raw/driver-output.json").read_text())
+    trace_text = (bundle / "trace/events.jsonl").read_text()
+    events = [json.loads(line) for line in trace_text.splitlines()]
+    requests = {event["call_id"]: event for event in events if event["type"] == "model.request"}
+    responses = {event["call_id"]: event for event in events if event["type"] == "model.response"}
+
+    args = ["-p", "--model", "test/mock", "--thinking", "high", "argv-last"]
+    expected_content = {
+        "argv-only": {"args": args},
+        "piped": {"args": args, "stdin": "piped prompt\n"},
+        "piped-empty": {"args": args, "stdin": ""},
+        "piped-bytes": {"args": args, "stdin": None},
+        "structured": {"request": {"route": {"driver": "structured-route", "model": "test/structured"},
+                                   "effort": "low", "prompt": "structured prompt"}},
+    }
+    assert output["model_calls"] == 5 and output.get("error") is None
+    assert set(requests) == set(expected_content)
+    assert requests["structured"]["metadata"]["route"] == "structured-route"
+    assert {requests[call]["metadata"]["route"] for call in expected_content if call != "structured"} == {"pi"}
+    if hooked:
+        # Under hooks the size is the runner's own report of the attempt; only content is the driver's.
+        assert {event["metadata"]["source"] for event in requests.values()} == {"harness_runner_hook"}
+        assert {event["metadata"]["prompt_chars"] for event in requests.values()} == {7}
+    else:
+        assert {event["metadata"]["source"] for event in requests.values()} == {"driver_runner_wrapper"}
+        assert {call: event["metadata"]["prompt_chars"] for call, event in requests.items()} == {
+            "argv-only": 9, "piped": 13, "piped-empty": 0, "piped-bytes": None, "structured": 17}
+        assert requests["structured"]["metadata"]["model_requested"] == "test/structured"
+        assert requests["piped"]["metadata"]["model_requested"] == "test/mock"
+        assert requests["piped"]["metadata"]["thinking"] == "high"
+    if trace_mode == "content":
+        assert {call: event["content"] for call, event in requests.items()} == expected_content
+        assert {call: json.loads(event["content"]["stdout"]) for call, event in responses.items()} == {
+            "argv-only": {"stdin": "<absent>", "last": "argv-last"},
+            "piped": {"stdin": "piped prompt\n", "last": "argv-last"},
+            "piped-empty": {"stdin": "", "last": "argv-last"},
+            "piped-bytes": {"stdin": "<bytes>", "last": "argv-last"},
+            "structured": {"stdin": "<absent>", "last": None},
+        }
+    else:
+        assert all("content" not in event for event in events)
+        assert "piped prompt" not in trace_text and "structured prompt" not in trace_text
+    assert "must-not-appear-in-trace" not in trace_text
+    assert "must-not-appear-in-trace" not in json.dumps(output)
+
+
 def test_stale_active_plan_retry_note_does_not_manufacture_a_recovery(tmp_path):
     engine = r'''
 export const HARNESS_OBSERVER_VERSION = 1;
@@ -2183,6 +2371,58 @@ def test_v1_truncated_spans_are_credited_only_after_exact_source_mapping(tmp_pat
         assert spans[call_id]["location_known"] is False
         assert spans[call_id].get("source_mapping") != "verified_exact"
     assert spans["null-truncation"]["truncated"] is None
+
+
+def test_source_mapping_is_verified_against_the_piped_prompt_not_the_last_argv_word(tmp_path):
+    """A truncated span is credited only when it is in the prompt the runner was actually sent.
+
+    The same contiguous prefix that ``test_v1_truncated_spans_are_credited_only_after_exact_source_mapping``
+    verifies is sent once on stdin behind a decoy argv word, and once as the last argv word behind
+    an explicit empty stdin. Only the first carried the source.
+    """
+    prepared = _prepared(tmp_path)
+    (prepared.source_dir / "src/context.ts").write_text(MAPPING_SOURCE, encoding="utf-8")
+    prepared = PreparedInput(prepared.input_id, prepared.source_dir,
+                             hash_exported_tree(prepared.source_dir)["tree_hash"],
+                             prepared.languages, prepared.provenance)
+    prefix = "".join(MAPPING_SOURCE.splitlines(keepends=True)[:4])
+    prompt = json.dumps("before\n" + prefix + "\nafter")
+    span = (f'{{ path: "src/context.ts", startLine: 1, endLine: 4, chars: {len(prefix)}, '
+            f'sha256: {json.dumps(hashlib.sha256(prefix.encode()).hexdigest())}, truncated: true, '
+            f'originalChars: {len(MAPPING_SOURCE)}, role: "primary" }}')
+    engine = f'''
+export const HARNESS_OBSERVER_VERSION = 1;
+const CALLS: any[] = [
+  {{ id: "piped", last: "argv-decoy", stdin: {prompt} }},
+  {{ id: "empty-piped", last: {prompt}, stdin: "" }},
+];
+export async function runRuntimeScan(options: any) {{
+  for (const call of CALLS) {{
+    options.observer.onContextSupplied({{ invocationId: call.id, stage: "llm-static.file",
+      promptChars: {len(prefix)}, spans: [{span}], truncatedSpans: 1, omittedPaths: [] }});
+    await options.llmRunner.runPi({{
+      args: ["-p", "--model", "test/mock", call.last], stdin: call.stdin, cwd: options.repoPath,
+      timeoutMs: 1000, env: {{}}, meta: {{ invocationId: call.id, stage: "llm-static.file" }},
+    }});
+  }}
+  options.observer.onScanComplete?.({{ hookFailures: 0, unattributablePayloads: 0 }});
+  return {{ newFindings: [], updatedFindings: [],
+    bootstrapScan: {{ llmCalls: CALLS.length, failedCalls: 0, status: "complete", hypothesisCoverage: 1 }},
+    runtimeProfile: "full", degraded: false, observer: {{ version: 1, hookFailures: 0 }} }};
+}}
+'''
+    root = _stub_harness(tmp_path, "mapping-stdin", engine=engine, runner=NO_HOOKS_RUNNER)
+    bundle = _stub_harness_bundle(tmp_path, root, run_id="mapping-stdin", runner="default",
+                                  prepared=prepared)
+    events = [json.loads(line) for line in
+              (bundle / "trace/events.jsonl").read_text(encoding="utf-8").splitlines()]
+    spans = {event["call_id"]: event["metadata"]["spans"][0]
+             for event in events if event["type"] == "context.selection"}
+
+    assert spans["piped"]["location_known"] is True
+    assert spans["piped"]["source_mapping"] == "verified_exact"
+    assert spans["empty-piped"]["location_known"] is False
+    assert spans["empty-piped"].get("source_mapping") != "verified_exact"
 
 
 def _reused_context_id_engine() -> str:
