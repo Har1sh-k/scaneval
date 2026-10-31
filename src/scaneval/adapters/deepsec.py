@@ -155,13 +155,13 @@ is an error.
 from __future__ import annotations
 
 from collections import Counter
+import errno
 import hashlib
 from importlib import import_module
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
-import shutil
 import stat
 import subprocess
 from typing import Any, NamedTuple, Sequence
@@ -180,6 +180,11 @@ ARTIFACT_EXPORT = "deepsec-export"
 # without transcript import still runs, on a checkout where the collectors are absent.
 COLLECTOR_MODULE = "scaneval.collectors.claude_code"
 DEFAULT_PROJECTS_DIR = "~/.claude/projects"
+# The most a transcript being moved may hold: the collector's MAX_TRANSCRIPT_BYTES, spelled here
+# for a checkout without the collector. See transcript_limit, which prefers the collector's own.
+TRANSCRIPT_LIMIT = 64 * 1024 * 1024
+# How much of a transcript a move holds in memory at once, the chunk the collector reads in.
+TRANSCRIPT_CHUNK = 1 << 20
 # DeepSec's own rule for a project id, from resolve-project-id.ts in 2.3.10. The id names a
 # directory under data/, so a value it would refuse must be refused here rather than sent.
 PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -2109,6 +2114,202 @@ def _overlapping(candidates: tuple[Candidate, ...], path: str, slug: str,
     return sorted(dict.fromkeys(ids))
 
 
+def transcript_limit() -> int:
+    """The most a transcript being moved may hold: the collector's ``MAX_TRANSCRIPT_BYTES``.
+
+    Discovery adopts only a transcript it read to its end within that bound, so a transcript past
+    it by the time it is moved has changed since and is not the file the workspace history
+    verified. The collector's constant is the rule when it is installed, so the two cannot drift,
+    as :func:`session_id_usable` keeps the session id rule; :data:`TRANSCRIPT_LIMIT` is the same
+    number spelled here for a checkout without the collector, which never has a workspace history
+    and so never has a transcript to move.
+    """
+    try:
+        limit = getattr(import_module(COLLECTOR_MODULE), "MAX_TRANSCRIPT_BYTES", None)
+    except ImportError:
+        limit = None
+    return limit if isinstance(limit, int) and limit > 0 else TRANSCRIPT_LIMIT
+
+
+def move_transcript(source: Path, raw_dir: Path, destination: PurePosixPath,
+                    enclosure: Enclosure) -> str | None:
+    """Move one verified transcript to *destination* under *raw_dir*; return why not, never raise.
+
+    Both ends are paths something other than this run can change. *raw_dir* is this run's raw
+    output, which DeepSec and every agent session it opened could write to while they ran, and
+    *source* is in the operator's projects directory, which every Claude Code session on the
+    machine writes to. The move used to check the enclosure on the destination's directory and
+    then call :func:`shutil.copyfile` and unlink the original, which left open the two holes
+    :func:`~scaneval.adapters.llm_harness.stage_record` had already closed for harness records.
+
+    A link already planted at the destination was written through, because :func:`shutil.copyfile`
+    follows a symbolic link and truncates whatever file a hard link names: the transcript
+    overwrote a host file of the planter's choosing, the original was deleted, and the note said
+    the transcript had been moved and registered. A check on the directory is a check on the
+    wrong path. Now the enclosure is checked on the destination itself, resolved whole, before
+    anything is created, which refuses a link anywhere along it that leads out of the raw output.
+    Resolving cannot refuse a link that leads back inside, such as ``raw/claude-sessions/<sid>``
+    pointing at another directory there: ``mkdir`` accepted it and the create landed behind it, so
+    the transcript left the projects directory for a path no artifact was registered at while the
+    note said it had been moved. So no directory is reached by its path any more. The raw output
+    is opened with ``O_DIRECTORY|O_NOFOLLOW``, and each directory under it is created with
+    ``mkdir`` relative to the descriptor of the one above, which never follows a link at its name,
+    and then opened the same way, so no directory under the raw output can be a link and nothing
+    is created behind one. The destination is created relative to the last of them with
+    ``O_CREAT|O_EXCL|O_NOFOLLOW``, so whatever is already at that name (a symbolic link, a named
+    pipe, a second name for a host file, a regular file) is refused rather than opened, and a copy
+    that is not kept is removed by that name in that directory, wherever the path leads by then.
+    Each directory created is private, as the session's directory always was.
+
+    A transcript replaced by a link after discovery and the import had read it was followed as
+    well, so a host file's bytes were registered and hashed as that session's transcript, and
+    nothing said so. And the move read the transcript whole, so a regular file swapped in after
+    the import was held in memory at whatever size it had: one large enough raised
+    :class:`MemoryError` out of the move and the scan, and a run that had finished with its claims
+    was recorded as an adapter failure with none. Now the source is opened with
+    ``O_NOFOLLOW|O_NONBLOCK``, which refuses a symbolic link and returns at once from a named pipe,
+    and its descriptor is proved with :func:`os.fstat`, before a byte is read, to be a regular file
+    with one name and no larger than :func:`transcript_limit`, the collector's bound. A second name
+    is refused as :func:`~scaneval.adapters.llm_harness.stage_record` refuses one at its
+    destination: a hard link is not a symbolic link, so ``O_NOFOLLOW`` has nothing to refuse, and a
+    host file linked into the transcript's place on the same volume was registered and hashed as
+    the transcript exactly as one behind a symbolic link had been. A larger file is refused because
+    discovery adopts only a transcript it read to its end within that bound, so the file there now
+    is not the one it verified. The copy then streams from one descriptor to the other in chunks of
+    :data:`TRANSCRIPT_CHUNK`, so a move never holds more than one chunk in memory. The bytes the
+    import read are not reused instead: the collector hands back a summary rather than the file,
+    and the lines it decodes are bounded and repaired, so they are not the file either.
+
+    The original is removed only after a verified write: the copy received exactly as many bytes
+    as the source held when it was opened, the source had nothing past them, and :func:`os.fstat`
+    on the copy's descriptor shows a regular file with one name and that size. A copy that fails
+    or does not verify is removed again and the original is left as it was, and so is a copy whose
+    original then cannot be removed, so a transcript is either moved or left where it was, and no
+    copy of it stays in ``raw/claude-sessions``. An original already gone by the time it is
+    removed costs nothing: the verified copy holds it.
+
+    Nothing is raised, whatever fails. The refusals above are the failures this function names,
+    and any other exception is a refusal too, naming only its type, because the move used to catch
+    :class:`OSError` alone and the :class:`MemoryError` of a whole-file read went on out of
+    :meth:`DeepsecAdapter.scan`. The rule is the import's: a transcript is evidence about how the
+    run went, so failing to keep one costs that evidence, never the scan's status or its claims.
+    The descriptors are closed and an unkept copy removed on every way out.
+
+    What is not verified, named so it is not mistaken for an oversight: the copy's content. Nothing
+    holds a digest of the file to check it against, because the collector hashes the spans it
+    delivers and never the file. A hash here could only compare the copy with the bytes this move
+    had just written to it, which proves nothing a process able to rewrite the copy could not undo
+    a moment later, before the run hashes the copy it registers.
+
+    That narrows the class ``docs/THREAT_MODEL.md`` names; it does not close it. Under the raw
+    output each step now acts through the descriptor of a directory it has already proved, but the
+    raw output itself and the source are still opened by their paths, and the read and the unlink
+    of the original are separate operations, so a process still running can swap the source, or a
+    directory above either end, in between. The projects directory is inside neither enclosure
+    root, so what vouches for the directory the source is read from is the workspace history that
+    listed it.
+    """
+    reader = writer = None
+    opened: list[int] = []
+    created = False
+    try:
+        try:
+            reader = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            found = os.fstat(reader)
+        except OSError as exc:
+            reason = ("it is a symbolic link, not a regular file" if exc.errno == errno.ELOOP
+                      else exc.strerror or str(exc))
+            return f"the transcript could not be read as a regular file ({reason})"
+        if not stat.S_ISREG(found.st_mode):
+            return "the transcript could not be read as a regular file (not a regular file)"
+        if found.st_nlink != 1:
+            return (f"the transcript has {found.st_nlink} names where it was written with one, so it may be a "
+                    "host file linked into its place")
+        limit = transcript_limit()
+        if found.st_size > limit:
+            return (f"the transcript holds {found.st_size} byte(s), past the collector's bound of {limit}, "
+                    "so it is not the file discovery read to its end")
+        if enclosure.write(raw_dir / destination) is None:
+            return "the destination does not resolve inside this run's raw output"
+        *directories, name = destination.parts
+        try:
+            parent = os.open(raw_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as exc:
+            return f"this run's raw output could not be opened without following a link ({exc.strerror or exc})"
+        opened.append(parent)
+        walked = PurePosixPath("raw")
+        for directory in directories:
+            walked /= directory
+            try:
+                os.mkdir(directory, 0o700, dir_fd=parent)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                return f"{walked} could not be created ({exc.strerror or exc})"
+            try:
+                parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            except OSError as exc:
+                # A link there is refused with ENOTDIR on macOS and Linux, ELOOP where O_NOFOLLOW is checked first.
+                if exc.errno in (errno.ENOTDIR, errno.ELOOP):
+                    return f"{walked} is a link or not a directory, so nothing was created through it"
+                return f"{walked} could not be opened ({exc.strerror or exc})"
+            opened.append(parent)
+        try:
+            # The umask decides the mode, as it did for the copy this replaces; the directory is private.
+            writer = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=parent)
+        except FileExistsError:
+            return "something was already at the destination, and it was not written through"
+        except OSError as exc:
+            return f"the destination could not be created ({exc.strerror or exc})"
+        created = True
+        copied = 0
+        try:
+            # Cleared now that the descriptor is proved a regular file, as the collector clears it:
+            # on a regular file it could only turn a slow read into a spurious EAGAIN.
+            os.set_blocking(reader, True)
+            with os.fdopen(writer, "wb") as stream:
+                writer = None
+                while copied < found.st_size:
+                    chunk = os.read(reader, min(TRANSCRIPT_CHUNK, found.st_size - copied))
+                    if not chunk:
+                        break
+                    stream.write(chunk)
+                    copied += len(chunk)
+                # One byte past the size it was opened at says whether it grew while it was copied.
+                grew = copied == found.st_size and bool(os.read(reader, 1))
+                stream.flush()
+                written = os.fstat(stream.fileno())
+        except OSError as exc:
+            return f"the transcript could not be copied ({exc.strerror or exc})"
+        if copied != found.st_size or grew:
+            return (f"the transcript changed size while it was copied, from the {found.st_size} byte(s) it "
+                    "held when it was opened")
+        if not (stat.S_ISREG(written.st_mode) and written.st_nlink == 1 and written.st_size == copied):
+            return f"the copy did not verify as a regular file with one name holding all {copied} byte(s)"
+        try:
+            source.unlink(missing_ok=True)
+        except OSError as exc:
+            return f"the original could not be removed ({exc.strerror or exc}), so the copy was discarded"
+        created = False
+        return None
+    except Exception as exc:  # noqa: BLE001 - same rule: the move, not the scan
+        return f"the move failed with {type(exc).__name__}"
+    finally:
+        if created:
+            # Created by this call alone (``O_EXCL``) in the directory *parent* holds, so removing that
+            # name there removes nothing anyone else wrote, wherever the path leads by now.
+            try:
+                os.unlink(name, dir_fd=parent)
+            except OSError:
+                pass
+        for descriptor in (reader, writer, *opened):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+
 def preserve_transcripts(sessions: tuple[Session, ...], transcripts: dict[str, tuple[Path, ...]],
                          projects_dir: Path, raw_dir: Path, enclosure: Enclosure) -> tuple[list[dict], list[str]]:
     """Move each session's Claude Code transcripts into ``raw/claude-sessions`` and register them.
@@ -2118,36 +2319,40 @@ def preserve_transcripts(sessions: tuple[Session, ...], transcripts: dict[str, t
     directory with every other session on the machine; moved here they become hashed artifacts of
     the run that wrote them. Only the files the workspace history verified are moved, the same
     paths the import read, and a subagent transcript keeps its ``subagents/`` level. That includes
-    the sessions no analysis entry names, which are the evidence of a failed batch. A transcript
-    that cannot be moved stays where it was and is counted in the note.
+    the sessions no analysis entry names, which are the evidence of a failed batch.
+
+    Each move is :func:`move_transcript`. A transcript it refuses stays where it was, is not
+    registered, and is named in the note with the reason, so a link of either kind planted at
+    either end, or at a directory on the way to the destination, reads as a transcript this run
+    did not keep rather than as one it moved. Neither the status nor any claim depends on this: a
+    transcript is evidence about how the run went, and a refused one costs that evidence and
+    nothing else.
     """
-    root = raw_dir / "claude-sessions"
+    root = PurePosixPath("claude-sessions")
     artifacts: list[dict] = []
-    moved = failed = 0
+    moved = 0
+    refused: list[str] = []
     seen: set[str] = set()
     for session in sessions:
         if not session.discoverable or session.session_id in seen:
             continue
         seen.add(session.session_id)
         for source in transcripts.get(session.session_id, ()):
-            relative = (Path("subagents", source.name) if source.parent.name == "subagents"
-                        else Path(source.name))
-            target = root / session.session_id / relative
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                if enclosure.write(target.parent) is None:
-                    raise OSError("the transcript directory escaped the private run directory")
-                shutil.copyfile(source, target)
-                source.unlink()
-            except OSError:
-                failed += 1
+            relative = (PurePosixPath("subagents", source.name) if source.parent.name == "subagents"
+                        else PurePosixPath(source.name))
+            destination = root / session.session_id / relative
+            failure = move_transcript(source, raw_dir, destination, enclosure)
+            if failure is not None:
+                refused.append(f"{session.session_id}/{relative.as_posix()} ({failure})")
                 continue
-            artifacts.append({"id": f"claude-session/{session.session_id}/{relative.as_posix()}", "path": target})
+            artifacts.append({"id": f"claude-session/{session.session_id}/{relative.as_posix()}",
+                              "path": raw_dir / destination})
             moved += 1
-    notes = [f"{moved} Claude Code transcript(s) were moved from {projects_dir} into raw/claude-sessions and "
-             "registered as artifacts of this run."
-             + (f" {failed} transcript(s) could not be moved and were left in place."
-                if failed else "")]
+    notes = [f"{moved} Claude Code transcript(s) were moved from {portable(projects_dir)} into "
+             "raw/claude-sessions and registered as artifacts of this run."
+             + (f" {len(refused)} transcript(s) could not be moved and were left in place: "
+                + "; ".join(refused[:5]) + ("; ..." if len(refused) > 5 else "") + "."
+                if refused else "")]
     return artifacts, notes
 
 
