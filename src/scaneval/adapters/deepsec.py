@@ -2131,10 +2131,11 @@ def transcript_limit() -> int:
     return limit if isinstance(limit, int) and limit > 0 else TRANSCRIPT_LIMIT
 
 
-def move_transcript(source: Path, target: Path, enclosure: Enclosure) -> str | None:
-    """Move one verified transcript to *target*; return why it was not moved, never raise.
+def move_transcript(source: Path, raw_dir: Path, destination: PurePosixPath,
+                    enclosure: Enclosure) -> str | None:
+    """Move one verified transcript to *destination* under *raw_dir*; return why not, never raise.
 
-    Both ends are paths something other than this run can change. *target* is in this run's raw
+    Both ends are paths something other than this run can change. *raw_dir* is this run's raw
     output, which DeepSec and every agent session it opened could write to while they ran, and
     *source* is in the operator's projects directory, which every Claude Code session on the
     machine writes to. The move used to check the enclosure on the destination's directory and
@@ -2145,12 +2146,20 @@ def move_transcript(source: Path, target: Path, enclosure: Enclosure) -> str | N
     follows a symbolic link and truncates whatever file a hard link names: the transcript
     overwrote a host file of the planter's choosing, the original was deleted, and the note said
     the transcript had been moved and registered. A check on the directory is a check on the
-    wrong path. Now the enclosure is checked on the destination itself, resolved whole so a link
-    anywhere along it is caught, and before ``mkdir``, which would otherwise descend a directory
-    link planted on the way and create the session's directory behind it. The destination is then
-    created with ``O_CREAT|O_EXCL|O_NOFOLLOW``, so whatever is already at that name (a symbolic
-    link, a named pipe, a second name for a host file, a regular file) is refused rather than
-    opened.
+    wrong path. Now the enclosure is checked on the destination itself, resolved whole, before
+    anything is created, which refuses a link anywhere along it that leads out of the raw output.
+    Resolving cannot refuse a link that leads back inside, such as ``raw/claude-sessions/<sid>``
+    pointing at another directory there: ``mkdir`` accepted it and the create landed behind it, so
+    the transcript left the projects directory for a path no artifact was registered at while the
+    note said it had been moved. So no directory is reached by its path any more. The raw output
+    is opened with ``O_DIRECTORY|O_NOFOLLOW``, and each directory under it is created with
+    ``mkdir`` relative to the descriptor of the one above, which never follows a link at its name,
+    and then opened the same way, so no directory under the raw output can be a link and nothing
+    is created behind one. The destination is created relative to the last of them with
+    ``O_CREAT|O_EXCL|O_NOFOLLOW``, so whatever is already at that name (a symbolic link, a named
+    pipe, a second name for a host file, a regular file) is refused rather than opened, and a copy
+    that is not kept is removed by that name in that directory, wherever the path leads by then.
+    Each directory created is private, as the session's directory always was.
 
     A transcript replaced by a link after discovery and the import had read it was followed as
     well, so a host file's bytes were registered and hashed as that session's transcript, and
@@ -2192,13 +2201,16 @@ def move_transcript(source: Path, target: Path, enclosure: Enclosure) -> str | N
     had just written to it, which proves nothing a process able to rewrite the copy could not undo
     a moment later, before the run hashes the copy it registers.
 
-    That narrows the class ``docs/THREAT_MODEL.md`` names; it does not close it. The enclosure
-    check, the ``mkdir`` and the open are separate operations, and so are the read and the
-    unlink, so a process still running can plant a link or swap a directory in between. The
-    projects directory is inside neither enclosure root, so what vouches for the directory the
-    source is read from is the workspace history that listed it.
+    That narrows the class ``docs/THREAT_MODEL.md`` names; it does not close it. Under the raw
+    output each step now acts through the descriptor of a directory it has already proved, but the
+    raw output itself and the source are still opened by their paths, and the read and the unlink
+    of the original are separate operations, so a process still running can swap the source, or a
+    directory above either end, in between. The projects directory is inside neither enclosure
+    root, so what vouches for the directory the source is read from is the workspace history that
+    listed it.
     """
     reader = writer = None
+    opened: list[int] = []
     created = False
     try:
         try:
@@ -2217,15 +2229,34 @@ def move_transcript(source: Path, target: Path, enclosure: Enclosure) -> str | N
         if found.st_size > limit:
             return (f"the transcript holds {found.st_size} byte(s), past the collector's bound of {limit}, "
                     "so it is not the file discovery read to its end")
-        if enclosure.write(target) is None:
+        if enclosure.write(raw_dir / destination) is None:
             return "the destination does not resolve inside this run's raw output"
+        *directories, name = destination.parts
         try:
-            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            parent = os.open(raw_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         except OSError as exc:
-            return f"the destination's directory could not be created ({exc.strerror or exc})"
+            return f"this run's raw output could not be opened without following a link ({exc.strerror or exc})"
+        opened.append(parent)
+        walked = PurePosixPath("raw")
+        for directory in directories:
+            walked /= directory
+            try:
+                os.mkdir(directory, 0o700, dir_fd=parent)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                return f"{walked} could not be created ({exc.strerror or exc})"
+            try:
+                parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            except OSError as exc:
+                # A link there is refused with ENOTDIR on macOS and Linux, ELOOP where O_NOFOLLOW is checked first.
+                if exc.errno in (errno.ENOTDIR, errno.ELOOP):
+                    return f"{walked} is a link or not a directory, so nothing was created through it"
+                return f"{walked} could not be opened ({exc.strerror or exc})"
+            opened.append(parent)
         try:
             # The umask decides the mode, as it did for the copy this replaces; the directory is private.
-            writer = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)
+            writer = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=parent)
         except FileExistsError:
             return "something was already at the destination, and it was not written through"
         except OSError as exc:
@@ -2264,18 +2295,19 @@ def move_transcript(source: Path, target: Path, enclosure: Enclosure) -> str | N
     except Exception as exc:  # noqa: BLE001 - same rule: the move, not the scan
         return f"the move failed with {type(exc).__name__}"
     finally:
-        for descriptor in (reader, writer):
+        if created:
+            # Created by this call alone (``O_EXCL``) in the directory *parent* holds, so removing that
+            # name there removes nothing anyone else wrote, wherever the path leads by now.
+            try:
+                os.unlink(name, dir_fd=parent)
+            except OSError:
+                pass
+        for descriptor in (reader, writer, *opened):
             if descriptor is not None:
                 try:
                     os.close(descriptor)
                 except OSError:
                     pass
-        if created:
-            # Created by this call alone (``O_EXCL``), so removing it removes nothing anyone else wrote.
-            try:
-                target.unlink()
-            except OSError:
-                pass
 
 
 def preserve_transcripts(sessions: tuple[Session, ...], transcripts: dict[str, tuple[Path, ...]],
@@ -2290,12 +2322,13 @@ def preserve_transcripts(sessions: tuple[Session, ...], transcripts: dict[str, t
     the sessions no analysis entry names, which are the evidence of a failed batch.
 
     Each move is :func:`move_transcript`. A transcript it refuses stays where it was, is not
-    registered, and is named in the note with the reason, so a link planted at either end reads
-    as a transcript this run did not keep rather than as one it moved. Neither the status nor any
-    claim depends on this: a transcript is evidence about how the run went, and a refused one
-    costs that evidence and nothing else.
+    registered, and is named in the note with the reason, so a link of either kind planted at
+    either end, or at a directory on the way to the destination, reads as a transcript this run
+    did not keep rather than as one it moved. Neither the status nor any claim depends on this: a
+    transcript is evidence about how the run went, and a refused one costs that evidence and
+    nothing else.
     """
-    root = raw_dir / "claude-sessions"
+    root = PurePosixPath("claude-sessions")
     artifacts: list[dict] = []
     moved = 0
     refused: list[str] = []
@@ -2305,14 +2338,15 @@ def preserve_transcripts(sessions: tuple[Session, ...], transcripts: dict[str, t
             continue
         seen.add(session.session_id)
         for source in transcripts.get(session.session_id, ()):
-            relative = (Path("subagents", source.name) if source.parent.name == "subagents"
-                        else Path(source.name))
-            target = root / session.session_id / relative
-            failure = move_transcript(source, target, enclosure)
+            relative = (PurePosixPath("subagents", source.name) if source.parent.name == "subagents"
+                        else PurePosixPath(source.name))
+            destination = root / session.session_id / relative
+            failure = move_transcript(source, raw_dir, destination, enclosure)
             if failure is not None:
                 refused.append(f"{session.session_id}/{relative.as_posix()} ({failure})")
                 continue
-            artifacts.append({"id": f"claude-session/{session.session_id}/{relative.as_posix()}", "path": target})
+            artifacts.append({"id": f"claude-session/{session.session_id}/{relative.as_posix()}",
+                              "path": raw_dir / destination})
             moved += 1
     notes = [f"{moved} Claude Code transcript(s) were moved from {projects_dir} into raw/claude-sessions and "
              "registered as artifacts of this run."

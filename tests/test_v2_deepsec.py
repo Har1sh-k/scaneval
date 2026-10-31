@@ -3650,6 +3650,42 @@ def test_a_directory_link_on_the_way_to_a_moved_transcript_is_refused_before_any
                              "raw output).")
 
 
+@pytest.mark.parametrize("planted", ["claude-sessions", "claude-sessions/session-aaaa",
+                                     "claude-sessions/session-aaaa/subagents"])
+def test_a_directory_link_that_stays_inside_the_raw_output_is_refused_and_nothing_is_created_behind_it(
+        tmp_path, planted):
+    """No directory under the raw output may be a link, not even one that leads back inside it.
+
+    Resolving the destination whole proves where it leads, and a link from
+    ``raw/claude-sessions/<sid>`` to another directory of the raw output leads inside it, so the
+    check passed, ``mkdir(exist_ok=True)`` accepted the link, and the exclusive create, which
+    refuses a link only as the last component, landed behind it. The transcript left the projects
+    directory for a path no artifact was registered at: the note said it was moved and registered,
+    and the run recorded the artifact as missing. A subagent transcript is moved here, so a link
+    at each of the three directories on its way is tried.
+    """
+    from scaneval.adapters.llm_harness import Enclosure
+
+    source = tmp_path / "transcripts" / "session-aaaa" / "subagents" / "agent-1.jsonl"
+    source.parent.mkdir(parents=True)
+    source.write_text('{"type": "assistant"}\n', encoding="utf-8")
+    raw = tmp_path / "raw"
+    elsewhere = raw / "elsewhere"
+    elsewhere.mkdir(parents=True)
+    (raw / planted).parent.mkdir(parents=True, exist_ok=True)
+    (raw / planted).symlink_to(elsewhere, target_is_directory=True)
+
+    artifacts, notes = deepsec_module.preserve_transcripts(
+        (workspace_history_session("session-aaaa"),), {"session-aaaa": (source,)}, tmp_path / "transcripts",
+        raw, Enclosure.capture(tmp_path / "source", raw))
+
+    assert artifacts == [] and list(elsewhere.iterdir()) == [], "nothing is created behind the link"
+    assert source.read_text(encoding="utf-8") == '{"type": "assistant"}\n', "the original stays where it was"
+    assert notes[0].endswith("1 transcript(s) could not be moved and were left in place: "
+                             f"session-aaaa/subagents/agent-1.jsonl (raw/{planted} is a link or not a directory, "
+                             "so nothing was created through it).")
+
+
 def test_a_copy_that_does_not_verify_is_discarded_and_the_original_is_kept(tmp_path, monkeypatch):
     """The original is removed only once its copy is proved whole, and a short copy is never kept.
 
