@@ -1843,6 +1843,56 @@ def test_a_comparison_needs_two_scheduled_systems(tmp_path):
         aggregate.compare([run], baseline="baseline", candidate="ghost")
 
 
+# --- bundle plans that place a control differently ----------------------------------------------
+#
+# The schedule freezes which controls an input carries, never where they are; each bundle's plan says that. A
+# plan written before full plans placed controls gave a standard input's controls no paths, and one written since
+# gives each the pack locates, so two runs of one input made either side of that change score the same evidence
+# under two rules: the scorer withholds quiet credit from a control placed nowhere once its result lists any
+# omitted path.
+
+PLACED = {"C-scanned": ["app.py"], "C-omitted": ["vendor/helper.py"]}
+PLACEMENT_WARNING = (
+    "input widget: its bundle plans place C-omitted nowhere in run-a and on vendor/helper.py in run-b; "
+    "C-scanned nowhere in run-a and on app.py in run-b, so their quiet assessments are not credited under one "
+    "rule: a control placed nowhere earns none once its result lists any omitted path")
+
+
+def placement_run(root: Path, run_id: str, systems: tuple[str, ...], *, placed: bool) -> Path:
+    """One input with two safe controls, scanned once per system, each result omitting README.md and vendor/helper.py.
+
+    Every control is assessed quiet. ``placed`` has each bundle's plan place C-scanned on app.py and C-omitted on
+    vendor/helper.py, as a plan written today does; without it the plans place nothing, as a standard input's plan
+    written before full plans placed controls did.
+    """
+    inputs = [planned("widget", controls=[control("C-scanned"), control("C-omitted")])]
+    spec = scan(omitted=["README.md", "vendor/helper.py"], paths=PLACED if placed else None)
+    return write_run(root, run_id, inputs, systems=systems,
+                     outcomes={("widget", system_id, 1): spec for system_id in systems})
+
+
+def test_a_view_names_an_input_whose_bundle_plans_place_its_controls_in_two_ways(tmp_path):
+    """run-a's plans place nothing and run-b's place each control, over the same evidence.
+
+    Under run-b's plan C-scanned, on a file the scan read, is resolved quiet and C-omitted is not; under run-a's plan
+    neither is. Pooled in one view, the two would read as a control improving between systems. The view says which
+    input, which controls, where each run's plans put them, and which runs; a view whose plans agree says nothing.
+    """
+    run_a = placement_run(tmp_path / "a", "run-a", ("baseline",), placed=False)
+    run_b = placement_run(tmp_path / "b", "run-b", ("candidate",), placed=True)
+
+    report = aggregate.aggregate([run_a, run_b], policy=policy())
+
+    assert view(report)["warnings"] == [PLACEMENT_WARNING]
+    resolved = {system_id: slice_of(system(view(report), system_id))["controls"]["capability_safe"]["resolved"]
+                for system_id in ("baseline", "candidate")}
+    assert resolved == {"baseline": 0, "candidate": 1}, "the same quiet evidence, credited under two rules"
+    for placed in (False, True):
+        alike = placement_run(tmp_path / f"alike-{placed}", "run-c", ("candidate",), placed=placed)
+        warnings = view(aggregate.aggregate([alike], policy=policy()))["warnings"]
+        assert not [warning for warning in warnings if "bundle plans place" in warning]
+
+
 # --- a run directory written by the runner ------------------------------------------------------
 
 

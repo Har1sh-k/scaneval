@@ -48,6 +48,14 @@ assignments still count toward completion, claims, and usage. Observations are k
 so one input scanned by two runs is two positive inputs of its targets, each averaged over its own
 repetitions.
 
+Where controls are placed. The schedule freezes which controls an input carries and never where they
+are; a bundle's plan says that, in the ``paths`` it gives each control, and the scorer withholds quiet
+credit from a control the plan places nowhere once the result lists any omitted path. A plan written
+before full plans placed controls gives a standard input's controls none, so the same evidence is
+credited file by file under a plan written since and not at all under one written before. A view
+whose bundle plans place one input's control in more than one way warns, naming the input, the
+controls, where each run's plans put them, and the runs.
+
 Pairs. A vulnerable/fixed pair is scored on whole canonical items, not on the one record it names:
 its vulnerable side is the whole canonical target, and its fixed state the whole canonical control
 its control record belongs to, every fixed-target record of it that the fixed input froze. A record
@@ -212,6 +220,9 @@ class _Observation:
     and wall seconds when the bundle carries one; a start or finish it cannot read is ``None``.
     ``processing`` is the selection marker the bundle's result records, ``None`` when it records none: a
     result written before the marker existed, or one the runner recorded in place of the adapter's.
+    ``placement`` says where the bundle's plan places each of its controls, as ``(control_id, paths)``
+    pairs in control id order, ``paths`` being ``None`` for a control it places nowhere; a failure has no
+    plan, and ``None`` here.
     """
 
     run_id: str
@@ -229,6 +240,7 @@ class _Observation:
     timing: tuple[datetime | None, datetime | None, float] | None = None
     condition: dict | None = field(default=None, repr=False)
     processing: str | None = None
+    placement: tuple[tuple[str, tuple[str, ...] | None], ...] | None = field(default=None, repr=False)
 
     @property
     def executed(self) -> bool:
@@ -374,6 +386,8 @@ def _observe(run: _Run, assignment: dict, row: dict | None, prepared: dict | Non
         timing = _timing(bundle, run, assignment, result)
     except ContractError:
         return failure("missing", "unusable_bundle")
+    placement = tuple(sorted(((control["control_id"], tuple(control["paths"]) if "paths" in control else None)
+                              for control in plan["controls"]), key=lambda item: item[0]))
     scope = None
     unscored = unregistered = 0
     if planned:
@@ -399,7 +413,7 @@ def _observe(run: _Run, assignment: dict, row: dict | None, prepared: dict | Non
                      "reasons": [{"code": "unusable_condition_evidence", "message": f"Condition evidence for {assignment['assignment_id']} is unusable: {str(exc).replace(str(run.directory), '<run>')}"}]}
     return _Observation(**identity, status=result["status"], scope=scope, observed=observed,
                         review_state=state, unscored=unscored, unregistered=unregistered, timing=timing,
-                        condition=condition, processing=result.get("processing"))
+                        condition=condition, processing=result.get("processing"), placement=placement)
 
 
 @dataclass
@@ -1841,9 +1855,66 @@ def _view_facts(corpus: _Corpus, mode: str, profile: str, system_ids: Iterable[s
     }
 
 
-def _view_warnings(facts: dict, results: Sequence[_SystemResult], systems: dict[str, dict]) -> list[str]:
-    """What a reader of one view must not miss: unplanned inputs, unscored items, failures, scope, and
-    which system each is when that is not a plain one (:func:`_system_warnings`)."""
+# Where one bundle's plan places a control: the paths it gives it, or None for none.
+Placement = tuple[str, ...] | None
+# Per (input id, control id), each placement and the (run id, system id) of the bundles that gave it.
+Placements = dict[tuple[str, str], dict[Placement, set[tuple[str, str]]]]
+
+
+def _placements(corpus: _Corpus, mode: str, profile: str, system_ids: Iterable[str]) -> Placements:
+    """Where the bundle plans of one view place each control of each input, and whose bundles say so.
+
+    Keyed by (input id, control id): each placement, the paths a plan gives the control or ``None`` for
+    none, maps to the (run id, system id) of every bundle whose plan gave it. Only read bundles of
+    *system_ids* count; a failure has no plan and says nothing about where a control is.
+    """
+    wanted = set(system_ids)
+    found: Placements = defaultdict(lambda: defaultdict(set))
+    for (run_id, input_id, system_id, _repetition), observation in sorted(corpus.observations.items()):
+        row = corpus.inputs[(run_id, input_id)]
+        if (system_id not in wanted or observation.placement is None
+                or (row["mode"], row["profile"]) != (mode, profile)):
+            continue
+        for control_id, paths in observation.placement:
+            found[(input_id, control_id)][paths].add((run_id, system_id))
+    return found
+
+
+def _placed(paths: Placement) -> str:
+    """Where one plan places a control, in words."""
+    return "nowhere" if paths is None else "on " + ", ".join(paths)
+
+
+def _placement_order(paths: Placement) -> tuple[bool, tuple[str, ...]]:
+    """Placements in a stable order: nowhere first, then by path."""
+    return paths is not None, paths or ()
+
+
+def _placement_warnings(placements: Placements) -> list[str]:
+    """One warning per input whose bundle plans place a control in more than one way, naming where and in which runs.
+
+    A plan written before full plans placed controls places a standard input's controls nowhere, and one
+    written since places each the pack locates, so two runs of one input made either side of that change
+    disagree. Their quiet assessments are then not credited under one rule, because the scorer withholds
+    quiet credit from a control placed nowhere once its result lists any omitted path. A control every
+    plan places alike, nowhere included, is not named.
+    """
+    differing: dict[str, list[str]] = defaultdict(list)
+    for (input_id, control_id), seen in sorted(placements.items()):
+        if len(seen) > 1:
+            ways = " and ".join(f"{_placed(paths)} in {', '.join(sorted({run for run, _system in seen[paths]}))}"
+                                for paths in sorted(seen, key=_placement_order))
+            differing[input_id].append(f"{control_id} {ways}")
+    return [f"input {input_id}: its bundle plans place {'; '.join(controls)}, so their quiet assessments are not "
+            "credited under one rule: a control placed nowhere earns none once its result lists any omitted path"
+            for input_id, controls in sorted(differing.items())]
+
+
+def _view_warnings(facts: dict, results: Sequence[_SystemResult], systems: dict[str, dict],
+                   placements: Placements) -> list[str]:
+    """What a reader of one view must not miss: unplanned inputs, unscored items, failures, scope,
+    which system each is when that is not a plain one (:func:`_system_warnings`), and a control the
+    bundle plans of one input place in more than one way (see :func:`_placement_warnings`)."""
     warnings = []
     unplanned = len(facts["inputs_without_frozen_plan"])
     if unplanned:
@@ -1870,7 +1941,7 @@ def _view_warnings(facts: dict, results: Sequence[_SystemResult], systems: dict[
             warnings.append(f"{system_id}: evidence scope is {result.block['evidence_scope']}, not "
                             "reviewed benchmark evidence")
         warnings.extend(_system_warnings(system_id, systems[system_id]))
-    return warnings
+    return warnings + _placement_warnings(placements)
 
 
 def _result_bindings(run: _Run) -> list[dict]:
@@ -2013,7 +2084,8 @@ def aggregate(run_dirs: Iterable[str | PathLike[str]], *, policy: dict | None = 
         views.append({"mode": mode, "profile": profile,
                       "evidence_scope": _scope(set().union(*(result.scopes for result in results))),
                       **facts, "systems": [result.block for result in results],
-                      "warnings": _view_warnings(facts, results, corpus.systems)})
+                      "warnings": _view_warnings(facts, results, corpus.systems,
+                                                 _placements(corpus, mode, profile, system_ids))})
     report = {
         "schema_version": SCHEMA_VERSION, "evaluator_version": __version__,
         "condition_digest_format": conditions.IDENTITY_FORMAT,
@@ -2227,7 +2299,8 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
             "systems": {"baseline": left.block, "candidate": right.block},
             "differences": [_difference(context, mine, theirs)
                             for mine, theirs in zip(left.slices, right.slices)],
-            "warnings": _view_warnings(facts, (left, right), corpus.systems)})
+            "warnings": _view_warnings(facts, (left, right), corpus.systems,
+                                       _placements(corpus, mode, profile, (baseline, candidate)))})
     structure = contracts[baseline]
     report = {
         "schema_version": SCHEMA_VERSION, "evaluator_version": __version__,
