@@ -302,10 +302,23 @@ def execute(frozen_path: Path, out_dir: Path, *, workspace_root: Path | None = N
     matrix. A cell failure does not remove any assignment or prevent other cells from running. Every
     immutable scanner artifact receives a matrix/assignment binding; later human review remains
     separate and is checked for cross-condition consistency by the matrix reporter.
+
+    A matrix frozen before full plans placed controls, whose standard plans place none
+    (:func:`scaneval.experiment.frozen_before_control_paths`), is refused before anything is
+    written. The runner plans each cell's input today, so a standard cell executed now would save a
+    plan that places the control, and the report accepts only the plan the matrix froze: every such
+    cell would run and then be ineligible as drift. Validation still accepts the matrix, so an
+    experiment executed from it before then stays reportable; to execute it now, freeze its
+    declaration again, which gives a new matrix whose plans place the control.
     """
     matrix = load_matrix(frozen_path)
     if matrix.get("stage") != "frozen":
         raise ContractError("execute requires a frozen experiment matrix")
+    if experiment.frozen_before_control_paths(matrix):
+        raise ContractError("matrix was frozen before full plans placed controls, so its standard plans place none, "
+                            "and a cell executed now would save a plan that places them, which its report would "
+                            "mark as drift; freeze its declaration again with scaneval matrix freeze and execute the "
+                            "new matrix")
     out = Path(out_dir).expanduser().resolve()
     refuse_trial_path(out)
     if out.exists():

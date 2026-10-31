@@ -2859,13 +2859,17 @@ def test_pr_mode_without_a_change_set_is_still_a_full_plan_with_the_pr_budgets(t
     full, _ = build_plan(pack, "widget-abc", HASH)
 
     assert plan["schema_version"] == "2.0" and "pr" not in plan["provenance"] and notes == []
-    assert not any("paths" in control for control in plan["controls"] + full["controls"]), \
-        "a plan that names no change stays the 2.0 plan, which has no field for where a control is"
+    assert not any("paths" in control for control in plan["controls"]), \
+        "a 2.1 plan in pr mode names the change it reviews, so one that names none stays the 2.0 plan, " \
+        "which has no field for where a control is"
+    assert full["schema_version"] == "2.1" and [c["paths"] for c in full["controls"]] == [["src/app.py"]] * 2, \
+        "the full plan of the same standard input places both controls"
     assert plan["review_budgets"] == [5, 10, 20] and full["review_budgets"] == [5, 10, 20, 50]
     assert plan["provenance"]["mode"] == "pr"
     assert [c["control_id"] for c in plan["controls"]] == ["C-widget-shell-eligible", "C-widget-shell-outside"],         "with no change set nothing is scoped, so every item of the snapshot is planned"
-    assert {**plan, "review_budgets": full["review_budgets"],
-            "provenance": {**plan["provenance"], "mode": "full"}} == full
+    assert {**full, "schema_version": "2.0", "review_budgets": plan["review_budgets"],
+            "provenance": {**full["provenance"], "mode": "pr"},
+            "controls": [{k: v for k, v in c.items() if k != "paths"} for c in full["controls"]]} == plan
 
 
 def test_a_pr_plan_binds_to_the_whole_identity_of_its_input(tmp_path):

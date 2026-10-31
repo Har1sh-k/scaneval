@@ -262,7 +262,21 @@ def check_adjudication_consistency(rows: list[dict]) -> None:
         raise ContractError("one exact structured allegation was both accepted and judged false across conditions")
 
 
-def _load_rows(matrix: dict, directory: Path, execution_record: dict | None = None) -> list[dict]:
+def _load_rows(matrix: dict, directory: Path, execution_record: dict | None = None, *,
+               legacy_placement: bool = False) -> list[dict]:
+    """One row per frozen assignment: its saved observation, or why there is none, and why it is ineligible.
+
+    A saved bundle's plan must be the plan its cell's runtime pack, whose label contract is the
+    frozen pack's, gives its input under the placement the matrix froze, or the observation is
+    ineligible as ``frozen_plan_eligibility_or_label_drift``. ``legacy_placement`` says the matrix
+    froze the pathless plans built before full plans placed controls (see
+    :func:`scaneval.experiment.frozen_before_control_paths`), and its plans are then built as they
+    were: a standard cell's bundle must hold the pathless plan an execution of it saved before then,
+    and one whose plan places a control is drift, as any plan other than its frozen form is. No
+    execution saves one now, because execution refuses such a matrix
+    (:func:`scaneval.experiment_execution.execute`). A matrix frozen since accepts today's plan
+    only, which places it.
+    """
     rows = []
     execution_record = execution_record or load_execution(directory, matrix)
     execution_cells = {row["condition"]: row for row in (execution_record.get("manifest") or {}).get("cells", [])}
@@ -327,7 +341,7 @@ def _load_rows(matrix: dict, directory: Path, execution_record: dict | None = No
                 expected_plan, _notes = cases.build_plan(
                     run_pack, source["snapshot_id"], source["source_tree_hash"], mode="full",
                     input_id=source["snapshot_id"], input_hash=result["input_hash"], profile=cell["config"]["inputs"][0]["profile"],
-                    blinding=execution["provenance"].get("blinding"))
+                    blinding=execution["provenance"].get("blinding"), legacy_placement=legacy_placement)
                 if plan != expected_plan:
                     row["reasons"].append("frozen_plan_eligibility_or_label_drift")
                 condition = conditions.classify_observation(bundle)
@@ -361,7 +375,8 @@ def report(directory: Path, *, output: Path | None = None) -> dict:
     matrix = experiment.validate_frozen(load_matrix(directory / "matrix.json"))
     execution_record = load_execution(directory, matrix)
     corpus_scope = evidence_scope(source["plan"]["scope"] for source in matrix["population"])
-    rows = _load_rows(matrix, directory, execution_record)
+    rows = _load_rows(matrix, directory, execution_record,
+                      legacy_placement=experiment.frozen_before_control_paths(matrix))
     check_adjudication_consistency(rows)
     metrics_helper = getattr(aggregate, "condition_metrics", None)
     if metrics_helper is None:

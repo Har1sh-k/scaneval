@@ -103,8 +103,20 @@ Freeze embeds the complete pack and reviewed maps, checks exact snapshot/map var
 strict-policy answer coverage, accepted scoring paths, and scanner-visible identity cues. It derives
 eligibility through the existing schedule planner and materializes the full condition/system/input/
 repetition cross-product. Semantic validation recomputes the population and configs, so changing
-a digest alone cannot waive the frozen declaration. Runtime preflight also checks actual staged
-configuration, cache, workspace, and default temporary paths before any cell consumes a budget.
+a digest alone cannot waive the frozen declaration. The one difference it forgives is where the
+plans place controls. A full plan now gives each control the pack locates its `paths`, and a
+standard input's plan gave none before, so a matrix frozen then, whose population plans a located
+control, holds the pathless 2.0 plans of that time. They remain its frozen plans: validation
+accepts them when nothing else differs, so an experiment executed from such a matrix stays
+reportable, and the report accepts a standard cell's saved plan only in that form, the one an
+execution before the change saved; a cell whose saved plan places the control is ineligible as
+`frozen_plan_eligibility_or_label_drift`. Execution refuses such a matrix before it writes
+anything, because a cell executed now would save today's plan, which places the control and which
+its report would mark as drift. To execute it, freeze its declaration again with `scaneval matrix freeze`:
+the new matrix plans the control by its paths and has a new digest, so no cell executed from the
+earlier matrix carries over to it. A matrix frozen since accepts today's plans only. Runtime
+preflight also checks actual staged configuration, cache, workspace, and default temporary paths
+before any cell consumes a budget.
 
 Execution writes the complete matrix, all assignments, every cell config, pack, and map before the
 first scanner starts. It checks staged files immediately before each cell, then reconciles each

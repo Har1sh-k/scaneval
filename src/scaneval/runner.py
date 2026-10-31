@@ -880,10 +880,13 @@ def _plan(pack: dict, spec: _InputSpec, prepared: execution.PreparedInput) -> tu
 
     The labels refer to the snapshot's original export, so that is the tree the plan is built
     against; the plan binds to what the result binds to. For a standard input named as its own
-    snapshot the two are one tree and the plan is the 2.0 plan it always was. A native PR input is
-    planned as the review of its change set, at evaluation time and from the frozen pack: only the
-    items the pack's eligibility names for it, bound to the base tree, head tree, and diff the
-    input recorded, whatever the schedule froze before the trees existed.
+    snapshot the two are one tree and the plan is the 2.0 plan it always was, except that it is
+    written at 2.1 when a control the pack locates carries its ``paths``: the scorer reads them to
+    credit a quiet control on a file the scan read while the result lists others it did not (see
+    :func:`cases.build_plan`). A native PR input is planned as the review of its change set, at
+    evaluation time and from the frozen pack: only the items the pack's eligibility names for it,
+    bound to the base tree, head tree, and diff the input recorded, whatever the schedule froze
+    before the trees existed.
     """
     pr = prepared.pr if prepared.mode == "pr" else None
     return cases.build_plan(

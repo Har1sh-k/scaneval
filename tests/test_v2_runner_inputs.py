@@ -1,9 +1,11 @@
 """Input identity from the configuration to the manifest: ids, plans, the schedule, and failures.
 
-A standard full input that is its snapshot's own export keeps the 2.0 plan it always had, byte for
-byte. Any other input (a renamed one, or a metadata-blinded one bound to a transformed tree) plans
-at 2.1 and says which input it is, which export its labels refer to, and which map transformed it.
-Which cases are planned, at which level and in which scope, never depends on that identity.
+A standard full input that is its snapshot's own export keeps the 2.0 plan it always had, except
+that a control the pack locates says where it is, which makes the plan 2.1 and changes nothing
+else; with no located control it is that 2.0 plan byte for byte. Any other input (a renamed one, or
+a metadata-blinded one bound to a transformed tree) plans at 2.1 and says which input it is, which
+export its labels refer to, and which map transformed it. Which cases are planned, at which level
+and in which scope, and where each control is, never depends on that identity.
 
 Every run writes a 2.1 manifest and freezes its schedule before the first input is fetched. An
 input whose preparation fails is recorded against that input, its assignments are skipped
@@ -49,8 +51,13 @@ REPRESENTS = ("This case tests shell interpolation of a request parameter under 
               "and adds a Python command-injection target.")
 
 
-def checked_pack(tmp_path: Path) -> dict:
-    """One mechanically checked case with a capability-safe control, both on one export."""
+def checked_pack(tmp_path: Path, *, control: bool = True, control_locations: list[dict] | None = None) -> dict:
+    """One mechanically checked case with a capability-safe control, both on one export.
+
+    The control sits on ``src/app.py``. *control_locations* replaces its locations, and
+    ``control=False`` leaves the case with no control at all, as every case of a pack that defines
+    no controls is.
+    """
     pack = cases.new_pack("org.example", "inputs", "input identity fixture")
     cases.add_snapshot(pack, SNAPSHOT)
     case = cases.draft_case(
@@ -60,15 +67,17 @@ def checked_pack(tmp_path: Path) -> dict:
         evidence=[cases.evidence("fix", origin="fix_without_advisory", kind="fix_commit",
                                  reference="acme/widget@" + "c" * 40)],
         accepted_locations=[{"path": "src/app.py", "start_line": 3, "end_line": 3, "role": "sink"}])
-    case["controls"].append({
-        "control_id": "C-widget-safe", "snapshot_id": "widget-abc", "type": "capability_safe",
-        "description": "The admin helper runs a fixed argument list.",
-        "property": "No caller-supplied string reaches a shell at this call site.",
-        "allowed_actors_inputs": "Operators on the host.", "assumptions": ["Default deployment."],
-        "ruled_out_allegation": "Caller-controlled shell interpolation in the admin helper.",
-        "locations": [{"path": "src/app.py", "start_line": 1, "end_line": 1, "role": "operation"}],
-        "evidence_ids": ["fix"],
-    })
+    if control:
+        case["controls"].append({
+            "control_id": "C-widget-safe", "snapshot_id": "widget-abc", "type": "capability_safe",
+            "description": "The admin helper runs a fixed argument list.",
+            "property": "No caller-supplied string reaches a shell at this call site.",
+            "allowed_actors_inputs": "Operators on the host.", "assumptions": ["Default deployment."],
+            "ruled_out_allegation": "Caller-controlled shell interpolation in the admin helper.",
+            "locations": ([{"path": "src/app.py", "start_line": 1, "end_line": 1, "role": "operation"}]
+                          if control_locations is None else control_locations),
+            "evidence_ids": ["fix"],
+        })
     cases.add_case(pack, case)
     source = tmp_path / "source"
     (source / "src").mkdir(parents=True)
@@ -78,7 +87,14 @@ def checked_pack(tmp_path: Path) -> dict:
     return pack
 
 
-def test_a_snapshot_input_named_as_itself_keeps_the_2_0_plan_byte_for_byte(tmp_path):
+def test_a_snapshot_input_named_as_itself_plans_at_2_1_only_to_say_where_each_control_is(tmp_path):
+    """A located control makes a standard input's plan 2.1 for its paths, and nothing else changes.
+
+    A full scan may list the files it did not examine, and the scorer withholds quiet credit from a
+    control the plan does not place whenever the result lists any. Semgrep lists every file it did not
+    scan, so a standard plan with no paths earned none of its controls credit, those on scanned files
+    included.
+    """
     pack = checked_pack(tmp_path)
 
     plain, notes = cases.build_plan(pack, "widget-abc", HASH)
@@ -86,12 +102,60 @@ def test_a_snapshot_input_named_as_itself_keeps_the_2_0_plan_byte_for_byte(tmp_p
                                           input_hash=HASH, profile="standard", blinding=None)
 
     assert canonical_json(named) == canonical_json(plain) and named_notes == notes
+    assert validate_document("evaluation-plan", plain) is plain
+    assert plain["schema_version"] == "2.1" and plain["input_hash"] == HASH
+    assert [(c["control_id"], c["paths"]) for c in plain["controls"]] == [("C-widget-safe", ["src/app.py"])], \
+        "a control's paths are a 2.1 field, so a plan that places one is 2.1 whatever its input"
+    assert set(plain["provenance"]) == {"namespace", "pack_id", "pack_version", "pack_sha256",
+                                        "snapshot_id", "mode", "case_ids"}, "it names no input id, profile, or map"
+    assert all("canonical_id" not in item for item in plain["targets"] + plain["controls"])
+    unplaced = {**plain, "schema_version": "2.0",
+                "controls": [{k: v for k, v in c.items() if k != "paths"} for c in plain["controls"]]}
+    assert validate_document("evaluation-plan", unplaced) is unplaced, \
+        "without its paths and its version it is the 2.0 plan a standard input always had"
+
+
+@pytest.mark.parametrize("shape", [{"control": False}, {"control_locations": []}],
+                         ids=["no-control", "unlocated-control"])
+def test_a_snapshot_input_that_places_no_control_keeps_the_2_0_plan_byte_for_byte(tmp_path, shape):
+    """Nothing to place, nothing 2.1: a pack that defines no controls is planned exactly as before."""
+    pack = checked_pack(tmp_path, **shape)
+
+    plain, notes = cases.build_plan(pack, "widget-abc", HASH)
+    named, named_notes = cases.build_plan(pack, "widget-abc", HASH, input_id="widget-abc",
+                                          input_hash=HASH, profile="standard", blinding=None)
+
+    assert canonical_json(named) == canonical_json(plain) and named_notes == notes
+    assert [target["target_id"] for target in plain["targets"]] == ["T-widget-shell"], "the case is planned"
     assert plain["schema_version"] == "2.0" and plain["input_hash"] == HASH
     assert set(plain["provenance"]) == {"namespace", "pack_id", "pack_version", "pack_sha256",
                                         "snapshot_id", "mode", "case_ids"}
     assert all("canonical_id" not in item for item in plain["targets"] + plain["controls"])
-    assert all("paths" not in control for control in plain["controls"]), \
-        "a control's paths are a 2.1 field, and a plan is never made 2.1 for them"
+    assert all("paths" not in control for control in plain["controls"])
+
+
+def test_the_legacy_placement_is_the_pathless_2_0_plan_of_a_standard_input_and_changes_no_other_plan(tmp_path):
+    """The plan as a build before full plans placed controls wrote it, rebuilt only to recognize one saved then.
+
+    A matrix frozen then embeds it, and an experiment executed from that matrix saved it in its bundles. A standard
+    plan loses its paths and its 2.1 and nothing else; a renamed or blinded input's plan was 2.1 and placed its
+    controls then as now, so it is unchanged.
+    """
+    pack = checked_pack(tmp_path)
+    plain, notes = cases.build_plan(pack, "widget-abc", HASH)
+    blinded = {"input_id": "widget-abc.blinded", "input_hash": TRANSFORMED, "profile": "metadata_blinded",
+               "blinding": {**MAP_IDENTITY, "original_tree_hash": HASH}}
+
+    legacy, legacy_notes = cases.build_plan(pack, "widget-abc", HASH, legacy_placement=True)
+
+    assert legacy_notes == notes
+    assert canonical_json(legacy) == canonical_json(
+        {**plain, "schema_version": "2.0",
+         "controls": [{k: v for k, v in c.items() if k != "paths"} for c in plain["controls"]]})
+    assert validate_document("evaluation-plan", legacy) is legacy
+    for identity in ({"input_id": "widget-main"}, blinded):
+        assert canonical_json(cases.build_plan(pack, "widget-abc", HASH, legacy_placement=True, **identity)[0]) \
+            == canonical_json(cases.build_plan(pack, "widget-abc", HASH, **identity)[0])
 
 
 def test_a_blinded_input_plans_at_2_1_bound_to_the_transformed_tree(tmp_path):
@@ -116,8 +180,8 @@ def test_a_blinded_input_plans_at_2_1_bound_to_the_transformed_tree(tmp_path):
     # The identity changes what the plan says about its input, never what it plans.
     assert plan["scope"] == plain["scope"] and plan["review_budgets"] == plain["review_budgets"]
     assert [{k: v for k, v in t.items() if k != "canonical_id"} for t in plan["targets"]] == plain["targets"]
-    assert [{k: v for k, v in c.items() if k not in ("canonical_id", "paths")}
-            for c in plan["controls"]] == plain["controls"]
+    assert [{k: v for k, v in c.items() if k != "canonical_id"} for c in plan["controls"]] == plain["controls"], \
+        "both place the control where the pack does"
 
 
 def test_a_renamed_standard_input_plans_at_2_1_without_a_blinding_identity(tmp_path):

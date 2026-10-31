@@ -1313,7 +1313,8 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
                input_id: str | None = None, input_hash: str | None = None,
                profile: str | None = None, blinding: dict | None = None,
                change_set_id: str | None = None, base_tree_hash: str | None = None,
-               head_tree_hash: str | None = None, diff_sha256: str | None = None) -> tuple[dict, list[str]]:
+               head_tree_hash: str | None = None, diff_sha256: str | None = None,
+               legacy_placement: bool = False) -> tuple[dict, list[str]]:
     """Targets and controls for one materialized input, with every exclusion stated in the notes.
 
     *tree_hash* is always the export of *snapshot_id* that the labels and the mechanical checks
@@ -1323,8 +1324,9 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
     (default ``standard``), and ``blinding``, the ``map_id``, ``map_version``, and ``map_sha256`` of
     the reviewed map a ``metadata_blinded`` input was transformed with. A blinded input needs that
     identity and nothing else carries one. With none of them given, or each given at its default,
-    the plan is the 2.0 plan this function has always built, byte for byte. Otherwise it is a 2.1
-    plan: its ``input_hash`` is the given one, its provenance also records the input id, the
+    the plan is that of a standard input: the 2.0 plan this function has always built, except that
+    a control the pack locates says where it is, which makes the plan 2.1 (below). Otherwise it is
+    a 2.1 plan: its ``input_hash`` is the given one, its provenance also records the input id, the
     profile, ``source_tree_hash`` (which is *tree_hash*), and the blinding identity, and its targets
     and controls carry ``canonical_id`` (the pack's canonical id, or the target or control id when
     the pack names none), so records of one root cause or one property on several inputs can be
@@ -1345,12 +1347,39 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
     ``mode="pr"`` with no change set is what it always was, a full plan carrying the ``pr`` review
     budgets, which says nothing about any change.
 
-    A 2.1 plan, a PR plan or the full plan of a renamed or blinded input, also gives each control
-    ``paths``: the sorted, unique paths of the control's pack locations, left out of a control that has
-    none. They are evaluator-side and read only by the scorer, to withhold quiet credit from a control
-    on a path a scan result lists in ``omitted_paths``, or from one the plan places on no path when the
-    result lists any. A plan is 2.1 for the reasons above and never for this one: the plan of a standard
-    full input stays the 2.0 plan it always was, byte for byte, and carries no ``paths``.
+    A PR plan and every plan built in ``full`` mode, whatever its input, also give each control
+    ``paths``: the sorted, unique paths of the control's pack locations, left out of a control that
+    has none. They are evaluator-side and read only by the scorer, to withhold quiet credit from a
+    control on a path a scan result lists in ``omitted_paths``, or from one the plan places on no
+    path when the result lists any. ``paths`` is a 2.1 field, so a plan in which any control carries
+    it is a 2.1 plan, as a result that lists ``omitted_paths`` is a 2.1 result whatever its mode. The
+    plan of a standard full input whose planned controls have a location is therefore written at 2.1
+    and is otherwise the 2.0 plan it always was: the same ``input_hash``, the same provenance, and no
+    ``canonical_id``. One whose planned controls have no location, as in every plan of a pack that
+    defines no controls, is still that 2.0 plan byte for byte.
+
+    Changed deliberately: the plan of a standard full input used to stay 2.0 and carry no ``paths``,
+    which cost nothing while only a PR result listed omissions. Once a full scan listed them too (a
+    Semgrep full scan names every file it did not scan, a README or a LICENSE included, so its list
+    is almost never empty), the scorer's rule for a control the plan does not place withheld quiet
+    credit from every control of a standard input, those on files the scan read included, while the
+    same evidence under a renamed or blinded input, planned at 2.1 with ``paths``, was credited file
+    by file. The rule is unchanged and stays conservative; what changed is that the plan now says
+    where the control is. A saved plan is read as it was written, so a bundle saved before this
+    keeps the pathless 2.0 plan it was scored against, and replaying it gives what it always gave.
+
+    The one plan that still places no control is the full plan built in ``pr`` mode with no change
+    set (above) for a standard input: a 2.1 plan in ``pr`` mode states the change it reviews in
+    ``provenance.pr``, and this one reviews none, so it stays the 2.0 plan it always was, and a
+    result that lists any omission earns none of its controls quiet credit.
+
+    ``legacy_placement=True`` builds the plan as this function did before full plans placed
+    controls: only a 2.1 plan, one for an input that is not the plain export of its snapshot or a
+    PR plan, gives its controls ``paths``, so the plan of a standard full input is the pathless 2.0
+    plan. Nothing plans an input with it. It exists to recognize plans saved before then and still
+    bound by a frozen contract: the population a matrix froze, and the plans of the bundles an
+    experiment executed from it (see :func:`scaneval.experiment.frozen_before_control_paths`), so
+    such a matrix is neither refused as drifted nor checked against plans it never froze.
 
     A case is planned only when its disposition is not ``exclude``, no check set failed after
     approval, the latest admission decision covering its content is not ``rejected``, the pack
@@ -1433,6 +1462,11 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
     identified = (input_id not in (None, snapshot_id) or input_hash not in (None, tree_hash)
                   or profile not in (None, "standard") or blinding is not None
                   or change_set_id is not None)
+    # Where each control is, for every plan whose version can say it: a 2.1 plan, and a full plan,
+    # which becomes 2.1 for it below. A standard plan in pr mode names no change set, and a 2.1 plan
+    # in pr mode must name one, so it stays the 2.0 plan and places nothing. The legacy placement is
+    # the rule before full plans placed controls, under which only a 2.1 plan did.
+    placed = identified or (mode == "full" and not legacy_placement)
     require_loadable(pack, "no plan can be built from it")
     _check_snapshot_export(pack, snapshot_id, tree_hash)
     change_set = None
@@ -1459,9 +1493,9 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
                         entry["target_id"] = control["target_id"]
                     if identified:
                         entry["canonical_id"] = control_canonical_id(control)
-                        paths = _control_paths(control)
-                        if paths:
-                            entry["paths"] = paths
+                    paths = _control_paths(control) if placed else []
+                    if paths:
+                        entry["paths"] = paths
                     controls.append(entry)
     if scope == "reviewed" and not (targets or controls):
         scope = "draft"
@@ -1473,8 +1507,11 @@ def build_plan(pack: dict, snapshot_id: str, tree_hash: str, *, mode: str = "ful
                        "pack_sha256": pack_sha256(pack), "snapshot_id": snapshot_id, "mode": mode,
                        "case_ids": [case["case_id"] for case, _, _ in included]},
     }
-    if identified:
+    if identified or any("paths" in control for control in controls):
+        # A control's paths are a 2.1 field, so a plan that places one is 2.1 whatever its input; a
+        # standard input's plan changes nothing else.
         plan["schema_version"] = "2.1"
+    if identified:
         plan["input_hash"] = input_hash or tree_hash
         default_id = (input_identity({"mode": "pr", "change_set_id": change_set_id, "profile": profile})
                       if change_set_id is not None else snapshot_id)
