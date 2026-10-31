@@ -47,6 +47,9 @@ its systems' adapter identity, so executing it with 1.2.0 is refused as version
 drift until a new configuration is deliberately frozen, and the matrix report flags
 an execution whose adapter differs from the frozen identity as
 `adapter_version_drift`. Existing 1.1.0 runs and their replay are not rewritten.
+Adapter 1.2.1 reads a standard-mode `process` exit 1 from DeepSec's records
+instead of ending the run with no claims (#120), so a failed batch's records
+written before and after that change carry different versions.
 
 ## What runs
 
@@ -102,9 +105,11 @@ The curated run only names populations inside that accounting:
 | Unlisted records with analysis, findings, or a status other than `pending`, and claims on unlisted paths | Kept, and the run fails as `process_manifest_not_honored`. |
 
 Status precedence is unchanged, and two checks are added. The full order is:
-timeout, a failed step, an unreadable export, import loss, failed batches, an
-undeclared record status, then the new `process_manifest_not_honored`, then
-unfinished records (`scope_incomplete`). The second check applies to a curated
+timeout, a failed step, an unreadable export, import loss, an exhausted quota
+(`quota_exhausted`), failed batches, an undeclared record status, then the new
+`process_manifest_not_honored`, then unfinished records (`scope_incomplete`). A
+standard-mode `process` exit 1 that the records explain is not a failed step (see
+below). The second check applies to a curated
 run that reaches the point where it would otherwise succeed: every candidate was
 selected, there was no candidate, or the intersection was empty. Such a run is
 `partial` with `scope_incomplete`. Every curated run has
@@ -114,7 +119,10 @@ outcome, so target detection stays visible. A standard-mode `process` exit 1,
 which 2.3.10 gives an errored batch or an exhausted quota once every record is
 written, does not stop the run before export. It is read from the records like
 the rest: a failed selected batch keeps the claims of the batches that finished,
-and a run in which no file reached a verdict is an `error`.
+and a run in which no file reached a verdict is an `error`. Only a selected file
+left in `error`, or one still `processing` when a run that died was holding it,
+explains that exit. An unlisted record is `pending` by design, so it explains
+nothing, and an exit 1 with no such record stays `error` with no claims.
 
 `examined_nothing` is not set. The regex scan examined the tree. The notes say
 when no AI batch ran, and `partial` already withholds every quiet credit.
