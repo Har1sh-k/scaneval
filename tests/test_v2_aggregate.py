@@ -188,7 +188,8 @@ def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: d
 
 
 def write_run(root: Path, run_id: str, inputs: list[dict], *, systems=("sys-a",), repetitions: int = 1,
-              outcomes=None, configs=None, failed_inputs=(), skipped_systems=(), pack=PACK, left_out=()) -> Path:
+              outcomes=None, configs=None, failed_inputs=(), skipped_systems=(), pack=PACK, left_out=(),
+              versions=None) -> Path:
     """Write one run directory the way ``scaneval run`` lays it out, with hand-chosen outcomes.
 
     *outcomes* maps ``(input_id, system_id, repetition)`` to a :func:`scan` spec, or to
@@ -197,9 +198,12 @@ def write_run(root: Path, run_id: str, inputs: list[dict], *, systems=("sys-a",)
     *failed_inputs* was never prepared, and a system in *skipped_systems* was never invoked. *left_out*
     names configured inputs the run was narrowed away from, as ``--only-input`` does: the configuration
     keeps them, and the schedule, the manifest, and the manifest's selection say they were left out.
+    *versions* maps a system id to the ``adapter_version`` its manifest row records, ``"1.0.0"`` when
+    unnamed; ``None`` records none, as the runner does for an adapter it could not resolve.
     """
     outcomes = outcomes or {}
     configs = configs or {}
+    versions = versions or {}
     directory = root / run_id
     (directory / "evaluator").mkdir(parents=True)
     entries = [{"system_id": system_id, "adapter": "fake", "config": {"knob": 1}, **configs.get(system_id, {})}
@@ -279,9 +283,10 @@ def write_run(root: Path, run_id: str, inputs: list[dict], *, systems=("sys-a",)
                     "provenance_path": None, "mechanical_checks": [],
                     "preparation_failure": ({"type": "MaterializationError", "message": "fixture export refused"}
                                             if row["input_id"] in failed_inputs else None)} for row in inputs],
-        "systems": [{"system_id": system_id, "adapter": "fake", "adapter_version": "1.0.0", "preparation": {},
+        "systems": [{"system_id": entry["system_id"], "adapter": entry["adapter"],
+                     "adapter_version": versions.get(entry["system_id"], "1.0.0"), "preparation": {},
                      "skipped_reason": ("AdapterError: fixture system not installed"
-                                        if system_id in skipped_systems else None)} for system_id in systems],
+                                        if entry["system_id"] in skipped_systems else None)} for entry in entries],
         "invocations": invocations, "warnings": [], "schedule_path": "evaluator/schedule.json"}
     validate_document("run-manifest", manifest)
     for relative, document in (("run-config.json", config), ("evaluator/schedule.json", frozen_schedule),
@@ -2097,10 +2102,164 @@ def test_timeout_identity_normalizes_equivalent_numbers(tmp_path):
     config = {"timeout_seconds": 60, "network_policy": "none", "systems": [
         {"system_id": "same", "adapter": "fake", "config": {}}]}
     schedule = {"systems": [{"system_id": "same"}]}
-    first = _Run("first", tmp_path, {}, schedule, config)
-    second = _Run("second", tmp_path, {}, schedule, {**config, "timeout_seconds": 60.0})
+    manifest = {"systems": []}
+    first = _Run("first", tmp_path, manifest, schedule, config)
+    second = _Run("second", tmp_path, manifest, schedule, {**config, "timeout_seconds": 60.0})
     assert _configuration(first, 'same') == _configuration(second, 'same')
     assert _systems([first, second])['same']['runs'] == ['first', 'second']
-    changed = _Run("changed", tmp_path, {}, schedule, {**config, "timeout_seconds": 120})
+    changed = _Run("changed", tmp_path, manifest, schedule, {**config, "timeout_seconds": 120})
     with pytest.raises(ContractError, match='configured differently'):
         _systems([first, changed])
+
+
+# --- system identity ----------------------------------------------------------------------------
+
+
+CURATED_TREE = "sha256:" + "1" * 64
+DEEPSEC_FULL = {"adapter": "deepsec", "config": {"deepsec_root": "/opt/deepsec-workspace", "model": "fixture-model"}}
+DEEPSEC_CURATED = {"adapter": "deepsec", "config": {**DEEPSEC_FULL["config"],
+                                                   "process_manifest_by_tree": {CURATED_TREE: ["src/server.js"]}}}
+
+
+def configuration_requirement(comparison: dict, allowed: list[str]) -> dict:
+    """The gate's configuration requirement over *comparison* when its policy allows exactly *allowed*."""
+    from scaneval import gate
+    from test_v2_gate import minimal_policy
+    document = minimal_policy()
+    document["configuration"]["allowed_differences"] = allowed
+    decision = gate.evaluate_gate(document, comparison)
+    return next(row for row in decision["requirements"] if row["id"] == "configuration.allowed_differences")
+
+
+def test_one_system_id_recorded_with_two_adapter_versions_is_refused_like_two_configurations(tmp_path):
+    """A blind DeepSec 1.1.0 run and a curated 1.2.0 run of one byte-identical configuration are two systems.
+
+    DeepSec 1.1.0 ignores config.process_manifest_by_tree, so run-a is a blind full scan and run-b a curated
+    diagnostic, and their configurations cannot tell them apart. Each aggregates alone, showing its version;
+    pooling them is refused wherever runs are pooled, naming both versions and both runs in either order.
+    """
+    inputs = [planned("p1", targets=[target("T-p1")])]
+    blind = write_run(tmp_path / "a", "run-a", inputs, systems=("deepsec-x",), configs={"deepsec-x": DEEPSEC_CURATED},
+                      versions={"deepsec-x": "1.1.0"})
+    curated = write_run(tmp_path / "b", "run-b", inputs, systems=("deepsec-x", "other"),
+                        configs={"deepsec-x": DEEPSEC_CURATED}, versions={"deepsec-x": "1.2.0"})
+    message = ("system deepsec-x is recorded as adapter deepsec 1.1.0 in run run-a and as deepsec 1.2.0 in run run-b; "
+               "one system id must name one adapter at one version to be aggregated")
+
+    for refused in (lambda: aggregate.aggregate([blind, curated], policy=policy()),
+                    lambda: aggregate.aggregate([curated, blind], policy=policy()),
+                    lambda: aggregate.aggregate_by_condition([blind, curated], policy=policy()),
+                    lambda: aggregate.compare([blind, curated], baseline="other", candidate="deepsec-x",
+                                              policy=policy())):
+        with pytest.raises(ContractError) as excinfo:
+            refused()
+        assert str(excinfo.value) == message
+    assert [row["adapter_version"] for row in aggregate.aggregate([blind], policy=policy())["systems"]] == ["1.1.0"]
+    assert [(row["system_id"], row["adapter_version"]) for row in
+            aggregate.aggregate([curated], policy=policy())["systems"]] == [("deepsec-x", "1.2.0"), ("other", "1.0.0")]
+
+
+def test_a_run_that_recorded_no_adapter_version_ran_nothing_and_pools_with_any_version(tmp_path):
+    """A version is unknown only where the system ran nothing, so those failures pool, and each view says so.
+
+    run-a ran sys-a under adapter 1.2.0. run-b skipped it, its adapter unresolved, so its manifest records no
+    version. run-c failed before preparing any system, so its manifest has no row for sys-a and no invocation row.
+    Pooled, sys-a is 1.2.0 and both failures stay in every denominator: completion is 1/3. Alone, run-b's sys-a has
+    no version and no such warning.
+    """
+    inputs = [planned("p1", targets=[target("T-p1")])]
+    ran = write_run(tmp_path / "a", "run-a", inputs, outcomes={("p1", "sys-a", 1): scan(hits={"T-p1": 1})},
+                    versions={"sys-a": "1.2.0"})
+    skipped = write_run(tmp_path / "b", "run-b", inputs, skipped_systems=("sys-a",), versions={"sys-a": None})
+    stopped = write_run(tmp_path / "c", "run-c", inputs, outcomes={("p1", "sys-a", 1): "missing_row"})
+    manifest = json.loads((stopped / "run-manifest.json").read_text(encoding="utf-8"))
+    manifest.update(status="failed", systems=[], failure={"type": "KeyboardInterrupt", "message": ""})
+    validate_document("run-manifest", manifest)
+    (stopped / "run-manifest.json").write_text(canonical_json(manifest) + "\n", encoding="utf-8")
+
+    report = aggregate.aggregate([stopped, skipped, ran], policy=policy())
+
+    assert [(row["system_id"], row["adapter_version"], row["runs"]) for row in report["systems"]] == [
+        ("sys-a", "1.2.0", ["run-a", "run-b", "run-c"])]
+    failures = system(view(report))["observations"]["failures"]
+    assert (failures["skipped_system"], failures["missing_row"]) == (1, 1)
+    assert slice_of(system(view(report)))["completion"]["value"] == 1 / 3
+    assert ("sys-a: run(s) run-b, run-c record no adapter version for it, because it ran nothing there; its "
+            "adapter_version 1.2.0 is the one the other runs recorded") in view(report)["warnings"]
+    alone = aggregate.aggregate([skipped], policy=policy())
+    assert alone["systems"][0]["adapter_version"] is None
+    assert not any("record no adapter version" in warning for warning in view(alone)["warnings"])
+
+
+def test_adapter_versions_are_in_every_system_row_and_a_difference_a_gate_policy_must_name(tmp_path):
+    """One adapter configuration at two versions, under two ids, compares with the version as a difference.
+
+    The configuration requirement isolates the version bump only when the policy names adapter_version: with an
+    empty allowlist it is inconclusive, and with adapter_version allowed it passes.
+    """
+    run = write_run(tmp_path, "run-versions", five_project_inputs(), systems=("baseline", "candidate"),
+                    versions={"baseline": "1.1.0", "candidate": "1.2.0"})
+
+    report = aggregate.aggregate([run], policy=policy())
+    comparison = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=policy())
+
+    assert [(row["system_id"], row["adapter"], row["adapter_version"]) for row in report["systems"]] == [
+        ("baseline", "fake", "1.1.0"), ("candidate", "fake", "1.2.0")]
+    assert [comparison[side]["adapter_version"] for side in ("baseline", "candidate")] == ["1.1.0", "1.2.0"]
+    assert comparison["configuration_differences"] == [
+        {"key": "adapter_version", "baseline": "1.1.0", "candidate": "1.2.0", "absent_in": None}]
+    unintended = configuration_requirement(comparison, [])
+    assert unintended["status"] == "inconclusive" and unintended["observed"]["not_allowed"] == ["adapter_version"]
+    assert configuration_requirement(comparison, ["adapter_version"])["status"] == "pass"
+
+
+class FakeAdapterNext(FakeAdapter):
+    adapter_version = "1.1.0"
+
+
+class FakeAdapterUnversioned(FakeAdapter):
+    # Not a string: the runner skips the system and its manifest records no version.
+    adapter_version = 1.1
+
+
+def test_the_versions_the_runner_records_decide_whether_its_runs_pool(tmp_path, upstream):
+    """Real manifests: one configuration run by fake 1.0.0 and by fake 1.1.0 is refused, and a run that skipped
+    the system for an adapter declaring no usable version pools with the 1.0.0 run, its version unknown."""
+    repo, commit = upstream
+    pack = cases.new_pack("test", "aggregate-versions", "Local fixture pack for the adapter version tests.")
+    cases.add_snapshot(pack, {
+        "snapshot_id": "snap-a", "repository": {"url": str(repo), "name": "widget"}, "commit": commit,
+        "reference": "Commit chosen by the test fixture; no advisory is claimed.", "languages": ["python"],
+        "workload": "conventional_application", "component_role": "application",
+        "license": {"spdx": None, "verified": False, "note": "Local fixture repository."}})
+    cases.add_case(pack, cases.draft_case(
+        "case-a", snapshot_id="snap-a", kind="command_injection",
+        description="Caller-controlled command string reaches subprocess with shell=True.",
+        represents=REPRESENTS, workload="conventional_application", component_role="application", aliases=[],
+        evidence=[cases.evidence("source", origin="research_note", kind="source_inspection",
+                                 reference="src/app.py", note="Fixture inspection, not an advisory.")],
+        accepted_locations=[{"path": "src/app.py", "start_line": 5, "end_line": 5, "role": "sink", "note": ""}]))
+    cases.save_pack(tmp_path / "pack.json", pack)
+
+    def run(run_id: str, adapter: Adapter) -> Path:
+        config = {"schema_version": "2.1", "run_id": run_id, "pack": "pack.json", "cache_root": "cache",
+                  "inputs": [{"snapshot_id": "snap-a"}],
+                  "systems": [{"system_id": "fake-a", "adapter": "fake", "config": {"knob": 1}}],
+                  "repetitions": 1, "timeout_seconds": 60, "trace_mode": "off", "network_policy": "none"}
+        (tmp_path / f"{run_id}.json").write_text(canonical_json(config) + "\n", encoding="utf-8")
+        run_from_config(tmp_path / f"{run_id}.json", tmp_path / run_id, clock=CLOCK, adapters={"fake": adapter})
+        return tmp_path / run_id
+
+    first, second = run("run-first", FakeAdapter()), run("run-second", FakeAdapterNext())
+    skipped = run("run-skipped", FakeAdapterUnversioned())
+    assert [row["adapter_version"] for run_dir in (first, second, skipped)
+            for row in json.loads((run_dir / "run-manifest.json").read_text(encoding="utf-8"))["systems"]] == [
+        "1.0.0", "1.1.0", None]
+
+    with pytest.raises(ContractError, match="recorded as adapter fake 1.0.0 in run run-first and as fake 1.1.0 in "
+                                            "run run-second"):
+        aggregate.aggregate([first, second], policy=policy())
+    report = aggregate.aggregate([first, skipped], policy=policy())
+    assert [(row["adapter_version"], row["runs"]) for row in report["systems"]] == [
+        ("1.0.0", ["run-first", "run-skipped"])]
+    assert system(view(report), "fake-a")["observations"]["failures"]["skipped_system"] == 1
