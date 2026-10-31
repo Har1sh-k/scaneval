@@ -167,7 +167,7 @@ import subprocess
 from typing import Any, NamedTuple, Sequence
 
 from ..collectors import EXTERNAL_PREFIX, relocate_paths, workspace_path
-from ..execution import list_directory, read_regular_file
+from ..execution import list_directory
 from ..kinds import kind_for_harness_class, load_mapping
 from ..observer import Observer, create_jsonl_sink
 from .base import Adapter, AdapterError, NativeOutcome, SystemSpec, build_env, run_command
@@ -180,6 +180,11 @@ ARTIFACT_EXPORT = "deepsec-export"
 # without transcript import still runs, on a checkout where the collectors are absent.
 COLLECTOR_MODULE = "scaneval.collectors.claude_code"
 DEFAULT_PROJECTS_DIR = "~/.claude/projects"
+# The most a transcript being moved may hold: the collector's MAX_TRANSCRIPT_BYTES, spelled here
+# for a checkout without the collector. See transcript_limit, which prefers the collector's own.
+TRANSCRIPT_LIMIT = 64 * 1024 * 1024
+# How much of a transcript a move holds in memory at once, the chunk the collector reads in.
+TRANSCRIPT_CHUNK = 1 << 20
 # DeepSec's own rule for a project id, from resolve-project-id.ts in 2.3.10. The id names a
 # directory under data/, so a value it would refuse must be refused here rather than sent.
 PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -2109,6 +2114,23 @@ def _overlapping(candidates: tuple[Candidate, ...], path: str, slug: str,
     return sorted(dict.fromkeys(ids))
 
 
+def transcript_limit() -> int:
+    """The most a transcript being moved may hold: the collector's ``MAX_TRANSCRIPT_BYTES``.
+
+    Discovery adopts only a transcript it read to its end within that bound, so a transcript past
+    it by the time it is moved has changed since and is not the file the workspace history
+    verified. The collector's constant is the rule when it is installed, so the two cannot drift,
+    as :func:`session_id_usable` keeps the session id rule; :data:`TRANSCRIPT_LIMIT` is the same
+    number spelled here for a checkout without the collector, which never has a workspace history
+    and so never has a transcript to move.
+    """
+    try:
+        limit = getattr(import_module(COLLECTOR_MODULE), "MAX_TRANSCRIPT_BYTES", None)
+    except ImportError:
+        limit = None
+    return limit if isinstance(limit, int) and limit > 0 else TRANSCRIPT_LIMIT
+
+
 def move_transcript(source: Path, target: Path, enclosure: Enclosure) -> str | None:
     """Move one verified transcript to *target*; return why it was not moved, never raise.
 
@@ -2132,20 +2154,32 @@ def move_transcript(source: Path, target: Path, enclosure: Enclosure) -> str | N
 
     A transcript replaced by a link after discovery and the import had read it was followed as
     well, so a host file's bytes were registered and hashed as that session's transcript, and
-    nothing said so. Now the source is read by :func:`~scaneval.execution.read_regular_file`,
-    whose ``O_NOFOLLOW`` open refuses a link and whose :func:`os.fstat` refuses anything that is
-    not a regular file, in the same open that reads the bytes. The bytes the import read are not
-    reused instead: the collector hands back a summary rather than the file, and the lines it
-    decodes are bounded and repaired, so they are not the file either. Reading the file whole is
-    bounded in practice, because discovery adopts only a transcript it read to its end under the
-    collector's size limit.
+    nothing said so. And the move read the transcript whole, so a regular file swapped in after
+    the import was held in memory at whatever size it had: one large enough raised
+    :class:`MemoryError` out of the move and the scan, and a run that had finished with its claims
+    was recorded as an adapter failure with none. Now the source is opened with
+    ``O_NOFOLLOW|O_NONBLOCK``, which refuses a symbolic link and returns at once from a named pipe,
+    and its descriptor is proved with :func:`os.fstat`, before a byte is read, to be a regular file
+    no larger than :func:`transcript_limit`, the collector's bound. A larger one is refused:
+    discovery adopts only a transcript it read to its end within that bound, so the file there now
+    is not the one it verified. The copy then streams from one descriptor to the other in chunks of
+    :data:`TRANSCRIPT_CHUNK`, so a move never holds more than one chunk in memory. The bytes the
+    import read are not reused instead: the collector hands back a summary rather than the file,
+    and the lines it decodes are bounded and repaired, so they are not the file either.
 
-    The original is removed only after a verified write: the copy is flushed and its descriptor
-    proved, with :func:`os.fstat`, to be a regular file with one name holding exactly the bytes
-    that were read. A copy that fails or does not verify is removed again and the original is
-    left as it was, and so is a copy whose original then cannot be removed, so a transcript is
-    either moved or left where it was, and no copy of it stays in ``raw/claude-sessions``. An
-    original already gone by the time it is removed costs nothing: the verified copy holds it.
+    The original is removed only after a verified write: the copy received exactly as many bytes
+    as the source held when it was opened, the source had nothing past them, and :func:`os.fstat`
+    on the copy's descriptor shows a regular file with one name and that size. A copy that fails
+    or does not verify is removed again and the original is left as it was, and so is a copy whose
+    original then cannot be removed, so a transcript is either moved or left where it was, and no
+    copy of it stays in ``raw/claude-sessions``. An original already gone by the time it is
+    removed costs nothing: the verified copy holds it.
+
+    What is not verified, named so it is not mistaken for an oversight: the copy's content. Nothing
+    holds a digest of the file to check it against, because the collector hashes the spans it
+    delivers and never the file. A hash here could only compare the copy with the bytes this move
+    had just written to it, which proves nothing a process able to rewrite the copy could not undo
+    a moment later, before the run hashes the copy it registers.
 
     That narrows the class ``docs/THREAT_MODEL.md`` names; it does not close it. The enclosure
     check, the ``mkdir`` and the open are separate operations, and so are the read and the
@@ -2153,47 +2187,79 @@ def move_transcript(source: Path, target: Path, enclosure: Enclosure) -> str | N
     projects directory is inside neither enclosure root, so what vouches for the directory the
     source is read from is the workspace history that listed it.
     """
+    reader = writer = None
+    created = False
     try:
-        data = read_regular_file(source)
-    except OSError as exc:
-        reason = ("it is a symbolic link, not a regular file" if exc.errno == errno.ELOOP
-                  else exc.strerror or str(exc))
-        return f"the transcript could not be read as a regular file ({reason})"
-    if enclosure.write(target) is None:
-        return "the destination does not resolve inside this run's raw output"
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    except OSError as exc:
-        return f"the destination's directory could not be created ({exc.strerror or exc})"
-    try:
-        # The umask decides the mode, as it did for the copy this replaces; the directory is private.
-        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)
-    except FileExistsError:
-        return "something was already at the destination, and it was not written through"
-    except OSError as exc:
-        return f"the destination could not be created ({exc.strerror or exc})"
-    failure = None
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            written = os.fstat(stream.fileno())
-        if not (stat.S_ISREG(written.st_mode) and written.st_nlink == 1 and written.st_size == len(data)):
-            failure = f"the copy did not verify as a regular file with one name holding all {len(data)} byte(s)"
-    except OSError as exc:
-        failure = f"the copy could not be written ({exc.strerror or exc})"
-    if failure is None:
+        try:
+            reader = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            found = os.fstat(reader)
+        except OSError as exc:
+            reason = ("it is a symbolic link, not a regular file" if exc.errno == errno.ELOOP
+                      else exc.strerror or str(exc))
+            return f"the transcript could not be read as a regular file ({reason})"
+        if not stat.S_ISREG(found.st_mode):
+            return "the transcript could not be read as a regular file (not a regular file)"
+        limit = transcript_limit()
+        if found.st_size > limit:
+            return (f"the transcript holds {found.st_size} byte(s), past the collector's bound of {limit}, "
+                    "so it is not the file discovery read to its end")
+        if enclosure.write(target) is None:
+            return "the destination does not resolve inside this run's raw output"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError as exc:
+            return f"the destination's directory could not be created ({exc.strerror or exc})"
+        try:
+            # The umask decides the mode, as it did for the copy this replaces; the directory is private.
+            writer = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)
+        except FileExistsError:
+            return "something was already at the destination, and it was not written through"
+        except OSError as exc:
+            return f"the destination could not be created ({exc.strerror or exc})"
+        created = True
+        copied = 0
+        try:
+            # Cleared now that the descriptor is proved a regular file, as the collector clears it:
+            # on a regular file it could only turn a slow read into a spurious EAGAIN.
+            os.set_blocking(reader, True)
+            with os.fdopen(writer, "wb") as stream:
+                writer = None
+                while copied < found.st_size:
+                    chunk = os.read(reader, min(TRANSCRIPT_CHUNK, found.st_size - copied))
+                    if not chunk:
+                        break
+                    stream.write(chunk)
+                    copied += len(chunk)
+                # One byte past the size it was opened at says whether it grew while it was copied.
+                grew = copied == found.st_size and bool(os.read(reader, 1))
+                stream.flush()
+                written = os.fstat(stream.fileno())
+        except OSError as exc:
+            return f"the transcript could not be copied ({exc.strerror or exc})"
+        if copied != found.st_size or grew:
+            return (f"the transcript changed size while it was copied, from the {found.st_size} byte(s) it "
+                    "held when it was opened")
+        if not (stat.S_ISREG(written.st_mode) and written.st_nlink == 1 and written.st_size == copied):
+            return f"the copy did not verify as a regular file with one name holding all {copied} byte(s)"
         try:
             source.unlink(missing_ok=True)
         except OSError as exc:
-            failure = f"the original could not be removed ({exc.strerror or exc}), so the copy was discarded"
-    if failure is not None:
-        # Created by this call alone (``O_EXCL``), so removing it removes nothing anyone else wrote.
-        try:
-            target.unlink()
-        except OSError:
-            pass
-    return failure
+            return f"the original could not be removed ({exc.strerror or exc}), so the copy was discarded"
+        created = False
+        return None
+    finally:
+        for descriptor in (reader, writer):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        if created:
+            # Created by this call alone (``O_EXCL``), so removing it removes nothing anyone else wrote.
+            try:
+                target.unlink()
+            except OSError:
+                pass
 
 
 def preserve_transcripts(sessions: tuple[Session, ...], transcripts: dict[str, tuple[Path, ...]],

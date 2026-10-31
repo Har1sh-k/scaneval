@@ -3676,6 +3676,90 @@ def test_a_copy_that_does_not_verify_is_discarded_and_the_original_is_kept(tmp_p
                              "byte(s)).")
 
 
+def test_a_transcript_grown_past_the_collectors_bound_after_the_import_is_refused_before_a_byte_is_read(
+        tmp_path, monkeypatch):
+    """A transcript larger than the collector reads is refused by its size, and the scan keeps its claims.
+
+    The move read the transcript whole, so a regular file swapped in after the import was held in
+    memory at whatever size it had: one large enough raised :class:`MemoryError` out of the move
+    and the scan, and a run that had finished with its claims was recorded as an adapter failure
+    with none. Discovery adopts only a transcript it read to its end within the collector's
+    ``MAX_TRANSCRIPT_BYTES``, so one past it has changed since and is refused before a byte of it
+    is read. The file grows sparse, so it costs no disk.
+    """
+    from scaneval.collectors.claude_code import MAX_TRANSCRIPT_BYTES
+
+    root = fake_deepsec_root(tmp_path, session_ids=["session-aaaa"])
+    stub_collector(monkeypatch, tmp_path)
+    main = transcript_fixture(tmp_path)
+    baseline, _ = documents(invoke(tmp_path / "baseline", root))
+    find, load = deepsec_module.collector()
+
+    def import_then_grow(observer, path, **options):
+        summary = load(observer, path, **options)
+        os.truncate(main, MAX_TRANSCRIPT_BYTES + 1)
+        return summary
+
+    monkeypatch.setattr(deepsec_module, "collector", lambda: (find, import_then_grow))
+    bundle = invoke(tmp_path, root, capture_claude_sessions=True)
+    result, execution = documents(bundle)
+
+    assert outcome_of(result) == outcome_of(baseline) and len(result["claims"]) == 2
+    assert not any(artifact["id"].startswith("claude-session/") for artifact in execution["raw_artifacts"])
+    assert not list(bundle.rglob("claude-sessions")), "nothing is created for a transcript that was not read"
+    assert main.stat().st_size == MAX_TRANSCRIPT_BYTES + 1, "the original is left where it was"
+    assert capture_note(execution).endswith(
+        "1 transcript(s) could not be moved and were left in place: session-aaaa/session-aaaa.jsonl (the "
+        f"transcript holds {MAX_TRANSCRIPT_BYTES + 1} byte(s), past the collector's bound of "
+        f"{MAX_TRANSCRIPT_BYTES}, so it is not the file discovery read to its end).")
+
+
+@pytest.mark.parametrize("past", [0, 1], ids=["at-the-bound", "past-it"])
+def test_the_collectors_bound_decides_which_transcripts_are_moved_and_a_moved_one_is_copied_whole(
+        tmp_path, monkeypatch, past):
+    """A transcript at the collector's bound is moved byte for byte, and one past it is refused.
+
+    The bound is the collector's ``MAX_TRANSCRIPT_BYTES``, read when the move runs, and it admits
+    a transcript of exactly that size, because discovery adopts one: it reads to the bound and then
+    finds nothing left. The transcript is longer than three chunks of the copy, so the moved one is
+    compared byte for byte; verification proves the copy's size, and only this proves the chunks
+    were written whole and in order.
+    """
+    from scaneval.adapters.llm_harness import Enclosure
+    from scaneval.collectors import claude_code
+
+    source = tmp_path / "transcripts" / "session-aaaa.jsonl"
+    source.parent.mkdir()
+    data = b"".join(b'{"line": %d}\n' % number for number in range(200_000))
+    source.write_bytes(data)
+    monkeypatch.setattr(claude_code, "MAX_TRANSCRIPT_BYTES", len(data) - past)
+    raw = tmp_path / "raw"
+    raw.mkdir()
+
+    artifacts, notes = deepsec_module.preserve_transcripts(
+        (workspace_history_session("session-aaaa"),), {"session-aaaa": (source,)}, source.parent, raw,
+        Enclosure.capture(tmp_path / "source", raw))
+
+    target = raw / "claude-sessions" / "session-aaaa" / "session-aaaa.jsonl"
+    if not past:
+        assert artifacts == [{"id": "claude-session/session-aaaa/session-aaaa.jsonl", "path": target}]
+        assert target.read_bytes() == data and not source.exists()
+    else:
+        assert artifacts == [] and source.read_bytes() == data
+        assert not (raw / "claude-sessions").exists(), "nothing is created for a transcript that was not read"
+        assert notes[0].endswith(f"(the transcript holds {len(data)} byte(s), past the collector's bound of "
+                                 f"{len(data) - 1}, so it is not the file discovery read to its end).")
+
+
+def test_the_bound_a_moved_transcript_is_held_to_is_the_collectors_own_number(monkeypatch):
+    """The collector's constant when it is installed, and the same number spelled here when it is not."""
+    from scaneval.collectors import claude_code
+
+    assert deepsec_module.transcript_limit() == claude_code.MAX_TRANSCRIPT_BYTES
+    monkeypatch.setattr(deepsec_module, "COLLECTOR_MODULE", "scaneval.collectors.not_installed")
+    assert deepsec_module.transcript_limit() == deepsec_module.TRANSCRIPT_LIMIT == claude_code.MAX_TRANSCRIPT_BYTES
+
+
 THIRD_FILE = {"src/jobs.js": "module.exports = () => 1;\n"}
 FAILED_CALL = "deepsec/workspace-history/session-cccc"
 
