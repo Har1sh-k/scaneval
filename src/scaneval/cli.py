@@ -615,7 +615,9 @@ def _plan(args: argparse.Namespace) -> int:
     """Write one evaluation plan: a full plan of a snapshot, or the PR plan of a declared change set.
 
     ``--mode pr`` alone keeps meaning what it always did, a full plan of the snapshot carrying the
-    pack's ``pr`` review budgets, and says so, because it names no change and reviews none. A PR plan
+    pack's ``pr`` review budgets, and says so, because it names no change and reviews none. It also
+    stays the 2.0 plan it always was, so unlike ``--mode full`` it places no control by its paths
+    (see :func:`scaneval.cases.build_plan`), and the note says that as well. A PR plan
     needs ``--change-set-id`` and the three hashes that identify the input: the tree a scanner is
     handed as the base and as the head, and the digest of the recorded diff between them, all of which
     a run prepares and records. ``--snapshot-id`` is then the change set's head snapshot and
@@ -632,8 +634,10 @@ def _plan(args: argparse.Namespace) -> int:
             raise ContractError(f"{', '.join(stray)} identify a PR input and belong with --change-set-id")
         plan, notes = cases.build_plan(pack, args.snapshot_id, args.tree_hash, mode=args.mode)
         if args.mode == "pr":
-            notes.insert(0, "--mode pr without --change-set-id only selects the pack's pr review budgets; "
-                            "this is a full plan of the snapshot, not the review of any change")
+            notes.insert(0, "--mode pr without --change-set-id selects the pack's pr review budgets; "
+                            "this is a full plan of the snapshot, not the review of any change, and a 2.0 "
+                            "plan that places no control, so a result that lists any omitted path earns "
+                            "none of its controls quiet credit")
     else:
         if args.mode != "pr":
             raise ContractError("--change-set-id plans the PR review of a change set; add --mode pr")

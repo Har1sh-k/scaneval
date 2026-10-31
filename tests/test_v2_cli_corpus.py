@@ -1698,8 +1698,10 @@ def test_plan_mode_pr_without_a_change_set_says_it_is_a_full_plan_with_the_pr_bu
     code, out, err = cli(capsys, *plan_pr_argv(checked_pack["pack"], output, checked_pack["tree_hash"]))
 
     assert code == 0 and "Wrote a draft plan with 1 targets and 0 controls" in out
-    assert err.startswith("note: --mode pr without --change-set-id only selects the pack's pr review budgets; "
-                          "this is a full plan of the snapshot, not the review of any change")
+    assert err.startswith("note: --mode pr without --change-set-id selects the pack's pr review budgets; "
+                          "this is a full plan of the snapshot, not the review of any change, and a 2.0 plan "
+                          "that places no control, so a result that lists any omitted path earns none of its "
+                          "controls quiet credit\n")
     plan = load_document(output, "evaluation-plan")
     assert plan["schema_version"] == "2.0" and plan["review_budgets"] == [5, 10, 20]
     assert plan["provenance"]["mode"] == "pr" and "pr" not in plan["provenance"]
