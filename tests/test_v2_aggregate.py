@@ -85,7 +85,7 @@ def planned(input_id: str, *, targets=(), controls=(), project: str = "acme/alph
 def scan(*, hits=None, claims: int | None = None, ranking: str = "native", status: str = "success",
          resolved: bool = True, controls=None, pending=None, usage=None, review_state: str = "approved",
          timing=None, execution: bool = True, drop=(), extra=(), scope: str | None = None,
-         omitted=None, paths=None, examined_nothing=None) -> dict:
+         omitted=None, paths=None, examined_nothing=None, processing=None) -> dict:
     """What one bundle holds.
 
     ``hits`` maps a target id to the 1-based position of the claim a reviewer accepted for it;
@@ -93,14 +93,15 @@ def scan(*, hits=None, claims: int | None = None, ranking: str = "native", statu
     ``"unresolved"``, or ``("false_allegation", position)``. ``drop`` leaves frozen targets or controls out
     of the bundle's plan and ``extra`` adds targets to it. ``omitted`` is the list of paths the result says
     its scanner did not examine, ``paths`` maps a control id to the paths its plan gives it, and
-    ``examined_nothing`` is the result's statement that no part of its input was shown examined; each makes the
-    document that carries it 2.1, and none is given by default.
+    ``examined_nothing`` is the result's statement that no part of its input was shown examined, and ``processing``
+    the selection marker the result records for its system; each makes the document that carries it 2.1, and none
+    is given by default.
     """
     return {"hits": hits or {}, "claims": claims, "ranking": ranking, "status": status, "resolved": resolved,
             "controls": controls or {}, "pending": pending or {}, "usage": usage or {"wall_seconds": 1.0},
             "review_state": review_state, "timing": timing, "execution": execution, "drop": set(drop),
             "extra": list(extra), "scope": scope, "omitted": omitted, "paths": paths or {},
-            "examined_nothing": examined_nothing}
+            "examined_nothing": examined_nothing, "processing": processing}
 
 
 def _plan_item(item: dict, kind: str) -> dict:
@@ -137,11 +138,13 @@ def write_bundle(bundle: Path, run_id: str, assignment: dict, row: dict, spec: d
                **({"rank": index} if native else {})} for index in range(1, count + 1)]
     usage = dict(spec["usage"])
     result = {"schema_version": "2.1" if usage.get("wall_seconds", 0) is None or spec["omitted"] is not None
-              or spec["examined_nothing"] is not None else "2.0", "run_id": run_id,
+              or spec["examined_nothing"] is not None or spec.get("processing") is not None else "2.0",
+              "run_id": run_id,
               "system_id": assignment["system_id"], "input_hash": bound, "status": spec["status"],
               "ranking": spec["ranking"], "claims": claims, "bundles_resolved": spec["resolved"], "usage": usage,
               **({"omitted_paths": spec["omitted"]} if spec["omitted"] is not None else {}),
-              **({"examined_nothing": spec["examined_nothing"]} if spec["examined_nothing"] is not None else {})}
+              **({"examined_nothing": spec["examined_nothing"]} if spec["examined_nothing"] is not None else {}),
+              **({"processing": spec["processing"]} if spec.get("processing") is not None else {})}
     matches = [{"claim_id": f"c{position}", "target_id": target_id, "decision": "accepted",
                 "reason": "fixture: accepted by a fictional reviewer"}
                for target_id, position in spec["hits"].items()]
@@ -2336,3 +2339,61 @@ def test_the_versions_the_runner_records_decide_whether_its_runs_pool(tmp_path, 
     assert [(row["adapter_version"], row["runs"]) for row in report["systems"]] == [
         ("1.0.0", ["run-first", "run-skipped"])]
     assert system(view(report), "fake-a")["observations"]["failures"]["skipped_system"] == 1
+
+
+@pytest.mark.parametrize("configured, version, recorded, derived", [
+    (DEEPSEC_CURATED, "1.2.1", "full", "curated"),
+    (DEEPSEC_FULL, "1.2.1", "curated", "full"),
+    (DEEPSEC_CURATED, "1.1.0", "curated", "full"),
+    ({}, "1.0.0", "curated", "full"),
+], ids=["curated-edited-to-full", "full-edited-to-curated", "ignored-key-recorded-curated", "no-curated-mode"])
+def test_a_bundle_whose_result_contradicts_its_system_s_processing_is_refused_wherever_runs_are_pooled(
+        tmp_path, configured, version, recorded, derived):
+    """An edited bundle does not pass silently, and it does not become a failure nobody traces back to it either.
+
+    Every document of the edited bundle binds to every other, as an edit that rehashed them would leave them, and the
+    other bundles record nothing, so the system's processing is the one its configuration and adapter version give.
+    The one marker that contradicts it is named by run and invocation wherever runs are pooled: a DeepSec curated
+    result edited to full, a full one edited to curated, curated recorded beside an adapter that predates the key, and
+    curated recorded for an adapter with no curated mode this evaluator knows.
+    """
+    inputs = [planned("p1", targets=[target("T-p1")]), planned("p2", targets=[target("T-p2")], project="acme/beta")]
+    edited = write_run(tmp_path, "run-a", inputs, systems=("other", "sys-a"),
+                       configs={"sys-a": configured}, versions={"sys-a": version},
+                       outcomes={("p2", "sys-a", 1): scan(hits={"T-p2": 1}, processing=recorded)})
+    message = (f"system sys-a is recorded as processing {recorded} in run run-a (p2__sys-a__r1), but its configuration "
+               f"and adapter version make it {derived}; a bundle must record the processing its system ran with to be "
+               "aggregated, so this one was edited or comes from an adapter whose curation rule this evaluator does "
+               "not know")
+
+    for refused in (lambda: aggregate.aggregate([edited], policy=policy()),
+                    lambda: aggregate.aggregate_by_condition([edited], policy=policy()),
+                    lambda: aggregate.compare([edited], baseline="other", candidate="sys-a", policy=policy())):
+        with pytest.raises(ContractError) as excinfo:
+            refused()
+        assert str(excinfo.value) == message
+
+
+def test_results_that_record_their_system_s_processing_pool_with_results_written_before_the_marker(tmp_path):
+    """One curated and one full DeepSec configuration at one adapter version, run before results recorded the marker
+    and after: run-a's results record nothing and are read by the derivation, run-b's record what the derivation
+    gives, so each system pools both runs, with the one caveat the curated system always had and no other."""
+    inputs = [planned("p1", targets=[target("T-p1")])]
+    configs = {"deepsec-full": DEEPSEC_FULL, "deepsec-x": DEEPSEC_CURATED}
+    versions = {"deepsec-full": "1.2.1", "deepsec-x": "1.2.1"}
+    before = write_run(tmp_path / "a", "run-a", inputs, systems=("deepsec-full", "deepsec-x"), configs=configs,
+                       versions=versions, outcomes={("p1", "deepsec-x", 1): scan(hits={"T-p1": 1})})
+    after = write_run(tmp_path / "b", "run-b", inputs, systems=("deepsec-full", "deepsec-x"), configs=configs,
+                      versions=versions, outcomes={("p1", "deepsec-x", 1): scan(processing="curated"),
+                                                   ("p1", "deepsec-full", 1): scan(processing="full")})
+    recorded = json.loads((after / "invocations" / "p1__deepsec-x__r1" / "result.json").read_text(encoding="utf-8"))
+    assert (recorded["schema_version"], recorded["processing"]) == ("2.1", "curated")
+
+    report = aggregate.aggregate([before, after], policy=policy())
+
+    assert [(row["system_id"], row["processing"], row["runs"]) for row in report["systems"]] == [
+        ("deepsec-full", "full", ["run-a", "run-b"]), ("deepsec-x", "curated", ["run-a", "run-b"])]
+    assert [warning for warning in view(report)["warnings"] if "processing" in warning] == [
+        f"deepsec-x: {CURATED_CAVEAT}"]
+    assert slice_of(system(view(report), "deepsec-x"))["completion"]["value"] == 1
+    assert recall(report, system_id="deepsec-x") == 0.5

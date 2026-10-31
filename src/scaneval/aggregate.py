@@ -24,9 +24,12 @@ Which system is which. A system is what its runs configured (adapter, adapter co
 network policy, execution backend, and deadline), the adapter version their manifests record, and the
 processing those two make of it, ``full`` or ``curated`` (:func:`system_processing`). One system id is
 one of each in every run it is aggregated from, or the runs are refused; a run that records no adapter
-version for a system ran nothing for it and pools with any version. System rows report the version and
-the processing, a comparison lists both among its configuration differences, and every view states a
-curated system's caveat: its figures describe paths chosen before the run and are not a detection rate.
+version for a system ran nothing for it and pools with any version. A result written since the marker
+existed records its system's processing itself; it must be the one the configuration and the version
+give, or the runs are refused, and a result that records none is read by that derivation. System rows
+report the version and the processing, a comparison lists both among its configuration differences,
+and every view states a curated system's caveat: its figures describe paths chosen before the run and
+are not a detection rate.
 
 What is scored against what. An input is scored on the targets and controls its schedule froze before
 the run. An item frozen there but absent from the bundle's plan is a miss (``unscored``): a target is
@@ -207,6 +210,8 @@ class _Observation:
     input whose schedule froze no plan. ``unscored`` and ``unregistered`` count the frozen items the
     bundle's plan lacks and the items it adds. ``timing`` holds the execution record's start, finish,
     and wall seconds when the bundle carries one; a start or finish it cannot read is ``None``.
+    ``processing`` is the selection marker the bundle's result records, ``None`` when it records none: a
+    result written before the marker existed, or one the runner recorded in place of the adapter's.
     """
 
     run_id: str
@@ -223,6 +228,7 @@ class _Observation:
     unregistered: int = 0
     timing: tuple[datetime | None, datetime | None, float] | None = None
     condition: dict | None = field(default=None, repr=False)
+    processing: str | None = None
 
     @property
     def executed(self) -> bool:
@@ -393,7 +399,7 @@ def _observe(run: _Run, assignment: dict, row: dict | None, prepared: dict | Non
                      "reasons": [{"code": "unusable_condition_evidence", "message": f"Condition evidence for {assignment['assignment_id']} is unusable: {str(exc).replace(str(run.directory), '<run>')}"}]}
     return _Observation(**identity, status=result["status"], scope=scope, observed=observed,
                         review_state=state, unscored=unscored, unregistered=unregistered, timing=timing,
-                        condition=condition)
+                        condition=condition, processing=result.get("processing"))
 
 
 @dataclass
@@ -421,8 +427,11 @@ def system_processing(adapter: str, config: dict, adapter_version: str | None) -
     ``curated`` means the configuration chose, before the run, which paths of each input are assigned the
     scanner's analysis; today only DeepSec's ``config.process_manifest_by_tree`` does
     (:data:`CURATED_PROCESSING`), and a curated run is a diagnostic of those paths, never a benchmark. It is
-    read from what a run or a benchmark plan already recorded, the configuration and the adapter version,
-    so a saved run shows it without being rewritten, and it changes no figure. The key's presence decides,
+    derived from what a run or a benchmark plan already recorded, the configuration and the adapter version,
+    so a run saved before results recorded the marker shows it without being rewritten, and it changes no
+    figure. A result written since records the marker itself (its ``processing``), which must be this one:
+    aggregation (:func:`_check_processing`) and the benchmark score refuse a recorded marker this
+    derivation contradicts, which is what catches a bundle edited after its run. The key's presence decides,
     whatever its value, because the adapter refuses a malformed map rather than run unscoped. An adapter
     version older than the first one honoring the key ignored it and ran unscoped, so that system is
     ``full``, and its caveat says the key was ignored. Versions compare as release numbers, a missing
@@ -469,7 +478,8 @@ def _systems(runs: list[_Run]) -> dict[str, dict]:
     it depends on one, and refusing it would push its failures out of the denominators they belong in. The
     system's ``adapter_version`` is the one the other runs recorded, or ``None`` when no run recorded one,
     and ``unversioned_runs`` names the runs that recorded none. ``processing`` and its ``caveat`` follow
-    from the configuration and that version (:func:`system_processing`).
+    from the configuration and that version (:func:`system_processing`), and every marker a bundle of the
+    system records must be that ``processing`` (:func:`_check_processing`).
     """
     systems: dict[str, dict] = {}
     for run in runs:
@@ -505,6 +515,29 @@ def _systems(runs: list[_Run]) -> dict[str, dict]:
         info["processing"], info["caveat"] = system_processing(
             info["configuration"]["adapter"], info["configuration"]["config"], version)
     return dict(sorted(systems.items()))
+
+
+def _check_processing(systems: dict[str, dict], observations: dict[tuple[str, str, str, int], _Observation]) -> None:
+    """Refuse a bundle whose result records a processing other than the one its system's identity gives.
+
+    A result written since the marker existed records the processing of the system that ran it, as its
+    adapter said it; one written before records none, and neither does an error result the runner recorded
+    in the adapter's place. Every marker recorded must be the system's own (:func:`_systems`), derived from
+    what its runs configured and the adapter version they recorded, which is also all a bundle without one
+    is read by. An adapter records ``curated`` exactly when its configuration names the key that curates it
+    (:data:`CURATED_PROCESSING`), so a marker that derivation contradicts was edited after the run, or was
+    written by an adapter whose curation rule this module does not know yet. Either way the bundle does not
+    say which system it observed, and the runs are refused, naming it, rather than pooled under a marker
+    one of their bundles contradicts or turned into a failure no reader would trace back to it.
+    """
+    for key, observation in sorted(observations.items()):
+        derived = systems[observation.system_id]["processing"]
+        if observation.processing is not None and observation.processing != derived:
+            raise ContractError(
+                f"system {observation.system_id} is recorded as processing {observation.processing} in run "
+                f"{key[0]} ({observation.assignment_id}), but its configuration and adapter version make it "
+                f"{derived}; a bundle must record the processing its system ran with to be aggregated, so this "
+                "one was edited or comes from an adapter whose curation rule this evaluator does not know")
 
 
 def _identity(info: dict) -> dict:
@@ -570,8 +603,9 @@ def _load_corpus(run_dirs: Iterable[str | PathLike[str]]) -> _Corpus:
 
     Refused: no directory at all, one run given twice, runs whose schedules froze different packs
     (canonical ids, levels, and families are comparable only within one frozen pack), a system id
-    configured two ways or recorded with two adapter versions, and a canonical item planned under two
-    groupings.
+    configured two ways or recorded with two adapter versions, a bundle recording a processing its
+    system's configuration and adapter version do not give (:func:`_check_processing`), and a canonical
+    item planned under two groupings.
     """
     runs = [_load_run(directory) for directory in run_dirs]
     if not runs:
@@ -597,6 +631,7 @@ def _load_corpus(run_dirs: Iterable[str | PathLike[str]]) -> _Corpus:
             observations[key] = _observe(
                 run, assignment, rows.get(assignment["assignment_id"]), prepared.get(assignment["input_id"]),
                 manifest_systems.get(assignment["system_id"]), inputs[key[:2]])
+    _check_processing(systems, observations)
     return _Corpus(runs, observations, targets, controls, inputs, systems)
 
 
@@ -1943,9 +1978,10 @@ def aggregate(run_dirs: Iterable[str | PathLike[str]], *, policy: dict | None = 
 
     Refused with :class:`ContractError`, before anything is computed: a directory that is not a 2.1 run
     directory, a run whose manifest, schedule, and configuration disagree, one run given twice, runs of
-    different packs, a system id configured two ways or recorded with two adapter versions, a canonical
-    item planned under two groupings, and a view mixing diagnostic fixtures with other evidence. Nothing
-    is written; the caller writes the returned document. The same directories and policy give the same
+    different packs, a system id configured two ways or recorded with two adapter versions, a bundle
+    recording a processing its system's configuration and adapter version do not give, a canonical item
+    planned under two groupings, and a view mixing diagnostic fixtures with other evidence. Nothing is
+    written; the caller writes the returned document. The same directories and policy give the same
     document in any order.
     """
     context = _Context(_load_corpus(run_dirs), resolve_policy(policy))
