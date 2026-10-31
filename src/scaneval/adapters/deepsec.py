@@ -115,9 +115,11 @@ not a sandbox: the agent still runs with the whole repository visible and may re
 files shown to be unread. Nothing is filtered out of the reconciliation: every record, status and
 exported claim counts as in an ordinary run, so the regex candidates the manifest did not list are
 assigned no AI batch, stay ``pending``, make the run ``scope_incomplete``, and are its
-``omitted_paths``. A listed path with no record had no regex candidate, or was skipped by DeepSec's ignore filter, so no
-AI batch ran on it: native triage, not a model's miss. An unlisted record carrying analysis, a finding
-or a status other than ``pending``, a claim on an unlisted path, or a manifest whose bytes changed is
+``omitted_paths``. After a scan that ran to the end, a listed path with no record had no regex
+candidate, or was skipped by DeepSec's ignore filter, so no AI batch ran on it: native triage, not a
+model's miss; after a scan that failed or was killed, the note says only that no scan completed. An
+unlisted record carrying analysis, a finding or a status other than ``pending``, a claim on an unlisted
+path, or a manifest whose bytes changed is
 ``process_manifest_not_honored``; its claims are kept. Every other failure keeps its precedence, and a
 curated run that would otherwise succeed is ``partial`` with ``scope_incomplete`` instead. Its bundles
 are never resolved, so it completes no control and earns no quiet credit.
@@ -3281,25 +3283,43 @@ class DeepsecAdapter(Adapter):
         ] + notes + list(imported.notes) + finding_import_notes
         if scope is not None:
             left_out = len(scope.unselected) + scope.external
+            # A listed path's missing record is DeepSec's triage only when its scan ran to the end; a
+            # scan that failed or was killed leaves a record list that says nothing about any path.
+            scan_result = results.get("scan")
+            scan_unfinished = ("never ran" if scan_result is None
+                               else "ran out of the shared time budget" if scan_result.timed_out
+                               else f"exited {scan_result.exit_code}" if scan_result.exit_code != 0
+                               else None)
+            if scan_unfinished is None:
+                scope_account = (
+                    f"Its regex scan left {len(records.files)} file record(s); {len(scope.selected)} are on a listed "
+                    "path, which are the only ones standard-mode process could assign to an AI batch, and "
+                    f"{left_out} regex candidate file(s) were assigned no AI batch"
+                    + (f" ({_listed(scope.unselected)})" if scope.unselected else "")
+                    + (f", {scope.external} of them under a record name outside the tree" if scope.external else "")
+                    + ". Their records stay as DeepSec wrote them, and a partial run that carries claims lists "
+                    "their paths as omitted. Batch assignment does not restrict repository access: the agent still "
+                    "sees the whole repository and may have read unlisted files, so an omitted path is a candidate "
+                    "with no assigned verdict, not evidence that it was never read. "
+                    f"{len(scope.listed_without_record)} listed path(s) got no file record"
+                    + (f" ({_listed(scope.listed_without_record)})" if scope.listed_without_record else "")
+                    + ": DeepSec's scan found no regex candidate there or its ignore filter skipped them, so no AI "
+                    "batch ran on them; that is native triage, not a model's miss. ")
+            else:
+                scope_account = (
+                    f"Its regex scan {scan_unfinished} before it finished, so no AI batch was assigned and the "
+                    f"{len(records.files)} file record(s) it left are not a full list of its candidates. "
+                    f"{len(scope.listed_without_record)} listed path(s) have no file record"
+                    + (f" ({_listed(scope.listed_without_record)})" if scope.listed_without_record else "")
+                    + ", which says nothing about DeepSec's triage of them, since no scan completed. ")
             notes.append(
                 f"Curated diagnostic, not a blind full-repository benchmark: config.process_manifest_by_tree chose "
                 f"{len(scope.manifest)} repository-relative path(s) for input tree {tree_hash} before the run. The "
                 "manifest holds those paths only, with no case identifier, label, weakness class, expected result "
                 "or reason for the selection. "
-                f"Its regex scan left {len(records.files)} file record(s); {len(scope.selected)} are on a listed "
-                "path, which are the only ones standard-mode process could assign to an AI batch, and "
-                f"{left_out} regex candidate file(s) were assigned no AI batch"
-                + (f" ({_listed(scope.unselected)})" if scope.unselected else "")
-                + (f", {scope.external} of them under a record name outside the tree" if scope.external else "")
-                + ". Their records stay as DeepSec wrote them, and a run that carries claims lists their paths "
-                "as omitted. Batch assignment does not restrict repository access: the agent still sees the "
-                "whole repository and may have read unlisted files, so an omitted path is a candidate with no "
-                "assigned verdict, not evidence that it was never read. "
-                f"{len(scope.listed_without_record)} listed path(s) got no file record"
-                + (f" ({_listed(scope.listed_without_record)})" if scope.listed_without_record else "")
-                + ": DeepSec's scan found no regex candidate there or its ignore filter skipped them, so no AI "
-                "batch ran on them; that is native triage, not a model's miss. A curated run is never a success "
-                "and its bundles are unresolved, so it completes no control and earns no quiet credit.")
+                + scope_account
+                + "A curated run is never a success and its bundles are unresolved, so it completes no control "
+                "and earns no quiet credit.")
             if scope.unexpected or scope.out_of_scope_claims:
                 notes.append(
                     f"{len(scope.unexpected)} file record(s) the manifest does not list are not in the state a "

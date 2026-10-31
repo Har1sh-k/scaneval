@@ -4796,7 +4796,7 @@ def test_a_full_run_over_a_tree_holding_a_name_deepsecs_pr_listing_cannot_resolv
 
 
 def curated_run(tmp_path: Path, monkeypatch, paths: list[str], *, control: dict | None = None,
-                extra_files: dict[str, str] | None = None, **overrides) -> Path:
+                extra_files: dict[str, str] | None = None, timeout_seconds: float = 300, **overrides) -> Path:
     """One full run through the runner whose AI batches are limited to *paths* for its own input tree."""
     stub_collector(monkeypatch, tmp_path)
     root = fake_deepsec_root(tmp_path, **(control or {}))
@@ -4805,7 +4805,7 @@ def curated_run(tmp_path: Path, monkeypatch, paths: list[str], *, control: dict 
     spec = system_spec(root, process_manifest_by_tree={prepared.tree_hash: list(paths)}, **overrides)
     return run_invocation(prepared=prepared, adapter=adapter, spec=spec,
                           preparation=adapter.prepare(spec, tmp_path / "cache"), out_dir=tmp_path / "out",
-                          run_id="run-deepsec", timeout_seconds=300, trace_mode="content",
+                          run_id="run-deepsec", timeout_seconds=timeout_seconds, trace_mode="content",
                           network_policy="model_provider_only", clock=CLOCK)
 
 
@@ -4938,6 +4938,26 @@ def test_a_failed_selected_batch_keeps_its_own_failure_and_its_claims(tmp_path, 
     assert result["status"] == "partial" and result["error"]["code"] == "deepsec_batches_failed"
     assert [claim["primary_location"]["path"] for claim in result["claims"]] == ["src/server.js"]
     assert result["omitted_paths"] == [] and result["bundles_resolved"] is False
+
+
+@pytest.mark.parametrize("control, timeout_seconds, status, said", [
+    ({"scan_exit": 3}, 300, "error", "Its regex scan exited 3 before it finished"),
+    ({"hang": "scan"}, 3, "timeout", "Its regex scan ran out of the shared time budget before it finished"),
+], ids=["failed", "timed-out"])
+def test_a_curated_run_whose_scan_did_not_finish_blames_no_listed_path_on_native_triage(
+        tmp_path, monkeypatch, control, timeout_seconds, status, said):
+    """With no completed scan, a listed path's missing record says nothing about DeepSec's triage of it."""
+    bundle = curated_run(tmp_path, monkeypatch, ["src/server.js"], control=control, timeout_seconds=timeout_seconds)
+
+    result, execution = documents(bundle)
+    assert result["status"] == status
+    note = next(note for note in execution["notes"] if note.startswith("Curated diagnostic"))
+    assert said in note
+    assert ("1 listed path(s) have no file record (src/server.js), which says nothing about DeepSec's triage of "
+            "them, since no scan completed") in note
+    assert "native triage" not in note and "ignore filter" not in note
+    assert note.endswith("A curated run is never a success and its bundles are unresolved, so it completes no "
+                         "control and earns no quiet credit.")
 
 
 def test_a_curated_run_whose_only_selected_batch_errored_is_an_error(tmp_path, monkeypatch):

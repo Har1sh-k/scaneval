@@ -98,7 +98,7 @@ The curated run only names populations inside that accounting:
 | --- | --- |
 | Regex records on a listed path | Selected. Only these can be assigned an AI batch. |
 | Regex records not listed, left as the scan wrote them | Assigned no AI batch. They stay `pending`, which makes the run `scope_incomplete`, and they are the result's `omitted_paths`: candidates with no assigned verdict, not files shown to be unread. |
-| Listed paths with no record | No regex candidate there, or DeepSec's ignore filter skipped the file. No AI batch ran. That is native triage, not a model's miss. |
+| Listed paths with no record | No regex candidate there, or DeepSec's ignore filter skipped the file. No AI batch ran. That is native triage, not a model's miss. This holds only after a completed scan: when the scan fails or is killed, the note says the missing record cannot be attributed. |
 | Unlisted records with analysis, findings, or a status other than `pending`, and claims on unlisted paths | Kept, and the run fails as `process_manifest_not_honored`. |
 
 Status precedence is unchanged, and two checks are added. The full order is:
