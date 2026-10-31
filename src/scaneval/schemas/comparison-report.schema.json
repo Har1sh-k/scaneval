@@ -1822,6 +1822,13 @@
           "minLength": 1,
           "description": "The adapter version the run manifests record for this system, the same in every run that records one; null when no run resolved its adapter. Two versions under one system id are refused. Reports written before it was recorded omit it."
         },
+        "processing": {
+          "enum": [
+            "full",
+            "curated"
+          ],
+          "description": "The system's selection marker. curated: its configuration chose before the run which paths are assigned the scanner's analysis (DeepSec config.process_manifest_by_tree, honored from adapter version 1.2.0), so its figures are a diagnostic of those paths, not a detection rate. full otherwise. Reports written before it was recorded omit it."
+        },
         "model_id": {
           "type": [
             "string",

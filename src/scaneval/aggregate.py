@@ -21,10 +21,12 @@ that do not bind to one another, and :func:`scaneval.review.review_status`; a re
 too.
 
 Which system is which. A system is what its runs configured (adapter, adapter configuration, model,
-network policy, execution backend, and deadline) and the adapter version their manifests record. One
-system id is one of each in every run it is aggregated from, or the runs are refused; a run that records
-no adapter version for a system ran nothing for it and pools with any version. System rows report the
-version, and a comparison lists it among its configuration differences.
+network policy, execution backend, and deadline), the adapter version their manifests record, and the
+processing those two make of it, ``full`` or ``curated`` (:func:`system_processing`). One system id is
+one of each in every run it is aggregated from, or the runs are refused; a run that records no adapter
+version for a system ran nothing for it and pools with any version. System rows report the version and
+the processing, a comparison lists both among its configuration differences, and every view states a
+curated system's caveat: its figures describe paths chosen before the run and are not a detection rate.
 
 What is scored against what. An input is scored on the targets and controls its schedule froze before
 the run. An item frozen there but absent from the bundle's plan is a miss (``unscored``): a target is
@@ -87,6 +89,7 @@ import math
 from math import comb
 from os import PathLike
 from pathlib import Path
+import re
 from typing import Any, Callable, Iterable, Sequence
 
 from . import __version__, conditions, review, scoring
@@ -122,6 +125,14 @@ REVIEW_STATES = ("human_approved", "draft", "stale", "missing")
 PAIR_OUTCOMES = ("correct", "both_flagged", "both_silent", "reversed")
 # Leave-one-project-out sensitivity is shown while projects are few (docs/EVALUATION_MATH.md, section 5).
 LOPO_PROJECT_LIMIT = 10
+# The system configuration key that curates processing, by adapter name, and the first adapter version
+# honoring it. DeepSec's config.process_manifest_by_tree chooses before the run which paths' regex candidates
+# are assigned AI batches; a DeepSec adapter before 1.2.0 ignores the key and runs unscoped
+# (docs/designs/deepsec-curated-processing.md). Kept here, beside the system identity it decides, so a saved
+# run is read by the rule of the adapter version it recorded and not by whichever adapter is installed now.
+CURATED_PROCESSING = {"deepsec": ("process_manifest_by_tree", (1, 2, 0))}
+# An adapter version this module can order: dot-separated decimal numbers and nothing else.
+RELEASE = re.compile(r"[0-9]+(?:\.[0-9]+)*")
 
 RANDOM_ORDER_LABEL = ("diagnostic: expected recall under a uniform random order of the delivered claims, "
                       "over unranked observations whose bundles and matches are resolved; not native recall@B "
@@ -404,6 +415,34 @@ class _Corpus:
         return next(run.repetitions for run in self.runs if run.run_id == run_id)
 
 
+def system_processing(adapter: str, config: dict, adapter_version: str | None) -> tuple[str, str | None]:
+    """A system's selection marker, ``curated`` or ``full``, and the caveat a report states beside it.
+
+    ``curated`` means the configuration chose, before the run, which paths of each input are assigned the
+    scanner's analysis; today only DeepSec's ``config.process_manifest_by_tree`` does
+    (:data:`CURATED_PROCESSING`), and a curated run is a diagnostic of those paths, never a benchmark. It is
+    read from what a run or a benchmark plan already recorded, the configuration and the adapter version,
+    so a saved run shows it without being rewritten, and it changes no figure. The key's presence decides,
+    whatever its value, because the adapter refuses a malformed map rather than run unscoped. An adapter
+    version older than the first one honoring the key ignored it and ran unscoped, so that system is
+    ``full``, and its caveat says the key was ignored. Versions compare as release numbers, a missing
+    trailing part counting as zero, so 1.2 is 1.2.0 and 1.10.0 follows 1.9.0. A version that is unknown
+    (nothing ran) or not dot-separated numbers is taken as configured, ``curated``, which can only
+    understate what the figures are. Every other system is ``full`` with no caveat.
+    """
+    key, honored_since = CURATED_PROCESSING.get(adapter, (None, None))
+    if key is None or key not in config:
+        return "full", None
+    if adapter_version is not None and RELEASE.fullmatch(adapter_version):
+        release = tuple(int(part) for part in adapter_version.split("."))
+        if release + (0,) * (len(honored_since) - len(release)) < honored_since:
+            return "full", (f"its configuration names {adapter} config.{key}, which adapter {adapter} "
+                            f"{adapter_version} predates and ignores, so it ran unscoped and its processing is full")
+    return "curated", (f"processing is curated: {adapter} config.{key} chose before the run which paths are "
+                       "assigned AI batches, so its figures are a diagnostic of those paths, not a detection rate, "
+                       "and not comparable with a full run")
+
+
 def _configuration(run: _Run, system_id: str) -> dict:
     """What one system is, as its run configured it: adapter, config, model, network policy, execution."""
     entry = next(item for item in run.config["systems"] if item["system_id"] == system_id)
@@ -429,7 +468,8 @@ def _systems(runs: list[_Run]) -> dict[str, dict]:
     run never prepared. Such a run pools with runs of any version and adds none, because no observation in
     it depends on one, and refusing it would push its failures out of the denominators they belong in. The
     system's ``adapter_version`` is the one the other runs recorded, or ``None`` when no run recorded one,
-    and ``unversioned_runs`` names the runs that recorded none.
+    and ``unversioned_runs`` names the runs that recorded none. ``processing`` and its ``caveat`` follow
+    from the configuration and that version (:func:`system_processing`).
     """
     systems: dict[str, dict] = {}
     for run in runs:
@@ -460,18 +500,21 @@ def _systems(runs: list[_Run]) -> dict[str, dict]:
                     "must name one adapter at one version to be aggregated")
             known["runs"].append(run.run_id)
     for info in systems.values():
-        info["adapter_version"] = info["adapter"][1] if info["adapter"] is not None else None
+        version = info["adapter"][1] if info["adapter"] is not None else None
+        info["adapter_version"] = version
+        info["processing"], info["caveat"] = system_processing(
+            info["configuration"]["adapter"], info["configuration"]["config"], version)
     return dict(sorted(systems.items()))
 
 
 def _identity(info: dict) -> dict:
-    """One system as configuration differences read it: its configuration and its adapter version."""
-    return {**info["configuration"], "adapter_version": info["adapter_version"]}
+    """One system as configuration differences read it: configuration, adapter version, and processing."""
+    return {**info["configuration"], "adapter_version": info["adapter_version"], "processing": info["processing"]}
 
 
 def _system_warnings(system_id: str, info: dict) -> list[str]:
     """What a reader of any figure of one system must not miss about which system it is."""
-    warnings = []
+    warnings = [f"{system_id}: {info['caveat']}"] if info["caveat"] is not None else []
     if info["adapter_version"] is not None and info["unversioned_runs"]:
         warnings.append(f"{system_id}: run(s) {', '.join(info['unversioned_runs'])} record no adapter version "
                         "for it, because it ran nothing there; its adapter_version "
@@ -1840,11 +1883,11 @@ def _run_row(corpus: _Corpus, run: _Run) -> dict:
 
 
 def _system_row(system_id: str, info: dict) -> dict:
-    """What the schedules say one system is, the adapter version it ran with, and the runs that assigned
-    it (:func:`_systems`)."""
+    """What the schedules say one system is, the adapter version and processing it ran with, and the runs
+    that assigned it (:func:`_systems`)."""
     row = info["row"]
     return {"system_id": system_id, "adapter": row["adapter"], "adapter_version": info["adapter_version"],
-            "model_id": row["model_id"],
+            "processing": info["processing"], "model_id": row["model_id"],
             "model_revision": row["model_revision"], "config_sha256": row["config_sha256"],
             "network_policy": row["network_policy"], "execution": row["execution"],
             "runs": list(info["runs"])}
@@ -2101,9 +2144,9 @@ def compare(run_dirs: Iterable[str | PathLike[str]], *, baseline: str, candidate
     manifest's selection and the inputs its configuration names, which is what the gate reads to leave
     such a comparison unresolved. Everything :func:`aggregate` refuses is refused here too. Differences
     are candidate minus baseline; each interval resamples the same clusters for both systems in every
-    replicate. Two systems of different adapter versions are compared, not refused: the version is listed
-    among the configuration differences, as ``adapter_version``, where a gate policy must name it to
-    measure it.
+    replicate. Two systems of different adapter versions or processing are compared, not refused: both
+    are listed among the configuration differences, as ``adapter_version`` and ``processing``, where a
+    gate policy must name them to measure them, and a curated system's caveat is in every view.
     """
     if baseline == candidate:
         raise ContractError("the baseline and the candidate are one system; name two systems to compare")

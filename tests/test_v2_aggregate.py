@@ -2119,6 +2119,9 @@ CURATED_TREE = "sha256:" + "1" * 64
 DEEPSEC_FULL = {"adapter": "deepsec", "config": {"deepsec_root": "/opt/deepsec-workspace", "model": "fixture-model"}}
 DEEPSEC_CURATED = {"adapter": "deepsec", "config": {**DEEPSEC_FULL["config"],
                                                    "process_manifest_by_tree": {CURATED_TREE: ["src/server.js"]}}}
+CURATED_CAVEAT = ("processing is curated: deepsec config.process_manifest_by_tree chose before the run which paths are "
+                  "assigned AI batches, so its figures are a diagnostic of those paths, not a detection rate, and not "
+                  "comparable with a full run")
 
 
 def configuration_requirement(comparison: dict, allowed: list[str]) -> dict:
@@ -2135,7 +2138,7 @@ def test_one_system_id_recorded_with_two_adapter_versions_is_refused_like_two_co
     """A blind DeepSec 1.1.0 run and a curated 1.2.0 run of one byte-identical configuration are two systems.
 
     DeepSec 1.1.0 ignores config.process_manifest_by_tree, so run-a is a blind full scan and run-b a curated
-    diagnostic, and their configurations cannot tell them apart. Each aggregates alone, showing its version;
+    diagnostic, and their configurations cannot tell them apart. Each aggregates alone, marked by what it ran;
     pooling them is refused wherever runs are pooled, naming both versions and both runs in either order.
     """
     inputs = [planned("p1", targets=[target("T-p1")])]
@@ -2154,9 +2157,11 @@ def test_one_system_id_recorded_with_two_adapter_versions_is_refused_like_two_co
         with pytest.raises(ContractError) as excinfo:
             refused()
         assert str(excinfo.value) == message
-    assert [row["adapter_version"] for row in aggregate.aggregate([blind], policy=policy())["systems"]] == ["1.1.0"]
-    assert [(row["system_id"], row["adapter_version"]) for row in
-            aggregate.aggregate([curated], policy=policy())["systems"]] == [("deepsec-x", "1.2.0"), ("other", "1.0.0")]
+    assert [(row["adapter_version"], row["processing"]) for row in
+            aggregate.aggregate([blind], policy=policy())["systems"]] == [("1.1.0", "full")]
+    assert [(row["system_id"], row["adapter_version"], row["processing"]) for row in
+            aggregate.aggregate([curated], policy=policy())["systems"]] == [
+        ("deepsec-x", "1.2.0", "curated"), ("other", "1.0.0", "full")]
 
 
 def test_a_run_that_recorded_no_adapter_version_ran_nothing_and_pools_with_any_version(tmp_path):
@@ -2203,14 +2208,82 @@ def test_adapter_versions_are_in_every_system_row_and_a_difference_a_gate_policy
     report = aggregate.aggregate([run], policy=policy())
     comparison = aggregate.compare([run], baseline="baseline", candidate="candidate", policy=policy())
 
-    assert [(row["system_id"], row["adapter"], row["adapter_version"]) for row in report["systems"]] == [
-        ("baseline", "fake", "1.1.0"), ("candidate", "fake", "1.2.0")]
+    assert [(row["system_id"], row["adapter"], row["adapter_version"], row["processing"])
+            for row in report["systems"]] == [("baseline", "fake", "1.1.0", "full"),
+                                              ("candidate", "fake", "1.2.0", "full")]
     assert [comparison[side]["adapter_version"] for side in ("baseline", "candidate")] == ["1.1.0", "1.2.0"]
     assert comparison["configuration_differences"] == [
         {"key": "adapter_version", "baseline": "1.1.0", "candidate": "1.2.0", "absent_in": None}]
     unintended = configuration_requirement(comparison, [])
     assert unintended["status"] == "inconclusive" and unintended["observed"]["not_allowed"] == ["adapter_version"]
     assert configuration_requirement(comparison, ["adapter_version"])["status"] == "pass"
+
+
+def test_a_curated_system_is_marked_in_every_report_and_compared_with_a_full_one_only_explicitly(tmp_path):
+    """config.process_manifest_by_tree makes a DeepSec 1.2.0 system curated; the marker changes no figure.
+
+    Both systems delivered the same scans, so every figure of theirs is equal. The curated one is marked in the
+    aggregate, condition-strata, and comparison rows, its caveat is in every view and in the strata notes, and the
+    full one carries neither. Comparing them lists processing beside the key that curates, so a policy allowing
+    every config key still leaves the configuration requirement inconclusive until it also names processing.
+    """
+    outcomes = {(f"p{index}", system_id, 1): scan(hits={f"T-p{index}": 1})
+                for index in (1, 2) for system_id in ("deepsec-full", "deepsec-curated")}
+    run = write_run(tmp_path, "run-curated", five_project_inputs(), systems=("deepsec-full", "deepsec-curated"),
+                    outcomes=outcomes, configs={"deepsec-full": DEEPSEC_FULL, "deepsec-curated": DEEPSEC_CURATED},
+                    versions={"deepsec-full": "1.2.0", "deepsec-curated": "1.2.0"})
+    caveat = f"deepsec-curated: {CURATED_CAVEAT}"
+
+    report = aggregate.aggregate([run], policy=policy())
+    strata = aggregate.aggregate_by_condition([run], policy=policy())
+    comparison = aggregate.compare([run], baseline="deepsec-full", candidate="deepsec-curated", policy=policy())
+
+    for document in (report, strata):
+        assert {row["system_id"]: row["processing"] for row in document["systems"]} == {
+            "deepsec-curated": "curated", "deepsec-full": "full"}
+    assert [warning for warning in view(report)["warnings"] if "processing" in warning] == [caveat]
+    assert [note for note in strata["notes"] if "processing" in note] == [caveat]
+    full, curated = (system(view(report), system_id) for system_id in ("deepsec-full", "deepsec-curated"))
+    assert {**curated, "system_id": None} == {**full, "system_id": None}
+    assert detection(slice_of(curated))["full_output_recall"]["value"] == 0.4
+
+    assert [comparison[side]["processing"] for side in ("baseline", "candidate")] == ["full", "curated"]
+    assert comparison["configuration_differences"] == [
+        {"key": f"config.process_manifest_by_tree.{CURATED_TREE}", "baseline": None, "candidate": ["src/server.js"],
+         "absent_in": "baseline"},
+        {"key": "processing", "baseline": "full", "candidate": "curated", "absent_in": None}]
+    assert [warning for warning in view(comparison)["warnings"] if "processing" in warning] == [caveat]
+    broad = configuration_requirement(comparison, ["config"])
+    assert broad["status"] == "inconclusive" and broad["observed"]["not_allowed"] == ["processing"]
+    assert configuration_requirement(comparison, ["config", "processing"])["status"] == "pass"
+
+
+@pytest.mark.parametrize("adapter, config, version, expected", [
+    ("deepsec", {"model": "m"}, "1.2.0", ("full", None)),
+    ("semgrep", {"process_manifest_by_tree": {CURATED_TREE: ["a.py"]}}, "2.1.0", ("full", None)),
+    ("deepsec", {"process_manifest_by_tree": {CURATED_TREE: ["a.js"]}}, "1.2.0", ("curated", CURATED_CAVEAT)),
+    ("deepsec", {"process_manifest_by_tree": None}, "1.2.0", ("curated", CURATED_CAVEAT)),
+    ("deepsec", {"process_manifest_by_tree": {CURATED_TREE: ["a.js"]}}, "1.10.0", ("curated", CURATED_CAVEAT)),
+    ("deepsec", {"process_manifest_by_tree": {CURATED_TREE: ["a.js"]}}, "1.2", ("curated", CURATED_CAVEAT)),
+    ("deepsec", {"process_manifest_by_tree": {CURATED_TREE: ["a.js"]}}, None, ("curated", CURATED_CAVEAT)),
+    ("deepsec", {"process_manifest_by_tree": {CURATED_TREE: ["a.js"]}}, "1.1.0-dev", ("curated", CURATED_CAVEAT)),
+    ("deepsec", {"process_manifest_by_tree": {CURATED_TREE: ["a.js"]}}, "1.1.0\n", ("curated", CURATED_CAVEAT)),
+    ("deepsec", {"process_manifest_by_tree": {CURATED_TREE: ["a.js"]}}, "1.1.0", ("full", (
+        "its configuration names deepsec config.process_manifest_by_tree, which adapter deepsec 1.1.0 predates and "
+        "ignores, so it ran unscoped and its processing is full"))),
+    ("deepsec", {"process_manifest_by_tree": {CURATED_TREE: ["a.js"]}}, "0.9", ("full", (
+        "its configuration names deepsec config.process_manifest_by_tree, which adapter deepsec 0.9 predates and "
+        "ignores, so it ran unscoped and its processing is full"))),
+    ("deepsec", {"process_manifest_by_tree": {CURATED_TREE: ["a.js"]}}, "1.1", ("full", (
+        "its configuration names deepsec config.process_manifest_by_tree, which adapter deepsec 1.1 predates and "
+        "ignores, so it ran unscoped and its processing is full"))),
+])
+def test_processing_is_curated_where_the_configuration_curates_and_no_recorded_version_ignored_it(
+        adapter, config, version, expected):
+    """Only DeepSec's key curates, whatever its value, since the adapter refuses a malformed map rather than run
+    unscoped. A version ordered below 1.2.0 as release numbers, a missing trailing part counting as zero, ignored
+    it, so 1.2 does not and 1.1 does; one that is unknown or not dot-separated numbers is taken as configured."""
+    assert aggregate.system_processing(adapter, config, version) == expected
 
 
 class FakeAdapterNext(FakeAdapter):
