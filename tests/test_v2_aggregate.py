@@ -1928,6 +1928,31 @@ def test_systems_whose_bundles_place_controls_alike_compare_and_a_view_names_eac
     assert not [warning for warning in view(alike)["warnings"] if "bundle plans place" in warning]
 
 
+def test_an_input_whose_schedule_froze_no_plan_is_not_named_for_where_its_bundles_place_a_control(tmp_path):
+    """Its controls take no part in any control metric, so their placement changes no credit.
+
+    The two runs of the first comparison above, with each schedule saying the input was not planned before the run:
+    the bundles still place the controls two ways, and neither the view nor the comparison names them.
+    """
+    runs = [placement_run(tmp_path / "a", "run-a", ("baseline",), placed=False),
+            placement_run(tmp_path / "b", "run-b", ("candidate",), placed=True)]
+    for run in runs:
+        path = run / "evaluator" / "schedule.json"
+        document = json.loads(path.read_text())
+        unplanned = planned("widget", frozen=False)
+        document["inputs"][0].update(plan=unplanned["plan"], declared_tree_hash=unplanned["declared_tree_hash"])
+        path.write_text(canonical_json(validate_document("evaluation-schedule", document)) + "\n")
+
+    report = aggregate.aggregate(runs, policy=policy())
+    comparison = aggregate.compare(runs, baseline="baseline", candidate="candidate", policy=policy())
+
+    assert view(report)["inputs_without_frozen_plan"] == [
+        {"run_id": run_id, "input_id": "widget", "reason": "snapshot widget declares no tree hash"}
+        for run_id in ("run-a", "run-b")]
+    for warnings in (view(report)["warnings"], view(comparison)["warnings"]):
+        assert not [warning for warning in warnings if "bundle plans place" in warning]
+
+
 # --- a run directory written by the runner ------------------------------------------------------
 
 

@@ -1868,13 +1868,15 @@ def _placements(corpus: _Corpus, mode: str, profile: str, system_ids: Iterable[s
 
     Keyed by (input id, control id): each placement, the paths a plan gives the control or ``None`` for
     none, maps to the (run id, system id) of every bundle whose plan gave it. Only read bundles of
-    *system_ids* count; a failure has no plan and says nothing about where a control is.
+    *system_ids* count; a failure has no plan and says nothing about where a control is. An input whose
+    schedule froze no plan takes no part in any control metric, so where its bundles place a control
+    changes no credit and is not collected.
     """
     wanted = set(system_ids)
     found: Placements = defaultdict(lambda: defaultdict(set))
     for (run_id, input_id, system_id, _repetition), observation in sorted(corpus.observations.items()):
         row = corpus.inputs[(run_id, input_id)]
-        if (system_id not in wanted or observation.placement is None
+        if (system_id not in wanted or observation.placement is None or row["plan"]["state"] != "frozen"
                 or (row["mode"], row["profile"]) != (mode, profile)):
             continue
         for control_id, paths in observation.placement:
