@@ -182,9 +182,8 @@ def do_process(argv):
         Path(manifest).write_text(json.dumps(settings["tamper_manifest"]) + "\\n", encoding="utf-8")
     names = names[:limit]
     if manifest and not names:
-        print("No files to process")
-    investigate(argv, names, settings)
-    print("processed %d file(s)" % len(names))
+        say("No files to process")
+    standard_ending(project, investigate(argv, names, settings), settings)
 
 
 def investigate(argv, names, settings):
@@ -346,6 +345,45 @@ def paint(code, text):
     return "\\x1b[%sm%s\\x1b[0m" % (code, text)
 
 
+def quota_lines(project):
+    """What 2.3.10's renderQuotaMessage prints for an exhausted Anthropic quota, in either mode."""
+    return ["", "\\x1b[31m\\x1b[1m\\u2718 Stopped: Anthropic API credits exhausted\\x1b[0m", "",
+            "  Your direct Anthropic account is out of credits/quota.", "",
+            "  Either top up that account, or switch to " + paint("1", "Vercel AI Gateway"),
+            "  for unified billing and observability:", "",
+            "  " + paint("2", "Upstream: credit balance is too low"), "",
+            "  " + paint("2", "After fixing, re-run:  deepsec process --project-id " + project), ""]
+
+
+def standard_ending(project, result, settings):
+    """How 2.3.10's standard-mode process ends: its summary, then exit 1 for a quota or an errored batch.
+
+    Unlike direct mode it never exits 1 for findings. The reason goes to stdout, stderr stays empty,
+    and every record is already on disk when it exits (processCommand in its bundle). ``late_exit``
+    is a runtime failure after the last batch: exit 1 with every record finished.
+    """
+    say(paint("32", "Processing complete.") + " Run: " + paint("1", "20260925120100-process"))
+    say("  Analyses: %d" % result["analyses"])
+    say("  Findings: %d" % result["findings"])
+    if result["errored"]:
+        say("  " + paint("31", "Errored batches: %d" % result["errored"]))
+    say()
+    if result["quota"]:
+        for line in quota_lines(project):
+            say(line)
+        sys.exit(1)
+    if not result["errored"]:
+        say("Next:")
+        say(paint("2", "pnpm deepsec report --project-id " + project))
+        if settings.get("late_exit"):
+            sys.stderr.write("\\nfake deepsec failed after its last batch\\n\\n(set DEEPSEC_DEBUG=1 for a stack trace)\\n")
+            sys.exit(1)
+        return
+    say(paint("31", "%d batch(es) errored \\u2014 exiting 1 (agent failure, not a clean review)." % result["errored"]))
+    say(paint("2", "Files in those batches were marked status=error and will be retried on the next run."))
+    sys.exit(1)
+
+
 def do_direct(argv, settings):
     """DeepSec's direct mode: resolve the changed files, scan just those, investigate each, exit 1 on trouble.
 
@@ -420,12 +458,7 @@ def do_direct(argv, settings):
     if result["errored"]:
         say("  " + paint("31", "Errored batches: %d" % result["errored"]))
     if result["quota"]:
-        for line in ["", "\\x1b[31m\\x1b[1m\\u2718 Stopped: Anthropic API credits exhausted\\x1b[0m", "",
-                     "  Your direct Anthropic account is out of credits/quota.", "",
-                     "  Either top up that account, or switch to " + paint("1", "Vercel AI Gateway"),
-                     "  for unified billing and observability:", "",
-                     "  " + paint("2", "Upstream: credit balance is too low"), "",
-                     "  " + paint("2", "After fixing, re-run:  deepsec process --project-id " + project), ""]:
+        for line in quota_lines(project):
             say(line)
         sys.exit(1)
     if result["errored"]:
@@ -3658,6 +3691,102 @@ def test_an_exit_of_1_with_findings_is_a_normal_review_that_is_recorded_as_one(t
     assert "DeepSec's own summary said 2 finding(s)" in note
 
 
+# --- full mode: what an exit 1 means ----------------------------------------------------
+#
+# Standard mode exits 1 for an errored batch and for an exhausted quota, never for findings, and also
+# for a runtime failure. It prints the reason on stdout after every record is on disk, so a full run
+# goes on to export and is classified from the records, as a PR review is.
+
+
+def process_output(bundle: Path, stream: str) -> str:
+    return ANSI.sub("", next(bundle.rglob(f"deepsec-process.{stream}.txt")).read_text(encoding="utf-8"))
+
+
+def test_a_full_run_whose_batch_errored_keeps_the_findings_of_the_batch_that_finished(tmp_path, monkeypatch):
+    """2.3.10 exits 1 here with its reason on stdout; this used to drop every claim with an empty stderr quote."""
+    root = fake_deepsec_root(tmp_path, fail_batches=[0])
+    stub_collector(monkeypatch, tmp_path)
+    bundle = invoke(tmp_path, root, batch_size=1)
+    result, execution = documents(bundle)
+
+    assert "1 batch(es) errored — exiting 1" in process_output(bundle, "stdout")
+    assert process_output(bundle, "stderr") == ""
+    assert result["status"] == "partial" and result["error"]["code"] == "deepsec_batches_failed"
+    assert "1 file(s) in status 'error'" in result["error"]["message"]
+    assert "part of the input reached no verdict; DeepSec itself counted 1 errored batch(es)" in result["error"]["message"]
+    assert [claim["primary_location"]["path"] for claim in result["claims"]] == ["src/server.js"]
+    assert "deepsec-export" in {artifact["id"] for artifact in execution["raw_artifacts"]}
+    assert any(note.startswith("deepsec process exited 1 and the run went on to export: in standard mode DeepSec "
+                               "exits 1 for an errored batch and for an exhausted quota, never for findings")
+               for note in execution["notes"])
+
+
+def test_a_full_run_in_which_every_batch_errored_observed_nothing_and_is_an_error(tmp_path, monkeypatch):
+    """What the real CLI does when its agent executable fails at once: exit 1, every file in status 'error'."""
+    root = fake_deepsec_root(tmp_path, fail_batches=[0])
+    stub_collector(monkeypatch, tmp_path)
+    result, _execution = documents(invoke(tmp_path, root, batch_size=5))
+
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "deepsec_batches_failed"
+    assert "2 file(s) in status 'error'" in result["error"]["message"]
+    assert result["error"]["message"].endswith("no file reached a verdict, so none of the input was observed")
+
+
+def test_a_full_run_stopped_by_an_exhausted_quota_is_partial_with_the_source_deepsec_named(tmp_path, monkeypatch):
+    root = fake_deepsec_root(tmp_path, quota_at_batch=1)
+    stub_collector(monkeypatch, tmp_path)
+    bundle = invoke(tmp_path, root, batch_size=1, extra_files=THIRD_FILE)
+    result, _execution = documents(bundle)
+
+    assert "Stopped: Anthropic API credits exhausted" in process_output(bundle, "stdout")
+    assert result["status"] == "partial" and result["bundles_resolved"] is False
+    assert result["error"]["code"] == "quota_exhausted"
+    assert result["error"]["message"] == (
+        "deepsec process stopped: Anthropic API credits exhausted, in DeepSec's own words. 1 of 3 file record(s) "
+        "reached a verdict, 1 were left in status 'error' and 1 were never finished, so the rest of the input "
+        "was not reviewed")
+    assert [claim["primary_location"]["path"] for claim in result["claims"]] == ["src/db.js"]
+
+
+def test_a_full_run_whose_quota_ran_out_before_any_file_finished_is_an_error(tmp_path, monkeypatch):
+    root = fake_deepsec_root(tmp_path, quota_at_batch=0)
+    stub_collector(monkeypatch, tmp_path)
+    result, _execution = documents(invoke(tmp_path, root, batch_size=1))
+
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "quota_exhausted"
+    assert result["error"]["message"].endswith("no file reached a verdict, so none of the input was observed")
+
+
+def test_a_full_run_whose_process_failed_before_any_batch_is_an_error_naming_its_stderr(tmp_path, monkeypatch):
+    """The scan's records are all still pending: nothing was analyzed, so there is no partial observation."""
+    root = fake_deepsec_root(tmp_path, process_exit=1)
+    stub_collector(monkeypatch, tmp_path)
+    result, _execution = documents(invoke(tmp_path, root))
+
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "scope_incomplete"
+    assert "under config.limit" not in result["error"]["message"], "the limit did not stop this run"
+    assert "deepsec process stderr: fake deepsec process failed on purpose" in result["error"]["message"]
+    assert result["error"]["message"].endswith("no file reached a verdict, so none of the input was observed")
+
+
+def test_a_full_run_s_exit_1_that_no_record_explains_is_an_error_quoting_stdout_and_stderr(tmp_path, monkeypatch):
+    """Every file finished, so no errored batch or quota explains the exit: a runtime failure keeps no claim."""
+    root = fake_deepsec_root(tmp_path, late_exit=True)
+    stub_collector(monkeypatch, tmp_path)
+    result, execution = documents(invoke(tmp_path, root))
+
+    assert result["status"] == "error" and result["claims"] == [] and execution["exit_code"] == 1
+    assert result["error"]["code"] == "process_exit_1"
+    message = result["error"]["message"]
+    assert "which is what an exit 1 means in standard mode (an errored batch or an exhausted quota)" in message
+    assert "stderr: \nfake deepsec failed after its last batch" in message
+    assert "stdout: " in message and "Findings: 2" in message
+    assert not any("went on to export" in note for note in execution["notes"])
+
+
 # --- PR mode: what an exit 1 means ------------------------------------------------------
 #
 # Direct mode exits 1 for findings, for an errored batch and for an exhausted quota, and also for
@@ -4804,10 +4933,23 @@ def test_a_failed_selected_batch_keeps_its_own_failure_and_its_claims(tmp_path, 
 
     result, _execution = documents(bundle)
     records = bundle_records(bundle)
+    assert "1 batch(es) errored — exiting 1" in process_output(bundle, "stdout"), "2.3.10 exits 1 here"
     assert sorted(record["status"] for record in records.values()) == ["analyzed", "error"]
     assert result["status"] == "partial" and result["error"]["code"] == "deepsec_batches_failed"
     assert [claim["primary_location"]["path"] for claim in result["claims"]] == ["src/server.js"]
     assert result["omitted_paths"] == [] and result["bundles_resolved"] is False
+
+
+def test_a_curated_run_whose_only_selected_batch_errored_is_an_error(tmp_path, monkeypatch):
+    """The real curated probe: the listed file's batch failed, the unlisted one stayed pending, and process exited 1."""
+    bundle = curated_run(tmp_path, monkeypatch, ["src/db.js"], control={"fail_batches": [0]})
+
+    result, _execution = documents(bundle)
+    assert {path: record["status"] for path, record in bundle_records(bundle).items()} == {
+        "src/db.js": "error", "src/server.js": "pending"}
+    assert result["status"] == "error" and result["claims"] == []
+    assert result["error"]["code"] == "deepsec_batches_failed"
+    assert result["error"]["message"].endswith("no file reached a verdict, so none of the input was observed")
 
 
 def test_a_selected_file_the_ai_stage_never_reached_is_unfinished_and_not_omitted(tmp_path, monkeypatch):
