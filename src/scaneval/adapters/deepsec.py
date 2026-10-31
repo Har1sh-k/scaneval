@@ -124,7 +124,11 @@ unlisted record carrying analysis, a finding or a status other than ``pending``,
 path, or a manifest whose bytes changed is
 ``process_manifest_not_honored``; its claims are kept. Every other failure keeps its precedence, and a
 curated run that would otherwise succeed is ``partial`` with ``scope_incomplete`` instead. Its bundles
-are never resolved, so it completes no control and earns no quiet credit.
+are never resolved, so it completes no control and earns no quiet credit. Every outcome a curated run
+returns, whatever its status, records ``processing: curated`` on its result, the selection marker that
+aggregation, comparison and the benchmark score show beside the adapter version; a full run records
+none. A curated configuration refused before anything runs raises instead, so the error result the
+runner records for it carries no marker, and reports derive one from the configuration.
 
 ``process`` exits 1 when a run ends short. Direct mode does it for three different reasons (a run
 that produced findings, a batch that errored, an exhausted quota) and standard mode for the last two,
@@ -3454,6 +3458,10 @@ class DeepsecAdapter(Adapter):
         base = dict(command=command, artifacts=artifacts, tool_versions=tool_versions,
                     capture=capture, usage=usage, notes=notes, model_identity=model_identity,
                     trace_path=trace_path, capture_state=capture_state,
+                    # The selection marker of a curated system, on every outcome this run returns,
+                    # whatever its status: its configuration chose the AI batches before the run. A
+                    # full run reports none, so its result stays the document it always was.
+                    processing="curated" if process_manifest is not None else None,
                     # A run that left records pending delivered claims about part of the input
                     # and nothing at all about the rest, so its bundles are not resolved: the
                     # scoring contract must not read a claim budget off it, and must not grant

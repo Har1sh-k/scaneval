@@ -138,6 +138,13 @@ nothing, and an exit 1 with no such record stays `error` with no claims.
 `examined_nothing` is not set. The regex scan examined the tree. The notes say
 when no AI batch ran, and `partial` already withholds every quiet credit.
 
+Every outcome of a curated run, whatever its status, records `processing:
+curated` on its result, a 2.1 field. It is the run's own selection marker, and it
+changes no status, claim or credit. A full run records none. A configuration
+refused before anything runs (a tree with no entry, a listed path the tree does
+not hold) raises before there is an outcome, so the error result the runner
+records for it carries no marker.
+
 ## Limits
 
 - Selection uses evaluator-side knowledge. Results from it are diagnostics about
