@@ -623,8 +623,11 @@ $SB plan --pack "$BYOC/pack.json" --snapshot-id reporting-main --tree-hash "$TRE
   --output "$BYOC/plan-reviewed.json" --mode full
 ```
 
-`--mode pr` on its own changes exactly one thing: the plan carries the pack's `pr` review budgets
-instead of its `full` budgets, and records `"mode": "pr"` in its provenance. It is still a full plan
+`--mode pr` on its own changes two things. The plan carries the pack's `pr` review budgets instead
+of its `full` budgets, and records `"mode": "pr"` in its provenance. It also stays a 2.0 plan, which
+cannot say where a control is: with `--mode full` a control the pack locates carries `paths`, and
+here it does not, so a result that lists any omitted path earns none of its controls quiet credit. A
+2.1 plan in `pr` mode names the change it reviews, and this one names none. It is still a full plan
 of the snapshot, and says so on stderr, because it names no change. With `--change-set-id` and the
 hashes that identify the input it is the plan of that change set's PR review; see
 [a native PR input](#a-native-pr-input).
@@ -1252,11 +1255,13 @@ These are limits of the current implementation, not guarantees about your enviro
   PR input with their own diff workflow; an adapter without a PR mode is recorded `unsupported`, and a
   full scan of the head never stands in for it. Every PR run starts from a fresh state: a
   prepared-state run is not implemented, and no vulnerable/fixed pair of PR inputs is defined.
-- **Omissions are reported for native PR reviews by `semgrep` and `deepsec` only.** A full scan does
-  not list the paths its scanner's ignore rules or limits dropped, the own harness's PR review lists
-  none, and a list covers only the paths the change touches, so a control on an unchanged `context` file
-  is withheld only when the review examined none of the change. A quiet assessment over a path a full scan
-  or the own harness dropped, or over such a file when some of the change was examined, still earns credit.
+- **Omissions are reported by `semgrep` in both modes and by `deepsec` PR reviews.** A Semgrep full
+  scan lists every path of its input it did not show scanned, which covers its ignore rules and limits.
+  A PR review by either lists only the paths the change touches, so a control on an unchanged `context`
+  file is withheld only when the review examined none of the change. A standard DeepSec full scan lists
+  none of what its ignore filter or limits dropped (a curated run lists the candidates it assigned no AI
+  batch), and the own harness lists none in either mode. A quiet assessment over a path one of those
+  dropped, or over such a `context` file when some of the change was examined, still earns credit.
 - **No cross-pack weighting.** `scaneval aggregate` combines the inputs, systems, and repetitions
   of saved runs of one pack into weighted corpus metrics ([aggregation](AGGREGATION.md)). It
   refuses runs of different packs. Private and public results stay separate because aggregation
