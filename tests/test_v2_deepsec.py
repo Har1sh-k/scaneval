@@ -3517,6 +3517,62 @@ def outcome_of(result: dict) -> tuple:
     return result["status"], result.get("error"), sorted(claims, key=lambda claim: json.dumps(claim, sort_keys=True))
 
 
+def workspace_history_session(session_id: str) -> deepsec_module.Session:
+    """A session as :func:`~scaneval.adapters.deepsec.workspace_history` builds one."""
+    return deepsec_module.Session(run_id="", session_id=session_id, model=None, paths=(), num_turns=0.0,
+                                  cost_usd=0.0, duration_ms=0.0, duration_api_ms=0.0, usage={}, refusals=(),
+                                  correlation="workspace_history", key=f"workspace-history/{session_id}",
+                                  external_paths=0)
+
+
+@pytest.mark.parametrize("link, reason", [
+    # Resolved whole, a symbolic link names the host file, so the enclosure on the destination refuses it.
+    (os.symlink, "the destination does not resolve inside this run's raw output"),
+    # A hard link is not followed by resolving and stays inside, so the exclusive create refuses it.
+    (os.link, "something was already at the destination, and it was not written through"),
+], ids=["symbolic", "hard"])
+def test_a_link_planted_where_a_transcript_is_moved_is_refused_and_never_written_through(tmp_path, monkeypatch,
+                                                                                        link, reason):
+    """A link at ``raw/claude-sessions/<sid>/<sid>.jsonl`` is refused, and the original stays where it was.
+
+    The move checked the enclosure on the destination's directory rather than the destination
+    and copied with :func:`shutil.copyfile`, which follows a symbolic link and truncates whatever
+    file a hard link names: the transcript overwrote the host file the link named, the original
+    was deleted, and the note said it had been moved and registered. Anything that could write
+    the raw output while DeepSec ran could plant either.
+    """
+    root = fake_deepsec_root(tmp_path, session_ids=["session-aaaa"])
+    stub_collector(monkeypatch, tmp_path, subagent=True)
+    main = transcript_fixture(tmp_path)
+    sub = main.parent / "session-aaaa" / "subagents" / "agent-1.jsonl"
+    original = main.read_bytes()
+    baseline, _ = documents(invoke(tmp_path / "baseline", root))
+    host = host_file(tmp_path)
+    preserve = deepsec_module.preserve_transcripts
+
+    def planted_first(sessions, transcripts, projects_dir, raw_dir, enclosure):
+        leaf = raw_dir / "claude-sessions" / "session-aaaa" / "session-aaaa.jsonl"
+        leaf.parent.mkdir(parents=True)
+        link(host, leaf)
+        return preserve(sessions, transcripts, projects_dir, raw_dir, enclosure)
+
+    monkeypatch.setattr(deepsec_module, "preserve_transcripts", planted_first)
+    result, execution = documents(invoke(tmp_path, root, capture_claude_sessions=True))
+
+    assert host.read_text(encoding="utf-8") == HOST_TEXT, "nothing was written through the link"
+    assert main.read_bytes() == original, "the original stays where it was"
+    registered = {artifact["id"] for artifact in execution["raw_artifacts"]}
+    assert "claude-session/session-aaaa/session-aaaa.jsonl" not in registered
+    assert "claude-session/session-aaaa/subagents/agent-1.jsonl" in registered and not sub.exists(), \
+        "a refusal costs that transcript and no other"
+    note = capture_note(execution)
+    assert note.startswith("1 Claude Code transcript(s) were moved")
+    assert note.endswith("1 transcript(s) could not be moved and were left in place: "
+                         f"session-aaaa/session-aaaa.jsonl ({reason}).")
+    assert not any("declared artifact missing" in note for note in execution["notes"])
+    assert outcome_of(result) == outcome_of(baseline) and len(result["claims"]) == 2
+
+
 def test_a_transcript_swapped_for_a_link_after_the_import_is_refused_rather_than_followed(tmp_path, monkeypatch):
     """A transcript that became a link once discovery and the import had read it is never followed.
 
@@ -3553,6 +3609,71 @@ def test_a_transcript_swapped_for_a_link_after_the_import_is_refused_rather_than
                          "(the transcript could not be read as a regular file (it is a symbolic link, not a "
                          "regular file)).")
     assert outcome_of(result) == outcome_of(baseline) and len(result["claims"]) == 2
+
+
+@pytest.mark.parametrize("planted", ["claude-sessions", "claude-sessions/session-aaaa"])
+def test_a_directory_link_on_the_way_to_a_moved_transcript_is_refused_before_anything_is_created(tmp_path, planted):
+    """The enclosure is checked on the destination itself, before ``mkdir`` can descend a link.
+
+    The move created the session's directory first and checked the enclosure on it afterwards, so
+    a link planted at ``raw/claude-sessions`` had ``mkdir`` create a directory outside the run's
+    raw output before the check refused it. A link at the session's own directory was refused
+    either way, and is here so moving the check ahead of ``mkdir`` cannot lose it.
+    """
+    from scaneval.adapters.llm_harness import Enclosure
+
+    source = transcript_fixture(tmp_path)
+    original = source.read_bytes()
+    raw = tmp_path / "raw"
+    (raw / planted).parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (raw / planted).symlink_to(outside, target_is_directory=True)
+
+    artifacts, notes = deepsec_module.preserve_transcripts(
+        (workspace_history_session("session-aaaa"),), {"session-aaaa": (source,)}, source.parent, raw,
+        Enclosure.capture(tmp_path / "source", raw))
+
+    assert artifacts == [] and list(outside.iterdir()) == []
+    assert source.read_bytes() == original
+    assert notes[0].endswith("1 transcript(s) could not be moved and were left in place: "
+                             "session-aaaa/session-aaaa.jsonl (the destination does not resolve inside this run's "
+                             "raw output).")
+
+
+def test_a_copy_that_does_not_verify_is_discarded_and_the_original_is_kept(tmp_path, monkeypatch):
+    """The original is removed only once its copy is proved whole, and a short copy is never kept.
+
+    The copy is made to look one byte short, as a write the filesystem cut off would leave it.
+    """
+    import fcntl
+    from scaneval.adapters.llm_harness import Enclosure
+
+    source = transcript_fixture(tmp_path)
+    original = source.read_bytes()
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    real_fstat = os.fstat
+
+    def short_when_written(descriptor):
+        status = real_fstat(descriptor)
+        if fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY:
+            return status
+        values = list(status[:10])
+        values[6] -= 1
+        return os.stat_result(values)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fstat", short_when_written)
+        artifacts, notes = deepsec_module.preserve_transcripts(
+            (workspace_history_session("session-aaaa"),), {"session-aaaa": (source,)}, source.parent, raw,
+            Enclosure.capture(tmp_path / "source", raw))
+
+    assert artifacts == []
+    assert source.read_bytes() == original, "the original is kept"
+    assert list((raw / "claude-sessions" / "session-aaaa").iterdir()) == [], "the short copy is removed"
+    assert notes[0].endswith(f"(the copy did not verify as a regular file with one name holding all {len(original)} "
+                             "byte(s)).")
 
 
 THIRD_FILE = {"src/jobs.js": "module.exports = () => 1;\n"}

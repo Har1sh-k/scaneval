@@ -2112,18 +2112,46 @@ def _overlapping(candidates: tuple[Candidate, ...], path: str, slug: str,
 def move_transcript(source: Path, target: Path, enclosure: Enclosure) -> str | None:
     """Move one verified transcript to *target*; return why it was not moved, never raise.
 
+    Both ends are paths something other than this run can change. *target* is in this run's raw
+    output, which DeepSec and every agent session it opened could write to while they ran, and
     *source* is in the operator's projects directory, which every Claude Code session on the
-    machine writes to, so its name can change between any two opens of it. Discovery checked the
-    name and the import opened it without following a link, and the move then opened it a third
-    time with :func:`shutil.copyfile`, which does follow one: a transcript replaced by a link after
-    the import had read it brought a host file's bytes into the bundle, registered and hashed as
-    that session's transcript, and nothing said so. Now the source is read by
-    :func:`~scaneval.execution.read_regular_file`, whose ``O_NOFOLLOW`` open refuses a link and
-    whose :func:`os.fstat` refuses anything that is not a regular file, in the same open that reads
-    the bytes. The bytes the import read are not reused instead: the collector hands back a summary
-    rather than the file, and the lines it decodes are bounded and repaired, so they are not the
-    file either. Reading the file whole is bounded in practice, because discovery adopts only a
-    transcript it read to its end under the collector's size limit.
+    machine writes to. The move used to check the enclosure on the destination's directory and
+    then call :func:`shutil.copyfile` and unlink the original, which left open the two holes
+    :func:`~scaneval.adapters.llm_harness.stage_record` had already closed for harness records.
+
+    A link already planted at the destination was written through, because :func:`shutil.copyfile`
+    follows a symbolic link and truncates whatever file a hard link names: the transcript
+    overwrote a host file of the planter's choosing, the original was deleted, and the note said
+    the transcript had been moved and registered. A check on the directory is a check on the
+    wrong path. Now the enclosure is checked on the destination itself, resolved whole so a link
+    anywhere along it is caught, and before ``mkdir``, which would otherwise descend a directory
+    link planted on the way and create the session's directory behind it. The destination is then
+    created with ``O_CREAT|O_EXCL|O_NOFOLLOW``, so whatever is already at that name (a symbolic
+    link, a named pipe, a second name for a host file, a regular file) is refused rather than
+    opened.
+
+    A transcript replaced by a link after discovery and the import had read it was followed as
+    well, so a host file's bytes were registered and hashed as that session's transcript, and
+    nothing said so. Now the source is read by :func:`~scaneval.execution.read_regular_file`,
+    whose ``O_NOFOLLOW`` open refuses a link and whose :func:`os.fstat` refuses anything that is
+    not a regular file, in the same open that reads the bytes. The bytes the import read are not
+    reused instead: the collector hands back a summary rather than the file, and the lines it
+    decodes are bounded and repaired, so they are not the file either. Reading the file whole is
+    bounded in practice, because discovery adopts only a transcript it read to its end under the
+    collector's size limit.
+
+    The original is removed only after a verified write: the copy is flushed and its descriptor
+    proved, with :func:`os.fstat`, to be a regular file with one name holding exactly the bytes
+    that were read. A copy that fails or does not verify is removed again and the original is
+    left as it was, and so is a copy whose original then cannot be removed, so a transcript is
+    either moved or left where it was, and no copy of it stays in ``raw/claude-sessions``. An
+    original already gone by the time it is removed costs nothing: the verified copy holds it.
+
+    That narrows the class ``docs/THREAT_MODEL.md`` names; it does not close it. The enclosure
+    check, the ``mkdir`` and the open are separate operations, and so are the read and the
+    unlink, so a process still running can plant a link or swap a directory in between. The
+    projects directory is inside neither enclosure root, so what vouches for the directory the
+    source is read from is the workspace history that listed it.
     """
     try:
         data = read_regular_file(source)
@@ -2131,15 +2159,41 @@ def move_transcript(source: Path, target: Path, enclosure: Enclosure) -> str | N
         reason = ("it is a symbolic link, not a regular file" if exc.errno == errno.ELOOP
                   else exc.strerror or str(exc))
         return f"the transcript could not be read as a regular file ({reason})"
+    if enclosure.write(target) is None:
+        return "the destination does not resolve inside this run's raw output"
     try:
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if enclosure.write(target.parent) is None:
-            return "the destination does not resolve inside this run's raw output"
-        target.write_bytes(data)
-        source.unlink()
     except OSError as exc:
-        return exc.strerror or str(exc)
-    return None
+        return f"the destination's directory could not be created ({exc.strerror or exc})"
+    try:
+        # The umask decides the mode, as it did for the copy this replaces; the directory is private.
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)
+    except FileExistsError:
+        return "something was already at the destination, and it was not written through"
+    except OSError as exc:
+        return f"the destination could not be created ({exc.strerror or exc})"
+    failure = None
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            written = os.fstat(stream.fileno())
+        if not (stat.S_ISREG(written.st_mode) and written.st_nlink == 1 and written.st_size == len(data)):
+            failure = f"the copy did not verify as a regular file with one name holding all {len(data)} byte(s)"
+    except OSError as exc:
+        failure = f"the copy could not be written ({exc.strerror or exc})"
+    if failure is None:
+        try:
+            source.unlink(missing_ok=True)
+        except OSError as exc:
+            failure = f"the original could not be removed ({exc.strerror or exc}), so the copy was discarded"
+    if failure is not None:
+        # Created by this call alone (``O_EXCL``), so removing it removes nothing anyone else wrote.
+        try:
+            target.unlink()
+        except OSError:
+            pass
+    return failure
 
 
 def preserve_transcripts(sessions: tuple[Session, ...], transcripts: dict[str, tuple[Path, ...]],
@@ -2154,9 +2208,10 @@ def preserve_transcripts(sessions: tuple[Session, ...], transcripts: dict[str, t
     the sessions no analysis entry names, which are the evidence of a failed batch.
 
     Each move is :func:`move_transcript`. A transcript it refuses stays where it was, is not
-    registered, and is named in the note with the reason, so a transcript this run did not keep
-    never reads as one it moved. Neither the status nor any claim depends on this: a transcript
-    is evidence about how the run went, and a refused one costs that evidence and nothing else.
+    registered, and is named in the note with the reason, so a link planted at either end reads
+    as a transcript this run did not keep rather than as one it moved. Neither the status nor any
+    claim depends on this: a transcript is evidence about how the run went, and a refused one
+    costs that evidence and nothing else.
     """
     root = raw_dir / "claude-sessions"
     artifacts: list[dict] = []
