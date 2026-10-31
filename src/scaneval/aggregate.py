@@ -541,7 +541,9 @@ def _check_processing(systems: dict[str, dict], observations: dict[tuple[str, st
     (:data:`CURATED_PROCESSING`), so a marker that derivation contradicts was edited after the run, or was
     written by an adapter whose curation rule this module does not know yet. Either way the bundle does not
     say which system it observed, and the runs are refused, naming it, rather than pooled under a marker
-    one of their bundles contradicts or turned into a failure no reader would trace back to it.
+    one of their bundles contradicts or turned into a failure no reader would trace back to it. Only a
+    bundle whose documents bind to one another reaches this check: a result edited without rebinding the
+    decisions written against it is already an ``unusable_bundle`` failure (:func:`_observe`).
     """
     for key, observation in sorted(observations.items()):
         derived = systems[observation.system_id]["processing"]

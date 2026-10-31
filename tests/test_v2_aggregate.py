@@ -2452,6 +2452,22 @@ def test_a_bundle_whose_result_contradicts_its_system_s_processing_is_refused_wh
         assert str(excinfo.value) == message
 
 
+def test_a_result_edited_to_contradict_its_processing_without_rebinding_its_decisions_is_an_unusable_bundle(tmp_path):
+    """The binding check reads first: the edited result no longer binds to the decisions written against it, so it is
+    the failure any unbound edit already was, and the run aggregates with it in every denominator, still curated."""
+    inputs = [planned("p1", targets=[target("T-p1")])]
+    run = write_run(tmp_path, "run-a", inputs, systems=("deepsec-x",), configs={"deepsec-x": DEEPSEC_CURATED},
+                    versions={"deepsec-x": "1.2.1"}, outcomes={("p1", "deepsec-x", 1): scan(hits={"T-p1": 1})})
+    path = run / "invocations" / "p1__deepsec-x__r1" / "result.json"
+    result = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(canonical_json({**result, "schema_version": "2.1", "processing": "full"}) + "\n", encoding="utf-8")
+
+    report = aggregate.aggregate([run], policy=policy())
+
+    assert system(view(report), "deepsec-x")["observations"]["failures"]["unusable_bundle"] == 1
+    assert [row["processing"] for row in report["systems"]] == ["curated"]
+
+
 def test_results_that_record_their_system_s_processing_pool_with_results_written_before_the_marker(tmp_path):
     """One curated and one full DeepSec configuration at one adapter version, run before results recorded the marker
     and after: run-a's results record nothing and are read by the derivation, run-b's record what the derivation
